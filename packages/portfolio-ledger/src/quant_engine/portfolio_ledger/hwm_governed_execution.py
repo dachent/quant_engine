@@ -30,6 +30,7 @@ from typing import Any, Final
 
 from quant_engine.portfolio_ledger.hwm import (
     AS_HELD_HWM_POLICY_ID,
+    AS_HELD_HWM_RETURN_BASIS,
     HwmCoverageError,
     _canonical_date,
     _canonical_sha256,
@@ -50,7 +51,6 @@ Row = dict[str, Any]
 
 _GOVERNED_INPUT_AUTHORITY: Final = "ACCEPTED_GOVERNED"
 _GOVERNED_PROOF_STATUS: Final = "AVAILABLE"
-_GOVERNED_RETURN_BASIS: Final = "ACCOUNT_LIVE_NET"
 _PERIOD_KEYS: Final = {
     "strategy_id",
     "interval_start",
@@ -400,7 +400,7 @@ def compute_governed_as_held_composite_hwm(
                 "governed period return must be greater than negative one"
             )
         basis = _text(original["return_basis"], "return_basis")
-        if basis != _GOVERNED_RETURN_BASIS:
+        if basis != AS_HELD_HWM_RETURN_BASIS:
             raise HwmCoverageError("governed return basis differs")
         _sha256(original["return_evidence_sha256"], "return evidence")
         span_days = (end - start).days
@@ -591,7 +591,7 @@ def compute_governed_as_held_composite_hwm(
                     }
                 )
             ),
-            "return_basis": _GOVERNED_RETURN_BASIS,
+            "return_basis": AS_HELD_HWM_RETURN_BASIS,
             "assurance_profile": assurance_profile,
             "evaluated_on": evaluation_date.isoformat(),
             "complete_through": complete_date.isoformat(),

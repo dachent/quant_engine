@@ -112,8 +112,8 @@
     "replacement_comparison": { "type": "object" },
     "leave_one_out": {
       "type": "array",
-      "minItems": 9,
-      "maxItems": 9,
+      "minItems": 7,
+      "maxItems": 7,
       "items": { "type": "object" }
     }
   },

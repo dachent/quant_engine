@@ -13,12 +13,15 @@ from pathlib import Path
 
 import pytest
 
+from quant_engine.portfolio_ledger.hwm import AS_HELD_HWM_RETURN_BASIS
 from quant_engine.portfolio_ledger.hwm_calendar_authority import (
     derive_governed_calendar_authority,
 )
 from quant_engine.portfolio_ledger.hwm_governed import (
+    GovernedHwmAuthorityError,
     validate_governed_hwm_calendar_authority,
 )
+from quant_engine.portfolio_ledger.hwm_input_builder import HwmInputBuilderError
 
 
 def _policy_bytes(tmp_path):
@@ -122,7 +125,9 @@ def test_accepted_interval_gap_is_derived_and_binds_next_day_return():
 
 def test_unreconciled_gap_without_accepted_interval_still_fails_closed():
     """An unreconciled gap not declared as accepted interval keeps failing."""
-    with pytest.raises(Exception, match="does not reconcile"):
+    with pytest.raises(
+        GovernedHwmAuthorityError, match="closure capital does not reconcile"
+    ):
         derive_governed_calendar_authority(
             strategy_calendars=[_base_entry(capital={"d1": "100", "d2": "103"})],
             calendar_policy_id="TEST-MIXED-1",
@@ -168,7 +173,9 @@ def test_validator_rejects_gap_with_no_disposition(tmp_path):
     """A gap covered by neither closure nor accepted interval fails closed."""
     entry = _base_entry("s-bad", ("2026-01-02", "2026-01-09"), {"d1": "10", "d2": "12"})
     entry["accepted_intervals"] = []  # explicitly none
-    with pytest.raises(Exception):
+    with pytest.raises(
+        GovernedHwmAuthorityError, match="closure capital does not reconcile"
+    ):
         derive_governed_calendar_authority(
             strategy_calendars=[entry],
             calendar_policy_id="TEST-MIXED-1",
@@ -199,7 +206,7 @@ def test_builder_admits_declared_multi_day_interval_row():
             "strategy_id": "s-mixed",
             "interval_start": "2026-01-02",
             "interval_end": "2026-01-05",
-            "return_basis": "ACCOUNT_LIVE_NET",
+            "return_basis": AS_HELD_HWM_RETURN_BASIS,
             "net_return": "0.03",
             "source_artifact_sha256": _sha("ret-row"),
         }
@@ -240,13 +247,16 @@ def test_builder_rejects_forged_return_value_despite_genuine_authority_hash():
             "strategy_id": "s-mixed",
             "interval_start": "2026-01-02",
             "interval_end": "2026-01-05",
-            "return_basis": "ACCOUNT_LIVE_NET",
+            "return_basis": AS_HELD_HWM_RETURN_BASIS,
             "net_return": "0.30",
             "source_artifact_sha256": _sha("ret-row"),
         }
     ]
     authority_doc = _authority_doc([("s-mixed", ("2026-01-02", "2026-01-05", "0.03"))])
-    with pytest.raises(Exception, match="binding"):
+    with pytest.raises(
+        HwmInputBuilderError,
+        match="builder net_return differs from the accepted interval binding",
+    ):
         build_governed_hwm_inputs(
             members=members,
             capital_observations=capital,
@@ -278,13 +288,16 @@ def test_builder_binds_document_to_calendar_authority_sha256():
             "strategy_id": "s-mixed",
             "interval_start": "2026-01-02",
             "interval_end": "2026-01-05",
-            "return_basis": "ACCOUNT_LIVE_NET",
+            "return_basis": AS_HELD_HWM_RETURN_BASIS,
             "net_return": "0.03",
             "source_artifact_sha256": _sha("ret-row"),
         }
     ]
     authority_doc = _authority_doc([("s-mixed", ("2026-01-02", "2026-01-05", "0.03"))])
-    with pytest.raises(Exception, match="binding parameter"):
+    with pytest.raises(
+        HwmInputBuilderError,
+        match="calendar authority hash differs from the binding parameter",
+    ):
         build_governed_hwm_inputs(
             members=members,
             capital_observations=capital,
@@ -309,19 +322,23 @@ def test_builder_rejects_undeclared_multi_day_interval_row():
         }
     ]
     capital = [
-        {"strategy_id": "s-x", "date": "2026-01-02", "closing_capital_usd": "100"}
+        {"strategy_id": "s-x", "date": "2026-01-02", "closing_capital_usd": "100"},
+        {"strategy_id": "s-x", "date": "2026-01-07", "closing_capital_usd": "104"},
     ]
     rets = [
         {
             "strategy_id": "s-x",
             "interval_start": "2026-01-02",
             "interval_end": "2026-01-06",
-            "return_basis": "ACCOUNT_LIVE_NET",
+            "return_basis": AS_HELD_HWM_RETURN_BASIS,
             "net_return": "0.04",
             "source_artifact_sha256": _sha("ret-row"),
         }
     ]
-    with pytest.raises(Exception):
+    with pytest.raises(
+        HwmInputBuilderError,
+        match="builder requires exact one-day accepted intervals for s-x",
+    ):
         build_governed_hwm_inputs(
             members=members,
             capital_observations=capital,

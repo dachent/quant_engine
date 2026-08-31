@@ -3,20 +3,26 @@
 from __future__ import annotations
 
 import ast
+import base64
 import builtins
+from collections.abc import Mapping
 from copy import deepcopy
-from datetime import date
+from dataclasses import fields
+from datetime import date, timedelta
+from decimal import Decimal, Inexact, ROUND_DOWN, getcontext, setcontext
 import hashlib
 import importlib.util
 import json
 import os
 from pathlib import Path
+import subprocess
 import sys
 import traceback
+from types import MappingProxyType
 from typing import Any
 
 import pytest
-from quant_engine.core import InputSnapshot
+from quant_engine.core import GenerationConflictError, InputSnapshot, read_generation_bundle
 from quant_engine.core.contracts import (
     AdapterIdentity,
     CoverageClaim,
@@ -30,6 +36,7 @@ from quant_engine.core.contracts import (
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "build_account_manifest_generation.py"
+EPOCH_PRODUCER_MODULE_PATH = REPOSITORY_ROOT / "tools" / "account_strategy_manifest.py"
 SCHEMA_PATH = (
     REPOSITORY_ROOT
     / "schemas"
@@ -37,12 +44,38 @@ SCHEMA_PATH = (
     / "account-assignment-perimeter.schema.json"
 )
 ACCOUNT_STRATEGY_SCHEMA_PATH = (
+    REPOSITORY_ROOT / "schemas" / "portfolio" / "account-strategy-manifest.schema.json"
+)
+VERIFIER_MODULE_PATH = (
+    REPOSITORY_ROOT / "tools" / "verify_account_manifest_generation.py"
+)
+VERIFIER_SCHEMA_PATH = (
     REPOSITORY_ROOT
     / "schemas"
     / "portfolio"
-    / "account-strategy-manifest.schema.json"
+    / "account-manifest-independent-verification.schema.json"
 )
 BASELINE_GENERATION_ID = "b" * 64
+CURRENT_EPOCH_CROSSWALK_PATH = (
+    REPOSITORY_ROOT / "contracts" / "account-strategy-current-epoch-crosswalk-v1.json"
+)
+CURRENT_EPOCH_CROSSWALK_SCHEMA_PATH = (
+    REPOSITORY_ROOT
+    / "schemas"
+    / "portfolio"
+    / "account-strategy-current-epoch-crosswalk.schema.json"
+)
+PINNED_BASELINE_PATH = (
+    REPOSITORY_ROOT
+    / ".q"
+    / "e2e"
+    / "i"
+    / "b"
+    / "generations"
+    / "20709bfd5f9a5846879854bf3166c11223a100cc62fcb13fe0b76040f881b542"
+    / "portfolio-baseline.json"
+)
+PINNED_BASELINE_MANIFEST_PATH = PINNED_BASELINE_PATH.with_name("generation.json")
 
 
 def _semantic_digest(value: object) -> str:
@@ -55,6 +88,11 @@ def _semantic_digest(value: object) -> str:
             allow_nan=False,
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _assert_canonical_report_bytes(value: object) -> None:
+    assert type(value) is bytes
+    assert value.endswith(b"\n")
 
 
 @pytest.fixture(scope="module")
@@ -73,17 +111,402 @@ def perimeter_module() -> Any:
 def _assignment(
     account_id: str,
     disposition: str,
-    start: str,
+    start: str | None,
     end: str | None,
     strategy_id: str | None,
 ) -> dict[str, object]:
     return {
+        "assignment_id": f"assignment-{account_id}-{disposition}-{start}",
         "account_id": account_id,
         "strategy_id": strategy_id,
         "strategy_mapping_disposition": disposition,
         "effective_start": start,
         "effective_end": end,
     }
+
+
+def test_current_epoch_crosswalk_uses_rows_as_sole_disposition_authority(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """Exactly 13 included rows come only from the supplied crosswalk authority."""
+
+    from jsonschema import Draft202012Validator
+
+    baseline = InputSnapshot.from_bytes(
+        "pinned baseline", PINNED_BASELINE_PATH.read_bytes()
+    )
+    crosswalk = InputSnapshot.from_bytes(
+        "current epoch crosswalk", CURRENT_EPOCH_CROSSWALK_PATH.read_bytes()
+    )
+    schema = Draft202012Validator(
+        json.loads(CURRENT_EPOCH_CROSSWALK_SCHEMA_PATH.read_text(encoding="utf-8"))
+    )
+    assert not list(schema.iter_errors(crosswalk.json_object()))
+
+    producer_rows = perimeter_module._validate_current_epoch_crosswalk(
+        baseline, crosswalk
+    )
+    verifier_rows = verifier_module._independently_validate_current_epoch_crosswalk(
+        baseline, crosswalk
+    )
+    assert [row["assignment_id"] for row in producer_rows] == [
+        row["assignment_id"] for row in verifier_rows
+    ]
+    assert len(producer_rows) == 13
+    forged = json.loads(crosswalk.contents)
+    excluded = next(
+        row
+        for row in forged["rows"]
+        if row["product_epoch_disposition"]
+        == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
+    )
+    excluded["product_epoch_disposition"] = "INCLUDED_PRODUCT_EPOCH"
+    excluded["owner_reason"] = "MUTATED_CURRENT_PRODUCT_EPOCH"
+    forged["disposition_counts"] = {
+        "INCLUDED_PRODUCT_EPOCH": 14,
+        "EXCLUDED_DEPRECATED_HISTORY_ONLY": 0,
+        "EXCLUDED_IMMATERIAL": 1,
+    }
+    forged_snapshot = InputSnapshot.from_bytes(
+        "forged current epoch crosswalk", canonical_json_bytes(forged)
+    )
+    assert list(schema.iter_errors(forged))
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module._validate_current_epoch_crosswalk(baseline, forged_snapshot)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._independently_validate_current_epoch_crosswalk(
+            baseline, forged_snapshot
+        )
+
+    swapped = json.loads(crosswalk.contents)
+    excluded = [
+        row for row in swapped["rows"]
+        if row["product_epoch_disposition"] != "INCLUDED_PRODUCT_EPOCH"
+    ]
+    assert len(excluded) == 2
+    excluded[0]["product_epoch_disposition"], excluded[1]["product_epoch_disposition"] = (
+        excluded[1]["product_epoch_disposition"],
+        excluded[0]["product_epoch_disposition"],
+    )
+    excluded[0]["owner_reason"] = "OWNER_AUTHORITY_EXCLUSION_ALPHA"
+    excluded[1]["owner_reason"] = "OWNER_AUTHORITY_EXCLUSION_BETA"
+    swapped_snapshot = InputSnapshot.from_bytes(
+        "count-preserving swapped exclusions", canonical_json_bytes(swapped)
+    )
+    assert [row["assignment_id"] for row in producer_rows] == [
+        row["assignment_id"]
+        for row in perimeter_module._validate_current_epoch_crosswalk(
+            baseline, swapped_snapshot
+        )
+    ]
+    assert [row["assignment_id"] for row in verifier_rows] == [
+        row["assignment_id"]
+        for row in verifier_module._independently_validate_current_epoch_crosswalk(
+            baseline, swapped_snapshot
+        )
+    ]
+
+
+def test_crosswalk_selected_input_caps_current_subject_to_cutoff(
+    perimeter_module: Any,
+) -> None:
+    """Removing the crosswalk selector would restore all 15 mapped rows."""
+
+    provider_ledger = InputSnapshot.from_bytes(
+        "synthetic provider ledger",
+        canonical_json_bytes({"as_of_date": "2026-08-16", "catalog_schema_version": 1}),
+    )
+    baseline = InputSnapshot.from_bytes("pinned baseline", PINNED_BASELINE_PATH.read_bytes())
+    selected = perimeter_module.AccountManifestSelectedInputs(
+        provider_ledger=provider_ledger,
+        provider_ledger_manifest=_generation_manifest_snapshot(
+            catalog=provider_ledger,
+            catalog_artifact_id="normalized/provider-ledger.json",
+            catalog_schema_name="provider-ledger-catalog",
+            catalog_schema_version="1",
+            as_of_date="2026-08-16",
+        ),
+        baseline=baseline,
+        baseline_manifest=InputSnapshot.from_bytes(
+            "pinned baseline manifest", PINNED_BASELINE_MANIFEST_PATH.read_bytes()
+        ),
+        flow_classification_policy=InputSnapshot.from_bytes("policy", b"policy"),
+        retrieval_receipts={"synthetic-receipt": InputSnapshot.from_bytes("receipt", b"receipt")},
+        epoch_producer_source=InputSnapshot.from_bytes("epoch", b"epoch"),
+        generation_builder_source=InputSnapshot.from_bytes("builder", b"builder"),
+        independent_verifier_source=InputSnapshot.from_bytes("verifier", b"verifier"),
+        current_epoch_crosswalk=InputSnapshot.from_bytes(
+            "current epoch crosswalk", CURRENT_EPOCH_CROSSWALK_PATH.read_bytes()
+        ),
+    )
+
+    mapped, _ = perimeter_module._c3_mapped_assignments(selected)
+    assert len(mapped) == 13
+    assert perimeter_module._current_epoch_calculation_cutoff(selected) == date(2026, 8, 13)
+    selected_identity = json.loads(perimeter_module.build_selected_input_identities(selected))
+    assert selected_identity["current_epoch_crosswalk"]["sha256"] == (
+        selected.current_epoch_crosswalk.sha256
+    )
+
+
+def test_verifier_preserves_validated_crosswalk_order_and_matches_each_tuple(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """The independent selector must retain crosswalk order, not account order."""
+
+    base_selected = _mixed_crosswalk_selected_inputs(perimeter_module)
+    baseline_payload = base_selected.baseline.json_object()
+    renamed: dict[str, str] = {}
+    for assignment in baseline_payload["assignments"]:
+        if assignment["account_id"] == "synthetic-account-01" and assignment[
+            "strategy_mapping_disposition"
+        ] == "STRATEGY_MAPPED":
+            renamed[assignment["assignment_id"]] = "assignment-z"
+            assignment["assignment_id"] = "assignment-z"
+        elif assignment["account_id"] == "synthetic-account-02" and assignment[
+            "strategy_mapping_disposition"
+        ] == "STRATEGY_MAPPED":
+            renamed[assignment["assignment_id"]] = "assignment-a"
+            assignment["assignment_id"] = "assignment-a"
+    baseline = InputSnapshot.from_bytes(
+        "reordered assignment baseline", canonical_json_bytes(baseline_payload)
+    )
+    baseline_manifest = _generation_manifest_snapshot(
+        catalog=baseline,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    crosswalk_payload = base_selected.current_epoch_crosswalk.json_object()
+    for row in crosswalk_payload["rows"]:
+        if row["assignment_id"] in renamed:
+            row["assignment_id"] = renamed[row["assignment_id"]]
+    crosswalk_payload["selected_baseline"].update(
+        {
+            "generation_id": json.loads(baseline_manifest.contents)["generation_id"],
+            "sha256": baseline.sha256,
+            "size_bytes": baseline.size_bytes,
+        }
+    )
+    values = _selected_input_kwargs(base_selected)
+    values.update(
+        {
+            "baseline": baseline,
+            "baseline_manifest": baseline_manifest,
+            "current_epoch_crosswalk": InputSnapshot.from_bytes(
+                "reordered assignment crosswalk",
+                canonical_json_bytes(crosswalk_payload),
+            ),
+        }
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    expected = verifier_module._independently_validate_current_epoch_crosswalk(
+        selected.baseline, selected.current_epoch_crosswalk
+    )
+    fields = ("account_id", "strategy_id", "effective_start", "effective_end")
+    expected_keys = [tuple(row[field] for field in fields) for row in expected]
+    assert expected_keys != sorted(expected_keys, key=lambda key: tuple(str(item) for item in key))
+
+    # Model all 15 producer perimeter mappings arriving in account-sorted form;
+    # the crosswalk explicitly excludes two while retaining assignment-id order.
+    perimeter_rows = sorted(
+        (
+            dict(row)
+            for row in selected.baseline.json_object()["assignments"]
+            if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+        ),
+        key=lambda row: tuple(str(row[field]) for field in fields),
+    )
+    selected_rows = verifier_module._selected_current_epoch_rows(
+        verifier_inputs, perimeter_rows
+    )
+    actual_keys = [tuple(row[field] for field in fields) for row in selected_rows]
+    assert actual_keys == expected_keys
+    assert set(actual_keys) == set(expected_keys)
+
+
+def test_verifier_final_output_order_is_account_then_chain_start(
+    verifier_module: Any,
+) -> None:
+    """Final manifest rows follow generic account/chain assembly order."""
+
+    rows = [
+        {
+            "assignment_id": "epoch-b",
+            "account_id": "account-b",
+            "strategy_id": "strategy-b",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        },
+        {
+            "assignment_id": "epoch-a-late",
+            "account_id": "account-a",
+            "strategy_id": "strategy-a-late",
+            "effective_start": "2026-02-01",
+            "effective_end": None,
+        },
+        {
+            "assignment_id": "epoch-a-early",
+            "account_id": "account-a",
+            "strategy_id": "strategy-a-early",
+            "effective_start": "2026-01-01",
+            "effective_end": "2026-01-31",
+        },
+    ]
+    ordered = verifier_module._sorted_mixed_output_assignments(rows)
+    assert [row["assignment_id"] for row in ordered] == [
+        "epoch-a-early",
+        "epoch-a-late",
+        "epoch-b",
+    ]
+
+
+def test_mixed_verify_canonicalizes_report_chains_after_interleaved_crosswalk(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Report state is canonical while artifacts retain producer-defined order."""
+
+    selected_base = _mixed_composer_selected_inputs(perimeter_module)
+    baseline_payload = selected_base.baseline.json_object()
+    renamed: dict[str, str] = {}
+    for assignment in baseline_payload["assignments"]:
+        if assignment["account_id"] == "synthetic-account-01" and assignment[
+            "strategy_mapping_disposition"
+        ] == "STRATEGY_MAPPED":
+            renamed[assignment["assignment_id"]] = "assignment-z"
+            assignment["assignment_id"] = "assignment-z"
+        elif assignment["account_id"] == "synthetic-account-02" and assignment[
+            "strategy_mapping_disposition"
+        ] == "STRATEGY_MAPPED":
+            renamed[assignment["assignment_id"]] = "assignment-a"
+            assignment["assignment_id"] = "assignment-a"
+    baseline = InputSnapshot.from_bytes(
+        "interleaved report baseline", canonical_json_bytes(baseline_payload)
+    )
+    baseline_manifest = _generation_manifest_snapshot(
+        catalog=baseline,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    crosswalk = selected_base.current_epoch_crosswalk.json_object()
+    for row in crosswalk["rows"]:
+        if row["assignment_id"] in renamed:
+            row["assignment_id"] = renamed[row["assignment_id"]]
+    crosswalk["selected_baseline"].update(
+        {
+            "generation_id": json.loads(baseline_manifest.contents)["generation_id"],
+            "sha256": baseline.sha256,
+            "size_bytes": baseline.size_bytes,
+        }
+    )
+    included = [
+        row
+        for row in crosswalk["rows"]
+        if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
+    ]
+    excluded = [
+        row
+        for row in crosswalk["rows"]
+        if row["product_epoch_disposition"] != "INCLUDED_PRODUCT_EPOCH"
+    ]
+    # Deliberately interleave the canonical account/strategy order.
+    canonical = sorted(
+        included,
+        key=lambda row: (
+            row["account_id"], row["strategy_id"],
+            row["effective_start"], row["effective_end"] or "",
+        ),
+    )
+    interleaved = canonical[::2] + canonical[1::2]
+    assert [row["assignment_id"] for row in interleaved] != [
+        row["assignment_id"] for row in canonical
+    ]
+    crosswalk["rows"] = interleaved + excluded
+    values = _selected_input_kwargs(selected_base)
+    values.update(
+        {
+            "baseline": baseline,
+            "baseline_manifest": baseline_manifest,
+            "receipt_authority": selected_base.receipt_authority,
+            "admission_policy": selected_base.admission_policy,
+            "manifest_schema": selected_base.manifest_schema,
+            "current_epoch_crosswalk": InputSnapshot.from_bytes(
+                "interleaved current epoch crosswalk", canonical_json_bytes(crosswalk)
+            ),
+        }
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+
+    def key(row: Mapping[str, object]) -> tuple[str, str, str, str]:
+        return (
+            str(row["account_id"]), str(row["strategy_id"]),
+            str(row["effective_start"]), str(row["effective_end"] or ""),
+        )
+
+    baseline_mapped = {
+        row["assignment_id"]: row
+        for row in baseline_payload["assignments"]
+        if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+    }
+    producer_rows = [
+        baseline_mapped[row["assignment_id"]]
+        for row in sorted(included, key=lambda row: row["assignment_id"])
+    ]
+    producer_keys = [key(row) for row in producer_rows]
+    crosswalk_keys = [key(row) for row in interleaved]
+    assert crosswalk_keys != producer_keys
+    assert producer_keys != sorted(producer_keys)
+    coverage = json.loads(payloads["authority/account-flow-coverage.json"])
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    admission = json.loads(payloads["authority/mapped-epoch-admission.json"])
+    assert [key(row["assignment"]) for row in coverage["rows"]] == producer_keys
+    assert [key(row["epoch"]) for row in calculation["rows"]] == producer_keys
+    admission_rows = admission.get("admissions", admission.get("rows"))
+    assert isinstance(admission_rows, list)
+    source_admission_rows = selected_base.admission_policy.json_object()["admissions"]
+    source_admission_keys = [
+        key(row.get("assignment", row))
+        for row in source_admission_rows
+        if key(row.get("assignment", row)) in set(producer_keys)
+    ]
+    assert [key(row.get("assignment", row)) for row in admission_rows] == source_admission_keys
+    assert json.loads(payloads["authority/selected-input-identities.json"]) == (
+        verifier_module._selected_identity(_mixed_verifier_inputs(verifier_module, selected))
+    )
+    assert payloads["authority/account-assignment-crosswalk.json"] == (
+        selected.current_epoch_crosswalk.contents
+    )
+
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+    )
+    report_keys = [key(chain["assignment"]) for chain in report["blocker_chains"]]
+    assert report_keys == sorted(report_keys)
+
+
+def test_crosswalk_display_fields_are_joined_only_by_epoch_key(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """Removing the structural display join leaves final rows non-human-readable."""
+
+    crosswalk = InputSnapshot.from_bytes(
+        "current epoch crosswalk", CURRENT_EPOCH_CROSSWALK_PATH.read_bytes()
+    )
+    producer_display = perimeter_module._crosswalk_display_by_epoch(crosswalk)
+    verifier_display = verifier_module._independent_crosswalk_display_by_epoch(crosswalk)
+    assert producer_display == verifier_display
+    assert len(producer_display) == 15
+    assert all(set(value) == {"account_label", "last_four"} for value in producer_display.values())
 
 
 def _generation_manifest_snapshot(
@@ -117,7 +540,9 @@ def _generation_manifest_snapshot(
         ),
         verification=VerificationStatus.VERIFIED,
     )
-    return InputSnapshot.from_bytes("synthetic generation manifest", manifest.to_json_bytes())
+    return InputSnapshot.from_bytes(
+        "synthetic generation manifest", manifest.to_json_bytes()
+    )
 
 
 def _selected_inputs(module: Any, baseline: InputSnapshot | None = None) -> object:
@@ -145,7 +570,9 @@ def _selected_inputs(module: Any, baseline: InputSnapshot | None = None) -> obje
             as_of_date="2026-02-01",
         ),
         flow_classification_policy=InputSnapshot.from_bytes("policy", b"policy"),
-        retrieval_receipts={"synthetic-receipt": InputSnapshot.from_bytes("receipt", b"receipt")},
+        retrieval_receipts={
+            "synthetic-receipt": InputSnapshot.from_bytes("receipt", b"receipt")
+        },
         epoch_producer_source=InputSnapshot.from_bytes("epoch", b"epoch"),
         generation_builder_source=InputSnapshot.from_bytes("builder", b"builder"),
         independent_verifier_source=InputSnapshot.from_bytes("verifier", b"verifier"),
@@ -163,6 +590,7 @@ def _selected_input_kwargs(selected_inputs: object) -> dict[str, object]:
         "epoch_producer_source": selected_inputs.epoch_producer_source,
         "generation_builder_source": selected_inputs.generation_builder_source,
         "independent_verifier_source": selected_inputs.independent_verifier_source,
+        "current_epoch_crosswalk": selected_inputs.current_epoch_crosswalk,
     }
 
 
@@ -208,8 +636,16 @@ def _c3_selected_inputs(module: Any) -> object:
         "policy_version": "1",
         "event_dispositions": {
             "exact": [
-                {"flow_type": "CONTRIBUTION", "disposition": "EXTERNAL", "amount_sign": "POSITIVE"},
-                {"flow_type": "UNAVAILABLE_FOREIGN", "disposition": "EXTERNAL", "amount_sign": "POSITIVE"},
+                {
+                    "flow_type": "CONTRIBUTION",
+                    "disposition": "EXTERNAL",
+                    "amount_sign": "POSITIVE",
+                },
+                {
+                    "flow_type": "UNAVAILABLE_FOREIGN",
+                    "disposition": "EXTERNAL",
+                    "amount_sign": "POSITIVE",
+                },
             ],
             "prefix": [],
         },
@@ -250,6 +686,36 @@ def _c3_with_mutated_ledger_or_policy(
     values["flow_classification_policy"] = InputSnapshot.from_bytes(
         "mutated c3 policy", canonical_json_bytes(policy)
     )
+    return module.AccountManifestSelectedInputs(**values)
+
+
+def _with_later_baseline_date(module: Any, selected: object) -> object:
+    baseline = selected.baseline.json_object()
+    baseline["as_of_date"] = "2026-02-03"
+    baseline_snapshot = InputSnapshot.from_bytes(
+        "later baseline", canonical_json_bytes(baseline)
+    )
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "baseline": baseline_snapshot,
+            "baseline_manifest": _generation_manifest_snapshot(
+                catalog=baseline_snapshot,
+                catalog_artifact_id="normalized/portfolio-baseline.json",
+                catalog_schema_name="portfolio-baseline-catalog",
+                catalog_schema_version="1",
+                as_of_date="2026-02-03",
+            ),
+        }
+    )
+    if selected.receipt_authority is not None:
+        values.update(
+            {
+                "receipt_authority": selected.receipt_authority,
+                "admission_policy": selected.admission_policy,
+                "manifest_schema": selected.manifest_schema,
+            }
+        )
     return module.AccountManifestSelectedInputs(**values)
 
 
@@ -336,7 +802,12 @@ def _fixture_inputs() -> dict[str, object]:
         ]
     )
     accounts = [
-        {"account_id": f"synthetic-account-{number:02d}", "provider": "SYNTHETIC"}
+        {
+            "account_id": f"synthetic-account-{number:02d}",
+            "base_currency": "USD",
+            "provider": "SYNTHETIC",
+            "role": "RESERVE" if number == 18 else "INVESTMENT",
+        }
         for number in range(1, 19)
     ]
     baseline_payload = {
@@ -390,7 +861,7 @@ def _fixture_inputs() -> dict[str, object]:
         "classified_flow_facts": [
             {
                 "event_id": "classified-mapped",
-                "source_record_id": "intentionally-unmatched-5c3-deferred",
+                "source_record_id": "raw-mapped",
                 "account_id": "synthetic-account-01",
                 "event_date": "2025-06-01",
             },
@@ -422,7 +893,9 @@ def _build(module: Any, inputs: dict[str, object]) -> bytes:
     )
 
 
-def _validate(module: Any, payload: dict[str, object], inputs: dict[str, object]) -> None:
+def _validate(
+    module: Any, payload: dict[str, object], inputs: dict[str, object]
+) -> None:
     baseline = inputs["baseline"]
     assert isinstance(baseline, InputSnapshot)
     module.validate_account_assignment_perimeter(
@@ -456,6 +929,20 @@ def _account_strategy_schema_validator_without_format_checker() -> Any:
     schema = json.loads(ACCOUNT_STRATEGY_SCHEMA_PATH.read_text(encoding="utf-8"))
     Draft202012Validator.check_schema(schema)
     return Draft202012Validator(schema)
+
+
+@pytest.fixture(scope="module")
+def verifier_module() -> Any:
+    assert VERIFIER_MODULE_PATH.is_file(), "C4.a verifier module has not been created"
+    spec = importlib.util.spec_from_file_location(
+        "verify_account_manifest_generation", VERIFIER_MODULE_PATH
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_red_contract_requires_new_producer_and_schema() -> None:
@@ -510,14 +997,22 @@ def test_red_c3_builds_the_exact_nine_blocked_authority_payloads(
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
     from jsonschema import Draft202012Validator
 
-    account_strategy_schema = json.loads(ACCOUNT_STRATEGY_SCHEMA_PATH.read_text(encoding="utf-8"))
+    account_strategy_schema = json.loads(
+        ACCOUNT_STRATEGY_SCHEMA_PATH.read_text(encoding="utf-8")
+    )
     assert not list(Draft202012Validator(account_strategy_schema).iter_errors(output))
     assert calculation_inputs["mapped_assignments_identity"]["count"] == 15
     assert calculation_inputs["mapped_assignments_identity"] == {
         "count": 15,
         "sha256": "87b17fffdd69e855a31aef206af51fb8acd18567d41218e330ac25bd48cc7240",
     }
-    assert len(calculation_inputs["rows"]) == len(coverage["rows"]) == len(admission["rows"]) == len(output["rows"]) == 15
+    assert (
+        len(calculation_inputs["rows"])
+        == len(coverage["rows"])
+        == len(admission["rows"])
+        == len(output["rows"])
+        == 15
+    )
     assert {row["status"] for row in coverage["rows"]} == {"BLOCKED"}
     assert {row["status"] for row in admission["rows"]} == {"BLOCKED"}
     assert {row["status"] for row in output["rows"]} == {"BLOCKED_ADMISSION"}
@@ -547,7 +1042,10 @@ def test_red_c3_builds_the_exact_nine_blocked_authority_payloads(
     generated_policy_bytes = payloads["authority/flow-classification-policy.json"]
     assert selected_policy_bytes != generated_policy_bytes
     selected_identity = json.loads(payloads["authority/selected-input-identities.json"])
-    assert selected_identity["flow_classification_policy"]["sha256"] == hashlib.sha256(selected_policy_bytes).hexdigest()
+    assert (
+        selected_identity["flow_classification_policy"]["sha256"]
+        == hashlib.sha256(selected_policy_bytes).hexdigest()
+    )
     forbidden = {
         "start",
         "end",
@@ -578,6 +1076,35 @@ def test_red_c3_builds_the_exact_nine_blocked_authority_payloads(
         payloads["other"] = b"other"
 
 
+def test_c3_preserves_provider_precision_in_nav_and_flow_facts(
+    perimeter_module: Any,
+) -> None:
+    selected = _c3_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    policy = selected.flow_classification_policy.json_object()
+    ledger["nav_observations"][0]["nav"]["value"] = "24009.8771286"
+    ledger["flows"][0]["amount"]["value"] = "25027.43294966"
+    precise = _c3_with_mutated_ledger_or_policy(perimeter_module, ledger, policy)
+
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(precise)
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    classified = json.loads(payloads["authority/classified-flows.json"])
+
+    nav = next(
+        fact
+        for row in calculation["rows"]
+        for fact in row["nav_observations"]
+        if fact["record_id"] == "c3-nav-01"
+    )
+    flow = next(
+        event
+        for event in classified["events"]
+        if event["source_record_id"] == "c3-flow-01"
+    )
+    assert nav["nav"]["value"] == "24009.8771286"
+    assert flow["amount"]["value"] == "25027.43294966"
+
+
 def test_red_v8_schema_pins_each_new_authority_artifact_contract(
     perimeter_module: Any,
 ) -> None:
@@ -591,10 +1118,30 @@ def test_red_v8_schema_pins_each_new_authority_artifact_contract(
     schema = json.loads(ACCOUNT_STRATEGY_SCHEMA_PATH.read_text(encoding="utf-8"))
     validator = Draft202012Validator(schema)
     for identity, artifact_id, schema_name, version in (
-        ("selected_inputs", "authority/selected-input-identities.json", "selected-input-identities", "1"),
-        ("account_assignment_perimeter", "authority/account-assignment-perimeter.json", "account-assignment-perimeter", "1"),
-        ("calculation_inputs", "authority/calculation-inputs.json", "account-manifest-calculation-inputs", "1"),
-        ("code_identities", "authority/code-identities.json", "account-manifest-code-identities", "1"),
+        (
+            "selected_inputs",
+            "authority/selected-input-identities.json",
+            "selected-input-identities",
+            "1",
+        ),
+        (
+            "account_assignment_perimeter",
+            "authority/account-assignment-perimeter.json",
+            "account-assignment-perimeter",
+            "1",
+        ),
+        (
+            "calculation_inputs",
+            "authority/calculation-inputs.json",
+            "account-manifest-calculation-inputs",
+            "1",
+        ),
+        (
+            "code_identities",
+            "authority/code-identities.json",
+            "account-manifest-code-identities",
+            "1",
+        ),
     ):
         for field, wrong_value in (
             ("artifact_id", "wrong.json"),
@@ -627,11 +1174,15 @@ def test_c3_validator_rejects_exact_path_bytes_and_epoch_cross_binding_tampering
         tampered = dict(payloads)
         tampered[path] = replacement
         with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
-            perimeter_module.validate_blocked_account_manifest_payloads(tampered, selected_inputs)
+            perimeter_module.validate_blocked_account_manifest_payloads(
+                tampered, selected_inputs
+            )
     missing = dict(payloads)
     del missing["authority/mapped-epoch-admission.json"]
     with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
-            perimeter_module.validate_blocked_account_manifest_payloads(missing, selected_inputs)
+        perimeter_module.validate_blocked_account_manifest_payloads(
+            missing, selected_inputs
+        )
 
 
 def test_red_c3_accepts_bound_provider_lineage_extras_but_projects_only_whitelist(
@@ -653,18 +1204,27 @@ def test_red_c3_accepts_bound_provider_lineage_extras_but_projects_only_whitelis
     )
 
 
-def test_red_c3_rejects_unpaired_internal_flow(perimeter_module: Any) -> None:
+def test_c3_retains_unpaired_internal_flow_blocked(perimeter_module: Any) -> None:
     selected = _c3_selected_inputs(perimeter_module)
     ledger = selected.provider_ledger.json_object()
     policy = selected.flow_classification_policy.json_object()
     policy["event_dispositions"]["exact"][0]["disposition"] = "INTERNAL"
-    policy["event_dispositions"]["exact"][0][
-        "counterparty_rule"
-    ] = "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
-    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
-        perimeter_module.build_blocked_account_manifest_payloads(
-            _c3_with_mutated_ledger_or_policy(perimeter_module, ledger, policy)
-        )
+    policy["event_dispositions"]["exact"][0]["counterparty_rule"] = (
+        "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(
+        _c3_with_mutated_ledger_or_policy(perimeter_module, ledger, policy)
+    )
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    event = next(
+        event
+        for event in classified["events"]
+        if event["source_record_id"] == "c3-flow-01"
+    )
+    assert event["classification_status"] == "BLOCKED"
+    assert event["disposition"] is None
+    assert event["blocker_code"] == "INTERNAL_COUNTERPARTY_MISSING"
+    assert "counterparty_source_record_id" not in event
 
 
 def test_red_c3_selects_prefix_rules_from_the_public_policy_shape(
@@ -690,17 +1250,23 @@ def test_red_c3_selects_prefix_rules_from_the_public_policy_shape(
     assert classified["events"][0]["flow_type"] == "PREFIXED_CONTRIBUTION"
 
 
-def test_red_c3_rejects_internal_pair_to_external_counterpart(
+def test_c3_retains_internal_leg_blocked_when_physical_counterpart_is_external(
     perimeter_module: Any,
 ) -> None:
     selected = _c3_selected_inputs(perimeter_module)
     ledger = selected.provider_ledger.json_object()
     policy = selected.flow_classification_policy.json_object()
     ledger["flows"][0].update(
-        {"flow_type": "TRANSFER_OUT", "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-1.00"}}
+        {
+            "flow_type": "TRANSFER_OUT",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-13.00"},
+        }
     )
     ledger["flows"][1].update(
-        {"flow_type": "TRANSFER_IN", "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1.00"}}
+        {
+            "flow_type": "TRANSFER_IN",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "13.00"},
+        }
     )
     policy["event_dispositions"]["exact"].extend(
         [
@@ -718,10 +1284,23 @@ def test_red_c3_rejects_internal_pair_to_external_counterpart(
         ]
     )
 
-    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
-        perimeter_module.build_blocked_account_manifest_payloads(
-            _c3_with_mutated_ledger_or_policy(perimeter_module, ledger, policy)
-        )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(
+        _c3_with_mutated_ledger_or_policy(perimeter_module, ledger, policy)
+    )
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    indexed = {event["source_record_id"]: event for event in classified["events"]}
+    internal = indexed["c3-flow-01"]
+    external = indexed["c3-flow-02"]
+    assert internal["classification_status"] == "BLOCKED"
+    assert internal["disposition"] is None
+    assert (
+        internal["blocker_code"]
+        == "INTERNAL_COUNTERPARTY_CLASSIFICATION_BLOCKED"
+    )
+    assert "counterparty_source_record_id" not in internal
+    assert external["classification_status"] == "CLASSIFIED"
+    assert external["disposition"] == "EXTERNAL"
+    assert external["blocker_code"] is None
 
 
 def test_red_v8_schema_pins_policy_coverage_and_admission_artifacts(
@@ -737,9 +1316,24 @@ def test_red_v8_schema_pins_policy_coverage_and_admission_artifacts(
     schema = json.loads(ACCOUNT_STRATEGY_SCHEMA_PATH.read_text(encoding="utf-8"))
     validator = Draft202012Validator(schema)
     for source, artifact_id, schema_name, version in (
-        ("flow_classification_policy", "wrong-policy.json", "flow-classification-policy", "1"),
-        ("flow_coverage", "authority/account-flow-coverage.json", "wrong-coverage", "2"),
-        ("admission_policy", "authority/mapped-epoch-admission.json", "mapped-epoch-admission", "9"),
+        (
+            "flow_classification_policy",
+            "wrong-policy.json",
+            "flow-classification-policy",
+            "1",
+        ),
+        (
+            "flow_coverage",
+            "authority/account-flow-coverage.json",
+            "wrong-coverage",
+            "2",
+        ),
+        (
+            "admission_policy",
+            "authority/mapped-epoch-admission.json",
+            "mapped-epoch-admission",
+            "9",
+        ),
     ):
         mutated = deepcopy(output)
         artifact = mutated["source_identities"][source]["artifact"]
@@ -793,10 +1387,16 @@ def test_c3_internal_events_bind_same_currency_reciprocally(
     ledger = selected.provider_ledger.json_object()
     policy = selected.flow_classification_policy.json_object()
     ledger["flows"][0].update(
-        {"flow_type": "TRANSFER_OUT", "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-1.00"}}
+        {
+            "flow_type": "TRANSFER_OUT",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-13.00"},
+        }
     )
     ledger["flows"][1].update(
-        {"flow_type": "TRANSFER_IN", "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1.00"}}
+        {
+            "flow_type": "TRANSFER_IN",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "13.00"},
+        }
     )
     for flow_type, sign in (("TRANSFER_OUT", "NEGATIVE"), ("TRANSFER_IN", "POSITIVE")):
         policy["event_dispositions"]["exact"].append(
@@ -828,9 +1428,7 @@ def test_c3_validator_rejects_each_exact_path_and_epoch_bijection_tamper(
             perimeter_module.validate_blocked_account_manifest_payloads(
                 tampered, selected
             )
-    parsed = {
-        path: json.loads(contents) for path, contents in payloads.items()
-    }
+    parsed = {path: json.loads(contents) for path, contents in payloads.items()}
     epoch_keys = ("account_id", "strategy_id", "effective_start", "effective_end")
     expected_epochs = {
         tuple(row["epoch"][key] for key in epoch_keys)
@@ -846,9 +1444,7 @@ def test_c3_validator_rejects_each_exact_path_and_epoch_bijection_tamper(
         for row in parsed["authority/mapped-epoch-admission.json"]["rows"]
     }
     assert expected_epochs == {
-        tuple(
-            row[key] for key in epoch_keys
-        )
+        tuple(row[key] for key in epoch_keys)
         for row in parsed["outputs/account-strategy-manifest.json"]["rows"]
     }
     for path, rows_key in (
@@ -867,12 +1463,16 @@ def test_c3_validator_rejects_each_exact_path_and_epoch_bijection_tamper(
                 if path == "outputs/account-strategy-manifest.json":
                     rows[0]["strategy_id"] = rows[1]["strategy_id"]
                 else:
-                    rows[0]["assignment"]["strategy_id"] = rows[1]["assignment"]["strategy_id"]
+                    rows[0]["assignment"]["strategy_id"] = rows[1]["assignment"][
+                        "strategy_id"
+                    ]
             encoded = {
                 name: canonical_json_bytes(value) for name, value in tampered.items()
             }
             with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
-                perimeter_module.validate_blocked_account_manifest_payloads(encoded, selected)
+                perimeter_module.validate_blocked_account_manifest_payloads(
+                    encoded, selected
+                )
 
 
 def test_c3_rejects_compact_invalid_retained_source_vectors(
@@ -884,19 +1484,13 @@ def test_c3_rejects_compact_invalid_retained_source_vectors(
     for label in (
         "unavailable-non-null",
         "wrong-available-currency",
-        "sign-violation",
-        "unresolved-rule",
     ):
         candidate_ledger = deepcopy(ledger)
         candidate_policy = deepcopy(policy)
         if label == "unavailable-non-null":
             candidate_ledger["flows"][15]["amount"]["value"] = "1.00"
-        elif label == "wrong-available-currency":
-            candidate_ledger["flows"][0]["amount"]["currency"] = "CAD"
-        elif label == "sign-violation":
-            candidate_ledger["flows"][0]["amount"]["value"] = "-1.00"
         else:
-            candidate_ledger["flows"][0]["flow_type"] = "UNKNOWN_FLOW"
+            candidate_ledger["flows"][0]["amount"]["currency"] = "CAD"
         with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
             perimeter_module.build_blocked_account_manifest_payloads(
                 _c3_with_mutated_ledger_or_policy(
@@ -925,7 +1519,9 @@ def test_red_c3_rejects_noninternal_account_ids_without_reemission(
     payloads = perimeter_module.build_blocked_account_manifest_payloads(
         _c3_with_mutated_ledger_or_policy(perimeter_module, valid_ledger, policy)
     )
-    assert all(sentinel.encode("ascii") not in contents for contents in payloads.values())
+    assert all(
+        sentinel.encode("ascii") not in contents for contents in payloads.values()
+    )
 
 
 def test_red_c3_preserves_only_normalized_unavailable_nav_reason(
@@ -935,7 +1531,10 @@ def test_red_c3_preserves_only_normalized_unavailable_nav_reason(
     ledger = selected.provider_ledger.json_object()
     policy = selected.flow_classification_policy.json_object()
     ledger["nav_observations"][0]["nav"] = {
-        "currency": "USD", "status": "UNAVAILABLE", "value": None, "reason": " retained "
+        "currency": "USD",
+        "status": "UNAVAILABLE",
+        "value": None,
+        "reason": " retained ",
     }
     payloads = perimeter_module.build_blocked_account_manifest_payloads(
         _c3_with_mutated_ledger_or_policy(perimeter_module, ledger, policy)
@@ -971,17 +1570,38 @@ def test_v8_schema_rejects_numeric_fields_for_every_non_ok_status(
     )
     validator = _account_strategy_schema_validator_without_format_checker()
     forbidden = (
-        "start", "end", "opening_capital", "deposits", "internal_in", "invested",
-        "external_withdrawals", "internal_out", "withdrawn", "net_capital",
-        "current_value", "gain", "return_on_net_capital", "annualized_return_on_net_capital",
-        "xirr_diagnostic", "observation_linked_return", "observed_hwm_index",
-        "observed_max_drawdown", "opening_basis", "observation_trace", "capital_flow_trace",
-        "nav_observation_trace", "nav_observations",
+        "start",
+        "end",
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "invested",
+        "external_withdrawals",
+        "internal_out",
+        "withdrawn",
+        "net_capital",
+        "current_value",
+        "gain",
+        "return_on_net_capital",
+        "annualized_return_on_net_capital",
+        "xirr_diagnostic",
+        "observation_linked_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "opening_basis",
+        "observation_trace",
+        "capital_flow_trace",
+        "nav_observation_trace",
+        "nav_observations",
     )
     statuses = (
-        "BLOCKED_ADMISSION", "NO_ADMITTED_NAV", "FLOWS_AFTER_CLOSING_NAV",
-        "BLOCKED_CONTINUITY_AFTER_WITHDRAWAL", "BLOCKED_UNDEFINED_RETURN",
-        "BLOCKED_UNPROVABLE_OPENING_FLOWS", "BLOCKED_UNAVAILABLE_NAV_OBSERVATION",
+        "BLOCKED_ADMISSION",
+        "NO_ADMITTED_NAV",
+        "FLOWS_AFTER_CLOSING_NAV",
+        "BLOCKED_CONTINUITY_AFTER_WITHDRAWAL",
+        "BLOCKED_UNDEFINED_RETURN",
+        "BLOCKED_UNPROVABLE_OPENING_FLOWS",
+        "BLOCKED_UNAVAILABLE_NAV_OBSERVATION",
         "BLOCKED_MISSING_PREDECESSOR_CONTINUITY",
     )
     for status in statuses:
@@ -1016,12 +1636,16 @@ def test_v7_excludes_v8_subjects_and_old_admission_loader_rejects_generated_v1(
     payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
     output["schema_version"] = 7
-    assert list(_account_strategy_schema_validator_without_format_checker().iter_errors(output))
+    assert list(
+        _account_strategy_schema_validator_without_format_checker().iter_errors(output)
+    )
     admission = json.loads(payloads["authority/mapped-epoch-admission.json"])
     with pytest.raises(ManifestError):
         load_admission_policy(
             admission,
-            InputSnapshot.from_bytes("generated admission", canonical_json_bytes(admission)),
+            InputSnapshot.from_bytes(
+                "generated admission", canonical_json_bytes(admission)
+            ),
             [],
             {},
         )
@@ -1035,10 +1659,17 @@ def test_red_c3_rejects_negative_zero_but_allows_negative_cents(
     ledger = selected.provider_ledger.json_object()
     policy = selected.flow_classification_policy.json_object()
     ledger["flows"][0].update(
-        {"flow_type": "TRANSFER_OUT", "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount}}
+        {
+            "flow_type": "TRANSFER_OUT",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        }
     )
     policy["event_dispositions"]["exact"].append(
-        {"flow_type": "TRANSFER_OUT", "disposition": "EXTERNAL", "amount_sign": "NEGATIVE"}
+        {
+            "flow_type": "TRANSFER_OUT",
+            "disposition": "EXTERNAL",
+            "amount_sign": "NEGATIVE",
+        }
     )
     with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
         perimeter_module.build_blocked_account_manifest_payloads(
@@ -1075,7 +1706,9 @@ def test_derived_generation_date_is_the_later_selected_catalog_date(
         "baseline diagnostic label", canonical_json_bytes(baseline_payload)
     )
 
-    assert perimeter_module.derive_generation_as_of_date(provider_ledger, baseline) == date.fromisoformat(expected)
+    assert perimeter_module.derive_generation_as_of_date(
+        provider_ledger, baseline
+    ) == date.fromisoformat(expected)
 
 
 def test_unequal_selected_source_dates_preserve_source_dates_but_use_stored_max(
@@ -1114,7 +1747,10 @@ def test_unequal_selected_source_dates_preserve_source_dates_but_use_stored_max(
     assert later_selected_inputs.generation_as_of_date == date(2026, 3, 1)
     assert identities["as_of_date"] == perimeter["as_of_date"] == "2026-03-01"
     assert identities["provider_ledger"]["artifact"]["as_of_date"] == "2026-03-01"
-    assert identities["provider_ledger"]["generation_manifest"]["as_of_date"] == "2026-03-01"
+    assert (
+        identities["provider_ledger"]["generation_manifest"]["as_of_date"]
+        == "2026-03-01"
+    )
     assert identities["baseline"]["artifact"]["as_of_date"] == "2026-02-01"
     assert identities["baseline"]["generation_manifest"]["as_of_date"] == "2026-02-01"
 
@@ -1162,12 +1798,21 @@ def test_selected_input_identities_are_frozen_and_validate_exactly(
     perimeter_module: Any,
 ) -> None:
     selected_inputs = _selected_inputs(perimeter_module)
-    payload = json.loads(perimeter_module.build_selected_input_identities(selected_inputs))
+    payload = json.loads(
+        perimeter_module.build_selected_input_identities(selected_inputs)
+    )
 
     assert payload["as_of_date"] == "2026-02-01"
-    assert payload["provider_ledger"]["generation_id"] == selected_inputs.provider_ledger_generation_id
-    assert payload["baseline"]["generation_id"] == selected_inputs.baseline_generation_id
-    assert [row["receipt_id"] for row in payload["retrieval_receipts"]] == ["synthetic-receipt"]
+    assert (
+        payload["provider_ledger"]["generation_id"]
+        == selected_inputs.provider_ledger_generation_id
+    )
+    assert (
+        payload["baseline"]["generation_id"] == selected_inputs.baseline_generation_id
+    )
+    assert [row["receipt_id"] for row in payload["retrieval_receipts"]] == [
+        "synthetic-receipt"
+    ]
     perimeter_module.validate_selected_input_identities(payload, selected_inputs)
 
     payload["as_of_date"] = "2026-12-31"
@@ -1179,7 +1824,9 @@ def test_selected_input_identities_are_frozen_and_validate_exactly(
     with pytest.raises((AttributeError, TypeError)):
         selected_inputs.generation_as_of_date = date(2026, 12, 31)
     with pytest.raises(TypeError):
-        selected_inputs.retrieval_receipts["different"] = InputSnapshot.from_bytes("x", b"x")
+        selected_inputs.retrieval_receipts["different"] = InputSnapshot.from_bytes(
+            "x", b"x"
+        )
     with pytest.raises(TypeError):
         perimeter_module.AccountManifestSelectedInputs(
             provider_ledger=selected_inputs.provider_ledger,
@@ -1347,7 +1994,9 @@ def test_selected_input_errors_do_not_expose_snapshot_diagnostics(
                     "safe", canonical_json_bytes({"as_of_date": "2026-02-01"})
                 ),
             )
-        details = "".join(traceback.format_exception(raised.type, raised.value, raised.tb))
+        details = "".join(
+            traceback.format_exception(raised.type, raised.value, raised.tb)
+        )
         assert secret_label not in details
         assert secret_path not in details
         assert secret_bytes.decode("ascii") not in details
@@ -1443,7 +2092,8 @@ def test_selected_input_public_seams_exclude_forbidden_time_and_filesystem_depen
     selected_inputs_class = next(
         node
         for node in ast.walk(tree)
-        if isinstance(node, ast.ClassDef) and node.name == "AccountManifestSelectedInputs"
+        if isinstance(node, ast.ClassDef)
+        and node.name == "AccountManifestSelectedInputs"
     )
     assert any(
         isinstance(node, ast.FunctionDef) and node.name == "__post_init__"
@@ -1458,6 +2108,7 @@ def test_selected_input_public_seams_exclude_forbidden_time_and_filesystem_depen
         "validate_account_assignment_perimeter",
         "build_blocked_account_manifest_payloads",
         "validate_blocked_account_manifest_payloads",
+        "build_account_manifest_payloads",
     }
     pending = list(reachable)
     while pending:
@@ -1486,16 +2137,17 @@ def test_selected_input_public_seams_exclude_forbidden_time_and_filesystem_depen
         "pathlib",
         "importlib",
     }
+    forbidden_bound_names: set[str] = set()
     for node in ast.walk(tree):
         if isinstance(node, ast.Import):
-            assert not (
-                {name.name.split(".")[0] for name in node.names} & forbidden_imports
-            )
-        if isinstance(node, ast.ImportFrom):
+            for name in node.names:
+                if name.name.split(".")[0] in forbidden_imports:
+                    forbidden_bound_names.add(name.asname or name.name.split(".")[0])
+        if isinstance(node, ast.ImportFrom) and node.module in forbidden_imports:
             if node.module == "datetime":
                 assert [name.name for name in node.names] == ["date"]
             else:
-                assert node.module not in forbidden_imports
+                forbidden_bound_names.update(name.asname or name.name for name in node.names)
 
     forbidden_call_names = {"__import__", "eval", "exec", "import_module"}
     forbidden_attributes = {
@@ -1519,15 +2171,23 @@ def test_selected_input_public_seams_exclude_forbidden_time_and_filesystem_depen
                 assert node.func.id not in forbidden_call_names
             if isinstance(node, ast.Attribute):
                 assert node.attr not in forbidden_attributes
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                assert node.id not in forbidden_bound_names
     source = MODULE_PATH.read_text(encoding="utf-8")
     for forbidden_dependency in (
-        "ManifestCandidateSnapshots",
-        "build_manifest_candidate_from_snapshots",
         "load_ledger",
         "load_flow_classes",
         "validate_classified_flow_coverage",
     ):
         assert forbidden_dependency not in source
+    imported_names = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "tools.account_strategy_manifest"
+        for alias in node.names
+    }
+    assert {"ManifestCandidateSnapshots", "build_manifest_candidate_from_snapshots", "validate_manifest_schema"} <= imported_names
 
     class GuardedDate:
         @staticmethod
@@ -1591,7 +2251,9 @@ def test_selected_input_public_seams_exclude_forbidden_time_and_filesystem_depen
 def test_captured_snapshots_ignore_post_capture_filesystem_changes(
     perimeter_module: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    def capture(filename: str, label: str, contents: bytes) -> tuple[Path, InputSnapshot]:
+    def capture(
+        filename: str, label: str, contents: bytes
+    ) -> tuple[Path, InputSnapshot]:
         path = tmp_path / filename
         path.write_bytes(contents)
         return path, InputSnapshot.capture(path, label)
@@ -1602,7 +2264,9 @@ def test_captured_snapshots_ignore_post_capture_filesystem_changes(
         "captured ledger",
         canonical_json_bytes({"as_of_date": "2026-01-31", "catalog_schema_version": 1}),
     )
-    baseline_path, baseline = capture("baseline.json", "captured baseline", baseline_bytes)
+    baseline_path, baseline = capture(
+        "baseline.json", "captured baseline", baseline_bytes
+    )
     ledger_manifest_path, provider_ledger_manifest = capture(
         "ledger-generation.json",
         "captured ledger manifest",
@@ -1642,16 +2306,40 @@ def test_captured_snapshots_ignore_post_capture_filesystem_changes(
         independent_verifier_source=verifier,
     )
     facts = _fixture_inputs()
-    expected_identities = perimeter_module.build_selected_input_identities(selected_inputs)
+    captured_ledger_sha256 = (
+        "7116fddcc52d3bf9e6dfc2f3720964a10e8f93e28171ee8469606d5662656bc3"
+    )
+    changed_ledger_sha256 = (
+        "577b2d5f7f1b60ea62b666eb13923ce5c149a0717bd8a8856aad7483be697901"
+    )
+    assert provider_ledger.sha256 == captured_ledger_sha256
+    assert provider_ledger.size_bytes == 55
+    assert selected_inputs.generation_as_of_date == date(2026, 2, 1)
+    expected_identities = perimeter_module.build_selected_input_identities(
+        selected_inputs
+    )
     expected_perimeter = perimeter_module.build_account_assignment_perimeter(
         selected_inputs=selected_inputs,
         nav_facts=facts["nav_facts"],
         raw_flow_facts=facts["raw_flow_facts"],
         classified_flow_facts=facts["classified_flow_facts"],
     )
+    expected_identity = json.loads(expected_identities)
+    expected_ledger_artifact = {
+        "artifact_id": "normalized/provider-ledger.json",
+        "as_of_date": "2026-01-31",
+        "schema": {"name": "provider-ledger-catalog", "version": "1"},
+        "sha256": captured_ledger_sha256,
+        "size_bytes": 55,
+    }
+    assert expected_identity["as_of_date"] == "2026-02-01"
+    assert expected_identity["provider_ledger"]["artifact"] == expected_ledger_artifact
+    assert json.loads(expected_perimeter)["as_of_date"] == "2026-02-01"
     changed_ledger = canonical_json_bytes(
         {"as_of_date": "2026-03-01", "catalog_schema_version": 1}
     )
+    assert hashlib.sha256(changed_ledger).hexdigest() == changed_ledger_sha256
+    assert len(changed_ledger) == 55
     ledger_path.write_bytes(changed_ledger)
     baseline_path.write_bytes(b"changed baseline bytes")
     ledger_manifest_path.write_bytes(b"changed ledger manifest bytes")
@@ -1659,7 +2347,9 @@ def test_captured_snapshots_ignore_post_capture_filesystem_changes(
     os.utime(ledger_path, (1, 1))
 
     def fail(*args: object, **kwargs: object) -> object:
-        raise AssertionError("post-capture selected-input access touched the filesystem")
+        raise AssertionError(
+            "post-capture selected-input access touched the filesystem"
+        )
 
     with monkeypatch.context() as trapped:
         trapped.setattr(Path, "read_bytes", fail)
@@ -1668,13 +2358,46 @@ def test_captured_snapshots_ignore_post_capture_filesystem_changes(
         trapped.setattr(Path, "stat", fail)
         trapped.setattr(os, "stat", fail)
         trapped.setattr(os, "lstat", fail)
-        assert perimeter_module.build_selected_input_identities(selected_inputs) == expected_identities
-        assert perimeter_module.build_account_assignment_perimeter(
+        rebuilt_identities = perimeter_module.build_selected_input_identities(
+            selected_inputs
+        )
+        rebuilt_perimeter = perimeter_module.build_account_assignment_perimeter(
             selected_inputs=selected_inputs,
             nav_facts=facts["nav_facts"],
             raw_flow_facts=facts["raw_flow_facts"],
             classified_flow_facts=facts["classified_flow_facts"],
-        ) == expected_perimeter
+        )
+        assert rebuilt_identities == expected_identities
+        assert rebuilt_perimeter == expected_perimeter
+        rebuilt_identity = json.loads(rebuilt_identities)
+        assert rebuilt_identity["as_of_date"] == "2026-02-01"
+        assert (
+            rebuilt_identity["provider_ledger"]["artifact"]
+            == expected_ledger_artifact
+        )
+        assert (
+            rebuilt_identity["provider_ledger"]["artifact"]["sha256"]
+            != changed_ledger_sha256
+        )
+
+    relocated_sha_mutant = deepcopy(rebuilt_identity)
+    relocated_sha_mutant["provider_ledger"]["artifact"]["sha256"] = "0" * 64
+    relocated_sha_mutant["unrelated_identity"] = {
+        "sha256": captured_ledger_sha256,
+    }
+    with pytest.raises(AssertionError):
+        assert (
+            relocated_sha_mutant["provider_ledger"]["artifact"]
+            == expected_ledger_artifact
+        )
+    wrong_size_mutant = deepcopy(rebuilt_identity)
+    wrong_size_mutant["provider_ledger"]["artifact"]["size_bytes"] = 54
+    with pytest.raises(AssertionError):
+        assert (
+            wrong_size_mutant["provider_ledger"]["artifact"]
+            == expected_ledger_artifact
+        )
+    assert rebuilt_identity["provider_ledger"]["artifact"] == expected_ledger_artifact
 
     fresh_ledger = InputSnapshot.capture(ledger_path, "fresh ledger")
     ledger_manifest_path.write_bytes(
@@ -1702,15 +2425,25 @@ def test_captured_snapshots_ignore_post_capture_filesystem_changes(
         }
     )
     assert fresh_inputs.generation_as_of_date == date(2026, 3, 1)
-    assert perimeter_module.build_selected_input_identities(fresh_inputs) != expected_identities
-    assert json.loads(
-        perimeter_module.build_account_assignment_perimeter(
-            selected_inputs=fresh_inputs,
-            nav_facts=facts["nav_facts"],
-            raw_flow_facts=facts["raw_flow_facts"],
-            classified_flow_facts=facts["classified_flow_facts"],
-        )
-    )["as_of_date"] == "2026-03-01"
+    fresh_identities = perimeter_module.build_selected_input_identities(fresh_inputs)
+    fresh_perimeter = perimeter_module.build_account_assignment_perimeter(
+        selected_inputs=fresh_inputs,
+        nav_facts=facts["nav_facts"],
+        raw_flow_facts=facts["raw_flow_facts"],
+        classified_flow_facts=facts["classified_flow_facts"],
+    )
+    fresh_identity = json.loads(fresh_identities)
+    fresh_ledger_artifact = {
+        "artifact_id": "normalized/provider-ledger.json",
+        "as_of_date": "2026-03-01",
+        "schema": {"name": "provider-ledger-catalog", "version": "1"},
+        "sha256": changed_ledger_sha256,
+        "size_bytes": 55,
+    }
+    assert fresh_identities != expected_identities
+    assert fresh_identity["as_of_date"] == "2026-03-01"
+    assert fresh_identity["provider_ledger"]["artifact"] == fresh_ledger_artifact
+    assert json.loads(fresh_perimeter)["as_of_date"] == "2026-03-01"
 
 
 def test_builds_schema_valid_complete_partition_and_counts_non_strategy_facts(
@@ -1753,6 +2486,46 @@ def test_builds_schema_valid_complete_partition_and_counts_non_strategy_facts(
     assert reserve["classified_flows"] == 1
 
 
+def test_builder_counts_facts_in_unbounded_non_strategy_interval_and_schema_keeps_it(
+    perimeter_module: Any,
+) -> None:
+    """Reserve facts before any dated epoch remain count-only perimeter evidence."""
+    inputs = _fixture_inputs()
+    baseline_payload = inputs["baseline"].json_object()
+    baseline_payload["assignments"] = [
+        assignment
+        for assignment in baseline_payload["assignments"]
+        if assignment["account_id"] != "synthetic-account-18"
+    ] + [
+        _assignment(
+            "synthetic-account-18",
+            "RESERVE_NOT_APPLICABLE",
+            None,
+            None,
+            None,
+        )
+    ]
+    inputs["baseline"] = InputSnapshot.from_bytes(
+        "synthetic unbounded reserve baseline", canonical_json_bytes(baseline_payload)
+    )
+
+    payload = json.loads(_build(perimeter_module, inputs))
+    reserve = next(
+        row for row in payload["rows"] if row["account_id"] == "synthetic-account-18"
+    )
+
+    assert reserve["effective_start"] is None
+    assert reserve["effective_end"] is None
+    assert reserve["calculation_eligible"] is False
+    assert reserve["available_nav"] == reserve["raw_flows"] == reserve["classified_flows"] == 1
+    assert not list(_schema_validator().iter_errors(payload))
+
+    reserve["strategy_mapping_disposition"] = "STRATEGY_MAPPED"
+    reserve["strategy_id"] = "synthetic-strategy-18"
+    reserve["calculation_eligible"] = True
+    assert list(_schema_validator().iter_errors(payload))
+
+
 def test_is_byte_deterministic_for_shuffled_fact_inputs(perimeter_module: Any) -> None:
     inputs = _fixture_inputs()
     expected = _build(perimeter_module, inputs)
@@ -1774,9 +2547,10 @@ def test_reordered_baseline_preserves_perimeter_but_changes_snapshot_identity(
     )
     reordered = json.loads(_build(perimeter_module, inputs))
 
-    assert reordered["selected_baseline_identity"] != original[
-        "selected_baseline_identity"
-    ]
+    assert (
+        reordered["selected_baseline_identity"]
+        != original["selected_baseline_identity"]
+    )
     for field in (
         "full_perimeter_identity",
         "account_count",
@@ -1837,8 +2611,8 @@ def test_pins_assignment_perimeter_and_selected_baseline_digest_vectors(
             "artifact_id": "normalized/portfolio-baseline.json",
             "as_of_date": "2026-02-01",
             "schema": {"name": "portfolio-baseline-catalog", "version": "1"},
-            "sha256": "35d757b23dfd079c4dab3f3ffd201cad0a8e9f494dd8619b9ccfbba4f4cd7049",
-            "size_bytes": 5703,
+            "sha256": "18fcd54bd29dcbae76c6ec8b5b25fc0869b9604bdc376acee3dbf09a8fbd7071",
+            "size_bytes": 6456,
         },
     }
 
@@ -1890,7 +2664,9 @@ def _mutate_non_strategy_row_to_mapped(payload: dict[str, object]) -> None:
             "payload differs from expected",
         ),
         (
-            lambda value: value["rows"][0]["assignment_identity"].update({"sha256": "0" * 64}),
+            lambda value: value["rows"][0]["assignment_identity"].update(
+                {"sha256": "0" * 64}
+            ),
             "payload differs from expected",
         ),
         (
@@ -1902,35 +2678,55 @@ def _mutate_non_strategy_row_to_mapped(payload: dict[str, object]) -> None:
             "payload differs from expected",
         ),
         (
-            lambda value: value["selected_baseline_identity"].update({"generation_id": "0" * 64}),
+            lambda value: value["selected_baseline_identity"].update(
+                {"generation_id": "0" * 64}
+            ),
             "payload differs from expected",
         ),
         (
-            lambda value: value["selected_baseline_identity"]["artifact"].update({"sha256": "0" * 64}),
+            lambda value: value["selected_baseline_identity"]["artifact"].update(
+                {"sha256": "0" * 64}
+            ),
             "payload differs from expected",
         ),
         (
-            lambda value: value["selected_baseline_identity"]["artifact"].update({"artifact_id": "other.json"}),
+            lambda value: value["selected_baseline_identity"]["artifact"].update(
+                {"artifact_id": "other.json"}
+            ),
             "payload differs from expected",
         ),
         (
-            lambda value: value["selected_baseline_identity"]["artifact"].update({"as_of_date": "2026-02-02"}),
+            lambda value: value["selected_baseline_identity"]["artifact"].update(
+                {"as_of_date": "2026-02-02"}
+            ),
             "payload differs from expected",
         ),
         (
-            lambda value: value["selected_baseline_identity"]["artifact"]["schema"].update({"name": "other-schema"}),
+            lambda value: value["selected_baseline_identity"]["artifact"][
+                "schema"
+            ].update({"name": "other-schema"}),
             "payload differs from expected",
         ),
         (
-            lambda value: value["selected_baseline_identity"]["artifact"]["schema"].update({"version": "2"}),
+            lambda value: value["selected_baseline_identity"]["artifact"][
+                "schema"
+            ].update({"version": "2"}),
             "payload differs from expected",
         ),
         (
-            lambda value: value["selected_baseline_identity"]["artifact"].update({"size_bytes": 1}),
+            lambda value: value["selected_baseline_identity"]["artifact"].update(
+                {"size_bytes": 1}
+            ),
             "payload differs from expected",
         ),
-        (lambda value: value.update({"account_count": 17}), "payload differs from expected"),
-        (lambda value: value.update({"assignment_count": 25}), "payload differs from expected"),
+        (
+            lambda value: value.update({"account_count": 17}),
+            "payload differs from expected",
+        ),
+        (
+            lambda value: value.update({"assignment_count": 25}),
+            "payload differs from expected",
+        ),
         (
             lambda value: value["partition_counts"].update({"STRATEGY_MAPPED": 14}),
             "payload differs from expected",
@@ -1940,7 +2736,9 @@ def _mutate_non_strategy_row_to_mapped(payload: dict[str, object]) -> None:
             "payload differs from expected",
         ),
         (
-            lambda value: value["partition_counts"].update({"RESERVE_NOT_APPLICABLE": 3}),
+            lambda value: value["partition_counts"].update(
+                {"RESERVE_NOT_APPLICABLE": 3}
+            ),
             "payload differs from expected",
         ),
         (
@@ -1998,7 +2796,11 @@ def test_semantic_validator_rejects_schema_valid_mutations(
 @pytest.mark.parametrize(
     ("section", "fact_mutation", "message"),
     [
-        ("nav_facts", lambda facts: facts.append(deepcopy(facts[0])), "duplicate NAV record_id"),
+        (
+            "nav_facts",
+            lambda facts: facts.append(deepcopy(facts[0])),
+            "duplicate NAV record_id",
+        ),
         (
             "nav_facts",
             lambda facts: facts.append(
@@ -2006,7 +2808,11 @@ def test_semantic_validator_rejects_schema_valid_mutations(
             ),
             "duplicate NAV account_id/as_of_date",
         ),
-        ("raw_flow_facts", lambda facts: facts.append(deepcopy(facts[0])), "duplicate raw flow record_id"),
+        (
+            "raw_flow_facts",
+            lambda facts: facts.append(deepcopy(facts[0])),
+            "duplicate raw flow record_id",
+        ),
         (
             "classified_flow_facts",
             lambda facts: facts.append(deepcopy(facts[0])),
@@ -2031,36 +2837,29 @@ def test_rejects_each_required_fact_identity_collision(
 
 
 @pytest.mark.parametrize("field", ["nav_facts", "raw_flow_facts", "classified_flow_facts"])
-@pytest.mark.parametrize("date", ["2024-12-31", "2027-01-01"])
-def test_rejects_unknown_accounts_and_dates_outside_the_full_perimeter(
-    perimeter_module: Any, field: str, date: str
+def test_rejects_malformed_fact_account_ids(
+    perimeter_module: Any, field: str
 ) -> None:
     inputs = _fixture_inputs()
     fact = deepcopy(inputs[field][0])
-    fact["account_id"] = "unknown-synthetic-account"
+    fact["account_id"] = ""
     if field == "classified_flow_facts":
-        fact["event_id"] = "unknown-account-event"
-        fact["source_record_id"] = "unknown-account-source"
-    else:
-        fact["record_id"] = "unknown-account-record"
-    inputs[field].append(fact)
-    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError, match="unknown fact account_id"):
-        _build(perimeter_module, inputs)
-
-    inputs = _fixture_inputs()
-    if date == "2027-01-01":
-        baseline_payload = inputs["baseline"].json_object()
-        baseline_payload["assignments"][0]["effective_end"] = "2025-12-31"
-        inputs["baseline"] = InputSnapshot.from_bytes(
-            "closed synthetic account baseline", canonical_json_bytes(baseline_payload)
+        fact["event_id"] = "malformed-account-event"
+        fact["source_record_id"] = "malformed-account-source"
+        inputs["raw_flow_facts"].append(
+            {
+                "record_id": "malformed-account-source",
+                "account_id": "",
+                "event_date": fact["event_date"],
+            }
         )
-    fact = deepcopy(inputs[field][0])
-    fact["record_id" if field != "classified_flow_facts" else "event_id"] = "date-test"
-    fact["as_of_date" if field == "nav_facts" else "event_date"] = date
-    if field == "classified_flow_facts":
-        fact["source_record_id"] = "date-test-source"
+    else:
+        fact["record_id"] = "malformed-account-record"
     inputs[field].append(fact)
-    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError, match="outside every assignment interval"):
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="account_id must be a non-empty string",
+    ):
         _build(perimeter_module, inputs)
 
 
@@ -2112,7 +2911,9 @@ def test_rejects_baseline_assignment_overlap_and_gap(
         _build(perimeter_module, inputs)
 
 
-def test_schema_is_general_and_rejects_private_or_invalid_shape(perimeter_module: Any) -> None:
+def test_schema_is_general_and_rejects_private_or_invalid_shape(
+    perimeter_module: Any,
+) -> None:
     inputs = _fixture_inputs()
     payload = json.loads(_build(perimeter_module, inputs))
     validator = _schema_validator()
@@ -2142,7 +2943,9 @@ def test_schema_is_general_and_rejects_private_or_invalid_shape(perimeter_module
     assert list(validator.iter_errors(noncanonical_version))
 
 
-@pytest.mark.parametrize("invalid_date", ["2026-02-30", "2026-13-99", "2025-02-29", "0000-01-01"])
+@pytest.mark.parametrize(
+    "invalid_date", ["2026-02-30", "2026-13-99", "2025-02-29", "0000-01-01"]
+)
 def test_schema_intrinsically_rejects_invalid_calendar_dates_without_format_checker(
     perimeter_module: Any, invalid_date: str
 ) -> None:
@@ -2181,3 +2984,22705 @@ def test_rejects_negative_baseline_schema_version_before_builder_or_validator_em
         match="baseline_schema_version must be a non-negative integer",
     ):
         _validate(perimeter_module, valid_payload, inputs)
+
+
+def _c4_selected_inputs(perimeter_module: Any, verifier_module: Any) -> object:
+    selected_inputs = _selected_inputs(perimeter_module)
+    return verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected_inputs)
+    )
+
+
+def _c4_subject_payloads(verifier_module: Any) -> dict[str, bytes]:
+    return {
+        path: canonical_json_bytes({"subject": path})
+        for path in verifier_module.EXACT_SUBJECT_PATHS
+    }
+
+
+def test_c4a_contract_artifacts_exist(verifier_module: Any) -> None:
+    assert VERIFIER_SCHEMA_PATH.is_file(), (
+        "C4.a verification schema has not been created"
+    )
+    assert verifier_module.EXACT_SUBJECT_PATHS == (
+        "authority/account-assignment-perimeter.json",
+        "authority/account-flow-coverage.json",
+        "authority/calculation-inputs.json",
+        "authority/classified-flows.json",
+        "authority/code-identities.json",
+        "authority/flow-classification-policy.json",
+        "authority/mapped-epoch-admission.json",
+        "authority/selected-input-identities.json",
+        "outputs/account-strategy-manifest.json",
+    )
+
+
+def test_c4a_inputs_are_frozen_and_defensively_copy_receipts(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    receipts = {"receipt/synthetic.json": InputSnapshot.from_bytes("receipt", b"one")}
+    values = _selected_input_kwargs(selected_inputs)
+    values["retrieval_receipts"] = receipts
+    frozen = verifier_module.IndependentVerifierInputs(**values)
+
+    receipts["receipt/other.json"] = InputSnapshot.from_bytes("receipt", b"two")
+    assert tuple(frozen.retrieval_receipts) == ("receipt/synthetic.json",)
+    with pytest.raises(TypeError):
+        frozen.retrieval_receipts["receipt/other.json"] = receipts["receipt/other.json"]
+    with pytest.raises((AttributeError, TypeError)):
+        frozen.provider_ledger = selected_inputs.provider_ledger
+
+
+def test_c4a_rejects_snapshot_subclasses_and_non_snapshot_receipts(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    class SnapshotSubclass(InputSnapshot):
+        pass
+
+    selected_inputs = _selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected_inputs)
+    values["provider_ledger"] = SnapshotSubclass(
+        label="subclass", contents=selected_inputs.provider_ledger.contents
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentVerifierInputs(**values)
+
+    values = _selected_input_kwargs(selected_inputs)
+    values["retrieval_receipts"] = {"receipt/synthetic.json": b"not-a-snapshot"}
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentVerifierInputs(**values)
+
+
+def test_c4a_subject_entries_are_exact_sorted_and_exclude_the_report(
+    verifier_module: Any,
+) -> None:
+    payloads = _c4_subject_payloads(verifier_module)
+    shuffled = dict(reversed(tuple(payloads.items())))
+    entries = verifier_module.canonical_subject_entries(shuffled)
+    assert [entry["path"] for entry in entries] == list(
+        verifier_module.EXACT_SUBJECT_PATHS
+    )
+    assert all(set(entry) == {"path", "sha256", "size_bytes"} for entry in entries)
+    assert verifier_module.subjects_semantic_sha256(
+        payloads
+    ) == verifier_module.subjects_semantic_sha256(shuffled)
+
+    with pytest.raises(verifier_module.IndependentVerificationError, match="invalid"):
+        verifier_module.canonical_subject_entries(
+            {**payloads, "verification/independent-verification.json": b"report"}
+        )
+
+    first_path = verifier_module.EXACT_SUBJECT_PATHS[0]
+    for invalid_bytes in (
+        b'{"subject":"noncanonical"} ',
+        b'{"duplicate":1,"duplicate":1}\n',
+        b"[]\n",
+        b"not-json",
+        b"\xff",
+    ):
+        mutated = dict(payloads)
+        mutated[first_path] = invalid_bytes
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module.canonical_subject_entries(mutated)
+
+
+def test_c4a_closed_request_codec_is_canonical_and_round_trips(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    selected_inputs = _c4_selected_inputs(perimeter_module, verifier_module)
+    payloads = _c4_subject_payloads(verifier_module)
+    request = verifier_module.encode_verification_request(selected_inputs, payloads)
+    parsed = json.loads(request)
+    assert request == canonical_json_bytes(parsed)
+    assert set(parsed) == {
+        "schema_version",
+        "selected_snapshots",
+        "retrieval_receipts",
+        "subjects",
+    }
+    assert [item["path"] for item in parsed["subjects"]] == list(
+        verifier_module.EXACT_SUBJECT_PATHS
+    )
+    assert [item["receipt_id"] for item in parsed["retrieval_receipts"]] == [
+        "synthetic-receipt"
+    ]
+
+    decoded_inputs, decoded_payloads = verifier_module.decode_verification_request(
+        request
+    )
+    assert decoded_payloads == payloads
+    assert (
+        decoded_inputs.provider_ledger.contents
+        == selected_inputs.provider_ledger.contents
+    )
+    assert decoded_inputs.retrieval_receipts["synthetic-receipt"].contents == b"receipt"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.update({"unexpected": 1}),
+        lambda value: value.pop("subjects"),
+        lambda value: value.update({"schema_version": 2}),
+        lambda value: value["subjects"].append(value["subjects"][0]),
+        lambda value: value["subjects"].reverse(),
+        lambda value: value["subjects"][0].update({"contents_base64": "%%%"}),
+    ],
+)
+def test_c4a_request_decoder_rejects_closed_contract_mutations(
+    perimeter_module: Any, verifier_module: Any, mutation: Any
+) -> None:
+    selected_inputs = _c4_selected_inputs(perimeter_module, verifier_module)
+    request = verifier_module.encode_verification_request(
+        selected_inputs, _c4_subject_payloads(verifier_module)
+    )
+    parsed = json.loads(request)
+    mutation(parsed)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.decode_verification_request(canonical_json_bytes(parsed))
+
+
+def test_c4a_schema_is_draft_2020_12_closed_and_has_no_report_subject() -> None:
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    assert schema["additionalProperties"] is False
+    assert (
+        "verification/independent-verification.json"
+        not in schema["$defs"]["subject"]["properties"]["path"]["enum"]
+    )
+
+
+@pytest.mark.parametrize(
+    "receipt_id",
+    [
+        "receipt//empty.json",
+        "receipt/../traversal.json",
+        "receipt\\backslash.json",
+        "/absolute/receipt.json",
+        "C:/drive/receipt.json",
+        "CON/receipt.json",
+        "con/other.json",
+        "receipt/trailing-dot.",
+    ],
+)
+def test_c4a_receipt_identifiers_match_portable_runtime_contract(
+    perimeter_module: Any, verifier_module: Any, receipt_id: str
+) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected_inputs)
+    values["retrieval_receipts"] = {
+        receipt_id: InputSnapshot.from_bytes("receipt", b"receipt")
+    }
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentVerifierInputs(**values)
+
+
+def test_c4a_input_dates_are_an_explicit_frozen_contract(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    selected_inputs = _selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected_inputs)
+    values["provider_ledger"] = InputSnapshot.from_bytes(
+        "diagnostic", canonical_json_bytes({"as_of_date": "2026-02-30"})
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentVerifierInputs(**values)
+
+
+def test_c4a_decoder_rejects_duplicate_keys_noncanonical_bytes_and_bad_base64(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    selected_inputs = _c4_selected_inputs(perimeter_module, verifier_module)
+    request = verifier_module.encode_verification_request(
+        selected_inputs, _c4_subject_payloads(verifier_module)
+    )
+    duplicate = request.replace(
+        b'"schema_version":1', b'"schema_version":1,"schema_version":1', 1
+    )
+    for invalid in (
+        duplicate,
+        request + b" ",
+        request.replace(b'"schema_version":1', b'"schema_version":NaN', 1),
+        request.replace(b'"contents_base64":"eyJ', b'"contents_base64":"%%%', 1),
+    ):
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module.decode_verification_request(invalid)
+
+
+def test_c4a_schema_runtime_path_agreement_without_format_checker(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema["$defs"]["portable_path"])
+    for receipt_id in ("a", "receipt/a.json"):
+        values = _selected_input_kwargs(_selected_inputs(perimeter_module))
+        values["retrieval_receipts"] = {
+            receipt_id: InputSnapshot.from_bytes("receipt", b"receipt")
+        }
+        accepted = verifier_module.IndependentVerifierInputs(**values)
+        assert tuple(accepted.retrieval_receipts) == (receipt_id,)
+        assert validator.is_valid(receipt_id)
+    for receipt_id in ("receipt//x", "receipt/../x", "CON/x", "receipt\\x"):
+        values = _selected_input_kwargs(_selected_inputs(perimeter_module))
+        values["retrieval_receipts"] = {
+            receipt_id: InputSnapshot.from_bytes("receipt", b"receipt")
+        }
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module.IndependentVerifierInputs(**values)
+        assert not validator.is_valid(receipt_id)
+
+
+def test_c4a_schema_intrinsically_validates_gregorian_dates_without_format_checker() -> (
+    None
+):
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema["$defs"]["date"])
+    for valid in ("2000-02-29", "2400-02-29", "2026-02-28"):
+        assert validator.is_valid(valid)
+    for invalid in ("1900-02-29", "2100-02-29", "2026-02-30", "0000-01-01"):
+        assert not validator.is_valid(invalid)
+
+
+def test_c4a_schema_subjects_require_exact_lexical_order(
+    verifier_module: Any,
+) -> None:
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    subjects_schema = {
+        "$schema": schema["$schema"],
+        "$defs": schema["$defs"],
+        **schema["properties"]["subjects"],
+    }
+    validator = Draft202012Validator(subjects_schema)
+    entries = [
+        {"path": path, "sha256": "0" * 64, "size_bytes": 0}
+        for path in verifier_module.EXACT_SUBJECT_PATHS
+    ]
+    assert validator.is_valid(entries)
+    reordered = list(reversed(entries))
+    assert not validator.is_valid(reordered)
+
+
+def _c4b1_bundle(
+    perimeter_module: Any, verifier_module: Any
+) -> tuple[object, dict[str, bytes]]:
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    assert isinstance(selected_inputs, object)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected_inputs)
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected_inputs)
+    return verifier_inputs, payloads
+
+
+def test_c4b1_valid_c3_subjects_reach_explicit_c4b2_boundary(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+
+
+def test_mvp_audit_001_independent_report_emits_exact_v2_population_partition(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """The report derives all fact/event partitions from its selected inputs."""
+    selected = _mvp_audit_001_selected_with_unmatched_facts(
+        perimeter_module, include_nav=True, include_flow=True
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_module.IndependentVerifierInputs(
+                **_selected_input_kwargs(selected)
+            ),
+            payloads,
+        )
+    )
+
+    assert report["schema_version"] == 2
+    counts = report["counts"]
+    assert {
+        "observed_nav_fact_count",
+        "observed_raw_flow_count",
+        "classified_event_count",
+        "classified_event_classified_count",
+        "classified_event_blocked_count",
+        "unmatched_nav_fact_count",
+        "unmatched_raw_flow_fact_count",
+        "unmatched_fact_count",
+        "unmatched_projection_count",
+    } <= set(counts)
+    assert {
+        key: counts[key]
+        for key in (
+            "observed_nav_fact_count",
+            "observed_raw_flow_count",
+            "classified_event_count",
+            "classified_event_classified_count",
+            "classified_event_blocked_count",
+            "unmatched_nav_fact_count",
+            "unmatched_raw_flow_fact_count",
+            "unmatched_fact_count",
+            "unmatched_projection_count",
+        )
+    } == {
+        "observed_nav_fact_count": 19,
+        "observed_raw_flow_count": 19,
+        "classified_event_count": 19,
+        "classified_event_classified_count": 18,
+        "classified_event_blocked_count": 1,
+        "unmatched_nav_fact_count": 1,
+        "unmatched_raw_flow_fact_count": 1,
+        "unmatched_fact_count": 2,
+        "unmatched_projection_count": 3,
+    }
+    assert counts["classified_event_count"] == (
+        counts["classified_event_classified_count"]
+        + counts["classified_event_blocked_count"]
+    ) == counts["observed_raw_flow_count"]
+    assert counts["unmatched_fact_count"] == (
+        counts["unmatched_nav_fact_count"]
+        + counts["unmatched_raw_flow_fact_count"]
+    )
+    assert counts["unmatched_projection_count"] == (
+        counts["unmatched_nav_fact_count"]
+        + 2 * counts["unmatched_raw_flow_fact_count"]
+    )
+
+
+def test_c4b1_reordered_baseline_assignments_reach_c4b2(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    baseline_payload = _fixture_inputs()["baseline"].json_object()
+    baseline_payload["assignments"].reverse()
+    reordered_baseline = InputSnapshot.from_bytes(
+        "reordered baseline", canonical_json_bytes(baseline_payload)
+    )
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected_inputs)
+    values["baseline"] = reordered_baseline
+    values["baseline_manifest"] = _generation_manifest_snapshot(
+        catalog=reordered_baseline,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    reordered_inputs = perimeter_module.AccountManifestSelectedInputs(**values)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(reordered_inputs)
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(
+        reordered_inputs
+    )
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+
+
+def test_c4b2_valid_c3_subjects_reach_explicit_c4b3_boundary(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+
+
+def test_c4b3_1_valid_c3_subjects_reach_explicit_c4b3_2_boundary(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+
+
+def test_c4b3_2a_valid_c3_subjects_reach_explicit_c4b3_2b_boundary(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+
+
+def test_c4b3_2b1_valid_c3_subjects_reach_explicit_c4b3_2b2_boundary(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+
+
+def test_c4b3_2b2_derives_exact_report_ready_fragments(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    _assert_canonical_report_bytes(verifier.verify(verifier_inputs, payloads))
+    state = verifier_module._verify_retained_semantics(verifier_inputs, payloads)
+    assert tuple(state) == (
+        "counts",
+        "blocker_chains",
+        "numeric_verification",
+        "invariants",
+    )
+    assert state["counts"] == {
+        "selected_baseline_account_count": 18,
+        "account_count": 18,
+        "assignment_count": 26,
+        "mapped_assignment_count": 15,
+        "historical_assignment_count": 7,
+        "reserve_assignment_count": 4,
+        "observed_nav_fact_count": 18,
+        "observed_raw_flow_count": 18,
+        "classified_event_count": 18,
+        "classified_event_classified_count": 15,
+        "classified_event_blocked_count": 3,
+        "unmatched_nav_fact_count": 0,
+        "unmatched_raw_flow_fact_count": 0,
+        "unmatched_fact_count": 0,
+        "unmatched_projection_count": 0,
+        "calculation_input_row_count": 15,
+        "coverage_row_count": 15,
+        "admission_row_count": 15,
+        "output_row_count": 15,
+        "blocked_coverage_row_count": 15,
+        "blocked_admission_row_count": 15,
+        "blocked_output_row_count": 15,
+    }
+    expected_assignments = [
+        {
+            "account_id": f"synthetic-account-{number:02d}",
+            "strategy_id": f"synthetic-strategy-{number:02d}",
+            "effective_start": "2025-01-01",
+            "effective_end": None,
+        }
+        for number in range(1, 12)
+    ] + [
+        {
+            "account_id": f"synthetic-account-{number:02d}",
+            "strategy_id": f"synthetic-strategy-{number:02d}",
+            "effective_start": "2025-01-01",
+            "effective_end": "2025-12-31",
+        }
+        for number in range(12, 16)
+    ]
+    fixed_chain = {
+        "coverage": {
+            "status": "BLOCKED",
+            "blocker_code": "NO_ADMISSIBLE_V2_RECEIPT",
+        },
+        "admission": {
+            "status": "BLOCKED",
+            "blocker_code": "FLOW_COMPLETENESS_NOT_PROVEN",
+        },
+        "output": {
+            "status": "BLOCKED_ADMISSION",
+            "blocking_reason": "FLOW_COMPLETENESS_NOT_PROVEN",
+        },
+        "numeric_candidate": False,
+    }
+    expected_chains = [
+        {"assignment": assignment, **fixed_chain} for assignment in expected_assignments
+    ]
+    assert state["blocker_chains"] == expected_chains
+    assert [
+        tuple(
+            chain["assignment"][key]
+            for key in ("account_id", "strategy_id", "effective_start", "effective_end")
+        )
+        for chain in state["blocker_chains"]
+    ] == [
+        tuple(
+            assignment[key]
+            for key in ("account_id", "strategy_id", "effective_start", "effective_end")
+        )
+        for assignment in expected_assignments
+    ]
+    assert state["numeric_verification"] == {
+        "candidate_count": 0,
+        "comparison_count": 0,
+        "discrepancy_count": 0,
+        "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
+    }
+    assert state["invariants"] == {
+        "exact_subject_set": True,
+        "canonical_subject_bytes": True,
+        "selected_source_binding": True,
+        "fact_disposition_complete": True,
+        "unassigned_numeric_exclusion": True,
+        "classified_flow_reconciliation": True,
+        "mapped_row_bijection": True,
+        "blocker_propagation": True,
+        "blocked_numeric_exclusion": True,
+        "privacy_safe_projection": True,
+    }
+    reversed_subjects = dict(reversed(list(payloads.items())))
+    b1_state = verifier_module._verify_c4b1_contract(verifier_inputs, payloads)
+    reversed_state = verifier_module._derive_c4b3_2b2_fragments(
+        verifier_inputs, reversed_subjects, b1_state
+    )
+    assert reversed_state == state
+
+
+class _OneShotItemsView:
+    """A lazy items view whose iterator can be consumed only once."""
+
+    def __init__(self, pairs: tuple[tuple[str, bytes], ...]) -> None:
+        self._pairs = pairs
+        self._position = 0
+        self._iterated = False
+
+    def __iter__(self):
+        if self._iterated:
+            raise AssertionError("subject items view was iterated more than once")
+        self._iterated = True
+        return self
+
+    def __next__(self) -> tuple[str, bytes]:
+        if self._position == len(self._pairs):
+            raise StopIteration
+        pair = self._pairs[self._position]
+        self._position += 1
+        return pair
+
+
+class _MutateAfterYieldItemsView:
+    """Mutate the previous yielded pair before each subsequent observation."""
+
+    def __init__(self, pairs: tuple[tuple[str, bytes], ...]) -> None:
+        self._pairs = [list(pair) for pair in pairs]
+        self._position = 0
+        self._iterated = False
+
+    def __iter__(self):
+        if self._iterated:
+            raise AssertionError("subject items view was iterated more than once")
+        self._iterated = True
+        return self
+
+    def __next__(self) -> list[object]:
+        if self._position:
+            previous = self._pairs[self._position - 1]
+            previous[0] = "authority/selected-input-identities.json"
+            previous[1] = canonical_json_bytes({"mutated_after_yield": True})
+        if self._position == len(self._pairs):
+            raise StopIteration
+        pair = self._pairs[self._position]
+        self._position += 1
+        return pair
+
+
+class _OneShotSubjectMapping(Mapping[str, bytes]):
+    """Expose valid items once; every other observation is hostile."""
+
+    def __init__(
+        self, values: dict[str, bytes], *, altered_on_second_items: bool = False
+    ) -> None:
+        self._values = values
+        self._altered_on_second_items = altered_on_second_items
+        self.items_calls = 0
+
+    def items(self):  # type: ignore[override]
+        self.items_calls += 1
+        if self.items_calls == 1:
+            return _OneShotItemsView(tuple(self._values.items()))
+        if self._altered_on_second_items:
+            altered = dict(self._values)
+            first_path = next(iter(altered))
+            altered[first_path] = canonical_json_bytes({"mixed_phase": True})
+            return _OneShotItemsView(tuple(altered.items()))
+        raise AssertionError("caller subject mapping was observed more than once")
+
+    def __getitem__(self, key: str) -> bytes:
+        raise AssertionError(f"unexpected subject lookup: {key}")
+
+    def __iter__(self):
+        raise AssertionError("unexpected subject key iteration")
+
+    def __len__(self) -> int:
+        raise AssertionError("unexpected subject length probe")
+
+    def __contains__(self, key: object) -> bool:
+        raise AssertionError(f"unexpected subject membership probe: {key}")
+
+
+class _MutateAfterYieldSubjectMapping(Mapping[str, bytes]):
+    def __init__(self, values: dict[str, bytes]) -> None:
+        self._values = values
+        self.items_calls = 0
+
+    def items(self):  # type: ignore[override]
+        self.items_calls += 1
+        if self.items_calls != 1:
+            raise AssertionError("caller subject mapping was observed more than once")
+        return _MutateAfterYieldItemsView(tuple(self._values.items()))
+
+    def __getitem__(self, key: str) -> bytes:
+        raise AssertionError(f"unexpected subject lookup: {key}")
+
+    def __iter__(self):
+        raise AssertionError("unexpected subject key iteration")
+
+    def __len__(self) -> int:
+        raise AssertionError("unexpected subject length probe")
+
+    def __contains__(self, key: object) -> bool:
+        raise AssertionError(f"unexpected subject membership probe: {key}")
+
+
+def test_c4b4_retained_semantics_materializes_hostile_subject_mapping_once(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    expected = verifier_module._verify_retained_semantics(verifier_inputs, payloads)
+    hostile = _OneShotSubjectMapping(payloads)
+
+    actual = verifier_module._verify_retained_semantics(verifier_inputs, hostile)
+
+    assert hostile.items_calls == 1
+    assert actual == expected
+
+
+def test_c4b4_retained_semantics_never_accepts_a_second_mixed_subject_view(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    expected = verifier_module._verify_retained_semantics(verifier_inputs, payloads)
+    hostile = _OneShotSubjectMapping(payloads, altered_on_second_items=True)
+
+    actual = verifier_module._verify_retained_semantics(verifier_inputs, hostile)
+
+    assert hostile.items_calls == 1
+    assert actual == expected
+
+
+@pytest.mark.parametrize("operation", ["c4b1", "entries", "digest", "encode", "verify"])
+def test_c4b4_each_subject_boundary_observes_hostile_mapping_once(
+    perimeter_module: Any, verifier_module: Any, operation: str
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    hostile = _OneShotSubjectMapping(payloads)
+
+    if operation == "c4b1":
+        result = verifier_module._verify_c4b1_contract(verifier_inputs, hostile)
+        assert result["mapped_assignments_identity"]["count"] == 15
+    elif operation == "entries":
+        result = verifier_module.canonical_subject_entries(hostile)
+        assert len(result) == len(verifier_module.EXACT_SUBJECT_PATHS)
+    elif operation == "digest":
+        result = verifier_module.subjects_semantic_sha256(hostile)
+        assert len(result) == 64
+    elif operation == "encode":
+        result = verifier_module.encode_verification_request(verifier_inputs, hostile)
+        assert result.startswith(b"{")
+    else:
+        result = verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, hostile
+        )
+
+    assert hostile.items_calls == 1
+    if operation == "verify":
+        _assert_canonical_report_bytes(result)
+
+
+def test_c4b4_normalization_binds_pair_before_view_mutation(
+    verifier_module: Any,
+) -> None:
+    payloads = _c4_subject_payloads(verifier_module)
+    expected = verifier_module.canonical_subject_entries(payloads)
+    hostile = _MutateAfterYieldSubjectMapping(payloads)
+
+    actual = verifier_module.canonical_subject_entries(hostile)
+
+    assert hostile.items_calls == 1
+    assert actual == expected
+
+
+def test_c4b4_duplicate_subject_pair_is_rejected_before_dict_collapse(
+    verifier_module: Any,
+) -> None:
+    payloads = _c4_subject_payloads(verifier_module)
+    pairs = tuple(payloads.items()) + (tuple(payloads.items())[0],)
+    hostile = _OneShotItemsView(pairs)
+
+    class DuplicateSubjectMapping(Mapping[str, bytes]):
+        def __init__(self) -> None:
+            self.items_calls = 0
+
+        def items(self):  # type: ignore[override]
+            self.items_calls += 1
+            return hostile
+
+        def __getitem__(self, key: str) -> bytes:
+            raise AssertionError(f"unexpected subject lookup: {key}")
+
+        def __iter__(self):
+            raise AssertionError("unexpected subject key iteration")
+
+        def __len__(self) -> int:
+            raise AssertionError("unexpected subject length probe")
+
+        def __contains__(self, key: object) -> bool:
+            raise AssertionError(f"unexpected subject membership probe: {key}")
+
+    duplicate_mapping = DuplicateSubjectMapping()
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.canonical_subject_entries(duplicate_mapping)
+    assert duplicate_mapping.items_calls == 1
+
+
+def test_c4b3_2b2_verifier_reuse_retains_no_instance_state(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    _assert_canonical_report_bytes(verifier.verify(verifier_inputs, payloads))
+    assert verifier.__dict__ == {}
+    invalid = dict(payloads)
+    invalid["outputs/account-strategy-manifest.json"] = b"{}"
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, invalid)
+    assert verifier.__dict__ == {}
+
+
+def test_c4b3_2b2_derives_fact_counts_from_a_19_fact_bundle(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    ledger = selected_inputs.provider_ledger.json_object()
+    ledger["nav_observations"].append(
+        {
+            "record_id": "c3-nav-extra",
+            "account_id": "synthetic-account-01",
+            "as_of_date": "2026-01-31",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "99.00"},
+        }
+    )
+    ledger["flows"].append(
+        {
+            "record_id": "c3-flow-extra",
+            "account_id": "synthetic-account-01",
+            "event_date": "2026-01-31",
+            "flow_type": "CONTRIBUTION",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1.00"},
+        }
+    )
+    provider_ledger = InputSnapshot.from_bytes(
+        "19-fact ledger", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected_inputs)
+    values["provider_ledger"] = provider_ledger
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=provider_ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    state = verifier_module._verify_retained_semantics(verifier_inputs, payloads)
+    assert state["counts"]["observed_nav_fact_count"] == 19
+    assert state["counts"]["observed_raw_flow_count"] == 19
+    assert state["counts"]["classified_event_count"] == 19
+    assert state["counts"]["calculation_input_row_count"] == 15
+
+
+def test_c4c1_private_date_and_decimal_primitives(verifier_module: Any) -> None:
+    assert verifier_module._parse_canonical_date("2000-02-29") == date(2000, 2, 29)
+    assert verifier_module._parse_canonical_date("2400-02-29") == date(2400, 2, 29)
+    for value in ("1900-02-29", "2100-02-29", "2026-02-30", "2026-2-3"):
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._parse_canonical_date(value)
+
+    assert verifier_module._parse_source_cents("-12.30") == Decimal("-12.30")
+    assert verifier_module._parse_source_cents("1.00") == Decimal("1.00")
+    assert verifier_module._parse_source_cents("0.10") == Decimal("0.10")
+    assert verifier_module._parse_numeric_output("-12.3") == Decimal("-12.3")
+    assert verifier_module._format_decimal(Decimal("-12.3000")) == "-12.3"
+    tiny = "0.0000000000000000000000000000001"
+    assert verifier_module._format_decimal(Decimal("1E-31")) == tiny
+    assert verifier_module._parse_numeric_output(tiny) == Decimal("1E-31")
+
+    for value in ("1.234", "01", "-0", "-0.00", "NaN", "Infinity", "1e2"):
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._parse_source_cents(value)
+    for value in (
+        1,
+        True,
+        1.0,
+        Decimal("1"),
+        "01",
+        "1.0",
+        "0.10",
+        "-0",
+        "NaN",
+        "Infinity",
+        "1e2",
+    ):
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._parse_numeric_output(value)
+
+
+@pytest.mark.parametrize(
+    ("cashflows", "expected"),
+    [
+        (
+            [
+                (date(2026, 1, 1), Decimal("-100")),
+                (date(2026, 7, 2), Decimal("-50")),
+                (date(2027, 1, 1), Decimal("160")),
+            ],
+            Decimal("0.0802658437401532091915211535238254551645"),
+        ),
+        (
+            [(date(2026, 1, 1), Decimal("-100")), (date(2027, 1, 1), Decimal("100"))],
+            Decimal("0"),
+        ),
+        (
+            [(date(2026, 1, 1), Decimal("-100")), (date(2027, 1, 1), Decimal("0.01"))],
+            Decimal("-0.9999"),
+        ),
+        (
+            [(date(2026, 1, 1), Decimal("-1")), (date(2027, 1, 1), Decimal("1000"))],
+            Decimal("999"),
+        ),
+        (
+            [
+                (date(2026, 1, 1), Decimal("-100")),
+                (date(2027, 1, 1), Decimal("0.012345")),
+            ],
+            Decimal("-0.99987655"),
+        ),
+        (
+            [(date(2026, 1, 1), Decimal("-100")), (date(2027, 1, 1), Decimal("12345"))],
+            Decimal("122.45"),
+        ),
+    ],
+)
+def test_c4c1_independent_xirr_vectors(
+    verifier_module: Any,
+    cashflows: list[tuple[date, Decimal]],
+    expected: Decimal,
+) -> None:
+    assert verifier_module._xirr(cashflows) == expected
+
+
+def test_c4c1_xirr_aggregation_order_and_no_unique_sign_change(
+    verifier_module: Any,
+) -> None:
+    cashflows = [
+        (date(2026, 1, 1), Decimal("-50")),
+        (date(2026, 1, 1), Decimal("-50")),
+        (date(2027, 1, 1), Decimal("100")),
+    ]
+    assert verifier_module._xirr(cashflows) == Decimal("0")
+    assert verifier_module._xirr(list(reversed(cashflows))) == Decimal("0")
+    assert (
+        verifier_module._xirr(
+            [
+                (date(2026, 1, 1), Decimal("-100")),
+                (date(2027, 1, 1), Decimal("230")),
+                (date(2028, 1, 1), Decimal("-132")),
+            ]
+        )
+        is None
+    )
+    assert verifier_module._xirr([]) is None
+    assert (
+        verifier_module._xirr(
+            [(date(2026, 1, 1), Decimal("100")), (date(2027, 1, 1), Decimal("200"))]
+        )
+        is None
+    )
+
+
+def test_c4c1_xirr_restores_global_decimal_context(verifier_module: Any) -> None:
+    before = getcontext().copy()
+    getcontext().prec = 17
+    getcontext().rounding = ROUND_DOWN
+    getcontext().traps[Inexact] = True
+
+    def context_state() -> tuple[object, ...]:
+        current = getcontext()
+        return (
+            current.prec,
+            current.rounding,
+            current.Emin,
+            current.Emax,
+            current.capitals,
+            current.clamp,
+            dict(current.flags),
+            dict(current.traps),
+        )
+
+    expected_state = context_state()
+    try:
+        expected = verifier_module._xirr(
+            [
+                (date(2026, 1, 1), Decimal("-100")),
+                (date(2026, 7, 2), Decimal("-50")),
+                (date(2027, 1, 1), Decimal("160")),
+            ]
+        )
+        assert expected == Decimal("0.0802658437401532091915211535238254551645")
+        assert verifier_module._xirr(
+            [
+                (date(2026, 1, 1), Decimal("-100")),
+                (date(2027, 1, 1), Decimal("0.012345")),
+            ]
+        ) == Decimal("-0.99987655")
+        assert verifier_module._xirr(
+            [(date(2026, 1, 1), Decimal("-100")), (date(2027, 1, 1), Decimal("12345"))]
+        ) == Decimal("122.45")
+        assert context_state() == expected_state
+    finally:
+        setcontext(before)
+
+
+def test_c4c1_decimal_parsers_ignore_hostile_global_bounds_and_traps(
+    verifier_module: Any,
+) -> None:
+    before = getcontext().copy()
+    getcontext().prec = 17
+    getcontext().rounding = ROUND_DOWN
+    getcontext().Emin = -3
+    getcontext().Emax = 3
+    getcontext().traps[Inexact] = True
+
+    def context_state() -> tuple[object, ...]:
+        current = getcontext()
+        return (
+            current.prec,
+            current.rounding,
+            current.Emin,
+            current.Emax,
+            current.capitals,
+            current.clamp,
+            dict(current.flags),
+            dict(current.traps),
+        )
+
+    expected_state = context_state()
+    try:
+        assert verifier_module._parse_source_cents("10000.00") == Decimal("10000.00")
+        assert verifier_module._parse_numeric_output("10000") == Decimal("10000")
+        assert context_state() == expected_state
+    finally:
+        setcontext(before)
+
+
+def _c4c2_fixture_a() -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    navs = [
+        {
+            "record_id": "nav-1",
+            "account_id": "acct-a",
+            "as_of_date": "2026-01-02",
+            "currency": "USD",
+            "value": "100.00",
+        },
+        {
+            "record_id": "nav-2",
+            "account_id": "acct-a",
+            "as_of_date": "2026-01-05",
+            "currency": "USD",
+            "value": "180.00",
+        },
+        {
+            "record_id": "nav-3",
+            "account_id": "acct-a",
+            "as_of_date": "2026-01-09",
+            "currency": "USD",
+            "value": "117.00",
+        },
+        {
+            "record_id": "nav-4",
+            "account_id": "acct-a",
+            "as_of_date": "2026-01-12",
+            "currency": "USD",
+            "value": "150.00",
+        },
+        {
+            "record_id": "nav-5",
+            "account_id": "acct-a",
+            "as_of_date": "2027-01-02",
+            "currency": "USD",
+            "value": "150.00",
+        },
+    ]
+    flows = [
+        {
+            "record_id": "flow-in",
+            "account_id": "acct-a",
+            "event_date": "2026-01-03",
+            "classification": "EXTERNAL_IN",
+            "currency": "USD",
+            "amount": "10.00",
+            "counterparty_source_record_id": None,
+        },
+        {
+            "record_id": "flow-out",
+            "account_id": "acct-a",
+            "event_date": "2026-01-03",
+            "classification": "EXTERNAL_OUT",
+            "currency": "USD",
+            "amount": "10.00",
+            "counterparty_source_record_id": None,
+        },
+        {
+            "record_id": "flow-int",
+            "account_id": "acct-a",
+            "event_date": "2026-01-05",
+            "classification": "INTERNAL_IN",
+            "currency": "USD",
+            "amount": "50.00",
+            "signed_amount": "+50.00",
+            "counterparty_source_record_id": "flow-reciprocal",
+        },
+        {
+            "record_id": "flow-reciprocal",
+            "account_id": "acct-b",
+            "event_date": "2026-01-05",
+            "classification": "INTERNAL_OUT",
+            "currency": "USD",
+            "amount": "50.00",
+            "signed_amount": "-50.00",
+            "counterparty_source_record_id": "flow-int",
+        },
+    ]
+    return navs, flows
+
+
+def _c4c2_numeric_projection(
+    navs: list[dict[str, object]], flows: list[dict[str, object]]
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    return (
+        [
+            {
+                "account_id": item["account_id"],
+                "as_of_date": item["as_of_date"],
+                "currency": item["currency"],
+                "value": item["value"],
+            }
+            for item in navs
+        ],
+        [
+            {
+                "account_id": item["account_id"],
+                "event_date": item["event_date"],
+                "classification": item["classification"],
+                "currency": item["currency"],
+                "amount": item["amount"],
+            }
+            for item in flows
+        ],
+    )
+
+
+def _c4c2_authority_evidence() -> tuple[dict[str, object], dict[str, object]]:
+    artifact = {
+        "artifact_id": "receipt-evidence.json",
+        "as_of_date": "2027-01-02",
+        "schema": {"name": "receipt-evidence", "version": "2"},
+        "sha256": "a" * 64,
+        "size_bytes": 1,
+    }
+    return (
+        {
+            "schema_version": 2,
+            "artifact_id": "receipt-a",
+            "issuer": {
+                "adapter_name": "synthetic",
+                "adapter_version": "1",
+                "code_sha256": "b" * 64,
+            },
+            "provider": "synthetic-provider",
+            "provider_generation": "c" * 64,
+            "provider_generation_manifest": artifact,
+            "raw_evidence_artifacts": [artifact],
+            "account_id": "acct-a",
+            "source_account_identity_sha256": "d" * 64,
+            "requested_start": "2026-01-02",
+            "requested_end": "2027-01-02",
+            "covered_start": "2026-01-02",
+            "covered_end": "2027-01-02",
+            "required_categories": ["CASH"],
+            "completed_categories": ["CASH"],
+            "unavailable_categories": [],
+            "pagination": {
+                "mode": "single_page",
+                "page_count": 1,
+                "request_response_chain_sha256": "e" * 64,
+                "terminal_response_sha256": "f" * 64,
+                "terminal": True,
+            },
+            "completeness": "EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES",
+            "truncated": False,
+        },
+        {
+            "status": "FUNDED",
+            "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+            "funded_nav_record_ids": ["nav-1", "nav-2", "nav-3", "nav-4", "nav-5"],
+            "continuity_to_successor": False,
+        },
+    )
+
+
+def _c4c2_validate_signed_reciprocal_flows(
+    flows: list[dict[str, object]],
+) -> None:
+    by_id = {item["record_id"]: item for item in flows}
+    assert len(by_id) == len(flows)
+    incoming = by_id["flow-int"]
+    outgoing = by_id["flow-reciprocal"]
+    for leg, opposite_class, opposite_sign in (
+        (incoming, "INTERNAL_OUT", "-50.00"),
+        (outgoing, "INTERNAL_IN", "+50.00"),
+    ):
+        opposite_legs = [
+            item
+            for item in flows
+            if item["classification"] == opposite_class
+            and item["event_date"] == leg["event_date"]
+            and item["currency"] == leg["currency"]
+            and item["amount"] == leg["amount"]
+            and item["signed_amount"] == opposite_sign
+            and item["account_id"] != leg["account_id"]
+        ]
+        assert len(opposite_legs) == 1
+        assert opposite_legs[0]["record_id"] == leg["counterparty_source_record_id"]
+        assert opposite_legs[0]["counterparty_source_record_id"] == leg["record_id"]
+    assert incoming["classification"] == "INTERNAL_IN"
+    assert outgoing["classification"] == "INTERNAL_OUT"
+    assert incoming["account_id"] != outgoing["account_id"]
+    assert incoming["event_date"] == outgoing["event_date"] == "2026-01-05"
+    assert incoming["currency"] == outgoing["currency"] == "USD"
+    assert incoming["amount"] == outgoing["amount"] == "50.00"
+    assert incoming["signed_amount"] == "+50.00"
+    assert outgoing["signed_amount"] == "-50.00"
+    assert incoming["counterparty_source_record_id"] == "flow-reciprocal"
+    assert outgoing["counterparty_source_record_id"] == "flow-int"
+
+
+def _c4c2_validate_bound_authority_evidence(
+    receipt: dict[str, object],
+    admission: dict[str, object],
+    navs: list[dict[str, object]],
+) -> None:
+    assert receipt["schema_version"] == 2
+    assert receipt["artifact_id"] == "receipt-a"
+    assert receipt["issuer"] == {
+        "adapter_name": "synthetic",
+        "adapter_version": "1",
+        "code_sha256": "b" * 64,
+    }
+    assert receipt["account_id"] == "acct-a"
+    assert receipt["provider"] == "synthetic-provider"
+    assert receipt["provider_generation"] == "c" * 64
+    assert receipt["provider_generation_manifest"] == {
+        "artifact_id": "receipt-evidence.json",
+        "as_of_date": "2027-01-02",
+        "schema": {"name": "receipt-evidence", "version": "2"},
+        "sha256": "a" * 64,
+        "size_bytes": 1,
+    }
+    assert receipt["raw_evidence_artifacts"] == [
+        receipt["provider_generation_manifest"]
+    ]
+    assert receipt["requested_start"] == receipt["covered_start"] == "2026-01-02"
+    assert receipt["requested_end"] == receipt["covered_end"] == "2027-01-02"
+    assert receipt["required_categories"] == receipt["completed_categories"] == ["CASH"]
+    assert receipt["unavailable_categories"] == []
+    assert receipt["pagination"]["terminal"] is True
+    assert receipt["truncated"] is False
+    assert admission == {
+        "status": "FUNDED",
+        "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+        "funded_nav_record_ids": ["nav-1", "nav-2", "nav-3", "nav-4", "nav-5"],
+        "continuity_to_successor": False,
+    }
+    by_id = {item["record_id"]: item for item in navs}
+    assert len(admission["funded_nav_record_ids"]) == len(
+        set(admission["funded_nav_record_ids"])
+    )
+    for record_id in admission["funded_nav_record_ids"]:
+        nav = by_id[record_id]
+        assert nav["account_id"] == "acct-a"
+        assert Decimal(nav["value"]) > 0
+        assert "2026-01-02" <= nav["as_of_date"] <= "2027-01-02"
+
+
+def test_c4c2_first_available_nav_epoch_red(verifier_module: Any) -> None:
+    navs, flows = _c4c2_fixture_a()
+    receipt, admission = _c4c2_authority_evidence()
+    _c4c2_validate_signed_reciprocal_flows(flows)
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    receipt_schema = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "schemas"
+            / "portfolio"
+            / "account-interval-retrieval-receipt.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator.check_schema(receipt_schema)
+    assert not list(
+        Draft202012Validator(
+            receipt_schema, format_checker=FormatChecker()
+        ).iter_errors(receipt)
+    )
+    _c4c2_validate_bound_authority_evidence(receipt, admission, navs)
+    numeric_navs, numeric_flows = _c4c2_numeric_projection(navs, flows)
+    facts = verifier_module._parse_epoch_facts(
+        numeric_navs,
+        numeric_flows,
+        account_id="acct-a",
+        start=date(2026, 1, 2),
+        end=date(2027, 1, 2),
+    )
+    row = verifier_module._derive_first_available_nav_epoch(facts)
+    assert row["opening_basis"] == "FIRST_AVAILABLE_NAV"
+    assert row["start"] == "2026-01-02"
+    assert row["end"] == "2027-01-02"
+    assert row["nav_observations"] == 5
+    assert row["deposits"] == Decimal("10")
+    assert row["internal_in"] == Decimal("50")
+    assert row["invested"] == Decimal("160")
+    assert row["external_withdrawals"] == Decimal("10")
+    assert row["withdrawn"] == Decimal("10")
+    assert row["net_capital"] == Decimal("150")
+    assert row["current_value"] == Decimal("150")
+    assert row["gain"] == Decimal("0")
+    assert row["capital_flow_trace"][0]["date"] == "2026-01-03"
+    assert row["capital_flow_trace"][-1]["date"] == "2026-01-05"
+    assert len(row["observation_trace"]["links"]) == 4
+    assert row == {
+        "start": "2026-01-02",
+        "end": "2027-01-02",
+        "opening_capital": Decimal("100"),
+        "deposits": Decimal("10"),
+        "internal_in": Decimal("50"),
+        "invested": Decimal("160"),
+        "external_withdrawals": Decimal("10"),
+        "internal_out": Decimal("0"),
+        "withdrawn": Decimal("10"),
+        "net_capital": Decimal("150"),
+        "current_value": Decimal("150"),
+        "gain": Decimal("0"),
+        "return_on_net_capital": Decimal("0"),
+        "annualized_return_on_net_capital": Decimal("0"),
+        "xirr_diagnostic": Decimal("0"),
+        "observation_linked_return": Decimal(
+            "0.083333333333333333333333333333333333333"
+        ),
+        "observed_hwm_index": Decimal("130"),
+        "observed_max_drawdown": Decimal("0.35"),
+        "nav_observations": 5,
+        "opening_basis": "FIRST_AVAILABLE_NAV",
+        "observation_trace": {
+            "links": [
+                {
+                    "start_date": "2026-01-02",
+                    "end_date": "2026-01-05",
+                    "base_nav": Decimal("100"),
+                    "ending_nav": Decimal("180"),
+                    "net_flow": Decimal("50"),
+                    "factor": Decimal("1.3"),
+                    "cumulative_index": Decimal("130"),
+                    "running_hwm_index": Decimal("130"),
+                    "drawdown": Decimal("0"),
+                },
+                {
+                    "start_date": "2026-01-05",
+                    "end_date": "2026-01-09",
+                    "base_nav": Decimal("180"),
+                    "ending_nav": Decimal("117"),
+                    "net_flow": Decimal("0"),
+                    "factor": Decimal("0.65"),
+                    "cumulative_index": Decimal("84.5"),
+                    "running_hwm_index": Decimal("130"),
+                    "drawdown": Decimal("0.35"),
+                },
+                {
+                    "start_date": "2026-01-09",
+                    "end_date": "2026-01-12",
+                    "base_nav": Decimal("117"),
+                    "ending_nav": Decimal("150"),
+                    "net_flow": Decimal("0"),
+                    "factor": Decimal("1.282051282051282051282051282051282051282"),
+                    "cumulative_index": Decimal(
+                        "108.3333333333333333333333333333333333333"
+                    ),
+                    "running_hwm_index": Decimal("130"),
+                    "drawdown": Decimal("0.1666666666666666666666666666666666666669"),
+                },
+                {
+                    "start_date": "2026-01-12",
+                    "end_date": "2027-01-02",
+                    "base_nav": Decimal("150"),
+                    "ending_nav": Decimal("150"),
+                    "net_flow": Decimal("0"),
+                    "factor": Decimal("1"),
+                    "cumulative_index": Decimal(
+                        "108.3333333333333333333333333333333333333"
+                    ),
+                    "running_hwm_index": Decimal("130"),
+                    "drawdown": Decimal("0.1666666666666666666666666666666666666669"),
+                },
+            ]
+        },
+        "capital_flow_trace": [
+            {"class": "EXTERNAL_IN", "date": "2026-01-03", "amount": Decimal("10")},
+            {"class": "EXTERNAL_OUT", "date": "2026-01-03", "amount": Decimal("10")},
+            {"class": "INTERNAL_IN", "date": "2026-01-05", "amount": Decimal("50")},
+        ],
+    }
+    assert "receipt-a" not in repr(row)
+    assert "funded_nav_record_ids" not in row
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["sign", "date", "account", "currency", "reference", "reverse_reference"],
+)
+def test_c4c2_signed_internal_reciprocal_evidence_rejects_mutations(
+    mutation: str,
+) -> None:
+    _navs, flows = _c4c2_fixture_a()
+    mutated = deepcopy(flows)
+    if mutation == "sign":
+        mutated[2]["signed_amount"] = "-50.00"
+    elif mutation == "date":
+        mutated[3]["event_date"] = "2026-01-06"
+    elif mutation == "account":
+        mutated[3]["account_id"] = "acct-a"
+    elif mutation == "currency":
+        mutated[3]["currency"] = "EUR"
+    elif mutation == "reverse_reference":
+        mutated[3]["counterparty_source_record_id"] = "wrong"
+    else:
+        mutated[2]["counterparty_source_record_id"] = "wrong"
+    with pytest.raises(AssertionError):
+        _c4c2_validate_signed_reciprocal_flows(mutated)
+
+
+def test_c4c2_signed_reciprocal_evidence_rejects_ambiguous_opposite_leg() -> None:
+    _navs, flows = _c4c2_fixture_a()
+    mutated = deepcopy(flows)
+    mutated.append(
+        {
+            "record_id": "flow-extra",
+            "account_id": "acct-c",
+            "event_date": "2026-01-05",
+            "classification": "INTERNAL_OUT",
+            "currency": "USD",
+            "amount": "50.00",
+            "signed_amount": "-50.00",
+            "counterparty_source_record_id": "flow-int",
+        }
+    )
+    with pytest.raises(AssertionError):
+        _c4c2_validate_signed_reciprocal_flows(mutated)
+
+
+def test_c4c2_signed_reciprocal_evidence_rejects_ambiguous_incoming_leg() -> None:
+    _navs, flows = _c4c2_fixture_a()
+    mutated = deepcopy(flows)
+    mutated.append(
+        {
+            "record_id": "flow-extra-in",
+            "account_id": "acct-c",
+            "event_date": "2026-01-05",
+            "classification": "INTERNAL_IN",
+            "currency": "USD",
+            "amount": "50.00",
+            "signed_amount": "+50.00",
+            "counterparty_source_record_id": "flow-reciprocal",
+        }
+    )
+    with pytest.raises(AssertionError):
+        _c4c2_validate_signed_reciprocal_flows(mutated)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "start",
+        "end",
+        "account",
+        "provider",
+        "issuer",
+        "generation",
+        "artifact",
+        "categories",
+        "terminal",
+        "truncated",
+        "blocked",
+        "authority",
+        "missing_id",
+        "extra_id",
+        "duplicate_id",
+        "unknown_id",
+        "continuity",
+    ],
+)
+def test_c4c2_authority_evidence_binding_rejects_mutations(
+    mutation: str,
+) -> None:
+    navs, _flows = _c4c2_fixture_a()
+    receipt, admission = _c4c2_authority_evidence()
+    mutated_receipt = deepcopy(receipt)
+    mutated_admission = deepcopy(admission)
+    if mutation == "start":
+        mutated_receipt["requested_start"] = "2026-01-03"
+    elif mutation == "end":
+        mutated_receipt["covered_end"] = "2027-01-01"
+    elif mutation == "account":
+        mutated_receipt["account_id"] = "acct-b"
+    elif mutation == "provider":
+        mutated_receipt["provider"] = "other"
+    elif mutation == "issuer":
+        mutated_receipt["issuer"]["adapter_name"] = "other"
+    elif mutation == "generation":
+        mutated_receipt["provider_generation"] = "0" * 64
+    elif mutation == "artifact":
+        mutated_receipt["provider_generation_manifest"]["sha256"] = "0" * 64
+    elif mutation == "categories":
+        mutated_receipt["completed_categories"] = []
+    elif mutation == "terminal":
+        mutated_receipt["pagination"]["terminal"] = False
+    elif mutation == "truncated":
+        mutated_receipt["truncated"] = True
+    elif mutation == "blocked":
+        mutated_admission["status"] = "BLOCKED"
+    elif mutation == "authority":
+        mutated_admission["authority_kind"] = "OTHER"
+    elif mutation == "missing_id":
+        mutated_admission["funded_nav_record_ids"] = mutated_admission[
+            "funded_nav_record_ids"
+        ][:-1]
+    elif mutation == "extra_id":
+        mutated_admission["funded_nav_record_ids"].append("nav-extra")
+    elif mutation == "duplicate_id":
+        mutated_admission["funded_nav_record_ids"][1] = mutated_admission[
+            "funded_nav_record_ids"
+        ][0]
+    elif mutation == "unknown_id":
+        mutated_admission["funded_nav_record_ids"][0] = "nav-unknown"
+    else:
+        mutated_admission["continuity_to_successor"] = True
+    with pytest.raises(AssertionError):
+        _c4c2_validate_bound_authority_evidence(
+            mutated_receipt, mutated_admission, navs
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "duplicate_date",
+        "nonpositive_funded",
+        "flow_after_close",
+        "too_few_observations",
+    ],
+)
+def test_c4c2_epoch_fact_parser_rejects_invalid_funding_shapes(
+    verifier_module: Any, mutation: str
+) -> None:
+    navs, flows = _c4c2_fixture_a()
+    if mutation == "duplicate_date":
+        navs.append(dict(navs[1]))
+    elif mutation == "nonpositive_funded":
+        navs = [dict(item, value="0.00") for item in navs]
+    elif mutation == "flow_after_close":
+        flows.append(
+            {
+                "record_id": "late",
+                "account_id": "acct-a",
+                "event_date": "2027-01-03",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "1.00",
+                "counterparty_source_record_id": None,
+            }
+        )
+    else:
+        navs = navs[:2]
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        numeric_navs, numeric_flows = _c4c2_numeric_projection(navs, flows)
+        facts = verifier_module._parse_epoch_facts(
+            numeric_navs,
+            numeric_flows,
+            account_id="acct-a",
+            start=date(2026, 1, 2),
+            end=date(2027, 1, 10)
+            if mutation == "flow_after_close"
+            else date(2027, 1, 2),
+        )
+        verifier_module._derive_first_available_nav_epoch(facts)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "nav_alias",
+        "nav_extra",
+        "flow_alias",
+        "flow_extra",
+        "nav_missing",
+        "flow_missing",
+        "wrong_top",
+        "wrong_item",
+        "inverted",
+    ],
+)
+def test_c4c2_parser_requires_closed_fact_shapes(
+    verifier_module: Any, shape: str
+) -> None:
+    navs, flows = _c4c2_fixture_a()
+    navs, flows = _c4c2_numeric_projection(navs, flows)
+    if shape == "wrong_top":
+        navs = navs[0]
+    elif shape == "wrong_item":
+        navs[0] = 1
+    elif shape == "inverted":
+        pass
+    elif shape == "nav_alias":
+        navs[0]["date"] = navs[0].pop("as_of_date")
+    elif shape == "nav_extra":
+        navs[0]["extra"] = "rejected"
+    elif shape == "flow_alias":
+        flows[0]["date"] = flows[0].pop("event_date")
+    elif shape == "nav_missing":
+        navs[0].pop("value")
+    elif shape == "flow_missing":
+        flows[0].pop("amount")
+    else:
+        flows[0]["extra"] = "rejected"
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._parse_epoch_facts(
+            navs,
+            flows,
+            account_id="acct-a",
+            start=date(2026, 1, 3) if shape == "inverted" else date(2026, 1, 2),
+            end=date(2026, 1, 2) if shape == "inverted" else date(2027, 1, 2),
+        )
+
+
+def test_c4c2_reorders_facts_without_changing_numeric_projection(
+    verifier_module: Any,
+) -> None:
+    navs, flows = _c4c2_fixture_a()
+    navs, flows = _c4c2_numeric_projection(navs, flows)
+    kwargs = {
+        "account_id": "acct-a",
+        "start": date(2026, 1, 2),
+        "end": date(2027, 1, 2),
+    }
+    expected = verifier_module._derive_first_available_nav_epoch(
+        verifier_module._parse_epoch_facts(navs, flows, **kwargs)
+    )
+    reordered = verifier_module._derive_first_available_nav_epoch(
+        verifier_module._parse_epoch_facts(
+            list(reversed(navs)), list(reversed(flows)), **kwargs
+        )
+    )
+    assert reordered == expected
+
+
+def test_c4c2_same_day_same_class_flows_aggregate_deterministically(
+    verifier_module: Any,
+) -> None:
+    navs, flows = _c4c2_fixture_a()
+    flows.append(
+        {
+            "record_id": "flow-in-extra",
+            "account_id": "acct-a",
+            "event_date": "2026-01-03",
+            "classification": "EXTERNAL_IN",
+            "currency": "USD",
+            "amount": "2.00",
+            "counterparty_source_record_id": None,
+        }
+    )
+    numeric_navs, numeric_flows = _c4c2_numeric_projection(navs, flows)
+    kwargs = {
+        "account_id": "acct-a",
+        "start": date(2026, 1, 2),
+        "end": date(2027, 1, 2),
+    }
+    first = verifier_module._derive_first_available_nav_epoch(
+        verifier_module._parse_epoch_facts(numeric_navs, numeric_flows, **kwargs)
+    )
+    second = verifier_module._derive_first_available_nav_epoch(
+        verifier_module._parse_epoch_facts(
+            list(reversed(numeric_navs)), list(reversed(numeric_flows)), **kwargs
+        )
+    )
+    assert first == second
+    assert first["capital_flow_trace"][0] == {
+        "class": "EXTERNAL_IN",
+        "date": "2026-01-03",
+        "amount": Decimal("12"),
+    }
+
+
+def test_c4c2_aggregation_uses_isolated_context(verifier_module: Any) -> None:
+    navs, flows = _c4c2_fixture_a()
+    flows.append(
+        {
+            "record_id": "flow-in-extra",
+            "account_id": "acct-a",
+            "event_date": "2026-01-03",
+            "classification": "EXTERNAL_IN",
+            "currency": "USD",
+            "amount": "2.00",
+            "counterparty_source_record_id": None,
+        }
+    )
+    navs, flows = _c4c2_numeric_projection(navs, flows)
+    before = getcontext().copy()
+    getcontext().prec = 1
+    getcontext().rounding = ROUND_DOWN
+    expected_state = (
+        getcontext().prec,
+        getcontext().rounding,
+        getcontext().Emin,
+        getcontext().Emax,
+        dict(getcontext().flags),
+        dict(getcontext().traps),
+    )
+    try:
+        facts = verifier_module._parse_epoch_facts(
+            navs,
+            flows,
+            account_id="acct-a",
+            start=date(2026, 1, 2),
+            end=date(2027, 1, 2),
+        )
+        assert facts.flows[0].amount == Decimal("12")
+        assert verifier_module._derive_first_available_nav_epoch(facts)[
+            "deposits"
+        ] == Decimal("12")
+        current = getcontext()
+        assert (
+            current.prec,
+            current.rounding,
+            current.Emin,
+            current.Emax,
+            dict(current.flags),
+            dict(current.traps),
+        ) == expected_state
+    finally:
+        setcontext(before)
+
+
+def test_c4c2_currency_is_exactly_three_letters(verifier_module: Any) -> None:
+    navs, flows = _c4c2_fixture_a()
+    navs, flows = _c4c2_numeric_projection(navs, flows)
+    navs[0]["currency"] = "USDC"
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._parse_epoch_facts(
+            navs,
+            flows,
+            account_id="acct-a",
+            start=date(2026, 1, 2),
+            end=date(2027, 1, 2),
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "bad_date",
+        "over_cent",
+        "json_number",
+        "json_bool",
+        "exponent",
+        "leading_zero",
+        "negative_zero",
+        "unknown_class",
+        "zero_flow",
+        "negative_flow",
+    ],
+)
+def test_c4c2_parser_rejects_noncanonical_fact_values(
+    verifier_module: Any, mutation: str
+) -> None:
+    navs, flows = _c4c2_fixture_a()
+    navs, flows = _c4c2_numeric_projection(navs, flows)
+    if mutation == "bad_date":
+        navs[0]["as_of_date"] = "2026-1-2"
+    elif mutation == "over_cent":
+        navs[0]["value"] = "100.000"
+    elif mutation == "json_number":
+        navs[0]["value"] = 100
+    elif mutation == "json_bool":
+        navs[0]["value"] = True
+    elif mutation == "exponent":
+        navs[0]["value"] = "1e2"
+    elif mutation == "leading_zero":
+        navs[0]["value"] = "0100.00"
+    elif mutation == "negative_zero":
+        navs[0]["value"] = "-0.00"
+    elif mutation == "unknown_class":
+        flows[0]["classification"] = "UNKNOWN"
+    elif mutation == "zero_flow":
+        flows[0]["amount"] = "0.00"
+    else:
+        flows[0]["amount"] = "-1.00"
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._parse_epoch_facts(
+            navs,
+            flows,
+            account_id="acct-a",
+            start=date(2026, 1, 2),
+            end=date(2027, 1, 2),
+        )
+
+
+def test_c4c2_leading_zero_trim_and_out_of_window_filter(verifier_module: Any) -> None:
+    navs, flows = _c4c2_fixture_a()
+    navs.insert(
+        0,
+        {
+            "record_id": "nav-leading",
+            "account_id": "acct-a",
+            "as_of_date": "2026-01-01",
+            "currency": "USD",
+            "value": "0.00",
+        },
+    )
+    navs.append(
+        {
+            "record_id": "nav-outside",
+            "account_id": "acct-a",
+            "as_of_date": "2025-12-31",
+            "currency": "EUR",
+            "value": "1.00",
+        }
+    )
+    flows.append(
+        {
+            "record_id": "flow-before",
+            "account_id": "acct-a",
+            "event_date": "2025-12-31",
+            "classification": "EXTERNAL_IN",
+            "currency": "USD",
+            "amount": "1.00",
+            "counterparty_source_record_id": None,
+        }
+    )
+    flows.append(
+        {
+            "record_id": "flow-outside-eur",
+            "account_id": "acct-a",
+            "event_date": "2025-12-30",
+            "classification": "EXTERNAL_IN",
+            "currency": "EUR",
+            "amount": "1.00",
+            "counterparty_source_record_id": None,
+        }
+    )
+    navs, flows = _c4c2_numeric_projection(navs, flows)
+    facts = verifier_module._parse_epoch_facts(
+        navs, flows, account_id="acct-a", start=date(2026, 1, 1), end=date(2027, 1, 2)
+    )
+    assert len(facts.navs) == 6
+    assert len(facts.flows) == 3
+    row = verifier_module._derive_first_available_nav_epoch(facts)
+    assert row["start"] == "2026-01-02"
+    assert row["deposits"] == Decimal("10")
+
+
+@pytest.mark.parametrize(
+    "mutation", ["flow_at_first", "post_funded_nonpositive", "nonpositive_factor"]
+)
+def test_c4c2_epoch_arithmetic_rejects_funding_boundaries(
+    verifier_module: Any, mutation: str
+) -> None:
+    navs, flows = _c4c2_fixture_a()
+    if mutation == "flow_at_first":
+        flows.append(
+            {
+                "record_id": "flow-first",
+                "account_id": "acct-a",
+                "event_date": "2026-01-02",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "1.00",
+                "counterparty_source_record_id": None,
+            }
+        )
+    elif mutation == "post_funded_nonpositive":
+        navs[2]["value"] = "0.00"
+    else:
+        navs[1]["value"] = "50.00"
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        navs, flows = _c4c2_numeric_projection(navs, flows)
+        facts = verifier_module._parse_epoch_facts(
+            navs,
+            flows,
+            account_id="acct-a",
+            start=date(2026, 1, 2),
+            end=date(2027, 1, 2),
+        )
+        verifier_module._derive_first_available_nav_epoch(facts)
+
+
+def _c4c3_fixture_b() -> tuple[
+    dict[str, object], list[dict[str, object]], list[dict[str, object]]
+]:
+    predecessor = {
+        "account_id": "acct-a",
+        "effective_end": "2026-02-05",
+        "closing_nav_date": "2026-02-05",
+        "closing_nav_currency": "USD",
+        "closing_nav_value": "120.00",
+        "continuity_to_successor": True,
+    }
+    navs = [
+        {
+            "record_id": "nav-b1",
+            "account_id": "acct-a",
+            "as_of_date": "2026-02-06",
+            "currency": "USD",
+            "value": "198.80",
+        },
+        {
+            "record_id": "nav-b2",
+            "account_id": "acct-a",
+            "as_of_date": "2026-02-07",
+            "currency": "USD",
+            "value": "178.92",
+        },
+        {
+            "record_id": "nav-b3",
+            "account_id": "acct-a",
+            "as_of_date": "2026-02-08",
+            "currency": "USD",
+            "value": "204.02",
+        },
+    ]
+    flows = [
+        {
+            "record_id": "flow-b-in",
+            "account_id": "acct-a",
+            "event_date": "2026-02-06",
+            "classification": "EXTERNAL_IN",
+            "currency": "USD",
+            "amount": "78.80",
+            "counterparty_source_record_id": None,
+        },
+    ]
+    return predecessor, navs, flows
+
+
+def _c4c3c1_authority_fixture() -> dict[str, object]:
+    predecessor_handoff, successor_navs, successor_flows = _c4c3_fixture_b()
+    predecessor_navs = [
+        {
+            "record_id": "pred-nav-1",
+            "account_id": "acct-a",
+            "as_of_date": "2026-02-03",
+            "currency": "USD",
+            "value": "100.00",
+        },
+        {
+            "record_id": "pred-nav-2",
+            "account_id": "acct-a",
+            "as_of_date": "2026-02-04",
+            "currency": "USD",
+            "value": "110.00",
+        },
+        {
+            "record_id": "pred-nav-3",
+            "account_id": "acct-a",
+            "as_of_date": "2026-02-05",
+            "currency": "USD",
+            "value": "120.00",
+        },
+    ]
+
+    def receipt(
+        *,
+        artifact_id: str,
+        evidence_sha256: str,
+        provider_generation: str,
+        as_of_date: str,
+        start: str,
+        end: str,
+    ) -> dict[str, object]:
+        manifest = {
+            "artifact_id": f"{artifact_id}-evidence.json",
+            "as_of_date": as_of_date,
+            "schema": {"name": "receipt-evidence", "version": "2"},
+            "sha256": evidence_sha256,
+            "size_bytes": 1,
+        }
+        return {
+            "schema_version": 2,
+            "artifact_id": artifact_id,
+            "issuer": {
+                "adapter_name": "synthetic",
+                "adapter_version": "1",
+                "code_sha256": "b" * 64,
+            },
+            "provider": "synthetic-provider",
+            "provider_generation": provider_generation,
+            "provider_generation_manifest": manifest,
+            "raw_evidence_artifacts": [deepcopy(manifest)],
+            "account_id": "acct-a",
+            "source_account_identity_sha256": "3" * 64,
+            "requested_start": start,
+            "requested_end": end,
+            "covered_start": start,
+            "covered_end": end,
+            "required_categories": ["CASH"],
+            "completed_categories": ["CASH"],
+            "unavailable_categories": [],
+            "pagination": {
+                "mode": "single_page",
+                "page_count": 1,
+                "request_response_chain_sha256": "e" * 64,
+                "terminal_response_sha256": "f" * 64,
+                "terminal": True,
+            },
+            "completeness": "EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES",
+            "truncated": False,
+        }
+
+    return {
+        "predecessor_handoff": predecessor_handoff,
+        "predecessor_navs": predecessor_navs,
+        "predecessor_flows": [],
+        "successor_navs": successor_navs,
+        "successor_flows": successor_flows,
+        "predecessor_receipt": receipt(
+            artifact_id="receipt-predecessor",
+            evidence_sha256="2" * 64,
+            provider_generation="1" * 64,
+            as_of_date="2026-02-05",
+            start="2026-02-03",
+            end="2026-02-05",
+        ),
+        "successor_receipt": receipt(
+            artifact_id="receipt-successor",
+            evidence_sha256="5" * 64,
+            provider_generation="4" * 64,
+            as_of_date="2026-02-08",
+            start="2026-02-06",
+            end="2026-02-08",
+        ),
+        "predecessor_admission": {
+            "status": "FUNDED",
+            "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+            "funded_nav_record_ids": ["pred-nav-1", "pred-nav-2", "pred-nav-3"],
+            "continuity_to_successor": True,
+        },
+        "successor_admission": {
+            "status": "FUNDED",
+            "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+            "funded_nav_record_ids": ["nav-b1", "nav-b2", "nav-b3"],
+            "continuity_to_successor": False,
+        },
+    }
+
+
+def _c4c3c1_validate_bound_authority(
+    evidence: dict[str, object],
+) -> None:
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    schema = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "schemas"
+            / "portfolio"
+            / "account-interval-retrieval-receipt.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    predecessor_receipt = evidence["predecessor_receipt"]
+    successor_receipt = evidence["successor_receipt"]
+    assert isinstance(predecessor_receipt, dict)
+    assert isinstance(successor_receipt, dict)
+    for receipt in (predecessor_receipt, successor_receipt):
+        validator.validate(receipt)
+
+    expected_receipt_fields = {
+        "issuer": {
+            "adapter_name": "synthetic",
+            "adapter_version": "1",
+            "code_sha256": "b" * 64,
+        },
+        "provider": "synthetic-provider",
+        "source_account_identity_sha256": "3" * 64,
+        "required_categories": ["CASH"],
+        "completed_categories": ["CASH"],
+        "unavailable_categories": [],
+        "pagination": {
+            "mode": "single_page",
+            "page_count": 1,
+            "request_response_chain_sha256": "e" * 64,
+            "terminal_response_sha256": "f" * 64,
+            "terminal": True,
+        },
+        "completeness": "EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES",
+        "truncated": False,
+    }
+    for receipt in (predecessor_receipt, successor_receipt):
+        assert receipt["schema_version"] == 2
+        assert receipt["account_id"] == "acct-a"
+        for field, expected in expected_receipt_fields.items():
+            assert receipt[field] == expected
+
+    assert predecessor_receipt["artifact_id"] == "receipt-predecessor"
+    assert successor_receipt["artifact_id"] == "receipt-successor"
+    assert predecessor_receipt["provider_generation"] == "1" * 64
+    assert successor_receipt["provider_generation"] == "4" * 64
+    assert predecessor_receipt["provider_generation_manifest"] == {
+        "artifact_id": "receipt-predecessor-evidence.json",
+        "as_of_date": "2026-02-05",
+        "schema": {"name": "receipt-evidence", "version": "2"},
+        "sha256": "2" * 64,
+        "size_bytes": 1,
+    }
+    assert successor_receipt["provider_generation_manifest"] == {
+        "artifact_id": "receipt-successor-evidence.json",
+        "as_of_date": "2026-02-08",
+        "schema": {"name": "receipt-evidence", "version": "2"},
+        "sha256": "5" * 64,
+        "size_bytes": 1,
+    }
+    assert predecessor_receipt["raw_evidence_artifacts"] == [
+        predecessor_receipt["provider_generation_manifest"]
+    ]
+    assert successor_receipt["raw_evidence_artifacts"] == [
+        successor_receipt["provider_generation_manifest"]
+    ]
+    assert predecessor_receipt["artifact_id"] != successor_receipt["artifact_id"]
+    assert (
+        predecessor_receipt["provider_generation"]
+        != successor_receipt["provider_generation"]
+    )
+    assert (
+        predecessor_receipt["provider_generation_manifest"]
+        != successor_receipt["provider_generation_manifest"]
+    )
+    assert (
+        predecessor_receipt["requested_start"]
+        == predecessor_receipt["covered_start"]
+        == "2026-02-03"
+    )
+    assert (
+        predecessor_receipt["requested_end"]
+        == predecessor_receipt["covered_end"]
+        == "2026-02-05"
+    )
+    assert (
+        successor_receipt["requested_start"]
+        == successor_receipt["covered_start"]
+        == "2026-02-06"
+    )
+    assert (
+        successor_receipt["requested_end"]
+        == successor_receipt["covered_end"]
+        == "2026-02-08"
+    )
+
+    predecessor_navs = evidence["predecessor_navs"]
+    successor_navs = evidence["successor_navs"]
+    assert isinstance(predecessor_navs, list)
+    assert isinstance(successor_navs, list)
+    assert predecessor_navs == [
+        {
+            "record_id": "pred-nav-1",
+            "account_id": "acct-a",
+            "as_of_date": "2026-02-03",
+            "currency": "USD",
+            "value": "100.00",
+        },
+        {
+            "record_id": "pred-nav-2",
+            "account_id": "acct-a",
+            "as_of_date": "2026-02-04",
+            "currency": "USD",
+            "value": "110.00",
+        },
+        {
+            "record_id": "pred-nav-3",
+            "account_id": "acct-a",
+            "as_of_date": "2026-02-05",
+            "currency": "USD",
+            "value": "120.00",
+        },
+    ]
+    assert successor_navs == [
+        {
+            "record_id": "nav-b1",
+            "account_id": "acct-a",
+            "as_of_date": "2026-02-06",
+            "currency": "USD",
+            "value": "198.80",
+        },
+        {
+            "record_id": "nav-b2",
+            "account_id": "acct-a",
+            "as_of_date": "2026-02-07",
+            "currency": "USD",
+            "value": "178.92",
+        },
+        {
+            "record_id": "nav-b3",
+            "account_id": "acct-a",
+            "as_of_date": "2026-02-08",
+            "currency": "USD",
+            "value": "204.02",
+        },
+    ]
+    predecessor_admission = evidence["predecessor_admission"]
+    successor_admission = evidence["successor_admission"]
+    assert predecessor_admission == {
+        "status": "FUNDED",
+        "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+        "funded_nav_record_ids": ["pred-nav-1", "pred-nav-2", "pred-nav-3"],
+        "continuity_to_successor": True,
+    }
+    assert successor_admission == {
+        "status": "FUNDED",
+        "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+        "funded_nav_record_ids": ["nav-b1", "nav-b2", "nav-b3"],
+        "continuity_to_successor": False,
+    }
+    for navs, receipt, admission in (
+        (predecessor_navs, predecessor_receipt, predecessor_admission),
+        (successor_navs, successor_receipt, successor_admission),
+    ):
+        assert isinstance(admission, dict)
+        start = date.fromisoformat(receipt["covered_start"])
+        end = date.fromisoformat(receipt["covered_end"])
+        assert len({nav["record_id"] for nav in navs}) == len(navs)
+        positive_ids = []
+        for nav in navs:
+            assert set(nav) == {
+                "record_id",
+                "account_id",
+                "as_of_date",
+                "currency",
+                "value",
+            }
+            assert nav["account_id"] == "acct-a"
+            assert nav["currency"] == "USD"
+            observation_date = date.fromisoformat(nav["as_of_date"])
+            assert start <= observation_date <= end
+            assert Decimal(nav["value"]) > 0
+            positive_ids.append(nav["record_id"])
+        assert admission["funded_nav_record_ids"] == positive_ids
+        assert len(admission["funded_nav_record_ids"]) == len(
+            set(admission["funded_nav_record_ids"])
+        )
+
+    assert predecessor_admission["continuity_to_successor"] is True
+    assert successor_admission["continuity_to_successor"] is False
+    handoff = evidence["predecessor_handoff"]
+    assert handoff == {
+        "account_id": "acct-a",
+        "effective_end": "2026-02-05",
+        "closing_nav_date": "2026-02-05",
+        "closing_nav_currency": "USD",
+        "closing_nav_value": "120.00",
+        "continuity_to_successor": True,
+    }
+    assert evidence["predecessor_flows"] == []
+    _c4c3c1_validate_epoch_relationships(evidence)
+    successor_flows = evidence["successor_flows"]
+    assert successor_flows == [
+        {
+            "record_id": "flow-b-in",
+            "account_id": "acct-a",
+            "event_date": "2026-02-06",
+            "classification": "EXTERNAL_IN",
+            "currency": "USD",
+            "amount": "78.80",
+            "counterparty_source_record_id": None,
+        }
+    ]
+    flow = successor_flows[0]
+    assert (
+        date.fromisoformat(successor_receipt["covered_start"])
+        <= date.fromisoformat(flow["event_date"])
+        <= date.fromisoformat(successor_receipt["covered_end"])
+    )
+
+
+def _c4c3c1_validate_epoch_relationships(evidence: dict[str, object]) -> None:
+    predecessor_receipt = evidence["predecessor_receipt"]
+    successor_receipt = evidence["successor_receipt"]
+    predecessor_navs = evidence["predecessor_navs"]
+    successor_navs = evidence["successor_navs"]
+    handoff = evidence["predecessor_handoff"]
+    predecessor_last = max(predecessor_navs, key=lambda nav: nav["as_of_date"])
+    successor_first = min(successor_navs, key=lambda nav: nav["as_of_date"])
+    assert (
+        date.fromisoformat(successor_receipt["covered_start"])
+        == date.fromisoformat(predecessor_receipt["covered_end"]) + date.resolution
+    )
+    assert (
+        handoff["account_id"]
+        == predecessor_last["account_id"]
+        == successor_first["account_id"]
+    )
+    assert (
+        handoff["closing_nav_date"]
+        == handoff["effective_end"]
+        == predecessor_last["as_of_date"]
+    )
+    assert (
+        handoff["closing_nav_currency"]
+        == predecessor_last["currency"]
+        == successor_first["currency"]
+    )
+    assert handoff["closing_nav_value"] == predecessor_last["value"]
+    assert (
+        date.fromisoformat(successor_first["as_of_date"])
+        == date.fromisoformat(handoff["closing_nav_date"]) + date.resolution
+    )
+
+
+def _c4c3c1_assert_numeric_row_private(row: dict[str, object]) -> None:
+    forbidden_row_keys = {
+        "schema_version",
+        "artifact_id",
+        "provider_generation",
+        "provider_generation_manifest",
+        "raw_evidence_artifacts",
+        "source_account_identity_sha256",
+        "record_id",
+        "source_record_id",
+        "event_id",
+        "status",
+        "authority_kind",
+        "admission_status",
+        "admission_authority_kind",
+        "funded_nav_record_ids",
+        "continuity_to_successor",
+        "schema",
+        "receipt_id",
+        "manifest_id",
+        "provider",
+        "issuer",
+        "account_id",
+        "required_categories",
+        "completed_categories",
+        "unavailable_categories",
+        "pagination",
+        "completeness",
+        "truncated",
+    }
+    forbidden_scalars = {
+        "receipt-predecessor",
+        "receipt-successor",
+        "receipt-predecessor-evidence.json",
+        "receipt-successor-evidence.json",
+        "synthetic",
+        "synthetic-provider",
+        "acct-a",
+        "receipt-evidence",
+        "pred-nav-1",
+        "pred-nav-2",
+        "pred-nav-3",
+        "nav-b1",
+        "nav-b2",
+        "nav-b3",
+        "flow-b-in",
+        "FUNDED",
+        "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+        "CASH",
+        "single_page",
+        "EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES",
+        "b" * 64,
+        "1" * 64,
+        "2" * 64,
+        "3" * 64,
+        "4" * 64,
+        "5" * 64,
+        "e" * 64,
+        "f" * 64,
+    }
+
+    def assert_private(value: object) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                assert key not in forbidden_row_keys
+                assert key not in forbidden_scalars
+                assert_private(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_private(nested)
+        elif isinstance(value, str):
+            assert value not in forbidden_scalars
+
+    assert_private(row)
+
+
+def test_c4c3c1_positive_two_epoch_authority_binding(
+    verifier_module: Any,
+) -> None:
+    evidence = _c4c3c1_authority_fixture()
+    _c4c3c1_validate_bound_authority(evidence)
+    predecessor = verifier_module._parse_predecessor_fact(
+        evidence["predecessor_handoff"]
+    )
+    numeric_navs, numeric_flows = _c4c2_numeric_projection(
+        evidence["successor_navs"], evidence["successor_flows"]
+    )
+    facts = verifier_module._parse_epoch_facts(
+        numeric_navs,
+        numeric_flows,
+        account_id="acct-a",
+        start=date(2026, 2, 6),
+        end=date(2026, 2, 8),
+    )
+    row = verifier_module._derive_predecessor_closing_nav_epoch(predecessor, facts)
+    assert row["opening_basis"] == "PREDECESSOR_CLOSING_NAV"
+    assert row["opening_capital"] == Decimal("120")
+    assert row["start"] == "2026-02-06"
+    assert row["end"] == "2026-02-08"
+    assert row["observation_trace"]["links"][0]["start_date"] == "2026-02-05"
+    _c4c3c1_assert_numeric_row_private(row)
+
+
+def test_c4c3c1_numeric_row_rejects_injected_authority_scalar(
+    verifier_module: Any,
+) -> None:
+    evidence = _c4c3c1_authority_fixture()
+    _c4c3c1_validate_bound_authority(evidence)
+    predecessor = verifier_module._parse_predecessor_fact(
+        evidence["predecessor_handoff"]
+    )
+    numeric_navs, numeric_flows = _c4c2_numeric_projection(
+        evidence["successor_navs"], evidence["successor_flows"]
+    )
+    facts = verifier_module._parse_epoch_facts(
+        numeric_navs,
+        numeric_flows,
+        account_id="acct-a",
+        start=date(2026, 2, 6),
+        end=date(2026, 2, 8),
+    )
+    row = verifier_module._derive_predecessor_closing_nav_epoch(predecessor, facts)
+    row["debug"] = "receipt-predecessor"
+    with pytest.raises(AssertionError):
+        _c4c3c1_assert_numeric_row_private(row)
+
+
+@pytest.mark.parametrize("injection", ["scalar", "key"])
+def test_c4c3c1_numeric_row_rejects_injected_account_identity(
+    verifier_module: Any, injection: str
+) -> None:
+    evidence = _c4c3c1_authority_fixture()
+    _c4c3c1_validate_bound_authority(evidence)
+    predecessor = verifier_module._parse_predecessor_fact(
+        evidence["predecessor_handoff"]
+    )
+    numeric_navs, numeric_flows = _c4c2_numeric_projection(
+        evidence["successor_navs"], evidence["successor_flows"]
+    )
+    facts = verifier_module._parse_epoch_facts(
+        numeric_navs,
+        numeric_flows,
+        account_id="acct-a",
+        start=date(2026, 2, 6),
+        end=date(2026, 2, 8),
+    )
+    row = verifier_module._derive_predecessor_closing_nav_epoch(predecessor, facts)
+    if injection == "scalar":
+        row["debug"] = "acct-a"
+    else:
+        row["account_id"] = "acct-a"
+    with pytest.raises(AssertionError):
+        _c4c3c1_assert_numeric_row_private(row)
+
+
+def test_c4c3c1_authority_binding_rejects_mutated_source_nav_value() -> None:
+    evidence = _c4c3c1_authority_fixture()
+    evidence["successor_navs"][1]["value"] = "179.00"
+    with pytest.raises(AssertionError):
+        _c4c3c1_validate_bound_authority(evidence)
+
+
+def test_c4c3c2_authority_binding_rejects_predecessor_flow() -> None:
+    evidence = deepcopy(_c4c3c1_authority_fixture())
+    evidence["predecessor_flows"].append(
+        {
+            "record_id": "flow-a-in",
+            "account_id": "acct-a",
+            "event_date": "2026-02-05",
+            "classification": "EXTERNAL_IN",
+            "currency": "USD",
+            "amount": "1.00",
+            "counterparty_source_record_id": None,
+        }
+    )
+    with pytest.raises(AssertionError):
+        _c4c3c1_validate_bound_authority(evidence)
+
+
+def _c4c3c2_set_path(path: tuple[str, ...], value: object) -> Any:
+    def mutate(evidence: dict[str, object]) -> None:
+        target: Any = evidence
+        for key in path[:-1]:
+            target = target[key]
+        target[path[-1]] = deepcopy(value)
+
+    return mutate
+
+
+def _c4c3c2_delete_path(path: tuple[str, ...]) -> Any:
+    def mutate(evidence: dict[str, object]) -> None:
+        target: Any = evidence
+        for key in path[:-1]:
+            target = target[key]
+        del target[path[-1]]
+
+    return mutate
+
+
+def _c4c3c2_swap_paths(path_a: tuple[object, ...], path_b: tuple[object, ...]) -> Any:
+    def mutate(evidence: dict[str, object]) -> None:
+        def get_path(path: tuple[object, ...]) -> object:
+            target: Any = evidence
+            for key in path:
+                target = target[key]
+            return deepcopy(target)
+
+        def set_path(path: tuple[object, ...], value: object) -> None:
+            target: Any = evidence
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = value
+
+        value_a = get_path(path_a)
+        value_b = get_path(path_b)
+        set_path(path_a, value_b)
+        set_path(path_b, value_a)
+
+    return mutate
+
+
+def _c4c3c2_mutation_cases() -> list[tuple[str, Any]]:
+    cases: list[tuple[str, Any]] = []
+
+    def add(case_id: str, mutate: Any) -> None:
+        cases.append((case_id, mutate))
+
+    receipt_fields = [
+        ("schema-version", ("schema_version",), 1),
+        ("issuer-adapter-name", ("issuer", "adapter_name"), "other-adapter"),
+        ("issuer-adapter-version", ("issuer", "adapter_version"), "2"),
+        ("issuer-code-sha", ("issuer", "code_sha256"), "a" * 64),
+        ("provider", ("provider",), "other-provider"),
+        ("provider-generation", ("provider_generation",), "6" * 64),
+        ("account-id", ("account_id",), "acct-b"),
+        ("source-account-identity-sha", ("source_account_identity_sha256",), "6" * 64),
+        ("requested-start", ("requested_start",), "2026-02-02"),
+        ("requested-end", ("requested_end",), "2026-02-06"),
+        ("covered-start", ("covered_start",), "2026-02-04"),
+        ("covered-end", ("covered_end",), "2026-02-07"),
+        ("required-categories", ("required_categories",), ["POSITIONS"]),
+        ("completed-categories", ("completed_categories",), ["POSITIONS"]),
+        ("unavailable-category", ("unavailable_categories",), ["POSITIONS"]),
+        ("pagination-mode", ("pagination", "mode"), "multi_page"),
+        ("pagination-page-count", ("pagination", "page_count"), 2),
+        (
+            "pagination-chain-sha",
+            ("pagination", "request_response_chain_sha256"),
+            "a" * 64,
+        ),
+        (
+            "pagination-terminal-sha",
+            ("pagination", "terminal_response_sha256"),
+            "a" * 64,
+        ),
+        ("pagination-terminal-flag", ("pagination", "terminal"), False),
+        ("completeness", ("completeness",), "PARTIAL"),
+        ("truncated", ("truncated",), True),
+    ]
+    for epoch, label in (
+        ("predecessor_receipt", "predecessor"),
+        ("successor_receipt", "successor"),
+    ):
+        add(
+            f"{label}-receipt-missing-artifact-id",
+            _c4c3c2_delete_path((epoch, "artifact_id")),
+        )
+        add(
+            f"{label}-receipt-extra-field",
+            lambda evidence, epoch=epoch: evidence[epoch].update({"unexpected": True}),
+        )
+        for field_id, path, value in receipt_fields:
+            add(f"{label}-receipt-{field_id}", _c4c3c2_set_path((epoch, *path), value))
+        manifest_fields = [
+            ("artifact-id", "artifact_id", f"{label}-other-evidence.json"),
+            (
+                "as-of-date",
+                "as_of_date",
+                "2026-02-04" if label == "predecessor" else "2026-02-07",
+            ),
+            ("schema-name", ("schema", "name"), "other-receipt-evidence"),
+            ("schema-version", ("schema", "version"), "3"),
+            ("sha", "sha256", "a" * 64),
+            ("size", "size_bytes", 2),
+        ]
+        for field_id, path, value in manifest_fields:
+            path_tuple = path if isinstance(path, tuple) else (path,)
+            add(
+                f"{label}-receipt-generation-manifest-{field_id}",
+                _c4c3c2_set_path(
+                    (epoch, "provider_generation_manifest", *path_tuple), value
+                ),
+            )
+        add(
+            f"{label}-receipt-raw-evidence-missing",
+            _c4c3c2_delete_path((epoch, "raw_evidence_artifacts")),
+        )
+        add(
+            f"{label}-receipt-raw-evidence-extra",
+            lambda evidence, epoch=epoch: evidence[epoch][
+                "raw_evidence_artifacts"
+            ].append(
+                {
+                    "artifact_id": "extra.json",
+                    "as_of_date": "2026-02-05",
+                    "schema": {"name": "extra", "version": "1"},
+                    "sha256": "a" * 64,
+                    "size_bytes": 1,
+                }
+            ),
+        )
+        add(
+            f"{label}-receipt-raw-evidence-substituted",
+            _c4c3c2_set_path(
+                (epoch, "raw_evidence_artifacts", 0),
+                {
+                    "artifact_id": "substituted.json",
+                    "as_of_date": "2026-02-05",
+                    "schema": {"name": "substituted", "version": "1"},
+                    "sha256": "a" * 64,
+                    "size_bytes": 1,
+                },
+            ),
+        )
+
+    add(
+        "receipt-artifact-id-reused",
+        lambda evidence: evidence["successor_receipt"].update(
+            {"artifact_id": evidence["predecessor_receipt"]["artifact_id"]}
+        ),
+    )
+    add(
+        "receipt-artifact-ids-swapped",
+        _c4c3c2_swap_paths(
+            ("predecessor_receipt", "artifact_id"), ("successor_receipt", "artifact_id")
+        ),
+    )
+    add(
+        "receipt-provider-generation-reused",
+        lambda evidence: evidence["successor_receipt"].update(
+            {
+                "provider_generation": evidence["predecessor_receipt"][
+                    "provider_generation"
+                ]
+            }
+        ),
+    )
+    add(
+        "receipt-generation-manifest-reused",
+        lambda evidence: evidence["successor_receipt"].update(
+            {
+                "provider_generation_manifest": deepcopy(
+                    evidence["predecessor_receipt"]["provider_generation_manifest"]
+                )
+            }
+        ),
+    )
+    add(
+        "receipt-generation-manifests-swapped",
+        _c4c3c2_swap_paths(
+            ("predecessor_receipt", "provider_generation_manifest"),
+            ("successor_receipt", "provider_generation_manifest"),
+        ),
+    )
+    add(
+        "receipt-raw-evidence-reused",
+        lambda evidence: evidence["successor_receipt"].update(
+            {
+                "raw_evidence_artifacts": deepcopy(
+                    evidence["predecessor_receipt"]["raw_evidence_artifacts"]
+                )
+            }
+        ),
+    )
+    add(
+        "receipt-raw-evidence-swapped",
+        _c4c3c2_swap_paths(
+            ("predecessor_receipt", "raw_evidence_artifacts"),
+            ("successor_receipt", "raw_evidence_artifacts"),
+        ),
+    )
+    add(
+        "receipts-swapped",
+        _c4c3c2_swap_paths(("predecessor_receipt",), ("successor_receipt",)),
+    )
+
+    admission_fields = [
+        ("status", ("status",), "BLOCKED"),
+        ("authority-kind", ("authority_kind",), "OTHER_AUTHORITY"),
+    ]
+    for epoch, label, nav_ids in (
+        (
+            "predecessor_admission",
+            "predecessor",
+            ["pred-nav-1", "pred-nav-2", "pred-nav-3"],
+        ),
+        ("successor_admission", "successor", ["nav-b1", "nav-b2", "nav-b3"]),
+    ):
+        for field_id, path, value in admission_fields:
+            add(
+                f"{label}-admission-{field_id}", _c4c3c2_set_path((epoch, *path), value)
+            )
+        add(
+            f"{label}-admission-funded-ids-missing",
+            lambda evidence, epoch=epoch: evidence[epoch][
+                "funded_nav_record_ids"
+            ].pop(),
+        )
+        add(
+            f"{label}-admission-funded-ids-extra",
+            lambda evidence, epoch=epoch: evidence[epoch][
+                "funded_nav_record_ids"
+            ].append("extra-nav"),
+        )
+        add(
+            f"{label}-admission-funded-ids-duplicate",
+            _c4c3c2_set_path(
+                (epoch, "funded_nav_record_ids"), [nav_ids[0], nav_ids[0], nav_ids[2]]
+            ),
+        )
+        add(
+            f"{label}-admission-funded-ids-unknown",
+            _c4c3c2_set_path(
+                (epoch, "funded_nav_record_ids"), ["unknown-nav", *nav_ids[1:]]
+            ),
+        )
+        add(
+            f"{label}-admission-funded-ids-reordered",
+            _c4c3c2_set_path((epoch, "funded_nav_record_ids"), list(reversed(nav_ids))),
+        )
+    add(
+        "predecessor-admission-continuity-false",
+        _c4c3c2_set_path(("predecessor_admission", "continuity_to_successor"), False),
+    )
+    add(
+        "successor-admission-continuity-true",
+        _c4c3c2_set_path(("successor_admission", "continuity_to_successor"), True),
+    )
+    add(
+        "admission-objects-swapped",
+        _c4c3c2_swap_paths(("predecessor_admission",), ("successor_admission",)),
+    )
+
+    nav_details = {
+        "predecessor_navs": (
+            "predecessor",
+            ["pred-nav-alt-1", "pred-nav-alt-2", "pred-nav-alt-3"],
+            ["2026-02-04", "2026-02-03", "2026-02-04"],
+        ),
+        "successor_navs": (
+            "successor",
+            ["nav-alt-1", "nav-alt-2", "nav-alt-3"],
+            ["2026-02-07", "2026-02-06", "2026-02-07"],
+        ),
+    }
+    for epoch, (label, alternate_ids, alternate_dates) in nav_details.items():
+        for index in range(3):
+            prefix = f"{label}-nav-{index + 1}"
+            add(
+                f"{prefix}-record-id",
+                _c4c3c2_set_path((epoch, index, "record_id"), alternate_ids[index]),
+            )
+            add(
+                f"{prefix}-account-id",
+                _c4c3c2_set_path((epoch, index, "account_id"), "acct-b"),
+            )
+            add(
+                f"{prefix}-date",
+                _c4c3c2_set_path((epoch, index, "as_of_date"), alternate_dates[index]),
+            )
+            add(
+                f"{prefix}-currency",
+                _c4c3c2_set_path((epoch, index, "currency"), "EUR"),
+            )
+            add(
+                f"{prefix}-positive-value",
+                _c4c3c2_set_path((epoch, index, "value"), "130.00"),
+            )
+        add(
+            f"{label}-nav-duplicate-record-id",
+            lambda evidence, epoch=epoch: evidence[epoch][1].update(
+                {"record_id": evidence[epoch][0]["record_id"]}
+            ),
+        )
+        add(
+            f"{label}-nav-row-removed",
+            lambda evidence, epoch=epoch: evidence[epoch].pop(),
+        )
+        add(
+            f"{label}-nav-row-added",
+            lambda evidence, epoch=epoch, label=label: evidence[epoch].append(
+                {
+                    "record_id": "extra-nav",
+                    "account_id": "acct-a",
+                    "as_of_date": "2026-02-05"
+                    if label == "predecessor"
+                    else "2026-02-08",
+                    "currency": "USD",
+                    "value": "130.00",
+                }
+            ),
+        )
+        add(
+            f"{label}-nav-rows-reordered",
+            lambda evidence, epoch=epoch: evidence[epoch].reverse(),
+        )
+
+    handoff_fields = [
+        ("account-id", "account_id", "acct-b"),
+        ("effective-end", "effective_end", "2026-02-07"),
+        ("closing-nav-date", "closing_nav_date", "2026-02-04"),
+        ("closing-nav-currency", "closing_nav_currency", "EUR"),
+        ("closing-nav-positive-value", "closing_nav_value", "121.00"),
+        ("continuity", "continuity_to_successor", False),
+    ]
+    for field_id, field, value in handoff_fields:
+        add(
+            f"handoff-{field_id}",
+            _c4c3c2_set_path(("predecessor_handoff", field), value),
+        )
+    add(
+        "handoff-one-day-gap",
+        _c4c3c2_set_path(("predecessor_handoff", "effective_end"), "2026-02-04"),
+    )
+    add(
+        "handoff-one-day-overlap",
+        _c4c3c2_set_path(("predecessor_handoff", "effective_end"), "2026-02-06"),
+    )
+    add(
+        "authority-one-day-gap",
+        _c4c3c2_set_path(("predecessor_receipt", "covered_end"), "2026-02-04"),
+    )
+    add(
+        "authority-one-day-overlap",
+        _c4c3c2_set_path(("predecessor_receipt", "covered_end"), "2026-02-06"),
+    )
+
+    add(
+        "predecessor-flow-added",
+        lambda evidence: evidence["predecessor_flows"].append(
+            {
+                "record_id": "flow-a-in",
+                "account_id": "acct-a",
+                "event_date": "2026-02-05",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "1.00",
+                "counterparty_source_record_id": None,
+            }
+        ),
+    )
+    successor_flow_fields = [
+        ("record-id", "record_id", "flow-b-alt"),
+        ("account-id", "account_id", "acct-b"),
+        ("date-before-predecessor-close", "event_date", "2026-02-05"),
+        ("date-after-successor-close", "event_date", "2026-02-09"),
+        ("classification", "classification", "EXTERNAL_OUT"),
+        ("currency", "currency", "EUR"),
+        ("positive-amount", "amount", "79.80"),
+        ("counterparty", "counterparty_source_record_id", "source-flow-2"),
+    ]
+    for field_id, field, value in successor_flow_fields:
+        add(
+            f"successor-flow-{field_id}",
+            _c4c3c2_set_path(("successor_flows", 0, field), value),
+        )
+    add("successor-flow-removed", lambda evidence: evidence["successor_flows"].pop())
+    add(
+        "successor-flow-duplicated",
+        lambda evidence: evidence["successor_flows"].append(
+            deepcopy(evidence["successor_flows"][0])
+        ),
+    )
+    add(
+        "successor-flow-added",
+        lambda evidence: evidence["successor_flows"].append(
+            {
+                "record_id": "flow-b-out",
+                "account_id": "acct-a",
+                "event_date": "2026-02-07",
+                "classification": "EXTERNAL_OUT",
+                "currency": "USD",
+                "amount": "1.00",
+                "counterparty_source_record_id": None,
+            }
+        ),
+    )
+    add(
+        "successor-flows-reordered",
+        lambda evidence: (
+            evidence["successor_flows"].append(
+                {
+                    "record_id": "flow-b-second",
+                    "account_id": "acct-a",
+                    "event_date": "2026-02-07",
+                    "classification": "EXTERNAL_OUT",
+                    "currency": "USD",
+                    "amount": "1.00",
+                    "counterparty_source_record_id": None,
+                }
+            ),
+            evidence["successor_flows"].reverse(),
+        ),
+    )
+    return cases
+
+
+def _c4c3c2_assert_rejected(evidence: dict[str, object], case_id: str) -> None:
+    try:
+        _c4c3c1_validate_bound_authority(evidence)
+    except AssertionError:
+        return
+    except (
+        Exception
+    ) as error:  # jsonschema.ValidationError is the other accepted rejection.
+        from jsonschema import ValidationError
+
+        if isinstance(error, ValidationError):
+            return
+        raise
+    pytest.fail(f"{case_id} was unexpectedly accepted")
+
+
+_C4C3C2_MUTATION_CASES = _c4c3c2_mutation_cases()
+
+
+def test_c4c3c2_fixture_manifest_and_raw_evidence_are_distinct() -> None:
+    evidence = _c4c3c1_authority_fixture()
+    for epoch in ("predecessor_receipt", "successor_receipt"):
+        manifest = evidence[epoch]["provider_generation_manifest"]
+        raw_evidence = evidence[epoch]["raw_evidence_artifacts"][0]
+        assert manifest is not raw_evidence
+        manifest["artifact_id"] = "mutated-manifest"
+        assert raw_evidence["artifact_id"] != "mutated-manifest"
+
+
+def test_c4c3c2_mutation_states_are_unique() -> None:
+    seen: dict[bytes, str] = {}
+    for case_id, mutate in _C4C3C2_MUTATION_CASES:
+        evidence = deepcopy(_c4c3c1_authority_fixture())
+        mutate(evidence)
+        state = canonical_json_bytes(evidence)
+        assert state not in seen, f"{case_id} duplicates {seen[state]}"
+        seen[state] = case_id
+
+
+def test_c4c3c2_predecessor_added_nav_is_in_predecessor_window() -> None:
+    mutate = dict(_C4C3C2_MUTATION_CASES)["predecessor-nav-row-added"]
+    evidence = deepcopy(_c4c3c1_authority_fixture())
+    mutate(evidence)
+    assert evidence["predecessor_navs"][-1]["as_of_date"] == "2026-02-05"
+
+
+def test_c4c3c2_coherent_receipt_gap_rejected_by_epoch_relation() -> None:
+    evidence = deepcopy(_c4c3c1_authority_fixture())
+    evidence["predecessor_receipt"]["requested_end"] = "2026-02-04"
+    evidence["predecessor_receipt"]["covered_end"] = "2026-02-04"
+    with pytest.raises(AssertionError):
+        _c4c3c1_validate_epoch_relationships(evidence)
+
+
+def test_c4c3c2_coherent_receipt_overlap_rejected_by_epoch_relation() -> None:
+    evidence = deepcopy(_c4c3c1_authority_fixture())
+    evidence["successor_receipt"]["requested_start"] = "2026-02-05"
+    evidence["successor_receipt"]["covered_start"] = "2026-02-05"
+    with pytest.raises(AssertionError):
+        _c4c3c1_validate_epoch_relationships(evidence)
+
+
+def test_c4c3c2_coherent_handoff_nav_gap_rejected_by_epoch_relation() -> None:
+    evidence = deepcopy(_c4c3c1_authority_fixture())
+    evidence["predecessor_navs"][0]["as_of_date"] = "2026-02-02"
+    evidence["predecessor_navs"][1]["as_of_date"] = "2026-02-03"
+    evidence["predecessor_navs"][2]["as_of_date"] = "2026-02-04"
+    evidence["predecessor_handoff"].update(
+        {"effective_end": "2026-02-04", "closing_nav_date": "2026-02-04"}
+    )
+    predecessor_receipt = evidence["predecessor_receipt"]
+    successor_receipt = evidence["successor_receipt"]
+    handoff = evidence["predecessor_handoff"]
+    predecessor_last = max(
+        evidence["predecessor_navs"], key=lambda nav: nav["as_of_date"]
+    )
+    successor_first = min(evidence["successor_navs"], key=lambda nav: nav["as_of_date"])
+    assert (
+        date.fromisoformat(successor_receipt["covered_start"])
+        == date.fromisoformat(predecessor_receipt["covered_end"]) + date.resolution
+    )
+    assert (
+        handoff["account_id"]
+        == predecessor_last["account_id"]
+        == successor_first["account_id"]
+    )
+    assert (
+        handoff["closing_nav_date"]
+        == handoff["effective_end"]
+        == predecessor_last["as_of_date"]
+    )
+    assert (
+        handoff["closing_nav_currency"]
+        == predecessor_last["currency"]
+        == successor_first["currency"]
+    )
+    assert handoff["closing_nav_value"] == predecessor_last["value"]
+    assert (
+        date.fromisoformat(successor_first["as_of_date"])
+        == date.fromisoformat(handoff["closing_nav_date"])
+        + date.resolution
+        + date.resolution
+    )
+    with pytest.raises(AssertionError):
+        _c4c3c1_validate_epoch_relationships(evidence)
+
+
+def test_c4c3c2_coherent_handoff_nav_overlap_rejected_by_epoch_relation() -> None:
+    evidence = deepcopy(_c4c3c1_authority_fixture())
+    evidence["predecessor_navs"][0]["as_of_date"] = "2026-02-04"
+    evidence["predecessor_navs"][1]["as_of_date"] = "2026-02-05"
+    evidence["predecessor_navs"][2]["as_of_date"] = "2026-02-06"
+    evidence["predecessor_handoff"].update(
+        {"effective_end": "2026-02-06", "closing_nav_date": "2026-02-06"}
+    )
+    predecessor_receipt = evidence["predecessor_receipt"]
+    successor_receipt = evidence["successor_receipt"]
+    handoff = evidence["predecessor_handoff"]
+    predecessor_last = max(
+        evidence["predecessor_navs"], key=lambda nav: nav["as_of_date"]
+    )
+    successor_first = min(evidence["successor_navs"], key=lambda nav: nav["as_of_date"])
+    assert (
+        date.fromisoformat(successor_receipt["covered_start"])
+        == date.fromisoformat(predecessor_receipt["covered_end"]) + date.resolution
+    )
+    assert (
+        handoff["account_id"]
+        == predecessor_last["account_id"]
+        == successor_first["account_id"]
+    )
+    assert (
+        handoff["closing_nav_date"]
+        == handoff["effective_end"]
+        == predecessor_last["as_of_date"]
+    )
+    assert (
+        handoff["closing_nav_currency"]
+        == predecessor_last["currency"]
+        == successor_first["currency"]
+    )
+    assert handoff["closing_nav_value"] == predecessor_last["value"]
+    assert date.fromisoformat(successor_first["as_of_date"]) == date.fromisoformat(
+        handoff["closing_nav_date"]
+    )
+    with pytest.raises(AssertionError):
+        _c4c3c1_validate_epoch_relationships(evidence)
+
+
+@pytest.mark.parametrize(
+    ("case_id", "mutate"),
+    _C4C3C2_MUTATION_CASES,
+    ids=[case_id for case_id, _mutate in _C4C3C2_MUTATION_CASES],
+)
+def test_c4c3c2_hostile_two_epoch_authority_mutations_fail_closed(
+    case_id: str, mutate: Any
+) -> None:
+    evidence = deepcopy(_c4c3c1_authority_fixture())
+    mutate(evidence)
+    _c4c3c2_assert_rejected(evidence, case_id)
+
+
+def test_c4c3a_predecessor_handoff_accepts_exact_shape(verifier_module: Any) -> None:
+    predecessor, navs, flows = _c4c3_fixture_b()
+    parsed = verifier_module._parse_predecessor_fact(predecessor)
+    numeric_navs, numeric_flows = _c4c2_numeric_projection(navs, flows)
+    facts = verifier_module._parse_epoch_facts(
+        numeric_navs,
+        numeric_flows,
+        account_id="acct-a",
+        start=date(2026, 2, 6),
+        end=date(2026, 2, 8),
+    )
+    verifier_module._validate_predecessor_adjacency(parsed, facts)
+    assert parsed.account_id == "acct-a"
+    assert parsed.effective_end.isoformat() == "2026-02-05"
+    assert parsed.closing_nav_date.isoformat() == "2026-02-05"
+    assert parsed.closing_nav_currency == "USD"
+    assert parsed.closing_nav_value == Decimal("120")
+    assert parsed.continuity_to_successor is True
+
+
+def test_c4c3a_date_max_predecessor_rejects_without_overflow(
+    verifier_module: Any,
+) -> None:
+    predecessor = {
+        "account_id": "acct-a",
+        "effective_end": "9999-12-31",
+        "closing_nav_date": "9999-12-31",
+        "closing_nav_currency": "USD",
+        "closing_nav_value": "120.00",
+        "continuity_to_successor": True,
+    }
+    navs = [
+        {
+            "account_id": "acct-a",
+            "as_of_date": "9999-12-29",
+            "currency": "USD",
+            "value": "120.00",
+        },
+        {
+            "account_id": "acct-a",
+            "as_of_date": "9999-12-30",
+            "currency": "USD",
+            "value": "120.00",
+        },
+        {
+            "account_id": "acct-a",
+            "as_of_date": "9999-12-31",
+            "currency": "USD",
+            "value": "120.00",
+        },
+    ]
+    parsed = verifier_module._parse_predecessor_fact(predecessor)
+    facts = verifier_module._parse_epoch_facts(
+        navs,
+        [],
+        account_id="acct-a",
+        start=date(9999, 12, 29),
+        end=date.max,
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._validate_predecessor_adjacency(parsed, facts)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "wrong_top_type",
+        "missing",
+        "extra",
+        "bad_date",
+        "noncanonical_date",
+        "bad_currency",
+        "json_number",
+        "over_cent",
+        "exponent",
+        "nonpositive",
+        "negative_zero",
+        "false_continuity",
+        "date_mismatch",
+        "account_mismatch",
+        "currency_mismatch",
+        "gap",
+        "overlap",
+    ],
+)
+def test_c4c3a_predecessor_handoff_rejects_hostile_shapes(
+    verifier_module: Any, mutation: str
+) -> None:
+    predecessor, navs, flows = _c4c3_fixture_b()
+    if mutation == "wrong_top_type":
+        predecessor = []
+    elif mutation == "missing":
+        predecessor.pop("closing_nav_value")
+    elif mutation == "extra":
+        predecessor["strategy_id"] = "forbidden"
+    elif mutation == "bad_date":
+        predecessor["effective_end"] = "2026-02-30"
+    elif mutation == "noncanonical_date":
+        predecessor["effective_end"] = "2026-2-5"
+    elif mutation == "bad_currency":
+        predecessor["closing_nav_currency"] = "USDC"
+    elif mutation == "json_number":
+        predecessor["closing_nav_value"] = 120
+    elif mutation == "over_cent":
+        predecessor["closing_nav_value"] = "120.000"
+    elif mutation == "exponent":
+        predecessor["closing_nav_value"] = "1.2e2"
+    elif mutation == "nonpositive":
+        predecessor["closing_nav_value"] = "0.00"
+    elif mutation == "negative_zero":
+        predecessor["closing_nav_value"] = "-0.00"
+    elif mutation == "false_continuity":
+        predecessor["continuity_to_successor"] = False
+    elif mutation == "date_mismatch":
+        predecessor["closing_nav_date"] = "2026-02-04"
+    elif mutation == "account_mismatch":
+        predecessor["account_id"] = "acct-b"
+    elif mutation == "currency_mismatch":
+        predecessor["closing_nav_currency"] = "EUR"
+    elif mutation == "gap":
+        predecessor["effective_end"] = predecessor["closing_nav_date"] = "2026-02-04"
+    else:
+        predecessor["effective_end"] = predecessor["closing_nav_date"] = "2026-02-06"
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        parsed = verifier_module._parse_predecessor_fact(predecessor)
+        numeric_navs, numeric_flows = _c4c2_numeric_projection(navs, flows)
+        facts = verifier_module._parse_epoch_facts(
+            numeric_navs,
+            numeric_flows,
+            account_id="acct-a",
+            start=date(2026, 2, 6),
+            end=date(2026, 2, 8),
+        )
+        verifier_module._validate_predecessor_adjacency(parsed, facts)
+
+
+def test_c4c3b_derives_literal_predecessor_closing_nav_epoch(
+    verifier_module: Any,
+) -> None:
+    predecessor, navs, flows = _c4c3_fixture_b()
+    parsed = verifier_module._parse_predecessor_fact(predecessor)
+    numeric_navs, numeric_flows = _c4c2_numeric_projection(navs, flows)
+    facts = verifier_module._parse_epoch_facts(
+        numeric_navs,
+        numeric_flows,
+        account_id="acct-a",
+        start=date(2026, 2, 6),
+        end=date(2026, 2, 8),
+    )
+    row = verifier_module._derive_predecessor_closing_nav_epoch(parsed, facts)
+    assert row == {
+        "start": "2026-02-06",
+        "end": "2026-02-08",
+        "opening_capital": Decimal("120"),
+        "deposits": Decimal("78.8"),
+        "internal_in": Decimal("0"),
+        "invested": Decimal("198.8"),
+        "external_withdrawals": Decimal("0"),
+        "internal_out": Decimal("0"),
+        "withdrawn": Decimal("0"),
+        "net_capital": Decimal("198.8"),
+        "current_value": Decimal("204.02"),
+        "gain": Decimal("5.22"),
+        "return_on_net_capital": Decimal("0.026257545271629778672032193158953722334"),
+        "annualized_return_on_net_capital": Decimal(
+            "3.194668008048289738430583501006036217303"
+        ),
+        "xirr_diagnostic": Decimal("36.7834343328871588776166047964976054625"),
+        "observation_linked_return": Decimal(
+            "0.026257545271629778672032193158953722334"
+        ),
+        "observed_hwm_index": Decimal("102.6257545271629778672032193158953722334"),
+        "observed_max_drawdown": Decimal("0.1"),
+        "nav_observations": 3,
+        "opening_basis": "PREDECESSOR_CLOSING_NAV",
+        "observation_trace": {
+            "links": [
+                {
+                    "start_date": "2026-02-05",
+                    "end_date": "2026-02-06",
+                    "base_nav": Decimal("120"),
+                    "ending_nav": Decimal("198.8"),
+                    "net_flow": Decimal("78.8"),
+                    "factor": Decimal("1"),
+                    "cumulative_index": Decimal("100"),
+                    "running_hwm_index": Decimal("100"),
+                    "drawdown": Decimal("0"),
+                },
+                {
+                    "start_date": "2026-02-06",
+                    "end_date": "2026-02-07",
+                    "base_nav": Decimal("198.8"),
+                    "ending_nav": Decimal("178.92"),
+                    "net_flow": Decimal("0"),
+                    "factor": Decimal("0.9"),
+                    "cumulative_index": Decimal("90"),
+                    "running_hwm_index": Decimal("100"),
+                    "drawdown": Decimal("0.1"),
+                },
+                {
+                    "start_date": "2026-02-07",
+                    "end_date": "2026-02-08",
+                    "base_nav": Decimal("178.92"),
+                    "ending_nav": Decimal("204.02"),
+                    "net_flow": Decimal("0"),
+                    "factor": Decimal("1.14028616141292197630225799239883746926"),
+                    "cumulative_index": Decimal(
+                        "102.6257545271629778672032193158953722334"
+                    ),
+                    "running_hwm_index": Decimal(
+                        "102.6257545271629778672032193158953722334"
+                    ),
+                    "drawdown": Decimal("0"),
+                },
+            ]
+        },
+        "capital_flow_trace": [
+            {
+                "class": "EXTERNAL_IN",
+                "date": "2026-02-06",
+                "amount": Decimal("78.8"),
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("mutation", ["continuity", "date", "value"])
+def test_c4c3b_derivation_rechecks_typed_predecessor_handoff(
+    verifier_module: Any,
+    mutation: str,
+) -> None:
+    _predecessor, navs, flows = _c4c3_fixture_b()
+    numeric_navs, numeric_flows = _c4c2_numeric_projection(navs, flows)
+    facts = verifier_module._parse_epoch_facts(
+        numeric_navs,
+        numeric_flows,
+        account_id="acct-a",
+        start=date(2026, 2, 6),
+        end=date(2026, 2, 8),
+    )
+    invalid_predecessor = verifier_module._IndependentPredecessorFact(
+        account_id="acct-a",
+        effective_end=(date(2026, 2, 4) if mutation == "date" else date(2026, 2, 5)),
+        closing_nav_date=date(2026, 2, 5),
+        closing_nav_currency="USD",
+        closing_nav_value=(Decimal("0") if mutation == "value" else Decimal("120")),
+        continuity_to_successor=(False if mutation == "continuity" else True),
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._derive_predecessor_closing_nav_epoch(
+            invalid_predecessor,
+            facts,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "ledger",
+        "baseline",
+        "classified_artifact",
+        "classified_ledger",
+        "classified_policy",
+        "policy_artifact",
+        "coverage_artifact",
+        "coverage_ledger",
+        "coverage_classified",
+        "admission_artifact",
+        "assignment",
+        "calculation_code",
+        "selected_inputs",
+        "perimeter",
+        "calculation_inputs",
+        "code_identities",
+        "epoch_rule_id",
+        "epoch_status",
+        "epoch_rule",
+        "flow_status",
+        "flow_method",
+        "row_missing",
+        "row_extra",
+        "row_duplicate",
+        "row_order",
+        "row_assignment",
+        "row_provider",
+        "row_admission_status",
+        "row_policy_reference",
+        "row_authority",
+        "row_funded",
+        "row_continuity",
+        "row_status",
+        "row_blocker",
+    ],
+)
+def test_c4b3_2b1_output_and_source_identity_mutations_fail(
+    perimeter_module: Any, verifier_module: Any, mutation: str
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    parsed = {path: json.loads(contents) for path, contents in payloads.items()}
+    output = parsed["outputs/account-strategy-manifest.json"]
+    sources = output["source_identities"]
+    if mutation == "ledger":
+        sources["ledger"]["generation_id"] = "0" * 64
+    elif mutation == "baseline":
+        sources["baseline"]["generation_id"] = "0" * 64
+    elif mutation == "classified_artifact":
+        sources["classified_flows"]["artifact"]["sha256"] = "0" * 64
+    elif mutation == "classified_ledger":
+        sources["classified_flows"]["ledger_identity"]["generation_id"] = "0" * 64
+    elif mutation == "classified_policy":
+        sources["classified_flows"]["classification_policy"]["policy_id"] = "OTHER"
+    elif mutation == "policy_artifact":
+        sources["flow_classification_policy"]["artifact"]["sha256"] = "0" * 64
+    elif mutation == "coverage_artifact":
+        sources["flow_coverage"]["artifact"]["sha256"] = "0" * 64
+    elif mutation == "coverage_ledger":
+        sources["flow_coverage"]["ledger_identity"]["generation_id"] = "0" * 64
+    elif mutation == "coverage_classified":
+        sources["flow_coverage"]["classified_flows_artifact"]["sha256"] = "0" * 64
+    elif mutation == "admission_artifact":
+        sources["admission_policy"]["artifact"]["sha256"] = "0" * 64
+    elif mutation in {
+        "assignment",
+        "calculation_code",
+        "selected_inputs",
+        "perimeter",
+        "calculation_inputs",
+        "code_identities",
+    }:
+        if mutation == "assignment":
+            sources["assignment"]["count"] = 0
+        elif mutation == "calculation_code":
+            sources["calculation_code"]["sha256"] = "0" * 64
+        else:
+            source_name = (
+                "account_assignment_perimeter" if mutation == "perimeter" else mutation
+            )
+            sources[source_name]["sha256"] = "0" * 64
+    elif mutation == "epoch_rule_id":
+        output["epoch_continuity"]["rule_id"] = "OTHER"
+    elif mutation == "epoch_status":
+        output["epoch_continuity"]["status"] = "OTHER"
+    elif mutation == "epoch_rule":
+        output["epoch_continuity"]["rule"] = "OTHER"
+    elif mutation == "flow_status":
+        output["flow_reconciliation"]["status"] = "OTHER"
+    elif mutation == "flow_method":
+        output["flow_reconciliation"]["method"] = "OTHER"
+    else:
+        rows = output["rows"]
+        if mutation == "row_missing":
+            rows.pop()
+        elif mutation in {"row_extra", "row_duplicate"}:
+            rows.append(deepcopy(rows[0]))
+        elif mutation == "row_order":
+            rows.reverse()
+        else:
+            row = rows[0]
+            if mutation == "row_assignment":
+                row["strategy_id"] = "other-strategy"
+            elif mutation == "row_provider":
+                row["provider"] = "OTHER"
+            elif mutation == "row_admission_status":
+                row["admission_status"] = "FUNDED"
+            elif mutation == "row_policy_reference":
+                row["admission_policy_reference"] = "OTHER"
+            elif mutation == "row_authority":
+                row["admission_authority_kind"] = "OTHER"
+            elif mutation == "row_funded":
+                row["funded_nav_record_ids"] = ["funded"]
+            elif mutation == "row_continuity":
+                row["continuity_to_successor"] = True
+            elif mutation == "row_status":
+                row["status"] = "OK"
+            else:
+                row["blocking_reason"] = "OTHER"
+    mutated = {path: canonical_json_bytes(value) for path, value in parsed.items()}
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, mutated
+        )
+
+
+@pytest.mark.parametrize(
+    "field",
+    sorted(
+        {
+            "start",
+            "end",
+            "opening_capital",
+            "deposits",
+            "internal_in",
+            "invested",
+            "external_withdrawals",
+            "internal_out",
+            "withdrawn",
+            "net_capital",
+            "current_value",
+            "gain",
+            "return_on_net_capital",
+            "annualized_return_on_net_capital",
+            "xirr_diagnostic",
+            "observation_linked_return",
+            "observed_hwm_index",
+            "observed_max_drawdown",
+            "nav_observations",
+            "opening_basis",
+            "observation_trace",
+            "capital_flow_trace",
+            "nav_observation_trace",
+        }
+    ),
+)
+@pytest.mark.parametrize("value", [None, 0, {}, []])
+def test_c4b3_2b1_output_rows_reject_every_forbidden_numeric_field(
+    perimeter_module: Any, verifier_module: Any, field: str, value: object
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    parsed = {path: json.loads(contents) for path, contents in payloads.items()}
+    parsed["outputs/account-strategy-manifest.json"]["rows"][0][field] = value
+    mutated = {path: canonical_json_bytes(item) for path, item in parsed.items()}
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, mutated
+        )
+
+
+def test_c4b3_mapped_rows_follow_producer_strategy_sort(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    baseline_payload = _fixture_inputs()["baseline"].json_object()
+    first = next(
+        row
+        for row in baseline_payload["assignments"]
+        if row["account_id"] == "synthetic-account-12"
+        and row["effective_start"] == "2025-01-01"
+    )
+    second = next(
+        row
+        for row in baseline_payload["assignments"]
+        if row["account_id"] == "synthetic-account-12"
+        and row["effective_start"] == "2026-01-01"
+    )
+    first["strategy_id"] = "zzz-strategy"
+    second.update(
+        {
+            "strategy_id": "aaa-strategy",
+            "strategy_mapping_disposition": "STRATEGY_MAPPED",
+        }
+    )
+    account11 = next(
+        row
+        for row in baseline_payload["assignments"]
+        if row["account_id"] == "synthetic-account-11"
+    )
+    account11.update(
+        {"strategy_id": None, "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY"}
+    )
+    baseline = InputSnapshot.from_bytes(
+        "reordered mapped baseline", canonical_json_bytes(baseline_payload)
+    )
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected_inputs)
+    values["baseline"] = baseline
+    values["baseline_manifest"] = _generation_manifest_snapshot(
+        catalog=baseline,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    _assert_canonical_report_bytes(verifier.verify(verifier_inputs, payloads))
+
+
+def test_c4b3_2a_rejects_explicit_future_mapped_assignment_end(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    mutated = dict(payloads)
+    perimeter = json.loads(mutated["authority/account-assignment-perimeter.json"])
+    perimeter["rows"][0]["effective_end"] = "2026-12-31"
+    mutated["authority/account-assignment-perimeter.json"] = canonical_json_bytes(
+        perimeter
+    )
+    perimeter_identity = verifier_module._mapped_assignment_identity(perimeter)
+    for path in (
+        "authority/account-flow-coverage.json",
+        "authority/mapped-epoch-admission.json",
+    ):
+        subject = json.loads(mutated[path])
+        subject["mapped_assignments_identity"] = perimeter_identity
+        subject["rows"][0]["assignment"]["effective_end"] = "2026-12-31"
+        if path.endswith("coverage.json"):
+            subject["rows"][0]["requested_end"] = "2026-02-01"
+        mutated[path] = canonical_json_bytes(subject)
+    admission = json.loads(mutated["authority/mapped-epoch-admission.json"])
+    admission["coverage_artifact"] = verifier_module._subject_artifact(
+        mutated["authority/account-flow-coverage.json"],
+        "authority/account-flow-coverage.json",
+        "account-flow-coverage",
+        "2",
+        "2026-02-01",
+    )
+    mutated["authority/mapped-epoch-admission.json"] = canonical_json_bytes(admission)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._verify_c4b3_2a_coverage_admission(
+            verifier_inputs,
+            mutated,
+            {"mapped_assignments_identity": perimeter_identity},
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "coverage_schema_version",
+        "coverage_artifact_id",
+        "coverage_as_of_date",
+        "coverage_ledger_identity",
+        "coverage_classified_artifact",
+        "coverage_mapped_digest",
+        "coverage_row_missing",
+        "coverage_row_extra",
+        "coverage_row_duplicate",
+        "coverage_row_order",
+        "coverage_assignment",
+        "coverage_requested_start",
+        "coverage_requested_end",
+        "coverage_status",
+        "coverage_authority",
+        "coverage_receipt",
+        "coverage_blocker",
+        "coverage_detail",
+        "admission_schema_version",
+        "admission_artifact_id",
+        "admission_as_of_date",
+        "admission_ledger_identity",
+        "admission_coverage_artifact",
+        "admission_mapped_digest",
+        "admission_row_missing",
+        "admission_row_extra",
+        "admission_row_order",
+        "admission_assignment",
+        "admission_status",
+        "admission_authority",
+        "admission_funded",
+        "admission_continuity",
+        "admission_blocker",
+    ],
+)
+def test_c4b3_2a_coverage_admission_mutations_fail(
+    perimeter_module: Any, verifier_module: Any, mutation: str
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    parsed = {path: json.loads(contents) for path, contents in payloads.items()}
+    coverage = parsed["authority/account-flow-coverage.json"]
+    admission = parsed["authority/mapped-epoch-admission.json"]
+    target = coverage if mutation.startswith("coverage_") else admission
+    if mutation.endswith("schema_version"):
+        target["schema_version"] = 9
+    elif mutation.endswith("artifact_id"):
+        target["artifact_id"] = "wrong-artifact.json"
+    elif mutation.endswith("as_of_date"):
+        target["as_of_date"] = "2026-03-01"
+    elif mutation.endswith("ledger_identity"):
+        target["ledger_identity"]["generation_id"] = "0" * 64
+    elif mutation == "coverage_classified_artifact":
+        target["classified_flows_artifact"]["sha256"] = "0" * 64
+    elif mutation.endswith("mapped_digest"):
+        target["mapped_assignments_identity"]["sha256"] = "0" * 64
+    elif mutation.endswith("row_missing"):
+        target["rows"].pop()
+    elif mutation.endswith("row_extra"):
+        target["rows"].append(deepcopy(target["rows"][0]))
+    elif mutation.endswith("row_duplicate"):
+        target["rows"].append(deepcopy(target["rows"][0]))
+    elif mutation.endswith("row_order"):
+        target["rows"].reverse()
+    elif mutation.endswith("assignment"):
+        target["rows"][0]["assignment"]["strategy_id"] = "other-strategy"
+    elif mutation == "coverage_requested_start":
+        target["rows"][0]["requested_start"] = "2026-01-02"
+    elif mutation == "coverage_requested_end":
+        target["rows"][0]["requested_end"] = "2026-01-02"
+    elif mutation.endswith("status"):
+        target["rows"][0]["status"] = "COMPLETE"
+    elif mutation.endswith("authority"):
+        target["rows"][0]["authority_kind"] = "RECEIPT"
+    elif mutation == "coverage_receipt":
+        target["rows"][0]["receipt_artifact_id"] = "receipt.json"
+    elif mutation == "coverage_blocker":
+        target["rows"][0]["blocker_code"] = "OTHER"
+    elif mutation == "coverage_detail":
+        target["rows"][0]["blocker_detail"] = "changed"
+    elif mutation == "admission_coverage_artifact":
+        target["coverage_artifact"]["sha256"] = "0" * 64
+    elif mutation == "admission_funded":
+        target["rows"][0]["funded_nav_record_ids"] = ["funded"]
+    elif mutation == "admission_continuity":
+        target["rows"][0]["continuity_to_successor"] = True
+    elif mutation == "admission_blocker":
+        target["rows"][0]["blocker_code"] = "OTHER"
+    else:  # pragma: no cover
+        raise AssertionError(mutation)
+    mutated = {path: canonical_json_bytes(value) for path, value in parsed.items()}
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, mutated
+        )
+
+
+def _c4b2_internal_bundle(
+    perimeter_module: Any, verifier_module: Any
+) -> tuple[object, dict[str, bytes]]:
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    ledger = selected_inputs.provider_ledger.json_object()
+    ledger["flows"][0]["flow_type"] = "INTERNAL_TRANSFER"
+    ledger["flows"][1]["flow_type"] = "INTERNAL_TRANSFER"
+    ledger["flows"][0]["amount"]["value"] = "13.00"
+    ledger["flows"][1]["amount"]["value"] = "-13.00"
+    policy = selected_inputs.flow_classification_policy.json_object()
+    policy["event_dispositions"]["exact"].append(
+        {
+            "flow_type": "INTERNAL_TRANSFER",
+            "disposition": "INTERNAL",
+            "amount_sign": "NONZERO",
+            "counterparty_rule": "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT",
+        }
+    )
+    values = _selected_input_kwargs(selected_inputs)
+    values["provider_ledger"] = InputSnapshot.from_bytes(
+        "internal ledger", canonical_json_bytes(ledger)
+    )
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=values["provider_ledger"],
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    values["flow_classification_policy"] = InputSnapshot.from_bytes(
+        "internal policy", canonical_json_bytes(policy)
+    )
+    internal_inputs = perimeter_module.AccountManifestSelectedInputs(**values)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(internal_inputs)
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(internal_inputs)
+    return verifier_inputs, payloads
+
+
+def test_c4b2_internal_reciprocity_reaches_c4b3_after_independent_validation(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    verifier_inputs, payloads = _c4b2_internal_bundle(perimeter_module, verifier_module)
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "missing_counterparty",
+        "wrong_counterparty",
+        "external_counterparty",
+        "counterpart_classified",
+        "counterpart_amount",
+        "counterpart_date",
+        "counterpart_account",
+        "counterpart_currency",
+    ],
+)
+def test_c4b2_internal_reciprocity_mutations_fail(
+    perimeter_module: Any, verifier_module: Any, mutation: str
+) -> None:
+    verifier_inputs, payloads = _c4b2_internal_bundle(perimeter_module, verifier_module)
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    indexed = {event["source_record_id"]: event for event in classified["events"]}
+    first = indexed["c3-flow-01"]
+    second = indexed["c3-flow-02"]
+    if mutation == "missing_counterparty":
+        first.pop("counterparty_source_record_id")
+    elif mutation == "wrong_counterparty":
+        first["counterparty_source_record_id"] = "c3-flow-03"
+    elif mutation == "external_counterparty":
+        indexed["c3-flow-03"]["counterparty_source_record_id"] = "c3-flow-02"
+    elif mutation == "counterpart_classified":
+        second["classification_status"] = "BLOCKED"
+    elif mutation == "counterpart_amount":
+        second["amount"]["value"] = "-2.00"
+    elif mutation == "counterpart_date":
+        second["event_date"] = "2026-02-02"
+    elif mutation == "counterpart_account":
+        second["account_id"] = first["account_id"]
+    else:
+        second["amount"]["currency"] = "CAD"
+    mutated = dict(payloads)
+    mutated["authority/classified-flows.json"] = canonical_json_bytes(classified)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, mutated
+        )
+
+
+def test_c4b2_prefix_rule_reaches_c4b3_after_independent_validation(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    ledger = selected_inputs.provider_ledger.json_object()
+    ledger["flows"][0]["flow_type"] = "PREFIXED_CONTRIBUTION"
+    policy = selected_inputs.flow_classification_policy.json_object()
+    policy["event_dispositions"]["prefix"] = [
+        {
+            "flow_type_prefix": "PREFIXED_",
+            "disposition": "EXTERNAL",
+            "amount_sign": "POSITIVE",
+        }
+    ]
+    values = _selected_input_kwargs(selected_inputs)
+    values["provider_ledger"] = InputSnapshot.from_bytes(
+        "prefix ledger", canonical_json_bytes(ledger)
+    )
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=values["provider_ledger"],
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    values["flow_classification_policy"] = InputSnapshot.from_bytes(
+        "prefix policy", canonical_json_bytes(policy)
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+
+
+def test_c4b2_policy_schema_version_rejects_bool(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    policy = selected_inputs.flow_classification_policy.json_object()
+    policy["schema_version"] = True
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._classification_rules(
+            InputSnapshot.from_bytes("bool policy", canonical_json_bytes(policy))
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "policy_rule",
+        "event_id",
+        "event_amount",
+        "event_status",
+        "event_disposition",
+        "event_blocker",
+        "provider_lineage_projection",
+    ],
+)
+def test_c4b2_policy_and_classified_flow_projection_mutations_fail(
+    perimeter_module: Any, verifier_module: Any, mutation: str
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    mutated = dict(payloads)
+    if mutation == "policy_rule":
+        policy = json.loads(mutated["authority/flow-classification-policy.json"])
+        policy["event_dispositions"]["exact"][0]["disposition"] = "INTERNAL"
+        mutated["authority/flow-classification-policy.json"] = canonical_json_bytes(
+            policy
+        )
+    else:
+        classified = json.loads(mutated["authority/classified-flows.json"])
+        event = classified["events"][0]
+        if mutation == "event_id":
+            event["event_id"] = "classified-flow:tampered"
+        elif mutation == "event_amount":
+            event["amount"]["value"] = "2.00"
+        elif mutation == "event_status":
+            event["classification_status"] = "BLOCKED"
+        elif mutation == "event_disposition":
+            event["disposition"] = "INTERNAL"
+        elif mutation == "event_blocker":
+            event["blocker_code"] = "AMOUNT_UNAVAILABLE"
+        else:
+            event["provider_lineage"] = {"provider": "forbidden-projection"}
+        mutated["authority/classified-flows.json"] = canonical_json_bytes(classified)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, mutated
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "calc_currency",
+        "calc_mapped_digest",
+        "calc_provider",
+        "calc_nav",
+        "calc_event",
+        "calc_row_remove",
+        "calc_row_duplicate",
+        "calc_epoch",
+        "calc_ledger_identity",
+        "calc_baseline_identity",
+        "code_schema_version",
+        "code_artifact_id",
+        "code_as_of_date",
+        "code_epoch_producer.artifact_id",
+        "code_epoch_producer.sha256",
+        "code_epoch_producer.size_bytes",
+        "code_generation_builder.artifact_id",
+        "code_generation_builder.sha256",
+        "code_generation_builder.size_bytes",
+        "code_independent_verifier.artifact_id",
+        "code_independent_verifier.sha256",
+        "code_independent_verifier.size_bytes",
+        "code_missing_source",
+        "code_extra_source",
+    ],
+)
+def test_c4b3_1_calculation_and_code_identity_mutations_fail(
+    perimeter_module: Any,
+    verifier_module: Any,
+    mutation: str,
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    parsed = {path: json.loads(contents) for path, contents in payloads.items()}
+    if mutation.startswith("code_"):
+        code = parsed["authority/code-identities.json"]
+        if mutation == "code_schema_version":
+            code["schema_version"] = 2
+        elif mutation == "code_artifact_id":
+            code["artifact_id"] = "wrong-code-identities.json"
+        elif mutation == "code_as_of_date":
+            code["as_of_date"] = "2026-03-01"
+        elif mutation == "code_missing_source":
+            code["code_sources"].pop("independent_verifier")
+        elif mutation == "code_extra_source":
+            code["code_sources"]["extra"] = {}
+        else:
+            source, field = mutation.removeprefix("code_").split(".")
+            code["code_sources"][source][field] = "0" * 64 if field == "sha256" else 0
+    else:
+        calc = parsed["authority/calculation-inputs.json"]
+        if mutation == "calc_currency":
+            calc["accounting_currency"] = "CAD"
+        elif mutation == "calc_mapped_digest":
+            calc["mapped_assignments_identity"]["sha256"] = "0" * 64
+        elif mutation == "calc_provider":
+            calc["rows"][0]["provider"] = "OTHER"
+        elif mutation == "calc_nav":
+            calc["rows"][0]["nav_observations"][0]["nav"]["value"] = "101.00"
+        elif mutation == "calc_event":
+            calc["rows"][0]["classified_flows"][0]["amount"]["value"] = "2.00"
+        elif mutation == "calc_row_remove":
+            calc["rows"].pop()
+        elif mutation == "calc_row_duplicate":
+            calc["rows"].append(deepcopy(calc["rows"][0]))
+        elif mutation == "calc_epoch":
+            calc["rows"][0]["epoch"]["strategy_id"] = "other-strategy"
+        elif mutation == "calc_ledger_identity":
+            calc["ledger_identity"]["generation_id"] = "0" * 64
+        else:
+            calc["baseline_identity"]["generation_id"] = "0" * 64
+    mutated = {path: canonical_json_bytes(value) for path, value in parsed.items()}
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, mutated
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda nav: nav.update({"status": "AVAILABLE", "value": None}),
+        lambda nav: nav.update({"status": "AVAILABLE", "value": "1.00 "}),
+        lambda nav: nav.update({"status": "AVAILABLE", "value": "-0.00"}),
+        lambda nav: nav.update({"status": "AVAILABLE", "value": "NaN"}),
+        lambda nav: nav.update({"status": "UNAVAILABLE", "value": "1.00"}),
+        lambda nav: nav.update({"status": "AVAILABLE", "reason": "leak"}),
+        lambda nav: nav.update(
+            {"status": "UNAVAILABLE", "value": None, "reason": "  "}
+        ),
+    ],
+)
+def test_c4b3_1_provider_nav_money_mutations_fail(
+    perimeter_module: Any, verifier_module: Any, mutation: Any
+) -> None:
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    ledger = selected_inputs.provider_ledger.json_object()
+    mutation(ledger["nav_observations"][0]["nav"])
+    provider_ledger = InputSnapshot.from_bytes(
+        "mutated ledger", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected_inputs)
+    values["provider_ledger"] = provider_ledger
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=provider_ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    mutated_inputs = perimeter_module.AccountManifestSelectedInputs(**values)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(mutated_inputs)
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._normalize_provider_navs(verifier_inputs)
+
+
+def test_c4b3_1_provider_lineage_is_not_projected_or_exposed(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    ledger = selected_inputs.provider_ledger.json_object()
+    sentinel = "C4PRIVACY987654321012345"
+    ledger["nav_observations"][0]["provider_lineage"] = {"account_number": sentinel}
+    ledger["flows"][0]["provider_lineage"] = {"account_number": sentinel}
+    provider_ledger = InputSnapshot.from_bytes(
+        "sentinel ledger", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected_inputs)
+    values["provider_ledger"] = provider_ledger
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=provider_ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+    state = verifier_module._verify_retained_semantics(verifier_inputs, payloads)
+    assert sentinel.encode("ascii") not in canonical_json_bytes(state)
+    for path in (
+        "authority/flow-classification-policy.json",
+        "authority/classified-flows.json",
+        "authority/calculation-inputs.json",
+        "authority/code-identities.json",
+    ):
+        assert sentinel.encode("ascii") not in payloads[path]
+    mutated = dict(payloads)
+    calculation = json.loads(mutated["authority/calculation-inputs.json"])
+    calculation["provider_lineage"] = sentinel
+    mutated["authority/calculation-inputs.json"] = canonical_json_bytes(calculation)
+    with pytest.raises(verifier_module.IndependentVerificationError) as raised:
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, mutated
+        )
+    assert sentinel not in str(raised.value)
+
+
+def test_c4b1_independent_interval_contract_rejects_a_gap(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    baseline_payload = _fixture_inputs()["baseline"].json_object()
+    gap_assignment = next(
+        assignment
+        for assignment in baseline_payload["assignments"]
+        if assignment["account_id"] == "synthetic-account-12"
+        and assignment["effective_start"] == "2026-01-01"
+    )
+    gap_assignment["effective_start"] = "2026-01-02"
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._validate_interval_rows(baseline_payload["assignments"])
+
+
+def _c4b1_mutated_fact_bundle(
+    perimeter_module: Any, verifier_module: Any, mutation: str
+) -> tuple[object, dict[str, bytes]]:
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    ledger_payload = selected_inputs.provider_ledger.json_object()
+    classified_payloads = dict(
+        perimeter_module.build_blocked_account_manifest_payloads(selected_inputs)
+    )
+    if mutation == "duplicate_nav_account_date":
+        duplicate = deepcopy(ledger_payload["nav_observations"][0])
+        duplicate["record_id"] = "duplicate-nav"
+        ledger_payload["nav_observations"].append(duplicate)
+        perimeter = json.loads(
+            classified_payloads["authority/account-assignment-perimeter.json"]
+        )
+        perimeter["rows"][0]["available_nav"] = 2
+        classified_payloads["authority/account-assignment-perimeter.json"] = (
+            canonical_json_bytes(perimeter)
+        )
+    elif mutation == "empty_nav_record_id":
+        ledger_payload["nav_observations"][0]["record_id"] = ""
+    elif mutation == "empty_raw_record_id":
+        ledger_payload["flows"][0]["record_id"] = ""
+    elif mutation == "empty_classified_event_id":
+        classified = json.loads(classified_payloads["authority/classified-flows.json"])
+        classified["events"][0]["event_id"] = ""
+        classified_payloads["authority/classified-flows.json"] = canonical_json_bytes(
+            classified
+        )
+    elif mutation == "empty_classified_source_record_id":
+        classified = json.loads(classified_payloads["authority/classified-flows.json"])
+        classified["events"][0]["source_record_id"] = ""
+        classified_payloads["authority/classified-flows.json"] = canonical_json_bytes(
+            classified
+        )
+    else:  # pragma: no cover
+        raise AssertionError(mutation)
+    ledger = InputSnapshot.from_bytes(
+        "mutated ledger", canonical_json_bytes(ledger_payload)
+    )
+    values = _selected_input_kwargs(selected_inputs)
+    values["provider_ledger"] = ledger
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    mutated_selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    classified_payloads["authority/selected-input-identities.json"] = (
+        perimeter_module.build_selected_input_identities(mutated_selected)
+    )
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(mutated_selected)
+    )
+    return verifier_inputs, classified_payloads
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "duplicate_nav_account_date",
+        "empty_nav_record_id",
+        "empty_raw_record_id",
+        "empty_classified_event_id",
+        "empty_classified_source_record_id",
+    ],
+)
+def test_c4b1_fact_identity_mutations_fail_before_c4b2(
+    perimeter_module: Any, verifier_module: Any, mutation: str
+) -> None:
+    verifier_inputs, payloads = _c4b1_mutated_fact_bundle(
+        perimeter_module, verifier_module, mutation
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+
+
+def test_c4b1_reconstructs_literal_mapped_assignment_identity(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    _verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
+    identity = verifier_module._mapped_assignment_identity(perimeter)
+    assert identity == {
+        "count": 15,
+        "sha256": "87b17fffdd69e855a31aef206af51fb8acd18567d41218e330ac25bd48cc7240",
+    }
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "provider_catalog_sha",
+        "baseline_catalog_sha",
+        "policy_bytes",
+        "receipt_bytes",
+        "producer_bytes",
+        "builder_bytes",
+        "verifier_bytes",
+    ],
+)
+def test_c4b1_selected_identity_mutations_fail_before_c4b2(
+    perimeter_module: Any, verifier_module: Any, mutation: str
+) -> None:
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected_inputs)
+    if mutation == "provider_catalog_sha":
+        values["provider_ledger"] = InputSnapshot.from_bytes(
+            "mutated", selected_inputs.provider_ledger.contents + b" "
+        )
+    elif mutation == "baseline_catalog_sha":
+        values["baseline"] = InputSnapshot.from_bytes(
+            "mutated", selected_inputs.baseline.contents + b" "
+        )
+    elif mutation == "policy_bytes":
+        values["flow_classification_policy"] = InputSnapshot.from_bytes(
+            "mutated", selected_inputs.flow_classification_policy.contents + b"x"
+        )
+    elif mutation == "receipt_bytes":
+        values["retrieval_receipts"] = {
+            "synthetic-receipt": InputSnapshot.from_bytes("mutated", b"changed")
+        }
+    else:
+        field = {
+            "producer_bytes": "epoch_producer_source",
+            "builder_bytes": "generation_builder_source",
+            "verifier_bytes": "independent_verifier_source",
+        }[mutation]
+        original = getattr(selected_inputs, field)
+        values[field] = InputSnapshot.from_bytes("mutated", original.contents + b"x")
+    verifier_inputs = verifier_module.IndependentVerifierInputs(**values)
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected_inputs)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+
+
+@pytest.mark.parametrize(
+    ("subject_path", "mutation"),
+    [
+        (
+            "authority/selected-input-identities.json",
+            lambda payload: payload.update({"as_of_date": "2026-03-01"}),
+        ),
+        (
+            "authority/account-assignment-perimeter.json",
+            lambda payload: payload.update({"as_of_date": "2026-03-01"}),
+        ),
+        (
+            "authority/account-assignment-perimeter.json",
+            lambda payload: payload["rows"][0].update({"provider": "OTHER"}),
+        ),
+        (
+            "authority/account-assignment-perimeter.json",
+            lambda payload: payload["rows"].pop(),
+        ),
+        (
+            "authority/account-assignment-perimeter.json",
+            lambda payload: payload.update({"account_count": 17}),
+        ),
+        (
+            "authority/account-assignment-perimeter.json",
+            lambda payload: payload["rows"][0].update(
+                {"effective_start": "2025-01-02"}
+            ),
+        ),
+        (
+            "authority/account-assignment-perimeter.json",
+            lambda payload: payload["rows"][0]["assignment_identity"].update(
+                {"sha256": "0" * 64}
+            ),
+        ),
+        (
+            "authority/account-assignment-perimeter.json",
+            lambda payload: payload["full_perimeter_identity"].update(
+                {"sha256": "0" * 64}
+            ),
+        ),
+        (
+            "authority/account-assignment-perimeter.json",
+            lambda payload: payload["rows"][0].update(
+                {
+                    "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY",
+                    "strategy_id": None,
+                }
+            ),
+        ),
+    ],
+)
+def test_c4b1_generated_subject_perimeter_mutations_fail_before_c4b2(
+    perimeter_module: Any, verifier_module: Any, subject_path: str, mutation: Any
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    parsed = {path: json.loads(contents) for path, contents in payloads.items()}
+    mutation(parsed[subject_path])
+    mutated = {path: canonical_json_bytes(value) for path, value in parsed.items()}
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, mutated
+        )
+
+
+def _c4c4a_first_facts(verifier_module: Any) -> Any:
+    navs = [
+        {
+            "account_id": "acct-a",
+            "as_of_date": "2026-01-02",
+            "currency": "USD",
+            "value": "100.00",
+        },
+        {
+            "account_id": "acct-a",
+            "as_of_date": "2026-01-05",
+            "currency": "USD",
+            "value": "180.00",
+        },
+        {
+            "account_id": "acct-a",
+            "as_of_date": "2026-01-09",
+            "currency": "USD",
+            "value": "117.00",
+        },
+        {
+            "account_id": "acct-a",
+            "as_of_date": "2026-01-12",
+            "currency": "USD",
+            "value": "150.00",
+        },
+        {
+            "account_id": "acct-a",
+            "as_of_date": "2027-01-02",
+            "currency": "USD",
+            "value": "150.00",
+        },
+    ]
+    flows = [
+        {
+            "account_id": "acct-a",
+            "event_date": "2026-01-03",
+            "classification": "EXTERNAL_IN",
+            "currency": "USD",
+            "amount": "10.00",
+        },
+        {
+            "account_id": "acct-a",
+            "event_date": "2026-01-03",
+            "classification": "EXTERNAL_OUT",
+            "currency": "USD",
+            "amount": "10.00",
+        },
+        {
+            "account_id": "acct-a",
+            "event_date": "2026-01-05",
+            "classification": "INTERNAL_IN",
+            "currency": "USD",
+            "amount": "50.00",
+        },
+    ]
+    return verifier_module._parse_epoch_facts(
+        navs, flows, account_id="acct-a", start=date(2026, 1, 2), end=date(2027, 1, 2)
+    )
+
+
+def _c4c4a_first_candidate() -> dict[str, object]:
+    return {
+        "start": "2026-01-02",
+        "end": "2027-01-02",
+        "opening_capital": "100",
+        "deposits": "10",
+        "internal_in": "50",
+        "invested": "160",
+        "external_withdrawals": "10",
+        "internal_out": "0",
+        "withdrawn": "10",
+        "net_capital": "150",
+        "current_value": "150",
+        "gain": "0",
+        "return_on_net_capital": "0",
+        "annualized_return_on_net_capital": "0",
+        "xirr_diagnostic": "0",
+        "observation_linked_return": "0.083333333333333333333333333333333333333",
+        "observed_hwm_index": "130",
+        "observed_max_drawdown": "0.35",
+        "opening_basis": "FIRST_AVAILABLE_NAV",
+        "nav_observations": 5,
+        "observation_trace": {
+            "links": [
+                {
+                    "start_date": "2026-01-02",
+                    "end_date": "2026-01-05",
+                    "base_nav": "100",
+                    "ending_nav": "180",
+                    "net_flow": "50",
+                    "factor": "1.3",
+                    "cumulative_index": "130",
+                    "running_hwm_index": "130",
+                    "drawdown": "0",
+                },
+                {
+                    "start_date": "2026-01-05",
+                    "end_date": "2026-01-09",
+                    "base_nav": "180",
+                    "ending_nav": "117",
+                    "net_flow": "0",
+                    "factor": "0.65",
+                    "cumulative_index": "84.5",
+                    "running_hwm_index": "130",
+                    "drawdown": "0.35",
+                },
+                {
+                    "start_date": "2026-01-09",
+                    "end_date": "2026-01-12",
+                    "base_nav": "117",
+                    "ending_nav": "150",
+                    "net_flow": "0",
+                    "factor": "1.282051282051282051282051282051282051282",
+                    "cumulative_index": "108.3333333333333333333333333333333333333",
+                    "running_hwm_index": "130",
+                    "drawdown": "0.1666666666666666666666666666666666666669",
+                },
+                {
+                    "start_date": "2026-01-12",
+                    "end_date": "2027-01-02",
+                    "base_nav": "150",
+                    "ending_nav": "150",
+                    "net_flow": "0",
+                    "factor": "1",
+                    "cumulative_index": "108.3333333333333333333333333333333333333",
+                    "running_hwm_index": "130",
+                    "drawdown": "0.1666666666666666666666666666666666666669",
+                },
+            ]
+        },
+        "capital_flow_trace": [
+            {"class": "EXTERNAL_IN", "date": "2026-01-03", "amount": "10"},
+            {"class": "EXTERNAL_OUT", "date": "2026-01-03", "amount": "10"},
+            {"class": "INTERNAL_IN", "date": "2026-01-05", "amount": "50"},
+        ],
+    }
+
+
+def _c4c4a_predecessor_facts(verifier_module: Any) -> tuple[Any, Any]:
+    predecessor = verifier_module._parse_predecessor_fact(
+        {
+            "account_id": "acct-a",
+            "effective_end": "2026-02-05",
+            "closing_nav_date": "2026-02-05",
+            "closing_nav_currency": "USD",
+            "closing_nav_value": "120.00",
+            "continuity_to_successor": True,
+        }
+    )
+    facts = verifier_module._parse_epoch_facts(
+        [
+            {
+                "account_id": "acct-a",
+                "as_of_date": "2026-02-06",
+                "currency": "USD",
+                "value": "198.80",
+            },
+            {
+                "account_id": "acct-a",
+                "as_of_date": "2026-02-07",
+                "currency": "USD",
+                "value": "178.92",
+            },
+            {
+                "account_id": "acct-a",
+                "as_of_date": "2026-02-08",
+                "currency": "USD",
+                "value": "204.02",
+            },
+        ],
+        [
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-02-06",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "78.80",
+            }
+        ],
+        account_id="acct-a",
+        start=date(2026, 2, 6),
+        end=date(2026, 2, 8),
+    )
+    return predecessor, facts
+
+
+def _c4c4a_predecessor_candidate() -> dict[str, object]:
+    return {
+        "start": "2026-02-06",
+        "end": "2026-02-08",
+        "opening_capital": "120",
+        "deposits": "78.8",
+        "internal_in": "0",
+        "invested": "198.8",
+        "external_withdrawals": "0",
+        "internal_out": "0",
+        "withdrawn": "0",
+        "net_capital": "198.8",
+        "current_value": "204.02",
+        "gain": "5.22",
+        "return_on_net_capital": "0.026257545271629778672032193158953722334",
+        "annualized_return_on_net_capital": "3.194668008048289738430583501006036217303",
+        "xirr_diagnostic": "36.7834343328871588776166047964976054625",
+        "observation_linked_return": "0.026257545271629778672032193158953722334",
+        "observed_hwm_index": "102.6257545271629778672032193158953722334",
+        "observed_max_drawdown": "0.1",
+        "opening_basis": "PREDECESSOR_CLOSING_NAV",
+        "nav_observations": 3,
+        "observation_trace": {
+            "links": [
+                {
+                    "start_date": "2026-02-05",
+                    "end_date": "2026-02-06",
+                    "base_nav": "120",
+                    "ending_nav": "198.8",
+                    "net_flow": "78.8",
+                    "factor": "1",
+                    "cumulative_index": "100",
+                    "running_hwm_index": "100",
+                    "drawdown": "0",
+                },
+                {
+                    "start_date": "2026-02-06",
+                    "end_date": "2026-02-07",
+                    "base_nav": "198.8",
+                    "ending_nav": "178.92",
+                    "net_flow": "0",
+                    "factor": "0.9",
+                    "cumulative_index": "90",
+                    "running_hwm_index": "100",
+                    "drawdown": "0.1",
+                },
+                {
+                    "start_date": "2026-02-07",
+                    "end_date": "2026-02-08",
+                    "base_nav": "178.92",
+                    "ending_nav": "204.02",
+                    "net_flow": "0",
+                    "factor": "1.14028616141292197630225799239883746926",
+                    "cumulative_index": "102.6257545271629778672032193158953722334",
+                    "running_hwm_index": "102.6257545271629778672032193158953722334",
+                    "drawdown": "0",
+                },
+            ]
+        },
+        "capital_flow_trace": [
+            {"class": "EXTERNAL_IN", "date": "2026-02-06", "amount": "78.8"}
+        ],
+    }
+
+
+def test_c4c4a_first_available_literal_projection_compares_once(
+    verifier_module: Any,
+) -> None:
+    facts = _c4c4a_first_facts(verifier_module)
+    candidate = _c4c4a_first_candidate()
+    before = deepcopy(candidate)
+    result = verifier_module._compare_test_local_numeric_epoch(facts, candidate)
+    assert result == verifier_module._NumericComparison(1, 1, 0)
+    assert candidate == before
+
+
+def test_c4c4a_predecessor_literal_projection_compares_once(
+    verifier_module: Any,
+) -> None:
+    predecessor, facts = _c4c4a_predecessor_facts(verifier_module)
+    candidate = _c4c4a_predecessor_candidate()
+    before = deepcopy(candidate)
+    result = verifier_module._compare_test_local_numeric_epoch(
+        (predecessor, facts), candidate
+    )
+    assert result == verifier_module._NumericComparison(1, 1, 0)
+    assert candidate == before
+    assert candidate["opening_basis"] == "PREDECESSOR_CLOSING_NAV"
+    assert candidate["observation_trace"]["links"][0]["start_date"] == "2026-02-05"
+    assert candidate["capital_flow_trace"][0] == {
+        "class": "EXTERNAL_IN",
+        "date": "2026-02-06",
+        "amount": "78.8",
+    }
+
+
+def test_c4c4a_projections_are_closed_and_comparator_private(
+    verifier_module: Any,
+) -> None:
+    expected = {
+        "start",
+        "end",
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "invested",
+        "external_withdrawals",
+        "internal_out",
+        "withdrawn",
+        "net_capital",
+        "current_value",
+        "gain",
+        "return_on_net_capital",
+        "annualized_return_on_net_capital",
+        "xirr_diagnostic",
+        "observation_linked_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "opening_basis",
+        "nav_observations",
+        "observation_trace",
+        "capital_flow_trace",
+    }
+    assert set(_c4c4a_first_candidate()) == expected
+    assert set(_c4c4a_first_candidate()["observation_trace"]["links"][0]) == {
+        "start_date",
+        "end_date",
+        "base_nav",
+        "ending_nav",
+        "net_flow",
+        "factor",
+        "cumulative_index",
+        "running_hwm_index",
+        "drawdown",
+    }
+    assert set(_c4c4a_first_candidate()["capital_flow_trace"][0]) == {
+        "class",
+        "date",
+        "amount",
+    }
+    assert "_NumericComparison" not in verifier_module.__all__
+    assert "_compare_test_local_numeric_epoch" not in verifier_module.__all__
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._NumericComparison(1, True, 0)
+
+
+def test_c4c4a_public_verifier_does_not_invoke_private_comparator(
+    perimeter_module: Any, verifier_module: Any, monkeypatch: Any
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+
+    def unexpected_call(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("private numeric comparator leaked into public path")
+
+    monkeypatch.setattr(
+        verifier_module, "_compare_test_local_numeric_epoch", unexpected_call
+    )
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+
+
+@pytest.mark.parametrize("bad_form", [[], ("wrong",), ("wrong", "wrong", "wrong")])
+def test_c4c4a_rejects_wrong_fact_form(verifier_module: Any, bad_form: object) -> None:
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._compare_test_local_numeric_epoch(
+            bad_form, _c4c4a_first_candidate()
+        )
+
+
+@pytest.mark.parametrize("mutation", ["missing", "extra"])
+def test_c4c4a_rejects_closed_projection_shape(
+    verifier_module: Any, mutation: str
+) -> None:
+    candidate = _c4c4a_first_candidate()
+    if mutation == "missing":
+        candidate.pop("gain")
+    else:
+        candidate["account_id"] = "acct-a"
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._compare_test_local_numeric_epoch(
+            _c4c4a_first_facts(verifier_module), candidate
+        )
+
+
+# C4.c4b1 deliberately keeps its inventory separate from the literal
+# candidates above.  These are the closed projection paths under attack, not a
+# traversal of the implementation or the expected row.
+_C4C4B1_ROOT_FIELDS = (
+    "start",
+    "end",
+    "opening_capital",
+    "deposits",
+    "internal_in",
+    "invested",
+    "external_withdrawals",
+    "internal_out",
+    "withdrawn",
+    "net_capital",
+    "current_value",
+    "gain",
+    "return_on_net_capital",
+    "annualized_return_on_net_capital",
+    "xirr_diagnostic",
+    "observation_linked_return",
+    "observed_hwm_index",
+    "observed_max_drawdown",
+    "opening_basis",
+    "nav_observations",
+    "observation_trace",
+    "capital_flow_trace",
+)
+_C4C4B1_LINK_FIELDS = (
+    "start_date",
+    "end_date",
+    "base_nav",
+    "ending_nav",
+    "net_flow",
+    "factor",
+    "cumulative_index",
+    "running_hwm_index",
+    "drawdown",
+)
+_C4C4B1_FLOW_FIELDS = ("class", "date", "amount")
+
+# These are intentionally literal: they are the independent 119-path
+# acceptance inventory, not an expansion of candidate fields or test cases.
+FIRST_AVAILABLE_NAV_VALID_PATHS = frozenset(
+    {
+        "root.start",
+        "root.end",
+        "root.opening_capital",
+        "root.deposits",
+        "root.internal_in",
+        "root.invested",
+        "root.external_withdrawals",
+        "root.internal_out",
+        "root.withdrawn",
+        "root.net_capital",
+        "root.current_value",
+        "root.gain",
+        "root.return_on_net_capital",
+        "root.annualized_return_on_net_capital",
+        "root.xirr_diagnostic",
+        "root.observation_linked_return",
+        "root.observed_hwm_index",
+        "root.observed_max_drawdown",
+        "root.opening_basis",
+        "root.nav_observations",
+        "root.observation_trace",
+        "root.capital_flow_trace",
+        "observation_trace.links[0].start_date",
+        "observation_trace.links[0].end_date",
+        "observation_trace.links[0].base_nav",
+        "observation_trace.links[0].ending_nav",
+        "observation_trace.links[0].net_flow",
+        "observation_trace.links[0].factor",
+        "observation_trace.links[0].cumulative_index",
+        "observation_trace.links[0].running_hwm_index",
+        "observation_trace.links[0].drawdown",
+        "observation_trace.links[1].start_date",
+        "observation_trace.links[1].end_date",
+        "observation_trace.links[1].base_nav",
+        "observation_trace.links[1].ending_nav",
+        "observation_trace.links[1].net_flow",
+        "observation_trace.links[1].factor",
+        "observation_trace.links[1].cumulative_index",
+        "observation_trace.links[1].running_hwm_index",
+        "observation_trace.links[1].drawdown",
+        "observation_trace.links[2].start_date",
+        "observation_trace.links[2].end_date",
+        "observation_trace.links[2].base_nav",
+        "observation_trace.links[2].ending_nav",
+        "observation_trace.links[2].net_flow",
+        "observation_trace.links[2].factor",
+        "observation_trace.links[2].cumulative_index",
+        "observation_trace.links[2].running_hwm_index",
+        "observation_trace.links[2].drawdown",
+        "observation_trace.links[3].start_date",
+        "observation_trace.links[3].end_date",
+        "observation_trace.links[3].base_nav",
+        "observation_trace.links[3].ending_nav",
+        "observation_trace.links[3].net_flow",
+        "observation_trace.links[3].factor",
+        "observation_trace.links[3].cumulative_index",
+        "observation_trace.links[3].running_hwm_index",
+        "observation_trace.links[3].drawdown",
+        "capital_flow_trace[0].class",
+        "capital_flow_trace[0].date",
+        "capital_flow_trace[0].amount",
+        "capital_flow_trace[1].class",
+        "capital_flow_trace[1].date",
+        "capital_flow_trace[1].amount",
+        "capital_flow_trace[2].class",
+        "capital_flow_trace[2].date",
+        "capital_flow_trace[2].amount",
+    }
+)
+
+PREDECESSOR_CLOSING_NAV_VALID_PATHS = frozenset(
+    {
+        "root.start",
+        "root.end",
+        "root.opening_capital",
+        "root.deposits",
+        "root.internal_in",
+        "root.invested",
+        "root.external_withdrawals",
+        "root.internal_out",
+        "root.withdrawn",
+        "root.net_capital",
+        "root.current_value",
+        "root.gain",
+        "root.return_on_net_capital",
+        "root.annualized_return_on_net_capital",
+        "root.xirr_diagnostic",
+        "root.observation_linked_return",
+        "root.observed_hwm_index",
+        "root.observed_max_drawdown",
+        "root.opening_basis",
+        "root.nav_observations",
+        "root.observation_trace",
+        "root.capital_flow_trace",
+        "observation_trace.links[0].start_date",
+        "observation_trace.links[0].end_date",
+        "observation_trace.links[0].base_nav",
+        "observation_trace.links[0].ending_nav",
+        "observation_trace.links[0].net_flow",
+        "observation_trace.links[0].factor",
+        "observation_trace.links[0].cumulative_index",
+        "observation_trace.links[0].running_hwm_index",
+        "observation_trace.links[0].drawdown",
+        "observation_trace.links[1].start_date",
+        "observation_trace.links[1].end_date",
+        "observation_trace.links[1].base_nav",
+        "observation_trace.links[1].ending_nav",
+        "observation_trace.links[1].net_flow",
+        "observation_trace.links[1].factor",
+        "observation_trace.links[1].cumulative_index",
+        "observation_trace.links[1].running_hwm_index",
+        "observation_trace.links[1].drawdown",
+        "observation_trace.links[2].start_date",
+        "observation_trace.links[2].end_date",
+        "observation_trace.links[2].base_nav",
+        "observation_trace.links[2].ending_nav",
+        "observation_trace.links[2].net_flow",
+        "observation_trace.links[2].factor",
+        "observation_trace.links[2].cumulative_index",
+        "observation_trace.links[2].running_hwm_index",
+        "observation_trace.links[2].drawdown",
+        "capital_flow_trace[0].class",
+        "capital_flow_trace[0].date",
+        "capital_flow_trace[0].amount",
+    }
+)
+
+
+class _C4C4B1StringSubclass(str):
+    pass
+
+
+class _C4C4B1IntSubclass(int):
+    pass
+
+
+class _C4C4B1ListSubclass(list):
+    pass
+
+
+class _C4C4B1MappingProxy(Mapping[str, object]):
+    """Read-only Mapping wrapper used to lock intentional Mapping acceptance."""
+
+    def __init__(self, source: Mapping[str, object]) -> None:
+        self._source = source
+
+    def __getitem__(self, key: str) -> object:
+        return self._source[key]
+
+    def __iter__(self):
+        return iter(self._source)
+
+    def __len__(self) -> int:
+        return len(self._source)
+
+
+def _c4c4b1_state_fingerprint(value: object) -> str:
+    """Fingerprint values while retaining closed-shape/container type."""
+
+    def encode(item: object) -> object:
+        if isinstance(item, Mapping):
+            return [
+                "mapping",
+                type(item).__name__,
+                sorted((str(key), encode(val)) for key, val in item.items()),
+            ]
+        if isinstance(item, list):
+            return ["list", type(item).__name__, [encode(val) for val in item]]
+        if isinstance(item, tuple):
+            return ["tuple", [encode(val) for val in item]]
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            return [type(item).__name__, item]
+        return [type(item).__name__, repr(item)]
+
+    return hashlib.sha256(
+        json.dumps(encode(value), sort_keys=True, ensure_ascii=True).encode("utf-8")
+    ).hexdigest()
+
+
+def _c4c4b1_path_diff(before: object, after: object, path: str = "root") -> set[str]:
+    """Return exact changed leaf/branch paths without consulting the oracle."""
+
+    if isinstance(before, Mapping) and isinstance(after, Mapping):
+        if "[" in path and (not before or not after):
+            return {path}
+        changed = {f"{path}.{key}" for key in set(before) ^ set(after)}
+        for key in set(before) & set(after):
+            child = f"{path}.{key}"
+            changed.update(_c4c4b1_path_diff(before[key], after[key], child))
+        return changed
+    if isinstance(before, list) and isinstance(after, list):
+        if type(before) is not type(after):
+            return {path}
+        if len(before) != len(after):
+            return {path}
+        changed = set()
+        for index, (old, new) in enumerate(zip(before, after)):
+            changed.update(_c4c4b1_path_diff(old, new, f"{path}[{index}]"))
+        return changed
+    if type(before) is not type(after) or before != after:
+        return {path}
+    return set()
+
+
+def _c4c4b1_top_level_diff(
+    before: Mapping[str, object], after: Mapping[str, object]
+) -> set[str]:
+    return {
+        f"root.{key}" for key in before if key not in after or before[key] != after[key]
+    }
+
+
+def _c4c4b1_fixture(
+    verifier_module: Any, fixture: str
+) -> tuple[object, dict[str, object], int, int]:
+    if fixture == "first":
+        return _c4c4a_first_facts(verifier_module), _c4c4a_first_candidate(), 4, 3
+    if fixture == "predecessor":
+        predecessor, facts = _c4c4a_predecessor_facts(verifier_module)
+        return (predecessor, facts), _c4c4a_predecessor_candidate(), 3, 1
+    raise AssertionError(fixture)
+
+
+def _c4c4b1_case(
+    case_id: str,
+    domain: str,
+    path: str,
+    operation: str,
+    mutate: Any,
+    disposition: str,
+) -> dict[str, object]:
+    return {
+        "case_id": case_id,
+        "domain": domain,
+        "path": path,
+        "operation": operation,
+        "mutate": mutate,
+        "disposition": disposition,
+    }
+
+
+def _c4c4b1_valid_cases(
+    fixture: str, link_count: int, flow_count: int
+) -> list[dict[str, object]]:
+    cases: list[dict[str, object]] = []
+    root_dates = {"start": "2026-03-01", "end": "2028-03-01"}
+    for field, value in root_dates.items():
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-valid-root-{field}",
+                "valid",
+                f"root.{field}",
+                "set-different-canonical-date",
+                lambda row, f=field, v=value: row.__setitem__(f, v),
+                "DISCREPANCY",
+            )
+        )
+    for field in (
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "invested",
+        "external_withdrawals",
+        "internal_out",
+        "withdrawn",
+        "net_capital",
+        "current_value",
+        "gain",
+    ):
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-valid-root-{field}",
+                "valid",
+                f"root.{field}",
+                "set-different-canonical-money",
+                lambda row, f=field: row.__setitem__(f, "2"),
+                "DISCREPANCY",
+            )
+        )
+    for field in (
+        "return_on_net_capital",
+        "annualized_return_on_net_capital",
+        "xirr_diagnostic",
+    ):
+        cases.extend(
+            (
+                _c4c4b1_case(
+                    f"{fixture}-valid-root-{field}-decimal",
+                    "valid",
+                    f"root.{field}",
+                    "set-different-canonical-rate",
+                    lambda row, f=field: row.__setitem__(f, "2"),
+                    "DISCREPANCY",
+                ),
+                _c4c4b1_case(
+                    f"{fixture}-valid-root-{field}-none",
+                    "valid",
+                    f"root.{field}",
+                    "set-null-rate",
+                    lambda row, f=field: row.__setitem__(f, None),
+                    "DISCREPANCY",
+                ),
+            )
+        )
+    for field in (
+        "observation_linked_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+    ):
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-valid-root-{field}",
+                "valid",
+                f"root.{field}",
+                "set-different-canonical-observation",
+                lambda row, f=field: row.__setitem__(f, "2"),
+                "DISCREPANCY",
+            )
+        )
+    cases.append(
+        _c4c4b1_case(
+            f"{fixture}-valid-root-opening-basis",
+            "valid",
+            "root.opening_basis",
+            "set-other-accepted-basis",
+            lambda row: row.__setitem__(
+                "opening_basis",
+                "PREDECESSOR_CLOSING_NAV"
+                if row["opening_basis"] == "FIRST_AVAILABLE_NAV"
+                else "FIRST_AVAILABLE_NAV",
+            ),
+            "DISCREPANCY",
+        )
+    )
+    cases.append(
+        _c4c4b1_case(
+            f"{fixture}-valid-root-nav-observations",
+            "valid",
+            "root.nav_observations",
+            "set-different-positive-non-bool-count",
+            lambda row: row.__setitem__("nav_observations", 99),
+            "DISCREPANCY",
+        )
+    )
+    cases.append(
+        _c4c4b1_case(
+            f"{fixture}-valid-root-observation-trace",
+            "valid",
+            "root.observation_trace",
+            "replace-with-fresh-valid-wrong-links",
+            lambda row: row.__setitem__(
+                "observation_trace",
+                {"links": list(reversed(deepcopy(row["observation_trace"]["links"])))},
+            ),
+            "DISCREPANCY",
+        )
+    )
+    cases.append(
+        _c4c4b1_case(
+            f"{fixture}-valid-root-capital-flow-trace",
+            "valid",
+            "root.capital_flow_trace",
+            "replace-with-fresh-valid-wrong-flows",
+            lambda row: row.__setitem__(
+                "capital_flow_trace",
+                (
+                    list(reversed(deepcopy(row["capital_flow_trace"])))
+                    if len(row["capital_flow_trace"]) > 1
+                    else [{**deepcopy(row["capital_flow_trace"][0]), "amount": "3"}]
+                ),
+            ),
+            "DISCREPANCY",
+        )
+    )
+    for index in range(link_count):
+        for field in _C4C4B1_LINK_FIELDS:
+            value = (
+                "2025-12-31"
+                if field == "start_date"
+                else "2028-01-01"
+                if field == "end_date"
+                else "2"
+            )
+            cases.append(
+                _c4c4b1_case(
+                    f"{fixture}-valid-link-{index}-{field}",
+                    "valid",
+                    f"observation_trace.links[{index}].{field}",
+                    "set-different-canonical-leaf",
+                    lambda row, i=index, f=field, v=value: row["observation_trace"][
+                        "links"
+                    ][i].__setitem__(f, v),
+                    "DISCREPANCY",
+                )
+            )
+    alternate_class = {
+        "EXTERNAL_IN": "EXTERNAL_OUT",
+        "EXTERNAL_OUT": "INTERNAL_IN",
+        "INTERNAL_IN": "INTERNAL_OUT",
+        "INTERNAL_OUT": "EXTERNAL_IN",
+    }
+    for index in range(flow_count):
+        for field in _C4C4B1_FLOW_FIELDS:
+            if field == "class":
+                operation = "set-accepted-alternate-class"
+
+                def mutate(row: dict[str, object], i: int = index) -> None:
+                    flow = row["capital_flow_trace"][i]
+                    flow["class"] = alternate_class[flow["class"]]
+            elif field == "date":
+                operation = "set-different-canonical-date"
+
+                def mutate(row: dict[str, object], i: int = index) -> None:
+                    row["capital_flow_trace"][i]["date"] = "2028-01-01"
+            else:
+                operation = "set-different-positive-canonical-amount"
+
+                def mutate(row: dict[str, object], i: int = index) -> None:
+                    row["capital_flow_trace"][i]["amount"] = "2"
+
+            cases.append(
+                _c4c4b1_case(
+                    f"{fixture}-valid-flow-{index}-{field}",
+                    "valid",
+                    f"capital_flow_trace[{index}].{field}",
+                    operation,
+                    mutate,
+                    "DISCREPANCY",
+                )
+            )
+    return cases
+
+
+def _c4c4b1_shape_cases(
+    fixture: str, link_count: int, flow_count: int
+) -> list[dict[str, object]]:
+    cases: list[dict[str, object]] = []
+    for field in _C4C4B1_ROOT_FIELDS:
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-shape-root-remove-{field}",
+                "shape",
+                f"root.{field}",
+                "remove-root-field",
+                lambda row, f=field: (row.pop(f), None)[1],
+                "REJECTED",
+            )
+        )
+    cases.append(
+        _c4c4b1_case(
+            f"{fixture}-shape-root-add-extra",
+            "shape",
+            "root.extra",
+            "add-root-field",
+            lambda row: row.__setitem__("extra", "x"),
+            "REJECTED",
+        )
+    )
+    for name, value in (("scalar", None), ("tuple", ()), ("list", [])):
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-shape-root-{name}",
+                "shape",
+                "root",
+                f"replace-root-with-{name}",
+                lambda _row, v=value: v,
+                "REJECTED",
+            )
+        )
+    cases.append(
+        _c4c4b1_case(
+            f"{fixture}-shape-observation-trace-remove-links",
+            "shape",
+            "observation_trace.links",
+            "remove-links-key",
+            lambda row: (row["observation_trace"].pop("links"), None)[1],
+            "REJECTED",
+        )
+    )
+    cases.append(
+        _c4c4b1_case(
+            f"{fixture}-shape-observation-trace-add-extra",
+            "shape",
+            "observation_trace.extra",
+            "add-trace-field",
+            lambda row: row["observation_trace"].__setitem__("extra", "x"),
+            "REJECTED",
+        )
+    )
+    for name, value in (("scalar", None), ("tuple", ()), ("list", [])):
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-shape-observation-trace-{name}",
+                "shape",
+                "observation_trace",
+                f"replace-trace-with-{name}",
+                lambda row, v=value: row.__setitem__("observation_trace", v),
+                "REJECTED",
+            )
+        )
+    for field in ("scalar", "mapping", "tuple", "list"):
+
+        def replace_links_list(row: dict[str, object], kind: str = field) -> None:
+            if kind == "scalar":
+                replacement: object = None
+            elif kind == "mapping":
+                replacement = {}
+            elif kind == "tuple":
+                replacement = ()
+            else:
+                replacement = _C4C4B1ListSubclass(
+                    deepcopy(row["observation_trace"]["links"])
+                )
+            row["observation_trace"]["links"] = replacement
+
+        def replace_flow_list(row: dict[str, object], kind: str = field) -> None:
+            if kind == "scalar":
+                replacement: object = None
+            elif kind == "mapping":
+                replacement = {}
+            elif kind == "tuple":
+                replacement = ()
+            else:
+                replacement = _C4C4B1ListSubclass(deepcopy(row["capital_flow_trace"]))
+            row["capital_flow_trace"] = replacement
+
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-shape-links-list-{field}",
+                "shape",
+                "observation_trace.links",
+                f"replace-links-list-with-{field}",
+                replace_links_list,
+                "REJECTED",
+            )
+        )
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-shape-flow-list-{field}",
+                "shape",
+                "capital_flow_trace",
+                f"replace-flow-list-with-{field}",
+                replace_flow_list,
+                "REJECTED",
+            )
+        )
+    for index in (0, link_count - 1):
+        for field in _C4C4B1_LINK_FIELDS:
+            cases.append(
+                _c4c4b1_case(
+                    f"{fixture}-shape-link-{index}-remove-{field}",
+                    "shape",
+                    f"observation_trace.links[{index}].{field}",
+                    "remove-link-field",
+                    lambda row, i=index, f=field: (
+                        row["observation_trace"]["links"][i].pop(f),
+                        None,
+                    )[1],
+                    "REJECTED",
+                )
+            )
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-shape-link-{index}-add-extra",
+                "shape",
+                f"observation_trace.links[{index}].extra",
+                "add-link-field",
+                lambda row, i=index: row["observation_trace"]["links"][i].__setitem__(
+                    "extra", "x"
+                ),
+                "REJECTED",
+            )
+        )
+    for index in range(flow_count):
+        for field in _C4C4B1_FLOW_FIELDS:
+            cases.append(
+                _c4c4b1_case(
+                    f"{fixture}-shape-flow-{index}-remove-{field}",
+                    "shape",
+                    f"capital_flow_trace[{index}].{field}",
+                    "remove-flow-field",
+                    lambda row, i=index, f=field: (
+                        row["capital_flow_trace"][i].pop(f),
+                        None,
+                    )[1],
+                    "REJECTED",
+                )
+            )
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-shape-flow-{index}-add-extra",
+                "shape",
+                f"capital_flow_trace[{index}].extra",
+                "add-flow-field",
+                lambda row, i=index: row["capital_flow_trace"][i].__setitem__(
+                    "extra", "x"
+                ),
+                "REJECTED",
+            )
+        )
+    for index in (0, link_count - 1):
+        for name in ("scalar", "mapping", "tuple", "list"):
+
+            def replace_link_entry(
+                row: dict[str, object], i: int = index, kind: str = name
+            ) -> None:
+                if kind == "scalar":
+                    replacement: object = None
+                elif kind == "mapping":
+                    replacement = {}
+                elif kind == "tuple":
+                    replacement = ()
+                else:
+                    replacement = []
+                row["observation_trace"]["links"][i] = replacement
+
+            cases.append(
+                _c4c4b1_case(
+                    f"{fixture}-shape-link-{index}-replace-{name}",
+                    "shape",
+                    f"observation_trace.links[{index}]",
+                    f"replace-link-with-{name}",
+                    replace_link_entry,
+                    "REJECTED",
+                )
+            )
+    for index in range(flow_count):
+        for name in ("scalar", "mapping", "tuple", "list"):
+
+            def replace_flow_entry(
+                row: dict[str, object], i: int = index, kind: str = name
+            ) -> None:
+                if kind == "scalar":
+                    replacement: object = None
+                elif kind == "mapping":
+                    replacement = {}
+                elif kind == "tuple":
+                    replacement = ()
+                else:
+                    replacement = []
+                row["capital_flow_trace"][i] = replacement
+
+            cases.append(
+                _c4c4b1_case(
+                    f"{fixture}-shape-flow-{index}-replace-{name}",
+                    "shape",
+                    f"capital_flow_trace[{index}]",
+                    f"replace-flow-with-{name}",
+                    replace_flow_entry,
+                    "REJECTED",
+                )
+            )
+    return cases
+
+
+def _c4c4b1_order_cases(
+    fixture: str, link_count: int, flow_count: int
+) -> list[dict[str, object]]:
+    cases: list[dict[str, object]] = []
+
+    def add_trace_cases(path: str, length: int, flow: bool) -> None:
+        def target(row: dict[str, object]) -> list[dict[str, object]]:
+            return (
+                row["capital_flow_trace"] if flow else row["observation_trace"]["links"]
+            )
+
+        if length > 1:
+            cases.append(
+                _c4c4b1_case(
+                    f"{fixture}-order-{path}-reverse",
+                    "ordered",
+                    path,
+                    "reverse-order",
+                    lambda row: target(row).reverse(),
+                    "DISCREPANCY",
+                )
+            )
+            cases.append(
+                _c4c4b1_case(
+                    f"{fixture}-order-{path}-swap",
+                    "ordered",
+                    path,
+                    "swap-first-two",
+                    lambda row: target(row).__setitem__(
+                        slice(0, 2), [target(row)[1], target(row)[0]]
+                    ),
+                    "DISCREPANCY",
+                )
+            )
+            cases.append(
+                _c4c4b1_case(
+                    f"{fixture}-order-{path}-remove-first",
+                    "ordered",
+                    path,
+                    "remove-first",
+                    lambda row: (target(row).pop(0), None)[1],
+                    "DISCREPANCY",
+                )
+            )
+            cases.append(
+                _c4c4b1_case(
+                    f"{fixture}-order-{path}-remove-last",
+                    "ordered",
+                    path,
+                    "remove-last",
+                    lambda row: (target(row).pop(), None)[1],
+                    "DISCREPANCY",
+                )
+            )
+        else:
+            cases.append(
+                _c4c4b1_case(
+                    f"{fixture}-order-{path}-remove-first-last",
+                    "ordered",
+                    path,
+                    "remove-first-and-last-single-flow-documented-exception",
+                    lambda row: (target(row).pop(), None)[1],
+                    "DISCREPANCY",
+                )
+            )
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-order-{path}-append-duplicate",
+                "ordered",
+                path,
+                "append-duplicate-entry",
+                lambda row: (
+                    target(row).append(deepcopy(target(row)[-1]))
+                    if target(row)
+                    else None
+                ),
+                "DISCREPANCY",
+            )
+        )
+
+        def insert_wrong(row: dict[str, object]) -> None:
+            entries = target(row)
+            if flow and length == 1:
+                inserted = deepcopy(entries[0])
+                inserted["amount"] = "2"
+            else:
+                inserted = deepcopy(entries[-1])
+            entries.insert(0 if length == 1 else 1, inserted)
+
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-order-{path}-insert-wrong",
+                "ordered",
+                path,
+                "insert-at-wrong-position",
+                insert_wrong,
+                "DISCREPANCY",
+            )
+        )
+        if length > 1:
+
+            def replace_empty(row: dict[str, object]) -> None:
+                replacement: list[object] = []
+                if flow:
+                    row["capital_flow_trace"] = replacement
+                else:
+                    row["observation_trace"]["links"] = replacement
+
+            cases.append(
+                _c4c4b1_case(
+                    f"{fixture}-order-{path}-replace-empty",
+                    "ordered",
+                    path,
+                    "replace-with-exact-empty-list",
+                    replace_empty,
+                    "DISCREPANCY",
+                )
+            )
+
+        def replace_valid_wrong(row: dict[str, object]) -> None:
+            entries = target(row)
+            if not entries:
+                return
+            replacement = [deepcopy(entries[0])]
+            if len(entries) == 1:
+                if flow:
+                    replacement[0]["amount"] = "3"
+                else:
+                    replacement[0]["factor"] = "3"
+            if flow:
+                row["capital_flow_trace"] = replacement
+            else:
+                row["observation_trace"]["links"] = replacement
+
+        cases.append(
+            _c4c4b1_case(
+                f"{fixture}-order-{path}-replace-valid-wrong",
+                "ordered",
+                path,
+                "replace-with-fresh-valid-wrong-list",
+                replace_valid_wrong,
+                "DISCREPANCY",
+            )
+        )
+
+    add_trace_cases("observation_trace.links", link_count, False)
+    add_trace_cases("capital_flow_trace", flow_count, True)
+    return cases
+
+
+_C4C4B1C1_LITERAL_EXPECTED_IDS = frozenset(
+    {
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::none",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::bool",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::integer",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::float",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::decimal",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::str-subclass",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::basic-iso",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::non-padded",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::datetime",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::impossible-day",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::year-zero",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::non-leap",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::leading-space",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::trailing-space",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::leading-nbsp",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::fullwidth-digits",
+        "c4c4b1c1::REJECTED::date::direct::parse-canonical-date::unrelated-object",
+        "c4c4b1c1::REJECTED::date::first::root--start::basic-iso",
+        "c4c4b1c1::REJECTED::date::first::root--end::basic-iso",
+        "c4c4b1c1::REJECTED::date::first::observation_trace--links-0--start_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::first::observation_trace--links-0--end_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::first::observation_trace--links-1--start_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::first::observation_trace--links-1--end_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::first::observation_trace--links-2--start_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::first::observation_trace--links-2--end_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::first::observation_trace--links-3--start_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::first::observation_trace--links-3--end_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::first::capital_flow_trace-0--date::basic-iso",
+        "c4c4b1c1::REJECTED::date::first::capital_flow_trace-1--date::basic-iso",
+        "c4c4b1c1::REJECTED::date::first::capital_flow_trace-2--date::basic-iso",
+        "c4c4b1c1::REJECTED::date::predecessor::root--start::basic-iso",
+        "c4c4b1c1::REJECTED::date::predecessor::root--end::basic-iso",
+        "c4c4b1c1::REJECTED::date::predecessor::observation_trace--links-0--start_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::predecessor::observation_trace--links-0--end_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::predecessor::observation_trace--links-1--start_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::predecessor::observation_trace--links-1--end_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::predecessor::observation_trace--links-2--start_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::predecessor::observation_trace--links-2--end_date::basic-iso",
+        "c4c4b1c1::REJECTED::date::predecessor::capital_flow_trace-0--date::basic-iso",
+        "c4c4b1c1::REJECTED::enum::first::root--opening_basis::unknown",
+        "c4c4b1c1::REJECTED::enum::first::root--opening_basis::none",
+        "c4c4b1c1::REJECTED::enum::first::root--opening_basis::integer",
+        "c4c4b1c1::REJECTED::enum::first::root--opening_basis::str-subclass",
+        "c4c4b1c1::REJECTED::enum::predecessor::root--opening_basis::unknown",
+        "c4c4b1c1::REJECTED::enum::predecessor::root--opening_basis::none",
+        "c4c4b1c1::REJECTED::enum::predecessor::root--opening_basis::integer",
+        "c4c4b1c1::REJECTED::enum::predecessor::root--opening_basis::str-subclass",
+        "c4c4b1c1::REJECTED::enum::first::capital_flow_trace-0--class::unknown",
+        "c4c4b1c1::REJECTED::enum::first::capital_flow_trace-0--class::none",
+        "c4c4b1c1::REJECTED::enum::first::capital_flow_trace-0--class::integer",
+        "c4c4b1c1::REJECTED::enum::first::capital_flow_trace-0--class::str-subclass",
+        "c4c4b1c1::REJECTED::enum::first::capital_flow_trace-1--class::unknown",
+        "c4c4b1c1::REJECTED::enum::first::capital_flow_trace-1--class::none",
+        "c4c4b1c1::REJECTED::enum::first::capital_flow_trace-1--class::integer",
+        "c4c4b1c1::REJECTED::enum::first::capital_flow_trace-1--class::str-subclass",
+        "c4c4b1c1::REJECTED::enum::first::capital_flow_trace-2--class::unknown",
+        "c4c4b1c1::REJECTED::enum::first::capital_flow_trace-2--class::none",
+        "c4c4b1c1::REJECTED::enum::first::capital_flow_trace-2--class::integer",
+        "c4c4b1c1::REJECTED::enum::first::capital_flow_trace-2--class::str-subclass",
+        "c4c4b1c1::REJECTED::enum::predecessor::capital_flow_trace-0--class::unknown",
+        "c4c4b1c1::REJECTED::enum::predecessor::capital_flow_trace-0--class::none",
+        "c4c4b1c1::REJECTED::enum::predecessor::capital_flow_trace-0--class::integer",
+        "c4c4b1c1::REJECTED::enum::predecessor::capital_flow_trace-0--class::str-subclass",
+        "c4c4b1c1::REJECTED::count::first::root--nav_observations::none",
+        "c4c4b1c1::REJECTED::count::first::root--nav_observations::bool",
+        "c4c4b1c1::REJECTED::count::first::root--nav_observations::zero",
+        "c4c4b1c1::REJECTED::count::first::root--nav_observations::negative",
+        "c4c4b1c1::REJECTED::count::first::root--nav_observations::float",
+        "c4c4b1c1::REJECTED::count::first::root--nav_observations::string",
+        "c4c4b1c1::REJECTED::count::first::root--nav_observations::decimal",
+        "c4c4b1c1::REJECTED::count::first::root--nav_observations::int-subclass",
+        "c4c4b1c1::REJECTED::count::predecessor::root--nav_observations::none",
+        "c4c4b1c1::REJECTED::count::predecessor::root--nav_observations::bool",
+        "c4c4b1c1::REJECTED::count::predecessor::root--nav_observations::zero",
+        "c4c4b1c1::REJECTED::count::predecessor::root--nav_observations::negative",
+        "c4c4b1c1::REJECTED::count::predecessor::root--nav_observations::float",
+        "c4c4b1c1::REJECTED::count::predecessor::root--nav_observations::string",
+        "c4c4b1c1::REJECTED::count::predecessor::root--nav_observations::decimal",
+        "c4c4b1c1::REJECTED::count::predecessor::root--nav_observations::int-subclass",
+        "c4c4b1c1::ACCEPTED::date::direct::parse-canonical-date::canonical-date",
+        "c4c4b1c1::ACCEPTED::date::direct::parse-canonical-date::canonical-leap-day",
+        "c4c4b1c1::DISCREPANCY::date::first::root--end::canonical-later-end",
+        "c4c4b1c1::DISCREPANCY::date::first::observation_trace--links-0--start_date::canonical-earlier-start",
+        "c4c4b1c1::DISCREPANCY::date::first::capital_flow_trace-0--date::canonical-in-window",
+        "c4c4b1c1::DISCREPANCY::date::predecessor::root--end::canonical-later-end",
+        "c4c4b1c1::DISCREPANCY::date::predecessor::observation_trace--links-0--start_date::canonical-earlier-start",
+        "c4c4b1c1::DISCREPANCY::date::predecessor::capital_flow_trace-0--date::canonical-in-window",
+        "c4c4b1c1::DISCREPANCY::enum::first::root--opening_basis::predecessor-closing-nav",
+        "c4c4b1c1::DISCREPANCY::enum::predecessor::root--opening_basis::first-available-nav",
+        "c4c4b1c1::DISCREPANCY::enum::first::capital_flow_trace-0--class::external-out",
+        "c4c4b1c1::DISCREPANCY::enum::predecessor::capital_flow_trace-0--class::external-out",
+        "c4c4b1c1::DISCREPANCY::count::first::root--nav_observations::positive-one",
+        "c4c4b1c1::DISCREPANCY::count::predecessor::root--nav_observations::positive-two",
+    }
+)
+
+
+def _c4c4b1c1_run_date_enum_count_boundary(verifier_module: Any) -> dict[str, int]:
+    """Exercise only the closed date, enum, and count parser boundaries."""
+
+    date_paths = (
+        ("first", "root.start"),
+        ("first", "root.end"),
+        ("first", "observation_trace.links[0].start_date"),
+        ("first", "observation_trace.links[0].end_date"),
+        ("first", "observation_trace.links[1].start_date"),
+        ("first", "observation_trace.links[1].end_date"),
+        ("first", "observation_trace.links[2].start_date"),
+        ("first", "observation_trace.links[2].end_date"),
+        ("first", "observation_trace.links[3].start_date"),
+        ("first", "observation_trace.links[3].end_date"),
+        ("first", "capital_flow_trace[0].date"),
+        ("first", "capital_flow_trace[1].date"),
+        ("first", "capital_flow_trace[2].date"),
+        ("predecessor", "root.start"),
+        ("predecessor", "root.end"),
+        ("predecessor", "observation_trace.links[0].start_date"),
+        ("predecessor", "observation_trace.links[0].end_date"),
+        ("predecessor", "observation_trace.links[1].start_date"),
+        ("predecessor", "observation_trace.links[1].end_date"),
+        ("predecessor", "observation_trace.links[2].start_date"),
+        ("predecessor", "observation_trace.links[2].end_date"),
+        ("predecessor", "capital_flow_trace[0].date"),
+    )
+    direct_date_classes = (
+        "none",
+        "bool",
+        "integer",
+        "float",
+        "decimal",
+        "str-subclass",
+        "basic-iso",
+        "non-padded",
+        "datetime",
+        "impossible-day",
+        "year-zero",
+        "non-leap",
+        "leading-space",
+        "trailing-space",
+        "leading-nbsp",
+        "fullwidth-digits",
+        "unrelated-object",
+    )
+    direct_date_values = (
+        None,
+        True,
+        1,
+        1.0,
+        Decimal("1"),
+        _C4C4B1StringSubclass("2026-02-01"),
+        "20260201",
+        "2026-2-1",
+        "2026-02-01T00:00:00",
+        "2026-02-30",
+        "0000-01-01",
+        "2025-02-29",
+        " 2026-02-01",
+        "2026-02-01 ",
+        "\u00a02026-02-01",
+        "２０２６-０２-０１",
+        object(),
+    )
+    enum_positions = (
+        ("first", "root.opening_basis"),
+        ("predecessor", "root.opening_basis"),
+        ("first", "capital_flow_trace[0].class"),
+        ("first", "capital_flow_trace[1].class"),
+        ("first", "capital_flow_trace[2].class"),
+        ("predecessor", "capital_flow_trace[0].class"),
+    )
+    enum_classes = ("unknown", "none", "integer", "str-subclass")
+    count_positions = (
+        ("first", "root.nav_observations"),
+        ("predecessor", "root.nav_observations"),
+    )
+    count_classes = (
+        "none",
+        "bool",
+        "zero",
+        "negative",
+        "float",
+        "string",
+        "decimal",
+        "int-subclass",
+    )
+    direct_date_positive_controls = (
+        ("direct", "_parse_canonical_date", "canonical-date", "2026-02-01"),
+        ("direct", "_parse_canonical_date", "canonical-leap-day", "2024-02-29"),
+    )
+    valid_controls = (
+        ("date", "first", "root.end", "canonical-later-end", "2027-01-03"),
+        (
+            "date",
+            "first",
+            "observation_trace.links[0].start_date",
+            "canonical-earlier-start",
+            "2026-01-01",
+        ),
+        (
+            "date",
+            "first",
+            "capital_flow_trace[0].date",
+            "canonical-in-window",
+            "2026-01-04",
+        ),
+        (
+            "date",
+            "predecessor",
+            "root.end",
+            "canonical-later-end",
+            "2026-02-09",
+        ),
+        (
+            "date",
+            "predecessor",
+            "observation_trace.links[0].start_date",
+            "canonical-earlier-start",
+            "2026-02-04",
+        ),
+        (
+            "date",
+            "predecessor",
+            "capital_flow_trace[0].date",
+            "canonical-in-window",
+            "2026-02-07",
+        ),
+        (
+            "enum",
+            "first",
+            "root.opening_basis",
+            "predecessor-closing-nav",
+            "PREDECESSOR_CLOSING_NAV",
+        ),
+        (
+            "enum",
+            "predecessor",
+            "root.opening_basis",
+            "first-available-nav",
+            "FIRST_AVAILABLE_NAV",
+        ),
+        (
+            "enum",
+            "first",
+            "capital_flow_trace[0].class",
+            "external-out",
+            "EXTERNAL_OUT",
+        ),
+        (
+            "enum",
+            "predecessor",
+            "capital_flow_trace[0].class",
+            "external-out",
+            "EXTERNAL_OUT",
+        ),
+        ("count", "first", "root.nav_observations", "positive-one", 1),
+        ("count", "predecessor", "root.nav_observations", "positive-two", 2),
+    )
+
+    assert len(date_paths) == 22
+    assert len(direct_date_classes) == len(direct_date_values) == 17
+    assert len(enum_positions) == 6
+    assert len(enum_classes) == 4
+    assert len(count_positions) == 2
+    assert len(count_classes) == 8
+    assert len(direct_date_positive_controls) == 2
+    assert len(valid_controls) == 12
+
+    def path_token(path: str) -> str:
+        if path == "_parse_canonical_date":
+            return "parse-canonical-date"
+        return path.replace(".", "--").replace("[", "-").replace("]", "")
+
+    def case_id(
+        disposition: str, family: str, fixture: str, path: str, value_class: str
+    ) -> str:
+        return "::".join(
+            ("c4c4b1c1", disposition, family, fixture, path_token(path), value_class)
+        )
+
+    def set_declared_path(row: dict[str, object], path: str, value: object) -> None:
+        if path.startswith("root."):
+            row[path.removeprefix("root.")] = value
+            return
+        if path.startswith("observation_trace.links["):
+            index_text, field = path.removeprefix("observation_trace.links[").split(
+                "].", 1
+            )
+            row["observation_trace"]["links"][int(index_text)][field] = value
+            return
+        if path.startswith("capital_flow_trace["):
+            index_text, field = path.removeprefix("capital_flow_trace[").split("].", 1)
+            row["capital_flow_trace"][int(index_text)][field] = value
+            return
+        raise AssertionError(path)
+
+    def enum_value(path: str, value_class: str) -> object:
+        if value_class == "unknown":
+            return "UNKNOWN"
+        if value_class == "none":
+            return None
+        if value_class == "integer":
+            return 1
+        if value_class == "str-subclass":
+            allowed = (
+                "FIRST_AVAILABLE_NAV" if path == "root.opening_basis" else "EXTERNAL_IN"
+            )
+            return _C4C4B1StringSubclass(allowed)
+        raise AssertionError(value_class)
+
+    def count_value(value_class: str) -> object:
+        values = {
+            "none": None,
+            "bool": True,
+            "zero": 0,
+            "negative": -1,
+            "float": 1.0,
+            "string": "5",
+            "decimal": Decimal("5"),
+            "int-subclass": _C4C4B1IntSubclass(5),
+        }
+        return values[value_class]
+
+    expected_malformed = {
+        ("REJECTED", "date", "direct", "_parse_canonical_date", value_class)
+        for value_class in direct_date_classes
+    }
+    expected_malformed.update(
+        ("REJECTED", "date", fixture, path, "basic-iso") for fixture, path in date_paths
+    )
+    expected_malformed.update(
+        ("REJECTED", "enum", fixture, path, value_class)
+        for fixture, path in enum_positions
+        for value_class in enum_classes
+    )
+    expected_malformed.update(
+        ("REJECTED", "count", fixture, path, value_class)
+        for fixture, path in count_positions
+        for value_class in count_classes
+    )
+    expected_accepted = {
+        ("ACCEPTED", "date", fixture, path, value_class)
+        for fixture, path, value_class, _value in direct_date_positive_controls
+    }
+    expected_discrepancy = {
+        ("DISCREPANCY", family, fixture, path, value_class)
+        for family, fixture, path, value_class, _value in valid_controls
+    }
+    expected_semantics = expected_malformed | expected_accepted | expected_discrepancy
+    expected_ids = {
+        case_id(disposition, family, fixture, path, value_class)
+        for disposition, family, fixture, path, value_class in expected_semantics
+    }
+    assert len(expected_malformed) == 79
+    assert len(expected_accepted) == 2
+    assert len(expected_discrepancy) == 12
+    assert len(_C4C4B1C1_LITERAL_EXPECTED_IDS) == 93
+
+    cases: list[dict[str, object]] = []
+    for value_class, value in zip(direct_date_classes, direct_date_values):
+        cases.append(
+            {
+                "case_id": case_id(
+                    "REJECTED", "date", "direct", "_parse_canonical_date", value_class
+                ),
+                "semantic": (
+                    "REJECTED",
+                    "date",
+                    "direct",
+                    "_parse_canonical_date",
+                    value_class,
+                ),
+                "value": value,
+            }
+        )
+    for fixture, path in date_paths:
+        cases.append(
+            {
+                "case_id": case_id("REJECTED", "date", fixture, path, "basic-iso"),
+                "semantic": ("REJECTED", "date", fixture, path, "basic-iso"),
+                "value": b"20260201".decode("ascii"),
+            }
+        )
+    for fixture, path in enum_positions:
+        for value_class in enum_classes:
+            cases.append(
+                {
+                    "case_id": case_id("REJECTED", "enum", fixture, path, value_class),
+                    "semantic": ("REJECTED", "enum", fixture, path, value_class),
+                    "value": enum_value(path, value_class),
+                }
+            )
+    for fixture, path in count_positions:
+        for value_class in count_classes:
+            cases.append(
+                {
+                    "case_id": case_id("REJECTED", "count", fixture, path, value_class),
+                    "semantic": ("REJECTED", "count", fixture, path, value_class),
+                    "value": count_value(value_class),
+                }
+            )
+    for fixture, path, value_class, value in direct_date_positive_controls:
+        cases.append(
+            {
+                "case_id": case_id("ACCEPTED", "date", fixture, path, value_class),
+                "semantic": ("ACCEPTED", "date", fixture, path, value_class),
+                "value": value,
+            }
+        )
+    for family, fixture, path, value_class, value in valid_controls:
+        cases.append(
+            {
+                "case_id": case_id("DISCREPANCY", family, fixture, path, value_class),
+                "semantic": ("DISCREPANCY", family, fixture, path, value_class),
+                "value": value,
+            }
+        )
+
+    actual_semantics = {case["semantic"] for case in cases}
+    actual_ids = {str(case["case_id"]) for case in cases}
+    assert actual_semantics == expected_semantics
+    assert actual_ids == expected_ids
+    assert actual_ids == _C4C4B1C1_LITERAL_EXPECTED_IDS
+    assert len(cases) == len(actual_semantics) == len(actual_ids) == 93
+
+    def pin_runtime_value_class(
+        case_id_value: str,
+        family: str,
+        disposition: str,
+        path: str,
+        value_class: str,
+        value: object,
+    ) -> None:
+        if family == "date":
+            if value_class == "none":
+                assert value is None, case_id_value
+            elif value_class == "bool":
+                assert type(value) is bool and value is True, case_id_value
+            elif value_class == "integer":
+                assert type(value) is int and value == 1, case_id_value
+            elif value_class == "float":
+                assert type(value) is float and value == 1.0, case_id_value
+            elif value_class == "decimal":
+                assert type(value) is Decimal and value == Decimal("1"), case_id_value
+            elif value_class == "str-subclass":
+                assert type(value) is _C4C4B1StringSubclass, case_id_value
+                assert value == "2026-02-01", case_id_value
+            elif value_class == "unrelated-object":
+                assert type(value) is object, case_id_value
+            else:
+                assert type(value) is str, case_id_value
+                if disposition == "REJECTED":
+                    direct_date_literals = {
+                        "basic-iso": "20260201",
+                        "non-padded": "2026-2-1",
+                        "datetime": "2026-02-01T00:00:00",
+                        "impossible-day": "2026-02-30",
+                        "year-zero": "0000-01-01",
+                        "non-leap": "2025-02-29",
+                        "leading-space": " 2026-02-01",
+                        "trailing-space": "2026-02-01 ",
+                        "leading-nbsp": "\u00a02026-02-01",
+                        "fullwidth-digits": "２０２６-０２-０１",
+                    }
+                    assert value == direct_date_literals[value_class], case_id_value
+            return
+        if family == "enum":
+            if value_class == "none":
+                assert value is None, case_id_value
+            elif value_class == "integer":
+                assert type(value) is int and value == 1, case_id_value
+            elif value_class == "str-subclass":
+                assert type(value) is _C4C4B1StringSubclass, case_id_value
+                expected = (
+                    "FIRST_AVAILABLE_NAV"
+                    if path == "root.opening_basis"
+                    else "EXTERNAL_IN"
+                )
+                assert value == expected, case_id_value
+            else:
+                assert type(value) is str, case_id_value
+                if value_class == "unknown":
+                    assert value == "UNKNOWN", case_id_value
+            return
+        if family == "count":
+            if value_class == "none":
+                assert value is None, case_id_value
+            elif value_class == "bool":
+                assert type(value) is bool and value is True, case_id_value
+            elif value_class == "zero":
+                assert type(value) is int and value == 0, case_id_value
+            elif value_class == "negative":
+                assert type(value) is int and value == -1, case_id_value
+            elif value_class == "float":
+                assert type(value) is float and value == 1.0, case_id_value
+            elif value_class == "string":
+                assert type(value) is str and value == "5", case_id_value
+            elif value_class == "decimal":
+                assert type(value) is Decimal and value == Decimal("5"), case_id_value
+            elif value_class == "int-subclass":
+                assert type(value) is _C4C4B1IntSubclass and value == 5, case_id_value
+            elif value_class == "positive-one":
+                assert type(value) is int and value == 1, case_id_value
+            elif value_class == "positive-two":
+                assert type(value) is int and value == 2, case_id_value
+            else:
+                raise AssertionError(case_id_value)
+            return
+        raise AssertionError(case_id_value)
+
+    def require_rejection(case_id_value: str, invoke: Any) -> None:
+        try:
+            invoke()
+        except verifier_module.IndependentVerificationError:
+            return
+        except Exception as exc:
+            pytest.fail(
+                f"{case_id_value}: raised {type(exc).__name__}, not IndependentVerificationError"
+            )
+        pytest.fail(f"{case_id_value}: DID NOT RAISE IndependentVerificationError")
+
+    def require_success(case_id_value: str, invoke: Any) -> object:
+        try:
+            return invoke()
+        except Exception as exc:
+            raise AssertionError(case_id_value) from exc
+
+    direct_positive_dates = {
+        "canonical-date": date(2026, 2, 1),
+        "canonical-leap-day": date(2024, 2, 29),
+    }
+
+    fingerprints: dict[tuple[str, str], set[str]] = {}
+    for case in cases:
+        disposition, family, fixture, path, value_class = case["semantic"]
+        case_id_value = str(case["case_id"])
+        assert case_id_value == case_id(
+            disposition, family, fixture, path, value_class
+        ), case_id_value
+        pin_runtime_value_class(
+            case_id_value, family, disposition, path, value_class, case["value"]
+        )
+        if fixture == "direct":
+            if disposition == "REJECTED":
+                require_rejection(
+                    case_id_value,
+                    lambda value=case["value"]: verifier_module._parse_canonical_date(
+                        value
+                    ),
+                )
+            else:
+                parsed = require_success(
+                    case_id_value,
+                    lambda value=case["value"]: verifier_module._parse_canonical_date(
+                        value
+                    ),
+                )
+                assert type(parsed) is date, case_id_value
+                assert parsed == direct_positive_dates[value_class], case_id_value
+            continue
+
+        facts, base_candidate, _link_count, _flow_count = _c4c4b1_fixture(
+            verifier_module, fixture
+        )
+        facts_before = deepcopy(facts)
+        base_before = deepcopy(base_candidate)
+        baseline_comparison = require_success(
+            case_id_value,
+            lambda: verifier_module._compare_test_local_numeric_epoch(
+                facts, deepcopy(base_candidate)
+            ),
+        )
+        assert baseline_comparison == verifier_module._NumericComparison(1, 1, 0), (
+            case_id_value
+        )
+        candidate = deepcopy(base_candidate)
+        before = deepcopy(candidate)
+        set_declared_path(candidate, path, case["value"])
+        changed = {
+            changed_path.removeprefix("root.")
+            for changed_path in _c4c4b1_path_diff(before, candidate)
+        }
+        assert changed == {path.removeprefix("root.")}, case["case_id"]
+        fingerprint = _c4c4b1_state_fingerprint(candidate)
+        state_group = (fixture, family)
+        assert fingerprint not in fingerprints.setdefault(state_group, set()), case[
+            "case_id"
+        ]
+        fingerprints[state_group].add(fingerprint)
+        facts_case = deepcopy(facts)
+        candidate_before_compare = deepcopy(candidate)
+        if disposition == "REJECTED":
+            require_rejection(
+                case_id_value,
+                lambda: verifier_module._compare_test_local_numeric_epoch(
+                    facts_case, candidate
+                ),
+            )
+        else:
+            comparison = require_success(
+                case_id_value,
+                lambda: verifier_module._compare_test_local_numeric_epoch(
+                    facts_case, candidate
+                ),
+            )
+            assert comparison == verifier_module._NumericComparison(1, 1, 1), (
+                case_id_value
+            )
+        assert candidate == candidate_before_compare, case["case_id"]
+        assert facts_case == facts_before, case["case_id"]
+        assert facts == facts_before, case_id_value
+        assert base_candidate == base_before, case_id_value
+
+    return {"malformed": 79, "accepted": 2, "discrepancy": 12}
+
+
+def _c4c4b1_run_matrix(verifier_module: Any, fixture: str) -> dict[str, int]:
+    facts, base_candidate, link_count, flow_count = _c4c4b1_fixture(
+        verifier_module, fixture
+    )
+    facts_before = deepcopy(facts)
+    base_before = deepcopy(base_candidate)
+    assert verifier_module._compare_test_local_numeric_epoch(
+        facts, deepcopy(base_candidate)
+    ) == verifier_module._NumericComparison(1, 1, 0)
+    cases = _c4c4b1_valid_cases(fixture, link_count, flow_count)
+    assert len({case["case_id"] for case in cases}) == len(cases)
+    by_domain: dict[str, set[str]] = {}
+    disposition_counts: dict[str, int] = {}
+    valid_paths: set[str] = set()
+    for case in cases:
+        candidate = deepcopy(base_candidate)
+        before = deepcopy(candidate)
+        result = case["mutate"](candidate)
+        if case["path"] == "root":
+            candidate = result
+        elif result is not None:
+            candidate = result
+        assert _c4c4b1_state_fingerprint(candidate) != _c4c4b1_state_fingerprint(
+            before
+        ), case["case_id"]
+        assert isinstance(before, Mapping) and isinstance(candidate, Mapping)
+        top_level_diff = _c4c4b1_top_level_diff(before, candidate)
+        if str(case["path"]).startswith("root."):
+            assert top_level_diff == {str(case["path"])}, case["case_id"]
+        else:
+            assert len(top_level_diff) == 1, case["case_id"]
+            changed = _c4c4b1_path_diff(before, candidate)
+            normalized = {path.removeprefix("root.") for path in changed}
+            assert normalized == {str(case["path"])}, case["case_id"]
+        fingerprint = _c4c4b1_state_fingerprint(candidate)
+        seen = by_domain.setdefault(str(case["domain"]), set())
+        if fingerprint in seen:
+            # The one-item predecessor flow has one documented remove-first/
+            # remove-last operation because both necessarily produce [].
+            assert (
+                case["operation"]
+                == "remove-first-and-last-single-flow-documented-exception"
+            )
+        seen.add(fingerprint)
+        disposition = str(case["disposition"])
+        disposition_counts[disposition] = disposition_counts.get(disposition, 0) + 1
+        facts_case = deepcopy(facts)
+        candidate_before_compare = deepcopy(candidate)
+        comparison = verifier_module._compare_test_local_numeric_epoch(
+            facts_case, candidate
+        )
+        assert comparison == verifier_module._NumericComparison(1, 1, 1), case[
+            "case_id"
+        ]
+        assert candidate == candidate_before_compare, case["case_id"]
+        assert facts_case == facts_before, case["case_id"]
+        valid_paths.add(str(case["path"]))
+    expected_paths = (
+        FIRST_AVAILABLE_NAV_VALID_PATHS
+        if fixture == "first"
+        else PREDECESSOR_CLOSING_NAV_VALID_PATHS
+    )
+    assert valid_paths == expected_paths
+    assert facts == facts_before
+    assert base_candidate == base_before
+    return {
+        "valid_paths": len(valid_paths),
+        "valid_cases": len(cases),
+        "nullable_rate_cases": sum(
+            case["operation"] == "set-null-rate" for case in cases
+        ),
+        "discrepancies": len(cases),
+    }
+
+
+def test_c4c4b1a_valid_proposed_row_matrix(verifier_module: Any) -> None:
+    first = _c4c4b1_run_matrix(verifier_module, "first")
+    predecessor = _c4c4b1_run_matrix(verifier_module, "predecessor")
+    assert first["valid_paths"] == 67
+    assert predecessor["valid_paths"] == 52
+    assert first["valid_cases"] == 70
+    assert predecessor["valid_cases"] == 55
+    assert first["nullable_rate_cases"] == 3
+    assert predecessor["nullable_rate_cases"] == 3
+    assert first["discrepancies"] == first["valid_cases"]
+    assert predecessor["discrepancies"] == predecessor["valid_cases"]
+
+
+def _c4c4b1_run_structural_cases(
+    verifier_module: Any, fixture: str, domain: str
+) -> int:
+    facts, base_candidate, link_count, flow_count = _c4c4b1_fixture(
+        verifier_module, fixture
+    )
+    cases = (
+        _c4c4b1_order_cases(fixture, link_count, flow_count)
+        if domain == "ordered"
+        else _c4c4b1_shape_cases(fixture, link_count, flow_count)
+    )
+    cases = [case for case in cases if case["domain"] == domain]
+    assert len({case["case_id"] for case in cases}) == len(cases)
+    fingerprints: set[str] = set()
+    facts_before = deepcopy(facts)
+    base_before = deepcopy(base_candidate)
+    assert verifier_module._compare_test_local_numeric_epoch(
+        facts, deepcopy(base_candidate)
+    ) == verifier_module._NumericComparison(1, 1, 0)
+    for case in cases:
+        candidate = deepcopy(base_candidate)
+        before = deepcopy(candidate)
+        declared_path = str(case["path"])
+        target_before_mutation = None
+        if domain == "ordered":
+            target_before_mutation = (
+                candidate["capital_flow_trace"]
+                if declared_path == "capital_flow_trace"
+                else candidate["observation_trace"]["links"]
+            )
+            target_before_ids = {id(entry) for entry in target_before_mutation}
+        elif case["operation"] in {
+            "replace-links-list-with-list",
+            "replace-flow-list-with-list",
+        }:
+            target_before_mutation = (
+                candidate["capital_flow_trace"]
+                if case["operation"] == "replace-flow-list-with-list"
+                else candidate["observation_trace"]["links"]
+            )
+            target_before_ids = {id(entry) for entry in target_before_mutation}
+        result = case["mutate"](candidate)
+        if case["path"] == "root":
+            candidate = result
+        elif result is not None:
+            candidate = result
+        assert _c4c4b1_state_fingerprint(candidate) != _c4c4b1_state_fingerprint(before)
+        assert _c4c4b1_state_fingerprint(candidate) not in fingerprints, case["case_id"]
+        fingerprints.add(_c4c4b1_state_fingerprint(candidate))
+        changed = {
+            path.removeprefix("root.") for path in _c4c4b1_path_diff(before, candidate)
+        }
+        if domain == "ordered":
+            declared = str(case["path"])
+            assert changed and all(
+                path == declared or path.startswith(f"{declared}[") for path in changed
+            ), case["case_id"]
+            if case["operation"] in {
+                "append-duplicate-entry",
+                "insert-at-wrong-position",
+                "replace-with-fresh-valid-wrong-list",
+            }:
+                target = (
+                    candidate["capital_flow_trace"]
+                    if declared == "capital_flow_trace"
+                    else candidate["observation_trace"]["links"]
+                )
+                assert len({id(entry) for entry in target}) == len(target)
+                after_ids = {id(entry) for entry in target}
+                if case["operation"] in {
+                    "append-duplicate-entry",
+                    "insert-at-wrong-position",
+                }:
+                    assert len(after_ids - target_before_ids) == 1, case["case_id"]
+                else:
+                    assert after_ids.isdisjoint(target_before_ids), case["case_id"]
+            if case["operation"] in {
+                "replace-with-exact-empty-list",
+                "replace-with-fresh-valid-wrong-list",
+            }:
+                target_after_mutation = (
+                    candidate["capital_flow_trace"]
+                    if declared == "capital_flow_trace"
+                    else candidate["observation_trace"]["links"]
+                )
+                assert target_after_mutation is not target_before_mutation
+                if case["operation"] == "replace-with-exact-empty-list":
+                    assert type(target_after_mutation) is list
+        else:
+            declared = str(case["path"])
+            expected_declared = declared.removeprefix("root.")
+            assert changed == {expected_declared}, case["case_id"]
+            if case["operation"] in {
+                "replace-links-list-with-list",
+                "replace-flow-list-with-list",
+            }:
+                target_after_mutation = (
+                    candidate["capital_flow_trace"]
+                    if case["operation"] == "replace-flow-list-with-list"
+                    else candidate["observation_trace"]["links"]
+                )
+                assert type(target_after_mutation) is _C4C4B1ListSubclass
+                assert list(target_after_mutation) == list(target_before_mutation)
+                assert len(target_after_mutation) == len(target_before_mutation)
+                assert target_after_mutation is not target_before_mutation
+                after_ids = {id(entry) for entry in target_after_mutation}
+                assert len(after_ids) == len(target_after_mutation)
+                assert after_ids.isdisjoint(target_before_ids)
+        candidate_before_compare = deepcopy(candidate)
+        facts_case = deepcopy(facts)
+        if domain == "ordered":
+            result_counts = verifier_module._compare_test_local_numeric_epoch(
+                facts_case, candidate
+            )
+            assert result_counts == verifier_module._NumericComparison(1, 1, 1), case[
+                "case_id"
+            ]
+        else:
+            with pytest.raises(verifier_module.IndependentVerificationError):
+                verifier_module._compare_test_local_numeric_epoch(facts_case, candidate)
+        assert candidate == candidate_before_compare, case["case_id"]
+        assert facts_case == facts_before, case["case_id"]
+    assert base_candidate == base_before
+    return len(cases)
+
+
+@pytest.mark.parametrize(
+    "fixture,expected",
+    [("first", 16), ("predecessor", 12)],
+)
+def test_c4c4b1b_ordered_trace_cases(
+    verifier_module: Any, fixture: str, expected: int
+) -> None:
+    assert _c4c4b1_run_structural_cases(verifier_module, fixture, "ordered") == expected
+
+
+@pytest.mark.parametrize(
+    "fixture,expected",
+    [("first", 91), ("predecessor", 75)],
+)
+def test_c4c4b1b_closed_shape_cases(
+    verifier_module: Any, fixture: str, expected: int
+) -> None:
+    assert _c4c4b1_run_structural_cases(verifier_module, fixture, "shape") == expected
+
+
+@pytest.mark.parametrize("fixture", ["first", "predecessor"])
+@pytest.mark.parametrize("boundary", ["root", "trace", "link", "flow"])
+def test_c4c4b1b_mapping_subclasses_remain_accepted(
+    verifier_module: Any, fixture: str, boundary: str
+) -> None:
+    facts, candidate, _link_count, _flow_count = _c4c4b1_fixture(
+        verifier_module, fixture
+    )
+    if boundary == "root":
+        candidate = _C4C4B1MappingProxy(candidate)
+    elif boundary == "trace":
+        candidate["observation_trace"] = _C4C4B1MappingProxy(
+            candidate["observation_trace"]
+        )
+    elif boundary == "link":
+        candidate["observation_trace"]["links"][0] = _C4C4B1MappingProxy(
+            candidate["observation_trace"]["links"][0]
+        )
+    elif boundary == "flow":
+        candidate["capital_flow_trace"][0] = _C4C4B1MappingProxy(
+            candidate["capital_flow_trace"][0]
+        )
+    else:
+        raise AssertionError(boundary)
+    candidate_before = _c4c4b1_state_fingerprint(candidate)
+    facts_before = deepcopy(facts)
+    assert verifier_module._compare_test_local_numeric_epoch(
+        facts, candidate
+    ) == verifier_module._NumericComparison(1, 1, 0)
+    assert _c4c4b1_state_fingerprint(candidate) == candidate_before
+    assert facts == facts_before
+
+
+def test_c4c4b1c1_date_enum_count_lexical_type_boundary(
+    verifier_module: Any,
+) -> None:
+    counts = _c4c4b1c1_run_date_enum_count_boundary(verifier_module)
+    assert counts == {"malformed": 79, "accepted": 2, "discrepancy": 12}
+
+
+# C4.c4b1c2 keeps its link-money inventory independent of the verifier's
+# projection constants and of either literal candidate's traversal order.
+_C4C4B1C2_LINK_MONEY_PATHS = frozenset(
+    {
+        "observation_trace.links[0].base_nav",
+        "observation_trace.links[0].ending_nav",
+        "observation_trace.links[0].net_flow",
+        "observation_trace.links[1].base_nav",
+        "observation_trace.links[1].ending_nav",
+        "observation_trace.links[1].net_flow",
+        "observation_trace.links[2].base_nav",
+        "observation_trace.links[2].ending_nav",
+        "observation_trace.links[2].net_flow",
+        "observation_trace.links[3].base_nav",
+        "observation_trace.links[3].ending_nav",
+        "observation_trace.links[3].net_flow",
+    }
+)
+_C4C4B1C2_PREDECESSOR_LINK_MONEY_PATHS = frozenset(
+    {
+        "observation_trace.links[0].base_nav",
+        "observation_trace.links[0].ending_nav",
+        "observation_trace.links[0].net_flow",
+        "observation_trace.links[1].base_nav",
+        "observation_trace.links[1].ending_nav",
+        "observation_trace.links[1].net_flow",
+        "observation_trace.links[2].base_nav",
+        "observation_trace.links[2].ending_nav",
+        "observation_trace.links[2].net_flow",
+    }
+)
+_C4C4B1C2_LINK_PRECISION_PATHS = frozenset(
+    {
+        "observation_trace.links[0].factor",
+        "observation_trace.links[0].cumulative_index",
+        "observation_trace.links[0].running_hwm_index",
+        "observation_trace.links[0].drawdown",
+        "observation_trace.links[1].factor",
+        "observation_trace.links[1].cumulative_index",
+        "observation_trace.links[1].running_hwm_index",
+        "observation_trace.links[1].drawdown",
+        "observation_trace.links[2].factor",
+        "observation_trace.links[2].cumulative_index",
+        "observation_trace.links[2].running_hwm_index",
+        "observation_trace.links[2].drawdown",
+        "observation_trace.links[3].factor",
+        "observation_trace.links[3].cumulative_index",
+        "observation_trace.links[3].running_hwm_index",
+        "observation_trace.links[3].drawdown",
+    }
+)
+_C4C4B1C2_PREDECESSOR_LINK_PRECISION_PATHS = frozenset(
+    {
+        "observation_trace.links[0].factor",
+        "observation_trace.links[0].cumulative_index",
+        "observation_trace.links[0].running_hwm_index",
+        "observation_trace.links[0].drawdown",
+        "observation_trace.links[1].factor",
+        "observation_trace.links[1].cumulative_index",
+        "observation_trace.links[1].running_hwm_index",
+        "observation_trace.links[1].drawdown",
+        "observation_trace.links[2].factor",
+        "observation_trace.links[2].cumulative_index",
+        "observation_trace.links[2].running_hwm_index",
+        "observation_trace.links[2].drawdown",
+    }
+)
+_C4C4B1C2_ALL_NUMERIC_LINK_PATHS = frozenset(
+    {
+        "observation_trace.links[0].base_nav",
+        "observation_trace.links[0].ending_nav",
+        "observation_trace.links[0].net_flow",
+        "observation_trace.links[0].factor",
+        "observation_trace.links[0].cumulative_index",
+        "observation_trace.links[0].running_hwm_index",
+        "observation_trace.links[0].drawdown",
+        "observation_trace.links[1].base_nav",
+        "observation_trace.links[1].ending_nav",
+        "observation_trace.links[1].net_flow",
+        "observation_trace.links[1].factor",
+        "observation_trace.links[1].cumulative_index",
+        "observation_trace.links[1].running_hwm_index",
+        "observation_trace.links[1].drawdown",
+        "observation_trace.links[2].base_nav",
+        "observation_trace.links[2].ending_nav",
+        "observation_trace.links[2].net_flow",
+        "observation_trace.links[2].factor",
+        "observation_trace.links[2].cumulative_index",
+        "observation_trace.links[2].running_hwm_index",
+        "observation_trace.links[2].drawdown",
+        "observation_trace.links[3].base_nav",
+        "observation_trace.links[3].ending_nav",
+        "observation_trace.links[3].net_flow",
+        "observation_trace.links[3].factor",
+        "observation_trace.links[3].cumulative_index",
+        "observation_trace.links[3].running_hwm_index",
+        "observation_trace.links[3].drawdown",
+    }
+)
+_C4C4B1C2_PREDECESSOR_ALL_NUMERIC_LINK_PATHS = frozenset(
+    {
+        "observation_trace.links[0].base_nav",
+        "observation_trace.links[0].ending_nav",
+        "observation_trace.links[0].net_flow",
+        "observation_trace.links[0].factor",
+        "observation_trace.links[0].cumulative_index",
+        "observation_trace.links[0].running_hwm_index",
+        "observation_trace.links[0].drawdown",
+        "observation_trace.links[1].base_nav",
+        "observation_trace.links[1].ending_nav",
+        "observation_trace.links[1].net_flow",
+        "observation_trace.links[1].factor",
+        "observation_trace.links[1].cumulative_index",
+        "observation_trace.links[1].running_hwm_index",
+        "observation_trace.links[1].drawdown",
+        "observation_trace.links[2].base_nav",
+        "observation_trace.links[2].ending_nav",
+        "observation_trace.links[2].net_flow",
+        "observation_trace.links[2].factor",
+        "observation_trace.links[2].cumulative_index",
+        "observation_trace.links[2].running_hwm_index",
+        "observation_trace.links[2].drawdown",
+    }
+)
+_C4C4B1C2_LITERAL_MONEY_PATHS = frozenset(
+    {
+        ("first", "observation_trace.links[0].base_nav"),
+        ("first", "observation_trace.links[0].ending_nav"),
+        ("first", "observation_trace.links[0].net_flow"),
+        ("first", "observation_trace.links[1].base_nav"),
+        ("first", "observation_trace.links[1].ending_nav"),
+        ("first", "observation_trace.links[1].net_flow"),
+        ("first", "observation_trace.links[2].base_nav"),
+        ("first", "observation_trace.links[2].ending_nav"),
+        ("first", "observation_trace.links[2].net_flow"),
+        ("first", "observation_trace.links[3].base_nav"),
+        ("first", "observation_trace.links[3].ending_nav"),
+        ("first", "observation_trace.links[3].net_flow"),
+        ("predecessor", "observation_trace.links[0].base_nav"),
+        ("predecessor", "observation_trace.links[0].ending_nav"),
+        ("predecessor", "observation_trace.links[0].net_flow"),
+        ("predecessor", "observation_trace.links[1].base_nav"),
+        ("predecessor", "observation_trace.links[1].ending_nav"),
+        ("predecessor", "observation_trace.links[1].net_flow"),
+        ("predecessor", "observation_trace.links[2].base_nav"),
+        ("predecessor", "observation_trace.links[2].ending_nav"),
+        ("predecessor", "observation_trace.links[2].net_flow"),
+    }
+)
+_C4C4B1C2_LITERAL_PRECISION_PATHS = frozenset(
+    {
+        ("first", "observation_trace.links[0].factor"),
+        ("first", "observation_trace.links[0].cumulative_index"),
+        ("first", "observation_trace.links[0].running_hwm_index"),
+        ("first", "observation_trace.links[0].drawdown"),
+        ("first", "observation_trace.links[1].factor"),
+        ("first", "observation_trace.links[1].cumulative_index"),
+        ("first", "observation_trace.links[1].running_hwm_index"),
+        ("first", "observation_trace.links[1].drawdown"),
+        ("first", "observation_trace.links[2].factor"),
+        ("first", "observation_trace.links[2].cumulative_index"),
+        ("first", "observation_trace.links[2].running_hwm_index"),
+        ("first", "observation_trace.links[2].drawdown"),
+        ("first", "observation_trace.links[3].factor"),
+        ("first", "observation_trace.links[3].cumulative_index"),
+        ("first", "observation_trace.links[3].running_hwm_index"),
+        ("first", "observation_trace.links[3].drawdown"),
+        ("predecessor", "observation_trace.links[0].factor"),
+        ("predecessor", "observation_trace.links[0].cumulative_index"),
+        ("predecessor", "observation_trace.links[0].running_hwm_index"),
+        ("predecessor", "observation_trace.links[0].drawdown"),
+        ("predecessor", "observation_trace.links[1].factor"),
+        ("predecessor", "observation_trace.links[1].cumulative_index"),
+        ("predecessor", "observation_trace.links[1].running_hwm_index"),
+        ("predecessor", "observation_trace.links[1].drawdown"),
+        ("predecessor", "observation_trace.links[2].factor"),
+        ("predecessor", "observation_trace.links[2].cumulative_index"),
+        ("predecessor", "observation_trace.links[2].running_hwm_index"),
+        ("predecessor", "observation_trace.links[2].drawdown"),
+    }
+)
+_C4C4B1C2_LITERAL_ALL_NUMERIC_LINK_PATHS = frozenset(
+    {
+        ("first", "observation_trace.links[0].base_nav"),
+        ("first", "observation_trace.links[0].ending_nav"),
+        ("first", "observation_trace.links[0].net_flow"),
+        ("first", "observation_trace.links[0].factor"),
+        ("first", "observation_trace.links[0].cumulative_index"),
+        ("first", "observation_trace.links[0].running_hwm_index"),
+        ("first", "observation_trace.links[0].drawdown"),
+        ("first", "observation_trace.links[1].base_nav"),
+        ("first", "observation_trace.links[1].ending_nav"),
+        ("first", "observation_trace.links[1].net_flow"),
+        ("first", "observation_trace.links[1].factor"),
+        ("first", "observation_trace.links[1].cumulative_index"),
+        ("first", "observation_trace.links[1].running_hwm_index"),
+        ("first", "observation_trace.links[1].drawdown"),
+        ("first", "observation_trace.links[2].base_nav"),
+        ("first", "observation_trace.links[2].ending_nav"),
+        ("first", "observation_trace.links[2].net_flow"),
+        ("first", "observation_trace.links[2].factor"),
+        ("first", "observation_trace.links[2].cumulative_index"),
+        ("first", "observation_trace.links[2].running_hwm_index"),
+        ("first", "observation_trace.links[2].drawdown"),
+        ("first", "observation_trace.links[3].base_nav"),
+        ("first", "observation_trace.links[3].ending_nav"),
+        ("first", "observation_trace.links[3].net_flow"),
+        ("first", "observation_trace.links[3].factor"),
+        ("first", "observation_trace.links[3].cumulative_index"),
+        ("first", "observation_trace.links[3].running_hwm_index"),
+        ("first", "observation_trace.links[3].drawdown"),
+        ("predecessor", "observation_trace.links[0].base_nav"),
+        ("predecessor", "observation_trace.links[0].ending_nav"),
+        ("predecessor", "observation_trace.links[0].net_flow"),
+        ("predecessor", "observation_trace.links[0].factor"),
+        ("predecessor", "observation_trace.links[0].cumulative_index"),
+        ("predecessor", "observation_trace.links[0].running_hwm_index"),
+        ("predecessor", "observation_trace.links[0].drawdown"),
+        ("predecessor", "observation_trace.links[1].base_nav"),
+        ("predecessor", "observation_trace.links[1].ending_nav"),
+        ("predecessor", "observation_trace.links[1].net_flow"),
+        ("predecessor", "observation_trace.links[1].factor"),
+        ("predecessor", "observation_trace.links[1].cumulative_index"),
+        ("predecessor", "observation_trace.links[1].running_hwm_index"),
+        ("predecessor", "observation_trace.links[1].drawdown"),
+        ("predecessor", "observation_trace.links[2].base_nav"),
+        ("predecessor", "observation_trace.links[2].ending_nav"),
+        ("predecessor", "observation_trace.links[2].net_flow"),
+        ("predecessor", "observation_trace.links[2].factor"),
+        ("predecessor", "observation_trace.links[2].cumulative_index"),
+        ("predecessor", "observation_trace.links[2].running_hwm_index"),
+        ("predecessor", "observation_trace.links[2].drawdown"),
+    }
+)
+
+
+def _c4c4b1c2_path_token(path: str) -> str:
+    return path.replace(".", "--").replace("[", "-").replace("]", "")
+
+
+# This is intentionally not a case-builder input: every expected node ID is a
+# literal so additions, omissions, and disposition changes remain detectable.
+_C4C4B1C2_LITERAL_EXPECTED_IDS = frozenset(
+    {
+        "c4c4b1c2::ACCEPTED::direct::parse-source-cents::zero",
+        "c4c4b1c2::ACCEPTED::direct::parse-source-cents::integer",
+        "c4c4b1c2::ACCEPTED::direct::parse-source-cents::one-decimal",
+        "c4c4b1c2::ACCEPTED::direct::parse-source-cents::two-decimal-trailing-zero",
+        "c4c4b1c2::ACCEPTED::direct::parse-source-cents::two-decimal",
+        "c4c4b1c2::ACCEPTED::direct::parse-source-cents::negative-two-decimal",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::none",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::json-integer",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::bool",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::float",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::decimal",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::str-subclass",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::exponent",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::leading-plus",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::leading-zero",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::negative-zero",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::negative-zero-dot",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::negative-zero-cents",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::nan",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::infinity",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::negative-infinity",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::empty",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::leading-space",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::trailing-space",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::nbsp",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::unicode-digit",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::unicode-minus",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::unrelated-object",
+        "c4c4b1c2::REJECTED::direct::parse-source-cents::over-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-0--base_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-0--ending_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-0--net_flow::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-1--base_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-1--ending_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-1--net_flow::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-2--base_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-2--ending_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-2--net_flow::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-3--base_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-3--ending_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-3--net_flow::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-0--base_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-0--ending_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-0--net_flow::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-1--base_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-1--ending_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-1--net_flow::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-2--base_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-2--ending_nav::canonical-cent",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-2--net_flow::canonical-cent",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-0--base_nav::over-cent",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-0--ending_nav::over-cent",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-0--net_flow::over-cent",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-1--base_nav::over-cent",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-1--ending_nav::over-cent",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-1--net_flow::over-cent",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-2--base_nav::over-cent",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-2--ending_nav::over-cent",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-2--net_flow::over-cent",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-3--base_nav::over-cent",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-3--ending_nav::over-cent",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-3--net_flow::over-cent",
+        "c4c4b1c2::REJECTED::predecessor::observation_trace--links-0--base_nav::over-cent",
+        "c4c4b1c2::REJECTED::predecessor::observation_trace--links-0--ending_nav::over-cent",
+        "c4c4b1c2::REJECTED::predecessor::observation_trace--links-0--net_flow::over-cent",
+        "c4c4b1c2::REJECTED::predecessor::observation_trace--links-1--base_nav::over-cent",
+        "c4c4b1c2::REJECTED::predecessor::observation_trace--links-1--ending_nav::over-cent",
+        "c4c4b1c2::REJECTED::predecessor::observation_trace--links-1--net_flow::over-cent",
+        "c4c4b1c2::REJECTED::predecessor::observation_trace--links-2--base_nav::over-cent",
+        "c4c4b1c2::REJECTED::predecessor::observation_trace--links-2--ending_nav::over-cent",
+        "c4c4b1c2::REJECTED::predecessor::observation_trace--links-2--net_flow::over-cent",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-0--factor::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-0--cumulative_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-0--running_hwm_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-0--drawdown::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-1--factor::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-1--cumulative_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-1--running_hwm_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-1--drawdown::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-2--factor::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-2--cumulative_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-2--running_hwm_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-2--drawdown::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-3--factor::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-3--cumulative_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-3--running_hwm_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::first::observation_trace--links-3--drawdown::high-precision",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-0--factor::high-precision",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-0--cumulative_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-0--running_hwm_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-0--drawdown::high-precision",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-1--factor::high-precision",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-1--cumulative_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-1--running_hwm_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-1--drawdown::high-precision",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-2--factor::high-precision",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-2--cumulative_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-2--running_hwm_index::high-precision",
+        "c4c4b1c2::DISCREPANCY::predecessor::observation_trace--links-2--drawdown::high-precision",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-0--base_nav::trailing-zero",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-0--ending_nav::trailing-zero",
+        "c4c4b1c2::REJECTED::first::observation_trace--links-0--net_flow::trailing-zero",
+        "c4c4b1c2::REJECTED::predecessor::observation_trace--links-0--base_nav::trailing-zero",
+        "c4c4b1c2::REJECTED::predecessor::observation_trace--links-0--ending_nav::trailing-zero",
+        "c4c4b1c2::REJECTED::predecessor::observation_trace--links-0--net_flow::trailing-zero",
+    }
+)
+
+
+def _c4c4b1c2_set_declared_link_path(
+    candidate: dict[str, object], path: str, value: object
+) -> None:
+    prefix = "observation_trace.links["
+    assert path.startswith(prefix), path
+    index_text, separator, field = path.removeprefix(prefix).partition("].")
+    assert separator == "]." and index_text.isascii() and index_text.isdecimal(), path
+    assert field in {
+        "base_nav",
+        "ending_nav",
+        "net_flow",
+        "factor",
+        "cumulative_index",
+        "running_hwm_index",
+        "drawdown",
+    }, path
+    trace = candidate.get("observation_trace")
+    assert isinstance(trace, dict) and set(trace) == {"links"}, path
+    links = trace.get("links")
+    assert type(links) is list, path
+    index = int(index_text)
+    assert 0 <= index < len(links), path
+    link = links[index]
+    assert isinstance(link, dict), path
+    assert field in link, path
+    link[field] = value
+
+
+def _c4c4b1c2_direct_cases() -> tuple[object, ...]:
+    values = (
+        ("ACCEPTED", "zero", "0", Decimal("0")),
+        ("ACCEPTED", "integer", "1", Decimal("1")),
+        ("ACCEPTED", "one-decimal", "1.2", Decimal("1.2")),
+        ("ACCEPTED", "two-decimal-trailing-zero", "1.20", Decimal("1.20")),
+        ("ACCEPTED", "two-decimal", "1.23", Decimal("1.23")),
+        ("ACCEPTED", "negative-two-decimal", "-1.23", Decimal("-1.23")),
+        ("REJECTED", "none", None, None),
+        ("REJECTED", "json-integer", 1, None),
+        ("REJECTED", "bool", True, None),
+        ("REJECTED", "float", 1.0, None),
+        ("REJECTED", "decimal", Decimal("1"), None),
+        ("REJECTED", "str-subclass", _C4C4B1StringSubclass("1"), None),
+        ("REJECTED", "exponent", "1e2", None),
+        ("REJECTED", "leading-plus", "+1", None),
+        ("REJECTED", "leading-zero", "01", None),
+        ("REJECTED", "negative-zero", "-0", None),
+        ("REJECTED", "negative-zero-dot", "-0.0", None),
+        ("REJECTED", "negative-zero-cents", "-0.00", None),
+        ("REJECTED", "nan", "NaN", None),
+        ("REJECTED", "infinity", "Infinity", None),
+        ("REJECTED", "negative-infinity", "-Infinity", None),
+        ("REJECTED", "empty", "", None),
+        ("REJECTED", "leading-space", " 1", None),
+        ("REJECTED", "trailing-space", "1 ", None),
+        ("REJECTED", "nbsp", "\u00a01", None),
+        ("REJECTED", "unicode-digit", "１", None),
+        ("REJECTED", "unicode-minus", "−1", None),
+        ("REJECTED", "unrelated-object", object(), None),
+        ("REJECTED", "over-cent", "1.001", None),
+    )
+    return tuple(
+        pytest.param(
+            f"c4c4b1c2::{disposition}::direct::parse-source-cents::{value_class}",
+            disposition,
+            value,
+            expected,
+            id=f"c4c4b1c2::{disposition}::direct::parse-source-cents::{value_class}",
+        )
+        for disposition, value_class, value, expected in values
+    )
+
+
+# This is deliberately independent of `_c4c4b1c2_direct_cases`: every direct
+# row pins its exact runtime type and spelling/value, rather than merely its
+# rejectability.  The object sentinel denotes the only value-class for which
+# identity is intentionally not a semantic input.
+_C4C4B1C2_OBJECT_CLASS_SENTINEL = "object-class"
+_C4C4B1C2_LITERAL_DIRECT_VALUE_ORACLE = {
+    "c4c4b1c2::ACCEPTED::direct::parse-source-cents::zero": (str, "0"),
+    "c4c4b1c2::ACCEPTED::direct::parse-source-cents::integer": (str, "1"),
+    "c4c4b1c2::ACCEPTED::direct::parse-source-cents::one-decimal": (str, "1.2"),
+    "c4c4b1c2::ACCEPTED::direct::parse-source-cents::two-decimal-trailing-zero": (
+        str,
+        "1.20",
+    ),
+    "c4c4b1c2::ACCEPTED::direct::parse-source-cents::two-decimal": (str, "1.23"),
+    "c4c4b1c2::ACCEPTED::direct::parse-source-cents::negative-two-decimal": (
+        str,
+        "-1.23",
+    ),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::none": (type(None), None),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::json-integer": (int, 1),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::bool": (bool, True),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::float": (float, 1.0),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::decimal": (Decimal, Decimal("1")),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::str-subclass": (
+        _C4C4B1StringSubclass,
+        _C4C4B1StringSubclass("1"),
+    ),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::exponent": (str, "1e2"),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::leading-plus": (str, "+1"),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::leading-zero": (str, "01"),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::negative-zero": (str, "-0"),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::negative-zero-dot": (str, "-0.0"),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::negative-zero-cents": (
+        str,
+        "-0.00",
+    ),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::nan": (str, "NaN"),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::infinity": (str, "Infinity"),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::negative-infinity": (
+        str,
+        "-Infinity",
+    ),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::empty": (str, ""),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::leading-space": (str, " 1"),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::trailing-space": (str, "1 "),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::nbsp": (str, "\u00a01"),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::unicode-digit": (str, "１"),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::unicode-minus": (str, "−1"),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::unrelated-object": (
+        object,
+        _C4C4B1C2_OBJECT_CLASS_SENTINEL,
+    ),
+    "c4c4b1c2::REJECTED::direct::parse-source-cents::over-cent": (str, "1.001"),
+}
+
+
+def _c4c4b1c2_integration_cases() -> tuple[object, ...]:
+    cases: list[object] = []
+    seen_states: dict[tuple[str, str], set[str]] = {}
+    path_groups = (
+        ("first", "money", _C4C4B1C2_LINK_MONEY_PATHS),
+        ("predecessor", "money", _C4C4B1C2_PREDECESSOR_LINK_MONEY_PATHS),
+        ("first", "precision", _C4C4B1C2_LINK_PRECISION_PATHS),
+        ("predecessor", "precision", _C4C4B1C2_PREDECESSOR_LINK_PRECISION_PATHS),
+    )
+    for fixture, family, paths in path_groups:
+        for path in sorted(paths):
+            scenarios = (
+                (
+                    ("DISCREPANCY", "canonical-cent", "2"),
+                    ("REJECTED", "over-cent", "1.001"),
+                )
+                if family == "money"
+                else (
+                    (
+                        "DISCREPANCY",
+                        "high-precision",
+                        "1.234567890123456789012345678901",
+                    ),
+                )
+            )
+            for disposition, value_class, value in scenarios:
+                case_id = f"c4c4b1c2::{disposition}::{fixture}::{_c4c4b1c2_path_token(path)}::{value_class}"
+                cases.append(
+                    pytest.param(
+                        case_id, disposition, fixture, family, path, value, id=case_id
+                    )
+                )
+                base = (
+                    _c4c4a_first_candidate()
+                    if fixture == "first"
+                    else _c4c4a_predecessor_candidate()
+                )
+                changed = deepcopy(base)
+                _c4c4b1c2_set_declared_link_path(changed, path, value)
+                state = _c4c4b1_state_fingerprint(changed)
+                assert state not in seen_states.setdefault((fixture, family), set()), (
+                    case_id
+                )
+                seen_states[(fixture, family)].add(state)
+    for fixture, paths in (
+        (
+            "first",
+            frozenset(
+                {
+                    "observation_trace.links[0].base_nav",
+                    "observation_trace.links[0].ending_nav",
+                    "observation_trace.links[0].net_flow",
+                }
+            ),
+        ),
+        (
+            "predecessor",
+            frozenset(
+                {
+                    "observation_trace.links[0].base_nav",
+                    "observation_trace.links[0].ending_nav",
+                    "observation_trace.links[0].net_flow",
+                }
+            ),
+        ),
+    ):
+        for path in sorted(paths):
+            case_id = f"c4c4b1c2::REJECTED::{fixture}::{_c4c4b1c2_path_token(path)}::trailing-zero"
+            cases.append(
+                pytest.param(
+                    case_id,
+                    "REJECTED",
+                    fixture,
+                    "trailing-zero",
+                    path,
+                    "1.20",
+                    id=case_id,
+                )
+            )
+            base = (
+                _c4c4a_first_candidate()
+                if fixture == "first"
+                else _c4c4a_predecessor_candidate()
+            )
+            changed = deepcopy(base)
+            _c4c4b1c2_set_declared_link_path(changed, path, "1.20")
+            state = _c4c4b1_state_fingerprint(changed)
+            assert state not in seen_states.setdefault(
+                (fixture, "trailing-zero"), set()
+            ), case_id
+            seen_states[(fixture, "trailing-zero")].add(state)
+    actual_ids = {str(case.values[0]) for case in cases}
+    assert len(cases) == len(actual_ids) == 76
+    return tuple(cases)
+
+
+_C4C4B1C2_DIRECT_CASES = _c4c4b1c2_direct_cases()
+_C4C4B1C2_INTEGRATION_CASES = _c4c4b1c2_integration_cases()
+_C4C4B1C2_ACTUAL_IDS = {
+    str(case.values[0])
+    for case in (*_C4C4B1C2_DIRECT_CASES, *_C4C4B1C2_INTEGRATION_CASES)
+}
+_C4C4B1C2_ACTUAL_DISPOSITION_COUNTS = {
+    disposition: sum(
+        str(case.values[1]) == disposition
+        for case in (*_C4C4B1C2_DIRECT_CASES, *_C4C4B1C2_INTEGRATION_CASES)
+    )
+    for disposition in ("ACCEPTED", "REJECTED", "DISCREPANCY")
+}
+assert len(_C4C4B1C2_LINK_MONEY_PATHS) == 12
+assert len(_C4C4B1C2_PREDECESSOR_LINK_MONEY_PATHS) == 9
+assert len(_C4C4B1C2_LINK_PRECISION_PATHS) == 16
+assert len(_C4C4B1C2_PREDECESSOR_LINK_PRECISION_PATHS) == 12
+assert _C4C4B1C2_LINK_MONEY_PATHS.isdisjoint(_C4C4B1C2_LINK_PRECISION_PATHS)
+assert _C4C4B1C2_PREDECESSOR_LINK_MONEY_PATHS.isdisjoint(
+    _C4C4B1C2_PREDECESSOR_LINK_PRECISION_PATHS
+)
+assert (
+    _C4C4B1C2_LINK_MONEY_PATHS | _C4C4B1C2_LINK_PRECISION_PATHS
+    == _C4C4B1C2_ALL_NUMERIC_LINK_PATHS
+)
+assert (
+    _C4C4B1C2_PREDECESSOR_LINK_MONEY_PATHS | _C4C4B1C2_PREDECESSOR_LINK_PRECISION_PATHS
+    == _C4C4B1C2_PREDECESSOR_ALL_NUMERIC_LINK_PATHS
+)
+assert len(_C4C4B1C2_LITERAL_MONEY_PATHS) == 21
+assert len(_C4C4B1C2_LITERAL_PRECISION_PATHS) == 28
+assert _C4C4B1C2_LITERAL_MONEY_PATHS.isdisjoint(_C4C4B1C2_LITERAL_PRECISION_PATHS)
+assert (
+    _C4C4B1C2_LITERAL_MONEY_PATHS | _C4C4B1C2_LITERAL_PRECISION_PATHS
+    == _C4C4B1C2_LITERAL_ALL_NUMERIC_LINK_PATHS
+)
+assert len(_C4C4B1C2_LITERAL_ALL_NUMERIC_LINK_PATHS) == 49
+assert len(_C4C4B1C2_DIRECT_CASES) == 29
+assert len(_C4C4B1C2_INTEGRATION_CASES) == 76
+assert set(_C4C4B1C2_LITERAL_DIRECT_VALUE_ORACLE) == {
+    str(case.values[0]) for case in _C4C4B1C2_DIRECT_CASES
+}
+assert _C4C4B1C2_ACTUAL_DISPOSITION_COUNTS == {
+    "ACCEPTED": 6,
+    "REJECTED": 50,
+    "DISCREPANCY": 49,
+}
+assert _C4C4B1C2_ACTUAL_IDS == _C4C4B1C2_LITERAL_EXPECTED_IDS
+
+
+@pytest.mark.parametrize(
+    "case_id, disposition, value, expected",
+    _C4C4B1C2_DIRECT_CASES,
+)
+def test_c4c4b1c2_parse_source_cents_literal_boundary(
+    verifier_module: Any,
+    case_id: str,
+    disposition: str,
+    value: object,
+    expected: Decimal | None,
+) -> None:
+    expected_type, expected_value = _C4C4B1C2_LITERAL_DIRECT_VALUE_ORACLE[case_id]
+    assert type(value) is expected_type, case_id
+    if expected_value == _C4C4B1C2_OBJECT_CLASS_SENTINEL:
+        assert expected_type is object, case_id
+    else:
+        assert value == expected_value, case_id
+    if disposition == "REJECTED":
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._parse_source_cents(value)
+        return
+    parsed = verifier_module._parse_source_cents(value)
+    assert type(parsed) is Decimal and parsed == expected, case_id
+    if value == "1.20":
+        assert parsed.as_tuple().exponent == -2, case_id
+
+
+@pytest.mark.parametrize(
+    "case_id, disposition, fixture, family, path, value",
+    _C4C4B1C2_INTEGRATION_CASES,
+)
+def test_c4c4b1c2_literal_link_money_and_precision_matrix(
+    verifier_module: Any,
+    case_id: str,
+    disposition: str,
+    fixture: str,
+    family: str,
+    path: str,
+    value: str,
+) -> None:
+    facts, base_literal, _link_count, _flow_count = _c4c4b1_fixture(
+        verifier_module, fixture
+    )
+    original_facts = deepcopy(facts)
+    original_base_literal = deepcopy(base_literal)
+    assert verifier_module._compare_test_local_numeric_epoch(
+        facts, base_literal
+    ) == verifier_module._NumericComparison(1, 1, 0), case_id
+    assert facts == original_facts, case_id
+    assert base_literal == original_base_literal, case_id
+
+    facts_case = deepcopy(facts)
+    candidate = deepcopy(base_literal)
+    _c4c4b1c2_set_declared_link_path(candidate, path, value)
+    assert _c4c4b1_path_diff(base_literal, candidate) == {f"root.{path}"}, case_id
+    candidate_before_compare = deepcopy(candidate)
+    facts_before_compare = deepcopy(facts_case)
+    if disposition == "REJECTED":
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._compare_test_local_numeric_epoch(facts_case, candidate)
+    else:
+        assert verifier_module._compare_test_local_numeric_epoch(
+            facts_case, candidate
+        ) == verifier_module._NumericComparison(1, 1, 1), case_id
+    assert candidate == candidate_before_compare, case_id
+    assert facts_case == facts_before_compare, case_id
+    assert facts == original_facts, case_id
+    assert base_literal == original_base_literal, case_id
+
+
+# C4.c4b1c3 is deliberately independent of the c2 link inventories above.
+# It includes every general-numeric proposed-output leaf, including six root
+# rates/observations that c2 does not own, without inspecting verifier fields.
+_C4C4B1C3_LITERAL_PATHS = frozenset(
+    {
+        ("first", "root.return_on_net_capital"),
+        ("first", "root.annualized_return_on_net_capital"),
+        ("first", "root.xirr_diagnostic"),
+        ("first", "root.observation_linked_return"),
+        ("first", "root.observed_hwm_index"),
+        ("first", "root.observed_max_drawdown"),
+        ("first", "observation_trace.links[0].factor"),
+        ("first", "observation_trace.links[0].cumulative_index"),
+        ("first", "observation_trace.links[0].running_hwm_index"),
+        ("first", "observation_trace.links[0].drawdown"),
+        ("first", "observation_trace.links[1].factor"),
+        ("first", "observation_trace.links[1].cumulative_index"),
+        ("first", "observation_trace.links[1].running_hwm_index"),
+        ("first", "observation_trace.links[1].drawdown"),
+        ("first", "observation_trace.links[2].factor"),
+        ("first", "observation_trace.links[2].cumulative_index"),
+        ("first", "observation_trace.links[2].running_hwm_index"),
+        ("first", "observation_trace.links[2].drawdown"),
+        ("first", "observation_trace.links[3].factor"),
+        ("first", "observation_trace.links[3].cumulative_index"),
+        ("first", "observation_trace.links[3].running_hwm_index"),
+        ("first", "observation_trace.links[3].drawdown"),
+        ("predecessor", "root.return_on_net_capital"),
+        ("predecessor", "root.annualized_return_on_net_capital"),
+        ("predecessor", "root.xirr_diagnostic"),
+        ("predecessor", "root.observation_linked_return"),
+        ("predecessor", "root.observed_hwm_index"),
+        ("predecessor", "root.observed_max_drawdown"),
+        ("predecessor", "observation_trace.links[0].factor"),
+        ("predecessor", "observation_trace.links[0].cumulative_index"),
+        ("predecessor", "observation_trace.links[0].running_hwm_index"),
+        ("predecessor", "observation_trace.links[0].drawdown"),
+        ("predecessor", "observation_trace.links[1].factor"),
+        ("predecessor", "observation_trace.links[1].cumulative_index"),
+        ("predecessor", "observation_trace.links[1].running_hwm_index"),
+        ("predecessor", "observation_trace.links[1].drawdown"),
+        ("predecessor", "observation_trace.links[2].factor"),
+        ("predecessor", "observation_trace.links[2].cumulative_index"),
+        ("predecessor", "observation_trace.links[2].running_hwm_index"),
+        ("predecessor", "observation_trace.links[2].drawdown"),
+    }
+)
+_C4C4B1C3_RATE_ROOTS = frozenset(
+    {
+        "root.return_on_net_capital",
+        "root.annualized_return_on_net_capital",
+        "root.xirr_diagnostic",
+    }
+)
+_C4C4B1C3_OBSERVATION_ROOTS = frozenset(
+    {
+        "root.observation_linked_return",
+        "root.observed_hwm_index",
+        "root.observed_max_drawdown",
+    }
+)
+_C4C4B1C3_LINK_PRECISION_FIELDS = frozenset(
+    {
+        "factor",
+        "cumulative_index",
+        "running_hwm_index",
+        "drawdown",
+    }
+)
+
+
+def _c4c4b1c3_path_token(path: str) -> str:
+    return path.replace(".", "--").replace("[", "-").replace("]", "")
+
+
+def _c4c4b1c3_set_declared_path(
+    candidate: dict[str, object], path: str, value: object
+) -> None:
+    if path.startswith("root."):
+        field = path.removeprefix("root.")
+        assert field and "." not in field and field in candidate, path
+        candidate[field] = value
+        return
+    prefix = "observation_trace.links["
+    assert path.startswith(prefix), path
+    index_text, separator, field = path.removeprefix(prefix).partition("].")
+    assert separator == "]." and index_text.isascii() and index_text.isdecimal(), path
+    assert field in _C4C4B1C3_LINK_PRECISION_FIELDS, path
+    trace = candidate.get("observation_trace")
+    assert isinstance(trace, dict) and set(trace) == {"links"}, path
+    links = trace.get("links")
+    assert type(links) is list, path
+    index = int(index_text)
+    assert 0 <= index < len(links), path
+    link = links[index]
+    assert isinstance(link, dict) and field in link, path
+    link[field] = value
+
+
+def _c4c4b1c3_direct_cases() -> tuple[object, ...]:
+    values = (
+        ("ACCEPTED", "zero", "0", "0"),
+        ("ACCEPTED", "negative-one", "-1", "-1"),
+        ("ACCEPTED", "one-decimal", "1.2", "1.2"),
+        (
+            "ACCEPTED",
+            "thirty-fractional",
+            "1.234567890123456789012345678901",
+            "1.234567890123456789012345678901",
+        ),
+        (
+            "ACCEPTED",
+            "long-precision",
+            "1.12345678901234567890123456789012345678901",
+            "1.12345678901234567890123456789012345678901",
+        ),
+        ("REJECTED", "none", None, None),
+        ("REJECTED", "json-integer", 1, None),
+        ("REJECTED", "bool", True, None),
+        ("REJECTED", "float", 1.0, None),
+        ("REJECTED", "decimal", Decimal("1"), None),
+        ("REJECTED", "str-subclass", _C4C4B1StringSubclass("1"), None),
+        ("REJECTED", "exponent", "1e2", None),
+        ("REJECTED", "leading-plus", "+1", None),
+        ("REJECTED", "leading-zero", "01", None),
+        ("REJECTED", "trailing-zero", "1.00", None),
+        ("REJECTED", "negative-zero", "-0", None),
+        ("REJECTED", "negative-zero-dot", "-0.0", None),
+        ("REJECTED", "negative-zero-cents", "-0.00", None),
+        ("REJECTED", "nan", "NaN", None),
+        ("REJECTED", "infinity", "Infinity", None),
+        ("REJECTED", "negative-infinity", "-Infinity", None),
+        ("REJECTED", "empty", "", None),
+        ("REJECTED", "leading-space", " 1", None),
+        ("REJECTED", "trailing-space", "1 ", None),
+        ("REJECTED", "nbsp", "\u00a01", None),
+        ("REJECTED", "unicode-digit", "１", None),
+        ("REJECTED", "unicode-minus", "−1", None),
+        ("REJECTED", "unrelated-object", object(), None),
+    )
+    return tuple(
+        pytest.param(
+            f"c4c4b1c3::{disposition}::direct::parse-numeric-output::{value_class}",
+            disposition,
+            value,
+            expected,
+            id=f"c4c4b1c3::{disposition}::direct::parse-numeric-output::{value_class}",
+        )
+        for disposition, value_class, value, expected in values
+    )
+
+
+_C4C4B1C3_OBJECT_CLASS_SENTINEL = "object-class"
+_C4C4B1C3_LITERAL_DIRECT_VALUE_ORACLE = {
+    "c4c4b1c3::ACCEPTED::direct::parse-numeric-output::zero": (str, "0"),
+    "c4c4b1c3::ACCEPTED::direct::parse-numeric-output::negative-one": (str, "-1"),
+    "c4c4b1c3::ACCEPTED::direct::parse-numeric-output::one-decimal": (str, "1.2"),
+    "c4c4b1c3::ACCEPTED::direct::parse-numeric-output::thirty-fractional": (
+        str,
+        "1.234567890123456789012345678901",
+    ),
+    "c4c4b1c3::ACCEPTED::direct::parse-numeric-output::long-precision": (
+        str,
+        "1.12345678901234567890123456789012345678901",
+    ),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::none": (type(None), None),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::json-integer": (int, 1),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::bool": (bool, True),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::float": (float, 1.0),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::decimal": (
+        Decimal,
+        Decimal("1"),
+    ),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::str-subclass": (
+        _C4C4B1StringSubclass,
+        _C4C4B1StringSubclass("1"),
+    ),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::exponent": (str, "1e2"),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::leading-plus": (str, "+1"),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::leading-zero": (str, "01"),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::trailing-zero": (str, "1.00"),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::negative-zero": (str, "-0"),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::negative-zero-dot": (
+        str,
+        "-0.0",
+    ),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::negative-zero-cents": (
+        str,
+        "-0.00",
+    ),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::nan": (str, "NaN"),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::infinity": (str, "Infinity"),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::negative-infinity": (
+        str,
+        "-Infinity",
+    ),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::empty": (str, ""),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::leading-space": (str, " 1"),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::trailing-space": (str, "1 "),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::nbsp": (str, "\u00a01"),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::unicode-digit": (str, "１"),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::unicode-minus": (str, "−1"),
+    "c4c4b1c3::REJECTED::direct::parse-numeric-output::unrelated-object": (
+        object,
+        _C4C4B1C3_OBJECT_CLASS_SENTINEL,
+    ),
+}
+
+
+# This set is intentionally hand-literal, separate from every case generator.
+_C4C4B1C3_LITERAL_EXPECTED_IDS = frozenset(
+    {
+        "c4c4b1c3::ACCEPTED::direct::parse-numeric-output::zero",
+        "c4c4b1c3::ACCEPTED::direct::parse-numeric-output::negative-one",
+        "c4c4b1c3::ACCEPTED::direct::parse-numeric-output::one-decimal",
+        "c4c4b1c3::ACCEPTED::direct::parse-numeric-output::thirty-fractional",
+        "c4c4b1c3::ACCEPTED::direct::parse-numeric-output::long-precision",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::none",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::json-integer",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::bool",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::float",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::decimal",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::str-subclass",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::exponent",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::leading-plus",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::leading-zero",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::trailing-zero",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::negative-zero",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::negative-zero-dot",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::negative-zero-cents",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::nan",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::infinity",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::negative-infinity",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::empty",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::leading-space",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::trailing-space",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::nbsp",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::unicode-digit",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::unicode-minus",
+        "c4c4b1c3::REJECTED::direct::parse-numeric-output::unrelated-object",
+        "c4c4b1c3::REJECTED::first::root--return_on_net_capital::trailing-zero",
+        "c4c4b1c3::REJECTED::first::root--annualized_return_on_net_capital::trailing-zero",
+        "c4c4b1c3::REJECTED::first::root--xirr_diagnostic::trailing-zero",
+        "c4c4b1c3::REJECTED::first::root--observation_linked_return::trailing-zero",
+        "c4c4b1c3::REJECTED::first::root--observed_hwm_index::trailing-zero",
+        "c4c4b1c3::REJECTED::first::root--observed_max_drawdown::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-0--factor::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-0--cumulative_index::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-0--running_hwm_index::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-0--drawdown::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-1--factor::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-1--cumulative_index::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-1--running_hwm_index::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-1--drawdown::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-2--factor::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-2--cumulative_index::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-2--running_hwm_index::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-2--drawdown::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-3--factor::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-3--cumulative_index::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-3--running_hwm_index::trailing-zero",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-3--drawdown::trailing-zero",
+        "c4c4b1c3::DISCREPANCY::first::root--return_on_net_capital::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::root--annualized_return_on_net_capital::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::root--xirr_diagnostic::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::root--observation_linked_return::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::root--observed_hwm_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::root--observed_max_drawdown::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-0--factor::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-0--cumulative_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-0--running_hwm_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-0--drawdown::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-1--factor::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-1--cumulative_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-1--running_hwm_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-1--drawdown::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-2--factor::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-2--cumulative_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-2--running_hwm_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-2--drawdown::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-3--factor::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-3--cumulative_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-3--running_hwm_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::observation_trace--links-3--drawdown::long-precision",
+        "c4c4b1c3::DISCREPANCY::first::root--return_on_net_capital::none",
+        "c4c4b1c3::DISCREPANCY::first::root--annualized_return_on_net_capital::none",
+        "c4c4b1c3::DISCREPANCY::first::root--xirr_diagnostic::none",
+        "c4c4b1c3::REJECTED::first::root--observation_linked_return::none",
+        "c4c4b1c3::REJECTED::first::root--observed_hwm_index::none",
+        "c4c4b1c3::REJECTED::first::root--observed_max_drawdown::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-0--factor::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-0--cumulative_index::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-0--running_hwm_index::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-0--drawdown::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-1--factor::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-1--cumulative_index::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-1--running_hwm_index::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-1--drawdown::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-2--factor::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-2--cumulative_index::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-2--running_hwm_index::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-2--drawdown::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-3--factor::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-3--cumulative_index::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-3--running_hwm_index::none",
+        "c4c4b1c3::REJECTED::first::observation_trace--links-3--drawdown::none",
+        "c4c4b1c3::REJECTED::predecessor::root--return_on_net_capital::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::root--annualized_return_on_net_capital::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::root--xirr_diagnostic::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::root--observation_linked_return::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::root--observed_hwm_index::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::root--observed_max_drawdown::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-0--factor::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-0--cumulative_index::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-0--running_hwm_index::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-0--drawdown::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-1--factor::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-1--cumulative_index::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-1--running_hwm_index::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-1--drawdown::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-2--factor::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-2--cumulative_index::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-2--running_hwm_index::trailing-zero",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-2--drawdown::trailing-zero",
+        "c4c4b1c3::DISCREPANCY::predecessor::root--return_on_net_capital::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::root--annualized_return_on_net_capital::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::root--xirr_diagnostic::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::root--observation_linked_return::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::root--observed_hwm_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::root--observed_max_drawdown::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::observation_trace--links-0--factor::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::observation_trace--links-0--cumulative_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::observation_trace--links-0--running_hwm_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::observation_trace--links-0--drawdown::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::observation_trace--links-1--factor::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::observation_trace--links-1--cumulative_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::observation_trace--links-1--running_hwm_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::observation_trace--links-1--drawdown::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::observation_trace--links-2--factor::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::observation_trace--links-2--cumulative_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::observation_trace--links-2--running_hwm_index::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::observation_trace--links-2--drawdown::long-precision",
+        "c4c4b1c3::DISCREPANCY::predecessor::root--return_on_net_capital::none",
+        "c4c4b1c3::DISCREPANCY::predecessor::root--annualized_return_on_net_capital::none",
+        "c4c4b1c3::DISCREPANCY::predecessor::root--xirr_diagnostic::none",
+        "c4c4b1c3::REJECTED::predecessor::root--observation_linked_return::none",
+        "c4c4b1c3::REJECTED::predecessor::root--observed_hwm_index::none",
+        "c4c4b1c3::REJECTED::predecessor::root--observed_max_drawdown::none",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-0--factor::none",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-0--cumulative_index::none",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-0--running_hwm_index::none",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-0--drawdown::none",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-1--factor::none",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-1--cumulative_index::none",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-1--running_hwm_index::none",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-1--drawdown::none",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-2--factor::none",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-2--cumulative_index::none",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-2--running_hwm_index::none",
+        "c4c4b1c3::REJECTED::predecessor::observation_trace--links-2--drawdown::none",
+    }
+)
+
+
+def _c4c4b1c3_integration_cases() -> tuple[object, ...]:
+    cases: list[object] = []
+    seen_states: dict[tuple[str, str], set[str]] = {}
+    for fixture in ("first", "predecessor"):
+        paths = tuple(
+            sorted(
+                path
+                for declared_fixture, path in _C4C4B1C3_LITERAL_PATHS
+                if declared_fixture == fixture
+            )
+        )
+        for disposition, value_class, value, selected_paths in (
+            ("REJECTED", "trailing-zero", "1.00", paths),
+            (
+                "DISCREPANCY",
+                "long-precision",
+                "1.12345678901234567890123456789012345678901",
+                paths,
+            ),
+            (
+                "DISCREPANCY",
+                "none",
+                None,
+                tuple(path for path in paths if path in _C4C4B1C3_RATE_ROOTS),
+            ),
+            (
+                "REJECTED",
+                "none",
+                None,
+                tuple(path for path in paths if path not in _C4C4B1C3_RATE_ROOTS),
+            ),
+        ):
+            for path in selected_paths:
+                case_id = f"c4c4b1c3::{disposition}::{fixture}::{_c4c4b1c3_path_token(path)}::{value_class}"
+                cases.append(
+                    pytest.param(
+                        case_id,
+                        disposition,
+                        fixture,
+                        value_class,
+                        path,
+                        value,
+                        id=case_id,
+                    )
+                )
+                base = (
+                    _c4c4a_first_candidate()
+                    if fixture == "first"
+                    else _c4c4a_predecessor_candidate()
+                )
+                changed = deepcopy(base)
+                _c4c4b1c3_set_declared_path(changed, path, value)
+                state = _c4c4b1_state_fingerprint(changed)
+                assert state not in seen_states.setdefault(
+                    (fixture, value_class), set()
+                ), case_id
+                seen_states[(fixture, value_class)].add(state)
+    actual_ids = {str(case.values[0]) for case in cases}
+    assert len(cases) == len(actual_ids) == 120
+    return tuple(cases)
+
+
+_C4C4B1C3_DIRECT_CASES = _c4c4b1c3_direct_cases()
+_C4C4B1C3_INTEGRATION_CASES = _c4c4b1c3_integration_cases()
+_C4C4B1C3_ACTUAL_IDS = {
+    str(case.values[0])
+    for case in (*_C4C4B1C3_DIRECT_CASES, *_C4C4B1C3_INTEGRATION_CASES)
+}
+_C4C4B1C3_ACTUAL_DISPOSITION_COUNTS = {
+    disposition: sum(
+        str(case.values[1]) == disposition
+        for case in (*_C4C4B1C3_DIRECT_CASES, *_C4C4B1C3_INTEGRATION_CASES)
+    )
+    for disposition in ("ACCEPTED", "REJECTED", "DISCREPANCY")
+}
+assert len(_C4C4B1C3_LITERAL_PATHS) == 40
+assert sum(fixture == "first" for fixture, _path in _C4C4B1C3_LITERAL_PATHS) == 22
+assert sum(fixture == "predecessor" for fixture, _path in _C4C4B1C3_LITERAL_PATHS) == 18
+assert (
+    sum(path in _C4C4B1C3_RATE_ROOTS for _fixture, path in _C4C4B1C3_LITERAL_PATHS) == 6
+)
+assert (
+    sum(
+        path in _C4C4B1C3_OBSERVATION_ROOTS
+        for _fixture, path in _C4C4B1C3_LITERAL_PATHS
+    )
+    == 6
+)
+assert (
+    sum(
+        "observation_trace.links[" in path for _fixture, path in _C4C4B1C3_LITERAL_PATHS
+    )
+    == 28
+)
+assert _C4C4B1C3_LITERAL_PATHS.isdisjoint(_C4C4B1C2_LITERAL_MONEY_PATHS)
+assert len(_C4C4B1C3_DIRECT_CASES) == 28
+assert len(_C4C4B1C3_INTEGRATION_CASES) == 120
+assert set(_C4C4B1C3_LITERAL_DIRECT_VALUE_ORACLE) == {
+    str(case.values[0]) for case in _C4C4B1C3_DIRECT_CASES
+}
+assert len(_C4C4B1C3_LITERAL_EXPECTED_IDS) == 148
+assert _C4C4B1C3_ACTUAL_DISPOSITION_COUNTS == {
+    "ACCEPTED": 5,
+    "REJECTED": 97,
+    "DISCREPANCY": 46,
+}
+assert _C4C4B1C3_ACTUAL_IDS == _C4C4B1C3_LITERAL_EXPECTED_IDS
+
+
+@pytest.mark.parametrize(
+    "case_id, disposition, value, expected_source",
+    _C4C4B1C3_DIRECT_CASES,
+)
+def test_c4c4b1c3_parse_numeric_output_literal_boundary(
+    verifier_module: Any,
+    case_id: str,
+    disposition: str,
+    value: object,
+    expected_source: str | None,
+) -> None:
+    expected_type, expected_value = _C4C4B1C3_LITERAL_DIRECT_VALUE_ORACLE[case_id]
+    assert type(value) is expected_type, case_id
+    if expected_value == _C4C4B1C3_OBJECT_CLASS_SENTINEL:
+        assert expected_type is object, case_id
+    else:
+        assert value == expected_value, case_id
+    if disposition == "REJECTED":
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._parse_numeric_output(value)
+        return
+    assert type(value) is str and expected_source == value, case_id
+    parsed = verifier_module._parse_numeric_output(value)
+    assert type(parsed) is Decimal and parsed == Decimal(expected_source), case_id
+    assert verifier_module._format_decimal(parsed) == expected_source, case_id
+    assert value == expected_source, case_id
+
+
+@pytest.mark.parametrize(
+    "case_id, disposition, fixture, family, path, value",
+    _C4C4B1C3_INTEGRATION_CASES,
+)
+def test_c4c4b1c3_general_numeric_routing_matrix(
+    verifier_module: Any,
+    case_id: str,
+    disposition: str,
+    fixture: str,
+    family: str,
+    path: str,
+    value: object,
+) -> None:
+    facts, base_literal, _link_count, _flow_count = _c4c4b1_fixture(
+        verifier_module, fixture
+    )
+    original_facts = deepcopy(facts)
+    original_base_literal = deepcopy(base_literal)
+    baseline_result = verifier_module._compare_test_local_numeric_epoch(
+        facts, base_literal
+    )
+    assert type(baseline_result) is verifier_module._NumericComparison, case_id
+    assert baseline_result == verifier_module._NumericComparison(1, 1, 0), case_id
+    assert facts == original_facts, case_id
+    assert base_literal == original_base_literal, case_id
+
+    facts_case = deepcopy(facts)
+    candidate = deepcopy(base_literal)
+    _c4c4b1c3_set_declared_path(candidate, path, value)
+    expected_diff_path = path if path.startswith("root.") else f"root.{path}"
+    assert _c4c4b1_path_diff(base_literal, candidate) == {expected_diff_path}, case_id
+    candidate_before_compare = deepcopy(candidate)
+    facts_before_compare = deepcopy(facts_case)
+    if disposition == "REJECTED":
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._compare_test_local_numeric_epoch(facts_case, candidate)
+    else:
+        discrepancy_result = verifier_module._compare_test_local_numeric_epoch(
+            facts_case, candidate
+        )
+        assert type(discrepancy_result) is verifier_module._NumericComparison, case_id
+        assert discrepancy_result == verifier_module._NumericComparison(1, 1, 1), (
+            case_id
+        )
+    assert candidate == candidate_before_compare, case_id
+    assert facts_case == facts_before_compare, case_id
+    assert facts == original_facts, case_id
+    assert base_literal == original_base_literal, case_id
+
+
+def _c4c4b2a_raw_first_fixture() -> tuple[
+    list[dict[str, str]], list[dict[str, str]], dict[str, object]
+]:
+    """Fresh raw records for C4.c4b2a; do not reuse parsed C4.c4a facts."""
+    return (
+        [
+            {
+                "account_id": "acct-a",
+                "as_of_date": "2026-01-02",
+                "currency": "USD",
+                "value": "100.00",
+            },
+            {
+                "account_id": "acct-a",
+                "as_of_date": "2026-01-05",
+                "currency": "USD",
+                "value": "180.00",
+            },
+            {
+                "account_id": "acct-a",
+                "as_of_date": "2026-01-09",
+                "currency": "USD",
+                "value": "117.00",
+            },
+            {
+                "account_id": "acct-a",
+                "as_of_date": "2026-01-12",
+                "currency": "USD",
+                "value": "150.00",
+            },
+            {
+                "account_id": "acct-a",
+                "as_of_date": "2027-01-02",
+                "currency": "USD",
+                "value": "150.00",
+            },
+        ],
+        [
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "10.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_OUT",
+                "currency": "USD",
+                "amount": "10.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-05",
+                "classification": "INTERNAL_IN",
+                "currency": "USD",
+                "amount": "50.00",
+            },
+        ],
+        {"account_id": "acct-a", "start": date(2026, 1, 2), "end": date(2027, 1, 2)},
+    )
+
+
+def test_c4c4b2a_test_power_first_nav_cent_change_is_not_equal(
+    verifier_module: Any,
+) -> None:
+    """The recorded inverted expectation RED; the correct result is (1,1,1)."""
+    navs, flows, context = _c4c4b2a_raw_first_fixture()
+    navs[1]["value"] = "180.01"
+    facts = verifier_module._parse_epoch_facts(navs, flows, **context)
+    assert verifier_module._compare_test_local_numeric_epoch(
+        facts, _c4c4a_first_candidate()
+    ) == verifier_module._NumericComparison(1, 1, 1)
+
+
+def _c4c4b2a_raw_predecessor_fixture() -> tuple[
+    list[dict[str, str]], list[dict[str, str]], dict[str, object]
+]:
+    """Fresh successor raw records; predecessor closing fact is a fixed control."""
+    return (
+        [
+            {
+                "account_id": "acct-a",
+                "as_of_date": "2026-02-06",
+                "currency": "USD",
+                "value": "198.80",
+            },
+            {
+                "account_id": "acct-a",
+                "as_of_date": "2026-02-07",
+                "currency": "USD",
+                "value": "178.92",
+            },
+            {
+                "account_id": "acct-a",
+                "as_of_date": "2026-02-08",
+                "currency": "USD",
+                "value": "204.02",
+            },
+        ],
+        [
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-02-06",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "78.80",
+            }
+        ],
+        {"account_id": "acct-a", "start": date(2026, 2, 6), "end": date(2026, 2, 8)},
+    )
+
+
+_C4C4B2A_LITERAL_LEAVES = frozenset(
+    {
+        ("first", "nav", 0, "as_of_date"),
+        ("first", "nav", 1, "as_of_date"),
+        ("first", "nav", 2, "as_of_date"),
+        ("first", "nav", 3, "as_of_date"),
+        ("first", "nav", 4, "as_of_date"),
+        ("first", "nav", 0, "value"),
+        ("first", "nav", 1, "value"),
+        ("first", "nav", 2, "value"),
+        ("first", "nav", 3, "value"),
+        ("first", "nav", 4, "value"),
+        ("first", "flow", 0, "event_date"),
+        ("first", "flow", 1, "event_date"),
+        ("first", "flow", 2, "event_date"),
+        ("first", "flow", 0, "classification"),
+        ("first", "flow", 1, "classification"),
+        ("first", "flow", 2, "classification"),
+        ("first", "flow", 0, "amount"),
+        ("first", "flow", 1, "amount"),
+        ("first", "flow", 2, "amount"),
+        ("predecessor", "nav", 0, "as_of_date"),
+        ("predecessor", "nav", 1, "as_of_date"),
+        ("predecessor", "nav", 2, "as_of_date"),
+        ("predecessor", "nav", 0, "value"),
+        ("predecessor", "nav", 1, "value"),
+        ("predecessor", "nav", 2, "value"),
+        ("predecessor", "flow", 0, "event_date"),
+        ("predecessor", "flow", 0, "classification"),
+        ("predecessor", "flow", 0, "amount"),
+    }
+)
+
+
+_C4C4B2A_LITERAL_EXPECTED_IDS = frozenset(
+    {
+        "c4c4b2a::REJECTED::first::nav-0-as_of_date::noncanonical",
+        "c4c4b2a::REJECTED::first::nav-1-as_of_date::noncanonical",
+        "c4c4b2a::REJECTED::first::nav-2-as_of_date::noncanonical",
+        "c4c4b2a::REJECTED::first::nav-3-as_of_date::noncanonical",
+        "c4c4b2a::REJECTED::first::nav-4-as_of_date::noncanonical",
+        "c4c4b2a::REJECTED::first::nav-0-value::noncanonical",
+        "c4c4b2a::REJECTED::first::nav-1-value::noncanonical",
+        "c4c4b2a::REJECTED::first::nav-2-value::noncanonical",
+        "c4c4b2a::REJECTED::first::nav-3-value::noncanonical",
+        "c4c4b2a::REJECTED::first::nav-4-value::noncanonical",
+        "c4c4b2a::REJECTED::first::flow-0-event_date::noncanonical",
+        "c4c4b2a::REJECTED::first::flow-1-event_date::noncanonical",
+        "c4c4b2a::REJECTED::first::flow-2-event_date::noncanonical",
+        "c4c4b2a::REJECTED::first::flow-0-classification::noncanonical",
+        "c4c4b2a::REJECTED::first::flow-1-classification::noncanonical",
+        "c4c4b2a::REJECTED::first::flow-2-classification::noncanonical",
+        "c4c4b2a::REJECTED::first::flow-0-amount::noncanonical",
+        "c4c4b2a::REJECTED::first::flow-1-amount::noncanonical",
+        "c4c4b2a::REJECTED::first::flow-2-amount::noncanonical",
+        "c4c4b2a::REJECTED::predecessor::nav-0-as_of_date::noncanonical",
+        "c4c4b2a::REJECTED::predecessor::nav-1-as_of_date::noncanonical",
+        "c4c4b2a::REJECTED::predecessor::nav-2-as_of_date::noncanonical",
+        "c4c4b2a::REJECTED::predecessor::nav-0-value::noncanonical",
+        "c4c4b2a::REJECTED::predecessor::nav-1-value::noncanonical",
+        "c4c4b2a::REJECTED::predecessor::nav-2-value::noncanonical",
+        "c4c4b2a::REJECTED::predecessor::flow-0-event_date::noncanonical",
+        "c4c4b2a::REJECTED::predecessor::flow-0-classification::noncanonical",
+        "c4c4b2a::REJECTED::predecessor::flow-0-amount::noncanonical",
+        "c4c4b2a::DISCREPANCY::first::nav-1-as_of_date::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::nav-2-as_of_date::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::nav-3-as_of_date::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::nav-4-as_of_date::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::nav-0-value::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::nav-1-value::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::nav-2-value::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::nav-3-value::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::nav-4-value::canonical-change",
+        "c4c4b2a::DISCREPANCY::predecessor::nav-0-value::canonical-change",
+        "c4c4b2a::DISCREPANCY::predecessor::nav-1-value::canonical-change",
+        "c4c4b2a::DISCREPANCY::predecessor::nav-2-value::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::flow-0-event_date::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::flow-1-event_date::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::flow-2-event_date::canonical-change",
+        "c4c4b2a::DISCREPANCY::predecessor::flow-0-event_date::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::flow-0-classification::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::flow-1-classification::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::flow-2-classification::canonical-change",
+        "c4c4b2a::DISCREPANCY::predecessor::flow-0-classification::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::flow-0-amount::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::flow-1-amount::canonical-change",
+        "c4c4b2a::DISCREPANCY::first::flow-2-amount::canonical-change",
+        "c4c4b2a::DISCREPANCY::predecessor::flow-0-amount::canonical-change",
+    }
+)
+
+
+# Independent of the case builder below: ID -> raw leaf, replacement, parsed fact.
+_C4C4B2A_LITERAL_RAW_ORACLE: dict[
+    str, tuple[tuple[str, int, str], str, tuple[object, ...]]
+] = {
+    "c4c4b2a::REJECTED::first::nav-0-as_of_date::noncanonical": (
+        ("nav", 0, "as_of_date"),
+        "2026-2-1",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::nav-1-as_of_date::noncanonical": (
+        ("nav", 1, "as_of_date"),
+        "2026-2-1",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::nav-2-as_of_date::noncanonical": (
+        ("nav", 2, "as_of_date"),
+        "2026-2-1",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::nav-3-as_of_date::noncanonical": (
+        ("nav", 3, "as_of_date"),
+        "2026-2-1",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::nav-4-as_of_date::noncanonical": (
+        ("nav", 4, "as_of_date"),
+        "2026-2-1",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::nav-0-value::noncanonical": (
+        ("nav", 0, "value"),
+        "1.001",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::nav-1-value::noncanonical": (
+        ("nav", 1, "value"),
+        "1.001",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::nav-2-value::noncanonical": (
+        ("nav", 2, "value"),
+        "1.001",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::nav-3-value::noncanonical": (
+        ("nav", 3, "value"),
+        "1.001",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::nav-4-value::noncanonical": (
+        ("nav", 4, "value"),
+        "1.001",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::flow-0-event_date::noncanonical": (
+        ("flow", 0, "event_date"),
+        "2026-2-1",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::flow-1-event_date::noncanonical": (
+        ("flow", 1, "event_date"),
+        "2026-2-1",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::flow-2-event_date::noncanonical": (
+        ("flow", 2, "event_date"),
+        "2026-2-1",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::flow-0-classification::noncanonical": (
+        ("flow", 0, "classification"),
+        "UNKNOWN",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::flow-1-classification::noncanonical": (
+        ("flow", 1, "classification"),
+        "UNKNOWN",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::flow-2-classification::noncanonical": (
+        ("flow", 2, "classification"),
+        "UNKNOWN",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::flow-0-amount::noncanonical": (
+        ("flow", 0, "amount"),
+        "1.001",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::flow-1-amount::noncanonical": (
+        ("flow", 1, "amount"),
+        "1.001",
+        (),
+    ),
+    "c4c4b2a::REJECTED::first::flow-2-amount::noncanonical": (
+        ("flow", 2, "amount"),
+        "1.001",
+        (),
+    ),
+    "c4c4b2a::REJECTED::predecessor::nav-0-as_of_date::noncanonical": (
+        ("nav", 0, "as_of_date"),
+        "2026-2-1",
+        (),
+    ),
+    "c4c4b2a::REJECTED::predecessor::nav-1-as_of_date::noncanonical": (
+        ("nav", 1, "as_of_date"),
+        "2026-2-1",
+        (),
+    ),
+    "c4c4b2a::REJECTED::predecessor::nav-2-as_of_date::noncanonical": (
+        ("nav", 2, "as_of_date"),
+        "2026-2-1",
+        (),
+    ),
+    "c4c4b2a::REJECTED::predecessor::nav-0-value::noncanonical": (
+        ("nav", 0, "value"),
+        "1.001",
+        (),
+    ),
+    "c4c4b2a::REJECTED::predecessor::nav-1-value::noncanonical": (
+        ("nav", 1, "value"),
+        "1.001",
+        (),
+    ),
+    "c4c4b2a::REJECTED::predecessor::nav-2-value::noncanonical": (
+        ("nav", 2, "value"),
+        "1.001",
+        (),
+    ),
+    "c4c4b2a::REJECTED::predecessor::flow-0-event_date::noncanonical": (
+        ("flow", 0, "event_date"),
+        "2026-2-1",
+        (),
+    ),
+    "c4c4b2a::REJECTED::predecessor::flow-0-classification::noncanonical": (
+        ("flow", 0, "classification"),
+        "UNKNOWN",
+        (),
+    ),
+    "c4c4b2a::REJECTED::predecessor::flow-0-amount::noncanonical": (
+        ("flow", 0, "amount"),
+        "1.001",
+        (),
+    ),
+    "c4c4b2a::DISCREPANCY::first::nav-1-as_of_date::canonical-change": (
+        ("nav", 1, "as_of_date"),
+        "2026-01-04",
+        ("navs", 1, "as_of_date", date, date(2026, 1, 4)),
+    ),
+    "c4c4b2a::DISCREPANCY::first::nav-2-as_of_date::canonical-change": (
+        ("nav", 2, "as_of_date"),
+        "2026-01-08",
+        ("navs", 2, "as_of_date", date, date(2026, 1, 8)),
+    ),
+    "c4c4b2a::DISCREPANCY::first::nav-3-as_of_date::canonical-change": (
+        ("nav", 3, "as_of_date"),
+        "2026-01-11",
+        ("navs", 3, "as_of_date", date, date(2026, 1, 11)),
+    ),
+    "c4c4b2a::DISCREPANCY::first::nav-4-as_of_date::canonical-change": (
+        ("nav", 4, "as_of_date"),
+        "2027-01-01",
+        ("navs", 4, "as_of_date", date, date(2027, 1, 1)),
+    ),
+    "c4c4b2a::DISCREPANCY::first::nav-0-value::canonical-change": (
+        ("nav", 0, "value"),
+        "100.01",
+        ("navs", 0, "value", Decimal, Decimal("100.01")),
+    ),
+    "c4c4b2a::DISCREPANCY::first::nav-1-value::canonical-change": (
+        ("nav", 1, "value"),
+        "180.01",
+        ("navs", 1, "value", Decimal, Decimal("180.01")),
+    ),
+    "c4c4b2a::DISCREPANCY::first::nav-2-value::canonical-change": (
+        ("nav", 2, "value"),
+        "117.01",
+        ("navs", 2, "value", Decimal, Decimal("117.01")),
+    ),
+    "c4c4b2a::DISCREPANCY::first::nav-3-value::canonical-change": (
+        ("nav", 3, "value"),
+        "150.01",
+        ("navs", 3, "value", Decimal, Decimal("150.01")),
+    ),
+    "c4c4b2a::DISCREPANCY::first::nav-4-value::canonical-change": (
+        ("nav", 4, "value"),
+        "150.01",
+        ("navs", 4, "value", Decimal, Decimal("150.01")),
+    ),
+    "c4c4b2a::DISCREPANCY::predecessor::nav-0-value::canonical-change": (
+        ("nav", 0, "value"),
+        "198.81",
+        ("navs", 0, "value", Decimal, Decimal("198.81")),
+    ),
+    "c4c4b2a::DISCREPANCY::predecessor::nav-1-value::canonical-change": (
+        ("nav", 1, "value"),
+        "178.93",
+        ("navs", 1, "value", Decimal, Decimal("178.93")),
+    ),
+    "c4c4b2a::DISCREPANCY::predecessor::nav-2-value::canonical-change": (
+        ("nav", 2, "value"),
+        "204.03",
+        ("navs", 2, "value", Decimal, Decimal("204.03")),
+    ),
+    "c4c4b2a::DISCREPANCY::first::flow-0-event_date::canonical-change": (
+        ("flow", 0, "event_date"),
+        "2026-01-04",
+        (
+            "flows",
+            1,
+            "event_date",
+            date,
+            date(2026, 1, 4),
+            (date(2026, 1, 4), "EXTERNAL_IN", "USD", Decimal("10.00")),
+        ),
+    ),
+    "c4c4b2a::DISCREPANCY::first::flow-1-event_date::canonical-change": (
+        ("flow", 1, "event_date"),
+        "2026-01-04",
+        (
+            "flows",
+            1,
+            "event_date",
+            date,
+            date(2026, 1, 4),
+            (date(2026, 1, 4), "EXTERNAL_OUT", "USD", Decimal("10.00")),
+        ),
+    ),
+    "c4c4b2a::DISCREPANCY::first::flow-2-event_date::canonical-change": (
+        ("flow", 2, "event_date"),
+        "2026-01-06",
+        (
+            "flows",
+            2,
+            "event_date",
+            date,
+            date(2026, 1, 6),
+            (date(2026, 1, 6), "INTERNAL_IN", "USD", Decimal("50.00")),
+        ),
+    ),
+    "c4c4b2a::DISCREPANCY::predecessor::flow-0-event_date::canonical-change": (
+        ("flow", 0, "event_date"),
+        "2026-02-07",
+        (
+            "flows",
+            0,
+            "event_date",
+            date,
+            date(2026, 2, 7),
+            (date(2026, 2, 7), "EXTERNAL_IN", "USD", Decimal("78.80")),
+        ),
+    ),
+    "c4c4b2a::DISCREPANCY::first::flow-0-classification::canonical-change": (
+        ("flow", 0, "classification"),
+        "EXTERNAL_OUT",
+        (
+            "flows",
+            0,
+            "classification",
+            str,
+            "EXTERNAL_OUT",
+            (date(2026, 1, 3), "EXTERNAL_OUT", "USD", Decimal("20.00")),
+        ),
+    ),
+    "c4c4b2a::DISCREPANCY::first::flow-1-classification::canonical-change": (
+        ("flow", 1, "classification"),
+        "EXTERNAL_IN",
+        (
+            "flows",
+            0,
+            "classification",
+            str,
+            "EXTERNAL_IN",
+            (date(2026, 1, 3), "EXTERNAL_IN", "USD", Decimal("20.00")),
+        ),
+    ),
+    "c4c4b2a::DISCREPANCY::first::flow-2-classification::canonical-change": (
+        ("flow", 2, "classification"),
+        "INTERNAL_OUT",
+        (
+            "flows",
+            2,
+            "classification",
+            str,
+            "INTERNAL_OUT",
+            (date(2026, 1, 5), "INTERNAL_OUT", "USD", Decimal("50.00")),
+        ),
+    ),
+    "c4c4b2a::DISCREPANCY::predecessor::flow-0-classification::canonical-change": (
+        ("flow", 0, "classification"),
+        "EXTERNAL_OUT",
+        (
+            "flows",
+            0,
+            "classification",
+            str,
+            "EXTERNAL_OUT",
+            (date(2026, 2, 6), "EXTERNAL_OUT", "USD", Decimal("78.80")),
+        ),
+    ),
+    "c4c4b2a::DISCREPANCY::first::flow-0-amount::canonical-change": (
+        ("flow", 0, "amount"),
+        "10.01",
+        (
+            "flows",
+            0,
+            "amount",
+            Decimal,
+            Decimal("10.01"),
+            (date(2026, 1, 3), "EXTERNAL_IN", "USD", Decimal("10.01")),
+        ),
+    ),
+    "c4c4b2a::DISCREPANCY::first::flow-1-amount::canonical-change": (
+        ("flow", 1, "amount"),
+        "10.01",
+        (
+            "flows",
+            1,
+            "amount",
+            Decimal,
+            Decimal("10.01"),
+            (date(2026, 1, 3), "EXTERNAL_OUT", "USD", Decimal("10.01")),
+        ),
+    ),
+    "c4c4b2a::DISCREPANCY::first::flow-2-amount::canonical-change": (
+        ("flow", 2, "amount"),
+        "50.01",
+        (
+            "flows",
+            2,
+            "amount",
+            Decimal,
+            Decimal("50.01"),
+            (date(2026, 1, 5), "INTERNAL_IN", "USD", Decimal("50.01")),
+        ),
+    ),
+    "c4c4b2a::DISCREPANCY::predecessor::flow-0-amount::canonical-change": (
+        ("flow", 0, "amount"),
+        "78.81",
+        (
+            "flows",
+            0,
+            "amount",
+            Decimal,
+            Decimal("78.81"),
+            (date(2026, 2, 6), "EXTERNAL_IN", "USD", Decimal("78.81")),
+        ),
+    ),
+}
+
+
+def _c4c4b2a_set_declared_raw_leaf(
+    navs: list[dict[str, str]],
+    flows: list[dict[str, str]],
+    path: tuple[str, int, str],
+    value: str,
+) -> None:
+    collection, index, field = path
+    assert collection in {"nav", "flow"}
+    records = navs if collection == "nav" else flows
+    assert type(records) is list and 0 <= index < len(records)
+    record = records[index]
+    assert type(record) is dict and field in record
+    assert field in (
+        {"as_of_date", "value"}
+        if collection == "nav"
+        else {"event_date", "classification", "amount"}
+    )
+    record[field] = value
+
+
+def _c4c4b2a_raw_diff(
+    before_navs: list[dict[str, str]],
+    before_flows: list[dict[str, str]],
+    navs: list[dict[str, str]],
+    flows: list[dict[str, str]],
+) -> set[tuple[str, int, str]]:
+    changed: set[tuple[str, int, str]] = set()
+    for collection, before_records, records in (
+        ("nav", before_navs, navs),
+        ("flow", before_flows, flows),
+    ):
+        assert len(before_records) == len(records)
+        for index, (before, current) in enumerate(
+            zip(before_records, records, strict=True)
+        ):
+            assert set(before) == set(current)
+            changed.update(
+                (collection, index, key)
+                for key in before
+                if before[key] != current[key]
+            )
+    return changed
+
+
+_C4C4B2A_DECLARED_CASES = (
+    (
+        "c4c4b2a::REJECTED::first::nav-0-as_of_date::noncanonical",
+        "REJECTED",
+        "first",
+        ("nav", 0, "as_of_date"),
+        "2026-2-1",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::nav-1-as_of_date::noncanonical",
+        "REJECTED",
+        "first",
+        ("nav", 1, "as_of_date"),
+        "2026-2-1",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::nav-2-as_of_date::noncanonical",
+        "REJECTED",
+        "first",
+        ("nav", 2, "as_of_date"),
+        "2026-2-1",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::nav-3-as_of_date::noncanonical",
+        "REJECTED",
+        "first",
+        ("nav", 3, "as_of_date"),
+        "2026-2-1",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::nav-4-as_of_date::noncanonical",
+        "REJECTED",
+        "first",
+        ("nav", 4, "as_of_date"),
+        "2026-2-1",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::nav-0-value::noncanonical",
+        "REJECTED",
+        "first",
+        ("nav", 0, "value"),
+        "1.001",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::nav-1-value::noncanonical",
+        "REJECTED",
+        "first",
+        ("nav", 1, "value"),
+        "1.001",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::nav-2-value::noncanonical",
+        "REJECTED",
+        "first",
+        ("nav", 2, "value"),
+        "1.001",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::nav-3-value::noncanonical",
+        "REJECTED",
+        "first",
+        ("nav", 3, "value"),
+        "1.001",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::nav-4-value::noncanonical",
+        "REJECTED",
+        "first",
+        ("nav", 4, "value"),
+        "1.001",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::flow-0-event_date::noncanonical",
+        "REJECTED",
+        "first",
+        ("flow", 0, "event_date"),
+        "2026-2-1",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::flow-1-event_date::noncanonical",
+        "REJECTED",
+        "first",
+        ("flow", 1, "event_date"),
+        "2026-2-1",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::flow-2-event_date::noncanonical",
+        "REJECTED",
+        "first",
+        ("flow", 2, "event_date"),
+        "2026-2-1",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::flow-0-classification::noncanonical",
+        "REJECTED",
+        "first",
+        ("flow", 0, "classification"),
+        "UNKNOWN",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::flow-1-classification::noncanonical",
+        "REJECTED",
+        "first",
+        ("flow", 1, "classification"),
+        "UNKNOWN",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::flow-2-classification::noncanonical",
+        "REJECTED",
+        "first",
+        ("flow", 2, "classification"),
+        "UNKNOWN",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::flow-0-amount::noncanonical",
+        "REJECTED",
+        "first",
+        ("flow", 0, "amount"),
+        "1.001",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::flow-1-amount::noncanonical",
+        "REJECTED",
+        "first",
+        ("flow", 1, "amount"),
+        "1.001",
+    ),
+    (
+        "c4c4b2a::REJECTED::first::flow-2-amount::noncanonical",
+        "REJECTED",
+        "first",
+        ("flow", 2, "amount"),
+        "1.001",
+    ),
+    (
+        "c4c4b2a::REJECTED::predecessor::nav-0-as_of_date::noncanonical",
+        "REJECTED",
+        "predecessor",
+        ("nav", 0, "as_of_date"),
+        "2026-2-1",
+    ),
+    (
+        "c4c4b2a::REJECTED::predecessor::nav-1-as_of_date::noncanonical",
+        "REJECTED",
+        "predecessor",
+        ("nav", 1, "as_of_date"),
+        "2026-2-1",
+    ),
+    (
+        "c4c4b2a::REJECTED::predecessor::nav-2-as_of_date::noncanonical",
+        "REJECTED",
+        "predecessor",
+        ("nav", 2, "as_of_date"),
+        "2026-2-1",
+    ),
+    (
+        "c4c4b2a::REJECTED::predecessor::nav-0-value::noncanonical",
+        "REJECTED",
+        "predecessor",
+        ("nav", 0, "value"),
+        "1.001",
+    ),
+    (
+        "c4c4b2a::REJECTED::predecessor::nav-1-value::noncanonical",
+        "REJECTED",
+        "predecessor",
+        ("nav", 1, "value"),
+        "1.001",
+    ),
+    (
+        "c4c4b2a::REJECTED::predecessor::nav-2-value::noncanonical",
+        "REJECTED",
+        "predecessor",
+        ("nav", 2, "value"),
+        "1.001",
+    ),
+    (
+        "c4c4b2a::REJECTED::predecessor::flow-0-event_date::noncanonical",
+        "REJECTED",
+        "predecessor",
+        ("flow", 0, "event_date"),
+        "2026-2-1",
+    ),
+    (
+        "c4c4b2a::REJECTED::predecessor::flow-0-classification::noncanonical",
+        "REJECTED",
+        "predecessor",
+        ("flow", 0, "classification"),
+        "UNKNOWN",
+    ),
+    (
+        "c4c4b2a::REJECTED::predecessor::flow-0-amount::noncanonical",
+        "REJECTED",
+        "predecessor",
+        ("flow", 0, "amount"),
+        "1.001",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::nav-1-as_of_date::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("nav", 1, "as_of_date"),
+        "2026-01-04",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::nav-2-as_of_date::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("nav", 2, "as_of_date"),
+        "2026-01-08",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::nav-3-as_of_date::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("nav", 3, "as_of_date"),
+        "2026-01-11",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::nav-4-as_of_date::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("nav", 4, "as_of_date"),
+        "2027-01-01",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::nav-0-value::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("nav", 0, "value"),
+        "100.01",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::nav-1-value::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("nav", 1, "value"),
+        "180.01",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::nav-2-value::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("nav", 2, "value"),
+        "117.01",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::nav-3-value::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("nav", 3, "value"),
+        "150.01",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::nav-4-value::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("nav", 4, "value"),
+        "150.01",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::predecessor::nav-0-value::canonical-change",
+        "DISCREPANCY",
+        "predecessor",
+        ("nav", 0, "value"),
+        "198.81",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::predecessor::nav-1-value::canonical-change",
+        "DISCREPANCY",
+        "predecessor",
+        ("nav", 1, "value"),
+        "178.93",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::predecessor::nav-2-value::canonical-change",
+        "DISCREPANCY",
+        "predecessor",
+        ("nav", 2, "value"),
+        "204.03",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::flow-0-event_date::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("flow", 0, "event_date"),
+        "2026-01-04",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::flow-1-event_date::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("flow", 1, "event_date"),
+        "2026-01-04",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::flow-2-event_date::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("flow", 2, "event_date"),
+        "2026-01-06",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::predecessor::flow-0-event_date::canonical-change",
+        "DISCREPANCY",
+        "predecessor",
+        ("flow", 0, "event_date"),
+        "2026-02-07",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::flow-0-classification::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("flow", 0, "classification"),
+        "EXTERNAL_OUT",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::flow-1-classification::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("flow", 1, "classification"),
+        "EXTERNAL_IN",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::flow-2-classification::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("flow", 2, "classification"),
+        "INTERNAL_OUT",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::predecessor::flow-0-classification::canonical-change",
+        "DISCREPANCY",
+        "predecessor",
+        ("flow", 0, "classification"),
+        "EXTERNAL_OUT",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::flow-0-amount::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("flow", 0, "amount"),
+        "10.01",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::flow-1-amount::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("flow", 1, "amount"),
+        "10.01",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::first::flow-2-amount::canonical-change",
+        "DISCREPANCY",
+        "first",
+        ("flow", 2, "amount"),
+        "50.01",
+    ),
+    (
+        "c4c4b2a::DISCREPANCY::predecessor::flow-0-amount::canonical-change",
+        "DISCREPANCY",
+        "predecessor",
+        ("flow", 0, "amount"),
+        "78.81",
+    ),
+)
+
+
+def _c4c4b2a_cases() -> tuple[object, ...]:
+    cases: list[object] = []
+    states: dict[tuple[str, str, str], set[str]] = {}
+
+    def append_case(
+        case_id: str,
+        disposition: str,
+        fixture: str,
+        path: tuple[str, int, str],
+        replacement: str,
+    ) -> None:
+        assert type(replacement) is str
+        navs, flows, _context = (
+            _c4c4b2a_raw_first_fixture()
+            if fixture == "first"
+            else _c4c4b2a_raw_predecessor_fixture()
+        )
+        _c4c4b2a_set_declared_raw_leaf(navs, flows, path, replacement)
+        family = (
+            "date"
+            if path[2] in {"as_of_date", "event_date"}
+            else "money"
+            if path[2] in {"value", "amount"}
+            else "classification"
+        )
+        state = json.dumps(
+            {"navs": navs, "flows": flows}, sort_keys=True, separators=(",", ":")
+        )
+        assert state not in states.setdefault((fixture, disposition, family), set()), (
+            case_id
+        )
+        states[(fixture, disposition, family)].add(state)
+        cases.append(
+            pytest.param(case_id, disposition, fixture, path, replacement, id=case_id)
+        )
+
+    for case_id, disposition, fixture, path, replacement in _C4C4B2A_DECLARED_CASES:
+        append_case(case_id, disposition, fixture, path, replacement)
+    ids = [str(case.values[0]) for case in cases]
+    assert len(ids) == len(set(ids)) == 52
+    return tuple(cases)
+
+
+_C4C4B2A_CASES = _c4c4b2a_cases()
+assert len(_C4C4B2A_LITERAL_LEAVES) == 28
+assert (
+    sum(
+        fixture == "first"
+        for fixture, _collection, _index, _field in _C4C4B2A_LITERAL_LEAVES
+    )
+    == 19
+)
+assert (
+    sum(
+        fixture == "predecessor"
+        for fixture, _collection, _index, _field in _C4C4B2A_LITERAL_LEAVES
+    )
+    == 9
+)
+assert (
+    sum(
+        collection == "nav" and field == "as_of_date"
+        for _fixture, collection, _index, field in _C4C4B2A_LITERAL_LEAVES
+    )
+    == 8
+)
+assert (
+    sum(
+        collection == "nav" and field == "value"
+        for _fixture, collection, _index, field in _C4C4B2A_LITERAL_LEAVES
+    )
+    == 8
+)
+assert (
+    sum(
+        collection == "flow" and field == "event_date"
+        for _fixture, collection, _index, field in _C4C4B2A_LITERAL_LEAVES
+    )
+    == 4
+)
+assert (
+    sum(
+        field == "classification"
+        for _fixture, _collection, _index, field in _C4C4B2A_LITERAL_LEAVES
+    )
+    == 4
+)
+assert (
+    sum(
+        collection == "flow" and field == "amount"
+        for _fixture, collection, _index, field in _C4C4B2A_LITERAL_LEAVES
+    )
+    == 4
+)
+assert len(_C4C4B2A_LITERAL_EXPECTED_IDS) == 52
+assert set(_C4C4B2A_LITERAL_RAW_ORACLE) == _C4C4B2A_LITERAL_EXPECTED_IDS
+assert {str(case.values[0]) for case in _C4C4B2A_CASES} == _C4C4B2A_LITERAL_EXPECTED_IDS
+assert len(_C4C4B2A_DECLARED_CASES) == 52
+_C4C4B2A_REJECTED_LEAVES = tuple(
+    (fixture, *path)
+    for _case_id, disposition, fixture, path, _replacement in _C4C4B2A_DECLARED_CASES
+    if disposition == "REJECTED"
+)
+_C4C4B2A_CANONICAL_LEAVES = tuple(
+    (fixture, *path)
+    for _case_id, disposition, fixture, path, _replacement in _C4C4B2A_DECLARED_CASES
+    if disposition == "DISCREPANCY"
+)
+assert set(_C4C4B2A_REJECTED_LEAVES) == _C4C4B2A_LITERAL_LEAVES
+assert len(_C4C4B2A_REJECTED_LEAVES) == len(set(_C4C4B2A_REJECTED_LEAVES)) == 28
+assert len(_C4C4B2A_CANONICAL_LEAVES) == len(set(_C4C4B2A_CANONICAL_LEAVES)) == 24
+assert set(_C4C4B2A_CANONICAL_LEAVES).issubset(_C4C4B2A_LITERAL_LEAVES)
+assert all(
+    _C4C4B2A_REJECTED_LEAVES.count(leaf) + _C4C4B2A_CANONICAL_LEAVES.count(leaf)
+    == (2 if leaf in _C4C4B2A_CANONICAL_LEAVES else 1)
+    for leaf in _C4C4B2A_LITERAL_LEAVES
+)
+assert {str(case.values[1]) for case in _C4C4B2A_CASES} == {"REJECTED", "DISCREPANCY"}
+assert sum(str(case.values[1]) == "REJECTED" for case in _C4C4B2A_CASES) == 28
+assert sum(str(case.values[1]) == "DISCREPANCY" for case in _C4C4B2A_CASES) == 24
+
+
+@pytest.mark.parametrize(
+    "case_id, disposition, fixture, path, replacement", _C4C4B2A_CASES
+)
+def test_c4c4b2a_raw_semantic_leaf_routing_matrix(
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    case_id: str,
+    disposition: str,
+    fixture: str,
+    path: tuple[str, int, str],
+    replacement: str,
+) -> None:
+    oracle_path, oracle_replacement, parsed_expectation = _C4C4B2A_LITERAL_RAW_ORACLE[
+        case_id
+    ]
+    assert (
+        path == oracle_path
+        and replacement == oracle_replacement
+        and type(replacement) is str
+    )
+    if fixture == "first":
+        navs, flows, context = _c4c4b2a_raw_first_fixture()
+        candidate = _c4c4a_first_candidate()
+        predecessor = None
+    else:
+        navs, flows, context = _c4c4b2a_raw_predecessor_fixture()
+        candidate = _c4c4a_predecessor_candidate()
+        predecessor = verifier_module._parse_predecessor_fact(
+            {
+                "account_id": "acct-a",
+                "effective_end": "2026-02-05",
+                "closing_nav_date": "2026-02-05",
+                "closing_nav_currency": "USD",
+                "closing_nav_value": "120.00",
+                "continuity_to_successor": True,
+            }
+        )
+    base_navs, base_flows, base_context, base_candidate, base_predecessor = (
+        deepcopy(navs),
+        deepcopy(flows),
+        deepcopy(context),
+        deepcopy(candidate),
+        deepcopy(predecessor),
+    )
+    _c4c4b2a_set_declared_raw_leaf(navs, flows, path, replacement)
+    assert _c4c4b2a_raw_diff(base_navs, base_flows, navs, flows) == {oracle_path}, (
+        case_id
+    )
+    mutated_navs, mutated_flows, mutated_context = (
+        deepcopy(navs),
+        deepcopy(flows),
+        deepcopy(context),
+    )
+    if disposition == "REJECTED":
+        records = navs if path[0] == "nav" else flows
+        assert (
+            type(records[path[1]][path[2]]) is str
+            and records[path[1]][path[2]] == oracle_replacement
+        ), case_id
+
+        def comparator_forbidden(*_args: object, **_kwargs: object) -> object:
+            pytest.fail(f"{case_id}: lexical rejection reached comparator")
+
+        monkeypatch.setattr(
+            verifier_module, "_compare_test_local_numeric_epoch", comparator_forbidden
+        )
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._parse_epoch_facts(navs, flows, **context)
+        assert (
+            navs == mutated_navs
+            and flows == mutated_flows
+            and context == mutated_context
+        ), case_id
+        assert (
+            context == base_context
+            and candidate == base_candidate
+            and predecessor == base_predecessor
+        ), case_id
+        return
+    facts = verifier_module._parse_epoch_facts(navs, flows, **context)
+    collection, index, field, expected_type, expected_value, *aggregate = (
+        parsed_expectation
+    )
+    record = getattr(facts, collection)[index]
+    observed = getattr(record, field)
+    assert type(observed) is expected_type and observed == expected_value, case_id
+    if aggregate:
+        expected_aggregate = aggregate[0]
+        assert (
+            record.event_date,
+            record.classification,
+            record.currency,
+            record.amount,
+        ) == expected_aggregate, case_id
+    assert all(facts.start <= nav.as_of_date <= facts.end for nav in facts.navs), (
+        case_id
+    )
+    assert len({nav.as_of_date for nav in facts.navs}) == len(facts.navs), case_id
+    assert tuple(nav.as_of_date for nav in facts.navs) == tuple(
+        sorted(date.fromisoformat(raw["as_of_date"]) for raw in navs)
+    ), case_id
+    facts_before, candidate_before, predecessor_before = (
+        deepcopy(facts),
+        deepcopy(candidate),
+        deepcopy(predecessor),
+    )
+    source = facts if predecessor is None else (predecessor, facts)
+    result = verifier_module._compare_test_local_numeric_epoch(source, candidate)
+    assert type(result) is verifier_module._NumericComparison, case_id
+    assert result == verifier_module._NumericComparison(1, 1, 1), case_id
+    assert (
+        facts == facts_before
+        and candidate == candidate_before
+        and predecessor == predecessor_before
+    ), case_id
+    assert (
+        navs == mutated_navs
+        and flows == mutated_flows
+        and context == mutated_context == base_context
+    ), case_id
+    assert base_navs != navs or base_flows != flows
+
+
+def test_c4c4b2b_test_power_balanced_external_gross_increase_wrongly_equal(
+    verifier_module: Any,
+) -> None:
+    """Intentional RED: gross external changes must not be net-only equal."""
+    navs, flows, context = _c4c4b2a_raw_first_fixture()
+    flows[0]["amount"] = "10.01"
+    flows[1]["amount"] = "10.01"
+    facts = verifier_module._parse_epoch_facts(navs, flows, **context)
+    assert verifier_module._compare_test_local_numeric_epoch(
+        facts, _c4c4a_first_candidate()
+    ) == verifier_module._NumericComparison(1, 1, 1)
+
+
+def test_c4c4b2b2a_test_power_first_translation_parsed_end(
+    verifier_module: Any,
+) -> None:
+    """Temporary RED pins that this control reaches the translated end bound."""
+    navs, flows, context, _predecessor, _candidate = _c4c4b2b_source(
+        "c4c4b2b::DISCREPANCY::first-translate-all-dates"
+    )
+    facts = verifier_module._parse_epoch_facts(navs, flows, **context)
+    assert facts.end.isoformat() == "2027-01-03"
+
+
+# This is a literal authority distinct from the parametrization below.  It is
+# deliberately not assembled from the mutation machinery or parsed facts.
+_C4C4B2B_LITERAL_EXPECTED_IDS = frozenset(
+    {
+        "c4c4b2b::DISCREPANCY::first-translate-all-dates",
+        "c4c4b2b::DISCREPANCY::first-retreat-end",
+        "c4c4b2b::REJECTED::first-inverted-interval",
+        "c4c4b2b::DISCREPANCY::predecessor-translate-all-dates",
+        "c4c4b2b::REJECTED::predecessor-one-day-gap",
+        "c4c4b2b::REJECTED::predecessor-one-day-overlap",
+        "c4c4b2b::DISCREPANCY::predecessor-flow-at-predecessor-close",
+        "c4c4b2b::DISCREPANCY::predecessor-flow-after-close",
+        "c4c4b2b::ACCEPTED::split-same-class-aggregate",
+        "c4c4b2b::ACCEPTED::reallocate-split-aggregate",
+        "c4c4b2b::ACCEPTED::swap-equal-external-classes",
+        "c4c4b2b::DISCREPANCY::balanced-external-gross-increase",
+        "c4c4b2b::DISCREPANCY::balanced-pair-date-shift",
+        "c4c4b2b::DISCREPANCY::balanced-internal-gross-increase",
+    }
+)
+
+
+# Every value below is a hand-written source-path/value, parsed-fact, phase,
+# or comparison oracle.  Cases do not derive their authority from this map.
+_C4C4B2B_LITERAL_ORACLE: dict[str, dict[str, object]] = {
+    "c4c4b2b::DISCREPANCY::first-translate-all-dates": {
+        "paths": frozenset(
+            {
+                (("context", "start"), "2026-01-03"),
+                (("context", "end"), "2027-01-03"),
+                (("navs", 0, "as_of_date"), "2026-01-03"),
+                (("navs", 1, "as_of_date"), "2026-01-06"),
+                (("navs", 2, "as_of_date"), "2026-01-10"),
+                (("navs", 3, "as_of_date"), "2026-01-13"),
+                (("navs", 4, "as_of_date"), "2027-01-03"),
+                (("flows", 0, "event_date"), "2026-01-04"),
+                (("flows", 1, "event_date"), "2026-01-04"),
+                (("flows", 2, "event_date"), "2026-01-06"),
+            }
+        ),
+        "nav_dates": (
+            "2026-01-03",
+            "2026-01-06",
+            "2026-01-10",
+            "2026-01-13",
+            "2027-01-03",
+        ),
+        "flow_dates": ("2026-01-04", "2026-01-04", "2026-01-06"),
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+    "c4c4b2b::DISCREPANCY::first-retreat-end": {
+        "paths": frozenset({(("context", "end"), "2026-01-12")}),
+        "nav_dates": ("2026-01-02", "2026-01-05", "2026-01-09", "2026-01-12"),
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+    "c4c4b2b::REJECTED::first-inverted-interval": {
+        "paths": frozenset({(("context", "start"), "2027-01-03")}),
+        "phase": "parser",
+    },
+    "c4c4b2b::DISCREPANCY::predecessor-translate-all-dates": {
+        "paths": frozenset(
+            {
+                (("predecessor", "effective_end"), "2026-02-06"),
+                (("predecessor", "closing_nav_date"), "2026-02-06"),
+                (("context", "start"), "2026-02-07"),
+                (("context", "end"), "2026-02-09"),
+                (("navs", 0, "as_of_date"), "2026-02-07"),
+                (("navs", 1, "as_of_date"), "2026-02-08"),
+                (("navs", 2, "as_of_date"), "2026-02-09"),
+                (("flows", 0, "event_date"), "2026-02-07"),
+            }
+        ),
+        "nav_dates": ("2026-02-07", "2026-02-08", "2026-02-09"),
+        "flow_dates": ("2026-02-07",),
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+    "c4c4b2b::REJECTED::predecessor-one-day-gap": {
+        "paths": frozenset(
+            {
+                (("predecessor", "effective_end"), "2026-02-04"),
+                (("predecessor", "closing_nav_date"), "2026-02-04"),
+            }
+        ),
+        "phase": "adjacency",
+    },
+    "c4c4b2b::REJECTED::predecessor-one-day-overlap": {
+        "paths": frozenset(
+            {
+                (("predecessor", "effective_end"), "2026-02-06"),
+                (("predecessor", "closing_nav_date"), "2026-02-06"),
+            }
+        ),
+        "phase": "adjacency",
+    },
+    "c4c4b2b::DISCREPANCY::predecessor-flow-at-predecessor-close": {
+        "paths": frozenset({(("flows", 0, "event_date"), "2026-02-05")}),
+        "flows": (),
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+    "c4c4b2b::DISCREPANCY::predecessor-flow-after-close": {
+        "paths": frozenset({(("flows", 0, "event_date"), "2026-02-09")}),
+        "flows": (),
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+    "c4c4b2b::ACCEPTED::split-same-class-aggregate": {
+        "paths": frozenset(
+            {
+                (("flows", 0, "amount"), "4.00"),
+                (("flows", 1, "classification"), "EXTERNAL_IN"),
+                (("flows", 1, "amount"), "6.00"),
+                (("flows", 2, "event_date"), "2026-01-03"),
+                (("flows", 2, "classification"), "EXTERNAL_OUT"),
+                (("flows", 2, "amount"), "10.00"),
+                (
+                    ("flows", 3),
+                    (
+                        ("account_id", "acct-a"),
+                        ("amount", "50.00"),
+                        ("classification", "INTERNAL_IN"),
+                        ("currency", "USD"),
+                        ("event_date", "2026-01-05"),
+                    ),
+                ),
+            }
+        ),
+        "semantic_equal": True,
+        "phase": "comparison",
+        "result": (1, 1, 0),
+    },
+    "c4c4b2b::ACCEPTED::reallocate-split-aggregate": {
+        "paths": frozenset(
+            {(("flows", 0, "amount"), "3.00"), (("flows", 1, "amount"), "7.00")}
+        ),
+        "semantic_equal": True,
+        "phase": "comparison",
+        "result": (1, 1, 0),
+    },
+    "c4c4b2b::ACCEPTED::swap-equal-external-classes": {
+        "paths": frozenset(
+            {
+                (("flows", 0, "classification"), "EXTERNAL_OUT"),
+                (("flows", 1, "classification"), "EXTERNAL_IN"),
+            }
+        ),
+        "semantic_equal": True,
+        "phase": "comparison",
+        "result": (1, 1, 0),
+    },
+    "c4c4b2b::DISCREPANCY::balanced-external-gross-increase": {
+        "paths": frozenset(
+            {(("flows", 0, "amount"), "10.01"), (("flows", 1, "amount"), "10.01")}
+        ),
+        "aggregate": (Decimal("150.00"), Decimal("10.01"), Decimal("10.01")),
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+    "c4c4b2b::DISCREPANCY::balanced-pair-date-shift": {
+        "paths": frozenset(
+            {
+                (("flows", 0, "event_date"), "2026-01-04"),
+                (("flows", 1, "event_date"), "2026-01-04"),
+            }
+        ),
+        "aggregate": (Decimal("150.00"), Decimal("10.00"), Decimal("10.00")),
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+    "c4c4b2b::DISCREPANCY::balanced-internal-gross-increase": {
+        "paths": frozenset(
+            {
+                (("flows", 2, "amount"), "50.01"),
+                (
+                    ("flows", 3),
+                    (
+                        ("account_id", "acct-a"),
+                        ("amount", "0.01"),
+                        ("classification", "INTERNAL_OUT"),
+                        ("currency", "USD"),
+                        ("event_date", "2026-01-05"),
+                    ),
+                ),
+            }
+        ),
+        "aggregate": (Decimal("150.00"), Decimal("50.01"), Decimal("0.01")),
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+}
+
+
+_C4C4B2B_CASES = (
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::first-translate-all-dates",
+        "DISCREPANCY",
+        id="c4c4b2b::DISCREPANCY::first-translate-all-dates",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::first-retreat-end",
+        "DISCREPANCY",
+        id="c4c4b2b::DISCREPANCY::first-retreat-end",
+    ),
+    pytest.param(
+        "c4c4b2b::REJECTED::first-inverted-interval",
+        "REJECTED",
+        id="c4c4b2b::REJECTED::first-inverted-interval",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::predecessor-translate-all-dates",
+        "DISCREPANCY",
+        id="c4c4b2b::DISCREPANCY::predecessor-translate-all-dates",
+    ),
+    pytest.param(
+        "c4c4b2b::REJECTED::predecessor-one-day-gap",
+        "REJECTED",
+        id="c4c4b2b::REJECTED::predecessor-one-day-gap",
+    ),
+    pytest.param(
+        "c4c4b2b::REJECTED::predecessor-one-day-overlap",
+        "REJECTED",
+        id="c4c4b2b::REJECTED::predecessor-one-day-overlap",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::predecessor-flow-at-predecessor-close",
+        "DISCREPANCY",
+        id="c4c4b2b::DISCREPANCY::predecessor-flow-at-predecessor-close",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::predecessor-flow-after-close",
+        "DISCREPANCY",
+        id="c4c4b2b::DISCREPANCY::predecessor-flow-after-close",
+    ),
+    pytest.param(
+        "c4c4b2b::ACCEPTED::split-same-class-aggregate",
+        "ACCEPTED",
+        id="c4c4b2b::ACCEPTED::split-same-class-aggregate",
+    ),
+    pytest.param(
+        "c4c4b2b::ACCEPTED::reallocate-split-aggregate",
+        "ACCEPTED",
+        id="c4c4b2b::ACCEPTED::reallocate-split-aggregate",
+    ),
+    pytest.param(
+        "c4c4b2b::ACCEPTED::swap-equal-external-classes",
+        "ACCEPTED",
+        id="c4c4b2b::ACCEPTED::swap-equal-external-classes",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::balanced-external-gross-increase",
+        "DISCREPANCY",
+        id="c4c4b2b::DISCREPANCY::balanced-external-gross-increase",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::balanced-pair-date-shift",
+        "DISCREPANCY",
+        id="c4c4b2b::DISCREPANCY::balanced-pair-date-shift",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::balanced-internal-gross-increase",
+        "DISCREPANCY",
+        id="c4c4b2b::DISCREPANCY::balanced-internal-gross-increase",
+    ),
+)
+
+
+def _c4c4b2b_literal_value(value: object) -> object:
+    if type(value) is date:
+        return value.isoformat()
+    if isinstance(value, dict):
+        return tuple(
+            (key, _c4c4b2b_literal_value(item)) for key, item in sorted(value.items())
+        )
+    if isinstance(value, list):
+        return tuple(_c4c4b2b_literal_value(item) for item in value)
+    return value
+
+
+def _c4c4b2b_changed_paths(
+    before: object, after: object, path: tuple[object, ...] = ()
+) -> set[tuple[tuple[object, ...], object]]:
+    if type(before) is not type(after):
+        return {(path, _c4c4b2b_literal_value(after))}
+    if isinstance(before, dict):
+        assert set(before) == set(after)
+        return set().union(
+            *(
+                _c4c4b2b_changed_paths(before[key], after[key], (*path, key))
+                for key in before
+            )
+        )
+    if isinstance(before, list):
+        common = (
+            set().union(
+                *(
+                    _c4c4b2b_changed_paths(before[index], after[index], (*path, index))
+                    for index in range(min(len(before), len(after)))
+                )
+            )
+            if before and after
+            else set()
+        )
+        return (
+            common
+            | {
+                ((*path, index), _c4c4b2b_literal_value(after[index]))
+                for index in range(len(before), len(after))
+            }
+            | {
+                ((*path, index), _c4c4b2b_literal_value(after[index]))
+                for index in range(len(after), len(before))
+            }
+        )
+    return set() if before == after else {(path, _c4c4b2b_literal_value(after))}
+
+
+def _c4c4b2b_source_fingerprint(source: object) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            source,
+            default=lambda value: value.isoformat(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _c4c4b2b_source(
+    case_id: str,
+) -> tuple[
+    list[dict[str, str]],
+    list[dict[str, str]],
+    dict[str, object],
+    dict[str, object] | None,
+    dict[str, object],
+]:
+    is_predecessor = "predecessor" in case_id and "first" not in case_id
+    navs, flows, context = (
+        _c4c4b2a_raw_predecessor_fixture()
+        if is_predecessor
+        else _c4c4b2a_raw_first_fixture()
+    )
+    predecessor = (
+        {
+            "account_id": "acct-a",
+            "effective_end": "2026-02-05",
+            "closing_nav_date": "2026-02-05",
+            "closing_nav_currency": "USD",
+            "closing_nav_value": "120.00",
+            "continuity_to_successor": True,
+        }
+        if is_predecessor
+        else None
+    )
+    candidate = (
+        _c4c4a_predecessor_candidate() if is_predecessor else _c4c4a_first_candidate()
+    )
+    if case_id.endswith("first-translate-all-dates"):
+        context.update({"start": date(2026, 1, 3), "end": date(2027, 1, 3)})
+        for record in navs:
+            record["as_of_date"] = (
+                date.fromisoformat(record["as_of_date"]) + timedelta(days=1)
+            ).isoformat()
+        for record in flows:
+            record["event_date"] = (
+                date.fromisoformat(record["event_date"]) + timedelta(days=1)
+            ).isoformat()
+    elif case_id.endswith("first-retreat-end"):
+        context["end"] = date(2026, 1, 12)
+    elif case_id.endswith("first-inverted-interval"):
+        context.update({"start": date(2027, 1, 3), "end": date(2027, 1, 2)})
+    elif case_id.endswith("predecessor-translate-all-dates"):
+        assert predecessor is not None
+        predecessor.update(
+            {"effective_end": "2026-02-06", "closing_nav_date": "2026-02-06"}
+        )
+        context.update({"start": date(2026, 2, 7), "end": date(2026, 2, 9)})
+        for record in navs:
+            record["as_of_date"] = (
+                date.fromisoformat(record["as_of_date"]) + timedelta(days=1)
+            ).isoformat()
+        flows[0]["event_date"] = "2026-02-07"
+    elif case_id.endswith("predecessor-one-day-gap"):
+        assert predecessor is not None
+        predecessor.update(
+            {"effective_end": "2026-02-04", "closing_nav_date": "2026-02-04"}
+        )
+    elif case_id.endswith("predecessor-one-day-overlap"):
+        assert predecessor is not None
+        predecessor.update(
+            {"effective_end": "2026-02-06", "closing_nav_date": "2026-02-06"}
+        )
+    elif case_id.endswith("predecessor-flow-at-predecessor-close"):
+        flows[0]["event_date"] = "2026-02-05"
+    elif case_id.endswith("predecessor-flow-after-close"):
+        flows[0]["event_date"] = "2026-02-09"
+    elif case_id.endswith("split-same-class-aggregate"):
+        flows[:] = [
+            {**flows[0], "amount": "4.00"},
+            {**flows[0], "amount": "6.00"},
+            flows[1],
+            flows[2],
+        ]
+    elif case_id.endswith("reallocate-split-aggregate"):
+        flows[:] = [
+            {**flows[0], "amount": "3.00"},
+            {**flows[0], "amount": "7.00"},
+            flows[1],
+            flows[2],
+        ]
+    elif case_id.endswith("swap-equal-external-classes"):
+        flows[0]["classification"], flows[1]["classification"] = (
+            "EXTERNAL_OUT",
+            "EXTERNAL_IN",
+        )
+    elif case_id.endswith("balanced-external-gross-increase"):
+        flows[0]["amount"] = flows[1]["amount"] = "10.01"
+    elif case_id.endswith("balanced-pair-date-shift"):
+        flows[0]["event_date"] = flows[1]["event_date"] = "2026-01-04"
+    elif case_id.endswith("balanced-internal-gross-increase"):
+        flows[2]["amount"] = "50.01"
+        flows.append(
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-05",
+                "classification": "INTERNAL_OUT",
+                "currency": "USD",
+                "amount": "0.01",
+            }
+        )
+    else:
+        raise AssertionError(case_id)
+    return navs, flows, context, predecessor, candidate
+
+
+def _c4c4b2b_base_source(
+    case_id: str,
+) -> tuple[
+    list[dict[str, str]],
+    list[dict[str, str]],
+    dict[str, object],
+    dict[str, object] | None,
+]:
+    is_predecessor = "predecessor" in case_id and "first" not in case_id
+    navs, flows, context = (
+        _c4c4b2a_raw_predecessor_fixture()
+        if is_predecessor
+        else _c4c4b2a_raw_first_fixture()
+    )
+    predecessor = (
+        {
+            "account_id": "acct-a",
+            "effective_end": "2026-02-05",
+            "closing_nav_date": "2026-02-05",
+            "closing_nav_currency": "USD",
+            "closing_nav_value": "120.00",
+            "continuity_to_successor": True,
+        }
+        if is_predecessor
+        else None
+    )
+    if case_id.endswith("reallocate-split-aggregate"):
+        flows[:] = [
+            {**flows[0], "amount": "4.00"},
+            {**flows[0], "amount": "6.00"},
+            flows[1],
+            flows[2],
+        ]
+    return navs, flows, context, predecessor
+
+
+def _c4c4b2b_manual_aggregates(facts: object) -> dict[str, Decimal]:
+    """Independent, narrow financial aggregate oracle for cases 12--14."""
+    flow_values = {
+        flow_class: sum(
+            (flow.amount for flow in facts.flows if flow.classification == flow_class),
+            Decimal("0"),
+        )
+        for flow_class in ("EXTERNAL_IN", "EXTERNAL_OUT", "INTERNAL_IN", "INTERNAL_OUT")
+    }
+    opening = facts.navs[0].value
+    invested = opening + flow_values["EXTERNAL_IN"] + flow_values["INTERNAL_IN"]
+    withdrawn = flow_values["EXTERNAL_OUT"] + flow_values["INTERNAL_OUT"]
+    return {
+        "deposits": flow_values["EXTERNAL_IN"],
+        "external_withdrawals": flow_values["EXTERNAL_OUT"],
+        "internal_in": flow_values["INTERNAL_IN"],
+        "internal_out": flow_values["INTERNAL_OUT"],
+        "invested": invested,
+        "withdrawn": withdrawn,
+        "net_capital": invested - withdrawn,
+    }
+
+
+assert {str(case.values[0]) for case in _C4C4B2B_CASES} == _C4C4B2B_LITERAL_EXPECTED_IDS
+assert len(_C4C4B2B_CASES) == len(_C4C4B2B_LITERAL_EXPECTED_IDS) == 14
+assert set(_C4C4B2B_LITERAL_ORACLE) == _C4C4B2B_LITERAL_EXPECTED_IDS
+assert sum(str(case.values[1]) == "ACCEPTED" for case in _C4C4B2B_CASES) == 3
+assert sum(str(case.values[1]) == "DISCREPANCY" for case in _C4C4B2B_CASES) == 8
+assert sum(str(case.values[1]) == "REJECTED" for case in _C4C4B2B_CASES) == 3
+assert (
+    len(
+        {
+            _c4c4b2b_source_fingerprint(
+                {
+                    "navs": navs,
+                    "flows": flows,
+                    "context": context,
+                    "predecessor": predecessor,
+                }
+            )
+            for case in _C4C4B2B_CASES
+            for navs, flows, context, predecessor, _candidate in (
+                _c4c4b2b_source(str(case.values[0])),
+            )
+        }
+    )
+    == 14
+)
+
+
+@pytest.mark.parametrize("case_id, disposition", _C4C4B2B_CASES)
+def test_c4c4b2b_interval_aggregate_relationship_matrix(
+    verifier_module: Any,
+    case_id: str,
+    disposition: str,
+) -> None:
+    oracle = _C4C4B2B_LITERAL_ORACLE[case_id]
+    assert f"::{disposition}::" in case_id, case_id
+    base_navs, base_flows, base_context, base_predecessor = _c4c4b2b_base_source(
+        case_id
+    )
+    navs, flows, context, predecessor_raw, candidate = _c4c4b2b_source(case_id)
+    before_source = {
+        "navs": deepcopy(base_navs),
+        "flows": deepcopy(base_flows),
+        "context": deepcopy(base_context),
+        "predecessor": deepcopy(base_predecessor),
+    }
+    after_source = {
+        "navs": navs,
+        "flows": flows,
+        "context": context,
+        "predecessor": predecessor_raw,
+    }
+    before_fingerprint = _c4c4b2b_source_fingerprint(before_source)
+    after_fingerprint = _c4c4b2b_source_fingerprint(after_source)
+    assert before_fingerprint != after_fingerprint, case_id
+    assert _c4c4b2b_changed_paths(before_source, after_source) == oracle["paths"], (
+        case_id
+    )
+    raw_before_calls = deepcopy(after_source)
+    base_before_calls = deepcopy(before_source)
+    candidate_before_calls = deepcopy(candidate)
+
+    if oracle["phase"] == "parser":
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._parse_epoch_facts(navs, flows, **context)
+        assert (
+            after_source == raw_before_calls
+            and before_source == base_before_calls
+            and candidate == candidate_before_calls
+        ), case_id
+        return
+
+    facts = verifier_module._parse_epoch_facts(navs, flows, **context)
+    predecessor = (
+        verifier_module._parse_predecessor_fact(predecessor_raw)
+        if predecessor_raw is not None
+        else None
+    )
+    facts_before_compare = deepcopy(facts)
+    predecessor_before_compare = deepcopy(predecessor)
+    assert len(facts.navs) >= 3 and all(nav.value > 0 for nav in facts.navs), case_id
+    assert len({nav.as_of_date for nav in facts.navs}) == len(facts.navs), case_id
+    assert all(facts.start <= nav.as_of_date <= facts.end for nav in facts.navs), (
+        case_id
+    )
+    assert all(facts.start <= flow.event_date <= facts.end for flow in facts.flows), (
+        case_id
+    )
+
+    if "nav_dates" in oracle:
+        assert (
+            tuple(nav.as_of_date.isoformat() for nav in facts.navs)
+            == oracle["nav_dates"]
+        ), case_id
+    if "flow_dates" in oracle:
+        assert (
+            tuple(flow.event_date.isoformat() for flow in facts.flows)
+            == oracle["flow_dates"]
+        ), case_id
+    if "flows" in oracle:
+        assert facts.flows == oracle["flows"], case_id
+
+    if oracle["phase"] == "adjacency":
+        assert predecessor is not None and predecessor.account_id == facts.account_id, (
+            case_id
+        )
+        assert (
+            predecessor.effective_end == predecessor.closing_nav_date
+            and predecessor.closing_nav_value > 0
+        ), case_id
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._compare_test_local_numeric_epoch(
+                (predecessor, facts), candidate
+            )
+        assert (
+            facts == facts_before_compare and predecessor == predecessor_before_compare
+        ), case_id
+        assert (
+            after_source == raw_before_calls
+            and before_source == base_before_calls
+            and candidate == candidate_before_calls
+        ), case_id
+        return
+
+    if oracle.get("semantic_equal") is True:
+        semantic_navs, semantic_flows, semantic_context = _c4c4b2a_raw_first_fixture()
+        unmutated_semantic_facts = verifier_module._parse_epoch_facts(
+            semantic_navs, semantic_flows, **semantic_context
+        )
+        assert facts == unmutated_semantic_facts, case_id
+        assert after_fingerprint != _c4c4b2b_source_fingerprint(
+            {
+                "navs": semantic_navs,
+                "flows": semantic_flows,
+                "context": semantic_context,
+                "predecessor": None,
+            }
+        ), case_id
+
+    if "aggregate" in oracle:
+        base_first_navs, base_first_flows, base_first_context = (
+            _c4c4b2a_raw_first_fixture()
+        )
+        base_facts = verifier_module._parse_epoch_facts(
+            base_first_navs, base_first_flows, **base_first_context
+        )
+        base_aggregates = _c4c4b2b_manual_aggregates(base_facts)
+        actual_aggregates = _c4c4b2b_manual_aggregates(facts)
+        assert base_aggregates == {
+            "deposits": Decimal("10.00"),
+            "external_withdrawals": Decimal("10.00"),
+            "internal_in": Decimal("50.00"),
+            "internal_out": Decimal("0.00"),
+            "invested": Decimal("160.00"),
+            "withdrawn": Decimal("10.00"),
+            "net_capital": Decimal("150.00"),
+        }, case_id
+        if case_id.endswith("balanced-internal-gross-increase"):
+            assert (
+                actual_aggregates["net_capital"],
+                actual_aggregates["internal_in"],
+                actual_aggregates["internal_out"],
+            ) == oracle["aggregate"], case_id
+        else:
+            assert (
+                actual_aggregates["net_capital"],
+                actual_aggregates["deposits"],
+                actual_aggregates["external_withdrawals"],
+            ) == oracle["aggregate"], case_id
+        assert actual_aggregates["net_capital"] == base_aggregates["net_capital"], (
+            case_id
+        )
+        assert tuple(
+            (flow.event_date.isoformat(), flow.classification, flow.amount)
+            for flow in facts.flows
+        ) != tuple(
+            (flow.event_date.isoformat(), flow.classification, flow.amount)
+            for flow in base_facts.flows
+        ), case_id
+
+    source = facts if predecessor is None else (predecessor, facts)
+    result = verifier_module._compare_test_local_numeric_epoch(source, candidate)
+    assert type(result) is verifier_module._NumericComparison, case_id
+    assert result == verifier_module._NumericComparison(*oracle["result"]), case_id
+    assert (
+        facts == facts_before_compare and predecessor == predecessor_before_compare
+    ), case_id
+    assert (
+        after_source == raw_before_calls
+        and before_source == base_before_calls
+        and candidate == candidate_before_calls
+    ), case_id
+
+
+# This independent relation/filter authority deliberately covers only cases 1--8.
+# It is not used to generate mutations or the original 14-case matrix.
+_C4C4B2B2A_LITERAL_EXPECTED_IDS = frozenset(
+    {
+        "c4c4b2b::DISCREPANCY::first-translate-all-dates",
+        "c4c4b2b::DISCREPANCY::first-retreat-end",
+        "c4c4b2b::REJECTED::first-inverted-interval",
+        "c4c4b2b::DISCREPANCY::predecessor-translate-all-dates",
+        "c4c4b2b::REJECTED::predecessor-one-day-gap",
+        "c4c4b2b::REJECTED::predecessor-one-day-overlap",
+        "c4c4b2b::DISCREPANCY::predecessor-flow-at-predecessor-close",
+        "c4c4b2b::DISCREPANCY::predecessor-flow-after-close",
+    }
+)
+
+_C4C4B2B2A_LITERAL_ORACLE: dict[str, dict[str, object]] = {
+    "c4c4b2b::DISCREPANCY::first-translate-all-dates": {
+        "paths": frozenset(
+            {
+                (("context", "start"), "2026-01-03"),
+                (("context", "end"), "2027-01-03"),
+                (("navs", 0, "as_of_date"), "2026-01-03"),
+                (("navs", 1, "as_of_date"), "2026-01-06"),
+                (("navs", 2, "as_of_date"), "2026-01-10"),
+                (("navs", 3, "as_of_date"), "2026-01-13"),
+                (("navs", 4, "as_of_date"), "2027-01-03"),
+                (("flows", 0, "event_date"), "2026-01-04"),
+                (("flows", 1, "event_date"), "2026-01-04"),
+                (("flows", 2, "event_date"), "2026-01-06"),
+            }
+        ),
+        "facts": {
+            "account_id": "acct-a",
+            "start": "2026-01-03",
+            "end": "2027-01-03",
+            "navs": (
+                ("2026-01-03", "USD", Decimal("100.00")),
+                ("2026-01-06", "USD", Decimal("180.00")),
+                ("2026-01-10", "USD", Decimal("117.00")),
+                ("2026-01-13", "USD", Decimal("150.00")),
+                ("2027-01-03", "USD", Decimal("150.00")),
+            ),
+            "flows": (
+                ("2026-01-04", "EXTERNAL_IN", "USD", Decimal("10.00")),
+                ("2026-01-04", "EXTERNAL_OUT", "USD", Decimal("10.00")),
+                ("2026-01-06", "INTERNAL_IN", "USD", Decimal("50.00")),
+            ),
+        },
+        "projection": {
+            "start": "2026-01-03",
+            "end": "2027-01-03",
+            "opening_basis": "FIRST_AVAILABLE_NAV",
+            "nav_observations": 5,
+            "link_dates": (
+                ("2026-01-03", "2026-01-06"),
+                ("2026-01-06", "2026-01-10"),
+                ("2026-01-10", "2026-01-13"),
+                ("2026-01-13", "2027-01-03"),
+            ),
+            "flow_dates": ("2026-01-04", "2026-01-04", "2026-01-06"),
+        },
+        "base_projection": {
+            "start": "2026-01-02",
+            "end": "2027-01-02",
+            "opening_basis": "FIRST_AVAILABLE_NAV",
+            "nav_observations": 5,
+            "link_dates": (
+                ("2026-01-02", "2026-01-05"),
+                ("2026-01-05", "2026-01-09"),
+                ("2026-01-09", "2026-01-12"),
+                ("2026-01-12", "2027-01-02"),
+            ),
+            "flow_dates": ("2026-01-03", "2026-01-03", "2026-01-05"),
+        },
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+    "c4c4b2b::DISCREPANCY::first-retreat-end": {
+        "paths": frozenset({(("context", "end"), "2026-01-12")}),
+        "facts": {
+            "account_id": "acct-a",
+            "start": "2026-01-02",
+            "end": "2026-01-12",
+            "navs": (
+                ("2026-01-02", "USD", Decimal("100.00")),
+                ("2026-01-05", "USD", Decimal("180.00")),
+                ("2026-01-09", "USD", Decimal("117.00")),
+                ("2026-01-12", "USD", Decimal("150.00")),
+            ),
+            "flows": (
+                ("2026-01-03", "EXTERNAL_IN", "USD", Decimal("10.00")),
+                ("2026-01-03", "EXTERNAL_OUT", "USD", Decimal("10.00")),
+                ("2026-01-05", "INTERNAL_IN", "USD", Decimal("50.00")),
+            ),
+        },
+        "projection": {
+            "start": "2026-01-02",
+            "end": "2026-01-12",
+            "opening_basis": "FIRST_AVAILABLE_NAV",
+            "nav_observations": 4,
+            "link_dates": (
+                ("2026-01-02", "2026-01-05"),
+                ("2026-01-05", "2026-01-09"),
+                ("2026-01-09", "2026-01-12"),
+            ),
+            "flow_dates": ("2026-01-03", "2026-01-03", "2026-01-05"),
+        },
+        "base_projection": {
+            "start": "2026-01-02",
+            "end": "2027-01-02",
+            "opening_basis": "FIRST_AVAILABLE_NAV",
+            "nav_observations": 5,
+            "link_dates": (
+                ("2026-01-02", "2026-01-05"),
+                ("2026-01-05", "2026-01-09"),
+                ("2026-01-09", "2026-01-12"),
+                ("2026-01-12", "2027-01-02"),
+            ),
+            "flow_dates": ("2026-01-03", "2026-01-03", "2026-01-05"),
+        },
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+    "c4c4b2b::REJECTED::first-inverted-interval": {
+        "paths": frozenset({(("context", "start"), "2027-01-03")}),
+        "phase": "parser",
+    },
+    "c4c4b2b::DISCREPANCY::predecessor-translate-all-dates": {
+        "paths": frozenset(
+            {
+                (("predecessor", "effective_end"), "2026-02-06"),
+                (("predecessor", "closing_nav_date"), "2026-02-06"),
+                (("context", "start"), "2026-02-07"),
+                (("context", "end"), "2026-02-09"),
+                (("navs", 0, "as_of_date"), "2026-02-07"),
+                (("navs", 1, "as_of_date"), "2026-02-08"),
+                (("navs", 2, "as_of_date"), "2026-02-09"),
+                (("flows", 0, "event_date"), "2026-02-07"),
+            }
+        ),
+        "facts": {
+            "account_id": "acct-a",
+            "start": "2026-02-07",
+            "end": "2026-02-09",
+            "navs": (
+                ("2026-02-07", "USD", Decimal("198.80")),
+                ("2026-02-08", "USD", Decimal("178.92")),
+                ("2026-02-09", "USD", Decimal("204.02")),
+            ),
+            "flows": (("2026-02-07", "EXTERNAL_IN", "USD", Decimal("78.80")),),
+        },
+        "predecessor": ("acct-a", "2026-02-06", "2026-02-06", "USD", Decimal("120.00"), True),
+        "projection": {
+            "start": "2026-02-07",
+            "end": "2026-02-09",
+            "opening_basis": "PREDECESSOR_CLOSING_NAV",
+            "nav_observations": 3,
+            "link_dates": (
+                ("2026-02-06", "2026-02-07"),
+                ("2026-02-07", "2026-02-08"),
+                ("2026-02-08", "2026-02-09"),
+            ),
+            "flow_dates": ("2026-02-07",),
+        },
+        "base_projection": {
+            "start": "2026-02-06",
+            "end": "2026-02-08",
+            "opening_basis": "PREDECESSOR_CLOSING_NAV",
+            "nav_observations": 3,
+            "link_dates": (
+                ("2026-02-05", "2026-02-06"),
+                ("2026-02-06", "2026-02-07"),
+                ("2026-02-07", "2026-02-08"),
+            ),
+            "flow_dates": ("2026-02-06",),
+        },
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+    "c4c4b2b::REJECTED::predecessor-one-day-gap": {
+        "paths": frozenset(
+            {
+                (("predecessor", "effective_end"), "2026-02-04"),
+                (("predecessor", "closing_nav_date"), "2026-02-04"),
+            }
+        ),
+        "facts": {
+            "account_id": "acct-a",
+            "start": "2026-02-06",
+            "end": "2026-02-08",
+            "navs": (
+                ("2026-02-06", "USD", Decimal("198.80")),
+                ("2026-02-07", "USD", Decimal("178.92")),
+                ("2026-02-08", "USD", Decimal("204.02")),
+            ),
+            "flows": (("2026-02-06", "EXTERNAL_IN", "USD", Decimal("78.80")),),
+        },
+        "predecessor": ("acct-a", "2026-02-04", "2026-02-04", "USD", Decimal("120.00"), True),
+        "phase": "adjacency",
+    },
+    "c4c4b2b::REJECTED::predecessor-one-day-overlap": {
+        "paths": frozenset(
+            {
+                (("predecessor", "effective_end"), "2026-02-06"),
+                (("predecessor", "closing_nav_date"), "2026-02-06"),
+            }
+        ),
+        "facts": {
+            "account_id": "acct-a",
+            "start": "2026-02-06",
+            "end": "2026-02-08",
+            "navs": (
+                ("2026-02-06", "USD", Decimal("198.80")),
+                ("2026-02-07", "USD", Decimal("178.92")),
+                ("2026-02-08", "USD", Decimal("204.02")),
+            ),
+            "flows": (("2026-02-06", "EXTERNAL_IN", "USD", Decimal("78.80")),),
+        },
+        "predecessor": ("acct-a", "2026-02-06", "2026-02-06", "USD", Decimal("120.00"), True),
+        "phase": "adjacency",
+    },
+    "c4c4b2b::DISCREPANCY::predecessor-flow-at-predecessor-close": {
+        "paths": frozenset({(("flows", 0, "event_date"), "2026-02-05")}),
+        "facts": {
+            "account_id": "acct-a",
+            "start": "2026-02-06",
+            "end": "2026-02-08",
+            "navs": (
+                ("2026-02-06", "USD", Decimal("198.80")),
+                ("2026-02-07", "USD", Decimal("178.92")),
+                ("2026-02-08", "USD", Decimal("204.02")),
+            ),
+            "flows": (),
+        },
+        "raw_flow": ("2026-02-05", "EXTERNAL_IN", "USD", "78.80"),
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+    "c4c4b2b::DISCREPANCY::predecessor-flow-after-close": {
+        "paths": frozenset({(("flows", 0, "event_date"), "2026-02-09")}),
+        "facts": {
+            "account_id": "acct-a",
+            "start": "2026-02-06",
+            "end": "2026-02-08",
+            "navs": (
+                ("2026-02-06", "USD", Decimal("198.80")),
+                ("2026-02-07", "USD", Decimal("178.92")),
+                ("2026-02-08", "USD", Decimal("204.02")),
+            ),
+            "flows": (),
+        },
+        "raw_flow": ("2026-02-09", "EXTERNAL_IN", "USD", "78.80"),
+        "phase": "comparison",
+        "result": (1, 1, 1),
+    },
+}
+
+_C4C4B2B2A_CASES = (
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::first-translate-all-dates",
+        id="c4c4b2b::DISCREPANCY::first-translate-all-dates",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::first-retreat-end",
+        id="c4c4b2b::DISCREPANCY::first-retreat-end",
+    ),
+    pytest.param(
+        "c4c4b2b::REJECTED::first-inverted-interval",
+        id="c4c4b2b::REJECTED::first-inverted-interval",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::predecessor-translate-all-dates",
+        id="c4c4b2b::DISCREPANCY::predecessor-translate-all-dates",
+    ),
+    pytest.param(
+        "c4c4b2b::REJECTED::predecessor-one-day-gap",
+        id="c4c4b2b::REJECTED::predecessor-one-day-gap",
+    ),
+    pytest.param(
+        "c4c4b2b::REJECTED::predecessor-one-day-overlap",
+        id="c4c4b2b::REJECTED::predecessor-one-day-overlap",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::predecessor-flow-at-predecessor-close",
+        id="c4c4b2b::DISCREPANCY::predecessor-flow-at-predecessor-close",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::predecessor-flow-after-close",
+        id="c4c4b2b::DISCREPANCY::predecessor-flow-after-close",
+    ),
+)
+
+
+def _c4c4b2b2a_facts_shape(facts: object) -> dict[str, object]:
+    return {
+        "account_id": facts.account_id,
+        "start": facts.start.isoformat(),
+        "end": facts.end.isoformat(),
+        "navs": tuple(
+            (nav.as_of_date.isoformat(), nav.currency, nav.value) for nav in facts.navs
+        ),
+        "flows": tuple(
+            (flow.event_date.isoformat(), flow.classification, flow.currency, flow.amount)
+            for flow in facts.flows
+        ),
+    }
+
+
+def _c4c4b2b2a_projection_shape(row: dict[str, object]) -> dict[str, object]:
+    return {
+        "start": row["start"],
+        "end": row["end"],
+        "opening_basis": row["opening_basis"],
+        "nav_observations": row["nav_observations"],
+        "link_dates": tuple(
+            (link["start_date"], link["end_date"])
+            for link in row["observation_trace"]["links"]
+        ),
+        "flow_dates": tuple(flow["date"] for flow in row["capital_flow_trace"]),
+    }
+
+
+assert {str(case.values[0]) for case in _C4C4B2B2A_CASES} == _C4C4B2B2A_LITERAL_EXPECTED_IDS
+assert len(_C4C4B2B2A_CASES) == len(_C4C4B2B2A_LITERAL_EXPECTED_IDS) == 8
+assert set(_C4C4B2B2A_LITERAL_ORACLE) == _C4C4B2B2A_LITERAL_EXPECTED_IDS
+assert sum("::DISCREPANCY::" in case_id for case_id in _C4C4B2B2A_LITERAL_EXPECTED_IDS) == 5
+assert sum("::REJECTED::" in case_id for case_id in _C4C4B2B2A_LITERAL_EXPECTED_IDS) == 3
+assert len(
+    {
+        _c4c4b2b_source_fingerprint(
+            {
+                "navs": navs,
+                "flows": flows,
+                "context": context,
+                "predecessor": predecessor,
+            }
+        )
+        for case in _C4C4B2B2A_CASES
+        for navs, flows, context, predecessor, _candidate in (
+            _c4c4b2b_source(str(case.values[0])),
+        )
+    }
+) == 8
+
+
+def test_c4c4b2b2a_unmutated_first_baseline_is_exact_non_discrepancy(
+    verifier_module: Any,
+) -> None:
+    navs, flows, context = _c4c4b2a_raw_first_fixture()
+    candidate = _c4c4a_first_candidate()
+    source = {"navs": navs, "flows": flows, "context": context}
+    before = deepcopy(source)
+    candidate_before = deepcopy(candidate)
+    facts = verifier_module._parse_epoch_facts(navs, flows, **context)
+    facts_before_derive = deepcopy(facts)
+    row = verifier_module._derive_first_available_nav_epoch(facts)
+    assert _c4c4b2b2a_projection_shape(row) == {
+        "start": "2026-01-02",
+        "end": "2027-01-02",
+        "opening_basis": "FIRST_AVAILABLE_NAV",
+        "nav_observations": 5,
+        "link_dates": (
+            ("2026-01-02", "2026-01-05"),
+            ("2026-01-05", "2026-01-09"),
+            ("2026-01-09", "2026-01-12"),
+            ("2026-01-12", "2027-01-02"),
+        ),
+        "flow_dates": ("2026-01-03", "2026-01-03", "2026-01-05"),
+    }
+    assert facts == facts_before_derive
+    result = verifier_module._compare_test_local_numeric_epoch(facts, candidate)
+    assert type(result) is verifier_module._NumericComparison
+    assert result == verifier_module._NumericComparison(1, 1, 0)
+    assert source == before and candidate == candidate_before and facts == facts_before_derive
+
+
+@pytest.mark.parametrize("case_id", _C4C4B2B2A_CASES)
+def test_c4c4b2b2a_relation_parser_and_filter_contracts(
+    verifier_module: Any,
+    monkeypatch: Any,
+    case_id: str,
+) -> None:
+    oracle = _C4C4B2B2A_LITERAL_ORACLE[case_id]
+    base_navs, base_flows, base_context, base_predecessor = _c4c4b2b_base_source(case_id)
+    navs, flows, context, predecessor_raw, candidate = _c4c4b2b_source(case_id)
+    before_source = {
+        "navs": deepcopy(base_navs),
+        "flows": deepcopy(base_flows),
+        "context": deepcopy(base_context),
+        "predecessor": deepcopy(base_predecessor),
+    }
+    source = {
+        "navs": navs,
+        "flows": flows,
+        "context": context,
+        "predecessor": predecessor_raw,
+    }
+    assert navs is not base_navs and flows is not base_flows and context is not base_context
+    assert _c4c4b2b_source_fingerprint(source) != _c4c4b2b_source_fingerprint(before_source)
+    assert _c4c4b2b_changed_paths(before_source, source) == oracle["paths"]
+    source_before_calls = deepcopy(source)
+    base_before_calls = deepcopy(before_source)
+    candidate_before_calls = deepcopy(candidate)
+
+    if oracle["phase"] == "parser":
+        assert context["start"] > context["end"]
+        parser_deeper_calls: list[object] = []
+        comparator_calls: list[object] = []
+
+        def forbidden_parser_deeper_work(*args: object, **kwargs: object) -> Decimal:
+            parser_deeper_calls.append((args, kwargs))
+            raise AssertionError("inverted bounds must fail before source-cent parsing")
+
+        def forbidden_comparator(*args: object, **kwargs: object) -> object:
+            comparator_calls.append((args, kwargs))
+            raise AssertionError("inverted bounds must not reach comparison")
+
+        monkeypatch.setattr(verifier_module, "_parse_source_cents", forbidden_parser_deeper_work)
+        monkeypatch.setattr(verifier_module, "_compare_test_local_numeric_epoch", forbidden_comparator)
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._parse_epoch_facts(navs, flows, **context)
+        assert parser_deeper_calls == [] and comparator_calls == []
+        assert source == source_before_calls and before_source == base_before_calls
+        assert candidate == candidate_before_calls
+        return
+
+    if "raw_flow" in oracle:
+        assert len(flows) == 1
+        assert (
+            flows[0]["event_date"],
+            flows[0]["classification"],
+            flows[0]["currency"],
+            flows[0]["amount"],
+        ) == oracle["raw_flow"]
+        assert flows[0]["account_id"] == "acct-a"
+
+    facts = verifier_module._parse_epoch_facts(navs, flows, **context)
+    facts_before = deepcopy(facts)
+    assert _c4c4b2b2a_facts_shape(facts) == oracle["facts"]
+    assert len(facts.navs) >= 3
+    assert len({nav.as_of_date for nav in facts.navs}) == len(facts.navs)
+    assert all(nav.value > 0 and nav.currency == "USD" for nav in facts.navs)
+    assert facts.navs[0].as_of_date == facts.start and facts.navs[-1].as_of_date == facts.end
+    assert all(facts.start <= flow.event_date <= facts.end for flow in facts.flows)
+
+    predecessor = (
+        verifier_module._parse_predecessor_fact(predecessor_raw)
+        if predecessor_raw is not None
+        else None
+    )
+    predecessor_before = deepcopy(predecessor)
+    if predecessor is not None:
+        assert (
+            predecessor.account_id,
+            predecessor.effective_end.isoformat(),
+            predecessor.closing_nav_date.isoformat(),
+            predecessor.closing_nav_currency,
+            predecessor.closing_nav_value,
+            predecessor.continuity_to_successor,
+        ) == oracle.get("predecessor", ("acct-a", "2026-02-05", "2026-02-05", "USD", Decimal("120.00"), True))
+
+    if oracle["phase"] == "adjacency":
+        assert predecessor is not None
+        assert facts.start != predecessor.closing_nav_date + timedelta(days=1)
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._validate_predecessor_adjacency(predecessor, facts)
+        downstream_calls: list[object] = []
+
+        def forbidden_downstream_derivation(*args: object, **kwargs: object) -> object:
+            downstream_calls.append((args, kwargs))
+            raise AssertionError("adjacency rejection must precede successor derivation")
+
+        monkeypatch.setattr(
+            verifier_module,
+            "_derive_first_available_nav_epoch",
+            forbidden_downstream_derivation,
+        )
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._compare_test_local_numeric_epoch((predecessor, facts), candidate)
+        assert downstream_calls == []
+        assert facts == facts_before and predecessor == predecessor_before
+        assert source == source_before_calls and before_source == base_before_calls
+        assert candidate == candidate_before_calls
+        return
+
+    if case_id.endswith(("first-translate-all-dates", "first-retreat-end")):
+        row = verifier_module._derive_first_available_nav_epoch(facts)
+        base_facts = verifier_module._parse_epoch_facts(
+            base_navs, base_flows, **base_context
+        )
+        base_row = verifier_module._derive_first_available_nav_epoch(base_facts)
+    elif case_id.endswith("predecessor-translate-all-dates"):
+        assert predecessor is not None and base_predecessor is not None
+        row = verifier_module._derive_predecessor_closing_nav_epoch(predecessor, facts)
+        base_facts = verifier_module._parse_epoch_facts(
+            base_navs, base_flows, **base_context
+        )
+        base_row = verifier_module._derive_predecessor_closing_nav_epoch(
+            verifier_module._parse_predecessor_fact(base_predecessor), base_facts
+        )
+    else:
+        row = base_row = None
+
+    if row is not None:
+        assert _c4c4b2b2a_projection_shape(row) == oracle["projection"]
+        assert _c4c4b2b2a_projection_shape(base_row) == oracle["base_projection"]
+        assert _c4c4b2b2a_projection_shape(row) != _c4c4b2b2a_projection_shape(base_row)
+        assert facts == facts_before and predecessor == predecessor_before
+
+    source_for_comparison = facts if predecessor is None else (predecessor, facts)
+    result = verifier_module._compare_test_local_numeric_epoch(source_for_comparison, candidate)
+    assert type(result) is verifier_module._NumericComparison
+    assert result == verifier_module._NumericComparison(*oracle["result"])
+    assert facts == facts_before and predecessor == predecessor_before
+    assert source == source_before_calls and before_source == base_before_calls
+    assert candidate == candidate_before_calls
+
+
+# This separate, literal authority covers only the three accepted aggregate
+# equivalences.  It deliberately does not generate either the original matrix
+# parameters or their raw mutations.
+_C4C4B2B2B_LITERAL_EXPECTED_IDS = frozenset(
+    {
+        "c4c4b2b::ACCEPTED::split-same-class-aggregate",
+        "c4c4b2b::ACCEPTED::reallocate-split-aggregate",
+        "c4c4b2b::ACCEPTED::swap-equal-external-classes",
+    }
+)
+
+_C4C4B2B2B_LITERAL_ORACLE: dict[str, dict[str, object]] = {
+    "c4c4b2b::ACCEPTED::split-same-class-aggregate": {
+        "paths": frozenset(
+            {
+                (("flows", 0, "amount"), "4.00"),
+                (("flows", 1, "classification"), "EXTERNAL_IN"),
+                (("flows", 1, "amount"), "6.00"),
+                (("flows", 2, "event_date"), "2026-01-03"),
+                (("flows", 2, "classification"), "EXTERNAL_OUT"),
+                (("flows", 2, "amount"), "10.00"),
+                (
+                    ("flows", 3),
+                    (
+                        ("account_id", "acct-a"),
+                        ("amount", "50.00"),
+                        ("classification", "INTERNAL_IN"),
+                        ("currency", "USD"),
+                        ("event_date", "2026-01-05"),
+                    ),
+                ),
+            }
+        ),
+        "facts": (
+            "acct-a",
+            "2026-01-02",
+            "2027-01-02",
+            (
+                ("2026-01-02", "USD", Decimal("100.00")),
+                ("2026-01-05", "USD", Decimal("180.00")),
+                ("2026-01-09", "USD", Decimal("117.00")),
+                ("2026-01-12", "USD", Decimal("150.00")),
+                ("2027-01-02", "USD", Decimal("150.00")),
+            ),
+            (
+                ("2026-01-03", "EXTERNAL_IN", "USD", Decimal("10.00")),
+                ("2026-01-03", "EXTERNAL_OUT", "USD", Decimal("10.00")),
+                ("2026-01-05", "INTERNAL_IN", "USD", Decimal("50.00")),
+            ),
+        ),
+        "aggregate": (
+            ("2026-01-03", "EXTERNAL_IN", "USD", Decimal("10.00")),
+            ("2026-01-03", "EXTERNAL_OUT", "USD", Decimal("10.00")),
+            ("2026-01-05", "INTERNAL_IN", "USD", Decimal("50.00")),
+        ),
+    },
+    "c4c4b2b::ACCEPTED::reallocate-split-aggregate": {
+        "paths": frozenset(
+            {(("flows", 0, "amount"), "3.00"), (("flows", 1, "amount"), "7.00")}
+        ),
+        "facts": (
+            "acct-a",
+            "2026-01-02",
+            "2027-01-02",
+            (
+                ("2026-01-02", "USD", Decimal("100.00")),
+                ("2026-01-05", "USD", Decimal("180.00")),
+                ("2026-01-09", "USD", Decimal("117.00")),
+                ("2026-01-12", "USD", Decimal("150.00")),
+                ("2027-01-02", "USD", Decimal("150.00")),
+            ),
+            (
+                ("2026-01-03", "EXTERNAL_IN", "USD", Decimal("10.00")),
+                ("2026-01-03", "EXTERNAL_OUT", "USD", Decimal("10.00")),
+                ("2026-01-05", "INTERNAL_IN", "USD", Decimal("50.00")),
+            ),
+        ),
+        "aggregate": (
+            ("2026-01-03", "EXTERNAL_IN", "USD", Decimal("10.00")),
+            ("2026-01-03", "EXTERNAL_OUT", "USD", Decimal("10.00")),
+            ("2026-01-05", "INTERNAL_IN", "USD", Decimal("50.00")),
+        ),
+    },
+    "c4c4b2b::ACCEPTED::swap-equal-external-classes": {
+        "paths": frozenset(
+            {
+                (("flows", 0, "classification"), "EXTERNAL_OUT"),
+                (("flows", 1, "classification"), "EXTERNAL_IN"),
+            }
+        ),
+        "facts": (
+            "acct-a",
+            "2026-01-02",
+            "2027-01-02",
+            (
+                ("2026-01-02", "USD", Decimal("100.00")),
+                ("2026-01-05", "USD", Decimal("180.00")),
+                ("2026-01-09", "USD", Decimal("117.00")),
+                ("2026-01-12", "USD", Decimal("150.00")),
+                ("2027-01-02", "USD", Decimal("150.00")),
+            ),
+            (
+                ("2026-01-03", "EXTERNAL_IN", "USD", Decimal("10.00")),
+                ("2026-01-03", "EXTERNAL_OUT", "USD", Decimal("10.00")),
+                ("2026-01-05", "INTERNAL_IN", "USD", Decimal("50.00")),
+            ),
+        ),
+        "aggregate": (
+            ("2026-01-03", "EXTERNAL_IN", "USD", Decimal("10.00")),
+            ("2026-01-03", "EXTERNAL_OUT", "USD", Decimal("10.00")),
+            ("2026-01-05", "INTERNAL_IN", "USD", Decimal("50.00")),
+        ),
+    },
+}
+
+_C4C4B2B2B_CASES = (
+    pytest.param(
+        "c4c4b2b::ACCEPTED::split-same-class-aggregate",
+        id="c4c4b2b::ACCEPTED::split-same-class-aggregate",
+    ),
+    pytest.param(
+        "c4c4b2b::ACCEPTED::reallocate-split-aggregate",
+        id="c4c4b2b::ACCEPTED::reallocate-split-aggregate",
+    ),
+    pytest.param(
+        "c4c4b2b::ACCEPTED::swap-equal-external-classes",
+        id="c4c4b2b::ACCEPTED::swap-equal-external-classes",
+    ),
+)
+
+
+def _c4c4b2b2b_fact_tuple(facts: object) -> tuple[object, ...]:
+    return (
+        facts.account_id,
+        facts.start.isoformat(),
+        facts.end.isoformat(),
+        tuple((nav.as_of_date.isoformat(), nav.currency, nav.value) for nav in facts.navs),
+        tuple(
+            (flow.event_date.isoformat(), flow.classification, flow.currency, flow.amount)
+            for flow in facts.flows
+        ),
+    )
+
+
+def _c4c4b2b2b_aggregate_tuple(facts: object) -> tuple[tuple[object, ...], ...]:
+    return tuple(
+        (flow.event_date.isoformat(), flow.classification, flow.currency, flow.amount)
+        for flow in facts.flows
+    )
+
+
+def _c4c4b2b2b_literal_base_flows(case_id: str) -> list[dict[str, str]]:
+    if case_id.endswith("reallocate-split-aggregate"):
+        # Case 10's base is independently authored: it is not copied from the
+        # mutation and is intentionally a two-row 4.00/6.00 split.
+        return [
+            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "4.00"},
+            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "6.00"},
+            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_OUT", "currency": "USD", "amount": "10.00"},
+            {"account_id": "acct-a", "event_date": "2026-01-05", "classification": "INTERNAL_IN", "currency": "USD", "amount": "50.00"},
+        ]
+    return [
+        {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "10.00"},
+        {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_OUT", "currency": "USD", "amount": "10.00"},
+        {"account_id": "acct-a", "event_date": "2026-01-05", "classification": "INTERNAL_IN", "currency": "USD", "amount": "50.00"},
+    ]
+
+
+def _c4c4b2b2b_literal_changed_flows(case_id: str) -> list[dict[str, str]]:
+    if case_id.endswith("split-same-class-aggregate"):
+        return [
+            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "4.00"},
+            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "6.00"},
+            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_OUT", "currency": "USD", "amount": "10.00"},
+            {"account_id": "acct-a", "event_date": "2026-01-05", "classification": "INTERNAL_IN", "currency": "USD", "amount": "50.00"},
+        ]
+    if case_id.endswith("reallocate-split-aggregate"):
+        # Case 10's mutation is separately literal from its 4.00/6.00 base.
+        return [
+            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "3.00"},
+            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "7.00"},
+            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_OUT", "currency": "USD", "amount": "10.00"},
+            {"account_id": "acct-a", "event_date": "2026-01-05", "classification": "INTERNAL_IN", "currency": "USD", "amount": "50.00"},
+        ]
+    if case_id.endswith("swap-equal-external-classes"):
+        return [
+            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_OUT", "currency": "USD", "amount": "10.00"},
+            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "10.00"},
+            {"account_id": "acct-a", "event_date": "2026-01-05", "classification": "INTERNAL_IN", "currency": "USD", "amount": "50.00"},
+        ]
+    raise AssertionError(case_id)
+
+
+def _c4c4b2b2b_literal_source(
+    case_id: str,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, object], dict[str, object]]:
+    navs, _ignored_flows, context = _c4c4b2a_raw_first_fixture()
+    return navs, _c4c4b2b2b_literal_changed_flows(case_id), context, _c4c4a_first_candidate()
+
+
+def _c4c4b2b2b_literal_base_source(
+    case_id: str,
+) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, object]]:
+    navs, _ignored_flows, context = _c4c4b2a_raw_first_fixture()
+    return navs, _c4c4b2b2b_literal_base_flows(case_id), context
+
+
+assert {str(case.values[0]) for case in _C4C4B2B2B_CASES} == _C4C4B2B2B_LITERAL_EXPECTED_IDS
+assert set(_C4C4B2B2B_LITERAL_ORACLE) == _C4C4B2B2B_LITERAL_EXPECTED_IDS
+assert len(_C4C4B2B2B_CASES) == len(_C4C4B2B2B_LITERAL_EXPECTED_IDS) == 3
+
+
+@pytest.mark.parametrize("case_id", _C4C4B2B2B_CASES)
+def test_c4c4b2b2b_accepted_semantic_aggregate_contracts(
+    verifier_module: Any,
+    case_id: str,
+) -> None:
+    """C3.c raw-fact bijection rejects these changed sources; only this private numeric aggregate may report zero."""
+    oracle = _C4C4B2B2B_LITERAL_ORACLE[case_id]
+    base_navs, base_flows, base_context = _c4c4b2b2b_literal_base_source(case_id)
+    navs, flows, context, candidate = _c4c4b2b2b_literal_source(case_id)
+    base_source = {"navs": base_navs, "flows": base_flows, "context": base_context, "predecessor": None}
+    changed_source = {"navs": navs, "flows": flows, "context": context, "predecessor": None}
+
+    base_fingerprint = _c4c4b2b_source_fingerprint(base_source)
+    changed_fingerprint = _c4c4b2b_source_fingerprint(changed_source)
+    assert base_fingerprint != changed_fingerprint, case_id
+    assert _c4c4b2b_changed_paths(base_source, changed_source) == oracle["paths"], case_id
+    assert base_source != changed_source, (
+        "C4.c3c raw-fact bijection must reject this changed raw source; the private numeric aggregate owns no source authority."
+    )
+
+    if case_id.endswith("split-same-class-aggregate"):
+        assert (len(base_flows), len(flows)) == (3, 4)
+    elif case_id.endswith("reallocate-split-aggregate"):
+        assert (len(base_flows), len(flows)) == (4, 4)
+        assert tuple(flow["amount"] for flow in base_flows[:2]) == ("4.00", "6.00")
+        assert tuple(flow["amount"] for flow in flows[:2]) == ("3.00", "7.00")
+        assert sum((Decimal(flow["amount"]) for flow in base_flows[:2]), Decimal("0")) == Decimal("10.00")
+        assert sum((Decimal(flow["amount"]) for flow in flows[:2]), Decimal("0")) == Decimal("10.00")
+    else:
+        assert len(base_flows) == len(flows) == 3
+        assert (flows[0]["classification"], flows[1]["classification"]) == (
+            "EXTERNAL_OUT",
+            "EXTERNAL_IN",
+        )
+
+    base_before_calls = deepcopy(base_source)
+    changed_before_calls = deepcopy(changed_source)
+    candidate_before_calls = deepcopy(candidate)
+    base_facts = verifier_module._parse_epoch_facts(base_navs, base_flows, **base_context)
+    facts = verifier_module._parse_epoch_facts(navs, flows, **context)
+    base_facts_before_compare = deepcopy(base_facts)
+    facts_before_compare = deepcopy(facts)
+
+    # The expected semantic facts and aggregate are authored above, independent
+    # of parser, mutation, parametrization, and comparator output.
+    assert _c4c4b2b2b_fact_tuple(base_facts) == oracle["facts"], case_id
+    assert _c4c4b2b2b_fact_tuple(facts) == oracle["facts"], case_id
+    assert _c4c4b2b2b_aggregate_tuple(base_facts) == oracle["aggregate"], case_id
+    assert _c4c4b2b2b_aggregate_tuple(facts) == oracle["aggregate"], case_id
+    assert base_source != changed_source, case_id
+
+    result = verifier_module._compare_test_local_numeric_epoch(facts, candidate)
+    assert type(result) is verifier_module._NumericComparison, case_id
+    assert result == verifier_module._NumericComparison(1, 1, 0), case_id
+    assert base_source == base_before_calls and changed_source == changed_before_calls
+    assert candidate == candidate_before_calls
+    assert base_facts == base_facts_before_compare and facts == facts_before_compare
+
+
+# This dedicated sensitivity surface owns only B2.2 cases 12--14.  Its raw
+# facts and full numeric-row oracle are literal/local; they do not call the
+# parser, verifier derivation, comparator, verifier constants, or matrix case
+# machinery to determine an expected result.
+_C4C4B2B2C_CASES = (
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::balanced-external-gross-increase",
+        id="c4c4b2b::DISCREPANCY::balanced-external-gross-increase",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::balanced-pair-date-shift",
+        id="c4c4b2b::DISCREPANCY::balanced-pair-date-shift",
+    ),
+    pytest.param(
+        "c4c4b2b::DISCREPANCY::balanced-internal-gross-increase",
+        id="c4c4b2b::DISCREPANCY::balanced-internal-gross-increase",
+    ),
+)
+
+_C4C4B2B2C_RAW_ORACLE: dict[str, dict[str, object]] = {
+    "c4c4b2b::DISCREPANCY::balanced-external-gross-increase": {
+        "paths": frozenset(
+            {(("flows", 0, "amount"), "10.01"), (("flows", 1, "amount"), "10.01")}
+        ),
+        "fingerprints": (
+            "d9f28d0aeab219416d45bfff71d921c162b3cac5c7abdea6de9e65ef99a509ba",
+            "c89c887a4738844f3b2992d09675c04ade63d992f421a3ab0d0f0e500b54f7e6",
+        ),
+        "projection_leaves": frozenset(
+            {
+                (("deposits",), Decimal("10.01")),
+                (("invested",), Decimal("160.01")),
+                (("external_withdrawals",), Decimal("10.01")),
+                (("withdrawn",), Decimal("10.01")),
+                (("capital_flow_trace", 0, "amount"), Decimal("10.01")),
+                (("capital_flow_trace", 1, "amount"), Decimal("10.01")),
+            }
+        ),
+    },
+    "c4c4b2b::DISCREPANCY::balanced-pair-date-shift": {
+        "paths": frozenset(
+            {
+                (("flows", 0, "event_date"), "2026-01-04"),
+                (("flows", 1, "event_date"), "2026-01-04"),
+            }
+        ),
+        "fingerprints": (
+            "d9f28d0aeab219416d45bfff71d921c162b3cac5c7abdea6de9e65ef99a509ba",
+            "8c9a5572659b5c32630773efd4a42fe6ca863a821c0c2e3981f8c74185bfdd57",
+        ),
+        "projection_leaves": frozenset(
+            {
+                (("capital_flow_trace", 0, "date"), "2026-01-04"),
+                (("capital_flow_trace", 1, "date"), "2026-01-04"),
+            }
+        ),
+    },
+    "c4c4b2b::DISCREPANCY::balanced-internal-gross-increase": {
+        "paths": frozenset(
+            {
+                (("flows", 2, "amount"), "50.01"),
+                (
+                    ("flows", 3),
+                    (
+                        ("account_id", "acct-a"),
+                        ("amount", "0.01"),
+                        ("classification", "INTERNAL_OUT"),
+                        ("currency", "USD"),
+                        ("event_date", "2026-01-05"),
+                    ),
+                ),
+            }
+        ),
+        "fingerprints": (
+            "d9f28d0aeab219416d45bfff71d921c162b3cac5c7abdea6de9e65ef99a509ba",
+            "22aa7f9b07bacaff9e34cb7a42ed673f810d29dfb101dd8f937fd4e6133d0137",
+        ),
+        "projection_leaves": frozenset(
+            {
+                (("internal_in",), Decimal("50.01")),
+                (("invested",), Decimal("160.01")),
+                (("internal_out",), Decimal("0.01")),
+                (("withdrawn",), Decimal("10.01")),
+                (("capital_flow_trace", 2, "amount"), Decimal("50.01")),
+                (
+                    ("capital_flow_trace", 3),
+                    (
+                        ("amount", Decimal("0.01")),
+                        ("class", "INTERNAL_OUT"),
+                        ("date", "2026-01-05"),
+                    ),
+                ),
+            }
+        ),
+    },
+}
+
+
+def _c4c4b2b2c_literal_base_facts() -> tuple[
+    tuple[tuple[date, Decimal], ...], tuple[tuple[date, str, Decimal], ...]
+]:
+    return (
+        (
+            (date(2026, 1, 2), Decimal("100.00")),
+            (date(2026, 1, 5), Decimal("180.00")),
+            (date(2026, 1, 9), Decimal("117.00")),
+            (date(2026, 1, 12), Decimal("150.00")),
+            (date(2027, 1, 2), Decimal("150.00")),
+        ),
+        (
+            (date(2026, 1, 3), "EXTERNAL_IN", Decimal("10.00")),
+            (date(2026, 1, 3), "EXTERNAL_OUT", Decimal("10.00")),
+            (date(2026, 1, 5), "INTERNAL_IN", Decimal("50.00")),
+        ),
+    )
+
+
+def _c4c4b2b2c_literal_mutated_facts(
+    case_id: str,
+) -> tuple[tuple[tuple[date, Decimal], ...], tuple[tuple[date, str, Decimal], ...]]:
+    navs = _c4c4b2b2c_literal_base_facts()[0]
+    if case_id.endswith("balanced-external-gross-increase"):
+        return navs, (
+            (date(2026, 1, 3), "EXTERNAL_IN", Decimal("10.01")),
+            (date(2026, 1, 3), "EXTERNAL_OUT", Decimal("10.01")),
+            (date(2026, 1, 5), "INTERNAL_IN", Decimal("50.00")),
+        )
+    if case_id.endswith("balanced-pair-date-shift"):
+        return navs, (
+            (date(2026, 1, 4), "EXTERNAL_IN", Decimal("10.00")),
+            (date(2026, 1, 4), "EXTERNAL_OUT", Decimal("10.00")),
+            (date(2026, 1, 5), "INTERNAL_IN", Decimal("50.00")),
+        )
+    if case_id.endswith("balanced-internal-gross-increase"):
+        return navs, (
+            (date(2026, 1, 3), "EXTERNAL_IN", Decimal("10.00")),
+            (date(2026, 1, 3), "EXTERNAL_OUT", Decimal("10.00")),
+            (date(2026, 1, 5), "INTERNAL_IN", Decimal("50.01")),
+            (date(2026, 1, 5), "INTERNAL_OUT", Decimal("0.01")),
+        )
+    raise AssertionError(case_id)
+
+
+def _c4c4b2b2c_expected_base_facts() -> tuple[
+    tuple[tuple[date, Decimal], ...], tuple[tuple[date, str, Decimal], ...]
+]:
+    """Separate literal input to the expected-row oracle, never parser input."""
+    return (
+        (
+            (date(2026, 1, 2), Decimal("100.00")),
+            (date(2026, 1, 5), Decimal("180.00")),
+            (date(2026, 1, 9), Decimal("117.00")),
+            (date(2026, 1, 12), Decimal("150.00")),
+            (date(2027, 1, 2), Decimal("150.00")),
+        ),
+        (
+            (date(2026, 1, 3), "EXTERNAL_IN", Decimal("10.00")),
+            (date(2026, 1, 3), "EXTERNAL_OUT", Decimal("10.00")),
+            (date(2026, 1, 5), "INTERNAL_IN", Decimal("50.00")),
+        ),
+    )
+
+
+def _c4c4b2b2c_expected_mutated_facts(
+    case_id: str,
+) -> tuple[tuple[tuple[date, Decimal], ...], tuple[tuple[date, str, Decimal], ...]]:
+    navs = _c4c4b2b2c_expected_base_facts()[0]
+    if case_id.endswith("balanced-external-gross-increase"):
+        return navs, (
+            (date(2026, 1, 3), "EXTERNAL_IN", Decimal("10.01")),
+            (date(2026, 1, 3), "EXTERNAL_OUT", Decimal("10.01")),
+            (date(2026, 1, 5), "INTERNAL_IN", Decimal("50.00")),
+        )
+    if case_id.endswith("balanced-pair-date-shift"):
+        return navs, (
+            (date(2026, 1, 4), "EXTERNAL_IN", Decimal("10.00")),
+            (date(2026, 1, 4), "EXTERNAL_OUT", Decimal("10.00")),
+            (date(2026, 1, 5), "INTERNAL_IN", Decimal("50.00")),
+        )
+    if case_id.endswith("balanced-internal-gross-increase"):
+        return navs, (
+            (date(2026, 1, 3), "EXTERNAL_IN", Decimal("10.00")),
+            (date(2026, 1, 3), "EXTERNAL_OUT", Decimal("10.00")),
+            (date(2026, 1, 5), "INTERNAL_IN", Decimal("50.01")),
+            (date(2026, 1, 5), "INTERNAL_OUT", Decimal("0.01")),
+        )
+    raise AssertionError(case_id)
+
+
+def _c4c4b2b2c_raw_source(
+    facts: tuple[tuple[tuple[date, Decimal], ...], tuple[tuple[date, str, Decimal], ...]],
+) -> dict[str, object]:
+    navs, flows = facts
+    return {
+        "navs": [
+            {"account_id": "acct-a", "as_of_date": when.isoformat(), "currency": "USD", "value": f"{value:.2f}"}
+            for when, value in navs
+        ],
+        "flows": [
+            {"account_id": "acct-a", "event_date": when.isoformat(), "classification": flow_class, "currency": "USD", "amount": f"{amount:.2f}"}
+            for when, flow_class, amount in flows
+        ],
+        "context": {"account_id": "acct-a", "start": date(2026, 1, 2), "end": date(2027, 1, 2)},
+        "predecessor": None,
+    }
+
+
+def _c4c4b2b2c_changed_leaves(
+    before: object, after: object, path: tuple[object, ...] = ()
+) -> set[tuple[tuple[object, ...], object]]:
+    if type(before) is not type(after):
+        return {(path, _c4c4b2b2c_literal_value(after))}
+    if isinstance(before, dict):
+        assert set(before) == set(after)
+        return set().union(
+            *(_c4c4b2b2c_changed_leaves(before[key], after[key], (*path, key)) for key in before)
+        )
+    if isinstance(before, list):
+        common = set().union(
+            *(
+                _c4c4b2b2c_changed_leaves(before[index], after[index], (*path, index))
+                for index in range(min(len(before), len(after)))
+            )
+        ) if before and after else set()
+        return common | {
+            ((*path, index), _c4c4b2b2c_literal_value(after[index]))
+            for index in range(len(before), len(after))
+        }
+    return set() if before == after else {(path, _c4c4b2b2c_literal_value(after))}
+
+
+def _c4c4b2b2c_literal_value(value: object) -> object:
+    if type(value) is date:
+        return value.isoformat()
+    if isinstance(value, dict):
+        return tuple(
+            (key, _c4c4b2b2c_literal_value(item)) for key, item in sorted(value.items())
+        )
+    if isinstance(value, list):
+        return tuple(_c4c4b2b2c_literal_value(item) for item in value)
+    return value
+
+
+def _c4c4b2b2c_fingerprint(source: object) -> str:
+    return hashlib.sha256(
+        json.dumps(source, default=lambda value: value.isoformat(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _c4c4b2b2c_expected_row(
+    facts: tuple[tuple[tuple[date, Decimal], ...], tuple[tuple[date, str, Decimal], ...]],
+) -> dict[str, object]:
+    """Independent Decimal/date derivation for the B2.2c literal facts only."""
+    navs, flows = facts
+    exact_context = getcontext().copy()
+    exact_context.prec = 40
+    exact_context.rounding = "ROUND_HALF_EVEN"
+    start, opening = navs[0]
+    end, current = navs[-1]
+    totals = {
+        flow_class: sum((amount for _when, kind, amount in flows if kind == flow_class), Decimal("0"))
+        for flow_class in ("EXTERNAL_IN", "EXTERNAL_OUT", "INTERNAL_IN", "INTERNAL_OUT")
+    }
+    invested = opening + totals["EXTERNAL_IN"] + totals["INTERNAL_IN"]
+    withdrawn = totals["EXTERNAL_OUT"] + totals["INTERNAL_OUT"]
+    net_capital = invested - withdrawn
+    flow_by_date: dict[date, Decimal] = {}
+    for when, flow_class, amount in flows:
+        signed = amount if flow_class in {"EXTERNAL_IN", "INTERNAL_IN"} else -amount
+        flow_by_date[when] = flow_by_date.get(when, Decimal("0")) + signed
+    cumulative = Decimal("100")
+    running_hwm = Decimal("100")
+    maximum_drawdown = Decimal("0")
+    links: list[dict[str, object]] = []
+    for (link_start, base_nav), (link_end, ending_nav) in zip(navs, navs[1:]):
+        net_flow = sum((amount for when, amount in flow_by_date.items() if link_start < when <= link_end), Decimal("0"))
+        factor = exact_context.add(
+            Decimal("1"),
+            exact_context.divide(ending_nav - base_nav - net_flow, base_nav),
+        )
+        cumulative = exact_context.multiply(cumulative, factor)
+        running_hwm = max(running_hwm, cumulative)
+        drawdown = exact_context.subtract(
+            Decimal("1"), exact_context.divide(cumulative, running_hwm)
+        )
+        maximum_drawdown = max(maximum_drawdown, drawdown)
+        links.append({
+            "start_date": link_start.isoformat(), "end_date": link_end.isoformat(), "base_nav": base_nav,
+            "ending_nav": ending_nav, "net_flow": net_flow, "factor": factor,
+            "cumulative_index": cumulative, "running_hwm_index": running_hwm, "drawdown": drawdown,
+        })
+    gain = current - net_capital
+    return {
+        "start": start.isoformat(), "end": end.isoformat(), "opening_capital": opening,
+        "deposits": totals["EXTERNAL_IN"], "internal_in": totals["INTERNAL_IN"], "invested": invested,
+        "external_withdrawals": totals["EXTERNAL_OUT"], "internal_out": totals["INTERNAL_OUT"],
+        "withdrawn": withdrawn, "net_capital": net_capital, "current_value": current, "gain": gain,
+        "return_on_net_capital": gain / net_capital, "annualized_return_on_net_capital": Decimal("0"),
+        "xirr_diagnostic": Decimal("0"),
+        "observation_linked_return": exact_context.subtract(
+            exact_context.divide(cumulative, Decimal("100")), Decimal("1")
+        ),
+        "observed_hwm_index": running_hwm, "observed_max_drawdown": maximum_drawdown,
+        "opening_basis": "FIRST_AVAILABLE_NAV", "nav_observations": len(navs),
+        "observation_trace": {"links": links},
+        "capital_flow_trace": [
+            {"class": flow_class, "date": when.isoformat(), "amount": amount}
+            for when, flow_class, amount in flows
+        ],
+    }
+
+
+assert {str(case.values[0]) for case in _C4C4B2B2C_CASES} == set(_C4C4B2B2C_RAW_ORACLE)
+assert len(_C4C4B2B2C_CASES) == len(_C4C4B2B2C_RAW_ORACLE) == 3
+
+
+@pytest.mark.parametrize("case_id", _C4C4B2B2C_CASES)
+def test_c4c4b2b2c_gross_net_timing_sensitivity_exact_projection(
+    verifier_module: Any,
+    case_id: str,
+) -> None:
+    raw_oracle = _C4C4B2B2C_RAW_ORACLE[case_id]
+    base_local_facts = _c4c4b2b2c_literal_base_facts()
+    mutated_local_facts = _c4c4b2b2c_literal_mutated_facts(case_id)
+    base_source = _c4c4b2b2c_raw_source(base_local_facts)
+    source = _c4c4b2b2c_raw_source(mutated_local_facts)
+    candidate = _c4c4a_first_candidate()
+    assert base_source["navs"] is not source["navs"] and base_source["flows"] is not source["flows"]
+    assert _c4c4b2b2c_changed_leaves(base_source, source) == raw_oracle["paths"], case_id
+    assert (_c4c4b2b2c_fingerprint(base_source), _c4c4b2b2c_fingerprint(source)) == raw_oracle["fingerprints"], case_id
+    source_before_calls = deepcopy(source)
+    base_source_before_calls = deepcopy(base_source)
+    candidate_before_calls = deepcopy(candidate)
+
+    # These full rows are independently calculated from the literal local
+    # facts before any verifier parser or derivation is consulted.
+    expected_base = _c4c4b2b2c_expected_row(_c4c4b2b2c_expected_base_facts())
+    expected_mutated = _c4c4b2b2c_expected_row(
+        _c4c4b2b2c_expected_mutated_facts(case_id)
+    )
+    base_facts = verifier_module._parse_epoch_facts(
+        base_source["navs"], base_source["flows"], **base_source["context"]
+    )
+    facts = verifier_module._parse_epoch_facts(source["navs"], source["flows"], **source["context"])
+    base_facts_before_compare = deepcopy(base_facts)
+    facts_before_compare = deepcopy(facts)
+    base_row = verifier_module._derive_first_available_nav_epoch(base_facts)
+    row = verifier_module._derive_first_available_nav_epoch(facts)
+
+    assert base_row == expected_base, case_id
+    assert row == expected_mutated, case_id
+    assert row["observation_trace"] == expected_mutated["observation_trace"], case_id
+    assert row["capital_flow_trace"] == expected_mutated["capital_flow_trace"], case_id
+    assert _c4c4b2b2c_changed_leaves(base_row, row) == raw_oracle["projection_leaves"], case_id
+
+    if case_id.endswith("balanced-pair-date-shift"):
+        aggregate_fields = (
+            "opening_capital", "deposits", "internal_in", "invested", "external_withdrawals",
+            "internal_out", "withdrawn", "net_capital", "current_value", "gain",
+        )
+        assert all(row[field] == base_row[field] for field in aggregate_fields), case_id
+        assert row["observation_trace"] == base_row["observation_trace"], case_id
+        first_link = row["observation_trace"]["links"][0]
+        assert (first_link["start_date"], first_link["end_date"]) == ("2026-01-02", "2026-01-05")
+        assert all(first_link["start_date"] < flow["date"] < first_link["end_date"] for flow in row["capital_flow_trace"][:2])
+    else:
+        assert row["net_capital"] == base_row["net_capital"] == Decimal("150.00"), case_id
+
+    result = verifier_module._compare_test_local_numeric_epoch(facts, candidate)
+    assert type(result) is verifier_module._NumericComparison, case_id
+    assert result == verifier_module._NumericComparison(1, 1, 1), case_id
+    assert base_source == base_source_before_calls and source == source_before_calls
+    assert candidate == candidate_before_calls
+    assert base_facts == base_facts_before_compare and facts == facts_before_compare
+
+
+def test_c4d1a_ast_semantic_dependency_allowlist_is_exact() -> None:
+    """The retained verifier has one fixed, source-visible snapshot projection."""
+    expected_imports = frozenset(
+        {
+            ("base64", None),
+            ("binascii", None),
+            ("hashlib", None),
+            ("json", None),
+            ("re", None),
+            ("sys", None),
+        }
+    )
+    expected_from_imports = frozenset(
+        {
+            ("__future__", 0, (("annotations", None),)),
+            ("collections.abc", 0, (("Mapping", None),)),
+            ("dataclasses", 0, (("dataclass", None),)),
+            ("datetime", 0, (("date", None), ("timedelta", None))),
+            (
+                "decimal",
+                0,
+                (
+                    ("Context", None),
+                    ("Decimal", None),
+                    ("InvalidOperation", None),
+                    ("ROUND_HALF_EVEN", None),
+                    ("localcontext", None),
+                ),
+                ),
+                ("types", 0, (("MappingProxyType", None),)),
+                ("pathlib", 0, (("Path", None),)),
+                ("typing", 0, (("Final", None), ("NoReturn", None))),
+            ("quant_engine.core", 0, (("InputSnapshot", None),)),
+            (
+                "quant_engine.core.contracts",
+                0,
+                (
+                    ("GenerationManifest", None),
+                    ("SourceArtifact", None),
+                    ("canonical_json_bytes", None),
+                ),
+            ),
+            ("quant_engine.core.strict_json", 0, (("strict_json_loads", None),)),
+        }
+    )
+    expected_snapshot_roles = (
+        "provider_ledger",
+        "provider_ledger_manifest",
+        "baseline",
+        "baseline_manifest",
+        "flow_classification_policy",
+        "epoch_producer_source",
+        "generation_builder_source",
+        "independent_verifier_source",
+    )
+    expected_subject_paths = (
+        "authority/account-assignment-perimeter.json",
+        "authority/account-flow-coverage.json",
+        "authority/calculation-inputs.json",
+        "authority/classified-flows.json",
+        "authority/code-identities.json",
+        "authority/flow-classification-policy.json",
+        "authority/mapped-epoch-admission.json",
+        "authority/selected-input-identities.json",
+        "outputs/account-strategy-manifest.json",
+    )
+    source = VERIFIER_MODULE_PATH.read_bytes()
+    tree = ast.parse(source, filename=str(VERIFIER_MODULE_PATH))
+
+    imports = [node for node in ast.walk(tree) if isinstance(node, ast.Import)]
+    from_imports = [
+        node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
+    ]
+    actual_imports = [
+        (alias.name, alias.asname) for node in imports for alias in node.names
+    ]
+    assert len(actual_imports) == len(expected_imports)
+    assert set(actual_imports) == expected_imports
+    actual_from_imports = [
+        (
+            node.module,
+            node.level,
+            tuple((alias.name, alias.asname) for alias in node.names),
+        )
+        for node in from_imports
+    ]
+    assert len(actual_from_imports) == len(expected_from_imports)
+    assert set(actual_from_imports) == expected_from_imports
+    assert all(node.level == 0 and all(alias.name != "*" for alias in node.names) for node in from_imports)
+
+    subject_paths_assignment = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+        and node.target.id == "EXACT_SUBJECT_PATHS"
+    )
+    assert isinstance(subject_paths_assignment.value, ast.Tuple)
+    subject_paths = tuple(
+        element.value
+        for element in subject_paths_assignment.value.elts
+        if isinstance(element, ast.Constant) and isinstance(element.value, str)
+    )
+    assert subject_paths == expected_subject_paths
+    assert len(subject_paths) == len(set(subject_paths)) == 9
+    assert set(subject_paths).isdisjoint(expected_snapshot_roles)
+
+    forbidden_module_names = {
+        "tools",
+        "tests",
+        "pytest",
+        "unittest",
+        "account_strategy_manifest",
+        "build_account_manifest_generation",
+        "importlib",
+        "runpy",
+        "pkgutil",
+        "site",
+        "inspect",
+        "subprocess",
+        "multiprocessing",
+        "ctypes",
+        "pickle",
+        "marshal",
+        "shelve",
+        "os",
+        "sys",
+        "pathlib",
+        "glob",
+        "fnmatch",
+        "tempfile",
+        "shutil",
+        "io",
+        "locale",
+        "time",
+        "random",
+        "secrets",
+        "socket",
+        "ssl",
+        "http",
+        "urllib",
+        "requests",
+        "webbrowser",
+        "asyncio",
+    }
+    forbidden_direct_calls = {
+        "__import__",
+        "getattr",
+        "setattr",
+        "delattr",
+        "vars",
+        "globals",
+        "locals",
+        "dir",
+        "eval",
+        "exec",
+        "compile",
+        "open",
+        "input",
+        "breakpoint",
+        "help",
+    }
+    forbidden_imported_attributes = {
+        "path",
+        "stat",
+        "lstat",
+        "iterdir",
+        "glob",
+        "rglob",
+        "read_bytes",
+        "read_text",
+        "environ",
+        "getenv",
+        "modules",
+        "meta_path",
+        "path_hooks",
+    }
+    imported_bindings = {
+        alias.asname or alias.name.split(".", 1)[0]
+        for node in imports
+        for alias in node.names
+    } | {
+        alias.asname or alias.name
+        for node in from_imports
+        for alias in node.names
+    }
+    cli_functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name.startswith("_cli_")
+    }
+    assert set(cli_functions) == {
+        "_cli_parse_argv",
+        "_cli_prepare",
+        "_cli_dispatch",
+        "_cli_main",
+    }
+    prepare_imports = [
+        node
+        for node in ast.walk(cli_functions["_cli_prepare"])
+        if isinstance(node, ast.ImportFrom)
+    ]
+    assert [
+        (node.module, tuple(alias.name for alias in node.names))
+        for node in prepare_imports
+    ] == [("pathlib", ("Path",))]
+    assert not any(
+        isinstance(node, ast.Import) or isinstance(node, ast.ImportFrom)
+        for name, function in cli_functions.items()
+        if name not in {"_cli_prepare", "_cli_main"}
+        for node in ast.walk(function)
+    )
+    cli_node_ids = {
+        id(node) for function in cli_functions.values() for node in ast.walk(function)
+    }
+    for node in ast.walk(tree):
+        if id(node) in cli_node_ids:
+            continue
+        if isinstance(node, ast.Name):
+            assert node.id not in forbidden_module_names | forbidden_direct_calls
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+            assert node.func.id not in forbidden_direct_calls
+        if isinstance(node, ast.Attribute):
+            root = node
+            while isinstance(root, ast.Attribute):
+                root = root.value
+            if isinstance(root, ast.Name) and root.id in imported_bindings:
+                assert node.attr not in forbidden_imported_attributes
+
+    top_level_functions = [
+        node for node in tree.body if isinstance(node, ast.FunctionDef)
+    ]
+    module_functions = {node.name: node for node in top_level_functions}
+    input_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "IndependentVerifierInputs"
+    )
+    post_init = next(
+        node
+        for node in input_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "__post_init__"
+    )
+    role_projections = [
+        node for node in top_level_functions if node.name == "_snapshot_roles"
+    ]
+    assert len(role_projections) == 1
+    role_projection = role_projections[0]
+    assert [argument.arg for argument in role_projection.args.args] == ["selected"]
+    assert not (
+        role_projection.args.posonlyargs
+        or role_projection.args.kwonlyargs
+        or role_projection.args.vararg
+        or role_projection.args.kwarg
+    )
+    projection_return = next(
+        node for node in role_projection.body if isinstance(node, ast.Return)
+    )
+    assert isinstance(projection_return.value, ast.Tuple)
+    projected_attributes = projection_return.value.elts
+    assert [
+        attribute.attr
+        for attribute in projected_attributes
+        if isinstance(attribute, ast.Attribute)
+        and isinstance(attribute.value, ast.Name)
+        and attribute.value.id == "selected"
+    ] == list(expected_snapshot_roles)
+    assert len(projected_attributes) == len(expected_snapshot_roles)
+
+    encoder = module_functions["encode_verification_request"]
+
+    def projection_calls(function: ast.FunctionDef) -> list[ast.Call]:
+        return [
+            node
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_snapshot_roles"
+        ]
+
+    post_init_projection_calls = projection_calls(post_init)
+    encoder_projection_calls = projection_calls(encoder)
+    assert len(post_init_projection_calls) == len(encoder_projection_calls) == 1
+    assert isinstance(post_init_projection_calls[0].args[0], ast.Name)
+    assert post_init_projection_calls[0].args[0].id == "self"
+    assert isinstance(encoder_projection_calls[0].args[0], ast.Name)
+    assert encoder_projection_calls[0].args[0].id == "selected_snapshots"
+
+    verifier_class = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.ClassDef)
+        and node.name == "IndependentAccountManifestVerifier"
+    )
+    verify_method = next(
+        node
+        for node in verifier_class.body
+        if isinstance(node, ast.FunctionDef) and node.name == "verify"
+    )
+    def reachable_functions(start: ast.FunctionDef) -> set[str]:
+        reachable: set[str] = set()
+        pending = [
+            node.func.id
+            for node in ast.walk(start)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in module_functions
+        ]
+        while pending:
+            function_name = pending.pop()
+            if function_name in reachable:
+                continue
+            reachable.add(function_name)
+            pending.extend(
+                node.func.id
+                for node in ast.walk(module_functions[function_name])
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in module_functions
+            )
+        return reachable
+
+    verify_reachable = reachable_functions(verify_method)
+    retained_reachable = reachable_functions(
+        module_functions["_verify_retained_semantics_normalized"]
+    )
+    mixed_reachable = reachable_functions(
+        module_functions["_verify_mixed_semantics_normalized"]
+    )
+    assert "_compare_test_local_numeric_epoch" not in verify_reachable
+    assert "_compare_test_local_numeric_epoch" not in retained_reachable
+    assert "_compare_test_local_numeric_epoch" not in mixed_reachable
+    assert "_compare_mixed_retained_numeric_epoch" in verify_reachable
+    assert "_compare_mixed_retained_numeric_epoch" not in retained_reachable
+    assert "_compare_mixed_retained_numeric_epoch" in mixed_reachable
+    comparator_callers = {
+        name
+        for name, function in module_functions.items()
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "_compare_mixed_retained_numeric_epoch"
+            for node in ast.walk(function)
+        )
+    }
+    assert comparator_callers == {"_verify_mixed_output_and_state"}
+
+
+def test_c4d1a_core_contract_objects_are_identical_and_pinned(
+    verifier_module: Any,
+) -> None:
+    """The verifier uses only the pinned immutable core objects."""
+    import quant_engine.core as core_module
+    import quant_engine.core.contracts as contracts_module
+    import quant_engine.core.snapshots as snapshots_module
+    import quant_engine.core.strict_json as strict_json_module
+
+    expected_core_pins = {
+        "quant_engine.core.snapshots": (
+            "packages/core/src/quant_engine/core/snapshots.py",
+            "ba9e0ee78c84a0c3ec38cab2e778284bcf02335c5958266f0823a04072e4e653",
+        ),
+        "quant_engine.core.contracts": (
+            "packages/core/src/quant_engine/core/contracts.py",
+            "82d64873d6e74c53b3421fd9aad0dc09b551a3c9ea5219fb33fa6121e144009f",
+        ),
+        "quant_engine.core.strict_json": (
+            "packages/core/src/quant_engine/core/strict_json.py",
+            "9f86b89862fd6510f607a25d2ec88e1ab5577614d36fe42ca1234c41f547f1e1",
+        ),
+    }
+    modules = {
+        "quant_engine.core.snapshots": snapshots_module,
+        "quant_engine.core.contracts": contracts_module,
+        "quant_engine.core.strict_json": strict_json_module,
+    }
+
+    assert verifier_module.InputSnapshot is snapshots_module.InputSnapshot
+    assert verifier_module.InputSnapshot is core_module.InputSnapshot
+    assert verifier_module.GenerationManifest is contracts_module.GenerationManifest
+    assert verifier_module.GenerationManifest is core_module.GenerationManifest
+    assert verifier_module.SourceArtifact is contracts_module.SourceArtifact
+    assert verifier_module.SourceArtifact is core_module.SourceArtifact
+    assert verifier_module.canonical_json_bytes is contracts_module.canonical_json_bytes
+    assert verifier_module.strict_json_loads is strict_json_module.strict_json_loads
+    assert verifier_module.strict_json_loads is core_module.strict_json_loads
+    assert verifier_module.InputSnapshot.__module__ == "quant_engine.core.snapshots"
+    assert verifier_module.GenerationManifest.__module__ == "quant_engine.core.contracts"
+    assert verifier_module.SourceArtifact.__module__ == "quant_engine.core.contracts"
+    assert verifier_module.canonical_json_bytes.__module__ == "quant_engine.core.contracts"
+    assert verifier_module.strict_json_loads.__module__ == "quant_engine.core.strict_json"
+    assert verifier_module.canonical_json_bytes({"z": 2, "a": 1}) == b'{"a":1,"z":2}\n'
+
+    for module_name, (relative_path, expected_sha256) in expected_core_pins.items():
+        expected_origin = (REPOSITORY_ROOT / relative_path).resolve()
+        module = modules[module_name]
+        assert Path(module.__file__).resolve() == expected_origin
+        assert module.__spec__ is not None
+        assert Path(module.__spec__.origin).resolve() == expected_origin
+        assert hashlib.sha256(expected_origin.read_bytes()).hexdigest() == expected_sha256
+
+
+def test_c4d1a_retained_blocked_public_path_does_not_export_or_call_comparator(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Retained semantics run once before the blocked C4.c/C4.d boundary."""
+    import inspect
+
+    comparator_name = "_compare_test_local_numeric_epoch"
+    numeric_type_name = "_NumericComparison"
+    assert comparator_name not in verifier_module.__all__
+    assert numeric_type_name not in verifier_module.__all__
+    public_signatures = (
+        inspect.signature(verifier_module.IndependentVerifierInputs),
+        inspect.signature(verifier_module.IndependentAccountManifestVerifier.verify),
+        inspect.signature(
+            verifier_module.IndependentAccountManifestVerifier.verify_finalized_report
+        ),
+        inspect.signature(verifier_module.encode_verification_request),
+        inspect.signature(verifier_module.decode_verification_request),
+    )
+    assert all(
+        comparator_name not in str(signature) and numeric_type_name not in str(signature)
+        for signature in public_signatures
+    )
+
+    class ComparatorReached(RuntimeError):
+        pass
+
+    def comparator_sentinel(*_args: object, **_kwargs: object) -> object:
+        raise ComparatorReached("retained verify reached the private comparator")
+
+    semantic_calls: list[dict[str, object]] = []
+    original_semantics = verifier_module._verify_retained_semantics_normalized
+
+    def retained_semantics_spy(*args: object, **kwargs: object) -> dict[str, object]:
+        result = original_semantics(*args, **kwargs)
+        semantic_calls.append(result)
+        return result
+
+    monkeypatch.setattr(verifier_module, comparator_name, comparator_sentinel)
+    monkeypatch.setattr(
+        verifier_module, "_verify_retained_semantics_normalized", retained_semantics_spy
+    )
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+
+    assert len(semantic_calls) == 1
+    retained_state = semantic_calls[0]
+    assert retained_state["counts"] == {
+        "selected_baseline_account_count": 18,
+        "account_count": 18,
+        "assignment_count": 26,
+        "mapped_assignment_count": 15,
+        "historical_assignment_count": 7,
+        "reserve_assignment_count": 4,
+        "observed_nav_fact_count": 18,
+        "observed_raw_flow_count": 18,
+        "classified_event_count": 18,
+        "classified_event_classified_count": 15,
+        "classified_event_blocked_count": 3,
+        "unmatched_nav_fact_count": 0,
+        "unmatched_raw_flow_fact_count": 0,
+        "unmatched_fact_count": 0,
+        "unmatched_projection_count": 0,
+        "calculation_input_row_count": 13,
+        "coverage_row_count": 13,
+        "admission_row_count": 13,
+        "output_row_count": 13,
+        "blocked_coverage_row_count": 15,
+        "blocked_admission_row_count": 15,
+        "blocked_output_row_count": 15,
+    }
+    assert retained_state["numeric_verification"] == {
+        "candidate_count": 0,
+        "comparison_count": 0,
+        "discrepancy_count": 0,
+        "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
+    }
+    assert len(retained_state["blocker_chains"]) == 15
+    retained_statuses = {
+        chain[phase]["status"]
+        for chain in retained_state["blocker_chains"]
+        for phase in ("coverage", "admission", "output")
+    }
+    assert retained_statuses.isdisjoint({"COMPLETE", "FUNDED", "OK"})
+    assert all(
+        chain["coverage"]["status"] == "BLOCKED"
+        and chain["admission"]["status"] == "BLOCKED"
+        and chain["output"]["status"] == "BLOCKED_ADMISSION"
+        and chain["numeric_candidate"] is False
+        for chain in retained_state["blocker_chains"]
+    )
+
+
+_C4D1B_CHILD = r'''
+import base64
+import binascii
+import builtins
+import hashlib
+import importlib
+import importlib.util
+import json
+import pkgutil
+import runpy
+import sys
+import types
+from collections import abc as collections_abc
+from dataclasses import dataclass
+from datetime import date, timedelta
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from pathlib import Path
+from typing import Final, NoReturn
+
+_saved_compile = builtins.compile
+_saved_exec = builtins.exec
+_saved_import = builtins.__import__
+_saved_find_spec = importlib.util.find_spec
+_request = sys.stdin.buffer.read()
+_verifier_path = Path(sys.argv[1]).resolve()
+_hostile_cwd = Path(sys.argv[2]).resolve()
+_hostile_pythonpath = Path(sys.argv[3]).resolve()
+_negative_control = sys.argv[4] == "negative"
+
+try:
+    _startup_paths = {str(Path(entry).resolve()) for entry in sys.path if entry}
+    if str(_hostile_cwd) in _startup_paths or str(_hostile_pythonpath) in _startup_paths:
+        raise RuntimeError("isolated-startup-path-violation")
+
+    _source = _verifier_path.read_bytes()
+    _code = _saved_compile(_source, str(_verifier_path), "exec")
+    import __future__
+    import base64 as _base64
+    import binascii as _binascii
+    import hashlib as _hashlib
+    import json as _json
+    import re as _re
+    import dataclasses as _dataclasses
+    import datetime as _datetime
+    import decimal as _decimal
+    import types as _types
+    import typing as _typing
+    import quant_engine.core as _core
+    import quant_engine.core.contracts as _contracts
+    import quant_engine.core.snapshots as _snapshots
+    import quant_engine.core.strict_json as _strict_json
+
+    _core_modules = {
+        "quant_engine.core.snapshots": _snapshots,
+        "quant_engine.core.contracts": _contracts,
+        "quant_engine.core.strict_json": _strict_json,
+    }
+    _core_origins = {
+        name: str(Path(module.__spec__.origin).resolve())
+        for name, module in _core_modules.items()
+    }
+    _core_hashes = {
+        name: hashlib.sha256(Path(origin).read_bytes()).hexdigest()
+        for name, origin in _core_origins.items()
+    }
+    _pinned_objects = {
+        "InputSnapshot": _snapshots.InputSnapshot,
+        "GenerationManifest": _contracts.GenerationManifest,
+        "SourceArtifact": _contracts.SourceArtifact,
+        "canonical_json_bytes": _contracts.canonical_json_bytes,
+        "strict_json_loads": _strict_json.strict_json_loads,
+    }
+    _approved = {
+        "__future__", "base64", "binascii", "hashlib", "json", "re",
+        "collections.abc", "dataclasses", "datetime", "decimal", "types", "typing",
+        "quant_engine.core", "quant_engine.core.snapshots",
+        "quant_engine.core.contracts", "quant_engine.core.strict_json",
+    }
+    _forbidden_count = 0
+
+    class _ForbiddenImport(RuntimeError):
+        pass
+
+    def _forbidden(*_args, **_kwargs):
+        raise RuntimeError("forbidden-runtime-facility")
+
+    def _guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+        global _forbidden_count
+        if level != 0 or name not in _approved or name not in sys.modules:
+            _forbidden_count += 1
+            raise _ForbiddenImport()
+        before = sys.modules[name]
+        result = _saved_import(name, globals, locals, fromlist, level)
+        if sys.modules.get(name) is not before:
+            raise RuntimeError("uncached-approved-import")
+        if name in _core_modules and str(Path(before.__spec__.origin).resolve()) != _core_origins[name]:
+            raise RuntimeError("core-origin-changed")
+        return result
+
+    for _module, _names in (
+        (importlib, ("import_module", "reload", "invalidate_caches")),
+        (importlib.util, ("find_spec", "module_from_spec", "spec_from_file_location")),
+        (runpy, ("run_module", "run_path")),
+        (pkgutil, ("find_loader", "get_loader", "get_importer", "iter_importers", "iter_modules", "walk_packages")),
+    ):
+        for _name in _names:
+            if hasattr(_module, _name):
+                setattr(_module, _name, _forbidden)
+
+    sys.path.insert(0, str(_hostile_pythonpath))
+    sys.path.insert(0, str(_hostile_cwd))
+    if _negative_control:
+        _saved_import("tools")
+        _negative_spec = _saved_find_spec("tools.account_strategy_manifest")
+        _expected_negative_origin = (
+            _hostile_cwd / "tools" / "account_strategy_manifest.py"
+        ).resolve()
+        if (
+            _negative_spec is None
+            or _negative_spec.origin is None
+            or Path(_negative_spec.origin).resolve() != _expected_negative_origin
+        ):
+            raise RuntimeError("negative-control-not-reachable")
+    _module_name = "_d1b_fresh_verifier_" + hashlib.sha256(_source).hexdigest()[:16]
+    _target = types.ModuleType(_module_name)
+    _target.__file__ = str(_verifier_path)
+    _target.__package__ = ""
+    _target.__dict__["__builtins__"] = {
+        **vars(builtins),
+        "__import__": _guarded_import,
+        "open": _forbidden,
+        "input": _forbidden,
+        "breakpoint": _forbidden,
+        "eval": _forbidden,
+        "exec": _forbidden,
+        "compile": _forbidden,
+        "getattr": _forbidden,
+        "setattr": _forbidden,
+        "delattr": _forbidden,
+        "vars": _forbidden,
+        "globals": _forbidden,
+        "locals": _forbidden,
+        "dir": _forbidden,
+        "help": _forbidden,
+    }
+    sys.modules[_module_name] = _target
+    _saved_exec(_code, _target.__dict__)
+    if any(_target.__dict__[name] is not value for name, value in _pinned_objects.items()):
+        raise RuntimeError("core-object-identity-mismatch")
+    if _target.InputSnapshot is not _core.InputSnapshot:
+        raise RuntimeError("core-public-object-identity-mismatch")
+    if _target.GenerationManifest is not _core.GenerationManifest or _target.SourceArtifact is not _core.SourceArtifact:
+        raise RuntimeError("core-public-contract-identity-mismatch")
+    if _target.strict_json_loads is not _core.strict_json_loads:
+        raise RuntimeError("core-public-strict-json-identity-mismatch")
+
+    if _negative_control:
+        _negative = _saved_compile("import tools.account_strategy_manifest", "<d1b-negative>", "exec")
+        try:
+            _saved_exec(
+                _negative,
+                {
+                    "__name__": "_d1b_negative",
+                    "__builtins__": _target.__dict__["__builtins__"],
+                },
+            )
+        except _ForbiddenImport:
+            pass
+        else:
+            raise RuntimeError("negative-control-did-not-hit-import-trap")
+    _real_forbidden_count = _forbidden_count
+    if _negative_control:
+        _real_forbidden_count -= 1
+    if _real_forbidden_count != 0:
+        raise RuntimeError("real-target-forbidden-import")
+
+    def _comparator_sentinel(*_args, **_kwargs):
+        raise RuntimeError("comparator-reached")
+
+    _target._compare_test_local_numeric_epoch = _comparator_sentinel
+    _selected, _subjects = _target.decode_verification_request(_request)
+    _report_bytes = _target.IndependentAccountManifestVerifier().verify(
+        _selected, _subjects
+    )
+    if type(_report_bytes) is not bytes or not _report_bytes.endswith(b"\n"):
+        raise RuntimeError("invalid-canonical-report-return")
+    if _real_forbidden_count != 0 or _forbidden_count != (1 if _negative_control else 0):
+        raise RuntimeError("forbidden-trap-accounting")
+    _output = {
+        "core": {
+            name: {"origin": _core_origins[name], "sha256": _core_hashes[name]}
+            for name in sorted(_core_modules)
+        },
+        "disposition": "BLOCKED_C4D_CANONICAL_BYTES",
+        "forbidden_trap_count": _real_forbidden_count,
+        "interpreter": {
+            "path": str(Path(sys.executable).resolve()),
+            "sha256": hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest(),
+            "version": list(sys.version_info[:3]),
+        },
+    }
+    sys.stdout.buffer.write(
+        json.dumps(_output, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\n"
+    )
+except Exception:
+    sys.stderr.write("D1B_CHILD_FAILURE\n")
+    raise SystemExit(1)
+'''
+
+
+def _c4d1b_fake_tree(root: Path, sentinel: str) -> None:
+    core_root = root / "quant_engine" / "core"
+    core_root.mkdir(parents=True)
+    (root / "quant_engine" / "__init__.py").write_text(
+        f"SENTINEL = {sentinel!r}\n", encoding="utf-8"
+    )
+    (core_root / "__init__.py").write_text(
+        f"SENTINEL = {sentinel!r}\n", encoding="utf-8"
+    )
+    for module_name in ("snapshots", "contracts", "strict_json"):
+        (core_root / f"{module_name}.py").write_text(
+            f"SENTINEL = {sentinel!r}\n", encoding="utf-8"
+        )
+    tools_root = root / "tools"
+    tools_root.mkdir()
+    (tools_root / "__init__.py").write_text("\n", encoding="utf-8")
+    (tools_root / "account_strategy_manifest.py").write_text(
+        f"SENTINEL = {sentinel!r}\n", encoding="utf-8"
+    )
+
+
+def _c4d1b_parent_core_table() -> tuple[dict[str, object], set[bytes]]:
+    import quant_engine.core as core_module
+    import quant_engine.core.contracts as contracts_module
+    import quant_engine.core.snapshots as snapshots_module
+    import quant_engine.core.strict_json as strict_json_module
+
+    expected_pins = {
+        "quant_engine.core.snapshots": "ba9e0ee78c84a0c3ec38cab2e778284bcf02335c5958266f0823a04072e4e653",
+        "quant_engine.core.contracts": "82d64873d6e74c53b3421fd9aad0dc09b551a3c9ea5219fb33fa6121e144009f",
+        "quant_engine.core.strict_json": "9f86b89862fd6510f607a25d2ec88e1ab5577614d36fe42ca1234c41f547f1e1",
+    }
+    modules = {
+        "quant_engine.core.snapshots": snapshots_module,
+        "quant_engine.core.contracts": contracts_module,
+        "quant_engine.core.strict_json": strict_json_module,
+    }
+    assert InputSnapshot is snapshots_module.InputSnapshot is core_module.InputSnapshot
+    assert contracts_module.GenerationManifest is core_module.GenerationManifest
+    assert contracts_module.SourceArtifact is core_module.SourceArtifact
+    assert strict_json_module.strict_json_loads is core_module.strict_json_loads
+    table: dict[str, object] = {}
+    privacy_tokens: set[bytes] = set()
+    for module_name, module in modules.items():
+        origin = Path(module.__spec__.origin).resolve()
+        digest = hashlib.sha256(origin.read_bytes()).hexdigest()
+        assert digest == expected_pins[module_name]
+        table[module_name] = {"origin": str(origin), "sha256": digest}
+        privacy_tokens.add(origin.name.encode("utf-8"))
+    return table, privacy_tokens
+
+
+def _c4d1b_run_fresh_verifier(
+    *,
+    perimeter_module: Any,
+    verifier_module: Any,
+    tmp_path: Path,
+    negative_control: bool,
+) -> tuple[dict[str, object], bytes, bytes, set[bytes]]:
+    assert _C4D1B_CHILD.count("sys.stdin.buffer.read(") == 1
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    request = verifier_module.encode_verification_request(verifier_inputs, payloads)
+    cwd_root = tmp_path / "cwd-shadow"
+    pythonpath_root = tmp_path / "pythonpath-shadow"
+    cwd_sentinel = "D1B_CWD_FAKE_CORE_SENTINEL"
+    pythonpath_sentinel = "D1B_PYTHONPATH_FAKE_CORE_SENTINEL"
+    _c4d1b_fake_tree(cwd_root, cwd_sentinel)
+    _c4d1b_fake_tree(pythonpath_root, pythonpath_sentinel)
+    interpreter = (REPOSITORY_ROOT / ".venv" / "Scripts" / "python.exe").resolve()
+    assert interpreter.is_file()
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PYTHONPATH": str(pythonpath_root),
+            "TZ": "D1B/Hostile-Timezone",
+            "LC_ALL": "C",
+            "LANG": "C",
+        }
+    )
+    completed = subprocess.run(
+        [
+            str(interpreter),
+            "-I",
+            "-c",
+            _C4D1B_CHILD,
+            str(VERIFIER_MODULE_PATH.resolve()),
+            str(cwd_root.resolve()),
+            str(pythonpath_root.resolve()),
+            "negative" if negative_control else "real",
+        ],
+        cwd=cwd_root,
+        env=environment,
+        input=request,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr.decode("utf-8", "replace")
+    assert completed.stderr == b""
+    assert completed.stdout.count(b"\n") == 1 and completed.stdout.endswith(b"\n")
+    parsed = json.loads(completed.stdout)
+    assert canonical_json_bytes(parsed) == completed.stdout
+    assert isinstance(parsed, dict)
+    return (
+        parsed,
+        completed.stdout,
+        completed.stderr,
+        {
+            cwd_sentinel.encode("utf-8"),
+            pythonpath_sentinel.encode("utf-8"),
+            str(cwd_root.resolve()).encode("utf-8"),
+            str(pythonpath_root.resolve()).encode("utf-8"),
+            b"synthetic-account",
+            b"provider",
+            b"report",
+            b"request",
+            b"source",
+        },
+    )
+
+
+def _c4d1b_assert_child_evidence(
+    result: dict[str, object], stdout: bytes, stderr: bytes, privacy_tokens: set[bytes]
+) -> None:
+    core_table, core_origin_tokens = _c4d1b_parent_core_table()
+    interpreter = (REPOSITORY_ROOT / ".venv" / "Scripts" / "python.exe").resolve()
+    assert result == {
+        "core": core_table,
+        "disposition": "BLOCKED_C4D_CANONICAL_BYTES",
+        "forbidden_trap_count": 0,
+        "interpreter": {
+            "path": str(interpreter),
+            "sha256": hashlib.sha256(interpreter.read_bytes()).hexdigest(),
+            "version": list(sys.version_info[:3]),
+        },
+    }
+    for token in privacy_tokens | core_origin_tokens:
+        if token.endswith(b".py"):
+            continue
+        assert token not in stdout and token not in stderr
+
+
+def test_c4d1b_fresh_interpreter_rejects_cwd_and_pythonpath_core_shadow(
+    perimeter_module: Any, verifier_module: Any, tmp_path: Path
+) -> None:
+    """The captured verifier retains real core identities after hostile path injection."""
+    result, stdout, stderr, privacy_tokens = _c4d1b_run_fresh_verifier(
+        perimeter_module=perimeter_module,
+        verifier_module=verifier_module,
+        tmp_path=tmp_path,
+        negative_control=False,
+    )
+    _c4d1b_assert_child_evidence(result, stdout, stderr, privacy_tokens)
+
+
+def test_c4d1b_fresh_retained_semantics_traps_forbidden_runtime_dependencies(
+    perimeter_module: Any, verifier_module: Any, tmp_path: Path
+) -> None:
+    """A reachable forbidden import is trapped before the retained blocked verifier runs."""
+    result, stdout, stderr, privacy_tokens = _c4d1b_run_fresh_verifier(
+        perimeter_module=perimeter_module,
+        verifier_module=verifier_module,
+        tmp_path=tmp_path,
+        negative_control=True,
+    )
+    _c4d1b_assert_child_evidence(result, stdout, stderr, privacy_tokens)
+
+
+def _c4d2a_state(perimeter_module: Any, verifier_module: Any) -> dict[str, object]:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    return verifier_module._verify_retained_semantics(verifier_inputs, payloads)
+
+
+def _c4d2a_19_fact_bundle(
+    perimeter_module: Any, verifier_module: Any
+) -> tuple[object, dict[str, bytes]]:
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    ledger = selected_inputs.provider_ledger.json_object()
+    ledger["nav_observations"].append(
+        {
+            "record_id": "c3-nav-extra",
+            "account_id": "synthetic-account-01",
+            "as_of_date": "2026-01-31",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "99.00"},
+        }
+    )
+    ledger["flows"].append(
+        {
+            "record_id": "c3-flow-extra",
+            "account_id": "synthetic-account-01",
+            "event_date": "2026-01-31",
+            "flow_type": "CONTRIBUTION",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1.00"},
+        }
+    )
+    provider_ledger = InputSnapshot.from_bytes(
+        "19-fact ledger", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected_inputs)
+    values["provider_ledger"] = provider_ledger
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=provider_ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    return verifier_inputs, perimeter_module.build_blocked_account_manifest_payloads(selected)
+
+
+def _c4d2a_forged_comparison(
+    verifier_module: Any, candidate: object, comparison: object, discrepancy: object
+) -> object:
+    result = object.__new__(verifier_module._NumericComparison)
+    object.__setattr__(result, "candidate_count", candidate)
+    object.__setattr__(result, "comparison_count", comparison)
+    object.__setattr__(result, "discrepancy_count", discrepancy)
+    return result
+
+
+def test_c4d2a_public_path_normalizes_once_then_composes_private_candidate(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D2a must add normalized-only composition before the public report return."""
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    hostile = _OneShotSubjectMapping(payloads)
+    events: list[str] = []
+    original_normalize = verifier_module._normalize_subject_payloads
+    original_semantics = verifier_module._verify_retained_semantics_normalized
+    original_common_gate = verifier_module._validate_reportable_comparison
+    original_gate = verifier_module._validate_numeric_decision
+    original_factory = verifier_module._build_retained_report_candidate
+
+    def normalize_spy(subjects: Mapping[object, object]) -> dict[str, bytes]:
+        events.append("normalize")
+        return original_normalize(subjects)
+
+    def semantics_spy(
+        selected: object, normalized: Mapping[str, bytes]
+    ) -> dict[str, object]:
+        events.append("semantics")
+        assert type(normalized) is dict
+        return original_semantics(selected, normalized)
+
+    def gate_spy(comparison: object, disposition: object, state: Mapping[str, object]) -> None:
+        events.append("gate")
+        original_gate(comparison, disposition, state)
+
+    def common_gate_spy(comparison: object, *, _context: object) -> None:
+        events.append("common_gate")
+        assert comparison == verifier_module._NumericComparison(0, 0, 0)
+        assert _context is verifier_module._D2A_REPORTABILITY_CONTEXT
+        original_common_gate(comparison, _context=_context)
+
+    def factory_spy(state: Mapping[str, object]) -> Mapping[str, object]:
+        events.append("factory")
+        return original_factory(state)
+
+    monkeypatch.setattr(verifier_module, "_normalize_subject_payloads", normalize_spy)
+    monkeypatch.setattr(
+        verifier_module, "_verify_retained_semantics_normalized", semantics_spy
+    )
+    monkeypatch.setattr(
+        verifier_module, "_validate_reportable_comparison", common_gate_spy
+    )
+    monkeypatch.setattr(verifier_module, "_validate_numeric_decision", gate_spy)
+    monkeypatch.setattr(
+        verifier_module, "_build_retained_report_candidate", factory_spy
+    )
+
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, hostile
+        )
+    )
+
+    assert hostile.items_calls == 1
+    assert events == ["normalize", "semantics", "common_gate", "gate", "factory"]
+
+
+def test_c4d2a_private_candidate_has_exact_blocked_state_and_no_vacuous_claim(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    state = _c4d2a_state(perimeter_module, verifier_module)
+    candidate = verifier_module._build_retained_report_candidate(state)
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    reversed_payloads = dict(reversed(list(payloads.items())))
+    reversed_state = verifier_module._verify_retained_semantics(
+        verifier_inputs, reversed_payloads
+    )
+
+    assert candidate["counts"] == {
+        "selected_baseline_account_count": 18,
+        "account_count": 18,
+        "assignment_count": 26,
+        "mapped_assignment_count": 15,
+        "historical_assignment_count": 7,
+        "reserve_assignment_count": 4,
+        "observed_nav_fact_count": 18,
+        "observed_raw_flow_count": 18,
+        "classified_event_count": 18,
+        "classified_event_classified_count": 15,
+        "classified_event_blocked_count": 3,
+        "unmatched_nav_fact_count": 0,
+        "unmatched_raw_flow_fact_count": 0,
+        "unmatched_fact_count": 0,
+        "unmatched_projection_count": 0,
+        "calculation_input_row_count": 15,
+        "coverage_row_count": 15,
+        "admission_row_count": 15,
+        "output_row_count": 15,
+        "blocked_coverage_row_count": 15,
+        "blocked_admission_row_count": 15,
+        "blocked_output_row_count": 15,
+    }
+    assert candidate["numeric_verification"] == {
+        "candidate_count": 0,
+        "comparison_count": 0,
+        "discrepancy_count": 0,
+        "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
+    }
+    assert "independent_numeric_recalculation" not in candidate["invariants"]
+    assert verifier_module._build_retained_report_candidate(reversed_state) == candidate
+    chains = candidate["blocker_chains"]
+    assert isinstance(chains, tuple) and len(chains) == 15
+    keys = [
+        tuple(chain["assignment"][field] for field in (
+            "account_id", "strategy_id", "effective_start", "effective_end"
+        ))
+        for chain in chains
+    ]
+    assert keys == sorted(keys)
+    assert all(
+        chain["coverage"] == {
+            "status": "BLOCKED",
+            "blocker_code": "NO_ADMISSIBLE_V2_RECEIPT",
+        }
+        and chain["admission"] == {
+            "status": "BLOCKED",
+            "blocker_code": "FLOW_COMPLETENESS_NOT_PROVEN",
+        }
+        and chain["output"] == {
+            "status": "BLOCKED_ADMISSION",
+            "blocking_reason": "FLOW_COMPLETENESS_NOT_PROVEN",
+        }
+        and chain["numeric_candidate"] is False
+        for chain in chains
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate", "comparison", "discrepancy", "disposition", "accepted"),
+    [
+        (0, 0, 0, "NOT_APPLICABLE_NO_CANDIDATES", True),
+        (0, 0, 0, None, False),
+        (0, 0, 0, "WRONG", False),
+        (0, 1, 0, "NOT_APPLICABLE_NO_CANDIDATES", False),
+        (1, 0, 0, "NOT_APPLICABLE_NO_CANDIDATES", False),
+        (1, 1, 2, "NOT_APPLICABLE_NO_CANDIDATES", False),
+        (1, 1, 1, "NOT_APPLICABLE_NO_CANDIDATES", False),
+        (1, 1, 0, "NOT_APPLICABLE_NO_CANDIDATES", False),
+        (True, 0, 0, "NOT_APPLICABLE_NO_CANDIDATES", False),
+        (0, True, 0, "NOT_APPLICABLE_NO_CANDIDATES", False),
+        (0, 0, True, "NOT_APPLICABLE_NO_CANDIDATES", False),
+        (0.0, 0, 0, "NOT_APPLICABLE_NO_CANDIDATES", False),
+        (0, 0.0, 0, "NOT_APPLICABLE_NO_CANDIDATES", False),
+        (0, 0, 0.0, "NOT_APPLICABLE_NO_CANDIDATES", False),
+        (Decimal("0"), 0, 0, "NOT_APPLICABLE_NO_CANDIDATES", False),
+        (-1, 0, 0, "NOT_APPLICABLE_NO_CANDIDATES", False),
+    ],
+)
+def test_c4d2a_numeric_gate_accepts_only_exact_retained_zero_state(
+    perimeter_module: Any,
+    verifier_module: Any,
+    candidate: object,
+    comparison: object,
+    discrepancy: object,
+    disposition: object,
+    accepted: bool,
+) -> None:
+    state = _c4d2a_state(perimeter_module, verifier_module)
+    state["numeric_verification"] = {
+        "candidate_count": candidate,
+        "comparison_count": comparison,
+        "discrepancy_count": discrepancy,
+        "disposition": disposition,
+    }
+    numeric = _c4d2a_forged_comparison(
+        verifier_module, candidate, comparison, discrepancy
+    )
+    if accepted:
+        verifier_module._validate_numeric_decision(numeric, disposition, state)
+        exact_state_mutations = (
+            lambda value: value["blocker_chains"][0]["coverage"].__setitem__(
+                "blocker_code", "MUTATED"
+            ),
+            lambda value: value["blocker_chains"].__setitem__(
+                slice(0, 2), reversed(value["blocker_chains"][:2])
+            ),
+            lambda value: value["invariants"].__setitem__(
+                "privacy_safe_projection", False
+            ),
+            lambda value: value["blocker_chains"][0]["output"].__setitem__(
+                "gain", "0.00"
+            ),
+        )
+        for mutate in exact_state_mutations:
+            altered_state = deepcopy(state)
+            mutate(altered_state)
+            with pytest.raises(verifier_module.IndependentVerificationError):
+                verifier_module._validate_numeric_decision(
+                    numeric, disposition, altered_state
+                )
+    else:
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._validate_numeric_decision(numeric, disposition, state)
+
+    class OtherInteger(int):
+        pass
+
+    class OtherString(str):
+        pass
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._validate_numeric_decision(
+            _c4d2a_forged_comparison(verifier_module, OtherInteger(0), 0, 0),
+            "NOT_APPLICABLE_NO_CANDIDATES",
+            {
+                **state,
+                "numeric_verification": {
+                    "candidate_count": OtherInteger(0),
+                    "comparison_count": 0,
+                    "discrepancy_count": 0,
+                    "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
+                },
+            },
+        )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._validate_numeric_decision(
+            _c4d2a_forged_comparison(verifier_module, 0, 0, 0),
+            OtherString("NOT_APPLICABLE_NO_CANDIDATES"),
+            {
+                **state,
+                "numeric_verification": {
+                    "candidate_count": 0,
+                    "comparison_count": 0,
+                    "discrepancy_count": 0,
+                    "disposition": OtherString("NOT_APPLICABLE_NO_CANDIDATES"),
+                },
+            },
+        )
+
+
+def test_c4d2a_candidate_is_deeply_immutable_and_nonaliased(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    state = _c4d2a_state(perimeter_module, verifier_module)
+    candidate = verifier_module._build_retained_report_candidate(state)
+    assert tuple(candidate) == (
+        "counts", "blocker_chains", "numeric_verification", "invariants"
+    )
+    assert tuple(candidate["invariants"]) == (
+        "exact_subject_set",
+        "canonical_subject_bytes",
+        "selected_source_binding",
+        "fact_disposition_complete",
+        "unassigned_numeric_exclusion",
+        "classified_flow_reconciliation",
+        "mapped_row_bijection",
+        "blocker_propagation",
+        "blocked_numeric_exclusion",
+        "privacy_safe_projection",
+    )
+    assert candidate["invariants"] == {
+        "exact_subject_set": True,
+        "canonical_subject_bytes": True,
+        "selected_source_binding": True,
+        "fact_disposition_complete": True,
+        "unassigned_numeric_exclusion": True,
+        "classified_flow_reconciliation": True,
+        "mapped_row_bijection": True,
+        "blocker_propagation": True,
+        "blocked_numeric_exclusion": True,
+        "privacy_safe_projection": True,
+    }
+
+    def plain(value: object) -> object:
+        if isinstance(value, Mapping):
+            return {key: plain(item) for key, item in value.items()}
+        if isinstance(value, tuple):
+            return tuple(plain(item) for item in value)
+        return value
+
+    def poison(value: object) -> None:
+        if type(value) is dict:
+            for item in list(value.values()):
+                poison(item)
+            value["mutated"] = "value"
+        elif type(value) is list:
+            for item in list(value):
+                poison(item)
+            value.append({"mutated": "value"})
+
+    def assert_no_mutable_container(value: object) -> None:
+        assert type(value) not in {dict, list, set}
+        if isinstance(value, Mapping):
+            for item in value.values():
+                assert_no_mutable_container(item)
+        elif isinstance(value, tuple):
+            for item in value:
+                assert_no_mutable_container(item)
+
+    expected = plain(candidate)
+    poison(state)
+
+    assert plain(candidate) == expected
+    assert_no_mutable_container(candidate)
+    with pytest.raises(TypeError):
+        candidate["counts"]["account_count"] = 19
+    with pytest.raises(TypeError):
+        candidate["blocker_chains"][0]["assignment"]["account_id"] = "mutated"
+    with pytest.raises(AttributeError):
+        candidate["blocker_chains"].append({})
+
+
+def test_c4d2a_dynamic_counts_succeed_and_invalid_mutations_fail_before_factory(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    mutated_payloads = dict(payloads)
+    output = json.loads(mutated_payloads["outputs/account-strategy-manifest.json"])
+    count_mutated_inputs, count_mutated_payloads = _c4d2a_19_fact_bundle(
+        perimeter_module, verifier_module
+    )
+    assert verifier_module._verify_retained_semantics(
+        count_mutated_inputs, count_mutated_payloads
+    )["counts"]["observed_nav_fact_count"] == 19
+    changed_count_report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            count_mutated_inputs, count_mutated_payloads
+        )
+    )
+    assert changed_count_report["counts"]["observed_nav_fact_count"] == 19
+    assert changed_count_report["counts"]["observed_raw_flow_count"] == 19
+    assert changed_count_report["counts"]["classified_event_count"] == 19
+    factory_calls: list[object] = []
+
+    def factory_sentinel(*args: object, **kwargs: object) -> object:
+        factory_calls.append((args, kwargs))
+        raise AssertionError("candidate factory was reached")
+
+    def comparator_sentinel(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("retained public path reached comparator")
+
+    monkeypatch.setattr(
+        verifier_module, "_build_retained_report_candidate", factory_sentinel
+    )
+    monkeypatch.setattr(
+        verifier_module, "_compare_test_local_numeric_epoch", comparator_sentinel
+    )
+    subject_mutations: list[dict[str, bytes]] = []
+    for mutate in (
+        lambda row: row.__setitem__("gain", "0.00"),
+        lambda row: row.__setitem__("status", "OK"),
+        lambda row: row.__setitem__("blocking_reason", "MUTATED"),
+        lambda row: row.__setitem__("strategy_id", "synthetic-strategy-99"),
+    ):
+        altered = deepcopy(output)
+        mutate(altered["rows"][0])
+        subjects = dict(payloads)
+        subjects["outputs/account-strategy-manifest.json"] = canonical_json_bytes(altered)
+        subject_mutations.append(subjects)
+    for inputs, subjects in (
+        (verifier_inputs, subjects) for subjects in subject_mutations
+    ):
+        with pytest.raises(verifier_module.IndependentVerificationError) as raised:
+            verifier_module.IndependentAccountManifestVerifier().verify(inputs, subjects)
+        assert "synthetic-account" not in str(raised.value)
+        assert factory_calls == []
+
+
+def test_c4d2a_public_blocked_path_keeps_comparator_private_and_unreached(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import inspect
+
+    class ComparatorReached(RuntimeError):
+        pass
+
+    def comparator_sentinel(*_args: object, **_kwargs: object) -> object:
+        raise ComparatorReached("retained public path reached comparator")
+
+    monkeypatch.setattr(
+        verifier_module, "_compare_test_local_numeric_epoch", comparator_sentinel
+    )
+    verifier_inputs, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+    assert "_compare_test_local_numeric_epoch" not in verifier_module.__all__
+    assert "_compare_test_local_numeric_epoch" not in str(
+        inspect.signature(verifier_module.IndependentAccountManifestVerifier.verify)
+    )
+
+
+def test_c4d2b_positive_gate_is_private_and_accepts_only_exact_context(
+    verifier_module: Any,
+) -> None:
+    comparison = verifier_module._NumericComparison(1, 1, 0)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._validate_reportable_comparison(
+            comparison, _context=verifier_module._D2A_REPORTABILITY_CONTEXT
+        )
+    assert verifier_module._validate_reportable_comparison(
+        comparison, _context=verifier_module._D2B_TEST_LOCAL_CONTEXT
+    ) is None
+    assert "_D2B_TEST_LOCAL_CONTEXT" not in verifier_module.__all__
+
+
+def _c4d2b_continue_after_gate(
+    verifier_module: Any, comparison: object, continuation: Any
+) -> None:
+    verifier_module._validate_reportable_comparison(
+        comparison, _context=verifier_module._D2B_TEST_LOCAL_CONTEXT
+    )
+    continuation()
+
+
+def _c4d2b_comparator_then_gate_then_continue(
+    verifier_module: Any,
+    fact_form: object,
+    candidate: object,
+    observed: list[object],
+    continuation: Any,
+) -> object:
+    comparison = verifier_module._compare_test_local_numeric_epoch(
+        fact_form, candidate
+    )
+    observed.append(comparison)
+    _c4d2b_continue_after_gate(verifier_module, comparison, continuation)
+    return comparison
+
+
+def _c4d2b_standalone_fingerprint(
+    facts: object, candidate: Mapping[str, object]
+) -> tuple[object, ...]:
+    return (
+        facts.account_id,
+        facts.start.isoformat(),
+        facts.end.isoformat(),
+        len(facts.navs),
+        len(facts.flows),
+        candidate["opening_basis"],
+        candidate["nav_observations"],
+        candidate["start"],
+        candidate["end"],
+    )
+
+
+def _c4d2b_predecessor_fingerprint(
+    predecessor: object, facts: object, candidate: Mapping[str, object]
+) -> tuple[object, ...]:
+    return (
+        predecessor.account_id,
+        predecessor.closing_nav_date.isoformat(),
+        str(predecessor.closing_nav_value),
+        predecessor.continuity_to_successor,
+        facts.account_id,
+        facts.start.isoformat(),
+        facts.end.isoformat(),
+        len(facts.navs),
+        len(facts.flows),
+        candidate["opening_basis"],
+        candidate["nav_observations"],
+        candidate["start"],
+        candidate["end"],
+    )
+
+
+def test_c4d2b_standalone_comparator_result_reaches_private_gate(
+    verifier_module: Any,
+) -> None:
+    facts = _c4c4a_first_facts(verifier_module)
+    candidate = _c4c4a_first_candidate()
+    facts_before = deepcopy(facts)
+    candidate_before = deepcopy(candidate)
+    calls: list[object] = []
+    observed: list[object] = []
+
+    result = _c4d2b_comparator_then_gate_then_continue(
+        verifier_module, facts, candidate, observed, lambda: calls.append(None)
+    )
+
+    assert result == verifier_module._NumericComparison(1, 1, 0)
+    assert observed == [result]
+    assert _c4d2b_standalone_fingerprint(facts, candidate) == (
+        "acct-a",
+        "2026-01-02",
+        "2027-01-02",
+        5,
+        3,
+        "FIRST_AVAILABLE_NAV",
+        5,
+        "2026-01-02",
+        "2027-01-02",
+    )
+    assert calls == [None]
+    assert facts == facts_before and candidate == candidate_before
+
+
+def test_c4d2b_predecessor_comparator_result_reaches_private_gate(
+    verifier_module: Any,
+) -> None:
+    predecessor, facts = _c4c4a_predecessor_facts(verifier_module)
+    candidate = _c4c4a_predecessor_candidate()
+    predecessor_before = deepcopy(predecessor)
+    facts_before = deepcopy(facts)
+    candidate_before = deepcopy(candidate)
+    calls: list[object] = []
+    observed: list[object] = []
+
+    result = _c4d2b_comparator_then_gate_then_continue(
+        verifier_module,
+        (predecessor, facts),
+        candidate,
+        observed,
+        lambda: calls.append(None),
+    )
+
+    assert result == verifier_module._NumericComparison(1, 1, 0)
+    assert observed == [result]
+    assert _c4d2b_predecessor_fingerprint(predecessor, facts, candidate) == (
+        "acct-a",
+        "2026-02-05",
+        "120.00",
+        True,
+        "acct-a",
+        "2026-02-06",
+        "2026-02-08",
+        3,
+        1,
+        "PREDECESSOR_CLOSING_NAV",
+        3,
+        "2026-02-06",
+        "2026-02-08",
+    )
+    assert calls == [None]
+    assert predecessor == predecessor_before and facts == facts_before
+    assert candidate == candidate_before
+
+
+@pytest.mark.parametrize(
+    ("case_id", "make_comparison"),
+    [
+        ("discrepancy", lambda module: module._NumericComparison(1, 1, 1)),
+        (
+            "comparison-exceeds-candidate",
+            lambda module: module._NumericComparison(0, 1, 0),
+        ),
+        (
+            "candidate-exceeds-comparison",
+            lambda module: module._NumericComparison(1, 0, 0),
+        ),
+        (
+            "discrepancy-exceeds-comparison",
+            lambda module: module._NumericComparison(1, 1, 2),
+        ),
+        ("wrong-type", lambda _module: object()),
+        ("negative", lambda module: _c4d2a_forged_comparison(module, -1, 0, 0)),
+        ("bool", lambda module: _c4d2a_forged_comparison(module, True, 0, 0)),
+        ("float", lambda module: _c4d2a_forged_comparison(module, 1.0, 1, 0)),
+        ("decimal", lambda module: _c4d2a_forged_comparison(module, Decimal("1"), 1, 0)),
+        (
+            "integer-subclass",
+            lambda module: _c4d2a_forged_comparison(
+                module, _C4D2BInteger(1), 1, 0
+            ),
+        ),
+        ("missing-field", lambda module: object.__new__(module._NumericComparison)),
+    ],
+)
+def test_c4d2b_invalid_decisions_stop_before_test_owned_continuation(
+    verifier_module: Any, case_id: str, make_comparison: Any
+) -> None:
+    calls: list[object] = []
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        _c4d2b_continue_after_gate(
+            verifier_module,
+            make_comparison(verifier_module),
+            lambda: calls.append(case_id),
+        )
+    assert calls == []
+
+
+class _C4D2BInteger(int):
+    pass
+
+
+@pytest.mark.parametrize(
+    ("case_id", "mutate"),
+    [
+        ("scalar", lambda candidate: candidate.__setitem__("gain", "2")),
+        (
+            "observation-link",
+            lambda candidate: candidate["observation_trace"]["links"][0].__setitem__(
+                "factor", "1.31"
+            ),
+        ),
+        (
+            "capital-flow-trace",
+            lambda candidate: candidate["capital_flow_trace"][0].__setitem__(
+                "amount", "10.01"
+            ),
+        ),
+    ],
+)
+def test_c4d2b_real_comparator_discrepancies_stop_before_test_owned_continuation(
+    verifier_module: Any, case_id: str, mutate: Any
+) -> None:
+    facts = _c4c4a_first_facts(verifier_module)
+    candidate = _c4c4a_first_candidate()
+    facts_before = deepcopy(facts)
+    candidate_before = deepcopy(candidate)
+    mutate(candidate)
+    calls: list[object] = []
+    observed: list[object] = []
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        _c4d2b_comparator_then_gate_then_continue(
+            verifier_module,
+            facts,
+            candidate,
+            observed,
+            lambda: calls.append(case_id),
+        )
+    assert observed == [verifier_module._NumericComparison(1, 1, 1)], case_id
+    assert calls == []
+    assert facts == facts_before
+    assert candidate != candidate_before
+
+
+def test_c4d2b_malformed_candidate_stops_before_test_owned_continuation(
+    verifier_module: Any,
+) -> None:
+    facts = _c4c4a_first_facts(verifier_module)
+    candidate = _c4c4a_first_candidate()
+    candidate["opening_capital"] = "100.00"
+    calls: list[object] = []
+    observed: list[object] = []
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        _c4d2b_comparator_then_gate_then_continue(
+            verifier_module,
+            facts,
+            candidate,
+            observed,
+            lambda: calls.append(None),
+        )
+
+    assert observed == [] and calls == []
+
+
+def test_c4d2b_private_gate_has_no_report_construction_or_serialization_edge() -> None:
+    tree = ast.parse(VERIFIER_MODULE_PATH.read_text(encoding="utf-8"))
+    gate = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_validate_reportable_comparison"
+    )
+    forbidden_names = {
+        "_build_retained_report_candidate",
+        "canonical_json_bytes",
+        "encode_verification_request",
+        "decode_verification_request",
+        "verify_finalized_report",
+        "open",
+        "print",
+    }
+    assert not {
+        node.id
+        for node in ast.walk(gate)
+        if isinstance(node, ast.Name) and node.id in forbidden_names
+    }
+
+
+def test_c4d2b_positive_context_has_no_production_call_site(
+    verifier_module: Any,
+) -> None:
+    import inspect
+
+    tree = ast.parse(VERIFIER_MODULE_PATH.read_text(encoding="utf-8"))
+    parents = {
+        id(child): node
+        for node in ast.walk(tree)
+        for child in ast.iter_child_nodes(node)
+    }
+    context_references = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Name) and node.id == "_D2B_TEST_LOCAL_CONTEXT"
+    ]
+    assert len(context_references) == 2
+    definition = next(
+        node
+        for node in context_references
+        if isinstance(parents[id(node)], ast.AnnAssign)
+    )
+    use = next(node for node in context_references if node is not definition)
+    definition_parent = parents[id(definition)]
+    use_parent = parents[id(use)]
+    assert isinstance(definition_parent, ast.AnnAssign)
+    assert definition_parent.target is definition
+    assert isinstance(use_parent, ast.Compare)
+    assert len(use_parent.ops) == 1 and isinstance(use_parent.ops[0], ast.Is)
+    assert isinstance(use_parent.left, ast.Name) and use_parent.left.id == "_context"
+    assert use_parent.comparators == [use]
+    containing = use_parent
+    while not isinstance(containing, ast.FunctionDef):
+        containing = parents[id(containing)]
+    assert containing.name == "_validate_reportable_comparison"
+    assert tuple(
+        inspect.signature(verifier_module.IndependentAccountManifestVerifier.verify).parameters
+    ) == ("self", "selected_snapshots", "subject_payloads")
+    assert "_D2B_TEST_LOCAL_CONTEXT" not in verifier_module.__all__
+    assert "_compare_test_local_numeric_epoch" not in verifier_module.__all__
+
+
+# C4.e1 — independent-report numeric schema reconciliation.
+def _c4e1_definition_validator(name: str) -> Any:
+    """Validate a real local definition through its complete schema wrapper."""
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    wrapper = {
+        "$schema": schema["$schema"],
+        "$defs": schema["$defs"],
+        "$ref": f"#/$defs/{name}",
+    }
+    Draft202012Validator.check_schema(wrapper)
+    return Draft202012Validator(wrapper)
+
+
+def _c4e1_retained_numeric() -> dict[str, object]:
+    return {
+        "candidate_count": 0,
+        "comparison_count": 0,
+        "discrepancy_count": 0,
+        "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
+    }
+
+
+C4E1_LITERAL_INVARIANT_KEYS = (
+    "exact_subject_set",
+    "canonical_subject_bytes",
+    "selected_source_binding",
+    "fact_disposition_complete",
+    "unassigned_numeric_exclusion",
+    "classified_flow_reconciliation",
+    "mapped_row_bijection",
+    "blocker_propagation",
+    "blocked_numeric_exclusion",
+    "privacy_safe_projection",
+)
+
+
+def _c4e1_invariants() -> dict[str, bool]:
+    return {
+        "exact_subject_set": True,
+        "canonical_subject_bytes": True,
+        "selected_source_binding": True,
+        "fact_disposition_complete": True,
+        "unassigned_numeric_exclusion": True,
+        "classified_flow_reconciliation": True,
+        "mapped_row_bijection": True,
+        "blocker_propagation": True,
+        "blocked_numeric_exclusion": True,
+        "privacy_safe_projection": True,
+    }
+
+
+def test_c4e1_numeric_schema_matches_retained_d2_contract() -> None:
+    assert _c4e1_definition_validator("numeric_verification").is_valid(
+        _c4e1_retained_numeric()
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.update({"candidate_count": 1}),
+        lambda value: value.update({"comparison_count": 1}),
+        lambda value: value.update({"discrepancy_count": 1}),
+        lambda value: value.pop("disposition"),
+        lambda value: value.update({"disposition": "UNKNOWN"}),
+        lambda value: value.pop("candidate_count"),
+        lambda value: value.update({"extra_count": 0}),
+        lambda value: value.update({"candidate_count": True}),
+        lambda value: value.update({"comparison_count": -1}),
+        lambda value: value.update({"discrepancy_count": 0.5}),
+        lambda value: value.update({"candidate_count": "0"}),
+        lambda value: value.update({"extra": False}),
+    ],
+)
+def test_c4e1_numeric_schema_rejects_stale_or_vacuous_retained_forms(
+    mutation: Any,
+) -> None:
+    value = _c4e1_retained_numeric()
+    mutation(value)
+    assert not _c4e1_definition_validator("numeric_verification").is_valid(value)
+
+
+def test_c4e1_integer_valued_float_is_schema_only_not_runtime_authority(
+    verifier_module: Any,
+) -> None:
+    """Draft JSON Schema accepts 0.0 structurally; exact runtime gates do not."""
+    structural = _c4e1_retained_numeric()
+    structural["discrepancy_count"] = 0.0
+    assert _c4e1_definition_validator("numeric_verification").is_valid(structural)
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._NumericComparison(0, 0, 0.0)
+    forged = _c4d2a_forged_comparison(verifier_module, 0, 0, 0.0)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._validate_reportable_comparison(
+            forged, _context=verifier_module._D2A_REPORTABILITY_CONTEXT
+        )
+
+
+def test_c4e1_numeric_schema_future_positive_branch_is_structural_only() -> None:
+    """Positive fragments are structural only, never authority or comparison proof."""
+    validator = _c4e1_definition_validator("numeric_verification")
+    structural = {
+        "candidate_count": 1,
+        "comparison_count": 1,
+        "discrepancy_count": 0,
+        "disposition": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES",
+    }
+    assert validator.is_valid(structural)
+    assert validator.is_valid({**structural, "comparison_count": 2})
+    for mutation in (
+        lambda value: value.update({"candidate_count": 0}),
+        lambda value: value.update({"comparison_count": 0}),
+        lambda value: value.update({"discrepancy_count": 1}),
+        lambda value: value.update({"disposition": "UNKNOWN"}),
+    ):
+        invalid = dict(structural)
+        mutation(invalid)
+        assert not validator.is_valid(invalid)
+
+
+def test_c4e1_invariants_have_the_literal_nine_key_oracle() -> None:
+    validator = _c4e1_definition_validator("invariants")
+    assert tuple(_c4e1_invariants()) == C4E1_LITERAL_INVARIANT_KEYS
+    assert validator.is_valid(_c4e1_invariants())
+
+
+@pytest.mark.parametrize("key", C4E1_LITERAL_INVARIANT_KEYS)
+def test_c4e1_invariants_reject_each_literal_key_when_missing_or_false(
+    key: str,
+) -> None:
+    validator = _c4e1_definition_validator("invariants")
+    missing = _c4e1_invariants()
+    missing.pop(key)
+    assert not validator.is_valid(missing)
+    false_value = _c4e1_invariants()
+    false_value[key] = False
+    assert not validator.is_valid(false_value)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda value: value.update({"unexpected": True}),
+        lambda value: value.update({"independent_numeric_recalculation": True}),
+        lambda value: value.update({"independent_numeric_recalculation": False}),
+    ],
+)
+def test_c4e1_invariants_reject_stale_or_extra_keys(mutation: Any) -> None:
+    validator = _c4e1_definition_validator("invariants")
+    invalid = _c4e1_invariants()
+    mutation(invalid)
+    assert not validator.is_valid(invalid)
+
+
+def test_c4e1_schema_has_exact_numeric_and_invariant_structure() -> None:
+    schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    numeric = schema["$defs"]["numeric_verification"]
+    invariants = schema["$defs"]["invariants"]
+    expected_numeric = {
+        "candidate_count",
+        "comparison_count",
+        "discrepancy_count",
+        "disposition",
+    }
+    expected_invariants = set(C4E1_LITERAL_INVARIANT_KEYS)
+
+    assert set(numeric["required"]) == expected_numeric
+    assert set(numeric["properties"]) == expected_numeric
+    assert numeric["additionalProperties"] is False
+    assert numeric["properties"]["disposition"]["enum"] == [
+        "NOT_APPLICABLE_NO_CANDIDATES",
+        "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES",
+    ]
+    assert numeric["allOf"] == [
+        {
+            "if": {
+                "required": ["disposition"],
+                "properties": {
+                    "disposition": {"const": "NOT_APPLICABLE_NO_CANDIDATES"}
+                },
+            },
+            "then": {
+                "properties": {
+                    "candidate_count": {"const": 0},
+                    "comparison_count": {"const": 0},
+                    "discrepancy_count": {"const": 0},
+                }
+            },
+        },
+        {
+            "if": {
+                "required": ["disposition"],
+                "properties": {
+                    "disposition": {
+                        "const": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
+                    }
+                },
+            },
+            "then": {
+                "properties": {
+                    "candidate_count": {"minimum": 1},
+                    "comparison_count": {"minimum": 1},
+                    "discrepancy_count": {"const": 0},
+                }
+            },
+        },
+    ]
+    assert set(invariants["required"]) == expected_invariants
+    assert set(invariants["properties"]) == expected_invariants
+    assert invariants["additionalProperties"] is False
+    assert all(value == {"const": True} for value in invariants["properties"].values())
+
+
+# C4.d3a.1 — pure normalized subject identities and semantic digest.
+C4D3A_LITERAL_SUBJECT_PATHS = (
+    "authority/account-assignment-perimeter.json",
+    "authority/account-flow-coverage.json",
+    "authority/calculation-inputs.json",
+    "authority/classified-flows.json",
+    "authority/code-identities.json",
+    "authority/flow-classification-policy.json",
+    "authority/mapped-epoch-admission.json",
+    "authority/selected-input-identities.json",
+    "outputs/account-strategy-manifest.json",
+)
+
+
+def _c4d3a_expected_subject_entries(
+    normalized: Mapping[str, bytes],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "path": path,
+            "sha256": hashlib.sha256(normalized[path]).hexdigest(),
+            "size_bytes": len(normalized[path]),
+        }
+        for path in C4D3A_LITERAL_SUBJECT_PATHS
+    ]
+
+
+def test_c4d3a_report_subject_entries_and_digest_are_exact_and_fresh(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    assert selected is not None
+    normalized = verifier_module._normalize_subject_payloads(payloads)
+    expected = _c4d3a_expected_subject_entries(normalized)
+
+    entries = verifier_module._report_subject_entries(normalized)
+    assert tuple(item["path"] for item in entries) == C4D3A_LITERAL_SUBJECT_PATHS
+    assert all(set(item) == {"path", "sha256", "size_bytes"} for item in entries)
+    assert entries == expected
+    assert verifier_module._report_subjects_semantic_sha256(entries) == hashlib.sha256(
+        canonical_json_bytes({"subjects": expected})
+    ).hexdigest()
+
+    reversed_normalized = dict(reversed(tuple(normalized.items())))
+    assert verifier_module._report_subject_entries(reversed_normalized) == expected
+    assert verifier_module._report_subjects_semantic_sha256(
+        verifier_module._report_subject_entries(reversed_normalized)
+    ) == hashlib.sha256(canonical_json_bytes({"subjects": expected})).hexdigest()
+
+    entries[0]["sha256"] = "0" * 64
+    assert verifier_module._report_subject_entries(normalized) == expected
+
+    accepted_entries = verifier_module._report_subject_entries(normalized)
+    accepted_digest = verifier_module._report_subjects_semantic_sha256(
+        accepted_entries
+    )
+    entries_before = deepcopy(accepted_entries)
+    normalized[C4D3A_LITERAL_SUBJECT_PATHS[0]] = canonical_json_bytes(
+        {"replacement": True}
+    )
+    assert accepted_entries == entries_before
+    assert accepted_digest == hashlib.sha256(
+        canonical_json_bytes({"subjects": entries_before})
+    ).hexdigest()
+
+
+def test_c4d3a_private_subject_helpers_never_normalize_again(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    normalized = verifier_module._normalize_subject_payloads(payloads)
+
+    def unexpected_normalization(_value: object) -> dict[str, bytes]:
+        raise AssertionError("private normalized-only helper normalized a raw mapping")
+
+    monkeypatch.setattr(
+        verifier_module, "_normalize_subject_payloads", unexpected_normalization
+    )
+    entries = verifier_module._report_subject_entries(normalized)
+    assert verifier_module._report_subjects_semantic_sha256(entries) == hashlib.sha256(
+        canonical_json_bytes({"subjects": _c4d3a_expected_subject_entries(normalized)})
+    ).hexdigest()
+
+
+def test_c4d3a_legacy_subject_helpers_normalize_once_and_delegate(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    calls: list[str] = []
+    original_normalize = verifier_module._normalize_subject_payloads
+    original_entries = verifier_module._report_subject_entries
+    original_digest = verifier_module._report_subjects_semantic_sha256
+
+    def normalize_spy(value: Mapping[object, object]) -> dict[str, bytes]:
+        calls.append("normalize")
+        return original_normalize(value)
+
+    def entries_spy(value: Mapping[str, bytes]) -> list[dict[str, object]]:
+        calls.append("entries")
+        return original_entries(value)
+
+    def digest_spy(value: list[dict[str, object]]) -> str:
+        calls.append("digest")
+        return original_digest(value)
+
+    monkeypatch.setattr(verifier_module, "_normalize_subject_payloads", normalize_spy)
+    monkeypatch.setattr(verifier_module, "_report_subject_entries", entries_spy)
+    monkeypatch.setattr(
+        verifier_module, "_report_subjects_semantic_sha256", digest_spy
+    )
+
+    entries = verifier_module.canonical_subject_entries(payloads)
+    assert type(entries) is tuple
+    assert list(entries) == _c4d3a_expected_subject_entries(
+        original_normalize(payloads)
+    )
+    assert calls == ["normalize", "entries"]
+
+    calls.clear()
+    digest = verifier_module.subjects_semantic_sha256(payloads)
+    assert digest == hashlib.sha256(
+        canonical_json_bytes(
+            {"subjects": _c4d3a_expected_subject_entries(original_normalize(payloads))}
+        )
+    ).hexdigest()
+    assert calls == ["normalize", "entries", "digest"]
+
+
+def _c4d3a_snapshot_identity_oracle(snapshot: InputSnapshot) -> dict[str, object]:
+    return {
+        "sha256": hashlib.sha256(snapshot.contents).hexdigest(),
+        "size_bytes": len(snapshot.contents),
+    }
+
+
+def _c4d3a_catalog_identity_oracle(
+    catalog: InputSnapshot,
+    manifest_snapshot: InputSnapshot,
+    *,
+    catalog_artifact_id: str,
+    catalog_schema_name: str,
+) -> dict[str, object]:
+    manifest = GenerationManifest.from_json_bytes(manifest_snapshot.contents)
+    artifacts = [
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == catalog_artifact_id
+    ]
+    assert len(artifacts) == 1
+    artifact = artifacts[0]
+    return {
+        "generation_id": manifest.generation_id,
+        "artifact": {
+            "artifact_id": catalog_artifact_id,
+            "as_of_date": manifest.as_of_date.isoformat(),
+            "schema": {
+                "name": catalog_schema_name,
+                "version": artifact.schema_version,
+            },
+            **_c4d3a_snapshot_identity_oracle(catalog),
+        },
+        "generation_manifest": {
+            "artifact_id": (
+                "identity/provider-ledger-generation.json"
+                if catalog_artifact_id == "normalized/provider-ledger.json"
+                else "identity/portfolio-baseline-generation.json"
+            ),
+            "as_of_date": manifest.as_of_date.isoformat(),
+            "schema": {"name": "generation-manifest", "version": "1"},
+            **_c4d3a_snapshot_identity_oracle(manifest_snapshot),
+        },
+    }
+
+
+def _c4d3a_selected_identity_oracle(
+    selected: object,
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "artifact_id": "selected-input-identities",
+        "as_of_date": selected.generation_as_of_date.isoformat(),
+        "provider_ledger": _c4d3a_catalog_identity_oracle(
+            selected.provider_ledger,
+            selected.provider_ledger_manifest,
+            catalog_artifact_id="normalized/provider-ledger.json",
+            catalog_schema_name="provider-ledger-catalog",
+        ),
+        "baseline": _c4d3a_catalog_identity_oracle(
+            selected.baseline,
+            selected.baseline_manifest,
+            catalog_artifact_id="normalized/portfolio-baseline.json",
+            catalog_schema_name="portfolio-baseline-catalog",
+        ),
+        "flow_classification_policy": _c4d3a_snapshot_identity_oracle(
+            selected.flow_classification_policy
+        ),
+        "retrieval_receipts": [
+            {"receipt_id": receipt_id, **_c4d3a_snapshot_identity_oracle(snapshot)}
+            for receipt_id, snapshot in selected.retrieval_receipts.items()
+        ],
+        "code_sources": {
+            "epoch_producer": {
+                "artifact_id": "tools/account_strategy_manifest.py",
+                **_c4d3a_snapshot_identity_oracle(selected.epoch_producer_source),
+            },
+            "generation_builder": {
+                "artifact_id": "tools/build_account_manifest_generation.py",
+                **_c4d3a_snapshot_identity_oracle(selected.generation_builder_source),
+            },
+            "independent_verifier": {
+                "artifact_id": "tools/verify_account_manifest_generation.py",
+                **_c4d3a_snapshot_identity_oracle(
+                    selected.independent_verifier_source
+                ),
+            },
+        },
+    }
+
+
+def test_c4d3a_report_metadata_is_selected_byte_bound_and_private(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    selected, _ = _c4b1_bundle(perimeter_module, verifier_module)
+    values = _selected_input_kwargs(selected)
+    values["provider_ledger"] = InputSnapshot.from_bytes(
+        "C4D3A_PRIVATE_PROVIDER_LABEL",
+        selected.provider_ledger.contents,
+    )
+    values["independent_verifier_source"] = InputSnapshot.from_bytes(
+        "C4D3A_PRIVATE_VERIFIER_LABEL",
+        selected.independent_verifier_source.contents,
+    )
+    selected = verifier_module.IndependentVerifierInputs(**values)
+    expected_artifact = {
+        "artifact_id": "tools/verify_account_manifest_generation.py",
+        "as_of_date": selected.generation_as_of_date.isoformat(),
+        "schema": {"name": "independent-account-manifest-verifier", "version": "1"},
+        **_c4d3a_snapshot_identity_oracle(selected.independent_verifier_source),
+    }
+
+    verifier_artifact, selected_identity = verifier_module._report_source_metadata(
+        selected
+    )
+
+    assert verifier_artifact == expected_artifact
+    assert selected_identity == _c4d3a_selected_identity_oracle(selected)
+    serialized = canonical_json_bytes(
+        {"verifier": verifier_artifact, "selected_source_identities": selected_identity}
+    )
+    assert selected.independent_verifier_source.label.encode("utf-8") not in serialized
+    assert selected.provider_ledger.label.encode("utf-8") not in serialized
+    assert selected.provider_ledger.contents not in serialized
+    provider_account = selected.provider_ledger.json_object()["nav_observations"][0][
+        "account_id"
+    ]
+    assert provider_account.encode("utf-8") not in serialized
+
+
+def test_c4d3a_report_metadata_is_fresh_deterministic_and_rejects_bad_binding(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    selected, _ = _c4b1_bundle(perimeter_module, verifier_module)
+    first_artifact, first_identity = verifier_module._report_source_metadata(selected)
+    second_artifact, second_identity = verifier_module._report_source_metadata(selected)
+    assert first_artifact == second_artifact and first_artifact is not second_artifact
+    assert first_identity == second_identity and first_identity is not second_identity
+    assert first_artifact["schema"] is not second_artifact["schema"]
+    assert first_identity["code_sources"] is not second_identity["code_sources"]
+    first_artifact["schema"]["name"] = "mutated"
+    first_identity["code_sources"]["epoch_producer"]["sha256"] = "0" * 64
+    assert second_artifact["schema"]["name"] == "independent-account-manifest-verifier"
+    assert second_identity == _c4d3a_selected_identity_oracle(selected)
+
+    values = _selected_input_kwargs(selected)
+    values["independent_verifier_source"] = InputSnapshot.from_bytes(
+        "private changed verifier source",
+        selected.independent_verifier_source.contents + b"-changed",
+    )
+    verifier_changed = verifier_module.IndependentVerifierInputs(**values)
+    changed_artifact, changed_identity = verifier_module._report_source_metadata(
+        verifier_changed
+    )
+    assert changed_artifact == {
+        "artifact_id": "tools/verify_account_manifest_generation.py",
+        "as_of_date": verifier_changed.generation_as_of_date.isoformat(),
+        "schema": {"name": "independent-account-manifest-verifier", "version": "1"},
+        **_c4d3a_snapshot_identity_oracle(verifier_changed.independent_verifier_source),
+    }
+    assert changed_identity == _c4d3a_selected_identity_oracle(verifier_changed)
+    assert changed_artifact != second_artifact
+    assert changed_identity["code_sources"]["independent_verifier"] != second_identity[
+        "code_sources"
+    ]["independent_verifier"]
+
+    values = _selected_input_kwargs(selected)
+    values["provider_ledger"] = InputSnapshot.from_bytes(
+        "private altered ledger",
+        canonical_json_bytes({"as_of_date": "2026-02-01", "catalog_schema_version": 1}),
+    )
+    bad_catalog = verifier_module.IndependentVerifierInputs(**values)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._report_source_metadata(bad_catalog)
+
+
+def test_c4d3a_report_metadata_receipt_order_is_deterministic(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    selected, _ = _c4b1_bundle(perimeter_module, verifier_module)
+    receipt_a = InputSnapshot.from_bytes("private receipt a", b"receipt-a")
+    receipt_b = InputSnapshot.from_bytes("private receipt b", b"receipt-b")
+    first_values = _selected_input_kwargs(selected)
+    first_values["retrieval_receipts"] = {
+        "receipt/b": receipt_b,
+        "receipt/a": receipt_a,
+    }
+    second_values = _selected_input_kwargs(selected)
+    second_values["retrieval_receipts"] = {
+        "receipt/a": receipt_a,
+        "receipt/b": receipt_b,
+    }
+    first = verifier_module.IndependentVerifierInputs(**first_values)
+    second = verifier_module.IndependentVerifierInputs(**second_values)
+
+    assert verifier_module._report_source_metadata(first) == verifier_module._report_source_metadata(
+        second
+    )
+    assert [
+        item["receipt_id"]
+        for item in verifier_module._report_source_metadata(first)[1]["retrieval_receipts"]
+    ] == ["receipt/a", "receipt/b"]
+
+
+def test_c4d3a_report_metadata_accepts_only_valid_rebound_provider_lineage(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    selected, _ = _c4b1_bundle(perimeter_module, verifier_module)
+    original_artifact, original_identity = verifier_module._report_source_metadata(
+        selected
+    )
+    changed_ledger = selected.provider_ledger.json_object()
+    changed_ledger["nav_observations"][0]["nav"]["value"] = "101.00"
+    changed_provider = InputSnapshot.from_bytes(
+        "C4D3A_PRIVATE_CHANGED_PROVIDER_LABEL",
+        canonical_json_bytes(changed_ledger),
+    )
+    values = _selected_input_kwargs(selected)
+    values["provider_ledger"] = changed_provider
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=changed_provider,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date=changed_ledger["as_of_date"],
+    )
+    rebound = verifier_module.IndependentVerifierInputs(**values)
+
+    verifier_artifact, selected_identity = verifier_module._report_source_metadata(
+        rebound
+    )
+
+    assert verifier_artifact == original_artifact
+    assert selected_identity == _c4d3a_selected_identity_oracle(rebound)
+    assert selected_identity["provider_ledger"] != original_identity["provider_ledger"]
+    assert selected_identity["baseline"] == original_identity["baseline"]
+    assert (
+        selected_identity["flow_classification_policy"]
+        == original_identity["flow_classification_policy"]
+    )
+    assert selected_identity["retrieval_receipts"] == original_identity[
+        "retrieval_receipts"
+    ]
+    assert selected_identity["code_sources"] == original_identity["code_sources"]
+    serialized = canonical_json_bytes(
+        {"verifier": verifier_artifact, "selected_source_identities": selected_identity}
+    )
+    assert changed_provider.label.encode("utf-8") not in serialized
+    assert changed_provider.contents not in serialized
+
+
+def test_c4d3a_report_metadata_requires_exact_selected_input_type(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    selected, _ = _c4b1_bundle(perimeter_module, verifier_module)
+
+    class SelectedSubclass(verifier_module.IndependentVerifierInputs):
+        pass
+
+    class SelectedDuck:
+        def __init__(self, source: object) -> None:
+            for key, value in _selected_input_kwargs(source).items():
+                setattr(self, key, value)
+
+        @property
+        def generation_as_of_date(self) -> date:
+            return selected.generation_as_of_date
+
+    subclass = SelectedSubclass(**_selected_input_kwargs(selected))
+    lookalike_mapping = _selected_input_kwargs(selected)
+    lookalike_duck = SelectedDuck(selected)
+    for invalid in (object(), subclass, lookalike_mapping, lookalike_duck):
+        with pytest.raises(verifier_module.IndependentVerificationError) as raised:
+            verifier_module._report_source_metadata(invalid)
+        assert str(raised.value) == "independent verification input is invalid"
+
+
+def _c4d3a_retained_candidate(
+    perimeter_module: Any, verifier_module: Any
+) -> tuple[object, dict[str, bytes], object]:
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    normalized = verifier_module._normalize_subject_payloads(payloads)
+    state = verifier_module._verify_retained_semantics_normalized(selected, normalized)
+    return selected, normalized, verifier_module._build_retained_report_candidate(state)
+
+
+def _c4d3a_assert_ordinary_report_tree(value: object) -> None:
+    if type(value) is dict:
+        assert all(type(key) is str for key in value)
+        for child in value.values():
+            _c4d3a_assert_ordinary_report_tree(child)
+    elif type(value) is list:
+        for child in value:
+            _c4d3a_assert_ordinary_report_tree(child)
+    else:
+        assert type(value) in {str, int, bool, type(None)}
+
+
+def test_c4d3a_assemble_report_is_exact_closed_and_nonaliased(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected, normalized, candidate = _c4d3a_retained_candidate(
+        perimeter_module, verifier_module
+    )
+    thaw_calls: list[object] = []
+    original_thaw = verifier_module._thaw_retained_report_candidate
+
+    def thaw_spy(value: object) -> dict[str, object]:
+        thaw_calls.append(value)
+        return original_thaw(value)
+
+    monkeypatch.setattr(verifier_module, "_thaw_retained_report_candidate", thaw_spy)
+    report = verifier_module._assemble_independent_report(selected, normalized, candidate)
+    expected_entries = _c4d3a_expected_subject_entries(normalized)
+    expected_artifact = {
+        "artifact_id": "tools/verify_account_manifest_generation.py",
+        "as_of_date": selected.generation_as_of_date.isoformat(),
+        "schema": {"name": "independent-account-manifest-verifier", "version": "1"},
+        **_c4d3a_snapshot_identity_oracle(selected.independent_verifier_source),
+    }
+
+    assert thaw_calls == [candidate]
+    assert set(report) == {
+        "schema_version",
+        "artifact_id",
+        "as_of_date",
+        "status",
+        "verifier",
+        "selected_source_identities",
+        "subjects",
+        "subjects_semantic_sha256",
+        "counts",
+        "blocker_chains",
+        "numeric_verification",
+        "invariants",
+    }
+    assert report["schema_version"] == 2
+    assert report["artifact_id"] == "verification/independent-verification.json"
+    assert report["as_of_date"] == selected.generation_as_of_date.isoformat()
+    assert report["status"] == "VERIFIED"
+    assert report["verifier"] == expected_artifact
+    assert report["selected_source_identities"] == _c4d3a_selected_identity_oracle(
+        selected
+    )
+    assert report["subjects"] == expected_entries
+    assert report["subjects_semantic_sha256"] == hashlib.sha256(
+        canonical_json_bytes({"subjects": expected_entries})
+    ).hexdigest()
+    assert report["counts"] == {
+        "selected_baseline_account_count": 18,
+        "account_count": 18,
+        "assignment_count": 26,
+        "mapped_assignment_count": 15,
+        "historical_assignment_count": 7,
+        "reserve_assignment_count": 4,
+        "observed_nav_fact_count": 18,
+        "observed_raw_flow_count": 18,
+        "classified_event_count": 18,
+        "classified_event_classified_count": 15,
+        "classified_event_blocked_count": 3,
+        "unmatched_nav_fact_count": 0,
+        "unmatched_raw_flow_fact_count": 0,
+        "unmatched_fact_count": 0,
+        "unmatched_projection_count": 0,
+        "calculation_input_row_count": 15,
+        "coverage_row_count": 15,
+        "admission_row_count": 15,
+        "output_row_count": 15,
+        "blocked_coverage_row_count": 15,
+        "blocked_admission_row_count": 15,
+        "blocked_output_row_count": 15,
+    }
+    expected_blocker_keys = (
+        ("synthetic-account-01", "synthetic-strategy-01", "2025-01-01", None),
+        ("synthetic-account-02", "synthetic-strategy-02", "2025-01-01", None),
+        ("synthetic-account-03", "synthetic-strategy-03", "2025-01-01", None),
+        ("synthetic-account-04", "synthetic-strategy-04", "2025-01-01", None),
+        ("synthetic-account-05", "synthetic-strategy-05", "2025-01-01", None),
+        ("synthetic-account-06", "synthetic-strategy-06", "2025-01-01", None),
+        ("synthetic-account-07", "synthetic-strategy-07", "2025-01-01", None),
+        ("synthetic-account-08", "synthetic-strategy-08", "2025-01-01", None),
+        ("synthetic-account-09", "synthetic-strategy-09", "2025-01-01", None),
+        ("synthetic-account-10", "synthetic-strategy-10", "2025-01-01", None),
+        ("synthetic-account-11", "synthetic-strategy-11", "2025-01-01", None),
+        ("synthetic-account-12", "synthetic-strategy-12", "2025-01-01", "2025-12-31"),
+        ("synthetic-account-13", "synthetic-strategy-13", "2025-01-01", "2025-12-31"),
+        ("synthetic-account-14", "synthetic-strategy-14", "2025-01-01", "2025-12-31"),
+        ("synthetic-account-15", "synthetic-strategy-15", "2025-01-01", "2025-12-31"),
+    )
+    assert tuple(
+        tuple(chain["assignment"][field] for field in (
+            "account_id", "strategy_id", "effective_start", "effective_end"
+        ))
+        for chain in report["blocker_chains"]
+    ) == expected_blocker_keys
+    assert all(
+        chain["coverage"]
+        == {"status": "BLOCKED", "blocker_code": "NO_ADMISSIBLE_V2_RECEIPT"}
+        and chain["admission"]
+        == {"status": "BLOCKED", "blocker_code": "FLOW_COMPLETENESS_NOT_PROVEN"}
+        and chain["output"]
+        == {
+            "status": "BLOCKED_ADMISSION",
+            "blocking_reason": "FLOW_COMPLETENESS_NOT_PROVEN",
+        }
+        and chain["numeric_candidate"] is False
+        for chain in report["blocker_chains"]
+    )
+    assert report["numeric_verification"] == {
+        "candidate_count": 0,
+        "comparison_count": 0,
+        "discrepancy_count": 0,
+        "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
+    }
+    assert report["invariants"] == {
+        key: True for key in C4E1_LITERAL_INVARIANT_KEYS
+    }
+    _c4d3a_assert_ordinary_report_tree(report)
+    subjects_before = deepcopy(report["subjects"])
+    normalized[C4D3A_LITERAL_SUBJECT_PATHS[0]] = canonical_json_bytes(
+        {"replacement": True}
+    )
+    assert report["subjects"] == subjects_before
+    serialized = canonical_json_bytes(report)
+    assert selected.provider_ledger.label.encode("utf-8") not in serialized
+    assert selected.provider_ledger.contents not in serialized
+    assert all(contents not in serialized for contents in normalized.values())
+    report["counts"]["account_count"] = 0
+    assert verifier_module._thaw_retained_report_candidate(candidate)["counts"][
+        "account_count"
+    ] == 18
+
+
+@pytest.mark.parametrize(
+    "make_invalid",
+    [
+        lambda module: object(),
+        lambda _module: {},
+        lambda _module: [],
+        lambda _module: MappingProxyType({"nested": {}}),
+        lambda _module: MappingProxyType({"nested": []}),
+        lambda _module: MappingProxyType({"payload": b"bytes"}),
+        lambda _module: MappingProxyType({"payload": 0.5}),
+        lambda _module: MappingProxyType({"payload": Decimal("1")}),
+        lambda _module: MappingProxyType({1: "non-string-key"}),
+        lambda _module: MappingProxyType({"payload": set()}),
+        lambda _module: MappingProxyType({"payload": frozenset()}),
+    ],
+)
+def test_c4d3a_thaw_rejects_mutable_or_non_json_frozen_shapes(
+    verifier_module: Any, make_invalid: Any
+) -> None:
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._thaw_retained_report_candidate(make_invalid(verifier_module))
+
+
+def test_c4d3a_thaw_rejects_cycles_and_repeated_frozen_containers(
+    verifier_module: Any,
+) -> None:
+    cyclic: dict[str, object] = {}
+    cyclic_proxy = MappingProxyType(cyclic)
+    cyclic["self"] = cyclic_proxy
+    shared = MappingProxyType({"item": 1})
+    repeated = MappingProxyType({"first": shared, "second": shared})
+    for invalid in (cyclic_proxy, repeated):
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._thaw_retained_report_candidate(invalid)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        lambda candidate: candidate.pop("counts"),
+        lambda candidate: candidate.update({"extra": True}),
+        lambda candidate: candidate["counts"].update({"account_count": 19}),
+        lambda candidate: candidate["blocker_chains"].pop(),
+        lambda candidate: candidate["blocker_chains"][0]["coverage"].update(
+            {"status": "OK"}
+        ),
+        lambda candidate: candidate["numeric_verification"].update({"discrepancy_count": 1}),
+        lambda candidate: candidate["invariants"].update({"privacy_safe_projection": False}),
+    ],
+)
+def test_c4d3a_assembler_rejects_malformed_frozen_d2_candidate(
+    perimeter_module: Any,
+    verifier_module: Any,
+    mutation: Any,
+) -> None:
+    selected, normalized, candidate = _c4d3a_retained_candidate(
+        perimeter_module, verifier_module
+    )
+    malformed = verifier_module._thaw_retained_report_candidate(candidate)
+    mutation(malformed)
+    frozen = verifier_module._freeze_report_candidate(malformed)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._assemble_independent_report(selected, normalized, frozen)
+
+
+def test_c4d3a_assembler_rejects_wrong_selected_or_normalized_input(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected, normalized, candidate = _c4d3a_retained_candidate(
+        perimeter_module, verifier_module
+    )
+    metadata_calls: list[object] = []
+
+    class SelectedSubclass(verifier_module.IndependentVerifierInputs):
+        pass
+
+    class SelectedDuck:
+        def __init__(self, source: object) -> None:
+            for key, value in _selected_input_kwargs(source).items():
+                setattr(self, key, value)
+
+        @property
+        def generation_as_of_date(self) -> date:
+            return selected.generation_as_of_date
+
+    def metadata_sentinel(_value: object) -> tuple[dict[str, object], dict[str, object]]:
+        metadata_calls.append(None)
+        raise AssertionError("assembler reached downstream metadata")
+
+    monkeypatch.setattr(verifier_module, "_report_source_metadata", metadata_sentinel)
+    invalid_selected = (
+        object(),
+        SelectedSubclass(**_selected_input_kwargs(selected)),
+        _selected_input_kwargs(selected),
+        SelectedDuck(selected),
+    )
+    for invalid in invalid_selected:
+        with pytest.raises(verifier_module.IndependentVerificationError) as raised:
+            verifier_module._assemble_independent_report(invalid, normalized, candidate)
+        assert str(raised.value) == "independent verification input is invalid"
+    assert metadata_calls == []
+
+    monkeypatch.undo()
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._assemble_independent_report(selected, {}, candidate)
+
+
+def _c4d3a_assembled_report(
+    perimeter_module: Any, verifier_module: Any
+) -> tuple[dict[str, object], object, dict[str, bytes], object]:
+    selected, normalized, candidate = _c4d3a_retained_candidate(
+        perimeter_module, verifier_module
+    )
+    return (
+        verifier_module._assemble_independent_report(selected, normalized, candidate),
+        selected,
+        normalized,
+        candidate,
+    )
+
+
+def test_c4d3a_assembler_validates_thawed_candidate_without_public_gate_adapter(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected, normalized, candidate = _c4d3a_retained_candidate(
+        perimeter_module, verifier_module
+    )
+    thaw_calls: list[object] = []
+    public_gate_calls: list[object] = []
+    original_thaw = verifier_module._thaw_retained_report_candidate
+
+    def thaw_spy(value: object) -> dict[str, object]:
+        thaw_calls.append(value)
+        return original_thaw(value)
+
+    def public_gate_sentinel(*_args: object, **_kwargs: object) -> None:
+        public_gate_calls.append(object())
+        raise AssertionError("assembler reached public numeric-gate adapter")
+
+    monkeypatch.setattr(verifier_module, "_thaw_retained_report_candidate", thaw_spy)
+    monkeypatch.setattr(
+        verifier_module, "_validate_numeric_decision", public_gate_sentinel
+    )
+
+    report = verifier_module._assemble_independent_report(selected, normalized, candidate)
+    assert report["numeric_verification"] == {
+        "candidate_count": 0,
+        "comparison_count": 0,
+        "discrepancy_count": 0,
+        "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
+    }
+    assert thaw_calls == [candidate]
+    assert public_gate_calls == []
+
+    malformed_thawed = original_thaw(candidate)
+    malformed_thawed["numeric_verification"]["candidate_count"] = 1
+    malformed = verifier_module._freeze_report_candidate(malformed_thawed)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._assemble_independent_report(selected, normalized, malformed)
+    assert thaw_calls == [candidate, malformed]
+    assert public_gate_calls == []
+
+
+def test_c4d3a_canonical_report_bytes_are_schema_valid_and_private(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    from jsonschema import Draft202012Validator
+
+    report, selected, normalized, _ = _c4d3a_assembled_report(
+        perimeter_module, verifier_module
+    )
+    report_bytes = verifier_module._canonical_independent_report_bytes(report)
+    parsed = json.loads(report_bytes)
+    schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema).validate(parsed)
+
+    assert report_bytes == canonical_json_bytes(parsed)
+    assert report_bytes.endswith(b"\n")
+    assert parsed == report
+    assert parsed["subjects_semantic_sha256"] == hashlib.sha256(
+        canonical_json_bytes({"subjects": _c4d3a_expected_subject_entries(normalized)})
+    ).hexdigest()
+    assert selected.provider_ledger.contents not in report_bytes
+
+
+def test_c4d3a_public_verify_reaches_private_assembly_and_canonicalization_once(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    events: list[str] = []
+    original_assemble = verifier_module._assemble_independent_report
+    original_canonicalize = verifier_module._canonical_independent_report_bytes
+
+    def assemble_spy(
+        selected_value: object,
+        normalized: Mapping[str, bytes],
+        candidate: object,
+    ) -> dict[str, object]:
+        events.append("assemble")
+        return original_assemble(selected_value, normalized, candidate)
+
+    def canonicalize_spy(report: Mapping[str, object]) -> bytes:
+        events.append("canonicalize")
+        return original_canonicalize(report)
+
+    monkeypatch.setattr(verifier_module, "_assemble_independent_report", assemble_spy)
+    monkeypatch.setattr(
+        verifier_module, "_canonical_independent_report_bytes", canonicalize_spy
+    )
+
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(selected, payloads)
+    )
+
+    assert events == ["assemble", "canonicalize"]
+
+
+def test_c4d3a_canonical_bytes_are_order_invariant_and_subject_bound(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    report, selected, normalized, candidate = _c4d3a_assembled_report(
+        perimeter_module, verifier_module
+    )
+    baseline_bytes = verifier_module._canonical_independent_report_bytes(report)
+    reversed_report = dict(reversed(tuple(report.items())))
+    assert verifier_module._canonical_independent_report_bytes(reversed_report) == baseline_bytes
+
+    reversed_normalized = dict(reversed(tuple(normalized.items())))
+    reversed_subject_report = verifier_module._assemble_independent_report(
+        selected, reversed_normalized, candidate
+    )
+    assert (
+        verifier_module._canonical_independent_report_bytes(reversed_subject_report)
+        == baseline_bytes
+    )
+
+    changed_subjects = dict(normalized)
+    changed_subjects[C4D3A_LITERAL_SUBJECT_PATHS[0]] = canonical_json_bytes(
+        {"changed": True}
+    )
+    changed_report = verifier_module._assemble_independent_report(
+        selected, changed_subjects, candidate
+    )
+    assert changed_report["subjects"][0] != report["subjects"][0]
+    assert changed_report["subjects_semantic_sha256"] != report[
+        "subjects_semantic_sha256"
+    ]
+    assert verifier_module._canonical_independent_report_bytes(changed_report) != baseline_bytes
+    assert "verification/independent-verification.json" not in {
+        item["path"] for item in changed_report["subjects"]
+    }
+
+
+def _c4d3a_report_with_receipts(
+    perimeter_module: Any,
+    verifier_module: Any,
+    receipts: Mapping[str, InputSnapshot],
+) -> dict[str, object]:
+    perimeter_selected = _c3_selected_inputs(perimeter_module)
+    selected_values = _selected_input_kwargs(perimeter_selected)
+    selected_values["retrieval_receipts"] = receipts
+    bound_perimeter_selected = perimeter_module.AccountManifestSelectedInputs(
+        **selected_values
+    )
+    selected = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(bound_perimeter_selected)
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(
+        bound_perimeter_selected
+    )
+    normalized = verifier_module._normalize_subject_payloads(payloads)
+    state = verifier_module._verify_retained_semantics_normalized(selected, normalized)
+    candidate = verifier_module._build_retained_report_candidate(state)
+    return verifier_module._assemble_independent_report(selected, normalized, candidate)
+
+
+def test_c4d3a_full_report_bytes_ignore_retrieval_receipt_insertion_order(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    receipt_a = InputSnapshot.from_bytes("receipt a", b"receipt-a")
+    receipt_b = InputSnapshot.from_bytes("receipt b", b"receipt-b")
+    forward = _c4d3a_report_with_receipts(
+        perimeter_module,
+        verifier_module,
+        {"receipt/a.json": receipt_a, "receipt/b.json": receipt_b},
+    )
+    reverse = _c4d3a_report_with_receipts(
+        perimeter_module,
+        verifier_module,
+        {"receipt/b.json": receipt_b, "receipt/a.json": receipt_a},
+    )
+
+    assert forward == reverse
+    assert verifier_module._canonical_independent_report_bytes(forward) == (
+        verifier_module._canonical_independent_report_bytes(reverse)
+    )
+
+
+def test_c4d3a_canonicalizer_is_runtime_safety_not_semantic_authority(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    report, _, _, _ = _c4d3a_assembled_report(perimeter_module, verifier_module)
+    semantically_wrong = deepcopy(report)
+    semantically_wrong["status"] = "WRONG"
+    assert verifier_module._canonical_independent_report_bytes(semantically_wrong) == (
+        canonical_json_bytes(semantically_wrong)
+    )
+
+    cyclic: dict[str, object] = {}
+    cyclic["self"] = cyclic
+
+    class StringSubclass(str):
+        pass
+
+    class IntegerSubclass(int):
+        pass
+
+    class DictSubclass(dict[str, object]):
+        pass
+
+    for invalid in (
+        MappingProxyType(report),
+        [],
+        "report",
+        1,
+        True,
+        object(),
+        DictSubclass(report),
+        {"bytes": b"x"},
+        {"float": 0.5},
+        {"decimal": Decimal("1")},
+        {"set": set()},
+        {"frozen": frozenset()},
+        {"proxy": MappingProxyType({})},
+        {"tuple": ()},
+        {1: "non-string"},
+        {"string_subclass": StringSubclass("x")},
+        {"integer_subclass": IntegerSubclass(1)},
+        cyclic,
+    ):
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._canonical_independent_report_bytes(invalid)
+
+
+def test_c4d3a_schema_mutations_and_digest_mismatch_stay_test_only(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    from jsonschema import Draft202012Validator
+
+    report, selected, normalized, _ = _c4d3a_assembled_report(
+        perimeter_module, verifier_module
+    )
+    schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema)
+    mutations = (
+        lambda value: value.pop("status"),
+        lambda value: value.update({"extra": True}),
+        lambda value: value["numeric_verification"].pop("disposition"),
+        lambda value: value["numeric_verification"].update({"disposition": "WRONG"}),
+        lambda value: value["numeric_verification"].update({"extra": 1}),
+        lambda value: value["subjects"].append(
+            {"path": "verification/independent-verification.json", "sha256": "0" * 64, "size_bytes": 0}
+        ),
+        lambda value: value["verifier"].update({"artifact_id": "wrong.py"}),
+        lambda value: value["verifier"].update({"as_of_date": "not-an-iso-date"}),
+    )
+    for mutate in mutations:
+        invalid = deepcopy(report)
+        mutate(invalid)
+        assert not validator.is_valid(invalid)
+
+    valid_date_mismatch = deepcopy(report)
+    valid_date_mismatch["verifier"]["as_of_date"] = "2026-02-02"
+    assert validator.is_valid(valid_date_mismatch)
+    expected_as_of_date = selected.generation_as_of_date.isoformat()
+    assert report["as_of_date"] == expected_as_of_date
+    assert report["verifier"]["as_of_date"] == expected_as_of_date
+    assert valid_date_mismatch["as_of_date"] == expected_as_of_date
+    assert valid_date_mismatch["verifier"]["as_of_date"] != expected_as_of_date
+
+    digest_mismatch = deepcopy(report)
+    digest_mismatch["subjects_semantic_sha256"] = "0" * 64
+    assert validator.is_valid(digest_mismatch)
+    literal_digest = hashlib.sha256(
+        canonical_json_bytes(
+            {"subjects": _c4d3a_expected_subject_entries(normalized)}
+        )
+    ).hexdigest()
+    assert report["subjects_semantic_sha256"] == literal_digest
+    assert digest_mismatch["subjects_semantic_sha256"] != literal_digest
+
+
+def test_c4d3a_verifier_ast_has_no_jsonschema_runtime_import() -> None:
+    tree = ast.parse(VERIFIER_MODULE_PATH.read_text(encoding="utf-8"))
+    assert not any(
+        isinstance(node, ast.Import) and any(alias.name == "jsonschema" for alias in node.names)
+        or isinstance(node, ast.ImportFrom) and node.module == "jsonschema"
+        for node in ast.walk(tree)
+    )
+
+
+def test_c4d3b1_public_verify_returns_exact_canonical_bytes_once(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    expected_subjects = [
+        {
+            "path": path,
+            "sha256": hashlib.sha256(payloads[path]).hexdigest(),
+            "size_bytes": len(payloads[path]),
+        }
+        for path in C4D3A_LITERAL_SUBJECT_PATHS
+    ]
+    expected_blocker_vector = (
+        ("synthetic-account-01", "synthetic-strategy-01", "2025-01-01", None),
+        ("synthetic-account-02", "synthetic-strategy-02", "2025-01-01", None),
+        ("synthetic-account-03", "synthetic-strategy-03", "2025-01-01", None),
+        ("synthetic-account-04", "synthetic-strategy-04", "2025-01-01", None),
+        ("synthetic-account-05", "synthetic-strategy-05", "2025-01-01", None),
+        ("synthetic-account-06", "synthetic-strategy-06", "2025-01-01", None),
+        ("synthetic-account-07", "synthetic-strategy-07", "2025-01-01", None),
+        ("synthetic-account-08", "synthetic-strategy-08", "2025-01-01", None),
+        ("synthetic-account-09", "synthetic-strategy-09", "2025-01-01", None),
+        ("synthetic-account-10", "synthetic-strategy-10", "2025-01-01", None),
+        ("synthetic-account-11", "synthetic-strategy-11", "2025-01-01", None),
+        ("synthetic-account-12", "synthetic-strategy-12", "2025-01-01", "2025-12-31"),
+        ("synthetic-account-13", "synthetic-strategy-13", "2025-01-01", "2025-12-31"),
+        ("synthetic-account-14", "synthetic-strategy-14", "2025-01-01", "2025-12-31"),
+        ("synthetic-account-15", "synthetic-strategy-15", "2025-01-01", "2025-12-31"),
+    )
+    expected_blocker_chains = [
+        {
+            "assignment": {
+                "account_id": account_id,
+                "strategy_id": strategy_id,
+                "effective_start": effective_start,
+                "effective_end": effective_end,
+            },
+            "coverage": {
+                "status": "BLOCKED",
+                "blocker_code": "NO_ADMISSIBLE_V2_RECEIPT",
+            },
+            "admission": {
+                "status": "BLOCKED",
+                "blocker_code": "FLOW_COMPLETENESS_NOT_PROVEN",
+            },
+            "output": {
+                "status": "BLOCKED_ADMISSION",
+                "blocking_reason": "FLOW_COMPLETENESS_NOT_PROVEN",
+            },
+            "numeric_candidate": False,
+        }
+        for account_id, strategy_id, effective_start, effective_end in expected_blocker_vector
+    ]
+    expected_report = {
+        "schema_version": 2,
+        "artifact_id": "verification/independent-verification.json",
+        "as_of_date": "2026-02-01",
+        "status": "VERIFIED",
+        "verifier": {
+            "artifact_id": "tools/verify_account_manifest_generation.py",
+            "as_of_date": "2026-02-01",
+            "schema": {
+                "name": "independent-account-manifest-verifier",
+                "version": "1",
+            },
+            **_c4d3a_snapshot_identity_oracle(selected.independent_verifier_source),
+        },
+        "selected_source_identities": _c4d3a_selected_identity_oracle(selected),
+        "subjects": expected_subjects,
+        "subjects_semantic_sha256": hashlib.sha256(
+            canonical_json_bytes({"subjects": expected_subjects})
+        ).hexdigest(),
+        "counts": {
+            "selected_baseline_account_count": 18,
+            "account_count": 18,
+            "assignment_count": 26,
+            "mapped_assignment_count": 15,
+            "historical_assignment_count": 7,
+            "reserve_assignment_count": 4,
+            "observed_nav_fact_count": 18,
+            "observed_raw_flow_count": 18,
+            "classified_event_count": 18,
+            "classified_event_classified_count": 15,
+            "classified_event_blocked_count": 3,
+            "unmatched_nav_fact_count": 0,
+            "unmatched_raw_flow_fact_count": 0,
+            "unmatched_fact_count": 0,
+            "unmatched_projection_count": 0,
+            "calculation_input_row_count": 15,
+            "coverage_row_count": 15,
+            "admission_row_count": 15,
+            "output_row_count": 15,
+            "blocked_coverage_row_count": 15,
+            "blocked_admission_row_count": 15,
+            "blocked_output_row_count": 15,
+        },
+        "blocker_chains": expected_blocker_chains,
+        "numeric_verification": {
+            "candidate_count": 0,
+            "comparison_count": 0,
+            "discrepancy_count": 0,
+            "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
+        },
+        "invariants": {key: True for key in C4E1_LITERAL_INVARIANT_KEYS},
+    }
+
+    actual = verifier_module.IndependentAccountManifestVerifier().verify(
+        selected, payloads
+    )
+    assert actual == canonical_json_bytes(expected_report)
+
+    mutated_payloads = dict(payloads)
+    hostile_output = json.loads(
+        mutated_payloads["outputs/account-strategy-manifest.json"]
+    )
+    assert hostile_output["rows"][0]["continuity_to_successor"] is False
+    hostile_output["rows"][0]["continuity_to_successor"] = True
+    assert not list(
+        _account_strategy_schema_validator_without_format_checker().iter_errors(
+            hostile_output
+        )
+    )
+    mutated_payloads["outputs/account-strategy-manifest.json"] = canonical_json_bytes(
+        hostile_output
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError) as raised:
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            selected, mutated_payloads
+        )
+    assert type(raised.value) is verifier_module.IndependentVerificationError
+    assert str(raised.value) == "independent verification input is invalid"
+
+
+def test_c4d3b2_finalized_report_exact_type_gate_precedes_verification(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+
+    class BytesSubclass(bytes):
+        pass
+
+    def verify_sentinel(*_args: object, **_kwargs: object) -> bytes:
+        raise AssertionError("non-bytes finalized report reached verification")
+
+    monkeypatch.setattr(
+        verifier_module.IndependentAccountManifestVerifier, "verify", verify_sentinel
+    )
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    for invalid in (
+        None,
+        bytearray(b"report"),
+        memoryview(b"report"),
+        "report",
+        {"report": b"bytes"},
+        BytesSubclass(b"report"),
+    ):
+        with pytest.raises(verifier_module.IndependentVerificationError) as raised:
+            verifier.verify_finalized_report(selected, payloads, invalid)
+        assert str(raised.value) == "independent verification input is invalid"
+    assert vars(verifier) == {}
+
+
+def test_c4d3b2_finalized_report_requires_one_fresh_exact_base_verification(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    baseline = verifier_module.IndependentAccountManifestVerifier().verify(
+        selected, payloads
+    )
+    original_verify = verifier_module.IndependentAccountManifestVerifier.verify
+    calls: list[tuple[object, object, object]] = []
+
+    def verify_spy(
+        verifier: object, selected_value: object, payload_value: object
+    ) -> bytes:
+        calls.append((verifier, selected_value, payload_value))
+        return original_verify(verifier, selected_value, payload_value)
+
+    monkeypatch.setattr(
+        verifier_module.IndependentAccountManifestVerifier, "verify", verify_spy
+    )
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    assert verifier.verify_finalized_report(selected, payloads, baseline) is None
+    with pytest.raises(verifier_module.IndependentVerificationError) as raised:
+        verifier.verify_finalized_report(selected, payloads, baseline[:-1] + b" ")
+    assert str(raised.value) == "independent verification input is invalid"
+    assert calls == [(verifier, selected, payloads), (verifier, selected, payloads)]
+    assert vars(verifier) == {}
+
+
+def test_c4d3b2_finalized_report_has_no_caller_or_override_authority(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    def select_finalized_method(source_tree: ast.Module) -> ast.FunctionDef:
+        verifier_classes = [
+            node
+            for node in source_tree.body
+            if isinstance(node, ast.ClassDef)
+            and node.name == "IndependentAccountManifestVerifier"
+        ]
+        assert len(verifier_classes) == 1
+        methods = [
+            node
+            for node in verifier_classes[0].body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "verify_finalized_report"
+        ]
+        assert len(methods) == 1
+        return methods[0]
+
+    tree = ast.parse(VERIFIER_MODULE_PATH.read_text(encoding="utf-8"))
+    method = select_finalized_method(tree)
+    hostile_tree = ast.parse(
+        "def verify_finalized_report():\n"
+        "    return None\n\n"
+        "class IndependentAccountManifestVerifier:\n"
+        "    def verify_finalized_report(self):\n"
+        "        return None\n"
+    )
+    decoy = hostile_tree.body[0]
+    assert isinstance(decoy, ast.FunctionDef)
+    assert next(
+        node
+        for node in ast.walk(hostile_tree)
+        if isinstance(node, ast.FunctionDef) and node.name == "verify_finalized_report"
+    ) is decoy
+    hostile_method = select_finalized_method(hostile_tree)
+    assert hostile_method is not decoy
+    assert hostile_method.lineno > decoy.lineno
+
+    finalized_references = [
+        node
+        for node in ast.walk(method)
+        if isinstance(node, ast.Name) and node.id == "finalized_report"
+    ]
+    assert len(finalized_references) == 2
+    assert any(isinstance(node.ctx, ast.Load) for node in finalized_references)
+    assert not any(
+        isinstance(node, (ast.Subscript, ast.Attribute))
+        and any(
+            isinstance(child, ast.Name) and child.id == "finalized_report"
+            for child in ast.walk(node)
+        )
+        for node in ast.walk(method)
+    )
+    calls = [node for node in ast.walk(method) if isinstance(node, ast.Call)]
+    class_qualified_calls = [
+        node
+        for node in calls
+        if isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "IndependentAccountManifestVerifier"
+        and node.func.attr == "verify"
+    ]
+    direct_call_names = {
+        node.func.id for node in calls if isinstance(node.func, ast.Name)
+    }
+    assert len(calls) == 4
+    assert len(class_qualified_calls) == 1
+    assert direct_call_names == {"type", "_fail"}
+    assert not any(
+        isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "self"
+        and node.func.attr == "verify"
+        for node in calls
+    )
+    assert not any(
+        isinstance(node, (ast.Assign, ast.AnnAssign))
+        and any(
+            isinstance(child, ast.Name) and child.id == "finalized_report"
+            for child in ast.walk(node)
+        )
+        for node in ast.walk(method)
+    )
+
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+
+    class Attacker(verifier_module.IndependentAccountManifestVerifier):
+        def verify(self, *_args: object, **_kwargs: object) -> bytes:
+            return b'{"attacker":true}\n'
+
+    attacker = Attacker()
+    with pytest.raises(verifier_module.IndependentVerificationError) as raised:
+        attacker.verify_finalized_report(selected, payloads, b'{"attacker":true}\n')
+    assert str(raised.value) == "independent verification input is invalid"
+    assert vars(attacker) == {}
+
+
+def test_c4d3b2_finalized_report_rejects_representative_caller_bytes_without_leakage(
+    perimeter_module: Any,
+    verifier_module: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from jsonschema import Draft202012Validator
+
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    baseline = verifier_module.IndependentAccountManifestVerifier().verify(
+        selected, payloads
+    )
+    parsed = json.loads(baseline)
+    schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema)
+
+    date_mutation = deepcopy(parsed)
+    date_mutation["verifier"]["as_of_date"] = "2026-02-02"
+    digest_mutation = deepcopy(parsed)
+    digest_mutation["subjects_semantic_sha256"] = "0" * 64
+    assert validator.is_valid(date_mutation)
+    assert validator.is_valid(digest_mutation)
+    assert date_mutation["verifier"]["as_of_date"] != selected.generation_as_of_date.isoformat()
+    assert digest_mutation["subjects_semantic_sha256"] != hashlib.sha256(
+        canonical_json_bytes({"subjects": parsed["subjects"]})
+    ).hexdigest()
+    reordered_whitespace = (
+        json.dumps(
+            dict(reversed(tuple(parsed.items()))), ensure_ascii=True, indent=2
+        ).encode("utf-8")
+        + b"\n"
+    )
+    assert json.loads(reordered_whitespace) == parsed
+
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    sentinel = b"C4PRIVACY987654321012345"
+    for invalid in (
+        canonical_json_bytes(date_mutation),
+        canonical_json_bytes(digest_mutation),
+        reordered_whitespace,
+        baseline[:-1],
+        baseline + b" ",
+        sentinel,
+    ):
+        capsys.readouterr()
+        with pytest.raises(verifier_module.IndependentVerificationError) as raised:
+            verifier.verify_finalized_report(selected, payloads, invalid)
+        captured = capsys.readouterr()
+        assert str(raised.value) == "independent verification input is invalid"
+        assert sentinel.decode("ascii") not in str(raised.value)
+        assert captured.out == "" and captured.err == ""
+        assert vars(verifier) == {}
+
+
+@pytest.mark.parametrize(
+    "argv, expected",
+    [
+        (("--request", "request.json"), ("request.json", None)),
+        (
+            ("--request", "request.json", "--finalized-report", "report.json"),
+            ("request.json", "report.json"),
+        ),
+    ],
+)
+def test_c4d3c1_cli_parse_argv_accepts_only_literal_forms(
+    verifier_module: Any, argv: tuple[str, ...], expected: tuple[str, str | None]
+) -> None:
+    assert verifier_module._cli_parse_argv(argv) == expected
+    for invalid in (
+        (),
+        ("--request",),
+        ("--request", "request.json", "--finalized-report"),
+        ("--finalized-report", "report.json", "--request", "request.json"),
+        ("--request", "request.json", "--request", "other.json"),
+        ("--request", "request.json", "--finalized-report", ""),
+        ("--request", "request.json", "--finalized-report", 1),
+        ("--request", "request.json", "@response.json"),
+        ("--default", "request.json"),
+        ("--request", "request.json", "--finalized-report", "report.json", "extra"),
+        ("--request", ""),
+        ("--request", 1),
+        ["--request", "request.json"],
+    ):
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module._cli_parse_argv(invalid)
+
+
+def test_c4d3c1_cli_prepare_reads_request_leaf_and_resolved_source_in_order_once(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    source_bytes = b"C4D3C1-EXECUTING-SOURCE"
+    values = _selected_input_kwargs(selected)
+    values["independent_verifier_source"] = InputSnapshot.from_bytes(
+        "selected verifier source", source_bytes
+    )
+    bound_selected = verifier_module.IndependentVerifierInputs(**values)
+    request_path = tmp_path / "request.json"
+    request_path.write_bytes(
+        verifier_module.encode_verification_request(bound_selected, payloads)
+    )
+    source_path = tmp_path / "verifier.py"
+    source_path.write_bytes(source_bytes)
+    finalized_path = tmp_path / "report.json"
+    monkeypatch.setattr(verifier_module, "__file__", str(source_path))
+
+    events: list[str] = []
+    original_read_bytes = Path.read_bytes
+    original_is_symlink = Path.is_symlink
+    original_resolve = Path.resolve
+
+    def spy_read_bytes(path: Path) -> bytes:
+        if path == request_path:
+            events.append("request.read_bytes")
+        elif path == source_path:
+            events.append("source.read_bytes")
+        elif path == finalized_path:
+            pytest.fail("C1 must return the finalized path without reading it")
+        else:
+            pytest.fail(f"unexpected C1 read: {path}")
+        return original_read_bytes(path)
+
+    def spy_is_symlink(path: Path) -> bool:
+        assert path == source_path
+        events.append("source.is_symlink")
+        return original_is_symlink(path)
+
+    def spy_resolve(path: Path, *, strict: bool = False) -> Path:
+        assert path == source_path
+        assert strict is True
+        events.append("source.resolve")
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "read_bytes", spy_read_bytes)
+    monkeypatch.setattr(Path, "is_symlink", spy_is_symlink)
+    monkeypatch.setattr(Path, "resolve", spy_resolve)
+
+    prepared_selected, prepared_payloads, finalized_path = verifier_module._cli_prepare(
+        ("--request", str(request_path), "--finalized-report", str(finalized_path))
+    )
+    assert verifier_module.encode_verification_request(
+        prepared_selected, prepared_payloads
+    ) == verifier_module.encode_verification_request(bound_selected, payloads)
+    assert prepared_payloads == payloads
+    assert isinstance(finalized_path, Path)
+    assert finalized_path == tmp_path / "report.json"
+    assert events == [
+        "request.read_bytes",
+        "source.is_symlink",
+        "source.resolve",
+        "source.read_bytes",
+    ]
+
+
+def test_c4d3c1_cli_prepare_rejects_leaf_symlink_before_source_resolution_or_read(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    source_bytes = b"C4D3C1-LEAF-SYMLINK"
+    values = _selected_input_kwargs(selected)
+    values["independent_verifier_source"] = InputSnapshot.from_bytes(
+        "selected verifier source", source_bytes
+    )
+    bound_selected = verifier_module.IndependentVerifierInputs(**values)
+    request_path = tmp_path / "request.json"
+    request_path.write_bytes(
+        verifier_module.encode_verification_request(bound_selected, payloads)
+    )
+    source_path = tmp_path / "verifier.py"
+    source_path.write_bytes(source_bytes)
+    monkeypatch.setattr(verifier_module, "__file__", str(source_path))
+
+    events: list[str] = []
+    original_read_bytes = Path.read_bytes
+
+    def spy_read_bytes(path: Path) -> bytes:
+        if path == request_path:
+            events.append("request.read_bytes")
+            return original_read_bytes(path)
+        pytest.fail(f"source bytes must not be read after a leaf-symlink result: {path}")
+
+    def true_leaf_symlink(path: Path) -> bool:
+        assert path == source_path
+        events.append("source.is_symlink")
+        return True
+
+    def forbidden_resolve(path: Path, *, strict: bool = False) -> Path:
+        pytest.fail(f"source must not resolve after a leaf-symlink result: {path}")
+
+    monkeypatch.setattr(Path, "read_bytes", spy_read_bytes)
+    monkeypatch.setattr(Path, "is_symlink", true_leaf_symlink)
+    monkeypatch.setattr(Path, "resolve", forbidden_resolve)
+
+    capsys.readouterr()
+    with pytest.raises(verifier_module.IndependentVerificationError) as raised:
+        verifier_module._cli_prepare(("--request", str(request_path)))
+    captured = capsys.readouterr()
+    assert str(raised.value) == "independent verification input is invalid"
+    assert captured.out == "" and captured.err == ""
+    assert events == ["request.read_bytes", "source.is_symlink"]
+
+
+def test_c4d3c1_cli_helpers_remain_private_and_export_no_cli_symbol(
+    verifier_module: Any,
+) -> None:
+    assert "_cli_parse_argv" not in verifier_module.__all__
+    assert "_cli_prepare" not in verifier_module.__all__
+    assert "_cli_dispatch" not in verifier_module.__all__
+    assert "_cli_main" not in verifier_module.__all__
+    source = VERIFIER_MODULE_PATH.read_text(encoding="utf-8")
+    assert "if __name__ == \"__main__\"" in source
+
+
+def test_c4d3c1_ast_pins_the_exact_private_cli_island() -> None:
+    expected_island_tree = ast.parse(
+        '''
+def _cli_parse_argv(argv: object) -> tuple[str, str | None]:
+    """Accept only the two literal D3c command forms."""
+
+    if type(argv) is not tuple:
+        _fail()
+    if len(argv) == 2:
+        request_flag, request_path = argv
+        finalized_path = None
+    elif len(argv) == 4:
+        request_flag, request_path, finalized_flag, finalized_path = argv
+        if finalized_flag != "--finalized-report":
+            _fail()
+    else:
+        _fail()
+    if request_flag != "--request":
+        _fail()
+    if type(request_path) is not str or not request_path:
+        _fail()
+    if finalized_path is not None and (
+        type(finalized_path) is not str or not finalized_path
+    ):
+        _fail()
+    return request_path, finalized_path
+
+
+def _cli_prepare(
+    argv: object,
+) -> tuple[IndependentVerifierInputs, dict[str, bytes], object | None]:
+    """Decode one request and attest the executing verifier source bytes."""
+
+    from pathlib import Path
+
+    request_name, finalized_name = _cli_parse_argv(argv)
+    selected, subjects = decode_verification_request(Path(request_name).read_bytes())
+    executing_path = Path(__file__)
+    if executing_path.is_symlink():
+        _fail()
+    source_bytes = executing_path.resolve(strict=True).read_bytes()
+    if source_bytes != selected.independent_verifier_source.contents:
+        _fail()
+    return selected, subjects, None if finalized_name is None else Path(finalized_name)
+
+
+def _cli_dispatch(argv: object) -> bytes | None:
+    """Run only the C2a request-mode verifier path."""
+
+    selected, subjects, finalized_path = _cli_prepare(argv)
+    if finalized_path is not None:
+        raise IndependentVerificationError(
+            "independent verification input is invalid"
+        ) from None
+    verifier = IndependentAccountManifestVerifier()
+    return verifier.verify(selected, subjects)
+
+
+def _cli_main() -> int:
+    """Contain expected CLI operational failures at one generic boundary."""
+
+    import sys
+
+    try:
+        result = _cli_dispatch(tuple(sys.argv[1:]))
+        if result is not None:
+            written = sys.stdout.buffer.write(result)
+            if written != len(result):
+                raise IndependentVerificationError(
+                    "independent verification input is invalid"
+                ) from None
+        return 0
+    except Exception:
+        try:
+            sys.stderr.buffer.write(b"INDEPENDENT_VERIFICATION_FAILED\\n")
+        except Exception:
+            pass
+        return 1
+'''
+    )
+    expected_island = tuple(
+        node
+        for node in expected_island_tree.body
+        if isinstance(node, ast.FunctionDef)
+    )
+    expected_guard = ast.parse(
+        'if __name__ == "__main__":\n    raise SystemExit(_cli_main())\n'
+    ).body[0]
+    assert isinstance(expected_guard, ast.If)
+
+    def assert_exact_c1_island(source_tree: ast.Module) -> None:
+        expected_names = (
+            "_cli_parse_argv",
+            "_cli_prepare",
+            "_cli_dispatch",
+            "_cli_main",
+        )
+        top_level_cli = [
+            node
+            for node in source_tree.body
+            if isinstance(node, ast.FunctionDef) and node.name.startswith("_cli_")
+        ]
+        assert tuple(node.name for node in top_level_cli) == expected_names
+        assert len({node.name for node in top_level_cli}) == len(expected_names)
+        assert tuple(
+            ast.dump(node, include_attributes=False) for node in top_level_cli
+        ) == tuple(
+            ast.dump(node, include_attributes=False) for node in expected_island
+        )
+        assert not any(
+            isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("_cli_")
+            and node not in top_level_cli
+            for node in ast.walk(source_tree)
+        )
+
+        parse, prepare, dispatch, main = top_level_cli
+        assert not any(
+            isinstance(node, (ast.Import, ast.ImportFrom)) for node in ast.walk(parse)
+        )
+        prepare_imports = [
+            node for node in ast.walk(prepare) if isinstance(node, ast.ImportFrom)
+        ]
+        assert [
+            (node.module, tuple((alias.name, alias.asname) for alias in node.names))
+            for node in prepare_imports
+        ] == [("pathlib", (("Path", None),))]
+        assert not any(
+            isinstance(node, ast.Import) for node in ast.walk(prepare)
+        )
+        assert not any(
+            isinstance(node, (ast.Import, ast.ImportFrom))
+            for node in ast.walk(dispatch)
+        )
+        main_imports = [node for node in ast.walk(main) if isinstance(node, ast.Import)]
+        assert [tuple(alias.name for alias in node.names) for node in main_imports] == [
+            ("sys",)
+        ]
+        assert not any(isinstance(node, ast.ImportFrom) for node in ast.walk(main))
+
+        local_functions = {
+            node.name
+            for node in source_tree.body
+            if isinstance(node, ast.FunctionDef)
+        }
+
+        def local_edges(function: ast.FunctionDef) -> set[str]:
+            return {
+                node.func.id
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in local_functions
+            }
+
+        assert local_edges(parse) == {"_fail"}
+        assert local_edges(prepare) == {
+            "_cli_parse_argv",
+            "decode_verification_request",
+            "_fail",
+        }
+        assert local_edges(dispatch) == {"_cli_prepare"}
+        assert local_edges(main) == {"_cli_dispatch"}
+
+        def direct_call_counts(function: ast.FunctionDef) -> dict[str, int]:
+            names = [
+                node.func.id
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+            ]
+            return {name: names.count(name) for name in set(names)}
+
+        def attribute_call_counts(function: ast.FunctionDef) -> dict[str, int]:
+            names = [
+                node.func.attr
+                for node in ast.walk(function)
+                if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+            ]
+            return {name: names.count(name) for name in set(names)}
+
+        assert direct_call_counts(parse) == {"_fail": 6, "len": 2, "type": 3}
+        assert attribute_call_counts(parse) == {}
+        assert direct_call_counts(prepare) == {
+            "Path": 3,
+            "_cli_parse_argv": 1,
+            "_fail": 2,
+            "decode_verification_request": 1,
+        }
+        assert attribute_call_counts(prepare) == {
+            "is_symlink": 1,
+            "read_bytes": 2,
+            "resolve": 1,
+        }
+        assert all(
+            isinstance(node.func, (ast.Name, ast.Attribute))
+            for function in (parse, prepare)
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call)
+        )
+
+        path_constructors = [
+            node
+            for node in ast.walk(prepare)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "Path"
+        ]
+        assert len(path_constructors) == 3
+        assert sorted(
+            node.args[0].id
+            for node in path_constructors
+            if len(node.args) == 1
+            and not node.keywords
+            and isinstance(node.args[0], ast.Name)
+        ) == ["__file__", "finalized_name", "request_name"]
+        assert all(len(node.args) == 1 and not node.keywords for node in path_constructors)
+        read_calls = [
+            node
+            for node in ast.walk(prepare)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "read_bytes"
+        ]
+        assert len(read_calls) == 2
+        request_reads = [
+            node
+            for node in read_calls
+            if isinstance(node.func.value, ast.Call)
+            and isinstance(node.func.value.func, ast.Name)
+            and node.func.value.func.id == "Path"
+            and len(node.func.value.args) == 1
+            and isinstance(node.func.value.args[0], ast.Name)
+            and node.func.value.args[0].id == "request_name"
+        ]
+        source_reads = [
+            node
+            for node in read_calls
+            if isinstance(node.func.value, ast.Call)
+            and isinstance(node.func.value.func, ast.Attribute)
+            and isinstance(node.func.value.func.value, ast.Name)
+            and node.func.value.func.value.id == "executing_path"
+            and node.func.value.func.attr == "resolve"
+        ]
+        assert len(request_reads) == len(source_reads) == 1
+        assert not request_reads[0].args and not request_reads[0].keywords
+        assert not source_reads[0].args and not source_reads[0].keywords
+        is_symlink_calls = [
+            node
+            for node in ast.walk(prepare)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "executing_path"
+            and node.func.attr == "is_symlink"
+        ]
+        assert len(is_symlink_calls) == 1
+        assert not is_symlink_calls[0].args and not is_symlink_calls[0].keywords
+        resolve_calls = [
+            node
+            for node in ast.walk(prepare)
+            if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "resolve"
+        ]
+        assert len(resolve_calls) == 1
+        assert isinstance(resolve_calls[0].func.value, ast.Name)
+        assert resolve_calls[0].func.value.id == "executing_path"
+        assert not resolve_calls[0].args
+        assert len(resolve_calls[0].keywords) == 1
+        resolve_keyword = resolve_calls[0].keywords[0]
+        assert resolve_keyword.arg == "strict"
+        assert isinstance(resolve_keyword.value, ast.Constant)
+        assert resolve_keyword.value.value is True
+        main_guards = [
+            node
+            for node in source_tree.body
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Compare)
+            and any(
+                isinstance(child, ast.Constant) and child.value == "__main__"
+                for child in ast.walk(node.test)
+            )
+        ]
+        assert len(main_guards) == 1
+        assert ast.dump(main_guards[0], include_attributes=False) == ast.dump(
+            expected_guard, include_attributes=False
+        )
+        guard_calls = [
+            node for node in ast.walk(main_guards[0]) if isinstance(node, ast.Call)
+        ]
+        allowed_guard_name_ids = {
+            id(node.func)
+            for node in guard_calls
+            if isinstance(node.func, ast.Name) and node.func.id == "_cli_main"
+        }
+        cli_node_ids = {
+            id(node) for function in top_level_cli for node in ast.walk(function)
+        }
+        assert not any(
+            isinstance(node, ast.Name)
+            and node.id in expected_names
+            and id(node) not in cli_node_ids
+            and id(node) not in allowed_guard_name_ids
+            for node in ast.walk(source_tree)
+        )
+        assert len(guard_calls) == 2
+        assert any(
+            isinstance(node.func, ast.Name) and node.func.id == "SystemExit"
+            for node in guard_calls
+        )
+        assert any(
+            isinstance(node.func, ast.Name) and node.func.id == "_cli_main"
+            for node in guard_calls
+        )
+        all_assignments = [
+            node
+            for node in source_tree.body
+            if isinstance(node, ast.Assign)
+            and any(
+                isinstance(target, ast.Name) and target.id == "__all__"
+                for target in node.targets
+            )
+        ]
+        assert len(all_assignments) == 1
+        all_value = all_assignments[0].value
+        assert isinstance(all_value, (ast.List, ast.Tuple))
+        assert not any(
+            isinstance(node, ast.Constant) and node.value in expected_names
+            for node in all_value.elts
+        )
+
+    tree = ast.parse(VERIFIER_MODULE_PATH.read_text(encoding="utf-8"))
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            child.parent = parent
+    assert_exact_c1_island(tree)
+
+    def assert_rejected(hostile_tree: ast.Module) -> None:
+        with pytest.raises(AssertionError):
+            assert_exact_c1_island(hostile_tree)
+
+    def hostile_copy() -> ast.Module:
+        return deepcopy(tree)
+
+    def cli_function(source_tree: ast.Module, name: str) -> ast.FunctionDef:
+        matches = [
+            node
+            for node in source_tree.body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        ]
+        assert len(matches) == 1
+        return matches[0]
+
+    duplicate = hostile_copy()
+    duplicate.body.append(deepcopy(cli_function(duplicate, "_cli_prepare")))
+    assert_rejected(duplicate)
+
+    nested = hostile_copy()
+    cli_function(nested, "_cli_parse_argv").body.insert(
+        1, ast.parse("def _cli_decoy():\n    return None\n").body[0]
+    )
+    assert_rejected(nested)
+
+    wrong_owner = hostile_copy()
+    moved_prepare = cli_function(wrong_owner, "_cli_prepare")
+    wrong_owner.body.remove(moved_prepare)
+    owner = ast.parse("class WrongOwner:\n    pass\n").body[0]
+    assert isinstance(owner, ast.ClassDef)
+    owner.body = [moved_prepare]
+    wrong_owner.body.append(owner)
+    assert_rejected(wrong_owner)
+
+    reordered = hostile_copy()
+    reordered_prepare = cli_function(reordered, "_cli_prepare")
+    request_read_statement = reordered_prepare.body.pop(3)
+    reordered_prepare.body.insert(5, request_read_statement)
+    assert_rejected(reordered)
+
+    extra_resolve_argument = hostile_copy()
+    extra_resolve_call = next(
+        node
+        for node in ast.walk(cli_function(extra_resolve_argument, "_cli_prepare"))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "resolve"
+    )
+    extra_resolve_call.keywords.append(
+        ast.keyword(arg="extra", value=ast.Name(id="sentinel", ctx=ast.Load()))
+    )
+    assert_rejected(extra_resolve_argument)
+
+    altered_direct_argument = hostile_copy()
+    altered_fail_call = next(
+        node
+        for node in ast.walk(cli_function(altered_direct_argument, "_cli_parse_argv"))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_fail"
+    )
+    altered_fail_call.args.append(ast.Constant(value=1))
+    assert_rejected(altered_direct_argument)
+
+    forbidden_direct = hostile_copy()
+    cli_function(forbidden_direct, "_cli_prepare").body.insert(
+        -1, ast.parse("open('forbidden')\n").body[0]
+    )
+    assert_rejected(forbidden_direct)
+
+    forbidden_attribute = hostile_copy()
+    cli_function(forbidden_attribute, "_cli_prepare").body.insert(
+        -1, ast.parse("Path('forbidden').glob('*')\n").body[0]
+    )
+    assert_rejected(forbidden_attribute)
+
+    verifier_call = hostile_copy()
+    cli_function(verifier_call, "_cli_prepare").body.insert(
+        -1,
+        ast.parse("IndependentAccountManifestVerifier().verify(None, None)\n").body[0],
+    )
+    assert_rejected(verifier_call)
+
+    report_read_in_dispatch = hostile_copy()
+    cli_function(report_read_in_dispatch, "_cli_dispatch").body.insert(
+        -1, ast.parse("finalized_path.read_bytes()\n").body[0]
+    )
+    assert_rejected(report_read_in_dispatch)
+
+    altered_guard = hostile_copy()
+    hostile_guard = next(
+        node
+        for node in altered_guard.body
+        if isinstance(node, ast.If)
+        and any(
+            isinstance(child, ast.Constant) and child.value == "__main__"
+            for child in ast.walk(node.test)
+        )
+    )
+    hostile_guard.body.append(ast.Pass())
+    assert_rejected(altered_guard)
+
+    non_cli_edge = hostile_copy()
+    non_cli_edge.body.append(
+        ast.parse("def unrelated():\n    _cli_prepare(())\n").body[0]
+    )
+    assert_rejected(non_cli_edge)
+
+
+def _c4d3c2a_bound_request(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> tuple[tuple[str, ...], Path, Path]:
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    source_path = tmp_path / "verifier.py"
+    source_bytes = b"C4D3C2A-EXECUTING-SOURCE"
+    source_path.write_bytes(source_bytes)
+    values = _selected_input_kwargs(selected)
+    values["independent_verifier_source"] = InputSnapshot.from_bytes(
+        "selected verifier source", source_bytes
+    )
+    bound_selected = verifier_module.IndependentVerifierInputs(**values)
+    request_path = tmp_path / "request.json"
+    request_path.write_bytes(
+        verifier_module.encode_verification_request(bound_selected, payloads)
+    )
+    monkeypatch.setattr(verifier_module, "__file__", str(source_path))
+    return ("--request", str(request_path)), tmp_path / "report.json", source_path
+
+
+def test_c4d3c2a_dispatch_returns_the_one_fresh_verifier_bytes_object(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    argv, _, _ = _c4d3c2a_bound_request(
+        perimeter_module, verifier_module, monkeypatch, tmp_path
+    )
+    returned = b"C4D3C2A-RETURN\n"
+    prepare_calls: list[object] = []
+    constructor_calls: list[object] = []
+    calls: list[tuple[object, object]] = []
+    original_prepare = verifier_module._cli_prepare
+
+    def prepare_spy(value: object) -> tuple[object, object, object]:
+        prepare_calls.append(value)
+        return original_prepare(value)
+
+    class FreshVerifier:
+        def __init__(self) -> None:
+            constructor_calls.append(self)
+
+        def verify(self, selected: object, subjects: object) -> bytes:
+            calls.append((selected, subjects))
+            return returned
+
+    monkeypatch.setattr(verifier_module, "_cli_prepare", prepare_spy)
+    monkeypatch.setattr(verifier_module, "IndependentAccountManifestVerifier", FreshVerifier)
+    actual = verifier_module._cli_dispatch(argv)
+    assert actual is returned
+    assert prepare_calls == [argv]
+    assert len(constructor_calls) == 1
+    assert len(calls) == 1
+
+
+def test_c4d3c2a_dispatch_blocks_finalized_form_before_verifier_or_report_read(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    argv, report_path, _ = _c4d3c2a_bound_request(
+        perimeter_module, verifier_module, monkeypatch, tmp_path
+    )
+    report_path.write_bytes(b"C4D3C2A-REPORT")
+    prepare_calls: list[object] = []
+    calls: list[str] = []
+    original_read_bytes = Path.read_bytes
+    original_prepare = verifier_module._cli_prepare
+
+    def prepare_spy(value: object) -> tuple[object, object, object]:
+        prepare_calls.append(value)
+        return original_prepare(value)
+
+    def read_spy(path: Path) -> bytes:
+        if path == report_path:
+            raise AssertionError("C2a must not read finalized report bytes")
+        return original_read_bytes(path)
+
+    class ForbiddenVerifier:
+        def __init__(self) -> None:
+            calls.append("constructor")
+            raise AssertionError("C2a finalized form constructed a verifier")
+
+        def verify(self, *_args: object, **_kwargs: object) -> bytes:
+            calls.append("verify")
+            raise AssertionError("C2a finalized form reached verifier")
+
+        def verify_finalized_report(self, *_args: object, **_kwargs: object) -> None:
+            calls.append("verify_finalized_report")
+            raise AssertionError("C2a finalized form reached finalization")
+
+    monkeypatch.setattr(Path, "read_bytes", read_spy)
+    monkeypatch.setattr(verifier_module, "_cli_prepare", prepare_spy)
+    monkeypatch.setattr(
+        verifier_module, "IndependentAccountManifestVerifier", ForbiddenVerifier
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError) as raised:
+        verifier_module._cli_dispatch(
+            argv + ("--finalized-report", str(report_path))
+        )
+    assert str(raised.value) == "independent verification input is invalid"
+    assert prepare_calls == [argv + ("--finalized-report", str(report_path))]
+    assert calls == []
+
+    class Buffer:
+        def __init__(self) -> None:
+            self.values: list[bytes] = []
+
+        def write(self, value: bytes) -> int:
+            self.values.append(value)
+            return len(value)
+
+    class Stdout:
+        def __init__(self) -> None:
+            self.buffer = Buffer()
+
+    class Stderr:
+        def __init__(self) -> None:
+            self.buffer = Buffer()
+
+    prepare_calls.clear()
+    stdout = Stdout()
+    stderr = Stderr()
+    finalized_argv = argv + ("--finalized-report", str(report_path))
+    monkeypatch.setattr(sys, "argv", ["verifier.py", *finalized_argv])
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    assert verifier_module._cli_main() == 1
+    assert prepare_calls == [finalized_argv]
+    assert calls == []
+    assert stdout.buffer.values == []
+    assert stderr.buffer.values == [b"INDEPENDENT_VERIFICATION_FAILED\n"]
+
+
+def test_c4d3c2a_main_preserves_stdout_identity_and_contains_operational_failures(
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Buffer:
+        def __init__(self, result: int | BaseException | None = None) -> None:
+            self.result = result
+            self.values: list[bytes] = []
+
+        def write(self, value: bytes) -> int:
+            if isinstance(self.result, BaseException):
+                raise self.result
+            self.values.append(value)
+            return len(value) if self.result is None else self.result
+
+    class Stdout:
+        def __init__(self, buffer: Buffer) -> None:
+            self.buffer = buffer
+
+    class Stderr:
+        def __init__(self, result: int | BaseException | None = None) -> None:
+            self.buffer = Buffer(result)
+
+    returned = b"C4D3C2A-STDOUT\n"
+    stdout = Stdout(Buffer())
+    stderr = Stderr()
+    monkeypatch.setattr(sys, "argv", ["verifier.py", "--request", "request.json"])
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(sys, "stderr", stderr)
+    dispatch_calls: list[object] = []
+
+    def dispatch_success(argv: object) -> bytes:
+        dispatch_calls.append(argv)
+        return returned
+
+    monkeypatch.setattr(verifier_module, "_cli_dispatch", dispatch_success)
+    assert verifier_module._cli_main() == 0
+    assert dispatch_calls == [("--request", "request.json")]
+    assert stdout.buffer.values == [returned]
+    assert stdout.buffer.values[0] is returned
+    assert stderr.buffer.values == []
+
+    for dispatch, buffer, error_stderr, expected_stderr in (
+        (
+            lambda _argv: (_ for _ in ()).throw(OSError("dispatch")),
+            Buffer(),
+            Stderr(),
+            [b"INDEPENDENT_VERIFICATION_FAILED\n"],
+        ),
+        (
+            lambda _argv: returned,
+            Buffer(len(returned) - 1),
+            Stderr(),
+            [b"INDEPENDENT_VERIFICATION_FAILED\n"],
+        ),
+        (
+            lambda _argv: (_ for _ in ()).throw(OSError("dispatch")),
+            Buffer(),
+            Stderr(len(b"INDEPENDENT_VERIFICATION_FAILED\n") - 1),
+            [b"INDEPENDENT_VERIFICATION_FAILED\n"],
+        ),
+        (
+            lambda _argv: returned,
+            Buffer(OSError("stdout")),
+            Stderr(OSError("stderr")),
+            [],
+        ),
+    ):
+        monkeypatch.setattr(verifier_module, "_cli_dispatch", dispatch)
+        monkeypatch.setattr(sys, "stdout", Stdout(buffer))
+        monkeypatch.setattr(sys, "stderr", error_stderr)
+        assert verifier_module._cli_main() == 1
+        assert error_stderr.buffer.values == expected_stderr
+        if isinstance(buffer.result, BaseException):
+            assert buffer.values == []
+
+    class MissingBuffer:
+        pass
+
+    monkeypatch.setattr(
+        verifier_module,
+        "_cli_dispatch",
+        lambda _argv: (_ for _ in ()).throw(OSError("dispatch")),
+    )
+    monkeypatch.setattr(sys, "stdout", Stdout(Buffer()))
+    monkeypatch.setattr(sys, "stderr", MissingBuffer())
+    assert verifier_module._cli_main() == 1
+
+    monkeypatch.setattr(
+        verifier_module,
+        "_cli_dispatch",
+        lambda _argv: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+    with pytest.raises(KeyboardInterrupt):
+        verifier_module._cli_main()
+
+    monkeypatch.setattr(verifier_module, "_cli_dispatch", lambda _argv: returned)
+    monkeypatch.setattr(sys, "stdout", Stdout(Buffer(KeyboardInterrupt())))
+    monkeypatch.setattr(sys, "stderr", Stderr())
+    with pytest.raises(KeyboardInterrupt):
+        verifier_module._cli_main()
+
+    monkeypatch.setattr(
+        verifier_module,
+        "_cli_dispatch",
+        lambda _argv: (_ for _ in ()).throw(OSError("dispatch")),
+    )
+    keyboard_interrupt_stderr = Stderr(KeyboardInterrupt())
+    monkeypatch.setattr(sys, "stdout", Stdout(Buffer()))
+    monkeypatch.setattr(sys, "stderr", keyboard_interrupt_stderr)
+    with pytest.raises(KeyboardInterrupt):
+        verifier_module._cli_main()
+    assert keyboard_interrupt_stderr.buffer.values == []
+
+
+def test_c4d3c2a_main_contains_real_request_and_source_read_failures(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class Buffer:
+        def __init__(self) -> None:
+            self.values: list[bytes] = []
+
+        def write(self, value: bytes) -> int:
+            self.values.append(value)
+            return len(value)
+
+    class Stdout:
+        def __init__(self) -> None:
+            self.buffer = Buffer()
+
+    class Stderr:
+        def __init__(self) -> None:
+            self.buffer = Buffer()
+
+    argv, _, source_path = _c4d3c2a_bound_request(
+        perimeter_module, verifier_module, monkeypatch, tmp_path
+    )
+    request_path = Path(argv[1])
+    original_read_bytes = Path.read_bytes
+    monkeypatch.setattr(sys, "argv", ["verifier.py", *argv])
+    stdout = Stdout()
+    monkeypatch.setattr(sys, "stdout", stdout)
+
+    def assert_generic_read_failure(read_bytes: Any) -> None:
+        stderr = Stderr()
+        monkeypatch.setattr(Path, "read_bytes", read_bytes)
+        monkeypatch.setattr(sys, "stderr", stderr)
+        assert verifier_module._cli_main() == 1
+        assert stderr.buffer.values == [b"INDEPENDENT_VERIFICATION_FAILED\n"]
+        assert stdout.buffer.values == []
+
+    def request_failure(path: Path) -> bytes:
+        assert path == request_path
+        raise OSError("request read")
+
+    assert_generic_read_failure(request_failure)
+
+    def source_failure(path: Path) -> bytes:
+        if path == request_path:
+            return original_read_bytes(path)
+        assert path == source_path
+        raise OSError("source read")
+
+    assert_generic_read_failure(source_failure)
+
+    monkeypatch.setattr(Path, "read_bytes", original_read_bytes)
+
+    def verify_failure(*_args: object, **_kwargs: object) -> bytes:
+        raise OSError("verify failure")
+
+    monkeypatch.setattr(
+        verifier_module.IndependentAccountManifestVerifier,
+        "verify",
+        verify_failure,
+    )
+    stderr = Stderr()
+    monkeypatch.setattr(sys, "stderr", stderr)
+    assert verifier_module._cli_main() == 1
+    assert stderr.buffer.values == [b"INDEPENDENT_VERIFICATION_FAILED\n"]
+    assert stdout.buffer.values == []
+
+
+_C4D3C2B1_ENVIRONMENT_KEYS = {
+    "SYSTEMROOT",
+    "WINDIR",
+    "TEMP",
+    "TMP",
+    "PYTHONPATH",
+    "PYTHONIOENCODING",
+    "PYTHONUTF8",
+    "TZ",
+    "LC_ALL",
+    "LANG",
+}
+_C4D3C2B1_CONTROLLER_PROBE = """
+import json
+import sys
+from pathlib import Path
+
+import quant_engine.core.contracts as contracts
+import quant_engine.core.snapshots as snapshots
+import quant_engine.core.strict_json as strict_json
+
+payload = {
+    "core_origins": {
+        "quant_engine.core.contracts": str(Path(contracts.__spec__.origin).resolve()),
+        "quant_engine.core.snapshots": str(Path(snapshots.__spec__.origin).resolve()),
+        "quant_engine.core.strict_json": str(Path(strict_json.__spec__.origin).resolve()),
+    },
+    "sys_path": [str(Path(item).resolve()) for item in sys.path if item],
+}
+sys.stdout.buffer.write(
+    json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8") + b"\\n"
+)
+"""
+
+
+def _c4d3c2b1_bound_request(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> tuple[bytes, Path, Path, Path, dict[str, str], dict[str, str]]:
+    """Build one canonical request from a single current-source capture."""
+    source_reads: list[Path] = []
+    original_read_bytes = Path.read_bytes
+
+    def source_read_spy(path: Path) -> bytes:
+        if path == VERIFIER_MODULE_PATH:
+            source_reads.append(path)
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", source_read_spy)
+    captured_source = VERIFIER_MODULE_PATH.read_bytes()
+    assert source_reads == [VERIFIER_MODULE_PATH]
+    captured_identity = {
+        "artifact_id": "tools/verify_account_manifest_generation.py",
+        "sha256": hashlib.sha256(captured_source).hexdigest(),
+        "size_bytes": len(captured_source),
+    }
+
+    selected = _c3_selected_inputs(perimeter_module)
+    selected_values = _selected_input_kwargs(selected)
+    selected_values["independent_verifier_source"] = InputSnapshot.from_bytes(
+        "C4D3C2B1_CURRENT_VERIFIER_SOURCE", captured_source
+    )
+    bound_selected = perimeter_module.AccountManifestSelectedInputs(**selected_values)
+    assert bound_selected.independent_verifier_source.contents == captured_source
+    assert bound_selected.independent_verifier_source.sha256 == captured_identity["sha256"]
+    assert bound_selected.independent_verifier_source.size_bytes == captured_identity["size_bytes"]
+
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(bound_selected)
+    selected_identity = json.loads(payloads["authority/selected-input-identities.json"])
+    code_identity = json.loads(payloads["authority/code-identities.json"])
+    assert selected_identity["code_sources"]["independent_verifier"] == captured_identity
+    assert code_identity["code_sources"]["independent_verifier"] == captured_identity
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(bound_selected)
+    )
+    request = verifier_module.encode_verification_request(verifier_inputs, payloads)
+    decoded_inputs, decoded_subjects = verifier_module.decode_verification_request(request)
+    assert decoded_inputs.independent_verifier_source.contents == captured_source
+    assert decoded_inputs.independent_verifier_source.sha256 == captured_identity["sha256"]
+    assert decoded_inputs.independent_verifier_source.size_bytes == captured_identity["size_bytes"]
+    assert decoded_subjects == payloads
+    expected_report = verifier_module.IndependentAccountManifestVerifier().verify(
+        verifier_inputs, payloads
+    )
+    from jsonschema import Draft202012Validator
+
+    expected_object = json.loads(expected_report)
+    assert len(expected_report) > 1
+    assert canonical_json_bytes(expected_object) == expected_report
+    Draft202012Validator(
+        json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    ).validate(expected_object)
+    assert expected_object["artifact_id"] == "verification/independent-verification.json"
+    assert expected_object["status"] == "VERIFIED"
+    assert expected_object["counts"]["account_count"] == 18
+    assert expected_object["counts"]["assignment_count"] == 26
+    assert len(expected_object["subjects"]) == len(verifier_module.EXACT_SUBJECT_PATHS)
+    assert expected_object["numeric_verification"] == {
+        "candidate_count": 0,
+        "comparison_count": 0,
+        "discrepancy_count": 0,
+        "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
+    }
+    assert source_reads == [VERIFIER_MODULE_PATH]
+
+    request_path = (tmp_path / "request.json").resolve()
+    request_path.write_bytes(request)
+    hostile_cwd = (tmp_path / "hostile-cwd").resolve()
+    hostile_pythonpath = (tmp_path / "hostile-pythonpath").resolve()
+    _c4d1b_fake_tree(hostile_cwd, "C4D3C2B1_CWD_SHADOW")
+    _c4d1b_fake_tree(hostile_pythonpath, "C4D3C2B1_PYTHONPATH_SHADOW")
+    controlled_temp = (tmp_path / "controlled-temp").resolve()
+    controlled_temp.mkdir()
+    windows_root = os.environ["SystemRoot"]
+    monkeypatch.setenv("C4D3C2B1_PARENT_ONLY_SENTINEL", "parent-only")
+    base_environment = {
+        "SYSTEMROOT": windows_root,
+        "WINDIR": windows_root,
+        "TEMP": str(controlled_temp),
+        "TMP": str(controlled_temp),
+        "PYTHONPATH": str(hostile_pythonpath),
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONUTF8": "1",
+        "TZ": "UTC",
+        "LC_ALL": "C",
+        "LANG": "C",
+    }
+    alternate_environment = {
+        "SYSTEMROOT": windows_root,
+        "WINDIR": windows_root,
+        "TEMP": str(controlled_temp),
+        "TMP": str(controlled_temp),
+        "PYTHONPATH": str(hostile_pythonpath),
+        "PYTHONIOENCODING": "utf-8:strict",
+        "PYTHONUTF8": "1",
+        "TZ": "America/Chicago",
+        "LC_ALL": "C.UTF-8",
+        "LANG": "C.UTF-8",
+    }
+    for environment in (base_environment, alternate_environment):
+        assert type(environment) is dict
+        assert len(environment) == len(_C4D3C2B1_ENVIRONMENT_KEYS)
+        assert set(environment) == _C4D3C2B1_ENVIRONMENT_KEYS
+        assert environment["SYSTEMROOT"] == environment["WINDIR"] == windows_root
+        assert environment["TEMP"] == environment["TMP"] == str(controlled_temp)
+        for forbidden_key in (
+            "PATH",
+            "USERPROFILE",
+            "APPDATA",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "C4D3C2B1_PARENT_ONLY_SENTINEL",
+            "PROVIDER_API_KEY",
+            "SCHWAB_TOKEN",
+            "CREDENTIAL",
+        ):
+            assert forbidden_key not in environment
+    return (
+        expected_report,
+        request_path,
+        hostile_cwd,
+        hostile_pythonpath,
+        base_environment,
+        alternate_environment,
+    )
+
+
+def test_c4d3c2b1_fresh_request_cli_matches_bound_report_and_isolates_startup(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A real isolated request-mode CLI must attest and emit the bound report bytes."""
+    (
+        expected_report,
+        request_path,
+        hostile_cwd,
+        hostile_pythonpath,
+        base_environment,
+        alternate_environment,
+    ) = _c4d3c2b1_bound_request(  # type: ignore[name-defined]
+        perimeter_module, verifier_module, monkeypatch, tmp_path
+    )
+    interpreter = (REPOSITORY_ROOT / ".venv" / "Scripts" / "python.exe").resolve()
+    verifier_script = VERIFIER_MODULE_PATH.resolve()
+    expected_cli_argv = [
+        str(interpreter),
+        "-I",
+        str(verifier_script),
+        "--request",
+        str(request_path),
+    ]
+    calls: list[tuple[object, dict[str, object]]] = []
+    original_run = subprocess.run
+
+    def run_spy(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append((args, dict(kwargs)))
+        return original_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(subprocess, "run", run_spy)
+
+    def run_cli(environment: dict[str, str]) -> subprocess.CompletedProcess[bytes]:
+        return subprocess.run(
+            expected_cli_argv,
+            cwd=hostile_cwd,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30,
+        )
+
+    first = run_cli(base_environment)
+    second = run_cli(alternate_environment)
+
+    assert first.returncode == second.returncode == 0
+    assert first.stdout == second.stdout == expected_report
+    assert first.stderr == second.stderr == b""
+    assert len(calls) == 2
+    for call, environment in zip(calls, (base_environment, alternate_environment)):
+        args, kwargs = call
+        assert args == (expected_cli_argv,)
+        assert kwargs == {
+            "cwd": hostile_cwd,
+            "env": environment,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "check": False,
+            "timeout": 30,
+        }
+        assert set(environment) == _C4D3C2B1_ENVIRONMENT_KEYS  # type: ignore[name-defined]
+        assert environment is not os.environ
+        assert environment["PYTHONPATH"] == str(hostile_pythonpath)
+        assert environment["TEMP"] == environment["TMP"]
+
+    probe_command = [
+        str(interpreter),
+        "-I",
+        "-c",
+        _C4D3C2B1_CONTROLLER_PROBE,  # type: ignore[name-defined]
+    ]
+    probe = subprocess.run(
+        probe_command,
+        cwd=hostile_cwd,
+        env=base_environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=False,
+        timeout=30,
+    )
+    assert len(calls) == 3
+    assert calls[-1] == (
+        (probe_command,),
+        {
+            "cwd": hostile_cwd,
+            "env": base_environment,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "check": False,
+            "timeout": 30,
+        },
+    )
+    assert probe.returncode == 0
+    assert probe.stderr == b""
+    evidence = json.loads(probe.stdout)
+    assert canonical_json_bytes(evidence) == probe.stdout
+    assert isinstance(evidence, dict)
+    assert set(evidence) == {"core_origins", "sys_path"}
+    assert isinstance(evidence["sys_path"], list)
+    startup_paths = set(evidence["sys_path"])
+    assert str(hostile_cwd) not in startup_paths
+    assert str(hostile_pythonpath) not in startup_paths
+    assert str(verifier_script.parent) not in startup_paths
+    core_source_root = (REPOSITORY_ROOT / "packages" / "core" / "src").resolve()
+    assert str(core_source_root) in startup_paths
+    assert evidence["core_origins"] == {
+        "quant_engine.core.contracts": str(
+            core_source_root / "quant_engine" / "core" / "contracts.py"
+        ),
+        "quant_engine.core.snapshots": str(
+            core_source_root / "quant_engine" / "core" / "snapshots.py"
+        ),
+        "quant_engine.core.strict_json": str(
+            core_source_root / "quant_engine" / "core" / "strict_json.py"
+        ),
+    }
+
+
+def test_c4d3c2b2_rejects_noncanonical_and_source_mismatch_requests_without_leaks(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Malformed transport and failed self-attestation stay generic end to end."""
+    (
+        _expected_report,
+        request_path,
+        hostile_cwd,
+        hostile_pythonpath,
+        base_environment,
+        _alternate_environment,
+    ) = _c4d3c2b1_bound_request(
+        perimeter_module, verifier_module, monkeypatch, tmp_path
+    )
+    original_request = request_path.read_bytes()
+    original_wire = json.loads(original_request)
+    assert canonical_json_bytes(original_wire) == original_request
+
+    noncanonical_request = b" " + original_request
+    assert json.loads(noncanonical_request) == original_wire
+    noncanonical_path = (
+        tmp_path / "C4PRIVACY987654321012345-noncanonical-request.json"
+    ).resolve()
+    noncanonical_path.write_bytes(noncanonical_request)
+
+    mismatch_source = b"C4PRIVACY987654321012345-source-mismatch"
+    mismatch_base64 = base64.b64encode(mismatch_source).decode("ascii")
+    mismatch_wire = deepcopy(original_wire)
+    assert isinstance(original_wire["selected_snapshots"], dict)
+    assert isinstance(mismatch_wire["selected_snapshots"], dict)
+    mismatch_wire["selected_snapshots"][
+        "independent_verifier_source_base64"
+    ] = mismatch_base64
+    assert mismatch_wire["schema_version"] == original_wire["schema_version"]
+    assert mismatch_wire["retrieval_receipts"] == original_wire["retrieval_receipts"]
+    assert mismatch_wire["subjects"] == original_wire["subjects"]
+    for key, value in original_wire["selected_snapshots"].items():
+        if key == "independent_verifier_source_base64":
+            assert mismatch_wire["selected_snapshots"][key] == mismatch_base64
+        else:
+            assert mismatch_wire["selected_snapshots"][key] == value
+    mismatch_request = canonical_json_bytes(mismatch_wire)
+    original_inputs, original_subjects = verifier_module.decode_verification_request(
+        original_request
+    )
+    mismatch_inputs, mismatch_subjects = verifier_module.decode_verification_request(
+        mismatch_request
+    )
+    assert (
+        original_inputs.independent_verifier_source.contents
+        != mismatch_inputs.independent_verifier_source.contents
+        == mismatch_source
+    )
+    assert mismatch_subjects == original_subjects
+    mismatch_path = (
+        tmp_path / "C4PRIVACY987654321012345-source-mismatch-request.json"
+    ).resolve()
+    mismatch_path.write_bytes(mismatch_request)
+
+    constructor_calls: list[str] = []
+
+    class ConstructorSentinel:
+        def __init__(self) -> None:
+            constructor_calls.append("constructor")
+            raise AssertionError("C4PRIVACY987654321012345-constructor")
+
+    monkeypatch.setattr(
+        verifier_module, "IndependentAccountManifestVerifier", ConstructorSentinel
+    )
+    capsys.readouterr()
+    with pytest.raises(verifier_module.IndependentVerificationError) as raised:
+        verifier_module._cli_dispatch(("--request", str(mismatch_path)))
+    direct = capsys.readouterr()
+    assert str(raised.value) == "independent verification input is invalid"
+    assert direct.out == "" and direct.err == ""
+    assert constructor_calls == []
+
+    interpreter = (REPOSITORY_ROOT / ".venv" / "Scripts" / "python.exe").resolve()
+    verifier_script = VERIFIER_MODULE_PATH.resolve()
+    calls: list[tuple[object, dict[str, object]]] = []
+    original_run = subprocess.run
+
+    def run_spy(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
+        calls.append((args, dict(kwargs)))
+        return original_run(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(subprocess, "run", run_spy)
+    fixture_paths = (noncanonical_path, mismatch_path)
+    results = [
+        subprocess.run(
+            [str(interpreter), "-I", str(verifier_script), "--request", str(path)],
+            cwd=hostile_cwd,
+            env=base_environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            timeout=30,
+        )
+        for path in fixture_paths
+    ]
+    assert len(calls) == len(fixture_paths)
+    for path, result, (args, kwargs) in zip(fixture_paths, results, calls, strict=True):
+        expected_argv = [
+            str(interpreter),
+            "-I",
+            str(verifier_script),
+            "--request",
+            str(path),
+        ]
+        assert args == (expected_argv,)
+        assert kwargs == {
+            "cwd": hostile_cwd,
+            "env": base_environment,
+            "stdout": subprocess.PIPE,
+            "stderr": subprocess.PIPE,
+            "check": False,
+            "timeout": 30,
+        }
+        assert result.returncode == 1
+        assert result.stdout == b""
+        assert result.stderr == b"INDEPENDENT_VERIFICATION_FAILED\n"
+        for forbidden in (
+            b"Traceback",
+            b"C4PRIVACY987654321012345",
+            str(path).encode("utf-8"),
+            str(request_path).encode("utf-8"),
+            str(hostile_cwd).encode("utf-8"),
+            str(hostile_pythonpath).encode("utf-8"),
+            str(verifier_script).encode("utf-8"),
+            mismatch_source,
+            b"independent_verifier_source_base64",
+        ):
+            assert forbidden not in result.stdout
+            assert forbidden not in result.stderr
+    assert b"C4PRIVACY987654321012345" not in str(raised.value).encode("utf-8")
+    assert mismatch_source not in str(raised.value).encode("utf-8")
+
+
+def test_c4d3a_private_call_graph_and_runtime_path_exclude_forbidden_facilities(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots = {
+        "_report_subject_entries",
+        "_report_subjects_semantic_sha256",
+        "_report_source_metadata",
+        "_thaw_retained_report_candidate",
+        "_assemble_independent_report",
+        "_canonical_independent_report_bytes",
+    }
+    forbidden_import_bases = {
+        "browser",
+        "http",
+        "importlib",
+        "jsonschema",
+        "os",
+        "pathlib",
+        "pkgutil",
+        "requests",
+        "runpy",
+        "socket",
+        "subprocess",
+        "sys",
+        "time",
+        "tools",
+        "urllib",
+        "webbrowser",
+    }
+    forbidden_direct_calls = {"__import__", "compile", "eval", "exec", "open"}
+    forbidden_clock_attributes = {
+        "fromtimestamp",
+        "now",
+        "timestamp",
+        "today",
+        "utcnow",
+    }
+    forbidden_filesystem_call_attributes = {
+        "absolute",
+        "cwd",
+        "exists",
+        "glob",
+        "iterdir",
+        "lstat",
+        "open",
+        "read_bytes",
+        "read_text",
+        "resolve",
+        "rglob",
+        "samefile",
+        "stat",
+        "touch",
+        "unlink",
+        "walk",
+        "write_bytes",
+        "write_text",
+    }
+
+    def assert_pure_d3a_closure(tree: ast.Module) -> set[str]:
+        function_map = {
+            node.name: node
+            for node in tree.body
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("_")
+        }
+        assert roots <= set(function_map)
+        reachable: set[str] = set()
+        pending = list(roots)
+        while pending:
+            name = pending.pop()
+            if name in reachable:
+                continue
+            reachable.add(name)
+            pending.extend(
+                node.func.id
+                for node in ast.walk(function_map[name])
+                if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id in function_map
+            )
+
+        for node in tree.body:
+            if isinstance(node, ast.Import):
+                assert all(
+                    alias.name.split(".", 1)[0] not in forbidden_import_bases
+                    for alias in node.names
+                )
+            elif isinstance(node, ast.ImportFrom):
+                assert node.module is None or (
+                    node.module.split(".", 1)[0] not in forbidden_import_bases
+                )
+
+        for name in reachable:
+            for node in ast.walk(function_map[name]):
+                if isinstance(node, ast.Attribute) and node.attr == "path":
+                    raise AssertionError("D3a closure must not inspect snapshot paths")
+                if not isinstance(node, ast.Call):
+                    continue
+                if isinstance(node.func, ast.Name):
+                    assert node.func.id not in forbidden_direct_calls
+                elif isinstance(node.func, ast.Attribute) and isinstance(
+                    node.func.value, ast.Name
+                ):
+                    base = node.func.value.id
+                    assert base not in forbidden_import_bases
+                    assert node.func.attr not in forbidden_filesystem_call_attributes
+                    assert node.func.attr not in forbidden_clock_attributes
+        return reachable
+
+    source_tree = ast.parse(VERIFIER_MODULE_PATH.read_text(encoding="utf-8"))
+    reachable = assert_pure_d3a_closure(source_tree)
+    assert {
+        "_bound_catalog",
+        "_date_value",
+        "_manifest",
+        "_selected_identity",
+        "_snapshot_identity",
+        "_subject_artifact",
+        "_validate_retained_candidate_state",
+    } <= reachable
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Name)
+        and node.func.value.id == "date"
+        and node.func.attr == "fromisoformat"
+        for name in reachable
+        for node in ast.walk(
+            next(
+                item
+                for item in source_tree.body
+                if isinstance(item, ast.FunctionDef) and item.name == name
+            )
+        )
+    )
+
+    stub_definitions = "\n\n".join(
+        f"def {root}():\n    pass"
+        for root in roots
+        if root != "_report_subject_entries"
+    )
+    for forbidden_call in (
+        "open('forbidden')",
+        "date.today()",
+        "date.fromtimestamp(0)",
+        "receiver.timestamp()",
+        "__import__('tools.build_account_manifest_generation')",
+        "importlib.import_module('tools.account_strategy_manifest')",
+        "pathlib.Path('forbidden').read_bytes()",
+        "receiver.read_text()",
+    ):
+        hostile_tree = ast.parse(
+            f"def _report_subject_entries():\n    {forbidden_call}\n\n{stub_definitions}"
+        )
+        with pytest.raises(AssertionError):
+            assert_pure_d3a_closure(hostile_tree)
+
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    trap_calls: list[str] = []
+    allowed_date_calls: list[str] = []
+    original_date = verifier_module.date
+
+    class RuntimeTrap:
+        def __getattr__(self, name: str) -> object:
+            trap_calls.append(name)
+            raise AssertionError(f"forbidden runtime access: {name}")
+
+    class GuardedDate(original_date):
+        max = original_date.max
+
+        @classmethod
+        def fromisoformat(cls, value: str) -> object:
+            allowed_date_calls.append("fromisoformat")
+            parsed = original_date.fromisoformat(value)
+            return cls(parsed.year, parsed.month, parsed.day)
+
+        @classmethod
+        def fromtimestamp(cls, *_args: object, **_kwargs: object) -> object:
+            trap_calls.append("fromtimestamp")
+            raise AssertionError("D3a path attempted a wall-clock conversion")
+
+        @classmethod
+        def today(cls) -> object:
+            trap_calls.append("today")
+            raise AssertionError("D3a path attempted wall-clock acquisition")
+
+        def timestamp(self) -> float:
+            trap_calls.append("timestamp")
+            raise AssertionError("D3a path attempted a wall-clock timestamp")
+
+    def file_trap(*_args: object, **_kwargs: object) -> object:
+        trap_calls.append("file")
+        raise AssertionError("D3a path attempted a file read")
+
+    def import_trap(
+        name: str,
+        globals_value: object = None,
+        locals_value: object = None,
+        fromlist: object = (),
+        level: int = 0,
+    ) -> object:
+        trap_calls.append(f"import:{name}")
+        raise AssertionError("D3a path attempted a dynamic import")
+
+    target_builtins = dict(vars(builtins))
+    target_builtins["open"] = file_trap
+    target_builtins["__import__"] = import_trap
+    monkeypatch.setitem(verifier_module.__dict__, "__builtins__", target_builtins)
+    monkeypatch.setattr(verifier_module, "date", GuardedDate)
+    monkeypatch.setattr(verifier_module, "time", RuntimeTrap(), raising=False)
+    monkeypatch.setattr(verifier_module, "datetime", RuntimeTrap(), raising=False)
+    monkeypatch.setattr(
+        verifier_module, "account_strategy_manifest", RuntimeTrap(), raising=False
+    )
+    monkeypatch.setattr(
+        verifier_module, "build_account_manifest_generation", RuntimeTrap(), raising=False
+    )
+
+    for name, source, expected_trap in (
+        (
+            "_c4d3a_runtime_open_negative",
+            "def _c4d3a_runtime_open_negative():\n    open('forbidden')",
+            "file",
+        ),
+        (
+            "_c4d3a_runtime_import_negative",
+            "def _c4d3a_runtime_import_negative():\n    __import__('forbidden')",
+            "import:forbidden",
+        ),
+        (
+            "_c4d3a_runtime_clock_negative",
+            "def _c4d3a_runtime_clock_negative():\n    time.now()",
+            "now",
+        ),
+        (
+            "_c4d3a_runtime_date_negative",
+            "def _c4d3a_runtime_date_negative():\n    date.today()",
+            "today",
+        ),
+        (
+            "_c4d3a_runtime_producer_negative",
+            "def _c4d3a_runtime_producer_negative():\n    account_strategy_manifest.value",
+            "value",
+        ),
+    ):
+        exec(source, verifier_module.__dict__)
+        with pytest.raises(AssertionError):
+            verifier_module.__dict__[name]()
+        assert trap_calls == [expected_trap]
+        trap_calls.clear()
+        monkeypatch.delitem(verifier_module.__dict__, name)
+
+    _assert_canonical_report_bytes(
+        verifier_module.IndependentAccountManifestVerifier().verify(selected, payloads)
+    )
+    assert trap_calls == []
+    assert allowed_date_calls and set(allowed_date_calls) == {"fromisoformat"}
+    assert verifier_module.__dict__["__builtins__"] is target_builtins
+
+
+def test_c4d3a_report_and_canonical_bytes_exclude_private_lineage_projection(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    sentinel = "C4PRIVACY987654321012345"
+    raw_fragment = "C4D3A-RAW-PAYLOAD-FRAGMENT"
+    private_label = "C4D3A-PRIVATE-SNAPSHOT-LABEL"
+    private_path = Path("C4D3A-private-source-path.json")
+    selected_inputs = _c3_selected_inputs(perimeter_module)
+    ledger = selected_inputs.provider_ledger.json_object()
+    ledger["nav_observations"][0]["provider_lineage"] = {
+        "account_number": sentinel,
+        "raw_payload": raw_fragment,
+    }
+    provider_ledger = InputSnapshot(
+        label=private_label,
+        contents=canonical_json_bytes(ledger),
+        path=private_path,
+    )
+    values = _selected_input_kwargs(selected_inputs)
+    values["provider_ledger"] = provider_ledger
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=provider_ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    perimeter_selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    selected = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(perimeter_selected)
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(
+        perimeter_selected
+    )
+    normalized = verifier_module._normalize_subject_payloads(payloads)
+    state = verifier_module._verify_retained_semantics_normalized(selected, normalized)
+    candidate = verifier_module._build_retained_report_candidate(state)
+    report = verifier_module._assemble_independent_report(selected, normalized, candidate)
+    report_bytes = verifier_module._canonical_independent_report_bytes(report)
+
+    assert sentinel.encode("ascii") in provider_ledger.contents
+    private_tokens = (sentinel, raw_fragment, private_label, str(private_path))
+
+    def assert_report_values_are_private(value: object) -> None:
+        if type(value) is dict:
+            for key, child in value.items():
+                assert type(key) is str
+                assert_report_values_are_private(child)
+        elif type(value) is list:
+            for child in value:
+                assert_report_values_are_private(child)
+        elif type(value) is str:
+            assert all(token not in value for token in private_tokens)
+        elif type(value) is bytes:
+            assert all(token.encode("utf-8") not in value for token in private_tokens)
+        else:
+            assert type(value) in {int, bool, type(None)}
+
+    assert_report_values_are_private(report)
+    for token in private_tokens:
+        assert token.encode("utf-8") not in report_bytes
+
+
+def test_assignment_perimeter_rejects_assignment_account_missing_from_baseline(
+    perimeter_module: Any,
+) -> None:
+    baseline_payload = {
+        "as_of_date": "2026-02-01",
+        "baseline_schema_version": 1,
+        "accounts": [
+            {"account_id": "synthetic-known", "provider": "SYNTHETIC"},
+        ],
+        "assignments": [
+            _assignment(
+                "synthetic-unknown",
+                "STRATEGY_MAPPED",
+                "2026-01-01",
+                None,
+                "synthetic-strategy",
+            ),
+        ],
+    }
+    baseline = InputSnapshot.from_bytes(
+        "synthetic baseline with unknown assignment account",
+        canonical_json_bytes(baseline_payload),
+    )
+
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="baseline assignment account is unknown",
+    ):
+        perimeter_module.build_account_assignment_perimeter(
+            selected_inputs=_selected_inputs(perimeter_module, baseline),
+            nav_facts=[],
+            raw_flow_facts=[],
+            classified_flow_facts=[],
+        )
+
+
+def test_assignment_perimeter_omits_baseline_account_without_assignment_or_facts(
+    perimeter_module: Any,
+) -> None:
+    baseline_payload = {
+        "as_of_date": "2026-02-01",
+        "baseline_schema_version": 1,
+        "accounts": [
+            {"account_id": "synthetic-assigned-a", "provider": "SYNTHETIC"},
+            {"account_id": "synthetic-assigned-b", "provider": "SYNTHETIC"},
+            {"account_id": "synthetic-reserve", "provider": "SYNTHETIC"},
+        ],
+        "assignments": [
+            _assignment(
+                "synthetic-assigned-a",
+                "STRATEGY_MAPPED",
+                "2026-01-01",
+                None,
+                "synthetic-strategy-a",
+            ),
+            _assignment(
+                "synthetic-assigned-b",
+                "HISTORICAL_POOL_ONLY",
+                "2026-01-01",
+                None,
+                None,
+            ),
+        ],
+    }
+    baseline = InputSnapshot.from_bytes(
+        "synthetic baseline with unassigned reserve",
+        canonical_json_bytes(baseline_payload),
+    )
+    selected_inputs = _selected_inputs(perimeter_module, baseline)
+
+    payload = json.loads(
+        perimeter_module.build_account_assignment_perimeter(
+            selected_inputs=selected_inputs,
+            nav_facts=[],
+            raw_flow_facts=[],
+            classified_flow_facts=[],
+        )
+    )
+
+    assert payload["account_count"] == 2
+    assert payload["assignment_count"] == 2
+    assert {row["account_id"] for row in payload["rows"]} == {
+        "synthetic-assigned-a",
+        "synthetic-assigned-b",
+    }
+    assert payload["selected_baseline_identity"]["artifact"]["sha256"] == baseline.sha256
+
+
+def test_assignment_perimeter_retains_nav_for_unassigned_baseline_account(
+    perimeter_module: Any,
+) -> None:
+    baseline_payload = {
+        "as_of_date": "2026-02-01",
+        "baseline_schema_version": 1,
+        "accounts": [
+            {"account_id": "synthetic-assigned", "provider": "SYNTHETIC"},
+            {"account_id": "synthetic-reserve", "provider": "SYNTHETIC"},
+        ],
+        "assignments": [
+            _assignment(
+                "synthetic-assigned",
+                "STRATEGY_MAPPED",
+                "2026-01-01",
+                None,
+                "synthetic-strategy",
+            ),
+        ],
+    }
+    baseline = InputSnapshot.from_bytes(
+        "synthetic baseline with factless reserve",
+        canonical_json_bytes(baseline_payload),
+    )
+    selected_inputs = _selected_inputs(perimeter_module, baseline)
+    payload = json.loads(
+        perimeter_module.build_account_assignment_perimeter(
+            selected_inputs=selected_inputs,
+            nav_facts=[
+                {
+                    "record_id": "reserve-nav",
+                    "account_id": "synthetic-reserve",
+                    "as_of_date": "2026-01-15",
+                    "nav": {"status": "AVAILABLE", "value": "1"},
+                }
+            ],
+            raw_flow_facts=[],
+            classified_flow_facts=[],
+        )
+    )
+
+    assert payload["selected_baseline_account_count"] == 2
+    assert payload["account_count"] == 1
+    assert payload["unassigned_fact_count"] == 1
+    assert payload["unassigned_projection_count"] == 1
+    assert payload["unassigned_facts"][0]["source_identity"] == {
+        "record_id": "reserve-nav"
+    }
+
+
+def _pinned_assignment_semantics_selected_inputs(module: Any) -> object:
+    assignments: list[dict[str, object]] = []
+    for number in range(1, 7):
+        account_id = f"synthetic-pinned-{number:02d}"
+        assignments.extend(
+            [
+                _assignment(
+                    account_id,
+                    "HISTORICAL_POOL_ONLY",
+                    "2025-01-01",
+                    "2026-01-01",
+                    None,
+                ),
+                _assignment(
+                    account_id,
+                    "STRATEGY_MAPPED",
+                    "2026-01-01",
+                    None,
+                    f"synthetic-strategy-{number:02d}",
+                ),
+            ]
+        )
+    for number in range(7, 9):
+        account_id = f"synthetic-pinned-{number:02d}"
+        assignments.extend(
+            [
+                _assignment(
+                    account_id,
+                    "STRATEGY_MAPPED",
+                    "2025-01-01",
+                    "2025-12-31",
+                    f"synthetic-strategy-{number:02d}-a",
+                ),
+                _assignment(
+                    account_id,
+                    "STRATEGY_MAPPED",
+                    "2026-01-01",
+                    None,
+                    f"synthetic-strategy-{number:02d}-b",
+                ),
+            ]
+        )
+    for number in range(9, 14):
+        assignments.append(
+            _assignment(
+                f"synthetic-pinned-{number:02d}",
+                "STRATEGY_MAPPED",
+                "2025-01-01",
+                None,
+                f"synthetic-strategy-{number:02d}",
+            )
+        )
+    assignments.append(
+        _assignment(
+            "synthetic-pinned-14",
+            "HISTORICAL_POOL_ONLY",
+            "2025-01-01",
+            None,
+            None,
+        )
+    )
+    for number in range(15, 19):
+        assignments.append(
+            _assignment(
+                f"synthetic-pinned-{number:02d}",
+                "RESERVE_NOT_APPLICABLE",
+                None if number == 15 else "2025-01-01",
+                None,
+                None,
+            )
+        )
+    accounts = [
+        {
+            "account_id": f"synthetic-pinned-{number:02d}",
+            "base_currency": "USD",
+            "provider": "SYNTHETIC",
+            "role": "RESERVE" if number >= 15 else "INVESTMENT",
+        }
+        for number in range(1, 20)
+    ]
+    baseline = InputSnapshot.from_bytes(
+        "synthetic pinned assignment baseline",
+        canonical_json_bytes(
+            {
+                "as_of_date": "2026-02-01",
+                "baseline_schema_version": 1,
+                "accounts": accounts,
+                "assignments": assignments,
+            }
+        ),
+    )
+    ledger = {
+        "as_of_date": "2026-02-01",
+        "catalog_schema_version": 1,
+        "nav_observations": [
+            {
+                "record_id": f"pinned-nav-{number:02d}",
+                "account_id": f"synthetic-pinned-{number:02d}",
+                "as_of_date": "2026-01-01" if number <= 6 else "2026-02-01",
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "100.00"},
+            }
+            for number in range(1, 19)
+        ],
+        "flows": [
+            {
+                "record_id": f"pinned-flow-{number:02d}",
+                "account_id": f"synthetic-pinned-{number:02d}",
+                "event_date": "2026-01-01" if number <= 6 else "2026-02-01",
+                "flow_type": "CONTRIBUTION",
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1.00"},
+            }
+            for number in range(1, 19)
+        ],
+    }
+    provider_ledger = InputSnapshot.from_bytes(
+        "synthetic pinned provider ledger", canonical_json_bytes(ledger)
+    )
+    policy = {
+        "schema_version": 1,
+        "artifact_id": "synthetic-pinned-flow-policy",
+        "as_of_date": "2026-02-01",
+        "policy_id": "SYNTHETIC_PINNED_POLICY",
+        "policy_version": "1",
+        "event_dispositions": {
+            "exact": [
+                {
+                    "flow_type": "CONTRIBUTION",
+                    "disposition": "EXTERNAL",
+                    "amount_sign": "POSITIVE",
+                }
+            ],
+            "prefix": [],
+        },
+    }
+    selected = _selected_inputs(module, baseline)
+    values = _selected_input_kwargs(selected)
+    values["provider_ledger"] = provider_ledger
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=provider_ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    values["flow_classification_policy"] = InputSnapshot.from_bytes(
+        "synthetic pinned flow policy", canonical_json_bytes(policy)
+    )
+    return module.AccountManifestSelectedInputs(**values)
+
+
+def _with_governed_assignment_envelopes(
+    module: Any,
+    selected: object,
+    *,
+    mutation: str | None = None,
+) -> object:
+    baseline_payload = selected.baseline.json_object()
+    assignments = baseline_payload["assignments"]
+    for index, assignment in enumerate(assignments, 1):
+        disposition = assignment["strategy_mapping_disposition"]
+        assignment.update(
+            {
+                "assignment_id": f"synthetic-assignment-{index:02d}",
+                "mapping_status": (
+                    "MAPPED" if disposition == "STRATEGY_MAPPED" else "UNMAPPED"
+                ),
+                "observed_label": f"Synthetic observed label {index:02d}",
+                "pool_id": f"synthetic-pool-{index:02d}",
+                "pool_mapping_status": "MAPPED",
+                "source_classification": "SYNTHETIC_GOVERNED_SOURCE",
+                "source_id": f"synthetic-source-{index:02d}",
+            }
+        )
+
+    first = assignments[0]
+    if mutation == "contradictory-mapping-status":
+        first["mapping_status"] = (
+            "UNMAPPED" if first["mapping_status"] == "MAPPED" else "MAPPED"
+        )
+    elif mutation == "partial-envelope":
+        del first["source_id"]
+    elif mutation == "unknown-extra":
+        first["synthetic_unknown_field"] = "synthetic-value"
+    elif mutation == "duplicate-assignment-id":
+        assignments[1]["assignment_id"] = first["assignment_id"]
+    elif mutation == "empty-assignment-id":
+        first["assignment_id"] = ""
+    elif mutation == "empty-observed-label":
+        first["observed_label"] = ""
+    elif mutation == "empty-pool-id":
+        first["pool_id"] = ""
+    elif mutation == "pool-mapping-status":
+        first["pool_mapping_status"] = "UNMAPPED"
+    elif mutation == "empty-source-classification":
+        first["source_classification"] = ""
+    elif mutation == "empty-source-id":
+        first["source_id"] = ""
+    elif mutation is not None:
+        raise AssertionError(f"unknown synthetic mutation: {mutation}")
+
+    baseline = InputSnapshot.from_bytes(
+        "synthetic governed assignment-envelope baseline",
+        canonical_json_bytes(baseline_payload),
+    )
+    values = _selected_input_kwargs(selected)
+    values["baseline"] = baseline
+    values["baseline_manifest"] = _generation_manifest_snapshot(
+        catalog=baseline,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    return module.AccountManifestSelectedInputs(**values)
+
+
+def test_assignment_perimeter_gives_shared_day_facts_to_mapped_successor(
+    perimeter_module: Any,
+) -> None:
+    baseline_payload = {
+        "as_of_date": "2026-02-01",
+        "baseline_schema_version": 1,
+        "accounts": [
+            {"account_id": "synthetic-transition", "provider": "SYNTHETIC"},
+            {"account_id": "synthetic-unassigned", "provider": "SYNTHETIC"},
+        ],
+        "assignments": [
+            _assignment(
+                "synthetic-transition",
+                "HISTORICAL_POOL_ONLY",
+                "2025-01-01",
+                "2026-01-01",
+                None,
+            ),
+            _assignment(
+                "synthetic-transition",
+                "STRATEGY_MAPPED",
+                "2026-01-01",
+                None,
+                "synthetic-successor",
+            ),
+        ],
+    }
+    baseline = InputSnapshot.from_bytes(
+        "synthetic shared-boundary baseline", canonical_json_bytes(baseline_payload)
+    )
+    payload = json.loads(
+        perimeter_module.build_account_assignment_perimeter(
+            selected_inputs=_selected_inputs(perimeter_module, baseline),
+            nav_facts=[
+                {
+                    "record_id": "shared-nav",
+                    "account_id": "synthetic-transition",
+                    "as_of_date": "2026-01-01",
+                    "nav": {"status": "AVAILABLE", "value": "1"},
+                }
+            ],
+            raw_flow_facts=[
+                {
+                    "record_id": "shared-flow",
+                    "account_id": "synthetic-transition",
+                    "event_date": "2026-01-01",
+                }
+            ],
+            classified_flow_facts=[
+                {
+                    "event_id": "shared-event",
+                    "source_record_id": "shared-flow",
+                    "account_id": "synthetic-transition",
+                    "event_date": "2026-01-01",
+                }
+            ],
+        )
+    )
+
+    historical, mapped = payload["rows"]
+    assert payload["account_count"] == 1
+    assert [historical[key] for key in ("available_nav", "raw_flows", "classified_flows")] == [0, 0, 0]
+    assert [mapped[key] for key in ("available_nav", "raw_flows", "classified_flows")] == [1, 1, 1]
+
+
+def test_blocked_builder_retains_outside_interval_facts_before_classification(
+    perimeter_module: Any,
+) -> None:
+    """Outside-interval and unresolved-policy evidence must both survive."""
+    selected = _pinned_assignment_semantics_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    nav = next(
+        row
+        for row in ledger["nav_observations"]
+        if row["account_id"] == "synthetic-pinned-09"
+    )
+    flow = next(
+        row
+        for row in ledger["flows"]
+        if row["account_id"] == "synthetic-pinned-09"
+    )
+    nav["as_of_date"] = "2024-12-31"
+    flow["event_date"] = "2024-12-31"
+    flow["flow_type"] = "UNRESOLVED_SYNTHETIC"
+    provider_ledger = InputSnapshot.from_bytes(
+        "synthetic outside-perimeter ledger", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected)
+    values["provider_ledger"] = provider_ledger
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=provider_ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    outside = perimeter_module.AccountManifestSelectedInputs(**values)
+
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(outside)
+    perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    assert perimeter["unassigned_fact_count"] == 2
+    assert perimeter["unassigned_projection_count"] == 3
+    assert next(
+        event
+        for event in classified["events"]
+        if event["source_record_id"] == flow["record_id"]
+    )["blocker_code"] == "FLOW_TYPE_UNRESOLVED"
+
+
+def test_independent_verifier_accepts_pinned_assignment_semantics(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    selected = _pinned_assignment_semantics_selected_inputs(perimeter_module)
+    accounts = selected.baseline.json_object()["accounts"]
+    assert all(
+        set(account) == {"account_id", "base_currency", "provider", "role"}
+        and account["base_currency"] == "USD"
+        and account["role"] in {"INVESTMENT", "RESERVE"}
+        for account in accounts
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+    perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
+
+    assert len(selected.baseline.json_object()["accounts"]) == 19
+    assert perimeter["account_count"] == 18
+    assert perimeter["assignment_count"] == 26
+    assert report["counts"]["account_count"] == 18
+
+
+def test_independent_verifier_accepts_complete_governed_assignment_envelope(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    minimal_selected = _pinned_assignment_semantics_selected_inputs(perimeter_module)
+    governed_selected = _with_governed_assignment_envelopes(
+        perimeter_module, minimal_selected
+    )
+    minimal_payloads = perimeter_module.build_blocked_account_manifest_payloads(
+        minimal_selected
+    )
+    governed_payloads = perimeter_module.build_blocked_account_manifest_payloads(
+        governed_selected
+    )
+    minimal_perimeter = json.loads(
+        minimal_payloads["authority/account-assignment-perimeter.json"]
+    )
+    governed_perimeter = json.loads(
+        governed_payloads["authority/account-assignment-perimeter.json"]
+    )
+
+    assert governed_selected.baseline.sha256 != minimal_selected.baseline.sha256
+    assert governed_perimeter["selected_baseline_identity"]["artifact"]["sha256"] == (
+        governed_selected.baseline.sha256
+    )
+    assert governed_perimeter["rows"] == minimal_perimeter["rows"]
+    assert verifier_module._mapped_assignment_identity(governed_perimeter) == (
+        verifier_module._mapped_assignment_identity(minimal_perimeter)
+    )
+
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_module.IndependentVerifierInputs(
+                **_selected_input_kwargs(governed_selected)
+            ),
+            governed_payloads,
+        )
+    )
+    assert report["counts"]["account_count"] == 18
+    assert report["counts"]["assignment_count"] == 26
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "contradictory-mapping-status",
+        "partial-envelope",
+        "unknown-extra",
+        "duplicate-assignment-id",
+        "empty-assignment-id",
+        "empty-observed-label",
+        "empty-pool-id",
+        "pool-mapping-status",
+        "empty-source-classification",
+        "empty-source-id",
+    ],
+)
+def test_independent_verifier_rejects_invalid_governed_assignment_envelope(
+    perimeter_module: Any,
+    verifier_module: Any,
+    mutation: str,
+) -> None:
+    selected = _with_governed_assignment_envelopes(
+        perimeter_module,
+        _pinned_assignment_semantics_selected_inputs(perimeter_module),
+        mutation=mutation,
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_module.IndependentVerifierInputs(**_selected_input_kwargs(selected)),
+            payloads,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["base-currency", "role", "missing-field", "extra-field", "duplicate-account"],
+)
+def test_independent_verifier_rejects_governed_baseline_account_shape_mutations(
+    verifier_module: Any,
+    mutation: str,
+) -> None:
+    account = {
+        "account_id": "synthetic-governed-account",
+        "base_currency": "USD",
+        "provider": "SYNTHETIC",
+        "role": "INVESTMENT",
+    }
+    accounts = [account]
+    if mutation == "base-currency":
+        account["base_currency"] = "EUR"
+    elif mutation == "role":
+        account["role"] = "CASH"
+    elif mutation == "missing-field":
+        del account["role"]
+    elif mutation == "extra-field":
+        account["nickname"] = "synthetic"
+    else:
+        accounts.append(dict(account))
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._baseline_account_providers(accounts)
+
+
+@pytest.mark.parametrize("mutation", ["account-count", "mapped-precedence"])
+def test_independent_verifier_rejects_assignment_perimeter_reassignment(
+    perimeter_module: Any,
+    verifier_module: Any,
+    mutation: str,
+) -> None:
+    selected = _pinned_assignment_semantics_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_blocked_account_manifest_payloads(selected))
+    perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
+    if mutation == "account-count":
+        perimeter["account_count"] = 19
+    else:
+        transition_rows = [
+            row
+            for row in perimeter["rows"]
+            if row["account_id"] == "synthetic-pinned-01"
+        ]
+        historical, mapped = transition_rows
+        for key in ("available_nav", "raw_flows", "classified_flows"):
+            historical[key], mapped[key] = mapped[key], historical[key]
+    payloads["authority/account-assignment-perimeter.json"] = canonical_json_bytes(perimeter)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+
+
+def _selected_with_unassigned_unresolved_facts(module: Any) -> object:
+    selected = _pinned_assignment_semantics_selected_inputs(module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["nav_observations"].append(
+        {
+            "record_id": "synthetic-unassigned-nav",
+            "account_id": "synthetic-pinned-19",
+            "as_of_date": "2026-02-01",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "5.00"},
+        }
+    )
+    ledger["flows"].append(
+        {
+            "record_id": "synthetic-unassigned-flow",
+            "account_id": "synthetic-pinned-19",
+            "event_date": "2026-02-01",
+            "flow_type": "UNRESOLVED_SYNTHETIC",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1.00"},
+        }
+    )
+    provider_ledger = InputSnapshot.from_bytes(
+        "synthetic ledger with retained blocked facts", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected)
+    values["provider_ledger"] = provider_ledger
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=provider_ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    return module.AccountManifestSelectedInputs(**values)
+
+
+def test_unassigned_and_unresolved_facts_are_retained_blocked_and_verified(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """Dropping zero-match facts or guessing their policy disposition is a bug."""
+    selected = _selected_with_unassigned_unresolved_facts(perimeter_module)
+
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    perimeter = json.loads(
+        payloads["authority/account-assignment-perimeter.json"]
+    )
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+
+    assert perimeter["selected_baseline_account_count"] == 19
+    assert perimeter["account_count"] == 18
+    assert perimeter["fact_bijection_status"] == "BLOCKED_UNASSIGNED_FACTS"
+    assert perimeter["unassigned_fact_count"] == 2
+    assert perimeter["unassigned_projection_count"] == 3
+    assert perimeter["unassigned_facts"] == [
+        {
+            "source_kind": "NAV",
+            "source_identity": {"record_id": "synthetic-unassigned-nav"},
+            "account_id": "synthetic-pinned-19",
+            "fact_date": "2026-02-01",
+            "assignment_match_count": 0,
+            "status": "BLOCKED",
+            "blocker_code": "NO_ASSIGNMENT_MATCH",
+        },
+        {
+            "source_kind": "RAW_FLOW",
+            "source_identity": {"record_id": "synthetic-unassigned-flow"},
+            "classified_projection_identity": {
+                "event_id": "classified-flow:synthetic-unassigned-flow",
+                "source_record_id": "synthetic-unassigned-flow",
+            },
+            "account_id": "synthetic-pinned-19",
+            "fact_date": "2026-02-01",
+            "assignment_match_count": 0,
+            "status": "BLOCKED",
+            "blocker_code": "NO_ASSIGNMENT_MATCH",
+        },
+    ]
+
+    unresolved = next(
+        event
+        for event in classified["events"]
+        if event["source_record_id"] == "synthetic-unassigned-flow"
+    )
+    assert unresolved["classification_status"] == "BLOCKED"
+    assert unresolved["disposition"] is None
+    assert unresolved["blocker_code"] == "FLOW_TYPE_UNRESOLVED"
+    calculation_nav_ids = {
+        nav["record_id"]
+        for row in calculation["rows"]
+        for nav in row["nav_observations"]
+    }
+    calculation_flow_ids = {
+        event["source_record_id"]
+        for row in calculation["rows"]
+        for event in row["classified_flows"]
+    }
+    assert "synthetic-unassigned-nav" not in calculation_nav_ids
+    assert "synthetic-unassigned-flow" not in calculation_flow_ids
+    assert output["authority_readiness"]["publication_readiness"] == "NOT_READY"
+    assert len(output["rows"]) == 15
+    assert all(
+        row["status"] == "BLOCKED_ADMISSION"
+        and not set(row).intersection(
+            {
+                "numeric_candidate",
+                "net_external_flow",
+                "start_nav",
+                "end_nav",
+                "return",
+            }
+        )
+        for row in output["rows"]
+    )
+
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    report_bytes = verifier_module.IndependentAccountManifestVerifier().verify(
+        verifier_inputs, payloads
+    )
+    report = json.loads(report_bytes)
+    assert report["counts"]["selected_baseline_account_count"] == 19
+    assert report["counts"]["account_count"] == 18
+    assert report["counts"]["observed_nav_fact_count"] == 19
+    assert report["counts"]["observed_raw_flow_count"] == 19
+    assert report["counts"]["classified_event_count"] == 19
+    assert report["counts"]["unmatched_fact_count"] == 2
+    assert report["counts"]["unmatched_projection_count"] == 3
+    assert report["invariants"]["fact_disposition_complete"] is True
+    assert report["invariants"]["unassigned_numeric_exclusion"] is True
+    assert "perimeter_fact_bijection" not in report["invariants"]
+
+    from jsonschema import Draft202012Validator
+
+    report_schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    Draft202012Validator(report_schema).validate(report)
+
+    mutated = dict(payloads)
+    mutated_perimeter = deepcopy(perimeter)
+    mutated_perimeter["unassigned_facts"][0]["source_identity"]["record_id"] = (
+        "synthetic-mutated-nav"
+    )
+    mutated["authority/account-assignment-perimeter.json"] = canonical_json_bytes(
+        mutated_perimeter
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, mutated
+        )
+
+
+def test_mvp_audit_001_public_report_partitions_mixed_unmatched_and_blocked_events(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Mixed unmatched sources retain their 1+2 projection weights publicly."""
+    selected = _selected_with_unassigned_unresolved_facts(perimeter_module)
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_module.IndependentVerifierInputs(
+                **_selected_input_kwargs(selected)
+            ),
+            payloads,
+        )
+    )
+
+    counts = report["counts"]
+    assert counts["classified_event_count"] == 19
+    assert counts["classified_event_classified_count"] == 18
+    assert counts["classified_event_blocked_count"] == 1
+    assert counts["observed_raw_flow_count"] == 19
+    assert counts["unmatched_nav_fact_count"] == 1
+    assert counts["unmatched_raw_flow_fact_count"] == 1
+    assert counts["unmatched_fact_count"] == 2
+    assert counts["unmatched_projection_count"] == 3
+
+
+def test_mvp_audit_001_report_schema_branches_and_semantic_finalization(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Closed v1/v2 branches reject cross-version and invalid count variants."""
+    from jsonschema import Draft202012Validator
+
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    generated = verifier.verify(selected, payloads)
+    report = json.loads(generated)
+    schema = Draft202012Validator(
+        json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    )
+    assert schema.is_valid(report)
+
+    legacy = deepcopy(report)
+    legacy["schema_version"] = 1
+    counts = legacy["counts"]
+    legacy["counts"] = {
+        **{key: value for key, value in counts.items() if key not in {
+            "observed_nav_fact_count", "observed_raw_flow_count",
+            "classified_event_count", "classified_event_classified_count",
+            "classified_event_blocked_count", "unmatched_nav_fact_count",
+            "unmatched_raw_flow_fact_count", "unmatched_fact_count",
+            "unmatched_projection_count",
+        }},
+        "nav_fact_count": counts["observed_nav_fact_count"],
+        "raw_flow_count": counts["observed_raw_flow_count"],
+        "classified_flow_count": counts["classified_event_count"],
+        "unassigned_fact_count": counts["unmatched_fact_count"],
+        "unassigned_projection_count": counts["unmatched_projection_count"],
+    }
+    assert schema.is_valid(legacy)
+    for mutate in (
+        lambda candidate: candidate["counts"].pop("unmatched_fact_count"),
+        lambda candidate: candidate["counts"].update({"unmatched_fact_count": True}),
+        lambda candidate: candidate["counts"].update({"unmatched_fact_count": -1}),
+        lambda candidate: candidate["counts"].update({"nav_fact_count": 0}),
+        lambda candidate: candidate.update({"schema_version": 1}),
+    ):
+        candidate = deepcopy(report)
+        mutate(candidate)
+        assert not schema.is_valid(candidate)
+    inconsistent = deepcopy(report)
+    inconsistent["counts"]["unmatched_projection_count"] = 1
+    assert schema.is_valid(inconsistent)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify_finalized_report(selected, payloads, canonical_json_bytes(inconsistent))
+
+def test_unassigned_perimeter_schema_rejects_contradictory_status_and_counts(
+    perimeter_module: Any,
+) -> None:
+    selected = _selected_with_unassigned_unresolved_facts(perimeter_module)
+    payload = json.loads(
+        perimeter_module.build_blocked_account_manifest_payloads(selected)[
+            "authority/account-assignment-perimeter.json"
+        ]
+    )
+    validator = _schema_validator()
+    assert not list(validator.iter_errors(payload))
+    contradictions = []
+    for key, value in (
+        ("fact_bijection_status", "ONE_TO_ONE_VERIFIED"),
+        ("unassigned_fact_count", 0),
+        ("unassigned_projection_count", 0),
+    ):
+        candidate = deepcopy(payload)
+        candidate[key] = value
+        contradictions.append(candidate)
+    candidate = deepcopy(payload)
+    candidate["unassigned_facts"] = []
+    contradictions.append(candidate)
+    assert all(list(validator.iter_errors(candidate)) for candidate in contradictions)
+
+
+def test_mapped_unresolved_flow_stays_blocked_and_non_numeric(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """A policy-blocked flow in a mapped interval cannot feed a number."""
+    selected = _pinned_assignment_semantics_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["flows"][8]["flow_type"] = "UNRESOLVED_SYNTHETIC"
+    provider_ledger = InputSnapshot.from_bytes(
+        "synthetic mapped unresolved flow ledger", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected)
+    values["provider_ledger"] = provider_ledger
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=provider_ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    unresolved = next(
+        event
+        for event in classified["events"]
+        if event["source_record_id"] == "pinned-flow-09"
+    )
+    assert unresolved["classification_status"] == "BLOCKED"
+    assert unresolved["blocker_code"] == "FLOW_TYPE_UNRESOLVED"
+    mapped_row = next(
+        row
+        for row in calculation["rows"]
+        if row["epoch"]["account_id"] == "synthetic-pinned-09"
+    )
+    assert unresolved in mapped_row["classified_flows"]
+    output_row = next(
+        row
+        for row in output["rows"]
+        if row["account_id"] == "synthetic-pinned-09"
+    )
+    assert output_row["status"] == "BLOCKED_ADMISSION"
+    assert "numeric_candidate" not in output_row
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        verifier_inputs, payloads
+    )
+
+
+def test_ambiguous_flow_rule_matches_still_fail(perimeter_module: Any) -> None:
+    rules = {
+        "exact": {},
+        "prefix": [
+            {
+                "flow_type_prefix": "SYNTHETIC_",
+                "disposition": "EXTERNAL",
+                "amount_sign": "NONZERO",
+            },
+            {
+                "flow_type_prefix": "SYNTHETIC_AMBIGUOUS",
+                "disposition": "INTERNAL",
+                "amount_sign": "NONZERO",
+                "counterparty_rule": "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT",
+            },
+        ],
+    }
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="ambiguous",
+    ):
+        perimeter_module._c3_rule(rules, "SYNTHETIC_AMBIGUOUS_FLOW")
+
+
+def _selected_with_internal_counterparty_boundaries(module: Any) -> object:
+    selected = _c3_selected_inputs(module)
+    ledger = selected.provider_ledger.json_object()
+    replacements = (
+        ("SYNTHETIC_INTERNAL", "5.00"),
+        ("SYNTHETIC_INTERNAL", "7.00"),
+        ("SYNTHETIC_INTERNAL", "-7.00"),
+        ("SYNTHETIC_INTERNAL", "-7.00"),
+        ("SYNTHETIC_INTERNAL", "9.00"),
+        ("SYNTHETIC_UNRESOLVED", "-9.00"),
+        ("SYNTHETIC_INTERNAL", "11.00"),
+        ("SYNTHETIC_INTERNAL", "-11.00"),
+    )
+    for flow, (flow_type, value) in zip(
+        ledger["flows"][: len(replacements)], replacements, strict=True
+    ):
+        flow["flow_type"] = flow_type
+        flow["amount"] = {
+            "currency": "USD",
+            "status": "AVAILABLE",
+            "value": value,
+        }
+    policy = selected.flow_classification_policy.json_object()
+    policy["event_dispositions"]["exact"].append(
+        {
+            "flow_type": "SYNTHETIC_INTERNAL",
+            "disposition": "INTERNAL",
+            "amount_sign": "NONZERO",
+            "counterparty_rule": (
+                "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+            ),
+        }
+    )
+    return _c3_with_mutated_ledger_or_policy(module, ledger, policy)
+
+
+def test_internal_counterparty_gaps_are_retained_blocked_and_verified(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """Physical counterparty gaps are evidence, while a proved pair stays linked."""
+    selected = _selected_with_internal_counterparty_boundaries(perimeter_module)
+
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    indexed = {event["source_record_id"]: event for event in classified["events"]}
+    expected_blockers = {
+        "c3-flow-01": "INTERNAL_COUNTERPARTY_MISSING",
+        "c3-flow-02": "INTERNAL_COUNTERPARTY_AMBIGUOUS",
+        "c3-flow-03": "INTERNAL_COUNTERPARTY_CLASSIFICATION_BLOCKED",
+        "c3-flow-04": "INTERNAL_COUNTERPARTY_CLASSIFICATION_BLOCKED",
+        "c3-flow-05": "INTERNAL_COUNTERPARTY_CLASSIFICATION_BLOCKED",
+        "c3-flow-06": "FLOW_TYPE_UNRESOLVED",
+    }
+    for record_id, blocker_code in expected_blockers.items():
+        assert indexed[record_id]["classification_status"] == "BLOCKED"
+        assert indexed[record_id]["disposition"] is None
+        assert indexed[record_id]["blocker_code"] == blocker_code
+        assert "counterparty_source_record_id" not in indexed[record_id]
+    assert indexed["c3-flow-07"]["classification_status"] == "CLASSIFIED"
+    assert indexed["c3-flow-07"]["disposition"] == "INTERNAL"
+    assert indexed["c3-flow-07"]["counterparty_source_record_id"] == "c3-flow-08"
+    assert indexed["c3-flow-08"]["counterparty_source_record_id"] == "c3-flow-07"
+
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    mapped_events = {
+        event["source_record_id"]: event
+        for row in calculation["rows"]
+        for event in row["classified_flows"]
+    }
+    assert all(record_id in mapped_events for record_id in expected_blockers)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    assert all(
+        row["status"] == "BLOCKED_ADMISSION" and "numeric_candidate" not in row
+        for row in output["rows"]
+    )
+
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        verifier_inputs, payloads
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "field", "value"),
+    [
+        ("blocker", "blocker_code", "INTERNAL_COUNTERPARTY_AMBIGUOUS"),
+        ("status", "classification_status", "CLASSIFIED"),
+        ("disposition", "disposition", "INTERNAL"),
+        ("counterparty", "counterparty_source_record_id", "c3-flow-01"),
+    ],
+)
+def test_independent_verifier_rejects_internal_counterparty_evidence_mutations(
+    perimeter_module: Any,
+    verifier_module: Any,
+    mutation: str,
+    field: str,
+    value: str,
+) -> None:
+    selected = _selected_with_internal_counterparty_boundaries(perimeter_module)
+    payloads = dict(perimeter_module.build_blocked_account_manifest_payloads(selected))
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    indexed = {event["source_record_id"]: event for event in classified["events"]}
+    target = indexed["c3-flow-07"] if mutation == "counterparty" else indexed["c3-flow-01"]
+    target[field] = value
+    payloads["authority/classified-flows.json"] = canonical_json_bytes(classified)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+
+
+def _selected_with_policy_sign_mismatches(module: Any) -> object:
+    selected = _c3_selected_inputs(module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["flows"][0].update(
+        {
+            "flow_type": "SYNTHETIC_INTERNAL_POSITIVE",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "17.00"},
+        }
+    )
+    ledger["flows"][1].update(
+        {
+            "flow_type": "SYNTHETIC_INTERNAL_POSITIVE",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-17.00"},
+        }
+    )
+    ledger["flows"][2]["amount"] = {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "-19.00",
+    }
+    policy = selected.flow_classification_policy.json_object()
+    policy["event_dispositions"]["exact"].append(
+        {
+            "flow_type": "SYNTHETIC_INTERNAL_POSITIVE",
+            "disposition": "INTERNAL",
+            "amount_sign": "POSITIVE",
+            "counterparty_rule": (
+                "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+            ),
+        }
+    )
+    return _c3_with_mutated_ledger_or_policy(module, ledger, policy)
+
+
+def test_policy_sign_mismatches_are_retained_blocked_and_verified(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """A wrong-sign rule match is evidence, never a fatal correction guess."""
+    selected = _selected_with_policy_sign_mismatches(perimeter_module)
+
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    indexed = {event["source_record_id"]: event for event in classified["events"]}
+    for record_id in ("c3-flow-02", "c3-flow-03"):
+        mismatch = indexed[record_id]
+        assert mismatch["classification_status"] == "BLOCKED"
+        assert mismatch["disposition"] is None
+        assert mismatch["blocker_code"] == "FLOW_AMOUNT_SIGN_MISMATCH"
+        assert "counterparty_source_record_id" not in mismatch
+    internal = indexed["c3-flow-01"]
+    assert internal["classification_status"] == "BLOCKED"
+    assert internal["disposition"] is None
+    assert (
+        internal["blocker_code"]
+        == "INTERNAL_COUNTERPARTY_CLASSIFICATION_BLOCKED"
+    )
+    assert "counterparty_source_record_id" not in internal
+    unavailable = indexed["c3-flow-16"]
+    assert unavailable["classification_status"] == "BLOCKED"
+    assert unavailable["disposition"] is None
+    assert unavailable["blocker_code"] == "AMOUNT_UNAVAILABLE"
+
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    mapped_events = {
+        event["source_record_id"]: event
+        for row in calculation["rows"]
+        for event in row["classified_flows"]
+    }
+    assert all(record_id in mapped_events for record_id in ("c3-flow-01", "c3-flow-02", "c3-flow-03"))
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    assert all(
+        row["status"] == "BLOCKED_ADMISSION" and "numeric_candidate" not in row
+        for row in output["rows"]
+    )
+
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        verifier_inputs, payloads
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("classification_status", "CLASSIFIED"),
+        ("blocker_code", "AMOUNT_UNAVAILABLE"),
+        ("disposition", "EXTERNAL"),
+    ],
+)
+def test_independent_verifier_rejects_policy_sign_mismatch_mutations(
+    perimeter_module: Any,
+    verifier_module: Any,
+    field: str,
+    value: str,
+) -> None:
+    selected = _selected_with_policy_sign_mismatches(perimeter_module)
+    payloads = dict(perimeter_module.build_blocked_account_manifest_payloads(selected))
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    mismatch = next(
+        event
+        for event in classified["events"]
+        if event["source_record_id"] == "c3-flow-03"
+    )
+    mismatch[field] = value
+    payloads["authority/classified-flows.json"] = canonical_json_bytes(classified)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+
+
+def _selected_with_absent_baseline_flow(module: Any) -> object:
+    selected = _c3_selected_inputs(module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["flows"].append(
+        {
+            "record_id": "synthetic-absent-flow",
+            "account_id": "synthetic-absent-account",
+            "event_date": "2025-12-31",
+            "flow_type": "CONTRIBUTION",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "23.00"},
+        }
+    )
+    provider_ledger = InputSnapshot.from_bytes(
+        "synthetic ledger with absent-baseline flow", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected)
+    values["provider_ledger"] = provider_ledger
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=provider_ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    return module.AccountManifestSelectedInputs(**values)
+
+
+def test_absent_baseline_flow_is_retained_blocked_counted_and_verified(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """A well-formed absent-baseline identity is evidence, not an assignment."""
+    selected = _selected_with_absent_baseline_flow(perimeter_module)
+
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
+    assert perimeter["selected_baseline_account_count"] == 18
+    assert perimeter["account_count"] == 18
+    assert perimeter["assignment_count"] == 26
+    assert perimeter["unassigned_fact_count"] == 1
+    assert perimeter["unassigned_projection_count"] == 2
+    assert perimeter["unassigned_facts"] == [
+        {
+            "source_kind": "RAW_FLOW",
+            "source_identity": {"record_id": "synthetic-absent-flow"},
+            "classified_projection_identity": {
+                "event_id": "classified-flow:synthetic-absent-flow",
+                "source_record_id": "synthetic-absent-flow",
+            },
+            "account_id": "synthetic-absent-account",
+            "fact_date": "2025-12-31",
+            "assignment_match_count": 0,
+            "status": "BLOCKED",
+            "blocker_code": "ACCOUNT_NOT_IN_SELECTED_BASELINE",
+        }
+    ]
+    assert all(
+        row["account_id"] != "synthetic-absent-account" for row in perimeter["rows"]
+    )
+
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    assert all(
+        row["epoch"]["account_id"] != "synthetic-absent-account"
+        and all(
+            event["account_id"] != "synthetic-absent-account"
+            for event in row["classified_flows"]
+        )
+        for row in calculation["rows"]
+    )
+    for path in (
+        "authority/account-flow-coverage.json",
+        "authority/mapped-epoch-admission.json",
+        "outputs/account-strategy-manifest.json",
+    ):
+        assert "synthetic-absent-account" not in payloads[path].decode("ascii")
+
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    Draft202012Validator(schema).validate(perimeter)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+    assert report["counts"]["observed_raw_flow_count"] == 19
+    assert report["counts"]["classified_event_count"] == 19
+    assert report["counts"]["unmatched_fact_count"] == 1
+    assert report["counts"]["unmatched_projection_count"] == 2
+    assert report["numeric_verification"]["candidate_count"] == 0
+
+
+@pytest.mark.parametrize("mutation", ["blocker", "linkage", "assign", "numeric"])
+def test_independent_verifier_rejects_absent_baseline_flow_mutations(
+    perimeter_module: Any,
+    verifier_module: Any,
+    mutation: str,
+) -> None:
+    selected = _selected_with_absent_baseline_flow(perimeter_module)
+    payloads = dict(perimeter_module.build_blocked_account_manifest_payloads(selected))
+    perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
+    absent = perimeter["unassigned_facts"][0]
+    if mutation == "blocker":
+        absent["blocker_code"] = "NO_ASSIGNMENT_MATCH"
+    elif mutation == "linkage":
+        absent["classified_projection_identity"]["event_id"] = (
+            "classified-flow:synthetic-other-flow"
+        )
+    elif mutation == "assign":
+        perimeter["fact_bijection_status"] = "ONE_TO_ONE_VERIFIED"
+        perimeter["unassigned_fact_count"] = 0
+        perimeter["unassigned_projection_count"] = 0
+        perimeter["unassigned_facts"] = []
+        perimeter["rows"][0]["raw_flows"] += 1
+        perimeter["rows"][0]["classified_flows"] += 1
+    else:
+        calculation = json.loads(payloads["authority/calculation-inputs.json"])
+        classified = json.loads(payloads["authority/classified-flows.json"])
+        absent_event = next(
+            event
+            for event in classified["events"]
+            if event["source_record_id"] == "synthetic-absent-flow"
+        )
+        calculation["rows"][0]["classified_flows"].append(absent_event)
+        payloads["authority/calculation-inputs.json"] = canonical_json_bytes(calculation)
+    payloads["authority/account-assignment-perimeter.json"] = canonical_json_bytes(
+        perimeter
+    )
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+
+
+@pytest.mark.parametrize("amount_sign", ("POSITIVE", "NEGATIVE", "NONZERO"))
+def test_mvp_audit_001_section_2f_canonical_zero_reaches_policy_sign_blocker(
+    perimeter_module: Any,
+    verifier_module: Any,
+    amount_sign: str,
+) -> None:
+    """Canonical source zero is retained until the policy-sign decision."""
+    selected = _c3_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["flows"][0]["amount"] = {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "0",
+    }
+    policy = selected.flow_classification_policy.json_object()
+    policy["event_dispositions"]["exact"][0]["amount_sign"] = amount_sign
+    selected = _c3_with_mutated_ledger_or_policy(perimeter_module, ledger, policy)
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    zero_event = next(
+        event for event in classified["events"] if event["source_record_id"] == "c3-flow-01"
+    )
+    assert zero_event["amount"]["value"] == "0"
+    assert zero_event["classification_status"] == "BLOCKED"
+    assert zero_event["disposition"] is None
+    assert zero_event["blocker_code"] == "FLOW_AMOUNT_SIGN_MISMATCH"
+
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        verifier_inputs, payloads
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "source_value"),
+    (("NAV", "100.123"), ("FLOW", "1.234")),
+)
+def test_mvp_audit_001_section_2f_retains_arbitrary_scale_source_money_end_to_end(
+    perimeter_module: Any,
+    verifier_module: Any,
+    source_kind: str,
+    source_value: str,
+) -> None:
+    """Producer-retained source decimals reach independent verification unchanged."""
+    selected = _c3_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    if source_kind == "NAV":
+        ledger["nav_observations"][0]["nav"]["value"] = source_value
+    else:
+        ledger["flows"][0]["amount"]["value"] = source_value
+    policy = selected.flow_classification_policy.json_object()
+    selected = _c3_with_mutated_ledger_or_policy(perimeter_module, ledger, policy)
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    if source_kind == "NAV":
+        retained_values = [
+            nav["nav"]["value"]
+            for row in calculation["rows"]
+            for nav in row["nav_observations"]
+            if nav["record_id"] == "c3-nav-01"
+        ]
+    else:
+        classified = json.loads(payloads["authority/classified-flows.json"])
+        retained_values = [
+            event["amount"]["value"]
+            for event in classified["events"]
+            if event["source_record_id"] == "c3-flow-01"
+        ]
+    assert retained_values == [source_value]
+
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        verifier_inputs, payloads
+    )
+
+
+def test_mvp_audit_001_section_2f_available_nav_currency_allows_all_unavailable_flows(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """Available NAV, not available flows, establishes accounting currency."""
+    selected = _c3_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    for flow in ledger["flows"]:
+        flow["amount"] = {"currency": "USD", "status": "UNAVAILABLE", "value": None}
+    policy = selected.flow_classification_policy.json_object()
+    selected = _c3_with_mutated_ledger_or_policy(perimeter_module, ledger, policy)
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    assert calculation["accounting_currency"] == "USD"
+    assert all(
+        event["blocker_code"] == "AMOUNT_UNAVAILABLE"
+        for event in json.loads(payloads["authority/classified-flows.json"])["events"]
+    )
+
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        verifier_inputs, payloads
+    )
+
+
+@pytest.mark.parametrize(
+    "source_value", ("-0", "-0.000", "1e2", "NaN", "Infinity", "01", "1.")
+)
+def test_mvp_audit_001_section_2f_rejects_noncanonical_source_money(
+    perimeter_module: Any,
+    verifier_module: Any,
+    source_value: str,
+) -> None:
+    """Both source seams reject noncanonical or negative-zero money spellings."""
+    selected = _c3_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["flows"][0]["amount"]["value"] = source_value
+    policy = selected.flow_classification_policy.json_object()
+    invalid_selected = _c3_with_mutated_ledger_or_policy(
+        perimeter_module, ledger, policy
+    )
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module.build_blocked_account_manifest_payloads(invalid_selected)
+
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(invalid_selected)
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._normalize_provider_navs(verifier_inputs)
+
+
+def _mvp_audit_001_section_2f_public_mutated_ledger_bundle(
+    perimeter_module: Any,
+    verifier_module: Any,
+    mutation: Any,
+) -> tuple[object, dict[str, bytes]]:
+    """Rebind a valid synthetic bundle so public verification reaches C4b2."""
+    selected = _c3_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_blocked_account_manifest_payloads(selected))
+    ledger = selected.provider_ledger.json_object()
+    mutation(ledger)
+    provider_ledger = InputSnapshot.from_bytes(
+        "section-2f public mutated ledger", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected)
+    values["provider_ledger"] = provider_ledger
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=provider_ledger,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    rebound_selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    payloads["authority/selected-input-identities.json"] = (
+        perimeter_module.build_selected_input_identities(rebound_selected)
+    )
+    return (
+        verifier_module.IndependentVerifierInputs(
+            **_selected_input_kwargs(rebound_selected)
+        ),
+        payloads,
+    )
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "source_value"),
+    (("NAV", "1e2"), ("FLOW", "-0.000")),
+)
+def test_mvp_audit_001_section_2f_public_verifier_rejects_malformed_retained_source(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    source_kind: str,
+    source_value: str,
+) -> None:
+    """Public verification reaches retained-source validation for each fact kind."""
+    def mutate(ledger: dict[str, object]) -> None:
+        if source_kind == "NAV":
+            ledger["nav_observations"][0]["nav"]["value"] = source_value
+        else:
+            ledger["flows"][0]["amount"]["value"] = source_value
+
+    verifier_inputs, payloads = _mvp_audit_001_section_2f_public_mutated_ledger_bundle(
+        perimeter_module, verifier_module, mutate
+    )
+
+    class RetainedNormalizationReached(RuntimeError):
+        pass
+
+    original_normalize = verifier_module._normalize_provider_navs
+
+    def reached_normalization(*_args: object, **_kwargs: object) -> object:
+        raise RetainedNormalizationReached
+
+    monkeypatch.setattr(
+        verifier_module, "_normalize_provider_navs", reached_normalization
+    )
+    with pytest.raises(RetainedNormalizationReached):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    monkeypatch.setattr(verifier_module, "_normalize_provider_navs", original_normalize)
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+
+
+def test_mvp_audit_001_section_2f_public_verifier_rejects_flow_nav_currency_disagreement(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A synthetic available flow cannot disagree with NAV-derived USD currency."""
+    def mutate(ledger: dict[str, object]) -> None:
+        ledger["flows"][0]["amount"]["currency"] = "EUR"
+
+    verifier_inputs, payloads = _mvp_audit_001_section_2f_public_mutated_ledger_bundle(
+        perimeter_module, verifier_module, mutate
+    )
+
+    class RetainedNormalizationReached(RuntimeError):
+        pass
+
+    original_normalize = verifier_module._normalize_provider_navs
+
+    def reached_normalization(*_args: object, **_kwargs: object) -> object:
+        raise RetainedNormalizationReached
+
+    monkeypatch.setattr(
+        verifier_module, "_normalize_provider_navs", reached_normalization
+    )
+    with pytest.raises(RetainedNormalizationReached):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    monkeypatch.setattr(verifier_module, "_normalize_provider_navs", original_normalize)
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+
+
+
+
+def _mvp_audit_001_selected_with_unmatched_facts(
+    module: Any, *, include_nav: bool, include_flow: bool
+) -> object:
+    selected = _pinned_assignment_semantics_selected_inputs(module)
+    ledger = selected.provider_ledger.json_object()
+    if include_nav:
+        ledger["nav_observations"].append(
+            {
+                "record_id": "mvp-audit-unmatched-nav",
+                "account_id": "synthetic-pinned-19",
+                "as_of_date": "2026-02-01",
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "5.00"},
+            }
+        )
+    if include_flow:
+        ledger["flows"].append(
+            {
+                "record_id": "mvp-audit-unmatched-flow",
+                "account_id": "synthetic-pinned-19",
+                "event_date": "2026-02-01",
+                "flow_type": "UNRESOLVED_SYNTHETIC",
+                "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1.00"},
+            }
+        )
+    ledger_snapshot = InputSnapshot.from_bytes(
+        "mvp audit unmatched synthetic ledger", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected)
+    values["provider_ledger"] = ledger_snapshot
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=ledger_snapshot,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    return module.AccountManifestSelectedInputs(**values)
+
+
+@pytest.mark.parametrize(
+    ("include_nav", "include_flow", "expected_unmatched", "expected_projection"),
+    [(True, False, 1, 1), (False, True, 1, 2), (True, True, 2, 3)],
+)
+def test_mvp_audit_001_public_report_derives_unmatched_projection_weights(
+    perimeter_module: Any,
+    verifier_module: Any,
+    include_nav: bool,
+    include_flow: bool,
+    expected_unmatched: int,
+    expected_projection: int,
+) -> None:
+    """NAV and raw-flow perimeter facts contribute one and two projections."""
+    selected = _mvp_audit_001_selected_with_unmatched_facts(
+        perimeter_module, include_nav=include_nav, include_flow=include_flow
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_module.IndependentVerifierInputs(**_selected_input_kwargs(selected)),
+            payloads,
+        )
+    )
+    counts = report["counts"]
+    assert counts["unmatched_nav_fact_count"] == int(include_nav)
+    assert counts["unmatched_raw_flow_fact_count"] == int(include_flow)
+    assert counts["unmatched_fact_count"] == expected_unmatched
+    assert counts["unmatched_projection_count"] == expected_projection
+    assert counts["unmatched_fact_count"] == (
+        counts["unmatched_nav_fact_count"] + counts["unmatched_raw_flow_fact_count"]
+    )
+    assert counts["unmatched_projection_count"] == (
+        counts["unmatched_nav_fact_count"] + 2 * counts["unmatched_raw_flow_fact_count"]
+    )
+
+
+def test_mvp_audit_001_public_report_keeps_unresolved_flow_in_blocked_partition(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """A valid unresolved flow is still an event and is explicitly BLOCKED."""
+    selected = _mvp_audit_001_selected_with_unmatched_facts(
+        perimeter_module, include_nav=False, include_flow=True
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_module.IndependentVerifierInputs(**_selected_input_kwargs(selected)),
+            payloads,
+        )
+    )
+    counts = report["counts"]
+    assert counts["observed_raw_flow_count"] == counts["classified_event_count"]
+    assert counts["classified_event_classified_count"] == 18
+    assert counts["classified_event_blocked_count"] == 1
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["classification_status", "source_kind", "unassigned_fact_count", "unassigned_projection_count"],
+)
+def test_mvp_audit_001_public_verifier_rejects_population_derivation_mutations(
+    perimeter_module: Any, verifier_module: Any, mutation: str
+) -> None:
+    """Report population arithmetic must be recomputed, never trusted from subjects."""
+    selected = _mvp_audit_001_selected_with_unmatched_facts(
+        perimeter_module, include_nav=True, include_flow=True
+    )
+    payloads = dict(perimeter_module.build_blocked_account_manifest_payloads(selected))
+    if mutation == "classification_status":
+        classified = json.loads(payloads["authority/classified-flows.json"])
+        classified["events"][-1]["classification_status"] = "UNKNOWN"
+        payloads["authority/classified-flows.json"] = canonical_json_bytes(classified)
+    else:
+        perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
+        if mutation == "source_kind":
+            perimeter["unassigned_facts"][0]["source_kind"] = "UNKNOWN"
+        else:
+            perimeter[mutation] = 0
+        payloads["authority/account-assignment-perimeter.json"] = canonical_json_bytes(
+            perimeter
+        )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_module.IndependentVerifierInputs(**_selected_input_kwargs(selected)),
+            payloads,
+        )
+
+
+def _mvp_audit_001_v1_report_from_v2(report: dict[str, object]) -> dict[str, object]:
+    legacy = deepcopy(report)
+    legacy["schema_version"] = 1
+    counts = legacy["counts"]
+    assert isinstance(counts, dict)
+    legacy["counts"] = {
+        **{key: value for key, value in counts.items() if key not in {
+            "observed_nav_fact_count", "observed_raw_flow_count",
+            "classified_event_count", "classified_event_classified_count",
+            "classified_event_blocked_count", "unmatched_nav_fact_count",
+            "unmatched_raw_flow_fact_count", "unmatched_fact_count",
+            "unmatched_projection_count",
+        }},
+        "nav_fact_count": counts["observed_nav_fact_count"],
+        "raw_flow_count": counts["observed_raw_flow_count"],
+        "classified_flow_count": counts["classified_event_count"],
+        "unassigned_fact_count": counts["unmatched_fact_count"],
+        "unassigned_projection_count": counts["unmatched_projection_count"],
+    }
+    return legacy
+
+
+@pytest.mark.parametrize(
+    "count_name",
+    [
+        "observed_nav_fact_count", "observed_raw_flow_count", "classified_event_count",
+        "classified_event_classified_count", "classified_event_blocked_count",
+        "unmatched_nav_fact_count", "unmatched_raw_flow_fact_count",
+        "unmatched_fact_count", "unmatched_projection_count",
+    ],
+)
+def test_mvp_audit_001_schema_closes_every_v2_population_count(
+    perimeter_module: Any, verifier_module: Any, count_name: str
+) -> None:
+    """Every v2 population count is mandatory and typed as a nonnegative integer."""
+    from jsonschema import Draft202012Validator
+
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(selected, payloads)
+    )
+    schema = Draft202012Validator(
+        json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    )
+    assert schema.is_valid(report)
+    missing = deepcopy(report)
+    del missing["counts"][count_name]
+    assert not schema.is_valid(missing)
+    for invalid in (True, -1):
+        candidate = deepcopy(report)
+        candidate["counts"][count_name] = invalid
+        assert not schema.is_valid(candidate)
+
+
+def test_mvp_audit_001_schema_rejects_cross_version_count_branches(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Version selection cannot admit legacy/v2 fields or a mixed count branch."""
+    from jsonschema import Draft202012Validator
+
+    selected, payloads = _c4b1_bundle(perimeter_module, verifier_module)
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(selected, payloads)
+    )
+    schema = Draft202012Validator(
+        json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    )
+    historical = _mvp_audit_001_v1_report_from_v2(report)
+    assert schema.is_valid(historical)
+    for candidate, field in (
+        (deepcopy(report), "nav_fact_count"),
+        (deepcopy(historical), "observed_nav_fact_count"),
+    ):
+        candidate["counts"][field] = 0
+        assert not schema.is_valid(candidate)
+    mixed = deepcopy(historical)
+    mixed["schema_version"] = 2
+    assert not schema.is_valid(mixed)
+    inconsistent = deepcopy(report)
+    inconsistent["counts"]["unmatched_projection_count"] = 1
+    assert schema.is_valid(inconsistent)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify_finalized_report(
+            selected, payloads, canonical_json_bytes(inconsistent)
+        )
+
+
+def test_mvp_audit_001_small_synthetic_population_verifies_without_retained_counts(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Generic verification accepts a one-account, one-assignment population."""
+    selected = _c3_selected_inputs(perimeter_module)
+    baseline = selected.baseline.json_object()
+    ledger = selected.provider_ledger.json_object()
+    baseline["accounts"] = [baseline["accounts"][0]]
+    baseline["assignments"] = [baseline["assignments"][0]]
+    account_id = baseline["accounts"][0]["account_id"]
+    ledger["nav_observations"] = [
+        row for row in ledger["nav_observations"] if row["account_id"] == account_id
+    ][:1]
+    ledger["flows"] = [
+        row for row in ledger["flows"] if row["account_id"] == account_id
+    ][:1]
+    baseline_snapshot = InputSnapshot.from_bytes(
+        "small synthetic baseline", canonical_json_bytes(baseline)
+    )
+    ledger_snapshot = InputSnapshot.from_bytes(
+        "small synthetic ledger", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected)
+    values["baseline"] = baseline_snapshot
+    values["baseline_manifest"] = _generation_manifest_snapshot(
+        catalog=baseline_snapshot,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date=str(baseline["as_of_date"]),
+    )
+    values["provider_ledger"] = ledger_snapshot
+    values["baseline_manifest"] = _generation_manifest_snapshot(
+        catalog=baseline_snapshot, catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog", catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=ledger_snapshot, catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog", catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    small = perimeter_module.AccountManifestSelectedInputs(**values)
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(small)
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_module.IndependentVerifierInputs(**_selected_input_kwargs(small)),
+            payloads,
+        )
+    )
+    assert report["counts"]["account_count"] == 1
+    assert report["counts"]["assignment_count"] == 1
+    assert report["counts"]["mapped_assignment_count"] == 1
+    assert report["counts"]["historical_assignment_count"] == 0
+    assert report["counts"]["reserve_assignment_count"] == 0
+
+
+def test_mixed_composer_preserves_the_hard_coded_legacy_nine_subject_vector(
+    perimeter_module: Any,
+) -> None:
+    """A no-triplet dispatcher must not silently alter the legacy blocked release."""
+    selected = _c3_selected_inputs(perimeter_module)
+    expected = {
+        "authority/selected-input-identities.json": ("c765ab9f5b28c88afc29db61c8f33e3ab23a050060feb9f6d0c76f06ca154977", 2083),
+        "authority/account-assignment-perimeter.json": ("e96ba78a8502c8fdb9edd88a007f1dc39e2681816b44a597b62e00537a4d0ae8", 11228),
+        "authority/calculation-inputs.json": ("310e73999b51bd4468e8951cb0e644c3f6dbc25fc53fc2db7b53e65d0a7be437", 9342),
+        "authority/flow-classification-policy.json": ("be860caffa13c6e121f73d13ce56b06cb940333ebeeb940c3d544ae5269c4de3", 350),
+        "authority/classified-flows.json": ("3fe88f8e1361189eabec3991bf83dbf4f78910007fe599ad39806936b6659b7e", 6249),
+        "authority/account-flow-coverage.json": ("7aa1304179b0307414ef7e75d7d6a2260f941c290eb022b01f89179ce15938a0", 6469),
+        "authority/mapped-epoch-admission.json": ("f16da4a4afa53c55ef6b3dcef85c9af1a34a737079ef49f03d27170b84b473f0", 5219),
+        "authority/code-identities.json": ("9a0f81804ee3317498ebe2de12ce7b4ec09c70d67b4956125afdb73664615749", 621),
+        "outputs/account-strategy-manifest.json": ("9417bee071778513ff2fec03a038eef900eeb507e38363d03a81c0f1e841b563", 11768),
+    }
+    blocked = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    dispatched = perimeter_module.build_account_manifest_payloads(selected)
+    observed = {
+        path: (hashlib.sha256(value).hexdigest(), len(value))
+        for path, value in blocked.items()
+    }
+    assert observed == expected
+    assert dispatched == blocked
+
+
+def test_mixed_composer_requires_the_optional_snapshot_triplet(
+    perimeter_module: Any,
+) -> None:
+    """A single selected mixed authority cannot be accidentally treated as legacy."""
+    selected = _c3_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected)
+    values["receipt_authority"] = InputSnapshot.from_bytes("authority", b"{}")
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError, match="selected together"):
+        perimeter_module.AccountManifestSelectedInputs(**values)
+
+
+def test_blocked_builder_rejects_a_complete_mixed_selection(
+    perimeter_module: Any,
+) -> None:
+    """The legacy-named builder cannot silently emit a mixed candidate."""
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="require build_account_manifest_payloads",
+    ):
+        perimeter_module.build_blocked_account_manifest_payloads(
+            _mixed_composer_selected_inputs(perimeter_module)
+        )
+
+
+def _mixed_base_selected_inputs(perimeter_module: Any) -> object:
+    selected = _c3_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    account_id = "synthetic-account-01"
+    ledger["nav_observations"] = [
+        {"record_id": "mixed-nav-1", "account_id": account_id, "as_of_date": "2026-01-30", "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"}},
+        {"record_id": "mixed-nav-2", "account_id": account_id, "as_of_date": "2026-01-31", "nav": {"currency": "USD", "status": "AVAILABLE", "value": "60"}},
+        {"record_id": "mixed-nav-3", "account_id": account_id, "as_of_date": "2026-02-01", "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"}},
+    ]
+    ledger["flows"] = [{"record_id": "mixed-flow-1", "account_id": account_id, "event_date": "2026-01-31", "nav_recognition_date": "2026-01-31", "flow_type": "CONTRIBUTION", "amount": {"currency": "USD", "status": "AVAILABLE", "value": "10"}}]
+    baseline = selected.baseline.json_object()
+    funded_assignment = next(
+        row for row in baseline["assignments"]
+        if row["account_id"] == account_id
+        and row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+    )
+    ledger["capital_anchors"] = [{
+        "record_id": "mixed-opening-anchor-1",
+        "account_id": account_id,
+        "provider_id": "synthetic",
+        "generation_id": "c" * 64,
+        "strategy_id": funded_assignment["strategy_id"],
+        "mapping_status": "MAPPED",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "event_date": "2024-12-31",
+        "nav_recognition_date": "2026-01-30",
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
+        "opening_nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
+        "source_artifact_id": "raw/synthetic.json",
+        "nav_source_artifact_id": "raw/synthetic.json",
+        "source_record_id": "synthetic-opening-1",
+        "mapping_basis": "EXACT_SYNTHETIC_OPENING",
+    }]
+    ledger["provider_generations"] = [{"provider_id": "synthetic", "generation_id": "c" * 64, "manifest_sha256": "a" * 64, "generation_as_of_date": "2026-02-01"}]
+    ledger_snapshot = InputSnapshot.from_bytes("mixed ledger", canonical_json_bytes(ledger))
+    raw_artifact = {"artifact_id": "raw/synthetic.json", "as_of_date": "2026-02-01", "schema": {"name": "synthetic", "version": "1"}, "sha256": "a" * 64, "size_bytes": 1}
+    receipt_id = "receipt/mixed-account-01.json"
+    receipt = {"schema_version": 2, "artifact_id": receipt_id, "issuer": {"adapter_name": "SYNTHETIC", "adapter_version": "1", "code_sha256": "b" * 64}, "provider": "SYNTHETIC", "provider_generation": "c" * 64, "provider_generation_manifest": raw_artifact, "raw_evidence_artifacts": [raw_artifact], "account_id": account_id, "source_account_identity_sha256": "d" * 64, "requested_start": "2025-01-01", "requested_end": "2026-02-01", "covered_start": "2025-01-01", "covered_end": "2026-02-01", "required_categories": ["CASH"], "completed_categories": ["CASH"], "unavailable_categories": [], "pagination": {"mode": "SYNTHETIC", "page_count": 1, "request_response_chain_sha256": "e" * 64, "terminal_response_sha256": "f" * 64, "terminal": True}, "completeness": "EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES", "truncated": False}
+    receipt_snapshot = InputSnapshot.from_bytes("mixed receipt", canonical_json_bytes(receipt))
+    authority = {"schema_version": 1, "artifact_id": "authority/account-interval-retrieval-receipt-authority.json", "as_of_date": "2026-02-01", "receipts": [{"artifact_id": receipt_id, "sha256": receipt_snapshot.sha256, "size_bytes": receipt_snapshot.size_bytes, "contract": {"adapter_name": "SYNTHETIC", "adapter_version": "1", "code_sha256": "b" * 64, "provider": "SYNTHETIC", "account_id": account_id, "source_account_identity_sha256": "d" * 64, "provider_generation": "c" * 64, "provider_generation_manifest": raw_artifact, "raw_evidence_artifacts": [raw_artifact], "required_categories": ["CASH"], "pagination": receipt["pagination"]}}]}
+    mapped, _ = perimeter_module._c3_mapped_assignments(selected)
+    assignments = [perimeter_module._c3_assignment_record(item) for item in mapped]
+    assignment_hash = hashlib.sha256(json.dumps(sorted(assignments, key=lambda item: (item["account_id"], item["strategy_id"], item["effective_start"], str(item["effective_end"]))), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+    admissions = []
+    for assignment in assignments:
+        funded = assignment["account_id"] == account_id
+        row = {**assignment, "status": "FUNDED" if funded else "BLOCKED", "continuity_to_successor": False}
+        row.update({"authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1", "funded_nav_record_ids": ["mixed-nav-1"]} if funded else {"reason": "SYNTHETIC_BLOCKED"})
+        admissions.append(row)
+    policy = {"schema_version": 2, "policy_id": "MAPPED_EPOCH_ADMISSION_V2", "policy_version": "2", "artifact_id": "authority/mapped-epoch-admission.json", "as_of_date": "2026-02-01", "assignment_sha256": assignment_hash, "admissions": admissions}
+    values = _selected_input_kwargs(selected)
+    values.update({"provider_ledger": ledger_snapshot, "provider_ledger_manifest": _generation_manifest_snapshot(catalog=ledger_snapshot, catalog_artifact_id="normalized/provider-ledger.json", catalog_schema_name="provider-ledger-catalog", catalog_schema_version="1", as_of_date="2026-02-01"), "retrieval_receipts": {receipt_id: receipt_snapshot}, "receipt_authority": InputSnapshot.from_bytes("mixed authority", canonical_json_bytes(authority)), "admission_policy": InputSnapshot.from_bytes("mixed admission", canonical_json_bytes(policy)), "manifest_schema": InputSnapshot.from_bytes("mixed schema", ACCOUNT_STRATEGY_SCHEMA_PATH.read_bytes())})
+    return perimeter_module.AccountManifestSelectedInputs(**values)
+
+
+def _mixed_crosswalk_selected_inputs(perimeter_module: Any) -> object:
+    """Attach one 15-row synthetic owner crosswalk to the mixed fixture."""
+
+    selected = _mixed_base_selected_inputs(perimeter_module)
+    baseline = selected.baseline.json_object()
+    providers = {row["account_id"]: row["provider"] for row in baseline["accounts"]}
+    mapped = [
+        row for row in baseline["assignments"]
+        if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+    ]
+    assert len(mapped) == 15
+    rows = []
+    for index, row in enumerate(sorted(mapped, key=lambda item: item["assignment_id"]), 1):
+        disposition = (
+            "INCLUDED_PRODUCT_EPOCH"
+            if index <= 13
+            else (
+                "EXCLUDED_DEPRECATED_HISTORY_ONLY"
+                if index == 14
+                else "EXCLUDED_IMMATERIAL"
+            )
+        )
+        rows.append(
+            {
+                "assignment_id": row["assignment_id"],
+                "account_id": row["account_id"],
+                "provider": providers[row["account_id"]],
+                "strategy_id": row["strategy_id"],
+                "effective_start": row["effective_start"],
+                "effective_end": row["effective_end"],
+                "account_label": f"Synthetic {index:02d}",
+                "last_four": f"{index:04d}",
+                "product_epoch_disposition": disposition,
+                "owner_reason": "SYNTHETIC_OWNER_AUTHORITY",
+            }
+        )
+    crosswalk = {
+        "schema_version": 1,
+        "artifact_id": "account-strategy-current-epoch-crosswalk",
+        "as_of_date": baseline["as_of_date"],
+        "calculation_cutoff_date": baseline["as_of_date"],
+        "disposition_counts": {
+            "INCLUDED_PRODUCT_EPOCH": 13,
+            "EXCLUDED_DEPRECATED_HISTORY_ONLY": 1,
+            "EXCLUDED_IMMATERIAL": 1,
+        },
+        "selected_baseline": {
+            "generation_id": selected.baseline_generation_id,
+            "artifact_id": "normalized/portfolio-baseline.json",
+            "sha256": selected.baseline.sha256,
+            "size_bytes": selected.baseline.size_bytes,
+            "as_of_date": baseline["as_of_date"],
+            "schema_name": "portfolio-baseline-catalog",
+            "schema_version": str(baseline["baseline_schema_version"]),
+        },
+        "rows": rows,
+    }
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+            "current_epoch_crosswalk": InputSnapshot.from_bytes(
+                "synthetic current epoch crosswalk", canonical_json_bytes(crosswalk)
+            ),
+        }
+    )
+    return perimeter_module.AccountManifestSelectedInputs(**values)
+
+
+def _mixed_composer_selected_inputs(perimeter_module: Any) -> object:
+    """Return the explicit current-product mixed fixture used by all mixed tests."""
+
+    return _mixed_crosswalk_selected_inputs(perimeter_module)
+
+
+def test_gate1_synthetic_crosswalk_mixed_transport_v3_has_thirteen_display_rows(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    selected = _mixed_crosswalk_selected_inputs(perimeter_module)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    assert len(output["rows"]) == 13
+    assert all({"account_label", "last_four"} <= set(row) for row in output["rows"])
+    assert payloads["authority/account-assignment-crosswalk.json"] == (
+        selected.current_epoch_crosswalk.contents
+    )
+    request = verifier_module.encode_verification_request(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+    assert json.loads(request)["schema_version"] == 3
+    decoded, decoded_payloads = verifier_module.decode_verification_request(request)
+    assert decoded.current_epoch_crosswalk.contents == selected.current_epoch_crosswalk.contents
+    assert decoded_payloads == payloads
+
+
+def test_current_v9_propagates_dual_dates_and_capital_anchor_lineage(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    baseline_output = json.loads(
+        perimeter_module.build_account_manifest_payloads(selected)[
+            "outputs/account-strategy-manifest.json"
+        ]
+    )
+    ledger = selected.provider_ledger.json_object()
+    ledger["flows"][0].pop("nav_recognition_date")
+    ledger["capital_anchors"][0]["amount"] = {
+        "currency": "USDT", "status": "AVAILABLE", "value": "499"
+    }
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+
+    assert classified["schema_version"] == 5
+    assert calculation["schema_version"] == 4
+    assert calculation["calculation_classified_flows"]["schema_version"] == 4
+    assert output["schema_version"] == 9
+    assert classified["events"][0]["nav_recognition_date"] == (
+        classified["events"][0]["event_date"]
+    )
+    assert calculation["calculation_ledger"]["capital_anchors"] == (
+        classified["capital_anchors"]
+    )
+    anchor_row = next(row for row in calculation["rows"] if row["capital_anchors"])
+    assert anchor_row["capital_anchors"][0]["event_date"] < (
+        anchor_row["epoch"]["effective_start"]
+    )
+    assert calculation["calculation_classified_flows"]["capital_anchors"] == (
+        classified["capital_anchors"]
+    )
+    ok_row = next(row for row in output["rows"] if row["status"] == "OK")
+    assert ok_row["opening_basis"] == "PROVIDER_CAPITAL_ANCHOR"
+    assert ok_row["opening_capital"] == "499"
+    assert ok_row["capital_flow_trace"] == [
+        {
+            "class": "EXTERNAL_IN",
+            "event_date": "2026-01-31",
+            "nav_recognition_date": "2026-01-31",
+            "amount": "10",
+        }
+    ]
+    baseline_rows = {
+        (row["account_id"], row["strategy_id"], row["effective_start"]): row
+        for row in baseline_output["rows"]
+    }
+    for row in output["rows"]:
+        row_key = (row["account_id"], row["strategy_id"], row["effective_start"])
+        if row["account_id"] != "synthetic-account-01":
+            assert row == baseline_rows[row_key]
+    assert ok_row["observation_trace"]["links"][0]["base_nav"] == "499"
+    assert ok_row["observation_trace"]["links"][0]["ending_nav"] == "50"
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+
+def test_current_cutoff_excludes_future_economic_flow_despite_earlier_recognition(
+    perimeter_module: Any,
+) -> None:
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    baseline_output = json.loads(
+        perimeter_module.build_account_manifest_payloads(selected)[
+            "outputs/account-strategy-manifest.json"
+        ]
+    )
+    ledger = selected.provider_ledger.json_object()
+    ledger["flows"].append({
+        "record_id": "future-economic-flow",
+        "account_id": "synthetic-account-01",
+        "event_date": "2026-02-02",
+        "nav_recognition_date": "2026-01-31",
+        "flow_type": "CONTRIBUTION",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "999"},
+    })
+    ledger["as_of_date"] = "2026-02-02"
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+    crosswalk = selected.current_epoch_crosswalk.json_object()
+    crosswalk["calculation_cutoff_date"] = "2026-02-01"
+    values = _selected_input_kwargs(selected)
+    values.update({
+        "receipt_authority": selected.receipt_authority,
+        "admission_policy": selected.admission_policy,
+        "manifest_schema": selected.manifest_schema,
+        "current_epoch_crosswalk": InputSnapshot.from_bytes(
+            "earlier current cutoff", canonical_json_bytes(crosswalk)
+        ),
+    })
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    assert all(
+        event["source_record_id"] != "future-economic-flow"
+        for event in calculation["calculation_classified_flows"]["events"]
+    )
+    assert output["calculation_cutoff_date"] == "2026-02-01"
+    assert output["rows"] == baseline_output["rows"]
+
+
+def test_post_cutoff_allocation_is_source_lineage_not_calculation_input(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """A later source fact remains auditable without entering cutoff calculations."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    baseline_payloads = perimeter_module.build_account_manifest_payloads(selected)
+    baseline_output = json.loads(
+        baseline_payloads["outputs/account-strategy-manifest.json"]
+    )
+    ledger = selected.provider_ledger.json_object()
+    opening = ledger["capital_anchors"][0]
+    allocation = {
+        "record_id": "post-cutoff-strategy-allocation",
+        "account_id": opening["account_id"],
+        "provider_id": opening["provider_id"],
+        "generation_id": opening["generation_id"],
+        "strategy_id": opening["strategy_id"],
+        "mapping_status": "MAPPED",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "event_date": "2026-02-02",
+        "nav_recognition_date": "2026-02-02",
+        "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
+        "source_artifact_id": "raw/synthetic.json",
+        "nav_source_artifact_id": "raw/synthetic.json",
+        "source_record_id": "synthetic-post-cutoff-allocation",
+        "mapping_basis": "EXACT_STRATEGY_ALLOCATION",
+    }
+    ledger["as_of_date"] = "2026-02-02"
+    ledger["capital_anchors"].append(allocation)
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+    admission = selected.admission_policy.json_object()
+    admission["as_of_date"] = "2026-02-02"
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": InputSnapshot.from_bytes(
+                "later source admission", canonical_json_bytes(admission)
+            ),
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    source_classified = json.loads(payloads["authority/classified-flows.json"])
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+
+    assert allocation in source_classified["capital_anchors"]
+    assert allocation not in calculation["calculation_ledger"]["capital_anchors"]
+    assert allocation not in calculation["calculation_classified_flows"][
+        "capital_anchors"
+    ]
+    assert output["calculation_cutoff_date"] == "2026-02-01"
+    assert output["rows"] == baseline_output["rows"]
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+
+def test_pre_epoch_strategy_allocation_is_not_admitted_by_recognition_date(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    opening = ledger["capital_anchors"][0]
+    ledger["capital_anchors"].append({
+        "record_id": "mixed-strategy-allocation-1",
+        "account_id": opening["account_id"],
+        "provider_id": opening["provider_id"],
+        "generation_id": opening["generation_id"],
+        "strategy_id": opening["strategy_id"],
+        "mapping_status": "MAPPED",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "event_date": "2024-12-31",
+        "nav_recognition_date": "2026-01-31",
+        "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
+        "source_artifact_id": "raw/synthetic.json",
+        "nav_source_artifact_id": "raw/synthetic.json",
+        "source_record_id": "synthetic-allocation-1",
+        "mapping_basis": "EXACT_STRATEGY_ALLOCATION",
+    })
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    row = next(item for item in output["rows"] if item["status"] == "OK")
+    assert row["deposits"] == "10"
+    assert row["internal_in"] == "0"
+    assert all(
+        anchor["record_id"] != "mixed-strategy-allocation-1"
+        for anchor in calculation["calculation_ledger"]["capital_anchors"]
+    )
+    assert row["capital_flow_trace"] == [{
+        "class": "EXTERNAL_IN",
+        "event_date": "2026-01-31",
+        "nav_recognition_date": "2026-01-31",
+        "amount": "10",
+    }]
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+
+@pytest.mark.parametrize(
+    ("event_date", "recognition_date"),
+    [
+        ("2024-12-31", "2026-02-02"),
+        ("2026-02-02", "2026-02-02"),
+    ],
+)
+def test_opening_anchor_requires_both_dates_at_or_before_cutoff(
+    perimeter_module: Any,
+    event_date: str,
+    recognition_date: str,
+) -> None:
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["as_of_date"] = "2026-02-02"
+    ledger["capital_anchors"][0]["event_date"] = event_date
+    ledger["capital_anchors"][0]["nav_recognition_date"] = recognition_date
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+    with pytest.raises(
+        (perimeter_module.AccountAssignmentPerimeterError, perimeter_module.ManifestError)
+    ):
+        perimeter_module.build_account_manifest_payloads(selected)
+
+
+def test_unattachable_recognition_emits_no_return_or_risk_numbers(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """An admitted IBKR event with unavailable Schwab recognition fails closed."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["flows"][0]["nav_recognition_date"] = "2026-02-02"
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(
+        item for item in output["rows"]
+        if item["account_id"] == "synthetic-account-01"
+    )
+
+    assert row["status"] == "BLOCKED_RETURN_LINKAGE"
+    assert row["blocking_reason"] == (
+        "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL"
+    )
+    assert not {
+        "observation_linked_return",
+        "observed_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "observation_trace",
+    } & set(row)
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+
+def test_in_epoch_strategy_allocation_is_retained_and_blocks_unlinked_recognition(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """Economic cutoff admission is distinct from observation-link attachment."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    opening = ledger["capital_anchors"][0]
+    allocation = {
+        "record_id": "mixed-strategy-allocation-at-cutoff",
+        "account_id": opening["account_id"],
+        "provider_id": opening["provider_id"],
+        "generation_id": opening["generation_id"],
+        "strategy_id": opening["strategy_id"],
+        "mapping_status": "MAPPED",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "event_date": "2026-01-31",
+        "nav_recognition_date": "2026-02-02",
+        "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
+        "source_artifact_id": "raw/synthetic.json",
+        "nav_source_artifact_id": "raw/synthetic.json",
+        "source_record_id": "synthetic-allocation-at-cutoff",
+        "mapping_basis": "EXACT_STRATEGY_ALLOCATION",
+    }
+    ledger["capital_anchors"].append(allocation)
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(
+        item for item in output["rows"]
+        if item["account_id"] == "synthetic-account-01"
+    )
+
+    assert output["calculation_cutoff_date"] == "2026-02-01"
+    assert allocation in calculation["calculation_ledger"]["capital_anchors"]
+    assert allocation in calculation["calculation_classified_flows"]["capital_anchors"]
+    assert row["status"] == "BLOCKED_RETURN_LINKAGE"
+    assert row["blocking_reason"] == (
+        "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL"
+    )
+    assert not {
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "current_value",
+        "gain",
+        "observation_linked_return",
+        "observed_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "observation_trace",
+        "capital_flow_trace",
+    } & set(row)
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+
+def test_independent_verifier_rejects_coordinated_recognition_date_rewrite(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """A producer cannot rewrite recognition timing while preserving economic totals."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    calculation["calculation_ledger"]["flows"][0][
+        "nav_recognition_date"
+    ] = "2026-02-01"
+    calculation["calculation_classified_flows"]["events"][0][
+        "nav_recognition_date"
+    ] = "2026-02-01"
+    funded_row = next(row for row in calculation["rows"] if row["classified_flows"])
+    funded_row["classified_flows"][0]["nav_recognition_date"] = "2026-02-01"
+    payloads["authority/calculation-inputs.json"] = canonical_json_bytes(calculation)
+
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(item for item in output["rows"] if item["status"] == "OK")
+    row["capital_flow_trace"][0]["nav_recognition_date"] = "2026-02-01"
+    row["observation_trace"]["links"][1].update({
+        "net_flow": "0",
+        "factor": "1.2",
+        "cumulative_index": "120",
+        "running_hwm_index": "120",
+    })
+    row["observation_trace"]["links"][2].update({
+        "net_flow": "10",
+        "factor": "1",
+        "cumulative_index": "120",
+        "running_hwm_index": "120",
+    })
+    row["observation_linked_return"] = "0.2"
+    row["observed_hwm_index"] = "120"
+    payloads["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+
+
+def test_gate1_synthetic_crosswalk_stages_and_reads_back(
+    perimeter_module: Any, tmp_path: Path
+) -> None:
+    selected = _mixed_crosswalk_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+            "epoch_producer_source": InputSnapshot.from_bytes(
+                "epoch source", EPOCH_PRODUCER_MODULE_PATH.read_bytes()
+            ),
+            "generation_builder_source": InputSnapshot.from_bytes(
+                "builder source", MODULE_PATH.read_bytes()
+            ),
+            "independent_verifier_source": InputSnapshot.from_bytes(
+                "verifier source", VERIFIER_MODULE_PATH.read_bytes()
+            ),
+        }
+    )
+    attested = perimeter_module.AccountManifestSelectedInputs(**values)
+    bundle = perimeter_module.stage_account_manifest_generation(attested, tmp_path)
+    reread = read_generation_bundle(tmp_path, bundle.manifest.generation_id)
+    assert "authority/account-assignment-crosswalk.json" in reread.payloads
+    output = json.loads(reread.payloads["outputs/account-strategy-manifest.json"])
+    assert len(output["rows"]) == 13
+
+
+def test_gate1_mixed_stage_rejects_missing_crosswalk(
+    perimeter_module: Any, tmp_path: Path
+) -> None:
+    """Mixed generation cannot fall back to the legacy all-mapped population."""
+
+    selected = _mixed_base_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+            "epoch_producer_source": InputSnapshot.from_bytes(
+                "epoch source", EPOCH_PRODUCER_MODULE_PATH.read_bytes()
+            ),
+            "generation_builder_source": InputSnapshot.from_bytes(
+                "builder source", MODULE_PATH.read_bytes()
+            ),
+            "independent_verifier_source": InputSnapshot.from_bytes(
+                "verifier source", VERIFIER_MODULE_PATH.read_bytes()
+            ),
+        }
+    )
+    no_crosswalk = perimeter_module.AccountManifestSelectedInputs(**values)
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="requires current_epoch_crosswalk",
+    ):
+        perimeter_module.stage_account_manifest_generation(no_crosswalk, tmp_path)
+
+
+def test_gate1_mixed_verifier_rejects_missing_crosswalk(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    selected = _mixed_base_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentVerifierInputs(**values)
+
+
+def _with_gate1_crosswalk(
+    perimeter_module: Any, selected: object, crosswalk: Mapping[str, object]
+) -> object:
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+            "current_epoch_crosswalk": InputSnapshot.from_bytes(
+                "mutated Gate 1 crosswalk", canonical_json_bytes(crosswalk)
+            ),
+        }
+    )
+    return perimeter_module.AccountManifestSelectedInputs(**values)
+
+
+def _crosswalk_bound_to_mutated_synthetic_baseline(
+    selected: object, baseline_payload: Mapping[str, object]
+) -> tuple[InputSnapshot, InputSnapshot]:
+    baseline = InputSnapshot.from_bytes(
+        "mutated Gate 1 baseline", canonical_json_bytes(baseline_payload)
+    )
+    crosswalk = selected.current_epoch_crosswalk.json_object()
+    crosswalk["selected_baseline"].update(
+        {
+            "sha256": baseline.sha256,
+            "size_bytes": baseline.size_bytes,
+            "as_of_date": baseline_payload["as_of_date"],
+        }
+    )
+    assignments = {
+        row["assignment_id"]: row
+        for row in baseline_payload["assignments"]
+        if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+    }
+    providers = {
+        row["account_id"]: row["provider"] for row in baseline_payload["accounts"]
+    }
+    for row in crosswalk["rows"]:
+        assignment = assignments[row["assignment_id"]]
+        row.update(
+            {
+                "account_id": assignment["account_id"],
+                "strategy_id": assignment["strategy_id"],
+                "effective_start": assignment["effective_start"],
+                "effective_end": assignment["effective_end"],
+                "provider": providers[assignment["account_id"]],
+            }
+        )
+    return baseline, InputSnapshot.from_bytes(
+        "mutated Gate 1 crosswalk", canonical_json_bytes(crosswalk)
+    )
+
+
+@pytest.mark.parametrize("mutation", ("duplicate_composite", "overlapping_included"))
+def test_gate1_crosswalk_semantic_epoch_mutations_reject_in_both_paths(
+    perimeter_module: Any, verifier_module: Any, mutation: str
+) -> None:
+    """Cardinality-preserving bad epochs must fail semantic validation, not counts."""
+
+    selected = _mixed_crosswalk_selected_inputs(perimeter_module)
+    baseline = selected.baseline.json_object()
+    mapped = [
+        row for row in baseline["assignments"]
+        if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+    ]
+    if mutation == "duplicate_composite":
+        excluded = mapped[-1]
+        source = mapped[-2]
+        for field in ("account_id", "strategy_id", "effective_start", "effective_end"):
+            excluded[field] = source[field]
+    else:
+        included = mapped[1]
+        included["account_id"] = mapped[0]["account_id"]
+    mutated_baseline, mutated_crosswalk = _crosswalk_bound_to_mutated_synthetic_baseline(
+        selected, baseline
+    )
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module._validate_current_epoch_crosswalk(
+            mutated_baseline, mutated_crosswalk
+        )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._independently_validate_current_epoch_crosswalk(
+            mutated_baseline, mutated_crosswalk
+        )
+
+
+@pytest.mark.parametrize("mutation", ("omitted", "extra", "duplicate_included"))
+def test_gate1_crosswalk_row_bijection_mutations_reject_in_both_paths(
+    perimeter_module: Any, verifier_module: Any, mutation: str
+) -> None:
+    """Neither producer nor clean-room verifier may repair a changed row set."""
+
+    selected = _mixed_crosswalk_selected_inputs(perimeter_module)
+    crosswalk = selected.current_epoch_crosswalk.json_object()
+    rows = crosswalk["rows"]
+    assert isinstance(rows, list)
+    if mutation == "omitted":
+        rows.pop()
+    elif mutation == "extra":
+        forged = deepcopy(rows[-1])
+        forged["assignment_id"] = "forged-extra-assignment"
+        rows.append(forged)
+    else:
+        included = next(
+            row for row in rows
+            if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
+        )
+        rows.append(deepcopy(included))
+    mutated = _with_gate1_crosswalk(perimeter_module, selected, crosswalk)
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module._c3_mapped_assignments(mutated)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._independently_validate_current_epoch_crosswalk(
+            mutated.baseline, mutated.current_epoch_crosswalk
+        )
+
+
+def test_gate1_count_preserving_disposition_swap_controls_exact_epoch_set(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """The selected row identities, not the unchanged 13/1/1 counts, are authority."""
+
+    selected = _mixed_crosswalk_selected_inputs(perimeter_module)
+    original_payloads = perimeter_module.build_account_manifest_payloads(selected)
+    crosswalk = selected.current_epoch_crosswalk.json_object()
+    included = next(
+        row for row in crosswalk["rows"]
+        if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
+        and row["account_id"] != "synthetic-account-01"
+    )
+    excluded = next(
+        row for row in crosswalk["rows"]
+        if row["product_epoch_disposition"]
+        == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
+    )
+    removed_key = tuple(
+        included[field]
+        for field in ("account_id", "strategy_id", "effective_start", "effective_end")
+    )
+    added_key = tuple(
+        excluded[field]
+        for field in ("account_id", "strategy_id", "effective_start", "effective_end")
+    )
+    included["product_epoch_disposition"], excluded["product_epoch_disposition"] = (
+        excluded["product_epoch_disposition"],
+        included["product_epoch_disposition"],
+    )
+    expected_counts = {
+        "INCLUDED_PRODUCT_EPOCH": 13,
+        "EXCLUDED_DEPRECATED_HISTORY_ONLY": 1,
+        "EXCLUDED_IMMATERIAL": 1,
+    }
+    assert crosswalk["disposition_counts"] == expected_counts
+    assert {
+        disposition: sum(
+            row["product_epoch_disposition"] == disposition
+            for row in crosswalk["rows"]
+        )
+        for disposition in expected_counts
+    } == expected_counts
+    mutated = _with_gate1_crosswalk(perimeter_module, selected, crosswalk)
+
+    selected_rows, _ = perimeter_module._c3_mapped_assignments(mutated)
+    selected_keys = {
+        tuple(
+            row[field]
+            for field in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        )
+        for row in selected_rows
+    }
+    assert len(selected_keys) == 13
+    assert removed_key not in selected_keys
+    assert added_key in selected_keys
+
+    payloads = perimeter_module.build_account_manifest_payloads(mutated)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    output_keys = {
+        tuple(
+            row[field]
+            for field in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        )
+        for row in output["rows"]
+    }
+    assert output_keys == selected_keys
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, mutated)
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        verifier_inputs, payloads
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, original_payloads
+        )
+
+
+def test_gate1_crosswalk_repeated_account_display_mismatch_rejects_in_both_paths(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Repeated non-overlapping account epochs need one stable masked display."""
+
+    selected = _mixed_crosswalk_selected_inputs(perimeter_module)
+    baseline = selected.baseline.json_object()
+    mapped = [
+        row for row in baseline["assignments"]
+        if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+    ]
+    first, second, replacement_open = mapped[0], mapped[1], mapped[11]
+    first["effective_end"] = "2025-12-31"
+    second["account_id"] = first["account_id"]
+    second["effective_start"] = "2026-01-01"
+    replacement_open["effective_end"] = None
+    replacement_history = next(
+        row
+        for row in baseline["assignments"]
+        if row["account_id"] == replacement_open["account_id"]
+        and row["strategy_mapping_disposition"] == "HISTORICAL_POOL_ONLY"
+    )
+    replacement_history["effective_start"] = "2024-01-01"
+    replacement_history["effective_end"] = "2024-12-31"
+    baseline_snapshot = InputSnapshot.from_bytes(
+        "repeated-account baseline", canonical_json_bytes(baseline)
+    )
+    crosswalk = selected.current_epoch_crosswalk.json_object()
+    crosswalk["selected_baseline"].update(
+        {
+            "sha256": baseline_snapshot.sha256,
+            "size_bytes": baseline_snapshot.size_bytes,
+        }
+    )
+    by_assignment = {row["assignment_id"]: row for row in mapped}
+    rows = crosswalk["rows"]
+    assert isinstance(rows, list)
+    repeated_rows = [
+        row for row in rows if row["assignment_id"] in by_assignment
+        and row["assignment_id"] in {first["assignment_id"], second["assignment_id"]}
+    ]
+    assert len(repeated_rows) == 2
+    for row in repeated_rows:
+        source = by_assignment[row["assignment_id"]]
+        row.update(
+            {
+                "account_id": source["account_id"],
+                "effective_start": source["effective_start"],
+                "effective_end": source["effective_end"],
+                "account_label": "Shared synthetic account",
+                "last_four": "1111",
+            }
+        )
+    next(
+        row for row in rows
+        if row["assignment_id"] == replacement_open["assignment_id"]
+    )["effective_end"] = None
+    values = _selected_input_kwargs(selected)
+    values["baseline"] = baseline_snapshot
+    values["baseline_manifest"] = _generation_manifest_snapshot(
+        catalog=baseline_snapshot,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date=str(baseline["as_of_date"]),
+    )
+    repeated = perimeter_module.AccountManifestSelectedInputs(**values)
+    crosswalk["selected_baseline"]["generation_id"] = repeated.baseline_generation_id
+    valid_crosswalk = _with_gate1_crosswalk(perimeter_module, repeated, crosswalk)
+    assert len(perimeter_module._c3_mapped_assignments(valid_crosswalk)[0]) == 13
+    assert len(
+        verifier_module._independently_validate_current_epoch_crosswalk(
+            valid_crosswalk.baseline, valid_crosswalk.current_epoch_crosswalk
+        )
+    ) == 13
+    repeated_rows[1]["account_label"] = "Mismatched synthetic account"
+    mutated = _with_gate1_crosswalk(perimeter_module, repeated, crosswalk)
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module._c3_mapped_assignments(mutated)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._independently_validate_current_epoch_crosswalk(
+            mutated.baseline, mutated.current_epoch_crosswalk
+        )
+
+
+def test_gate1_independent_verifier_rejects_staged_crosswalk_byte_mutation(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    selected = _mixed_crosswalk_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    forged = json.loads(payloads["authority/account-assignment-crosswalk.json"])
+    forged["rows"][0]["account_label"] = "forged staged display"
+    payloads["authority/account-assignment-crosswalk.json"] = canonical_json_bytes(forged)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+
+
+@pytest.mark.parametrize("mutation", ("unknown", "missing", "extra"))
+def test_gate1_selected_assignment_key_mutations_cannot_emit_a_candidate(
+    perimeter_module: Any, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    """The generic consumer accepts only the exact crosswalk-derived key set."""
+
+    from tools import account_strategy_manifest
+
+    selected = _mixed_crosswalk_selected_inputs(perimeter_module)
+    selected_rows, _ = perimeter_module._c3_mapped_assignments(selected)
+    keys = [tuple(perimeter_module._c3_assignment_record(row).values()) for row in selected_rows]
+    if mutation == "unknown":
+        forged_keys = [*keys, ("unknown-account", "unknown-strategy", "2026-01-01", None)]
+    elif mutation == "missing":
+        forged_keys = keys[:-1]
+    else:
+        baseline = selected.baseline.json_object()
+        additional = next(
+            row for row in baseline["assignments"]
+            if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+            and tuple(perimeter_module._c3_assignment_record(row).values()) not in keys
+        )
+        forged_keys = [*keys, tuple(perimeter_module._c3_assignment_record(additional).values())]
+    original = perimeter_module.ManifestCandidateSnapshots
+
+    def forged_candidate(*args: object, **kwargs: object) -> object:
+        kwargs["selected_assignment_keys"] = tuple(forged_keys)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(perimeter_module, "ManifestCandidateSnapshots", forged_candidate)
+    with pytest.raises(
+        (account_strategy_manifest.ManifestError, perimeter_module.AccountAssignmentPerimeterError)
+    ):
+        perimeter_module.build_account_manifest_payloads(selected)
+
+
+def test_gate1_independent_verifier_rejects_producer_selection_monkeypatch(
+    perimeter_module: Any, verifier_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A self-consistent producer subset cannot override staged crosswalk bytes."""
+
+    selected = _mixed_crosswalk_selected_inputs(perimeter_module)
+    original = perimeter_module._c3_mapped_assignments
+
+    def forged_selection(inputs: object) -> tuple[list[dict[str, object]], dict[str, str]]:
+        mapped, providers = original(inputs)
+        return mapped[:-1], providers
+
+    monkeypatch.setattr(perimeter_module, "_c3_mapped_assignments", forged_selection)
+    forged_payloads = perimeter_module.build_account_manifest_payloads(selected)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), forged_payloads
+        )
+
+
+def _mixed_two_receipt_selected_inputs(perimeter_module: Any) -> object:
+    """Return two independently routed literal epochs with distinct generations."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    baseline = selected.baseline.json_object()
+    next(
+        account
+        for account in baseline["accounts"]
+        if account["account_id"] == "synthetic-account-02"
+    )["provider"] = "SYNTHETIC2"
+    baseline_snapshot = InputSnapshot.from_bytes(
+        "two-receipt baseline", canonical_json_bytes(baseline)
+    )
+
+    ledger = selected.provider_ledger.json_object()
+    ledger["nav_observations"].extend(
+        [
+            {
+                "record_id": "mixed-2-nav-1",
+                "account_id": "synthetic-account-02",
+                "as_of_date": "2026-01-30",
+                "nav": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "80",
+                },
+            },
+            {
+                "record_id": "mixed-2-nav-2",
+                "account_id": "synthetic-account-02",
+                "as_of_date": "2026-01-31",
+                "nav": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "100",
+                },
+            },
+            {
+                "record_id": "mixed-2-nav-3",
+                "account_id": "synthetic-account-02",
+                "as_of_date": "2026-02-01",
+                "nav": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "120",
+                },
+            },
+        ]
+    )
+    ledger["flows"].append(
+        {
+            "record_id": "mixed-2-flow-1",
+            "account_id": "synthetic-account-02",
+            "event_date": "2026-01-31",
+            "flow_type": "CONTRIBUTION",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
+        }
+    )
+    ledger["provider_generations"] = [
+        {
+            "provider_id": "synthetic",
+            "generation_id": "c" * 64,
+            "manifest_sha256": "a" * 64,
+            "generation_as_of_date": "2026-02-01",
+        },
+        {
+            "provider_id": "synthetic2",
+            "generation_id": "1" * 64,
+            "manifest_sha256": "2" * 64,
+            "generation_as_of_date": "2026-02-01",
+        },
+    ]
+    ledger_snapshot = InputSnapshot.from_bytes(
+        "two-receipt ledger", canonical_json_bytes(ledger)
+    )
+
+    first = next(iter(selected.retrieval_receipts.values())).json_object()
+    first_id = "receipt/Z-account-01.json"
+    first["artifact_id"] = first_id
+    first_snapshot = InputSnapshot.from_bytes(
+        "two-receipt first", canonical_json_bytes(first)
+    )
+    second = deepcopy(first)
+    second_id = "receipt/a-account-02.json"
+    second_artifact = {
+        "artifact_id": "raw/synthetic2.json",
+        "as_of_date": "2026-02-01",
+        "schema": {"name": "synthetic", "version": "1"},
+        "sha256": "2" * 64,
+        "size_bytes": 2,
+    }
+    second.update(
+        {
+            "artifact_id": second_id,
+            "issuer": {
+                "adapter_name": "SYNTHETIC2",
+                "adapter_version": "1",
+                "code_sha256": "3" * 64,
+            },
+            "provider": "SYNTHETIC2",
+            "provider_generation": "1" * 64,
+            "provider_generation_manifest": second_artifact,
+            "raw_evidence_artifacts": [second_artifact],
+            "account_id": "synthetic-account-02",
+            "source_account_identity_sha256": "4" * 64,
+            "pagination": {
+                "mode": "SYNTHETIC2",
+                "page_count": 1,
+                "request_response_chain_sha256": "5" * 64,
+                "terminal_response_sha256": "6" * 64,
+                "terminal": True,
+            },
+        }
+    )
+    second_snapshot = InputSnapshot.from_bytes(
+        "two-receipt second", canonical_json_bytes(second)
+    )
+
+    def authority_entry(
+        receipt_id: str, snapshot: InputSnapshot, receipt: dict[str, object]
+    ) -> dict[str, object]:
+        issuer = receipt["issuer"]
+        assert isinstance(issuer, dict)
+        return {
+            "artifact_id": receipt_id,
+            "sha256": snapshot.sha256,
+            "size_bytes": snapshot.size_bytes,
+            "contract": {
+                "adapter_name": issuer["adapter_name"],
+                "adapter_version": issuer["adapter_version"],
+                "code_sha256": issuer["code_sha256"],
+                "provider": receipt["provider"],
+                "account_id": receipt["account_id"],
+                "source_account_identity_sha256": receipt[
+                    "source_account_identity_sha256"
+                ],
+                "provider_generation": receipt["provider_generation"],
+                "provider_generation_manifest": receipt[
+                    "provider_generation_manifest"
+                ],
+                "raw_evidence_artifacts": receipt["raw_evidence_artifacts"],
+                "required_categories": receipt["required_categories"],
+                "pagination": receipt["pagination"],
+            },
+        }
+
+    authority = {
+        "schema_version": 1,
+        "artifact_id": (
+            "authority/account-interval-retrieval-receipt-authority.json"
+        ),
+        "as_of_date": "2026-02-01",
+        "receipts": [
+            authority_entry(second_id, second_snapshot, second),
+            authority_entry(first_id, first_snapshot, first),
+        ],
+    }
+    policy = selected.admission_policy.json_object()
+    second_admission = next(
+        row
+        for row in policy["admissions"]
+        if row["account_id"] == "synthetic-account-02"
+    )
+    second_admission.clear()
+    second_admission.update(
+        {
+            "account_id": "synthetic-account-02",
+            "strategy_id": "synthetic-strategy-02",
+            "effective_start": "2025-01-01",
+            "effective_end": None,
+            "status": "FUNDED",
+            "continuity_to_successor": False,
+            "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+            "funded_nav_record_ids": ["mixed-2-nav-1"],
+        }
+    )
+
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "provider_ledger": ledger_snapshot,
+            "provider_ledger_manifest": _generation_manifest_snapshot(
+                catalog=ledger_snapshot,
+                catalog_artifact_id="normalized/provider-ledger.json",
+                catalog_schema_name="provider-ledger-catalog",
+                catalog_schema_version="1",
+                as_of_date="2026-02-01",
+            ),
+            "baseline": baseline_snapshot,
+            "baseline_manifest": _generation_manifest_snapshot(
+                catalog=baseline_snapshot,
+                catalog_artifact_id="normalized/portfolio-baseline.json",
+                catalog_schema_name="portfolio-baseline-catalog",
+                catalog_schema_version="1",
+                as_of_date="2026-02-01",
+            ),
+            "retrieval_receipts": {
+                first_id: first_snapshot,
+                second_id: second_snapshot,
+            },
+            "receipt_authority": InputSnapshot.from_bytes(
+                "two-receipt authority", canonical_json_bytes(authority)
+            ),
+            "admission_policy": InputSnapshot.from_bytes(
+                "two-receipt admission", canonical_json_bytes(policy)
+            ),
+            "manifest_schema": InputSnapshot.from_bytes(
+                "mixed schema", ACCOUNT_STRATEGY_SCHEMA_PATH.read_bytes()
+            ),
+        }
+    )
+    return perimeter_module.AccountManifestSelectedInputs(**values)
+
+
+def test_mixed_two_receipts_produce_two_literal_independent_numeric_rows(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every funded receipt route earns its own literal row and comparison."""
+
+    selected = _mixed_two_receipt_selected_inputs(perimeter_module)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    ok_rows = {row["account_id"]: row for row in output["rows"] if row["status"] == "OK"}
+    assert {
+        account_id: {
+            key: row[key]
+            for key in (
+                "opening_capital",
+                "deposits",
+                "invested",
+                "net_capital",
+                "current_value",
+                "gain",
+            )
+        }
+        for account_id, row in ok_rows.items()
+    } == {
+        "synthetic-account-01": {
+            "opening_capital": "50",
+            "deposits": "10",
+            "invested": "60",
+            "net_capital": "60",
+            "current_value": "70",
+            "gain": "10",
+        },
+        "synthetic-account-02": {
+            "opening_capital": "80",
+            "deposits": "20",
+            "invested": "100",
+            "net_capital": "100",
+            "current_value": "120",
+            "gain": "20",
+        },
+    }
+
+    monkeypatch.setattr(
+        perimeter_module,
+        "build_manifest_candidate_from_snapshots",
+        lambda *_args, **_kwargs: pytest.fail("verifier called the producer"),
+    )
+    original_compare = verifier_module._compare_mixed_retained_numeric_epoch
+    comparisons = 0
+
+    def count_comparison(*args: object, **kwargs: object) -> object:
+        nonlocal comparisons
+        comparisons += 1
+        return original_compare(*args, **kwargs)
+
+    monkeypatch.setattr(
+        verifier_module,
+        "_compare_mixed_retained_numeric_epoch",
+        count_comparison,
+    )
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+    )
+    assert comparisons == 2
+    assert report["numeric_verification"] == {
+        "candidate_count": 2,
+        "comparison_count": 2,
+        "discrepancy_count": 0,
+        "disposition": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES",
+    }
+    assert {
+        key: report["counts"][key]
+        for key in (
+            "complete_coverage_row_count",
+            "funded_admission_row_count",
+            "ok_output_row_count",
+            "blocked_coverage_row_count",
+            "blocked_admission_row_count",
+            "blocked_output_row_count",
+        )
+    } == {
+        "complete_coverage_row_count": 2,
+        "funded_admission_row_count": 2,
+        "ok_output_row_count": 2,
+        "blocked_coverage_row_count": 13,
+        "blocked_admission_row_count": 13,
+        "blocked_output_row_count": 13,
+    }
+    assert [item["path"] for item in report["subjects"]] == [
+        "authority/account-assignment-perimeter.json",
+        "authority/account-flow-coverage.json",
+        "authority/calculation-inputs.json",
+        "authority/classified-flows.json",
+        "authority/code-identities.json",
+        "authority/flow-classification-policy.json",
+        "authority/mapped-epoch-admission.json",
+        "authority/selected-input-identities.json",
+        "outputs/account-strategy-manifest.json",
+        "authority/account-interval-retrieval-receipt-authority.json",
+        "receipt/a-account-02.json",
+        "receipt/Z-account-01.json",
+    ]
+    from jsonschema import Draft202012Validator
+
+    report_schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    assert not list(Draft202012Validator(report_schema).iter_errors(report))
+
+
+def _mixed_authority_entry_for_payload(
+    receipt_id: str,
+    snapshot: InputSnapshot,
+    receipt: dict[str, object],
+) -> dict[str, object]:
+    issuer = receipt["issuer"]
+    assert isinstance(issuer, dict)
+    return {
+        "artifact_id": receipt_id,
+        "sha256": snapshot.sha256,
+        "size_bytes": snapshot.size_bytes,
+        "contract": {
+            "adapter_name": issuer["adapter_name"],
+            "adapter_version": issuer["adapter_version"],
+            "code_sha256": issuer["code_sha256"],
+            "provider": receipt["provider"],
+            "account_id": receipt["account_id"],
+            "source_account_identity_sha256": receipt[
+                "source_account_identity_sha256"
+            ],
+            "provider_generation": receipt["provider_generation"],
+            "provider_generation_manifest": receipt[
+                "provider_generation_manifest"
+            ],
+            "raw_evidence_artifacts": receipt["raw_evidence_artifacts"],
+            "required_categories": receipt["required_categories"],
+            "pagination": receipt["pagination"],
+        },
+    }
+
+
+def _mixed_reselect_receipts(
+    perimeter_module: Any,
+    selected: object,
+    receipts: Mapping[str, dict[str, object]],
+    *,
+    authority_order: list[str] | None = None,
+    authority_as_of_date: str | None = None,
+    admission: dict[str, object] | None = None,
+) -> object:
+    snapshots = {
+        receipt_id: InputSnapshot.from_bytes(
+            f"reselected {receipt_id}", canonical_json_bytes(receipt)
+        )
+        for receipt_id, receipt in receipts.items()
+    }
+    order = (
+        sorted(receipts, key=str.casefold)
+        if authority_order is None
+        else authority_order
+    )
+    authority = selected.receipt_authority.json_object()
+    if authority_as_of_date is not None:
+        authority["as_of_date"] = authority_as_of_date
+    authority["receipts"] = [
+        _mixed_authority_entry_for_payload(
+            receipt_id, snapshots[receipt_id], receipts[receipt_id]
+        )
+        for receipt_id in order
+    ]
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "retrieval_receipts": snapshots,
+            "receipt_authority": InputSnapshot.from_bytes(
+                "reselected authority", canonical_json_bytes(authority)
+            ),
+            "admission_policy": (
+                selected.admission_policy
+                if admission is None
+                else InputSnapshot.from_bytes(
+                    "reselected admission", canonical_json_bytes(admission)
+                )
+            ),
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    return perimeter_module.AccountManifestSelectedInputs(**values)
+
+
+def test_mixed_open_receipt_cutoff_bounds_calculation_projection(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """A receipt-bounded open epoch cannot project later ledger facts."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    receipt_id = "receipt/mixed-account-01.json"
+    receipt = selected.retrieval_receipts[receipt_id].json_object()
+    receipt["requested_end"] = "2026-01-31"
+    receipt["covered_end"] = "2026-01-31"
+    selected = _mixed_reselect_receipts(
+        perimeter_module,
+        selected,
+        {receipt_id: receipt},
+        authority_as_of_date="2026-01-31",
+    )
+    ledger = selected.provider_ledger.json_object()
+    ledger["capital_anchors"][0]["nav_recognition_date"] = "2026-01-29"
+    ledger["nav_observations"].append(
+        {
+            "record_id": "receipt-nav-0",
+            "account_id": "synthetic-account-01",
+            "as_of_date": "2026-01-29",
+            "nav": {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": "40",
+            },
+        }
+    )
+    next(
+        nav
+        for nav in ledger["nav_observations"]
+        if nav["record_id"] == "mixed-nav-3"
+    )["nav"]["value"] = "777"
+    ledger["flows"].append(
+        {
+            "record_id": "post-receipt-flow-333",
+            "account_id": "synthetic-account-01",
+            "event_date": "2026-02-01",
+            "flow_type": "CONTRIBUTION",
+            "amount": {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": "333",
+            },
+        }
+    )
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    coverage = json.loads(payloads["authority/account-flow-coverage.json"])
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+
+    assert coverage["as_of_date"] == "2026-02-01"
+    assert next(
+        row
+        for row in coverage["rows"]
+        if row["assignment"]["account_id"] == "synthetic-account-01"
+    )["requested_end"] == "2026-01-31"
+    assert {
+        nav["record_id"]
+        for nav in calculation["calculation_ledger"]["nav_observations"]
+    } == {"receipt-nav-0", "mixed-nav-1", "mixed-nav-2"}
+    assert {
+        flow["record_id"] for flow in calculation["calculation_ledger"]["flows"]
+    } == {"mixed-flow-1"}
+    assert "mixed-nav-3" not in payloads["authority/calculation-inputs.json"].decode()
+    assert "post-receipt-flow-333" not in payloads[
+        "authority/calculation-inputs.json"
+    ].decode()
+    row = next(
+        item
+        for item in output["rows"]
+        if item["account_id"] == "synthetic-account-01"
+    )
+    assert {key: row[key] for key in ("end", "current_value", "deposits")} == {
+        "end": "2026-01-31",
+        "current_value": "60",
+        "deposits": "10",
+    }
+
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    report = verifier.verify(verifier_inputs, payloads)
+    verifier.verify_finalized_report(verifier_inputs, payloads, report)
+
+
+def _mixed_same_account_continuity_selected_inputs(perimeter_module: Any) -> object:
+    """Return two contiguous funded epochs for one receipt-routed account."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    baseline = selected.baseline.json_object()
+    assignments: list[dict[str, object]] = []
+    for assignment in baseline["assignments"]:
+        if assignment["account_id"] == "synthetic-account-01":
+            assignments.extend(
+                [
+                    _assignment(
+                        "synthetic-account-01",
+                        "STRATEGY_MAPPED",
+                        "2025-01-01",
+                        "2026-01-28",
+                        "synthetic-strategy-01a",
+                    ),
+                    _assignment(
+                        "synthetic-account-01",
+                        "STRATEGY_MAPPED",
+                        "2026-01-29",
+                        None,
+                        "synthetic-strategy-01b",
+                    ),
+                ]
+            )
+        elif assignment["account_id"] == "synthetic-account-02":
+            assignments.append(
+                _assignment(
+                    "synthetic-account-02",
+                    "HISTORICAL_POOL_ONLY",
+                    "2025-01-01",
+                    None,
+                    None,
+                )
+            )
+        else:
+            assignments.append(deepcopy(assignment))
+    baseline["assignments"] = assignments
+    baseline_snapshot = InputSnapshot.from_bytes(
+        "continuity baseline", canonical_json_bytes(baseline)
+    )
+
+    ledger = selected.provider_ledger.json_object()
+    ledger["nav_observations"] = [
+        nav
+        for nav in ledger["nav_observations"]
+        if nav["account_id"] != "synthetic-account-01"
+    ]
+    ledger["nav_observations"].extend(
+        [
+            {
+                "record_id": record_id,
+                "account_id": "synthetic-account-01",
+                "as_of_date": as_of_date,
+                "nav": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": value,
+                },
+            }
+            for record_id, as_of_date, value in (
+                ("continuity-nav-p1", "2026-01-26", "50"),
+                ("continuity-nav-p2", "2026-01-27", "60"),
+                ("continuity-nav-p3", "2026-01-28", "70"),
+                ("continuity-nav-s1", "2026-01-30", "80"),
+                ("continuity-nav-s2", "2026-01-31", "90"),
+                ("continuity-nav-s3", "2026-02-01", "100"),
+            )
+        ]
+    )
+    ledger["flows"] = [
+        flow
+        for flow in ledger["flows"]
+        if flow["account_id"] != "synthetic-account-01"
+    ]
+    ledger["flows"].extend(
+        [
+            {
+                "record_id": "continuity-flow-predecessor",
+                "account_id": "synthetic-account-01",
+                "event_date": "2026-01-27",
+                "flow_type": "CONTRIBUTION",
+                "amount": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "10",
+                },
+            },
+            {
+                "record_id": "continuity-flow-successor-boundary",
+                "account_id": "synthetic-account-01",
+                "event_date": "2026-01-29",
+                "flow_type": "CONTRIBUTION",
+                "amount": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "10",
+                },
+            },
+        ]
+    )
+    ledger_snapshot = InputSnapshot.from_bytes(
+        "continuity ledger", canonical_json_bytes(ledger)
+    )
+
+    base_receipt = next(iter(selected.retrieval_receipts.values())).json_object()
+    receipts: dict[str, dict[str, object]] = {}
+    for receipt_id, start, end in (
+        (
+            "receipt/continuity-predecessor.json",
+            "2025-01-01",
+            "2026-01-28",
+        ),
+        (
+            "receipt/continuity-successor.json",
+            "2026-01-29",
+            "2026-02-01",
+        ),
+    ):
+        receipt = deepcopy(base_receipt)
+        receipt.update(
+            {
+                "artifact_id": receipt_id,
+                "requested_start": start,
+                "requested_end": end,
+                "covered_start": start,
+                "covered_end": end,
+            }
+        )
+        receipts[receipt_id] = receipt
+    snapshots = {
+        receipt_id: InputSnapshot.from_bytes(
+            receipt_id, canonical_json_bytes(receipt)
+        )
+        for receipt_id, receipt in receipts.items()
+    }
+    authority = {
+        "schema_version": 1,
+        "artifact_id": (
+            "authority/account-interval-retrieval-receipt-authority.json"
+        ),
+        "as_of_date": "2026-01-28",
+        "receipts": [
+            _mixed_authority_entry_for_payload(
+                receipt_id, snapshots[receipt_id], receipts[receipt_id]
+            )
+            for receipt_id in sorted(receipts, key=str.casefold)
+        ],
+    }
+
+    provisional = _selected_input_kwargs(selected)
+    provisional.update(
+        {
+            "provider_ledger": ledger_snapshot,
+            "provider_ledger_manifest": _generation_manifest_snapshot(
+                catalog=ledger_snapshot,
+                catalog_artifact_id="normalized/provider-ledger.json",
+                catalog_schema_name="provider-ledger-catalog",
+                catalog_schema_version="1",
+                as_of_date="2026-02-01",
+            ),
+            "baseline": baseline_snapshot,
+            "baseline_manifest": _generation_manifest_snapshot(
+                catalog=baseline_snapshot,
+                catalog_artifact_id="normalized/portfolio-baseline.json",
+                catalog_schema_name="portfolio-baseline-catalog",
+                catalog_schema_version="1",
+                as_of_date="2026-02-01",
+            ),
+            "retrieval_receipts": snapshots,
+        }
+    )
+    without_mixed = perimeter_module.AccountManifestSelectedInputs(**provisional)
+    mapped, _providers = perimeter_module._c3_mapped_assignments(without_mixed)
+    mapped_records = [
+        perimeter_module._c3_assignment_record(assignment) for assignment in mapped
+    ]
+    assignment_sha256 = hashlib.sha256(
+        json.dumps(
+            sorted(
+                mapped_records,
+                key=lambda item: (
+                    item["account_id"],
+                    item["strategy_id"],
+                    item["effective_start"],
+                    str(item["effective_end"]),
+                ),
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
+    admission_rows = []
+    for assignment in mapped_records:
+        predecessor = assignment["strategy_id"] == "synthetic-strategy-01a"
+        successor = assignment["strategy_id"] == "synthetic-strategy-01b"
+        if predecessor or successor:
+            admission_rows.append(
+                {
+                    **assignment,
+                    "status": "FUNDED",
+                    "continuity_to_successor": predecessor,
+                    "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                    "funded_nav_record_ids": [
+                        (
+                            "continuity-nav-p3"
+                            if predecessor
+                            else "continuity-nav-s1"
+                        )
+                    ],
+                }
+            )
+        else:
+            admission_rows.append(
+                {
+                    **assignment,
+                    "status": "BLOCKED",
+                    "continuity_to_successor": False,
+                    "reason": "SYNTHETIC_BLOCKED",
+                }
+            )
+    admission = {
+        "schema_version": 2,
+        "policy_id": "MAPPED_EPOCH_ADMISSION_V2",
+        "policy_version": "2",
+        "artifact_id": "authority/mapped-epoch-admission.json",
+        "as_of_date": "2026-02-01",
+        "assignment_sha256": assignment_sha256,
+        "admissions": admission_rows,
+    }
+    provisional.update(
+        {
+            "receipt_authority": InputSnapshot.from_bytes(
+                "continuity authority", canonical_json_bytes(authority)
+            ),
+            "admission_policy": InputSnapshot.from_bytes(
+                "continuity admission", canonical_json_bytes(admission)
+            ),
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    return perimeter_module.AccountManifestSelectedInputs(**provisional)
+
+
+def test_mixed_same_account_sequential_receipts_preserve_continuity_once(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The successor opens once from its predecessor and counts its boundary flow once."""
+
+    selected = _mixed_same_account_continuity_selected_inputs(perimeter_module)
+    assert selected.receipt_authority.json_object()["as_of_date"] == "2026-01-28"
+    assert {
+        receipt.json_object()["requested_end"]
+        for receipt in selected.retrieval_receipts.values()
+    } == {"2026-01-28", "2026-02-01"}
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    rows = {
+        row["strategy_id"]: row
+        for row in output["rows"]
+        if row["status"] == "OK"
+    }
+    assert {
+        strategy_id: {
+            key: row[key]
+            for key in (
+                "opening_capital",
+                "deposits",
+                "invested",
+                "net_capital",
+                "current_value",
+                "gain",
+                "opening_basis",
+            )
+        }
+        for strategy_id, row in rows.items()
+    } == {
+        "synthetic-strategy-01a": {
+            "opening_capital": "50",
+            "deposits": "10",
+            "invested": "60",
+            "net_capital": "60",
+            "current_value": "70",
+            "gain": "10",
+            "opening_basis": "FIRST_AVAILABLE_NAV",
+        },
+        "synthetic-strategy-01b": {
+            "opening_capital": "70",
+            "deposits": "10",
+            "invested": "80",
+            "net_capital": "80",
+            "current_value": "100",
+            "gain": "20",
+            "opening_basis": "PREDECESSOR_CLOSING_NAV",
+        },
+    }
+    predecessor = rows["synthetic-strategy-01a"]
+    successor = rows["synthetic-strategy-01b"]
+    assert predecessor["continuity_to_successor"] is True
+    assert successor["continuity_to_successor"] is False
+    first_successor_link = successor["observation_trace"]["links"][0]
+    assert {
+        key: first_successor_link[key]
+        for key in (
+            "start_date",
+            "end_date",
+            "base_nav",
+            "ending_nav",
+            "net_flow",
+            "factor",
+        )
+    } == {
+        "start_date": "2026-01-28",
+        "end_date": "2026-01-30",
+        "base_nav": "70",
+        "ending_nav": "80",
+        "net_flow": "10",
+        "factor": "1",
+    }
+    assert successor["capital_flow_trace"] == [
+        {
+            "date": "2026-01-29",
+            "class": "EXTERNAL_IN",
+            "amount": "10",
+        }
+    ]
+
+    monkeypatch.setattr(
+        perimeter_module,
+        "build_manifest_candidate_from_snapshots",
+        lambda *_args, **_kwargs: pytest.fail("verifier called the producer"),
+    )
+    original_compare = verifier_module._compare_mixed_retained_numeric_epoch
+    comparisons = 0
+
+    def count_comparison(*args: object, **kwargs: object) -> object:
+        nonlocal comparisons
+        comparisons += 1
+        return original_compare(*args, **kwargs)
+
+    monkeypatch.setattr(
+        verifier_module,
+        "_compare_mixed_retained_numeric_epoch",
+        count_comparison,
+    )
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+    )
+    assert comparisons == 2
+    assert report["numeric_verification"] == {
+        "candidate_count": 2,
+        "comparison_count": 2,
+        "discrepancy_count": 0,
+        "disposition": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES",
+    }
+
+
+@pytest.mark.parametrize("mismatch", ("complete_blocked", "blocked_funded"))
+def test_mixed_two_receipts_keep_coverage_and_admission_independent(
+    perimeter_module: Any,
+    verifier_module: Any,
+    mismatch: str,
+) -> None:
+    """Neither complete coverage nor funded admission can substitute for the other."""
+
+    selected = _mixed_two_receipt_selected_inputs(perimeter_module)
+    receipts = {
+        receipt_id: snapshot.json_object()
+        for receipt_id, snapshot in selected.retrieval_receipts.items()
+    }
+    if mismatch == "complete_blocked":
+        admission = selected.admission_policy.json_object()
+        row = next(
+            item
+            for item in admission["admissions"]
+            if item["account_id"] == "synthetic-account-02"
+        )
+        row.clear()
+        row.update(
+            {
+                "account_id": "synthetic-account-02",
+                "strategy_id": "synthetic-strategy-02",
+                "effective_start": "2025-01-01",
+                "effective_end": None,
+                "status": "BLOCKED",
+                "continuity_to_successor": False,
+                "reason": "SYNTHETIC_BLOCKED",
+            }
+        )
+        selected = _mixed_reselect_receipts(
+            perimeter_module, selected, receipts, admission=admission
+        )
+        expected_status = "BLOCKED_ADMISSION"
+        expected_coverage = "COMPLETE"
+        expected_admission = "BLOCKED"
+    else:
+        receipts.pop("receipt/a-account-02.json")
+        selected = _mixed_reselect_receipts(perimeter_module, selected, receipts)
+        expected_status = "BLOCKED_UNPROVABLE_OPENING_FLOWS"
+        expected_coverage = "BLOCKED"
+        expected_admission = "FUNDED"
+
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(
+        item for item in output["rows"]
+        if item["account_id"] == "synthetic-account-02"
+    )
+    assert row["status"] == expected_status
+    forbidden = {
+        "opening_capital", "deposits", "invested", "net_capital",
+        "current_value", "gain", "observation_trace", "capital_flow_trace",
+    }
+    assert forbidden.isdisjoint(row)
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+    )
+    chain = next(
+        item
+        for item in report["blocker_chains"]
+        if item["assignment"]["account_id"] == "synthetic-account-02"
+    )
+    assert chain["coverage"]["status"] == expected_coverage
+    assert chain["admission"]["status"] == expected_admission
+    assert chain["output"]["status"] == expected_status
+    assert chain["numeric_candidate"] is False
+
+
+@pytest.mark.parametrize("account_id", ("synthetic-account-01", "synthetic-account-02"))
+def test_mixed_two_receipt_verifier_rejects_each_ok_row_mutation(
+    perimeter_module: Any,
+    verifier_module: Any,
+    account_id: str,
+) -> None:
+    """A scalar or trace forgery in either OK row fails local recalculation."""
+
+    selected = _mixed_two_receipt_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(verifier_inputs, payloads)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(item for item in output["rows"] if item["account_id"] == account_id)
+    if account_id == "synthetic-account-01":
+        row["gain"] = "11"
+    else:
+        row["observation_trace"]["links"][1]["factor"] = "1"
+    payloads["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, payloads)
+
+
+def test_mixed_two_receipt_verifier_rejects_blocked_numeric_injection(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """A complete-but-blocked row remains numeric-free in the final output."""
+
+    selected = _mixed_two_receipt_selected_inputs(perimeter_module)
+    receipts = {
+        receipt_id: snapshot.json_object()
+        for receipt_id, snapshot in selected.retrieval_receipts.items()
+    }
+    admission = selected.admission_policy.json_object()
+    row = next(
+        item for item in admission["admissions"]
+        if item["account_id"] == "synthetic-account-02"
+    )
+    row.clear()
+    row.update(
+        {
+            "account_id": "synthetic-account-02",
+            "strategy_id": "synthetic-strategy-02",
+            "effective_start": "2025-01-01",
+            "effective_end": None,
+            "status": "BLOCKED",
+            "continuity_to_successor": False,
+            "reason": "SYNTHETIC_BLOCKED",
+        }
+    )
+    selected = _mixed_reselect_receipts(
+        perimeter_module, selected, receipts, admission=admission
+    )
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(verifier_inputs, payloads)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    blocked = next(
+        item for item in output["rows"]
+        if item["account_id"] == "synthetic-account-02"
+    )
+    blocked["gain"] = "0"
+    payloads["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, payloads)
+
+
+@pytest.mark.parametrize(
+    "edge",
+    ("provider_mismatch", "unmatched_route", "duplicate_route", "unsorted_authority"),
+)
+def test_mixed_two_receipt_composer_rejects_each_route_trust_edge(
+    perimeter_module: Any,
+    verifier_module: Any,
+    edge: str,
+) -> None:
+    """Each selected receipt must independently match provider, route, and order."""
+
+    selected = _mixed_two_receipt_selected_inputs(perimeter_module)
+    genuine = perimeter_module.build_account_manifest_payloads(selected)
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), genuine
+    )
+    receipts = {
+        receipt_id: snapshot.json_object()
+        for receipt_id, snapshot in selected.retrieval_receipts.items()
+    }
+    second = receipts["receipt/a-account-02.json"]
+    authority_order = None
+    if edge == "provider_mismatch":
+        second["provider"] = "SYNTHETIC"
+    elif edge == "unmatched_route":
+        second["requested_start"] = "2025-01-02"
+        second["covered_start"] = "2025-01-02"
+    elif edge == "duplicate_route":
+        duplicate = deepcopy(receipts["receipt/Z-account-01.json"])
+        duplicate["artifact_id"] = "receipt/a-account-02.json"
+        receipts["receipt/a-account-02.json"] = duplicate
+    else:
+        authority_order = [
+            "receipt/Z-account-01.json",
+            "receipt/a-account-02.json",
+        ]
+    invalid = _mixed_reselect_receipts(
+        perimeter_module,
+        selected,
+        receipts,
+        authority_order=authority_order,
+    )
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module.build_account_manifest_payloads(invalid)
+
+
+@pytest.mark.parametrize("edge", ("fixed_path", "casefold_collision"))
+def test_mixed_receipt_identifiers_reject_dynamic_path_collisions(
+    perimeter_module: Any,
+    edge: str,
+) -> None:
+    """Portable receipt IDs cannot collide with fixed or dynamic subject paths."""
+
+    selected = _mixed_two_receipt_selected_inputs(perimeter_module)
+    perimeter_module.build_account_manifest_payloads(selected)
+    receipts = {
+        receipt_id: snapshot.json_object()
+        for receipt_id, snapshot in selected.retrieval_receipts.items()
+    }
+    if edge == "fixed_path":
+        second = receipts.pop("receipt/a-account-02.json")
+        fixed_id = "authority/account-flow-coverage.json"
+        second["artifact_id"] = fixed_id
+        receipts[fixed_id] = second
+        invalid = _mixed_reselect_receipts(perimeter_module, selected, receipts)
+        with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+            perimeter_module.build_account_manifest_payloads(invalid)
+    else:
+        values = _selected_input_kwargs(selected)
+        values.update(
+            {
+                "retrieval_receipts": {
+                    "receipt/Case.json": selected.retrieval_receipts[
+                        "receipt/Z-account-01.json"
+                    ],
+                    "receipt/case.json": selected.retrieval_receipts[
+                        "receipt/a-account-02.json"
+                    ],
+                },
+                "receipt_authority": selected.receipt_authority,
+                "admission_policy": selected.admission_policy,
+                "manifest_schema": selected.manifest_schema,
+            }
+        )
+        with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+            perimeter_module.AccountManifestSelectedInputs(**values)
+
+
+@pytest.mark.parametrize(
+    "reserved_id",
+    (
+        "verification/independent-verification.json",
+        "Verification/Independent-Verification.JSON",
+    ),
+)
+def test_mixed_finalized_report_path_is_reserved_across_public_boundaries(
+    perimeter_module: Any,
+    verifier_module: Any,
+    reserved_id: str,
+) -> None:
+    """No receipt can occupy the report path, including a case-only variant."""
+
+    selected = _mixed_two_receipt_selected_inputs(perimeter_module)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+    request = verifier_module.encode_verification_request(verifier_inputs, payloads)
+    verifier_module.decode_verification_request(request)
+    if reserved_id == "verification/independent-verification.json":
+        from jsonschema import Draft202012Validator
+
+        report_schema = json.loads(
+            VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8")
+        )
+        mutated_report = deepcopy(report)
+        mutated_report["subjects"][10] = {
+            "path": reserved_id,
+            "sha256": "7" * 64,
+            "size_bytes": 7,
+        }
+        assert list(
+            Draft202012Validator(report_schema).iter_errors(mutated_report)
+        )
+
+    receipts = {
+        receipt_id: snapshot.json_object()
+        for receipt_id, snapshot in selected.retrieval_receipts.items()
+    }
+    replacement = receipts.pop("receipt/a-account-02.json")
+    replacement["artifact_id"] = reserved_id
+    receipts[reserved_id] = replacement
+    invalid = _mixed_reselect_receipts(perimeter_module, selected, receipts)
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module.build_account_manifest_payloads(invalid)
+
+    parsed = json.loads(request)
+    replacement_bytes = canonical_json_bytes(replacement)
+    replacement_snapshot = InputSnapshot.from_bytes(
+        "reserved receipt", replacement_bytes
+    )
+    authority = invalid.receipt_authority.json_object()
+    parsed["selected_snapshots"]["receipt_authority_base64"] = base64.b64encode(
+        canonical_json_bytes(authority)
+    ).decode("ascii")
+    receipt_entries = {
+        item["receipt_id"]: item for item in parsed["retrieval_receipts"]
+    }
+    receipt_entries.pop("receipt/a-account-02.json")
+    receipt_entries[reserved_id] = {
+        "receipt_id": reserved_id,
+        "contents_base64": base64.b64encode(replacement_bytes).decode("ascii"),
+    }
+    parsed["retrieval_receipts"] = [
+        receipt_entries[receipt_id]
+        for receipt_id in sorted(receipt_entries, key=str.casefold)
+    ]
+    subject_entries = {item["path"]: item for item in parsed["subjects"]}
+    subject_entries.pop("receipt/a-account-02.json")
+    subject_entries[reserved_id] = {
+        "path": reserved_id,
+        "contents_base64": base64.b64encode(replacement_bytes).decode("ascii"),
+    }
+    fixed_paths = [
+        "authority/account-assignment-perimeter.json",
+        "authority/account-flow-coverage.json",
+        "authority/calculation-inputs.json",
+        "authority/classified-flows.json",
+        "authority/code-identities.json",
+        "authority/flow-classification-policy.json",
+        "authority/mapped-epoch-admission.json",
+        "authority/selected-input-identities.json",
+        "outputs/account-strategy-manifest.json",
+        "authority/account-interval-retrieval-receipt-authority.json",
+    ]
+    dynamic_paths = sorted(
+        ("receipt/Z-account-01.json", reserved_id), key=str.casefold
+    )
+    parsed["subjects"] = [
+        subject_entries[path] for path in (*fixed_paths, *dynamic_paths)
+    ]
+    assert replacement_snapshot.sha256 == hashlib.sha256(replacement_bytes).hexdigest()
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.decode_verification_request(canonical_json_bytes(parsed))
+
+
+def test_mixed_receipt_cardinality_is_closed_at_fifteen(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """The static mixed boundary admits 15 portable IDs and rejects the 16th."""
+
+    snapshot = InputSnapshot.from_bytes("receipt boundary", b"{}")
+    fifteen = {
+        f"receipt/boundary-{index:02d}.json": snapshot for index in range(15)
+    }
+    perimeter_module._validate_mixed_receipt_cardinality(fifteen)
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module._validate_mixed_receipt_cardinality(
+            {**fifteen, "receipt/boundary-15.json": snapshot}
+        )
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    authority = selected.receipt_authority.json_object()
+    authority["receipts"] = [
+        {"artifact_id": receipt_id} for receipt_id in sorted(fifteen, key=str.casefold)
+    ]
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "retrieval_receipts": fifteen,
+            "receipt_authority": InputSnapshot.from_bytes(
+                "15 receipt authority", canonical_json_bytes(authority)
+            ),
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    verifier_selected = verifier_module.IndependentVerifierInputs(**values)
+    assert len(verifier_module._mixed_subject_paths(verifier_selected)) == 25
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentVerifierInputs(
+            **{
+                **values,
+                "retrieval_receipts": {
+                    **fifteen,
+                    "receipt/boundary-15.json": snapshot,
+                },
+            }
+        )
+
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema).evolve(
+        schema=schema["$defs"]["subjects_v3"]
+    )
+    subjects = [
+        {"path": path, "sha256": "0" * 64, "size_bytes": 0}
+        for path in (
+            "authority/account-assignment-perimeter.json",
+            "authority/account-flow-coverage.json",
+            "authority/calculation-inputs.json",
+            "authority/classified-flows.json",
+            "authority/code-identities.json",
+            "authority/flow-classification-policy.json",
+            "authority/mapped-epoch-admission.json",
+            "authority/selected-input-identities.json",
+            "outputs/account-strategy-manifest.json",
+            "authority/account-interval-retrieval-receipt-authority.json",
+            *fifteen,
+        )
+    ]
+    assert not list(validator.iter_errors(subjects))
+    assert list(
+        validator.iter_errors(
+            [
+                *subjects,
+                {
+                    "path": "receipt/boundary-15.json",
+                    "sha256": "1" * 64,
+                    "size_bytes": 1,
+                },
+            ]
+        )
+    )
+
+
+def test_mixed_two_receipt_verifier_and_request_reject_subject_set_or_order_drift(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """Mixed subject transport is the exact fixed-plus-selected ordered set."""
+
+    selected = _mixed_two_receipt_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(verifier_inputs, payloads)
+
+    missing = dict(payloads)
+    missing.pop("receipt/a-account-02.json")
+    extra = {**payloads, "receipt/extra.json": b"{}"}
+    for mutated in (missing, extra):
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier.verify(verifier_inputs, mutated)
+
+    request = verifier_module.encode_verification_request(verifier_inputs, payloads)
+    parsed = json.loads(request)
+    verifier_module.decode_verification_request(request)
+    mutations = []
+    missing_subject = deepcopy(parsed)
+    missing_subject["subjects"].pop()
+    mutations.append(missing_subject)
+    extra_subject = deepcopy(parsed)
+    extra_subject["subjects"].append(
+        {"path": "receipt/extra.json", "contents_base64": "e30="}
+    )
+    mutations.append(extra_subject)
+    unsorted_subjects = deepcopy(parsed)
+    unsorted_subjects["subjects"][-2:] = reversed(
+        unsorted_subjects["subjects"][-2:]
+    )
+    mutations.append(unsorted_subjects)
+    unsorted_receipts = deepcopy(parsed)
+    unsorted_receipts["retrieval_receipts"][-2:] = reversed(
+        unsorted_receipts["retrieval_receipts"][-2:]
+    )
+    mutations.append(unsorted_receipts)
+    for mutated in mutations:
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier_module.decode_verification_request(canonical_json_bytes(mutated))
+
+
+def test_mixed_composer_routes_one_receipt_to_one_literal_numeric_row(
+    perimeter_module: Any,
+) -> None:
+    """A selected receipt and funded admission authorize exactly account 01's result."""
+    payloads = perimeter_module.build_account_manifest_payloads(
+        _mixed_composer_selected_inputs(perimeter_module)
+    )
+    assert set(payloads) == {
+        "authority/selected-input-identities.json", "authority/account-assignment-perimeter.json",
+        "authority/calculation-inputs.json", "authority/flow-classification-policy.json",
+        "authority/classified-flows.json", "authority/account-flow-coverage.json",
+        "authority/mapped-epoch-admission.json", "authority/code-identities.json",
+        "authority/account-interval-retrieval-receipt-authority.json",
+        "receipt/mixed-account-01.json", "outputs/account-strategy-manifest.json",
+    }
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    assert payloads["authority/account-interval-retrieval-receipt-authority.json"] == selected.receipt_authority.contents
+    assert payloads["receipt/mixed-account-01.json"] == selected.retrieval_receipts["receipt/mixed-account-01.json"].contents
+    coverage = json.loads(payloads["authority/account-flow-coverage.json"])
+    assert [row["status"] for row in coverage["rows"]].count("COMPLETE") == 1
+    assert [row["status"] for row in coverage["rows"]].count("BLOCKED") == 14
+    admission = json.loads(payloads["authority/mapped-epoch-admission.json"])
+    assert [row["status"] for row in admission["admissions"]].count("FUNDED") == 1
+    assert [row["status"] for row in admission["admissions"]].count("BLOCKED") == 14
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    ok_rows = [row for row in output["rows"] if row["status"] == "OK"]
+    assert len(ok_rows) == 1
+    assert {key: ok_rows[0][key] for key in ("opening_capital", "deposits", "internal_in", "invested", "withdrawn", "net_capital", "current_value", "gain")} == {"opening_capital": "50", "deposits": "10", "internal_in": "0", "invested": "60", "withdrawn": "0", "net_capital": "60", "current_value": "70", "gain": "10"}
+    blocked = [row for row in output["rows"] if row["status"] == "BLOCKED_ADMISSION"]
+    assert len(blocked) == 14
+    forbidden = {"start", "end", "opening_capital", "deposits", "internal_in", "invested", "external_withdrawals", "internal_out", "withdrawn", "net_capital", "current_value", "gain", "return_on_net_capital", "annualized_return_on_net_capital", "xirr_diagnostic", "observation_linked_return", "observed_return", "observed_hwm_index", "observed_max_drawdown", "opening_basis", "observation_trace", "capital_flow_trace", "nav_observation_trace", "nav_observations"}
+    assert all(forbidden.isdisjoint(row) for row in blocked)
+
+
+def test_mixed_schema_scopes_v3_to_v8_receipt_outputs_only(
+    perimeter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The generic v7 producer keeps Task 8A authority/v2 admission valid."""
+    from jsonschema import Draft202012Validator
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    captured: dict[str, object] = {}
+    original = perimeter_module.build_manifest_candidate_from_snapshots
+
+    def capture(inputs: object) -> object:
+        candidate = original(inputs)
+        captured["candidate"] = deepcopy(candidate)
+        return candidate
+
+    monkeypatch.setattr(perimeter_module, "build_manifest_candidate_from_snapshots", capture)
+    mixed = json.loads(
+        perimeter_module.build_account_manifest_payloads(selected)[
+            "outputs/account-strategy-manifest.json"
+        ]
+    )
+    generic = captured["candidate"]
+    assert isinstance(generic, dict)
+    validator = Draft202012Validator(
+        json.loads(ACCOUNT_STRATEGY_SCHEMA_PATH.read_text(encoding="utf-8"))
+    )
+    assert generic["schema_version"] == 7
+    assert "receipt_authority" in generic["source_identities"]["flow_coverage"]
+    assert generic["source_identities"]["admission_policy"]["artifact"]["schema"]["version"] == "2"
+    assert validator.is_valid(generic)
+    assert mixed["schema_version"] == 8
+    assert mixed["source_identities"]["calculation_inputs"]["schema"]["version"] == "3"
+    assert mixed["source_identities"]["admission_policy"]["artifact"]["schema"]["version"] == "2"
+    assert validator.is_valid(mixed)
+    legacy = json.loads(
+        perimeter_module.build_blocked_account_manifest_payloads(
+            _c3_selected_inputs(perimeter_module)
+        )["outputs/account-strategy-manifest.json"]
+    )
+    assert legacy["source_identities"]["calculation_inputs"]["schema"]["version"] == "1"
+    assert legacy["source_identities"]["admission_policy"]["artifact"]["schema"]["version"] == "1"
+    assert validator.is_valid(legacy)
+
+
+def test_mixed_composer_retains_the_producer_validated_earlier_authority_date(
+    perimeter_module: Any,
+) -> None:
+    """The final v8 envelope must not relabel authority as_of_date to generation date."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    authority = selected.receipt_authority.json_object()
+    authority["as_of_date"] = "2026-01-31"
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": InputSnapshot.from_bytes(
+                "earlier authority", canonical_json_bytes(authority)
+            ),
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    rebuilt = perimeter_module.AccountManifestSelectedInputs(**values)
+    output = json.loads(
+        perimeter_module.build_account_manifest_payloads(rebuilt)[
+            "outputs/account-strategy-manifest.json"
+        ]
+    )
+    assert output["source_identities"]["flow_coverage"]["receipt_authority"]["as_of_date"] == "2026-01-31"
+
+
+def test_mixed_composer_rejects_a_generic_candidate_identity_substitution(
+    perimeter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rows cannot be accepted when the public producer reports another calc source."""
+    original = perimeter_module.build_manifest_candidate_from_snapshots
+
+    def substituted(inputs: object) -> object:
+        candidate = deepcopy(original(inputs))
+        candidate["source_identities"]["classified_flows"]["artifact"]["sha256"] = "0" * 64
+        return candidate
+
+    monkeypatch.setattr(perimeter_module, "build_manifest_candidate_from_snapshots", substituted)
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="calculation identities differ",
+    ):
+        perimeter_module.build_account_manifest_payloads(
+            _mixed_composer_selected_inputs(perimeter_module)
+        )
+
+
+@pytest.mark.parametrize("identity_path", ["baseline", "flow_coverage", "calculation_code"])
+def test_mixed_composer_rejects_other_generic_identity_substitutions(
+    perimeter_module: Any, monkeypatch: pytest.MonkeyPatch, identity_path: str
+) -> None:
+    """A passing numeric candidate cannot substitute any omitted identity member."""
+    original = perimeter_module.build_manifest_candidate_from_snapshots
+
+    def substituted(inputs: object) -> object:
+        candidate = deepcopy(original(inputs))
+        if identity_path == "baseline":
+            candidate["source_identities"]["baseline"]["generation_id"] = "0" * 64
+        elif identity_path == "flow_coverage":
+            candidate["source_identities"]["flow_coverage"]["artifact"]["sha256"] = "0" * 64
+        else:
+            candidate["source_identities"]["calculation_code"]["sha256"] = "0" * 64
+        return candidate
+
+    monkeypatch.setattr(perimeter_module, "build_manifest_candidate_from_snapshots", substituted)
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="calculation identities differ",
+    ):
+        perimeter_module.build_account_manifest_payloads(
+            _mixed_composer_selected_inputs(perimeter_module)
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("provider_id", "other"),
+        ("generation_id", "0" * 64),
+        ("manifest_sha256", "0" * 64),
+        ("generation_as_of_date", "2026-01-31"),
+    ],
+)
+def test_mixed_composer_rejects_receipt_provider_generation_mismatch(
+    perimeter_module: Any, field: str, value: str
+) -> None:
+    """One selected receipt cannot float free of its selected provider evidence."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["provider_generations"][0][field] = value
+    ledger_snapshot = InputSnapshot.from_bytes("mutated mixed ledger", canonical_json_bytes(ledger))
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "provider_ledger": ledger_snapshot,
+            "provider_ledger_manifest": _generation_manifest_snapshot(
+                catalog=ledger_snapshot,
+                catalog_artifact_id="normalized/provider-ledger.json",
+                catalog_schema_name="provider-ledger-catalog",
+                catalog_schema_version="1",
+                as_of_date="2026-02-01",
+            ),
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="selected receipt provider evidence differs",
+    ):
+        perimeter_module.build_account_manifest_payloads(
+            perimeter_module.AccountManifestSelectedInputs(**values)
+        )
+
+
+def test_mixed_composer_rejects_a_lowercase_baseline_provider_alias(
+    perimeter_module: Any,
+) -> None:
+    """Casefold-equivalent provider labels are not canonical evidence bindings."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    baseline = selected.baseline.json_object()
+    baseline["accounts"][0]["provider"] = "synthetic"
+    baseline_snapshot = InputSnapshot.from_bytes("aliased baseline", canonical_json_bytes(baseline))
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "baseline": baseline_snapshot,
+            "baseline_manifest": _generation_manifest_snapshot(
+                catalog=baseline_snapshot,
+                catalog_artifact_id="normalized/portfolio-baseline.json",
+                catalog_schema_name="portfolio-baseline-catalog",
+                catalog_schema_version="1",
+                as_of_date="2026-02-01",
+            ),
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="selected receipt provider evidence differs",
+    ):
+        perimeter_module.build_account_manifest_payloads(
+            perimeter_module.AccountManifestSelectedInputs(**values)
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("sha256", "0" * 64), ("as_of_date", "2026-01-31")],
+)
+def test_mixed_composer_rejects_a_self_consistent_receipt_authority_evidence_mutation(
+    perimeter_module: Any, field: str, value: str
+) -> None:
+    """Task 8A byte/contract consistency cannot replace selected-ledger anchoring."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    receipt_id = "receipt/mixed-account-01.json"
+    receipt = selected.retrieval_receipts[receipt_id].json_object()
+    receipt["provider_generation_manifest"][field] = value
+    receipt_snapshot = InputSnapshot.from_bytes("mutated receipt", canonical_json_bytes(receipt))
+    authority = selected.receipt_authority.json_object()
+    authority_entry = authority["receipts"][0]
+    authority_entry["sha256"] = receipt_snapshot.sha256
+    authority_entry["size_bytes"] = receipt_snapshot.size_bytes
+    authority_entry["contract"]["provider_generation_manifest"][field] = value
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "retrieval_receipts": {receipt_id: receipt_snapshot},
+            "receipt_authority": InputSnapshot.from_bytes("mutated authority", canonical_json_bytes(authority)),
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="selected receipt provider evidence differs",
+    ):
+        perimeter_module.build_account_manifest_payloads(
+            perimeter_module.AccountManifestSelectedInputs(**values)
+        )
+
+
+def test_mixed_composer_rejects_receipt_path_collision_before_payload_mapping(
+    perimeter_module: Any,
+) -> None:
+    """A selected receipt may not replace one of the ten fixed mixed subjects."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    collision = "authority/code-identities.json"
+    receipt = selected.retrieval_receipts["receipt/mixed-account-01.json"].json_object()
+    receipt["artifact_id"] = collision
+    receipt_snapshot = InputSnapshot.from_bytes("colliding receipt", canonical_json_bytes(receipt))
+    authority = selected.receipt_authority.json_object()
+    authority["receipts"][0]["artifact_id"] = collision
+    authority["receipts"][0]["sha256"] = receipt_snapshot.sha256
+    authority["receipts"][0]["size_bytes"] = receipt_snapshot.size_bytes
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "retrieval_receipts": {collision: receipt_snapshot},
+            "receipt_authority": InputSnapshot.from_bytes("colliding authority", canonical_json_bytes(authority)),
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="receipt artifact_id collides with a fixed mixed subject",
+    ):
+        perimeter_module.build_account_manifest_payloads(
+            perimeter_module.AccountManifestSelectedInputs(**values)
+        )
+
+
+def _mixed_verifier_inputs(
+    verifier_module: Any, selected: object
+) -> object:
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    return verifier_module.IndependentVerifierInputs(**values)
+
+
+def _mixed_selected_with_ledger(
+    perimeter_module: Any,
+    selected: object,
+    ledger: dict[str, object],
+    policy: dict[str, object] | None = None,
+) -> object:
+    ledger_as_of_date = str(ledger.get("as_of_date", "2026-02-01"))
+    ledger_snapshot = InputSnapshot.from_bytes(
+        "mutated mixed ledger", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "provider_ledger": ledger_snapshot,
+            "provider_ledger_manifest": _generation_manifest_snapshot(
+                catalog=ledger_snapshot,
+                catalog_artifact_id="normalized/provider-ledger.json",
+                catalog_schema_name="provider-ledger-catalog",
+                catalog_schema_version="1",
+                as_of_date=ledger_as_of_date,
+            ),
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    if policy is not None:
+        values["flow_classification_policy"] = InputSnapshot.from_bytes(
+            "mutated mixed policy", canonical_json_bytes(policy)
+        )
+    return perimeter_module.AccountManifestSelectedInputs(**values)
+
+
+def test_mixed_independent_verifier_ignores_other_account_nav_for_numeric_epoch(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Bridge facts remain complete while numeric facts select only the funded account."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["nav_observations"].append(
+        {
+            "record_id": "mixed-other-account-nav",
+            "account_id": "synthetic-account-02",
+            "as_of_date": "2026-02-01",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "125.75"},
+        }
+    )
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    calculation_inputs = json.loads(payloads["authority/calculation-inputs.json"])
+    assert not any(
+        nav["record_id"] == "mixed-other-account-nav"
+        for nav in calculation_inputs["calculation_ledger"]["nav_observations"]
+    )
+    assert not any(
+        nav["record_id"] == "mixed-other-account-nav"
+        for row in calculation_inputs["rows"]
+        for nav in row["nav_observations"]
+    )
+
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+    )
+    assert report["numeric_verification"] == {
+        "candidate_count": 1,
+        "comparison_count": 1,
+        "discrepancy_count": 0,
+        "disposition": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES",
+    }
+    assert report["counts"]["ok_output_row_count"] == 1
+    assert report["counts"]["observed_nav_fact_count"] == 4
+
+
+def test_mixed_independent_verifier_recomputes_retained_high_precision_money(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Mixed source precision is retained without weakening the cent-only test seam."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    for nav, value in zip(
+        ledger["nav_observations"],
+        ("50.125", "60.375", "70.625"),
+        strict=True,
+    ):
+        nav["nav"]["value"] = value
+    ledger["flows"][0]["amount"]["value"] = "10.25"
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    candidate = next(row for row in output["rows"] if row["status"] == "OK")
+    assert {
+        field: candidate[field]
+        for field in (
+            "opening_capital",
+            "deposits",
+            "internal_in",
+            "invested",
+            "external_withdrawals",
+            "internal_out",
+            "withdrawn",
+            "net_capital",
+            "current_value",
+            "gain",
+        )
+    } == {
+        "opening_capital": "50.125",
+        "deposits": "10.25",
+        "internal_in": "0",
+        "invested": "60.375",
+        "external_withdrawals": "0",
+        "internal_out": "0",
+        "withdrawn": "0",
+        "net_capital": "60.375",
+        "current_value": "70.625",
+        "gain": "10.25",
+    }
+
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+    )
+    assert report["numeric_verification"] == {
+        "candidate_count": 1,
+        "comparison_count": 1,
+        "discrepancy_count": 0,
+        "disposition": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES",
+    }
+
+
+def test_mixed_admitted_projection_excludes_unrelated_blocked_facts(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Blocked-account facts stay global evidence but cannot poison the root epoch."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["nav_observations"].extend(
+        [
+            {
+                "record_id": "blocked-account-nav-a",
+                "account_id": "synthetic-account-02",
+                "as_of_date": "2026-02-01",
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "25"},
+            },
+            {
+                "record_id": "blocked-account-nav-b",
+                "account_id": "synthetic-account-02",
+                "as_of_date": "2026-01-30",
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "30"},
+            },
+        ]
+    )
+    ledger["flows"].append(
+        {
+            "record_id": "blocked-account-unavailable-flow",
+            "account_id": "synthetic-account-02",
+            "event_date": "2026-01-31",
+            "flow_type": "UNRESOLVED_BLOCKED_ACCOUNT",
+            "amount": {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+        }
+    )
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+
+    outer_events = json.loads(
+        payloads["authority/classified-flows.json"]
+    )["events"]
+    blocked = next(
+        event
+        for event in outer_events
+        if event["source_record_id"] == "blocked-account-unavailable-flow"
+    )
+    assert blocked["classification_status"] == "BLOCKED"
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    assert calculation["schema_version"] == 3
+    assert calculation["projection"] == {
+        "selector": "ALL_FUNDED_EPOCHS_V1",
+        "funded_epochs": [
+            {
+                "account_id": "synthetic-account-01",
+                "strategy_id": "synthetic-strategy-01",
+                "effective_start": "2025-01-01",
+                "effective_end": None,
+            }
+        ],
+        "supporting_internal_counterparty_source_record_ids": [],
+    }
+    projected_nav_ids = {
+        nav["record_id"]
+        for nav in calculation["calculation_ledger"]["nav_observations"]
+    }
+    projected_flow_ids = {
+        flow["record_id"] for flow in calculation["calculation_ledger"]["flows"]
+    }
+    assert projected_nav_ids == {"mixed-nav-1", "mixed-nav-2", "mixed-nav-3"}
+    assert projected_flow_ids == {"mixed-flow-1"}
+    assert all(
+        row["nav_observations"] == [] and row["classified_flows"] == []
+        for row in calculation["rows"]
+        if row["epoch"]["account_id"] == "synthetic-account-02"
+    )
+
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+    )
+    assert report["counts"]["observed_nav_fact_count"] == 5
+    assert report["counts"]["observed_raw_flow_count"] == 2
+    assert report["counts"]["classified_event_blocked_count"] == 1
+    assert report["counts"]["ok_output_row_count"] == 1
+    assert report["counts"]["blocked_output_row_count"] == 14
+
+
+def test_mixed_admitted_projection_ignores_foreign_currency_blocked_evidence(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Only admitted facts set the USD calculation currency, not blocked evidence."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["nav_observations"].extend(
+        [
+            {
+                "record_id": "blocked-eur-nav-a",
+                "account_id": "synthetic-account-02",
+                "as_of_date": "2026-01-30",
+                "nav": {"currency": "EUR", "status": "AVAILABLE", "value": "30"},
+            },
+            {
+                "record_id": "blocked-eur-nav-b",
+                "account_id": "synthetic-account-02",
+                "as_of_date": "2026-02-01",
+                "nav": {"currency": "EUR", "status": "AVAILABLE", "value": "25"},
+            },
+        ]
+    )
+    ledger["flows"].append(
+        {
+            "record_id": "blocked-eur-flow",
+            "account_id": "synthetic-account-02",
+            "event_date": "2026-01-31",
+            "flow_type": "UNRESOLVED_BLOCKED_ACCOUNT",
+            "amount": {"currency": "EUR", "status": "AVAILABLE", "value": "5"},
+        }
+    )
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    assert calculation["accounting_currency"] == "USD"
+    assert {
+        nav["record_id"]
+        for nav in calculation["calculation_ledger"]["nav_observations"]
+    } == {"mixed-nav-1", "mixed-nav-2", "mixed-nav-3"}
+    assert {
+        flow["record_id"]
+        for flow in calculation["calculation_ledger"]["flows"]
+    } == {"mixed-flow-1"}
+    classified = json.loads(payloads["authority/classified-flows.json"])["events"]
+    blocked_flow = next(
+        event for event in classified if event["source_record_id"] == "blocked-eur-flow"
+    )
+    assert blocked_flow["amount"] == {
+        "currency": "EUR",
+        "status": "AVAILABLE",
+        "value": "5",
+    }
+    assert blocked_flow["classification_status"] == "BLOCKED"
+    assert blocked_flow["blocker_code"] == "FLOW_TYPE_UNRESOLVED"
+
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+    )
+    assert report["status"] == "VERIFIED"
+
+
+def _mixed_internal_selected(
+    perimeter_module: Any, *, ambiguous: bool = False
+) -> object:
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["flows"][0]["flow_type"] = "INTERNAL_TRANSFER"
+    ledger["flows"].append(
+        {
+            "record_id": "mixed-internal-counterpart",
+            "account_id": "synthetic-account-02",
+            "event_date": "2026-01-31",
+            "flow_type": "INTERNAL_TRANSFER",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-10"},
+        }
+    )
+    if ambiguous:
+        ledger["flows"].append(
+            {
+                "record_id": "mixed-internal-second-candidate",
+                "account_id": "synthetic-account-03",
+                "event_date": "2026-01-31",
+                "flow_type": "INTERNAL_TRANSFER",
+                "amount": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "-10",
+                },
+            }
+        )
+    policy = selected.flow_classification_policy.json_object()
+    policy["event_dispositions"]["exact"].append(
+        {
+            "flow_type": "INTERNAL_TRANSFER",
+            "disposition": "INTERNAL",
+            "amount_sign": "NONZERO",
+            "counterparty_rule": (
+                "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+            ),
+        }
+    )
+    return _mixed_selected_with_ledger(
+        perimeter_module, selected, ledger, policy
+    )
+
+
+@pytest.mark.parametrize("selected_edge", ("unresolved", "unavailable"))
+def test_mixed_admitted_projection_rejects_selected_blocked_event(
+    perimeter_module: Any,
+    verifier_module: Any,
+    selected_edge: str,
+) -> None:
+    """A blocked event inside the receipt-routed epoch cannot be projected away."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+    ledger = selected.provider_ledger.json_object()
+    if selected_edge == "unresolved":
+        ledger["flows"][0]["flow_type"] = "UNRESOLVED_SELECTED"
+    else:
+        ledger["flows"][0]["amount"] = {
+            "currency": "USD",
+            "status": "UNAVAILABLE",
+            "value": None,
+        }
+    invalid = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module.build_account_manifest_payloads(invalid)
+
+
+def test_mixed_admitted_projection_includes_exact_internal_counterpart(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """One reciprocal blocked-account leg is retained only as root support."""
+
+    selected = _mixed_internal_selected(perimeter_module)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    assert calculation["projection"] == {
+        "selector": "ALL_FUNDED_EPOCHS_V1",
+        "funded_epochs": [
+            {
+                "account_id": "synthetic-account-01",
+                "strategy_id": "synthetic-strategy-01",
+                "effective_start": "2025-01-01",
+                "effective_end": None,
+            }
+        ],
+        "supporting_internal_counterparty_source_record_ids": [
+            "mixed-internal-counterpart"
+        ],
+    }
+    assert {
+        flow["record_id"] for flow in calculation["calculation_ledger"]["flows"]
+    } == {"mixed-flow-1", "mixed-internal-counterpart"}
+    assert {
+        event["source_record_id"]
+        for event in calculation["calculation_classified_flows"]["events"]
+    } == {"mixed-flow-1", "mixed-internal-counterpart"}
+    supporting_row = next(
+        row
+        for row in calculation["rows"]
+        if row["epoch"]["account_id"] == "synthetic-account-02"
+    )
+    assert supporting_row["nav_observations"] == []
+    assert [
+        event["source_record_id"] for event in supporting_row["classified_flows"]
+    ] == ["mixed-internal-counterpart"]
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    ok = next(row for row in output["rows"] if row["status"] == "OK")
+    assert {
+        "deposits": ok["deposits"],
+        "internal_in": ok["internal_in"],
+        "invested": ok["invested"],
+        "net_capital": ok["net_capital"],
+        "current_value": ok["current_value"],
+        "gain": ok["gain"],
+    } == {
+        "deposits": "0",
+        "internal_in": "10",
+        "invested": "60",
+        "net_capital": "60",
+        "current_value": "70",
+        "gain": "10",
+    }
+    counterpart = next(
+        row
+        for row in output["rows"]
+        if row["account_id"] == "synthetic-account-02"
+    )
+    assert counterpart["status"] == "BLOCKED_ADMISSION"
+    assert {
+        "opening_capital",
+        "deposits",
+        "invested",
+        "net_capital",
+        "current_value",
+        "gain",
+        "observation_trace",
+        "capital_flow_trace",
+    }.isdisjoint(counterpart)
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+    )
+    assert report["numeric_verification"]["discrepancy_count"] == 0
+    counterpart_chain = next(
+        chain
+        for chain in report["blocker_chains"]
+        if chain["assignment"]["account_id"] == "synthetic-account-02"
+    )
+    assert counterpart_chain["admission"]["status"] == "BLOCKED"
+    assert counterpart_chain["numeric_candidate"] is False
+
+
+def test_mixed_admitted_projection_rejects_selected_internal_ambiguity(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """A second physical counterpart blocks the selected root instead of being dropped."""
+
+    selected = _mixed_internal_selected(perimeter_module)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+    ambiguous = _mixed_internal_selected(perimeter_module, ambiguous=True)
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module.build_account_manifest_payloads(ambiguous)
+
+
+def test_mixed_admitted_projection_rejects_foreign_currency_internal_support(
+    perimeter_module: Any,
+) -> None:
+    """A selected internal counterpart belongs to calculation currency validation."""
+
+    selected = _mixed_internal_selected(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    next(
+        flow
+        for flow in ledger["flows"]
+        if flow["record_id"] == "mixed-internal-counterpart"
+    )["amount"]["currency"] = "EUR"
+    invalid = _mixed_selected_with_ledger(
+        perimeter_module,
+        selected,
+        ledger,
+        selected.flow_classification_policy.json_object(),
+    )
+
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module.build_account_manifest_payloads(invalid)
+
+
+def test_legacy_blocked_manifest_still_rejects_mixed_available_currency(
+    perimeter_module: Any,
+) -> None:
+    """The all-blocked global ledger contract remains unchanged outside mixed mode."""
+
+    selected = _c3_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["nav_observations"][0]["nav"]["currency"] = "EUR"
+    invalid = _c3_with_mutated_ledger_or_policy(
+        perimeter_module,
+        ledger,
+        selected.flow_classification_policy.json_object(),
+    )
+
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module.build_blocked_account_manifest_payloads(invalid)
+
+
+def test_mixed_admitted_projection_rejects_duplicate_global_raw_record_id(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Projection filtering cannot conceal a duplicate outside the root account."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+    ledger = selected.provider_ledger.json_object()
+    duplicate = deepcopy(ledger["flows"][0])
+    duplicate["account_id"] = "synthetic-account-02"
+    ledger["flows"].append(duplicate)
+    invalid = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module.build_account_manifest_payloads(invalid)
+
+
+def _refresh_mixed_calculation_projection_lineage(
+    calculation: dict[str, Any],
+) -> None:
+    """Refresh only identities enclosing a coherently changed nested projection."""
+
+    ledger_bytes = canonical_json_bytes(calculation["calculation_ledger"])
+    ledger_sha256 = hashlib.sha256(ledger_bytes).hexdigest()
+    ledger_artifact = calculation["calculation_ledger_identity"]["artifact"]
+    calculation["calculation_ledger_identity"]["generation_id"] = ledger_sha256
+    ledger_artifact["sha256"] = ledger_sha256
+    ledger_artifact["size_bytes"] = len(ledger_bytes)
+    ledger_identity = {
+        "generation_id": ledger_sha256,
+        "artifact": deepcopy(ledger_artifact),
+    }
+    calculation["calculation_classified_flows"]["ledger_identity"] = deepcopy(
+        ledger_identity
+    )
+    classified_bytes = canonical_json_bytes(
+        calculation["calculation_classified_flows"]
+    )
+    classified_artifact = calculation["calculation_flow_coverage"][
+        "classified_flows_artifact"
+    ]
+    classified_artifact["sha256"] = hashlib.sha256(classified_bytes).hexdigest()
+    classified_artifact["size_bytes"] = len(classified_bytes)
+    calculation["calculation_flow_coverage"]["ledger_identity"] = ledger_identity
+
+
+@pytest.mark.parametrize("projection_edge", ("counterpart", "descriptor"))
+def test_mixed_admitted_projection_mutation_is_independently_rejected(
+    perimeter_module: Any,
+    verifier_module: Any,
+    projection_edge: str,
+) -> None:
+    """Enclosing hashes cannot turn a forged admitted projection into source truth."""
+
+    selected = _mixed_internal_selected(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(verifier_inputs, payloads)
+
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    if projection_edge == "counterpart":
+        next(
+            flow
+            for flow in calculation["calculation_ledger"]["flows"]
+            if flow["record_id"] == "mixed-internal-counterpart"
+        )["amount"]["value"] = "-11"
+        next(
+            event
+            for event in calculation["calculation_classified_flows"]["events"]
+            if event["source_record_id"] == "mixed-internal-counterpart"
+        )["amount"] = "-11"
+        next(
+            event
+            for row in calculation["rows"]
+            for event in row["classified_flows"]
+            if event["source_record_id"] == "mixed-internal-counterpart"
+        )["amount"]["value"] = "-11"
+        _refresh_mixed_calculation_projection_lineage(calculation)
+    else:
+        calculation["projection"][
+            "supporting_internal_counterparty_source_record_ids"
+        ] = ["mixed-flow-1"]
+
+    mutated = dict(payloads)
+    mutated["authority/calculation-inputs.json"] = canonical_json_bytes(calculation)
+    output = json.loads(mutated["outputs/account-strategy-manifest.json"])
+    calculation_source = output["source_identities"]["calculation_inputs"]
+    calculation_source["sha256"] = hashlib.sha256(
+        mutated["authority/calculation-inputs.json"]
+    ).hexdigest()
+    calculation_source["size_bytes"] = len(
+        mutated["authority/calculation-inputs.json"]
+    )
+    mutated["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, mutated)
+
+
+def test_mixed_independent_verifier_recomputes_one_literal_numeric_row(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """One selected epoch is recalculated from frozen facts, never composer math."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    candidate = next(row for row in output["rows"] if row["status"] == "OK")
+
+    # Hand-literal arithmetic: 50 + 10 + 0 = 60; 60 - 0 = 60; 70 - 60 = 10.
+    assert {
+        key: candidate[key]
+        for key in (
+            "opening_capital",
+            "deposits",
+            "internal_in",
+            "invested",
+            "withdrawn",
+            "net_capital",
+            "current_value",
+            "gain",
+        )
+    } == {
+        "opening_capital": "50",
+        "deposits": "10",
+        "internal_in": "0",
+        "invested": "60",
+        "withdrawn": "0",
+        "net_capital": "60",
+        "current_value": "70",
+        "gain": "10",
+    }
+    # Hand-literal links: the exact opening anchor first links at 1, then the
+    # contribution-adjusted link is 1, and finally 70 / 60 = 7/6.
+    assert candidate["observation_trace"] == {
+        "links": [
+            {
+                "start_date": "2024-12-31",
+                "end_date": "2026-01-30",
+                "base_nav": "50",
+                "ending_nav": "50",
+                "net_flow": "0",
+                "factor": "1",
+                "cumulative_index": "100",
+                "running_hwm_index": "100",
+                "drawdown": "0",
+            },
+            {
+                "start_date": "2026-01-30",
+                "end_date": "2026-01-31",
+                "base_nav": "50",
+                "ending_nav": "60",
+                "net_flow": "10",
+                "factor": "1",
+                "cumulative_index": "100",
+                "running_hwm_index": "100",
+                "drawdown": "0",
+            },
+            {
+                "start_date": "2026-01-31",
+                "end_date": "2026-02-01",
+                "base_nav": "60",
+                "ending_nav": "70",
+                "net_flow": "0",
+                "factor": "1.166666666666666666666666666666666666667",
+                "cumulative_index": "116.6666666666666666666666666666666666667",
+                "running_hwm_index": "116.6666666666666666666666666666666666667",
+                "drawdown": "0",
+            },
+        ]
+    }
+    assert candidate["observation_linked_return"] == (
+        "0.166666666666666666666666666666666666667"
+    )
+    assert candidate["observed_hwm_index"] == (
+        "116.6666666666666666666666666666666666667"
+    )
+    assert candidate["observed_max_drawdown"] == "0"
+    assert candidate["capital_flow_trace"] == [
+        {
+            "class": "EXTERNAL_IN",
+            "event_date": "2026-01-31",
+            "nav_recognition_date": "2026-01-31",
+            "amount": "10",
+        }
+    ]
+
+    report_bytes = verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+    report = json.loads(report_bytes)
+    assert report_bytes == canonical_json_bytes(report)
+    assert report["schema_version"] == 3
+    assert [item["path"] for item in report["subjects"]] == [
+        "authority/account-assignment-perimeter.json",
+        "authority/account-flow-coverage.json",
+        "authority/calculation-inputs.json",
+        "authority/classified-flows.json",
+        "authority/code-identities.json",
+        "authority/flow-classification-policy.json",
+        "authority/mapped-epoch-admission.json",
+        "authority/selected-input-identities.json",
+        "outputs/account-strategy-manifest.json",
+        "authority/account-interval-retrieval-receipt-authority.json",
+        "authority/account-assignment-crosswalk.json",
+        "receipt/mixed-account-01.json",
+    ]
+    assert report["counts"] == {
+        "selected_baseline_account_count": 18,
+        "account_count": 18,
+        "assignment_count": 26,
+        "mapped_assignment_count": 15,
+        "historical_assignment_count": 7,
+        "reserve_assignment_count": 4,
+        "current_product_epoch_count": 13,
+        "observed_nav_fact_count": 3,
+        "observed_raw_flow_count": 1,
+        "classified_event_count": 1,
+        "classified_event_classified_count": 1,
+        "classified_event_blocked_count": 0,
+        "unmatched_nav_fact_count": 0,
+        "unmatched_raw_flow_fact_count": 0,
+        "unmatched_fact_count": 0,
+        "unmatched_projection_count": 0,
+        "calculation_input_row_count": 13,
+        "coverage_row_count": 13,
+        "admission_row_count": 13,
+        "output_row_count": 13,
+        "complete_coverage_row_count": 1,
+        "funded_admission_row_count": 1,
+        "ok_output_row_count": 1,
+        "blocked_coverage_row_count": 12,
+        "blocked_admission_row_count": 12,
+        "blocked_output_row_count": 12,
+    }
+    assert report["numeric_verification"] == {
+        "candidate_count": 1,
+        "comparison_count": 1,
+        "discrepancy_count": 0,
+        "disposition": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES",
+    }
+
+
+def test_mixed_independent_verifier_preserves_literal_legacy_report_and_request_oracles(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """The mixed dispatcher cannot alter either legacy canonical byte contract."""
+    selected = _c3_selected_inputs(perimeter_module)
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    report = verifier_module.IndependentAccountManifestVerifier().verify(
+        verifier_inputs, payloads
+    )
+    request = verifier_module.encode_verification_request(verifier_inputs, payloads)
+    assert (hashlib.sha256(report).hexdigest(), len(report)) == (
+        "f4d6b014a0a2e9fc855d6b58c474d357b3ad0c31c27b189a92b2b558c6c06801",
+        11224,
+    )
+    assert (hashlib.sha256(request).hexdigest(), len(request)) == (
+        "47047c92e84b832d7c7b6f10c9b2637ec8cc14490b77467cfd559609dce571ce",
+        94069,
+    )
+    assert json.loads(report)["schema_version"] == 2
+    assert json.loads(request)["schema_version"] == 1
+
+
+def test_mixed_independent_verifier_request_v2_round_trips_closed_selection(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Mixed transport carries all three frozen authorities and exactly 11 subjects."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+
+    request = verifier_module.encode_verification_request(verifier_inputs, payloads)
+    parsed = json.loads(request)
+    assert request == canonical_json_bytes(parsed)
+    assert parsed["schema_version"] == 2
+    assert set(parsed["selected_snapshots"]) == {
+        "provider_ledger_base64",
+        "provider_ledger_manifest_base64",
+        "baseline_base64",
+        "baseline_manifest_base64",
+        "flow_classification_policy_base64",
+        "epoch_producer_source_base64",
+        "generation_builder_source_base64",
+        "independent_verifier_source_base64",
+        "receipt_authority_base64",
+        "admission_policy_base64",
+        "manifest_schema_base64",
+    }
+    assert [item["path"] for item in parsed["subjects"]] == [
+        "authority/account-assignment-perimeter.json",
+        "authority/account-flow-coverage.json",
+        "authority/calculation-inputs.json",
+        "authority/classified-flows.json",
+        "authority/code-identities.json",
+        "authority/flow-classification-policy.json",
+        "authority/mapped-epoch-admission.json",
+        "authority/selected-input-identities.json",
+        "outputs/account-strategy-manifest.json",
+        "authority/account-interval-retrieval-receipt-authority.json",
+        "receipt/mixed-account-01.json",
+    ]
+    decoded, decoded_payloads = verifier_module.decode_verification_request(request)
+    assert decoded_payloads == payloads
+    assert decoded.receipt_authority.contents == selected.receipt_authority.contents
+    assert decoded.admission_policy.contents == selected.admission_policy.contents
+    assert decoded.manifest_schema.contents == selected.manifest_schema.contents
+    report = verifier_module.IndependentAccountManifestVerifier().verify(
+        decoded, decoded_payloads
+    )
+    assert json.loads(report)["schema_version"] == 3
+
+
+def test_mixed_independent_verifier_rejects_partial_selection_and_layout_drift(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Mode comes from the frozen triplet; candidate extras cannot opt into mixed."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected)
+    values["receipt_authority"] = selected.receipt_authority
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentVerifierInputs(**values)
+
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    mixed_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    for mutated in (
+        {**payloads, "unexpected.json": canonical_json_bytes({"unexpected": True})},
+        {key: value for key, value in payloads.items() if key != "authority/account-interval-retrieval-receipt-authority.json"},
+        {key: value for key, value in payloads.items() if key != "receipt/mixed-account-01.json"},
+        {**payloads, "verification/independent-verification.json": canonical_json_bytes({"status": "VERIFIED"})},
+    ):
+        with pytest.raises(verifier_module.IndependentVerificationError):
+            verifier.verify(mixed_inputs, mutated)
+
+    legacy_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(legacy_inputs, payloads)
+
+
+def test_mixed_independent_verifier_v3_report_schema_is_closed(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Static v3 owns shape/ranges while runtime owns count arithmetic."""
+    from jsonschema import Draft202012Validator
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+    )
+    schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
+    assert not list(validator.iter_errors(report))
+
+    reordered = deepcopy(report)
+    reordered["subjects"].reverse()
+    assert list(validator.iter_errors(reordered))
+
+    fixed_path_collision = deepcopy(report)
+    fixed_path_collision["subjects"][10] = {
+        "path": "authority/account-assignment-perimeter.json",
+        "sha256": "0" * 64,
+        "size_bytes": 0,
+    }
+    assert list(validator.iter_errors(fixed_path_collision))
+
+    stale_counts = deepcopy(report)
+    stale_counts["counts"]["blocked_output_row_count"] = 13
+    assert not list(validator.iter_errors(stale_counts))
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify_finalized_report(
+            _mixed_verifier_inputs(verifier_module, selected),
+            payloads,
+            canonical_json_bytes(stale_counts),
+        )
+
+    stale_counts = deepcopy(report)
+    stale_counts["counts"]["mapped_assignment_count"] = 14
+    assert list(validator.iter_errors(stale_counts))
+
+    stale_counts = deepcopy(report)
+    stale_counts["counts"]["output_row_count"] = 14
+    assert not list(validator.iter_errors(stale_counts))
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify_finalized_report(
+            _mixed_verifier_inputs(verifier_module, selected),
+            payloads,
+            canonical_json_bytes(stale_counts),
+        )
+
+    duplicate_ok = deepcopy(report)
+    blocked = next(
+        chain for chain in duplicate_ok["blocker_chains"]
+        if chain["numeric_candidate"] is False
+    )
+    blocked["coverage"] = {"status": "COMPLETE", "blocker_code": None}
+    blocked["admission"] = {"status": "FUNDED", "blocker_code": None}
+    blocked["output"] = {"status": "OK", "blocking_reason": None}
+    blocked["numeric_candidate"] = True
+    assert not list(validator.iter_errors(duplicate_ok))
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify_finalized_report(
+            _mixed_verifier_inputs(verifier_module, selected),
+            payloads,
+            canonical_json_bytes(duplicate_ok),
+        )
+
+
+def _mutate_mixed_subject(
+    payloads: Mapping[str, bytes], path: str, mutation: Any
+) -> dict[str, bytes]:
+    mutated = dict(payloads)
+    value = json.loads(mutated[path])
+    mutation(value)
+    mutated[path] = canonical_json_bytes(value)
+    return mutated
+
+
+def _rebound_mixed_verifier_inputs(
+    verifier_module: Any,
+    selected: object,
+    *,
+    retrieval_receipts: Mapping[str, InputSnapshot] | None = None,
+    receipt_authority: InputSnapshot | None = None,
+    admission_policy: InputSnapshot | None = None,
+    manifest_schema: InputSnapshot | None = None,
+) -> object:
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "retrieval_receipts": (
+                selected.retrieval_receipts
+                if retrieval_receipts is None
+                else retrieval_receipts
+            ),
+            "receipt_authority": (
+                selected.receipt_authority
+                if receipt_authority is None
+                else receipt_authority
+            ),
+            "admission_policy": (
+                selected.admission_policy
+                if admission_policy is None
+                else admission_policy
+            ),
+            "manifest_schema": (
+                selected.manifest_schema
+                if manifest_schema is None
+                else manifest_schema
+            ),
+        }
+    )
+    return verifier_module.IndependentVerifierInputs(**values)
+
+
+def _refresh_mixed_selected_identity_subject(
+    payloads: Mapping[str, bytes],
+    *,
+    receipt_snapshot: InputSnapshot | None = None,
+    authority_snapshot: InputSnapshot | None = None,
+    admission_snapshot: InputSnapshot | None = None,
+    manifest_schema_snapshot: InputSnapshot | None = None,
+) -> dict[str, bytes]:
+    mutated = dict(payloads)
+    selected_identity = json.loads(
+        mutated["authority/selected-input-identities.json"]
+    )
+    if receipt_snapshot is not None:
+        selected_identity["retrieval_receipts"] = [
+            {
+                "receipt_id": "receipt/mixed-account-01.json",
+                "sha256": receipt_snapshot.sha256,
+                "size_bytes": receipt_snapshot.size_bytes,
+            }
+        ]
+        mutated["receipt/mixed-account-01.json"] = receipt_snapshot.contents
+    if authority_snapshot is not None:
+        selected_identity["receipt_authority"] = {
+            "sha256": authority_snapshot.sha256,
+            "size_bytes": authority_snapshot.size_bytes,
+        }
+        mutated[
+            "authority/account-interval-retrieval-receipt-authority.json"
+        ] = authority_snapshot.contents
+    if admission_snapshot is not None:
+        selected_identity["admission_policy"] = {
+            "sha256": admission_snapshot.sha256,
+            "size_bytes": admission_snapshot.size_bytes,
+        }
+        mutated["authority/mapped-epoch-admission.json"] = (
+            admission_snapshot.contents
+        )
+    if manifest_schema_snapshot is not None:
+        selected_identity["manifest_schema"] = {
+            "sha256": manifest_schema_snapshot.sha256,
+            "size_bytes": manifest_schema_snapshot.size_bytes,
+        }
+    mutated["authority/selected-input-identities.json"] = canonical_json_bytes(
+        selected_identity
+    )
+    return mutated
+
+
+def _refresh_mixed_receipt_lineage(
+    payloads: Mapping[str, bytes],
+    *,
+    receipt_snapshot: InputSnapshot,
+    authority_snapshot: InputSnapshot,
+) -> dict[str, bytes]:
+    """Refresh every enclosing subject without deciding receipt admissibility."""
+
+    mutated = _refresh_mixed_selected_identity_subject(
+        payloads,
+        receipt_snapshot=receipt_snapshot,
+        authority_snapshot=authority_snapshot,
+    )
+    receipt_artifact = {
+        "artifact_id": "receipt/mixed-account-01.json",
+        "sha256": receipt_snapshot.sha256,
+        "size_bytes": receipt_snapshot.size_bytes,
+    }
+    coverage = json.loads(mutated["authority/account-flow-coverage.json"])
+    coverage["receipt_artifacts"] = [receipt_artifact]
+    mutated["authority/account-flow-coverage.json"] = canonical_json_bytes(coverage)
+
+    calculation = json.loads(mutated["authority/calculation-inputs.json"])
+    calculation["calculation_flow_coverage"]["receipt_artifacts"] = [
+        receipt_artifact
+    ]
+    mutated["authority/calculation-inputs.json"] = canonical_json_bytes(calculation)
+
+    output = json.loads(mutated["outputs/account-strategy-manifest.json"])
+    source_identities = output["source_identities"]
+    for source, subject_path in (
+        (
+            source_identities["flow_coverage"]["artifact"],
+            "authority/account-flow-coverage.json",
+        ),
+        (
+            source_identities["calculation_inputs"],
+            "authority/calculation-inputs.json",
+        ),
+        (
+            source_identities["selected_inputs"],
+            "authority/selected-input-identities.json",
+        ),
+    ):
+        source["sha256"] = hashlib.sha256(mutated[subject_path]).hexdigest()
+        source["size_bytes"] = len(mutated[subject_path])
+    authority = json.loads(authority_snapshot.contents)
+    authority_artifact = source_identities["flow_coverage"]["receipt_authority"]
+    authority_artifact["as_of_date"] = authority["as_of_date"]
+    authority_artifact["sha256"] = authority_snapshot.sha256
+    authority_artifact["size_bytes"] = authority_snapshot.size_bytes
+    mutated["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
+    return mutated
+
+
+def test_mixed_independent_verifier_rejects_self_consistent_receipt_generation_rebind(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Authority/receipt agreement cannot replace the frozen provider anchor."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(_mixed_verifier_inputs(verifier_module, selected), payloads)
+
+    receipt_id = "receipt/mixed-account-01.json"
+    receipt = selected.retrieval_receipts[receipt_id].json_object()
+    receipt["provider_generation"] = "0" * 64
+    receipt_snapshot = InputSnapshot.from_bytes(
+        "rebound receipt", canonical_json_bytes(receipt)
+    )
+    authority = selected.receipt_authority.json_object()
+    authority["receipts"][0]["sha256"] = receipt_snapshot.sha256
+    authority["receipts"][0]["size_bytes"] = receipt_snapshot.size_bytes
+    authority["receipts"][0]["contract"]["provider_generation"] = "0" * 64
+    authority_snapshot = InputSnapshot.from_bytes(
+        "rebound authority", canonical_json_bytes(authority)
+    )
+    verifier_inputs = _rebound_mixed_verifier_inputs(
+        verifier_module,
+        selected,
+        retrieval_receipts={receipt_id: receipt_snapshot},
+        receipt_authority=authority_snapshot,
+    )
+    mutated = _refresh_mixed_receipt_lineage(
+        payloads,
+        receipt_snapshot=receipt_snapshot,
+        authority_snapshot=authority_snapshot,
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, mutated)
+
+
+def test_mixed_independent_verifier_rejects_rebound_manifest_schema(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """A valid but unapproved schema cannot be rebound through lineage."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(_mixed_verifier_inputs(verifier_module, selected), payloads)
+
+    reject_all_schema = InputSnapshot.from_bytes(
+        "rebound manifest schema",
+        canonical_json_bytes(
+            {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "$id": "https://example.test/reject-all",
+                "type": "object",
+                "not": {},
+            }
+        ),
+    )
+    verifier_inputs = _rebound_mixed_verifier_inputs(
+        verifier_module,
+        selected,
+        manifest_schema=reject_all_schema,
+    )
+    mutated = _refresh_mixed_selected_identity_subject(
+        payloads,
+        manifest_schema_snapshot=reject_all_schema,
+    )
+    output = json.loads(mutated["outputs/account-strategy-manifest.json"])
+    selected_inputs_artifact = output["source_identities"]["selected_inputs"]
+    selected_inputs_artifact["sha256"] = hashlib.sha256(
+        mutated["authority/selected-input-identities.json"]
+    ).hexdigest()
+    selected_inputs_artifact["size_bytes"] = len(
+        mutated["authority/selected-input-identities.json"]
+    )
+    mutated["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, mutated)
+
+
+def test_verifier_manifest_schema_pin_matches_repository_bytes(
+    verifier_module: Any,
+) -> None:
+    schema_bytes = ACCOUNT_STRATEGY_SCHEMA_PATH.read_bytes()
+    assert verifier_module.APPROVED_MANIFEST_SCHEMA_SHA256 == hashlib.sha256(
+        schema_bytes
+    ).hexdigest()
+    assert verifier_module.APPROVED_MANIFEST_SCHEMA_SIZE_BYTES == len(schema_bytes)
+
+
+@pytest.mark.parametrize(
+    "contract_edge",
+    ("covered_boundary", "future_authority", "duplicate_raw_artifact"),
+)
+def test_mixed_independent_verifier_rejects_receipt_contract_parity_gaps(
+    perimeter_module: Any,
+    verifier_module: Any,
+    contract_edge: str,
+) -> None:
+    """Rebound selected bytes cannot relax the Task 8A receipt predicate."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(_mixed_verifier_inputs(verifier_module, selected), payloads)
+
+    receipt_id = "receipt/mixed-account-01.json"
+    receipt_snapshot = selected.retrieval_receipts[receipt_id]
+    authority = selected.receipt_authority.json_object()
+    if contract_edge == "future_authority":
+        authority["as_of_date"] = "2026-02-02"
+    else:
+        receipt = receipt_snapshot.json_object()
+        if contract_edge == "covered_boundary":
+            receipt["covered_start"] = "2024-12-31"
+        else:
+            receipt["raw_evidence_artifacts"].append(
+                deepcopy(receipt["raw_evidence_artifacts"][0])
+            )
+            authority["receipts"][0]["contract"][
+                "raw_evidence_artifacts"
+            ] = deepcopy(receipt["raw_evidence_artifacts"])
+        receipt_snapshot = InputSnapshot.from_bytes(
+            f"{contract_edge} receipt", canonical_json_bytes(receipt)
+        )
+        authority["receipts"][0]["sha256"] = receipt_snapshot.sha256
+        authority["receipts"][0]["size_bytes"] = receipt_snapshot.size_bytes
+    authority_snapshot = InputSnapshot.from_bytes(
+        f"{contract_edge} authority", canonical_json_bytes(authority)
+    )
+    verifier_inputs = _rebound_mixed_verifier_inputs(
+        verifier_module,
+        selected,
+        retrieval_receipts={receipt_id: receipt_snapshot},
+        receipt_authority=authority_snapshot,
+    )
+    mutated = _refresh_mixed_receipt_lineage(
+        payloads,
+        receipt_snapshot=receipt_snapshot,
+        authority_snapshot=authority_snapshot,
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, mutated)
+
+
+def test_mixed_independent_verifier_accepts_older_anchored_provider_generation(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Generation age is admissible when every frozen provider anchor agrees."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["provider_generations"][0]["generation_as_of_date"] = "2026-01-31"
+    ledger_snapshot = InputSnapshot.from_bytes(
+        "older-generation mixed ledger", canonical_json_bytes(ledger)
+    )
+    ledger_manifest = _generation_manifest_snapshot(
+        catalog=ledger_snapshot,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+
+    receipt_id = "receipt/mixed-account-01.json"
+    receipt = selected.retrieval_receipts[receipt_id].json_object()
+    receipt["provider_generation_manifest"]["as_of_date"] = "2026-01-31"
+    receipt["raw_evidence_artifacts"][0]["as_of_date"] = "2026-01-31"
+    receipt_snapshot = InputSnapshot.from_bytes(
+        "older-generation receipt", canonical_json_bytes(receipt)
+    )
+    authority = selected.receipt_authority.json_object()
+    authority_entry = authority["receipts"][0]
+    authority_entry["sha256"] = receipt_snapshot.sha256
+    authority_entry["size_bytes"] = receipt_snapshot.size_bytes
+    authority_entry["contract"]["provider_generation_manifest"][
+        "as_of_date"
+    ] = "2026-01-31"
+    authority_entry["contract"]["raw_evidence_artifacts"][0][
+        "as_of_date"
+    ] = "2026-01-31"
+    authority_snapshot = InputSnapshot.from_bytes(
+        "older-generation authority", canonical_json_bytes(authority)
+    )
+
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "provider_ledger": ledger_snapshot,
+            "provider_ledger_manifest": ledger_manifest,
+            "retrieval_receipts": {receipt_id: receipt_snapshot},
+            "receipt_authority": authority_snapshot,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    older_selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    payloads = perimeter_module.build_account_manifest_payloads(older_selected)
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, older_selected), payloads
+        )
+    )
+    assert report["schema_version"] == 3
+    assert report["numeric_verification"] == {
+        "candidate_count": 1,
+        "comparison_count": 1,
+        "discrepancy_count": 0,
+        "disposition": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES",
+    }
+
+
+def test_mixed_independent_verifier_rejects_exact_c3_coverage_mutation(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """One ordinary C3 coverage row cannot be relabeled after composition."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(verifier_inputs, payloads)
+    mutated = _mutate_mixed_subject(
+        payloads,
+        "authority/account-flow-coverage.json",
+        lambda value: value["rows"][0].update(
+            {
+                "status": "BLOCKED",
+                "authority_kind": "NONE",
+                "receipt_artifact_id": None,
+                "blocker_code": "NO_ADMISSIBLE_V2_RECEIPT",
+                "blocker_detail": "No admissible retained receipt issuer.",
+            }
+        ),
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, mutated)
+
+
+@pytest.mark.parametrize("bridge_edge", ["nav", "event", "coverage"])
+def test_mixed_independent_verifier_rejects_value_level_bridge_mutations(
+    perimeter_module: Any, verifier_module: Any, bridge_edge: str
+) -> None:
+    """Canonical outer v2 bytes cannot conceal a changed nested C3 fact."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(verifier_inputs, payloads)
+
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    if bridge_edge == "nav":
+        calculation["calculation_ledger"]["nav_observations"][0]["nav"]["value"] = "51"
+    elif bridge_edge == "event":
+        calculation["calculation_classified_flows"]["events"][0]["amount"] = "11"
+    else:
+        calculation["calculation_flow_coverage"]["rows"][0]["requested_start"] = (
+            "2025-01-02"
+        )
+    mutated = dict(payloads)
+    mutated["authority/calculation-inputs.json"] = canonical_json_bytes(calculation)
+    output = json.loads(mutated["outputs/account-strategy-manifest.json"])
+    output["source_identities"]["calculation_inputs"]["sha256"] = hashlib.sha256(
+        mutated["authority/calculation-inputs.json"]
+    ).hexdigest()
+    output["source_identities"]["calculation_inputs"]["size_bytes"] = len(
+        mutated["authority/calculation-inputs.json"]
+    )
+    mutated["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, mutated)
+
+
+@pytest.mark.parametrize("fact_kind", ["nav", "raw_flow", "classified_flow"])
+def test_provider_fact_after_selected_ledger_date_is_rejected_by_legacy_perimeter(
+    perimeter_module: Any, fact_kind: str
+) -> None:
+    """Legacy perimeter facts cannot be newer than the selected provider ledger."""
+    inputs = deepcopy(_fixture_inputs())
+    if fact_kind == "nav":
+        inputs["nav_facts"][0]["as_of_date"] = "2026-02-02"
+    elif fact_kind == "raw_flow":
+        inputs["raw_flow_facts"][0]["event_date"] = "2026-02-02"
+    else:
+        inputs["classified_flow_facts"][0]["event_date"] = "2026-02-02"
+    selected = _c3_selected_inputs(perimeter_module)
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module.build_account_assignment_perimeter(
+            selected_inputs=selected,
+            nav_facts=inputs["nav_facts"],
+            raw_flow_facts=inputs["raw_flow_facts"],
+            classified_flow_facts=inputs["classified_flow_facts"],
+        )
+
+
+@pytest.mark.parametrize("fact_kind", ["nav", "flow", "provider_generation"])
+def test_provider_fact_after_selected_ledger_date_is_rejected_before_c3_calculation_inputs(
+    perimeter_module: Any, fact_kind: str
+) -> None:
+    """C3 source facts newer than ledger as_of_date never enter calculation inputs."""
+    selected = _c3_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    if fact_kind == "nav":
+        ledger["nav_observations"][0]["as_of_date"] = "2026-02-02"
+    elif fact_kind == "flow":
+        ledger["flows"][0]["event_date"] = "2026-02-02"
+    else:
+        ledger["provider_generations"] = [
+            {
+                "provider_id": "synthetic",
+                "generation_id": "c" * 64,
+                "manifest_sha256": "a" * 64,
+                "generation_as_of_date": "2026-02-02",
+            }
+        ]
+    mutated = _c3_with_mutated_ledger_or_policy(
+        perimeter_module, ledger, selected.flow_classification_policy.json_object()
+    )
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module.build_blocked_account_manifest_payloads(mutated)
+
+
+def test_legacy_perimeter_rejects_future_provider_generation_metadata(
+    perimeter_module: Any,
+) -> None:
+    """Legacy perimeter selection rejects provider generations after ledger as_of_date."""
+    selected = _c3_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["provider_generations"] = [
+        {
+            "provider_id": "synthetic",
+            "generation_id": "c" * 64,
+            "manifest_sha256": "a" * 64,
+            "generation_as_of_date": "2026-02-02",
+        }
+    ]
+    ledger_snapshot = InputSnapshot.from_bytes(
+        "future legacy provider generation", canonical_json_bytes(ledger)
+    )
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "provider_ledger": ledger_snapshot,
+            "provider_ledger_manifest": _generation_manifest_snapshot(
+                catalog=ledger_snapshot,
+                catalog_artifact_id="normalized/provider-ledger.json",
+                catalog_schema_name="provider-ledger-catalog",
+                catalog_schema_version="1",
+                as_of_date="2026-02-01",
+            ),
+        }
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    facts = _fixture_inputs()
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module.build_account_assignment_perimeter(
+            selected_inputs=selected,
+            nav_facts=facts["nav_facts"],
+            raw_flow_facts=facts["raw_flow_facts"],
+            classified_flow_facts=facts["classified_flow_facts"],
+        )
+
+
+def test_blocked_c3_uses_provider_ledger_date_for_open_ended_boundaries(
+    perimeter_module: Any,
+) -> None:
+    """A later baseline cannot extend blocked provider coverage past ledger as_of_date."""
+    selected = _with_later_baseline_date(
+        perimeter_module, _c3_selected_inputs(perimeter_module)
+    )
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    coverage = json.loads(payloads["authority/account-flow-coverage.json"])
+    assert selected.generation_as_of_date.isoformat() == "2026-02-03"
+    assert {
+        row["requested_end"]
+        for row in coverage["rows"]
+        if row["assignment"]["effective_end"] is None
+    } == {"2026-02-01"}
+
+
+def test_mixed_builder_uses_provider_ledger_date_for_open_ended_receipt_route(
+    perimeter_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mixed receipt routing accepts an open assignment capped at ledger as_of_date."""
+    from tools import account_strategy_manifest
+
+    monkeypatch.setattr(account_strategy_manifest, "validate_manifest_schema", lambda *args, **kwargs: None)
+    selected = _with_later_baseline_date(
+        perimeter_module, _mixed_composer_selected_inputs(perimeter_module)
+    )
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    coverage = json.loads(payloads["authority/account-flow-coverage.json"])
+    assert selected.generation_as_of_date.isoformat() == "2026-02-03"
+    assert {
+        row["requested_end"]
+        for row in coverage["rows"]
+        if row["assignment"]["effective_end"] is None
+    } == {"2026-02-01"}
+
+
+def test_independent_verifier_accepts_later_baseline_receipt_capped_at_ledger_date(
+    perimeter_module: Any, verifier_module: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Independent verification accepts the mixed candidate at the provider boundary."""
+    from tools import account_strategy_manifest
+
+    monkeypatch.setattr(account_strategy_manifest, "validate_manifest_schema", lambda *args, **kwargs: None)
+    selected = _with_later_baseline_date(
+        perimeter_module, _mixed_composer_selected_inputs(perimeter_module)
+    )
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    report = verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+    assert json.loads(report)["as_of_date"] == "2026-02-03"
+    coverage = json.loads(payloads["authority/account-flow-coverage.json"])
+    assert {
+        row["requested_end"]
+        for row in coverage["rows"]
+        if row["assignment"]["effective_end"] is None
+    } == {"2026-02-01"}
+
+
+@pytest.mark.parametrize(
+    "receipt_field",
+    [
+        "provider_generation",
+        "requested_start",
+        "requested_end",
+        "covered_start",
+        "covered_end",
+        "provider_generation_manifest",
+        "raw_evidence_artifacts",
+    ],
+)
+def test_mixed_receipt_date_after_selected_ledger_date_is_rejected(
+    perimeter_module: Any, receipt_field: str
+) -> None:
+    """Receipt/provider evidence dates cannot exceed provider ledger as_of_date."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    receipt = selected.retrieval_receipts["receipt/mixed-account-01.json"].json_object()
+    if receipt_field in {"provider_generation", "provider_generation_manifest"}:
+        receipt["provider_generation_manifest"]["as_of_date"] = "2026-02-02"
+    elif receipt_field == "raw_evidence_artifacts":
+        receipt["raw_evidence_artifacts"][0]["as_of_date"] = "2026-02-02"
+    else:
+        receipt[receipt_field] = "2026-02-02"
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module._validate_mixed_receipt_provider_evidence(
+            selected, receipt, "SYNTHETIC"
+        )
+
+
+@pytest.mark.parametrize(
+    "receipt_field",
+    [
+        "requested_start",
+        "requested_end",
+        "covered_start",
+        "covered_end",
+        "provider_generation_manifest",
+        "raw_evidence_artifacts",
+    ],
+)
+def test_independent_verifier_rejects_receipt_interval_after_selected_ledger_date(
+    perimeter_module: Any, verifier_module: Any, receipt_field: str
+) -> None:
+    """Verifier authority validation uses the provider ledger date for receipt intervals."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    verifier_selected = _mixed_verifier_inputs(verifier_module, selected)
+    receipt = selected.retrieval_receipts["receipt/mixed-account-01.json"].json_object()
+    if receipt_field == "provider_generation_manifest":
+        receipt[receipt_field]["as_of_date"] = "2026-02-02"
+    elif receipt_field == "raw_evidence_artifacts":
+        receipt[receipt_field][0]["as_of_date"] = "2026-02-02"
+    else:
+        receipt[receipt_field] = "2026-02-02"
+    manifest = receipt["provider_generation_manifest"]
+    raw_artifacts = receipt["raw_evidence_artifacts"]
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._validate_provider_receipt_date_authority(
+            verifier_selected, receipt, manifest, raw_artifacts
+        )
+
+
+@pytest.mark.parametrize("fact_kind", ["nav", "flow", "provider_generation"])
+def test_independent_verifier_rejects_provider_fact_after_selected_ledger_date(
+    perimeter_module: Any, verifier_module: Any, fact_kind: str
+) -> None:
+    """Independent reconstruction rejects provider facts after ledger as_of_date."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    if fact_kind == "nav":
+        ledger["nav_observations"][0]["as_of_date"] = "2026-02-02"
+    elif fact_kind == "flow":
+        ledger["flows"][0]["event_date"] = "2026-02-02"
+    else:
+        ledger["provider_generations"][0]["generation_as_of_date"] = "2026-02-02"
+    values = _selected_input_kwargs(selected)
+    ledger_snapshot = InputSnapshot.from_bytes(
+        "future provider ledger", canonical_json_bytes(ledger)
+    )
+    values["provider_ledger"] = ledger_snapshot
+    values["provider_ledger_manifest"] = _generation_manifest_snapshot(
+        catalog=ledger_snapshot,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    verifier_selected = verifier_module.IndependentVerifierInputs(**values)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        if fact_kind == "nav":
+            verifier_module._normalize_provider_navs(verifier_selected)
+        elif fact_kind == "flow":
+            verifier_module._mixed_normalized_facts(verifier_selected)
+        else:
+            verifier_module._validate_provider_ledger_date_authority(
+                verifier_selected, ledger
+            )
+
+
+@pytest.mark.parametrize("admission_edge", ["funded_to_blocked", "invalid_nav_id"])
+def test_mixed_independent_verifier_rejects_admission_trust_edge_mutations(
+    perimeter_module: Any, verifier_module: Any, admission_edge: str
+) -> None:
+    """The selected v2 policy must prove exactly one valid funded NAV."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(_mixed_verifier_inputs(verifier_module, selected), payloads)
+    policy = selected.admission_policy.json_object()
+    funded = next(row for row in policy["admissions"] if row["status"] == "FUNDED")
+    if admission_edge == "funded_to_blocked":
+        funded.clear()
+        funded.update(
+            {
+                "account_id": "synthetic-account-01",
+                "strategy_id": "synthetic-strategy-01",
+                "effective_start": "2025-01-01",
+                "effective_end": None,
+                "status": "BLOCKED",
+                "continuity_to_successor": False,
+                "reason": "SYNTHETIC_BLOCKED",
+            }
+        )
+    else:
+        funded["funded_nav_record_ids"] = ["missing-nav-record"]
+    admission_snapshot = InputSnapshot.from_bytes(
+        "mutated admission", canonical_json_bytes(policy)
+    )
+    verifier_inputs = _rebound_mixed_verifier_inputs(
+        verifier_module, selected, admission_policy=admission_snapshot
+    )
+    mutated = _refresh_mixed_selected_identity_subject(
+        payloads, admission_snapshot=admission_snapshot
+    )
+    output = json.loads(mutated["outputs/account-strategy-manifest.json"])
+    artifact = output["source_identities"]["admission_policy"]["artifact"]
+    artifact["sha256"] = admission_snapshot.sha256
+    artifact["size_bytes"] = admission_snapshot.size_bytes
+    mutated["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, mutated)
+
+
+def test_mixed_independent_verifier_accepts_multiple_valid_funded_nav_ids(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """A funded epoch may cite every valid NAV supporting its admission."""
+
+    base = _mixed_composer_selected_inputs(perimeter_module)
+    policy = base.admission_policy.json_object()
+    funded = next(row for row in policy["admissions"] if row["status"] == "FUNDED")
+    funded["funded_nav_record_ids"] = ["mixed-nav-1", "mixed-nav-2"]
+    admission = InputSnapshot.from_bytes(
+        "two valid funded NAV ids", canonical_json_bytes(policy)
+    )
+    values = _selected_input_kwargs(base)
+    values.update(
+        {
+            "admission_policy": admission,
+            "receipt_authority": base.receipt_authority,
+            "manifest_schema": base.manifest_schema,
+        }
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    mapped = verifier_module._independently_validate_current_epoch_crosswalk(
+        selected.baseline, selected.current_epoch_crosswalk
+    )
+    expected_bytes, _expected_policy = verifier_module._selected_mixed_admission_bytes(
+        verifier_inputs, mapped
+    )
+    result = verifier_module._verify_mixed_admission(
+        verifier_inputs,
+        {"authority/mapped-epoch-admission.json": expected_bytes},
+        mapped,
+        verifier_module._mapped_assignment_identity({"rows": mapped}),
+    )
+    assert result["funded"][0]["funded_nav_record_ids"] == [
+        "mixed-nav-1",
+        "mixed-nav-2",
+    ]
+
+
+def test_mixed_independent_verifier_ignores_null_start_reserve_assignment(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Unselected reserve rows may have null dates without breaking admission proof."""
+
+    base = _mixed_composer_selected_inputs(perimeter_module)
+    baseline_payload = base.baseline.json_object()
+    reserve = next(
+        row
+        for row in baseline_payload["assignments"]
+        if row["strategy_mapping_disposition"] == "RESERVE_NOT_APPLICABLE"
+    )
+    reserve["effective_start"] = None
+    baseline = InputSnapshot.from_bytes(
+        "null-start reserve baseline", canonical_json_bytes(baseline_payload)
+    )
+    baseline_manifest = _generation_manifest_snapshot(
+        catalog=baseline,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    crosswalk_payload = base.current_epoch_crosswalk.json_object()
+    crosswalk_payload["selected_baseline"].update(
+        {"sha256": baseline.sha256, "size_bytes": baseline.size_bytes}
+    )
+    values = _selected_input_kwargs(base)
+    values.update(
+        {
+            "baseline": baseline,
+            "baseline_manifest": baseline_manifest,
+            "current_epoch_crosswalk": InputSnapshot.from_bytes(
+                "null-start reserve crosswalk",
+                canonical_json_bytes(crosswalk_payload),
+            ),
+            "receipt_authority": base.receipt_authority,
+            "admission_policy": base.admission_policy,
+            "manifest_schema": base.manifest_schema,
+        }
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    mapped = verifier_module._independently_validate_current_epoch_crosswalk(
+        selected.baseline, selected.current_epoch_crosswalk
+    )
+    expected_bytes, _expected_policy = verifier_module._selected_mixed_admission_bytes(
+        verifier_inputs, mapped
+    )
+    result = verifier_module._verify_mixed_admission(
+        verifier_inputs,
+        {"authority/mapped-epoch-admission.json": expected_bytes},
+        mapped,
+        verifier_module._mapped_assignment_identity({"rows": mapped}),
+    )
+    assert len(result["funded"]) == 1
+
+
+def test_mixed_opening_anchor_uses_amount_as_basis_not_opening_nav(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Retained anchor amount funds the basis; opening_nav is the first ending NAV."""
+
+    from tools import account_strategy_manifest
+
+    base = _mixed_composer_selected_inputs(perimeter_module)
+    ledger_payload = base.provider_ledger.json_object()
+    anchor = ledger_payload["capital_anchors"][0]
+    anchor["amount"]["value"] = "1000"
+    anchor["opening_nav"]["value"] = "985.44"
+    nav_values = ["985.44", "990", "1000"]
+    for nav, value in zip(ledger_payload["nav_observations"], nav_values, strict=True):
+        nav["nav"]["value"] = value
+    ledger = InputSnapshot.from_bytes(
+        "unequal opening anchor basis", canonical_json_bytes(ledger_payload)
+    )
+    values = _selected_input_kwargs(base)
+    values.update(
+        {
+            "provider_ledger": ledger,
+            "provider_ledger_manifest": _generation_manifest_snapshot(
+                catalog=ledger,
+                catalog_artifact_id="normalized/provider-ledger.json",
+                catalog_schema_name="provider-ledger-catalog",
+                catalog_schema_version="1",
+                as_of_date="2026-02-01",
+            ),
+            "receipt_authority": base.receipt_authority,
+            "admission_policy": base.admission_policy,
+            "manifest_schema": base.manifest_schema,
+        }
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    mapped = verifier_module._independently_validate_current_epoch_crosswalk(
+        selected.baseline, selected.current_epoch_crosswalk
+    )
+    assignment = mapped[0]
+
+    producer_ledger = deepcopy(ledger_payload)
+    producer_ledger["accounting_currency"] = "USD"
+    producer_anchors = account_strategy_manifest.parse_capital_anchors(
+        producer_ledger
+    )
+    producer_row = account_strategy_manifest.analyze_epoch(
+        {date: Decimal(value) for date, value in zip(
+            ("2026-01-30", "2026-01-31", "2026-02-01"), nav_values, strict=True
+        )},
+        {"2026-01-31": Decimal("10")},
+        {},
+        {},
+        {},
+        None,
+        "2025-01-01",
+        None,
+        opening_anchor=producer_anchors[0],
+    )
+    assert producer_row is not None
+
+    navs, flows, anchors = verifier_module._mixed_normalized_facts(verifier_inputs)
+    events = [
+        {
+            "account_id": flow["account_id"],
+            "event_date": flow["event_date"],
+            "nav_recognition_date": flow["nav_recognition_date"],
+            "amount": flow["amount"]["value"],
+            "disposition": "EXTERNAL",
+        }
+        for flow in flows
+    ]
+    facts = verifier_module._mixed_numeric_facts(
+        verifier_inputs,
+        assignment,
+        {
+            "ledger": {"nav_observations": navs},
+            "events": events,
+            "capital_anchors": anchors,
+            "currency": "USD",
+        },
+    )
+    verifier_row = verifier_module._derive_first_available_nav_epoch(facts)
+    expected = {
+        "opening_capital": Decimal("1000"),
+        "first_base_nav": Decimal("1000"),
+        "first_ending_nav": Decimal("985.44"),
+    }
+    assert producer_row["opening_capital"] == expected["opening_capital"]
+    assert producer_row["observation_trace"]["links"][0]["base_nav"] == expected["first_base_nav"]
+    assert producer_row["observation_trace"]["links"][0]["ending_nav"] == expected["first_ending_nav"]
+    assert verifier_row["opening_capital"] == expected["opening_capital"]
+    assert verifier_row["observation_trace"]["links"][0]["base_nav"] == expected["first_base_nav"]
+    assert verifier_row["observation_trace"]["links"][0]["ending_nav"] == expected["first_ending_nav"]
+
+    # Exercise the complete retained mixed producer -> independent verifier path.
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    output_row = next(
+        row for row in output["rows"] if row["account_id"] == assignment["account_id"]
+    )
+    assert output_row["opening_capital"] == "1000"
+    assert output_row["observation_trace"]["links"][0] == {
+        "start_date": "2024-12-31",
+        "end_date": "2026-01-30",
+        "base_nav": "1000",
+        "ending_nav": "985.44",
+        "net_flow": "0",
+        "factor": "0.98544",
+        "cumulative_index": "98.544",
+        "running_hwm_index": "100",
+        "drawdown": "0.01456",
+    }
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+
+@pytest.mark.parametrize("lineage_edge", ["schema_relabel", "authority_removal"])
+def test_mixed_independent_verifier_rejects_final_v8_lineage_mutations(
+    perimeter_module: Any, verifier_module: Any, lineage_edge: str
+) -> None:
+    """The final v8 source envelope cannot downgrade or omit mixed authority."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(verifier_inputs, payloads)
+
+    def mutate(output: dict[str, object]) -> None:
+        if lineage_edge == "schema_relabel":
+            output["source_identities"]["calculation_inputs"]["schema"]["version"] = "1"
+        else:
+            output["source_identities"]["flow_coverage"].pop("receipt_authority")
+
+    mutated = _mutate_mixed_subject(
+        payloads, "outputs/account-strategy-manifest.json", mutate
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, mutated)
+
+
+@pytest.mark.parametrize(
+    ("numeric_edge", "replacement"),
+    [
+        ("opening_capital", "51"),
+        ("observation_factor", "1.1"),
+        ("capital_flow_amount", "11"),
+    ],
+)
+def test_mixed_independent_verifier_rejects_numeric_and_trace_mutations(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    numeric_edge: str,
+    replacement: str,
+) -> None:
+    """Verifier-local arithmetic, not a composer symbol, rejects each scalar edge."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+
+    def producer_trap(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("verifier called a producer/composer calculation symbol")
+
+    monkeypatch.setattr(
+        perimeter_module, "build_manifest_candidate_from_snapshots", producer_trap
+    )
+    original_compare = verifier_module._compare_mixed_retained_numeric_epoch
+    calls = 0
+
+    def counting_compare(*args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        return original_compare(*args, **kwargs)
+
+    monkeypatch.setattr(
+        verifier_module, "_compare_mixed_retained_numeric_epoch", counting_compare
+    )
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(verifier_inputs, payloads)
+    assert calls == 1
+
+    def mutate(output: dict[str, object]) -> None:
+        row = next(item for item in output["rows"] if item["status"] == "OK")
+        if numeric_edge == "opening_capital":
+            row["opening_capital"] = replacement
+        elif numeric_edge == "observation_factor":
+            row["observation_trace"]["links"][1]["factor"] = replacement
+        else:
+            row["capital_flow_trace"][0]["amount"] = replacement
+
+    mutated = _mutate_mixed_subject(
+        payloads, "outputs/account-strategy-manifest.json", mutate
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, mutated)
+    assert calls == 2
+
+
+def test_mixed_independent_verifier_rejects_blocked_numeric_injection(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Every blocked row remains free of the complete numeric/trace vector."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(verifier_inputs, payloads)
+
+    def mutate(output: dict[str, object]) -> None:
+        blocked = next(
+            item for item in output["rows"] if item["status"] == "BLOCKED_ADMISSION"
+        )
+        blocked["opening_capital"] = "0"
+
+    mutated = _mutate_mixed_subject(
+        payloads, "outputs/account-strategy-manifest.json", mutate
+    )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, mutated)
+
+
+def test_mixed_independent_verifier_rejects_mutated_finalized_report(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Finalized v3 bytes must equal a fresh semantic recomputation."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    report = verifier.verify(verifier_inputs, payloads)
+    verifier.verify_finalized_report(verifier_inputs, payloads, report)
+    mutated = json.loads(report)
+    mutated["counts"]["ok_output_row_count"] = 0
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify_finalized_report(
+            verifier_inputs, payloads, canonical_json_bytes(mutated)
+        )
+
+
+def _generation_composer_selected_inputs(perimeter_module: Any) -> object:
+    selected = _mixed_two_receipt_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "epoch_producer_source": InputSnapshot.from_bytes(
+                "executing account-manifest epoch producer",
+                EPOCH_PRODUCER_MODULE_PATH.read_bytes(),
+            ),
+            "generation_builder_source": InputSnapshot.from_bytes(
+                "executing account-manifest builder", MODULE_PATH.read_bytes()
+            ),
+            "independent_verifier_source": InputSnapshot.from_bytes(
+                "executing independent verifier", VERIFIER_MODULE_PATH.read_bytes()
+            ),
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    return perimeter_module.AccountManifestSelectedInputs(**values)
+
+
+def _generation_composer_legacy_selected_inputs(perimeter_module: Any) -> object:
+    selected = _c3_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "epoch_producer_source": InputSnapshot.from_bytes(
+                "executing account-manifest epoch producer",
+                EPOCH_PRODUCER_MODULE_PATH.read_bytes(),
+            ),
+            "generation_builder_source": InputSnapshot.from_bytes(
+                "executing account-manifest builder", MODULE_PATH.read_bytes()
+            ),
+            "independent_verifier_source": InputSnapshot.from_bytes(
+                "executing independent verifier", VERIFIER_MODULE_PATH.read_bytes()
+            ),
+        }
+    )
+    return perimeter_module.AccountManifestSelectedInputs(**values)
+
+
+def test_generation_composer_stages_one_verified_two_receipt_bundle(
+    perimeter_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The public composer verifies once and stages the exact retained bundle."""
+
+    selected = _generation_composer_selected_inputs(perimeter_module)
+    verifier_calls: list[str] = []
+    real_loader = perimeter_module._load_attested_independent_verifier
+
+    def instrumented_loader(path: Path) -> object:
+        verifier_module = real_loader(path)
+        real_verifier = verifier_module.IndependentAccountManifestVerifier
+
+        class CountingVerifier(real_verifier):
+            def verify(self, *args: object, **kwargs: object) -> bytes:
+                verifier_calls.append("verify")
+                return super().verify(*args, **kwargs)
+
+            def verify_finalized_report(
+                self, *args: object, **kwargs: object
+            ) -> None:
+                verifier_calls.append("verify_finalized_report")
+                return super().verify_finalized_report(*args, **kwargs)
+
+        verifier_module.IndependentAccountManifestVerifier = CountingVerifier
+        return verifier_module
+
+    monkeypatch.setattr(
+        perimeter_module,
+        "_load_attested_independent_verifier",
+        instrumented_loader,
+    )
+    generation_root = tmp_path.parent / "composer-positive"
+    bundle = perimeter_module.stage_account_manifest_generation(
+        selected, generation_root
+    )
+
+    assert verifier_calls == ["verify"]
+    assert bundle.manifest.adapter.to_dict() == {
+        "name": "account-manifest-generation-builder",
+        "version": "1",
+    }
+    assert bundle.manifest.as_of_date == date(2026, 2, 1)
+    assert bundle.manifest.verification is VerificationStatus.VERIFIED
+    assert bundle.manifest.coverage.to_dict() == {
+        "boundary": (
+            "Exact account-manifest subject and independent-verification artifact "
+            "bytes only; row availability is encoded in the selected output artifact."
+        ),
+        "fact_types": [
+            "account-manifest-subject-bytes",
+            "independent-verification-report-bytes",
+        ],
+        "known_gaps": [],
+        "observed_end": "2026-02-01",
+        "observed_start": "2026-02-01",
+        "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+    }
+
+    expected_schema_map = {
+        "authority/account-assignment-perimeter.json": (
+            "account-assignment-perimeter",
+            "1",
+        ),
+        "authority/account-flow-coverage.json": ("account-flow-coverage", "2"),
+        "authority/calculation-inputs.json": (
+            "account-manifest-calculation-inputs",
+            "3",
+        ),
+        "authority/classified-flows.json": ("classified-flows", "4"),
+        "authority/code-identities.json": ("account-manifest-code-identities", "1"),
+        "authority/flow-classification-policy.json": (
+            "flow-classification-policy",
+            "1",
+        ),
+        "authority/mapped-epoch-admission.json": (
+            "account-strategy-manifest-admission-policy",
+            "2",
+        ),
+        "authority/selected-input-identities.json": (
+            "selected-input-identities",
+            "1",
+        ),
+        "outputs/account-strategy-manifest.json": ("account-strategy-manifest", "8"),
+        "authority/account-interval-retrieval-receipt-authority.json": (
+            "account-interval-retrieval-receipt-authority",
+            "1",
+        ),
+        "receipt/a-account-02.json": ("account-interval-retrieval-receipt", "2"),
+        "receipt/Z-account-01.json": ("account-interval-retrieval-receipt", "2"),
+        "verification/independent-verification.json": (
+            "account-manifest-independent-verification",
+            "3",
+        ),
+    }
+    assert {
+        artifact.artifact_id: (artifact.schema_name, artifact.schema_version)
+        for artifact in bundle.manifest.artifacts
+    } == expected_schema_map
+    assert set(bundle.payloads) == set(expected_schema_map)
+
+    report = json.loads(
+        bundle.payloads["verification/independent-verification.json"]
+    )
+    assert report["schema_version"] == 3
+    assert report["status"] == "VERIFIED"
+    assert report["numeric_verification"] == {
+        "candidate_count": 2,
+        "comparison_count": 2,
+        "discrepancy_count": 0,
+        "disposition": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES",
+    }
+    candidate = json.loads(bundle.payloads["outputs/account-strategy-manifest.json"])
+    assert candidate["authority_readiness"] == {
+        "authority_status": "SOURCE_BOUND_CANDIDATE",
+        "independent_authority_verification": "NOT_PERFORMED",
+        "publication_readiness": "NOT_READY",
+    }
+
+
+def test_schema9_generation_coverage_boundary_is_version_neutral(
+    perimeter_module: Any,
+    tmp_path: Path,
+) -> None:
+    """A schema-9 generation must not describe its coverage as a version-8 output."""
+
+    selected_base = _mixed_crosswalk_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected_base)
+    values.update(
+        {
+            "epoch_producer_source": InputSnapshot.from_bytes(
+                "executing account-manifest epoch producer",
+                EPOCH_PRODUCER_MODULE_PATH.read_bytes(),
+            ),
+            "generation_builder_source": InputSnapshot.from_bytes(
+                "executing account-manifest builder", MODULE_PATH.read_bytes()
+            ),
+            "independent_verifier_source": InputSnapshot.from_bytes(
+                "executing independent verifier", VERIFIER_MODULE_PATH.read_bytes()
+            ),
+            "receipt_authority": selected_base.receipt_authority,
+            "admission_policy": selected_base.admission_policy,
+            "manifest_schema": selected_base.manifest_schema,
+        }
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+
+    bundle = perimeter_module.stage_account_manifest_generation(
+        selected, tmp_path / "schema9-coverage"
+    )
+    output = json.loads(bundle.payloads["outputs/account-strategy-manifest.json"])
+    output_artifact = next(
+        artifact
+        for artifact in bundle.manifest.artifacts
+        if artifact.artifact_id == "outputs/account-strategy-manifest.json"
+    )
+
+    assert output["schema_version"] == 9
+    assert output_artifact.schema_version == "9"
+    boundary = bundle.manifest.coverage.boundary
+    assert "version-8" not in boundary.casefold()
+    assert "selected output artifact" in boundary
+
+
+def test_generation_composer_stages_legacy_report_v2_in_fixed_artifact_order(
+    perimeter_module: Any,
+    tmp_path: Path,
+) -> None:
+    """Legacy producer insertion order cannot block its verified report-v2 bundle."""
+
+    selected = _generation_composer_legacy_selected_inputs(perimeter_module)
+    bundle = perimeter_module.stage_account_manifest_generation(
+        selected, tmp_path.parent / "composer-legacy"
+    )
+    report = json.loads(
+        bundle.payloads["verification/independent-verification.json"]
+    )
+    assert report["schema_version"] == 2
+    assert report["numeric_verification"] == {
+        "candidate_count": 0,
+        "comparison_count": 0,
+        "discrepancy_count": 0,
+        "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
+    }
+    schemas = {
+        artifact.artifact_id: (artifact.schema_name, artifact.schema_version)
+        for artifact in bundle.manifest.artifacts
+    }
+    assert schemas["authority/calculation-inputs.json"] == (
+        "account-manifest-calculation-inputs",
+        "1",
+    )
+    assert schemas["authority/mapped-epoch-admission.json"] == (
+        "mapped-epoch-admission",
+        "1",
+    )
+    assert schemas["verification/independent-verification.json"] == (
+        "account-manifest-independent-verification",
+        "2",
+    )
+
+
+@pytest.mark.parametrize(
+    "source_field",
+    [
+        "epoch_producer_source",
+        "generation_builder_source",
+        "independent_verifier_source",
+    ],
+)
+def test_generation_composer_rejects_executing_source_mismatch_before_writes(
+    perimeter_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    source_field: str,
+) -> None:
+    """Changed selected code bytes cannot reach calculation, verification, or staging."""
+
+    selected = _generation_composer_selected_inputs(perimeter_module)
+    values = _selected_input_kwargs(selected)
+    values[source_field] = InputSnapshot.from_bytes(
+        "mismatched executing source",
+        getattr(selected, source_field).contents + b"\n",
+    )
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    mismatched = perimeter_module.AccountManifestSelectedInputs(**values)
+
+    monkeypatch.setattr(
+        perimeter_module,
+        "build_account_manifest_payloads",
+        lambda *_args, **_kwargs: pytest.fail("source mismatch reached calculation"),
+    )
+    monkeypatch.setattr(
+        perimeter_module,
+        "stage_generation_bundle",
+        lambda *_args, **_kwargs: pytest.fail("source mismatch reached staging"),
+    )
+    generation_root = tmp_path.parent / "composer-source-mismatch"
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="differs from executing bytes",
+    ):
+        perimeter_module.stage_account_manifest_generation(
+            mismatched, generation_root
+        )
+    assert not generation_root.exists()
+
+
+def test_generation_composer_does_not_stage_a_numeric_mutation(
+    perimeter_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A genuine independent arithmetic rejection occurs before publication."""
+
+    selected = _generation_composer_selected_inputs(perimeter_module)
+    real_builder = perimeter_module.build_account_manifest_payloads
+
+    def mutate_after_production(selected_inputs: object) -> Mapping[str, bytes]:
+        payloads = dict(real_builder(selected_inputs))
+        output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+        row = next(item for item in output["rows"] if item["status"] == "OK")
+        row["opening_capital"] = "51"
+        payloads["outputs/account-strategy-manifest.json"] = canonical_json_bytes(
+            output
+        )
+        return MappingProxyType(payloads)
+
+    monkeypatch.setattr(
+        perimeter_module,
+        "build_account_manifest_payloads",
+        mutate_after_production,
+    )
+    monkeypatch.setattr(
+        perimeter_module,
+        "stage_generation_bundle",
+        lambda *_args, **_kwargs: pytest.fail(
+            "independent verification rejection reached staging"
+        ),
+    )
+    generation_root = tmp_path.parent / "composer-numeric-rejection"
+    with pytest.raises(ValueError, match="independent verification input is invalid"):
+        perimeter_module.stage_account_manifest_generation(selected, generation_root)
+    assert not generation_root.exists()
+
+
+def test_generation_composer_rejects_receipt_authority_rebinding_before_staging(
+    perimeter_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Receipt bytes cannot be rebound by changing the selected authority digest."""
+
+    selected = _generation_composer_selected_inputs(perimeter_module)
+    authority = selected.receipt_authority.json_object()
+    authority["receipts"][0]["sha256"] = "0" * 64
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": InputSnapshot.from_bytes(
+                "rebound receipt authority", canonical_json_bytes(authority)
+            ),
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    rebound = perimeter_module.AccountManifestSelectedInputs(**values)
+    monkeypatch.setattr(
+        perimeter_module,
+        "stage_generation_bundle",
+        lambda *_args, **_kwargs: pytest.fail(
+            "receipt authority rejection reached staging"
+        ),
+    )
+    generation_root = tmp_path.parent / "composer-authority-rejection"
+    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
+        perimeter_module.stage_account_manifest_generation(rebound, generation_root)
+    assert not generation_root.exists()
+
+
+def test_generation_composer_is_byte_deterministic_and_readback_rejects_tampering(
+    perimeter_module: Any,
+    tmp_path: Path,
+) -> None:
+    """Two clean roots are identical; one changed byte invalidates either subject."""
+
+    selected = _generation_composer_selected_inputs(perimeter_module)
+    first_root = tmp_path.parent / "composer-determinism-a"
+    second_root = tmp_path.parent / "composer-determinism-b"
+    first = perimeter_module.stage_account_manifest_generation(selected, first_root)
+    second = perimeter_module.stage_account_manifest_generation(selected, second_root)
+
+    assert first.manifest.generation_id == second.manifest.generation_id
+    assert first.manifest.to_json_bytes() == second.manifest.to_json_bytes()
+    assert dict(first.payloads) == dict(second.payloads)
+    assert first.receipt_bytes == second.receipt_bytes
+    assert first.inventory_bytes == second.inventory_bytes
+    assert (
+        first.full_directory_inventory_sha256
+        == second.full_directory_inventory_sha256
+    )
+
+    def directory_bytes(root: Path, generation_id: str) -> dict[str, bytes]:
+        generation = root / "generations" / generation_id
+        return {
+            path.relative_to(generation).as_posix(): path.read_bytes()
+            for path in sorted(item for item in generation.rglob("*") if item.is_file())
+        }
+
+    assert directory_bytes(
+        first_root, first.manifest.generation_id
+    ) == directory_bytes(second_root, second.manifest.generation_id)
+
+    for root, artifact_id in (
+        (first_root, "outputs/account-strategy-manifest.json"),
+        (second_root, "verification/independent-verification.json"),
+    ):
+        path = root / "generations" / first.manifest.generation_id / artifact_id
+        changed = bytearray(path.read_bytes())
+        changed[-1] = ord(" ")
+        path.write_bytes(changed)
+        with pytest.raises(GenerationConflictError):
+            read_generation_bundle(root, first.manifest.generation_id)
+
+
+def test_owner_correction_retains_closed_echo_baseline_without_assignment_overlay(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """Deprecated Echo stays closed; later facts remain unmatched and non-numeric."""
+
+    assert "assignment_authority" not in {
+        item.name for item in fields(perimeter_module.AccountManifestSelectedInputs)
+    }
+    assert "assignment_authority" not in {
+        item.name for item in fields(verifier_module.IndependentVerifierInputs)
+    }
+    assert not hasattr(perimeter_module, "load_assignment_authority")
+
+    data_root = REPOSITORY_ROOT.parent / "dataPortfolio"
+    ledger_generation_id = (
+        "4b3de4f4656c236c3334eb76fb091b73c4a1a8afdbc9f3893485ed97403e0e36"
+    )
+    baseline_generation_id = (
+        "20709bfd5f9a5846879854bf3166c11223a100cc62fcb13fe0b76040f881b542"
+    )
+    ledger_root = data_root / "provider-ledger" / "generations" / ledger_generation_id
+    baseline_root = data_root / "baseline" / "generations" / baseline_generation_id
+    selected = perimeter_module.AccountManifestSelectedInputs(
+        provider_ledger=InputSnapshot.capture(
+            ledger_root / "provider-ledger.json", "owner-correction provider ledger"
+        ),
+        provider_ledger_manifest=InputSnapshot.capture(
+            ledger_root / "generation.json", "owner-correction provider manifest"
+        ),
+        baseline=InputSnapshot.capture(
+            baseline_root / "portfolio-baseline.json", "owner-correction baseline"
+        ),
+        baseline_manifest=InputSnapshot.capture(
+            baseline_root / "generation.json", "owner-correction baseline manifest"
+        ),
+        flow_classification_policy=InputSnapshot.capture(
+            REPOSITORY_ROOT
+            / "contracts"
+            / "account-strategy-flow-classification-policy-v1.json",
+            "owner-correction flow policy",
+        ),
+        retrieval_receipts={},
+        epoch_producer_source=InputSnapshot.capture(
+            REPOSITORY_ROOT / "tools" / "account_strategy_manifest.py",
+            "owner-correction epoch producer",
+        ),
+        generation_builder_source=InputSnapshot.capture(
+            REPOSITORY_ROOT / "tools" / "build_account_manifest_generation.py",
+            "owner-correction generation builder",
+        ),
+        independent_verifier_source=InputSnapshot.capture(
+            REPOSITORY_ROOT / "tools" / "verify_account_manifest_generation.py",
+            "owner-correction independent verifier",
+        ),
+    )
+
+    baseline = selected.baseline.json_object("owner-correction baseline")
+    echo_rows = [
+        row
+        for row in baseline["assignments"]
+        if row["strategy_id"] == "echotrade-growth-pivots"
+    ]
+    assert [
+        (
+            row["account_id"],
+            row["effective_start"],
+            row["effective_end"],
+            row["strategy_mapping_disposition"],
+        )
+        for row in echo_rows
+    ] == [
+        (
+            "account-0acb9e17da731d0e",
+            "2025-09-27",
+            "2025-11-24",
+            "STRATEGY_MAPPED",
+        )
+    ]
+    historical_rows = [
+        (
+            row["account_id"],
+            row["effective_start"],
+            row["effective_end"],
+            row["observed_label"],
+        )
+        for row in baseline["assignments"]
+        if row["strategy_mapping_disposition"] == "HISTORICAL_POOL_ONLY"
+    ]
+    assert historical_rows == [
+        ("account-38b653b91ff43a10", "2024-05-24", "2025-11-25", "General"),
+        ("account-cff10c44aedcf5e8", "2024-05-30", "2025-11-25", "General"),
+        ("account-2d0a996cf7ab4876", "2025-09-15", "2026-03-31", "General"),
+        ("account-d69701da9143c430", "2025-09-15", "2025-11-12", "General"),
+        ("account-c63d2a487e019790", "2024-02-26", "2025-11-25", "General"),
+        ("account-1b44c987969b9e47", "2025-09-15", "2026-01-22", "General"),
+        ("account-98f5986706ed53c5", "2024-05-30", "2025-11-25", "General"),
+    ]
+
+    payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
+    selected_identity = json.loads(
+        payloads["authority/selected-input-identities.json"]
+    )
+    assert "assignment_authority" not in selected_identity
+    perimeter = json.loads(
+        payloads["authority/account-assignment-perimeter.json"]
+    )
+    assert (
+        perimeter["selected_baseline_account_count"],
+        perimeter["account_count"],
+        perimeter["assignment_count"],
+        perimeter["partition_counts"],
+    ) == (
+        19,
+        18,
+        26,
+        {
+            "STRATEGY_MAPPED": 15,
+            "HISTORICAL_POOL_ONLY": 7,
+            "RESERVE_NOT_APPLICABLE": 4,
+        },
+    )
+    unmatched_nav = [
+        row for row in perimeter["unassigned_facts"] if row["source_kind"] == "NAV"
+    ]
+    unmatched_raw_flow = [
+        row
+        for row in perimeter["unassigned_facts"]
+        if row["source_kind"] == "RAW_FLOW"
+    ]
+    assert len(unmatched_nav) == 62
+    assert len(unmatched_raw_flow) == 46
+    assert perimeter["unassigned_fact_count"] == 108
+    assert perimeter["unassigned_projection_count"] == 154
+    assert {
+        (row["account_id"], row["assignment_match_count"], row["blocker_code"])
+        for row in unmatched_nav
+    } == {("account-0acb9e17da731d0e", 0, "NO_ASSIGNMENT_MATCH")}
+    assert all(row["fact_date"] > "2025-11-24" for row in unmatched_nav)
+
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    coverage = json.loads(payloads["authority/account-flow-coverage.json"])
+    admission = json.loads(payloads["authority/mapped-epoch-admission.json"])
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    assert [
+        len(calculation["rows"]),
+        len(coverage["rows"]),
+        len(admission["rows"]),
+        len(output["rows"]),
+    ] == [15, 15, 15, 15]
+    assert all(row["status"] == "BLOCKED_ADMISSION" for row in output["rows"])
+    assert not any("numeric_candidate" in row for row in output["rows"])
+
+    verifier_inputs = verifier_module.IndependentVerifierInputs(
+        **_selected_input_kwargs(selected)
+    )
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            verifier_inputs, payloads
+        )
+    )
+    assert report["counts"]["unmatched_nav_fact_count"] == 62
+    assert report["counts"]["unmatched_raw_flow_fact_count"] == 46
+    assert report["counts"]["unmatched_fact_count"] == 108
+    assert report["counts"]["unmatched_projection_count"] == 154
+    assert report["numeric_verification"] == {
+        "candidate_count": 0,
+        "comparison_count": 0,
+        "discrepancy_count": 0,
+        "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
+    }

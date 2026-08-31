@@ -33,12 +33,6 @@
       "label": "Directional crypto",
       "members": ["Robuxio Crypto (High Sharpe High Vol)"],
       "rationale": "The accepted provider-live sleeve is governed as a distinct directional crypto risk driver."
-    },
-    {
-      "cluster_id": "DE_MINIMIS_OPERATIONAL",
-      "label": "De-minimis operational remnants",
-      "members": ["[Composer] - The Holy Grail (Buy Copy)", "Growth at Market Pivot Points [EchoTrade]"],
-      "rationale": "The sleeves remain visible and receive one explicit aggregate budget; no missing-history diversification credit is inferred."
     }
   ]
 }

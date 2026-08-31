@@ -54,6 +54,28 @@ def _contract(path: Path) -> None:
     )
 
 
+def _payload(path: Path) -> dict[str, object]:
+    loaded = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(loaded, dict):
+        raise AssertionError("synthetic contract must be an object")
+    return loaded
+
+
+def _strategy(payload: dict[str, object], strategy_id: str) -> dict[str, object]:
+    strategies = payload["strategies"]
+    if not isinstance(strategies, list):
+        raise AssertionError("synthetic strategies must be a list")
+    return next(
+        row
+        for row in strategies
+        if isinstance(row, dict) and row.get("strategy_id") == strategy_id
+    )
+
+
+def _write_payload(path: Path, payload: dict[str, object]) -> None:
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
 def test_implementation_reconciliation_contract_accepts_exact_three_strategy_boundary(
     tmp_path: Path,
 ) -> None:
@@ -82,4 +104,97 @@ def test_implementation_reconciliation_contract_rejects_future_artifact(
     with pytest.raises(reporter.ReportValidationError, match="future-dated"):
         reporter._implementation_reconciliation_contract(
             path, portfolio_as_of="2026-08-02"
+        )
+
+
+def test_implementation_reconciliation_contract_rejects_future_observed_end(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "implementation.json"
+    _contract(path)
+    payload = _payload(path)
+    metrics = _strategy(payload, "p123-ai-factor")["return_reconciliation"]
+    assert isinstance(metrics, dict)
+    metrics["observed_end"] = "2026-08-04"
+    _write_payload(path, payload)
+
+    with pytest.raises(reporter.ReportValidationError, match="future-dated"):
+        reporter._implementation_reconciliation_contract(
+            path, portfolio_as_of="2026-08-03"
+        )
+
+
+def test_implementation_reconciliation_contract_rejects_future_observed_start(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "implementation.json"
+    _contract(path)
+    payload = _payload(path)
+    metrics = _strategy(payload, "p123-ai-factor")["return_reconciliation"]
+    assert isinstance(metrics, dict)
+    metrics["observed_start"] = "2026-08-04"
+    metrics["observed_end"] = "2026-08-04"
+    _write_payload(path, payload)
+
+    with pytest.raises(reporter.ReportValidationError, match="future-dated"):
+        reporter._implementation_reconciliation_contract(
+            path, portfolio_as_of="2026-08-03"
+        )
+
+
+def test_implementation_reconciliation_contract_rejects_nested_future_boundary(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "implementation.json"
+    _contract(path)
+    payload = _payload(path)
+    strategy = _strategy(payload, "grizzlybears-vtma")
+    strategy["holding_state_reconciliation"] = {
+        "observed_end": "2026-08-04",
+        "observed_start": "2026-08-01",
+    }
+    _write_payload(path, payload)
+
+    with pytest.raises(reporter.ReportValidationError, match="future-dated"):
+        reporter._implementation_reconciliation_contract(
+            path, portfolio_as_of="2026-08-03"
+        )
+
+
+def test_implementation_reconciliation_contract_rejects_reversed_nested_interval(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "implementation.json"
+    _contract(path)
+    payload = _payload(path)
+    strategy = _strategy(payload, "tt-portfolio")
+    strategy["return_window_decomposition"] = {
+        "from_complete_allocation_history": {
+            "observed_end": "2026-08-01",
+            "observed_start": "2026-08-02",
+        }
+    }
+    _write_payload(path, payload)
+
+    with pytest.raises(reporter.ReportValidationError, match="reversed"):
+        reporter._implementation_reconciliation_contract(
+            path, portfolio_as_of="2026-08-03"
+        )
+
+
+def test_implementation_reconciliation_contract_uses_stricter_reconciliation_boundary(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "implementation.json"
+    _contract(path)
+    payload = _payload(path)
+    payload["as_of_date"] = "2026-08-02"
+    metrics = _strategy(payload, "p123-ai-factor")["return_reconciliation"]
+    assert isinstance(metrics, dict)
+    metrics["observed_end"] = "2026-08-03"
+    _write_payload(path, payload)
+
+    with pytest.raises(reporter.ReportValidationError, match="future-dated"):
+        reporter._implementation_reconciliation_contract(
+            path, portfolio_as_of="2026-08-03"
         )

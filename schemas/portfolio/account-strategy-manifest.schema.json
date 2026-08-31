@@ -16,7 +16,8 @@
     "rows"
   ],
   "properties": {
-    "schema_version": {"enum": [7, 8]},
+    "schema_version": {"enum": [7, 8, 9]},
+    "calculation_cutoff_date": {"$ref": "#/$defs/date"},
     "artifact": {"const": "account-strategy-manifest"},
     "accounting_currency": {"type": "string", "pattern": "^[A-Z]{3}$"},
     "authority_readiness": {
@@ -65,7 +66,10 @@
           {"required": ["code_identities"]}
         ]}},
         {"properties": {"classified_flows": {"properties": {"schema_version": {"const": 3}}}}}
-      ]}}}
+      ]}, "rows": {"items": {"properties": {
+        "capital_flow_trace": {"$ref": "#/$defs/capital_flow_trace"},
+        "opening_basis": {"enum": ["FIRST_AVAILABLE_NAV", "PREDECESSOR_CLOSING_NAV"]}
+      }}}}}
     },
     {
       "if": {"properties": {"schema_version": {"const": 8}}, "required": ["schema_version"]},
@@ -75,13 +79,75 @@
           "classified_flows": {"properties": {"schema_version": {"const": 4}, "artifact": {"properties": {"artifact_id": {"const": "authority/classified-flows.json"}, "schema": {"properties": {"name": {"const": "classified-flows"}, "version": {"const": "4"}}}}}}},
           "selected_inputs": {"properties": {"artifact_id": {"const": "authority/selected-input-identities.json"}, "schema": {"properties": {"name": {"const": "selected-input-identities"}, "version": {"const": "1"}}}}},
           "account_assignment_perimeter": {"properties": {"artifact_id": {"const": "authority/account-assignment-perimeter.json"}, "schema": {"properties": {"name": {"const": "account-assignment-perimeter"}, "version": {"const": "1"}}}}},
-          "calculation_inputs": {"properties": {"artifact_id": {"const": "authority/calculation-inputs.json"}, "schema": {"properties": {"name": {"const": "account-manifest-calculation-inputs"}, "version": {"const": "1"}}}}},
+          "calculation_inputs": {"properties": {"artifact_id": {"const": "authority/calculation-inputs.json"}, "schema": {"properties": {"name": {"const": "account-manifest-calculation-inputs"}, "version": {"enum": ["1", "3"]}}}}},
           "code_identities": {"properties": {"artifact_id": {"const": "authority/code-identities.json"}, "schema": {"properties": {"name": {"const": "account-manifest-code-identities"}, "version": {"const": "1"}}}}},
           "flow_classification_policy": {"properties": {"artifact": {"properties": {"artifact_id": {"const": "authority/flow-classification-policy.json"}, "schema": {"properties": {"name": {"const": "flow-classification-policy"}, "version": {"const": "1"}}}}}}},
           "flow_coverage": {"properties": {"artifact": {"properties": {"artifact_id": {"const": "authority/account-flow-coverage.json"}, "schema": {"properties": {"name": {"const": "account-flow-coverage"}, "version": {"const": "2"}}}}}}},
-          "admission_policy": {"properties": {"artifact": {"properties": {"artifact_id": {"const": "authority/mapped-epoch-admission.json"}, "schema": {"properties": {"name": {"const": "mapped-epoch-admission"}, "version": {"const": "1"}}}}}}}
+          "admission_policy": {"properties": {"artifact": {"properties": {"artifact_id": {"const": "authority/mapped-epoch-admission.json"}}}}}
         }
-      }}}
+      }, "rows": {"items": {"properties": {
+        "capital_flow_trace": {"$ref": "#/$defs/capital_flow_trace"},
+        "opening_basis": {"enum": ["FIRST_AVAILABLE_NAV", "PREDECESSOR_CLOSING_NAV"]}
+      }}}}}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 9}}, "required": ["schema_version"]},
+      "then": {"required": ["calculation_cutoff_date"], "properties": {
+        "source_identities": {
+          "properties": {
+            "classified_flows": {"properties": {"schema_version": {"enum": [4, 5]}, "artifact": {"properties": {"artifact_id": {"enum": ["authority/calculation-classified-flows.json", "authority/classified-flows.json"]}, "schema": {"properties": {"name": {"const": "classified-flows"}, "version": {"enum": ["4", "5"]}}}}}}},
+            "selected_inputs": {"properties": {"artifact_id": {"const": "authority/selected-input-identities.json"}, "schema": {"properties": {"name": {"const": "selected-input-identities"}, "version": {"const": "1"}}}}},
+            "account_assignment_perimeter": {"properties": {"artifact_id": {"const": "authority/account-assignment-perimeter.json"}, "schema": {"properties": {"name": {"const": "account-assignment-perimeter"}, "version": {"const": "1"}}}}},
+            "calculation_inputs": {"properties": {"artifact_id": {"const": "authority/calculation-inputs.json"}, "schema": {"properties": {"name": {"const": "account-manifest-calculation-inputs"}, "version": {"const": "4"}}}}},
+            "code_identities": {"properties": {"artifact_id": {"const": "authority/code-identities.json"}, "schema": {"properties": {"name": {"const": "account-manifest-code-identities"}, "version": {"const": "1"}}}}},
+            "admission_policy": {"properties": {"policy_id": {"const": "MAPPED_EPOCH_ADMISSION_V2"}, "policy_version": {"const": "2"}}}
+          }
+        },
+        "rows": {"items": {"properties": {
+          "capital_flow_trace": {"$ref": "#/$defs/capital_flow_trace_v9"},
+          "opening_basis": {"enum": ["FIRST_AVAILABLE_NAV", "PREDECESSOR_CLOSING_NAV", "PROVIDER_CAPITAL_ANCHOR"]}
+        }}}
+      }}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 9}, "source_identities": {"required": ["selected_inputs"]}}, "required": ["schema_version", "source_identities"]},
+      "then": {"properties": {"source_identities": {"required": ["selected_inputs", "account_assignment_perimeter", "calculation_inputs", "code_identities"]}}}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 8}, "source_identities": {"properties": {"flow_coverage": {"required": ["receipt_authority"]}}}}, "required": ["schema_version", "source_identities"]},
+      "then": {"properties": {"source_identities": {"properties": {
+        "calculation_inputs": {"properties": {"schema": {"properties": {"version": {"const": "3"}}}}},
+        "admission_policy": {"properties": {"policy_id": {"const": "MAPPED_EPOCH_ADMISSION_V2"}, "policy_version": {"const": "2"}, "artifact": {"properties": {"schema": {"properties": {"name": {"const": "account-strategy-manifest-admission-policy"}, "version": {"const": "2"}}}}}}}
+      }}}}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 8}, "source_identities": {"properties": {"flow_coverage": {"not": {"required": ["receipt_authority"]}}}}}, "required": ["schema_version", "source_identities"]},
+      "then": {"properties": {"source_identities": {"properties": {
+        "calculation_inputs": {"properties": {"schema": {"properties": {"version": {"const": "1"}}}}},
+        "admission_policy": {"properties": {"artifact": {"properties": {"schema": {"properties": {"name": {"const": "mapped-epoch-admission"}, "version": {"const": "1"}}}}}}}
+      }}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "rows": {
+            "contains": {
+              "type": "object",
+              "required": ["status"],
+              "properties": {"status": {"const": "OK"}}
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "source_identities": {
+            "properties": {
+              "flow_coverage": {"required": ["receipt_authority"]}
+            }
+          }
+        }
+      }
     }
   ],
   "$defs": {
@@ -150,7 +216,7 @@
           "required": ["artifact", "schema_version", "ledger_identity", "classification_policy"],
           "properties": {
             "artifact": {"$ref": "#/$defs/source_artifact"},
-            "schema_version": {"enum": [3, 4]},
+            "schema_version": {"enum": [3, 4, 5]},
             "ledger_identity": {"$ref": "#/$defs/ledger_generation_source"},
             "classification_policy": {
               "type": "object",
@@ -191,7 +257,23 @@
           "properties": {
             "artifact": {"$ref": "#/$defs/source_artifact"},
             "ledger_identity": {"$ref": "#/$defs/ledger_generation_source"},
-            "classified_flows_artifact": {"$ref": "#/$defs/source_artifact"}
+            "classified_flows_artifact": {"$ref": "#/$defs/source_artifact"},
+            "receipt_authority": {
+              "allOf": [
+                {"$ref": "#/$defs/source_artifact"},
+                {
+                  "properties": {
+                    "artifact_id": {"const": "authority/account-interval-retrieval-receipt-authority.json"},
+                    "schema": {
+                      "properties": {
+                        "name": {"const": "account-interval-retrieval-receipt-authority"},
+                        "version": {"const": "1"}
+                      }
+                    }
+                  }
+                }
+              ]
+            }
           }
         },
         "admission_policy": {
@@ -271,6 +353,20 @@
         }
       }
     },
+    "capital_flow_trace_v9": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["class", "event_date", "nav_recognition_date", "amount"],
+        "properties": {
+          "class": {"enum": ["EXTERNAL_IN", "EXTERNAL_OUT", "INTERNAL_IN", "INTERNAL_OUT"]},
+          "event_date": {"$ref": "#/$defs/date"},
+          "nav_recognition_date": {"$ref": "#/$defs/date"},
+          "amount": {"$ref": "#/$defs/decimal"}
+        }
+      }
+    },
     "nav_observation_trace": {
       "type": "array",
       "minItems": 3,
@@ -302,6 +398,8 @@
       ],
       "properties": {
         "account_id": {"type": "string", "minLength": 1},
+        "account_label": {"type": "string", "minLength": 1},
+        "last_four": {"anyOf": [{"type": "string", "pattern": "^[0-9]{4}$"}, {"type": "null"}]},
         "provider": {"type": "string"},
         "strategy_id": {"type": "string", "minLength": 1},
         "effective_start": {"$ref": "#/$defs/date"},
@@ -328,6 +426,7 @@
             "BLOCKED_UNPROVABLE_OPENING_FLOWS",
             "BLOCKED_UNAVAILABLE_NAV_OBSERVATION",
             "BLOCKED_MISSING_PREDECESSOR_CONTINUITY"
+            ,"BLOCKED_RETURN_LINKAGE"
           ]
         },
         "blocking_reason": {"type": "string", "minLength": 1},
@@ -349,9 +448,9 @@
         "observation_linked_return": {"$ref": "#/$defs/decimal"},
         "observed_hwm_index": {"$ref": "#/$defs/decimal"},
         "observed_max_drawdown": {"$ref": "#/$defs/nonnegative_decimal"},
-        "opening_basis": {"enum": ["FIRST_AVAILABLE_NAV", "PREDECESSOR_CLOSING_NAV"]},
+        "opening_basis": {"enum": ["FIRST_AVAILABLE_NAV", "PREDECESSOR_CLOSING_NAV", "PROVIDER_CAPITAL_ANCHOR"]},
         "observation_trace": {"$ref": "#/$defs/observation_trace"},
-        "capital_flow_trace": {"$ref": "#/$defs/capital_flow_trace"},
+        "capital_flow_trace": {"type": "array"},
         "nav_observation_trace": {"$ref": "#/$defs/nav_observation_trace"},
         "nav_observations": {"type": "integer", "minimum": 3}
       },
@@ -386,7 +485,7 @@
           }
         },
         {
-          "if": {"properties": {"status": {"enum": ["NO_ADMITTED_NAV", "BLOCKED_CONTINUITY_AFTER_WITHDRAWAL", "BLOCKED_UNDEFINED_RETURN", "BLOCKED_UNPROVABLE_OPENING_FLOWS", "BLOCKED_UNAVAILABLE_NAV_OBSERVATION", "BLOCKED_MISSING_PREDECESSOR_CONTINUITY"]}}, "required": ["status"]},
+          "if": {"properties": {"status": {"enum": ["NO_ADMITTED_NAV", "BLOCKED_CONTINUITY_AFTER_WITHDRAWAL", "BLOCKED_UNDEFINED_RETURN", "BLOCKED_UNPROVABLE_OPENING_FLOWS", "BLOCKED_UNAVAILABLE_NAV_OBSERVATION", "BLOCKED_MISSING_PREDECESSOR_CONTINUITY", "BLOCKED_RETURN_LINKAGE"]}}, "required": ["status"]},
           "then": {
             "required": ["blocking_reason"],
             "properties": {

@@ -13,7 +13,7 @@ import importlib.util
 import inspect
 import json
 import sys
-from decimal import Decimal
+from decimal import Decimal, Inexact, ROUND_DOWN, getcontext, setcontext
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,9 @@ from quant_engine.core import InputSnapshot
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "account_strategy_manifest.py"
+INDEPENDENT_VERIFIER_MODULE_PATH = (
+    REPOSITORY_ROOT / "tools" / "verify_account_manifest_generation.py"
+)
 LEDGER_GENERATION_ID = "1" * 64
 BASELINE_GENERATION_ID = "2" * 64
 
@@ -38,6 +41,95 @@ def manifest_module() -> Any:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture(scope="module")
+def independent_verifier_module() -> Any:
+    spec = importlib.util.spec_from_file_location(
+        "_annualized_ronc_independent_verifier",
+        INDEPENDENT_VERIFIER_MODULE_PATH,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _decimal_context_state() -> tuple[object, ...]:
+    context = getcontext()
+    return (
+        context.prec,
+        context.rounding,
+        context.Emin,
+        context.Emax,
+        context.capitals,
+        context.clamp,
+        dict(context.flags),
+        dict(context.traps),
+    )
+
+
+def test_import_does_not_mutate_process_decimal_context() -> None:
+    before = getcontext().copy()
+    module_name = "_account_strategy_manifest_decimal_import_probe"
+    try:
+        getcontext().prec = 17
+        getcontext().rounding = ROUND_DOWN
+        getcontext().traps[Inexact] = True
+        expected = _decimal_context_state()
+        spec = importlib.util.spec_from_file_location(module_name, MODULE_PATH)
+        assert spec is not None
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+
+        spec.loader.exec_module(module)
+
+        assert _decimal_context_state() == expected
+    finally:
+        sys.modules.pop(module_name, None)
+        setcontext(before)
+
+
+def test_numeric_entrypoint_ignores_and_restores_hostile_decimal_context(
+    manifest_module: Any,
+) -> None:
+    before = getcontext().copy()
+    try:
+        getcontext().prec = 2
+        getcontext().rounding = ROUND_DOWN
+        getcontext().Emin = -3
+        getcontext().Emax = 3
+        getcontext().traps[Inexact] = True
+        expected_state = _decimal_context_state()
+
+        stats = manifest_module.analyze_epoch(
+            {
+                "2026-01-01": Decimal("100"),
+                "2026-07-01": Decimal("110"),
+                "2027-01-01": Decimal("121"),
+            },
+            {},
+            {},
+            {},
+            {},
+            None,
+            "2026-01-01",
+            "2027-01-01",
+        )
+
+        assert stats is not None
+        assert stats["return_on_net_capital"] == Decimal("0.21")
+        assert stats["annualized_return_on_net_capital"] == Decimal("0.21")
+        assert stats["observation_linked_return"] == Decimal("0.21")
+        assert stats["xirr_diagnostic"] == Decimal(
+            "0.2100000000000000000000000000000000000006"
+        )
+        assert _decimal_context_state() == expected_state
+    finally:
+        setcontext(before)
 
 
 def test_producer_imports_the_core_owned_snapshot_type(manifest_module: Any) -> None:
@@ -74,6 +166,7 @@ def test_supported_public_surface_exposes_no_authority_or_numeric_assembly_seam(
         "classified_flows_artifact",
         "receipt_snapshots",
         "mapped_assignments",
+        "receipt_authority_snapshot",
     )
     assert tuple(
         inspect.signature(manifest_module.build_manifest_candidate_from_snapshots).parameters
@@ -161,12 +254,12 @@ def test_snapshot_native_producer_matches_the_compatibility_wrapper(
     )
 
 
-def test_public_producer_rejects_valid_looking_synthetic_receipts(
+def test_public_producer_rejects_valid_looking_synthetic_receipts_without_selected_authority(
     manifest_module: Any, tmp_path: Path
 ) -> None:
-    """No producer seam may install a caller-provided receipt contract."""
+    """Passing a receipt alone must not install a caller-provided trust contract."""
     inputs = _write_valid_inputs(tmp_path)
-    with pytest.raises(manifest_module.ManifestError, match="receipt artifact set"):
+    with pytest.raises(manifest_module.ManifestError, match="receipt authority"):
         manifest_module.build_manifest_candidate(
             ledger_path=inputs["ledger"],
             ledger_identity_path=inputs["ledger_identity"],
@@ -185,6 +278,201 @@ def test_public_producer_rejects_valid_looking_synthetic_receipts(
                 ],
             },
         )
+
+
+def test_selected_receipt_authority_emits_funded_first_epoch_and_preserves_blocked_second(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """One selected complete first interval can produce only its first epoch."""
+    inputs = _write_valid_inputs(tmp_path)
+    authority_path = _write_selected_first_receipt_authority(inputs)
+
+    manifest = manifest_module.build_manifest_candidate(
+        ledger_path=inputs["ledger"],
+        ledger_identity_path=inputs["ledger_identity"],
+        baseline_root=inputs["baseline_root"],
+        baseline_generation_id=BASELINE_GENERATION_ID,
+        classified_flows_path=inputs["flows"],
+        classification_policy_path=inputs["classification_policy"],
+        admission_policy_path=inputs["policy"],
+        flow_coverage_path=inputs["flow_coverage"],
+        retrieval_receipt_paths={
+            "receipt/synthetic-2026-01-01-2026-01-03.json": inputs[
+                "retrieval_receipt"
+            ]
+        },
+        receipt_authority_path=authority_path,
+    )
+
+    first, second = manifest["rows"]
+    assert first["admission_status"] == "FUNDED"
+    assert first["status"] == "OK"
+    assert {
+        "opening_capital": Decimal(first["opening_capital"]),
+        "deposits": Decimal(first["deposits"]),
+        "invested": Decimal(first["invested"]),
+        "net_capital": Decimal(first["net_capital"]),
+        "current_value": Decimal(first["current_value"]),
+        "gain": Decimal(first["gain"]),
+    } == {
+        "opening_capital": Decimal("50.00"),
+        "deposits": Decimal("10.00"),
+        "invested": Decimal("60.00"),
+        "net_capital": Decimal("60.00"),
+        "current_value": Decimal("70.00"),
+        "gain": Decimal("10.00"),
+    }
+    assert second["status"] == "BLOCKED_UNPROVABLE_OPENING_FLOWS"
+    assert not {
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "invested",
+        "withdrawals",
+        "internal_out",
+        "net_capital",
+        "current_value",
+        "gain",
+        "return_on_net_capital",
+        "annualized_return_on_net_capital",
+        "observed_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "observation_trace",
+        "capital_flow_trace",
+        "nav_observation_trace",
+    } & second.keys()
+    authority_bytes = authority_path.read_bytes()
+    assert manifest["source_identities"]["flow_coverage"]["receipt_authority"] == {
+        "artifact_id": "authority/account-interval-retrieval-receipt-authority.json",
+        "as_of_date": "2026-01-06",
+        "schema": {
+            "name": "account-interval-retrieval-receipt-authority",
+            "version": "1",
+        },
+        "sha256": hashlib.sha256(authority_bytes).hexdigest(),
+        "size_bytes": len(authority_bytes),
+    }
+    missing_authority_identity = json.loads(json.dumps(manifest))
+    missing_authority_identity["source_identities"]["flow_coverage"].pop(
+        "receipt_authority"
+    )
+    with pytest.raises(manifest_module.ManifestError, match="formal schema"):
+        manifest_module.validate_manifest_schema(missing_authority_identity)
+    argv = _producer_argv(inputs)
+    argv.extend(["--receipt-authority-json", str(authority_path)])
+    assert manifest_module.main(argv) == 0
+    assert json.loads(capsys.readouterr().out) == manifest
+
+
+def test_selected_receipt_authority_rejects_contract_fact_mismatch_before_output(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Skipping the receipt-contract predicate would admit altered authority facts."""
+    inputs = _write_valid_inputs(tmp_path)
+    authority_path = _write_selected_first_receipt_authority(inputs)
+    success = manifest_module.build_manifest_candidate(
+        ledger_path=inputs["ledger"],
+        ledger_identity_path=inputs["ledger_identity"],
+        baseline_root=inputs["baseline_root"],
+        baseline_generation_id=BASELINE_GENERATION_ID,
+        classified_flows_path=inputs["flows"],
+        classification_policy_path=inputs["classification_policy"],
+        admission_policy_path=inputs["policy"],
+        flow_coverage_path=inputs["flow_coverage"],
+        retrieval_receipt_paths={
+            "receipt/synthetic-2026-01-01-2026-01-03.json": inputs[
+                "retrieval_receipt"
+            ]
+        },
+        receipt_authority_path=authority_path,
+    )
+    assert success["rows"][0]["status"] == "OK"
+    authority = json.loads(authority_path.read_text(encoding="utf-8"))
+    authority["receipts"][0]["contract"]["required_categories"] = ["OTHER"]
+    authority_path.write_bytes(_canonical_json_bytes(authority))
+
+    with pytest.raises(
+        manifest_module.ManifestError,
+        match="retrieval receipt categories are incomplete",
+    ):
+        manifest_module.build_manifest_candidate(
+            ledger_path=inputs["ledger"],
+            ledger_identity_path=inputs["ledger_identity"],
+            baseline_root=inputs["baseline_root"],
+            baseline_generation_id=BASELINE_GENERATION_ID,
+            classified_flows_path=inputs["flows"],
+            classification_policy_path=inputs["classification_policy"],
+            admission_policy_path=inputs["policy"],
+            flow_coverage_path=inputs["flow_coverage"],
+            retrieval_receipt_paths={
+                "receipt/synthetic-2026-01-01-2026-01-03.json": inputs[
+                    "retrieval_receipt"
+                ]
+            },
+            receipt_authority_path=authority_path,
+        )
+    assert capsys.readouterr().out == ""
+
+
+def test_selected_receipt_authority_rejects_semantically_equivalent_receipt_rewrite(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Skipping byte binding would treat a rewritten receipt as the selected bytes."""
+    inputs = _write_valid_inputs(tmp_path)
+    authority_path = _write_selected_first_receipt_authority(inputs)
+    success = manifest_module.build_manifest_candidate(
+        ledger_path=inputs["ledger"],
+        ledger_identity_path=inputs["ledger_identity"],
+        baseline_root=inputs["baseline_root"],
+        baseline_generation_id=BASELINE_GENERATION_ID,
+        classified_flows_path=inputs["flows"],
+        classification_policy_path=inputs["classification_policy"],
+        admission_policy_path=inputs["policy"],
+        flow_coverage_path=inputs["flow_coverage"],
+        retrieval_receipt_paths={
+            "receipt/synthetic-2026-01-01-2026-01-03.json": inputs[
+                "retrieval_receipt"
+            ]
+        },
+        receipt_authority_path=authority_path,
+    )
+    assert success["rows"][0]["status"] == "OK"
+    receipt_path = inputs["retrieval_receipt"]
+    rewritten_receipt_bytes = receipt_path.read_bytes() + b"\n"
+    receipt_path.write_bytes(rewritten_receipt_bytes)
+    coverage = json.loads(inputs["flow_coverage"].read_text(encoding="utf-8"))
+    coverage["receipt_artifacts"][0]["sha256"] = hashlib.sha256(
+        rewritten_receipt_bytes
+    ).hexdigest()
+    coverage["receipt_artifacts"][0]["size_bytes"] = len(rewritten_receipt_bytes)
+    _write_json(inputs["flow_coverage"], coverage)
+
+    with pytest.raises(
+        manifest_module.ManifestError,
+        match="receipt authority receipt bytes differ",
+    ):
+        manifest_module.build_manifest_candidate(
+            ledger_path=inputs["ledger"],
+            ledger_identity_path=inputs["ledger_identity"],
+            baseline_root=inputs["baseline_root"],
+            baseline_generation_id=BASELINE_GENERATION_ID,
+            classified_flows_path=inputs["flows"],
+            classification_policy_path=inputs["classification_policy"],
+            admission_policy_path=inputs["policy"],
+            flow_coverage_path=inputs["flow_coverage"],
+            retrieval_receipt_paths={
+                "receipt/synthetic-2026-01-01-2026-01-03.json": receipt_path
+            },
+            receipt_authority_path=authority_path,
+        )
+    assert capsys.readouterr().out == ""
 
 
 def test_end_to_end_producer_emits_only_blocked_rows_without_retained_receipts(
@@ -420,6 +708,13 @@ def _write_json(path: Path, payload: object) -> None:
     path.write_bytes(_bytes(payload))
 
 
+def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
+    return (
+        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
+    ).encode("utf-8")
+
+
 def _classified_flow_artifact(path: Path) -> dict[str, Any]:
     """Hand-build the source identity bound by the coverage authority."""
     payload = json.loads(path.read_text(encoding="utf-8"))
@@ -597,12 +892,37 @@ def _load_flow_coverage(
             mapped_assignments,
             validate_receipt,
         )
+    authority_snapshot = None
+    if receipt_snapshots:
+        authority_path = tmp_path / "account-interval-retrieval-receipt-authority.json"
+        authority_path.write_bytes(
+            _canonical_json_bytes(
+                {
+                    "schema_version": 1,
+                    "artifact_id": "authority/account-interval-retrieval-receipt-authority.json",
+                    "as_of_date": "2026-01-06",
+                    "receipts": [
+                        {
+                            "artifact_id": artifact_id,
+                            "sha256": snapshot.sha256,
+                            "size_bytes": snapshot.size_bytes,
+                            "contract": predicate_contracts[artifact_id],
+                        }
+                        for artifact_id, snapshot in sorted(receipt_snapshots.items())
+                    ],
+                }
+            )
+        )
+        authority_snapshot = manifest_module.InputSnapshot.capture(
+            authority_path, "receipt authority"
+        )
     return manifest_module.load_flow_coverage(
         coverage_snapshot,
         selected_ledger_identity,
         _classified_flow_artifact(inputs["flows"]),
         receipt_snapshots,
         mapped_assignments,
+        authority_snapshot,
     )
 
 
@@ -871,11 +1191,20 @@ def test_coverage_v2_mutation_matrix_fails_closed(
 
 
 @pytest.mark.parametrize(
-    "receipt_snapshots",
-    [{}, {"receipt/extra.json": InputSnapshot.from_bytes("extra receipt", b"{}")}],
+    ("receipt_snapshots", "message"),
+    [
+        ({}, "receipt artifact set"),
+        (
+            {"receipt/extra.json": InputSnapshot.from_bytes("extra receipt", b"{}")},
+            "receipt authority",
+        ),
+    ],
 )
 def test_coverage_rejects_missing_or_unreferenced_receipt_snapshots(
-    manifest_module: Any, tmp_path: Path, receipt_snapshots: dict[str, InputSnapshot]
+    manifest_module: Any,
+    tmp_path: Path,
+    receipt_snapshots: dict[str, InputSnapshot],
+    message: str,
 ) -> None:
     """Declared v2 receipt authority and supplied snapshot bytes are an exact set."""
     inputs = _write_valid_inputs(tmp_path / "inputs")
@@ -908,7 +1237,7 @@ def test_coverage_rejects_missing_or_unreferenced_receipt_snapshots(
     _write_json(path, payload)
     snapshot = InputSnapshot.capture(path, "flow coverage")
     identity = json.loads(inputs["ledger_identity"].read_text(encoding="utf-8"))
-    with pytest.raises(manifest_module.ManifestError, match="receipt artifact set"):
+    with pytest.raises(manifest_module.ManifestError, match=message):
         manifest_module.load_flow_coverage(
             snapshot,
             {
@@ -1604,6 +1933,75 @@ def _write_valid_inputs(tmp_path: Path, *, gap: bool = False) -> dict[str, Path]
     }
 
 
+def _write_selected_first_receipt_authority(inputs: dict[str, Path]) -> Path:
+    """Select exactly one synthetic receipt by its canonical immutable bytes."""
+    receipt_id = "receipt/synthetic-2026-01-01-2026-01-03.json"
+    receipt_bytes = inputs["retrieval_receipt"].read_bytes()
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    coverage = json.loads(inputs["flow_coverage"].read_text(encoding="utf-8"))
+    coverage["rows"][0].update(
+        {
+            "status": "COMPLETE",
+            "authority_kind": "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2",
+            "receipt_artifact_id": receipt_id,
+            "blocker_code": None,
+            "blocker_detail": None,
+        }
+    )
+    coverage["receipt_artifacts"] = [
+        {
+            "artifact_id": receipt_id,
+            "sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+            "size_bytes": len(receipt_bytes),
+        }
+    ]
+    _write_json(inputs["flow_coverage"], coverage)
+    raw_artifact = {
+        "artifact_id": "raw/synthetic.json",
+        "as_of_date": "2026-01-06",
+        "schema": {"name": "synthetic", "version": "1"},
+        "sha256": "a" * 64,
+        "size_bytes": 1,
+    }
+    authority = {
+        "schema_version": 1,
+        "artifact_id": "authority/account-interval-retrieval-receipt-authority.json",
+        "as_of_date": "2026-01-06",
+        "receipts": [
+            {
+                "artifact_id": receipt_id,
+                "sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+                "size_bytes": len(receipt_bytes),
+                "contract": {
+                    "adapter_name": "SYNTHETIC",
+                    "adapter_version": "1",
+                    "code_sha256": "b" * 64,
+                    "provider": "SYNTHETIC",
+                    "account_id": "synthetic-account",
+                    "source_account_identity_sha256": "d" * 64,
+                    "provider_generation": "c" * 64,
+                    "provider_generation_manifest": raw_artifact,
+                    "raw_evidence_artifacts": [raw_artifact],
+                    "required_categories": ["CASH"],
+                    "pagination": {
+                        "mode": "SYNTHETIC",
+                        "page_count": 1,
+                        "request_response_chain_sha256": "e" * 64,
+                        "terminal_response_sha256": "f" * 64,
+                        "terminal": True,
+                    },
+                },
+            }
+        ],
+    }
+    authority_path = inputs["flow_coverage"].with_name(
+        "account-interval-retrieval-receipt-authority.json"
+    )
+    authority_path.write_bytes(_canonical_json_bytes(authority))
+    assert receipt == _retrieval_receipt("2026-01-01", "2026-01-03", receipt_id)
+    return authority_path
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     [
@@ -1797,6 +2195,129 @@ def test_partition_assignments_retains_full_real_shape_and_calculates_only_mappe
     ] == ["mapped-strategy"]
 
 
+def test_partition_assignments_accepts_unbounded_non_strategy_history(
+    manifest_module: Any,
+) -> None:
+    """A null non-strategy start covers all prior evidence without becoming an epoch."""
+    assignments = [
+        {
+            "account_id": "reserve-account",
+            "strategy_id": None,
+            "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+            "effective_start": None,
+            "effective_end": "2025-12-31",
+        },
+        {
+            "account_id": "reserve-account",
+            "strategy_id": None,
+            "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        }
+    ]
+
+    perimeter = manifest_module.partition_assignments(assignments)
+    manifest_module.validate_evidence_coverage(
+        {"nav_observations": [{"account_id": "reserve-account", "as_of_date": "1900-01-01"}], "flows": []},
+        [{"account_id": "reserve-account", "event_date": "9999-12-31"}],
+        perimeter.full_chains,
+        {"reserve-account": {}},
+    )
+
+    assert perimeter.mapped_chains == {}
+    assert [assignment["_key"] for assignment in perimeter.full_chains["reserve-account"]] == [
+        ("reserve-account", None, None, "2025-12-31"),
+        ("reserve-account", None, "2026-01-01", None),
+    ]
+    assert perimeter.full_perimeter_identity["count"] == 2
+
+
+@pytest.mark.parametrize(
+    ("assignment", "message"),
+    [
+        (
+            {
+                "account_id": "mapped-account",
+                "strategy_id": "mapped-strategy",
+                "strategy_mapping_disposition": "STRATEGY_MAPPED",
+                "effective_start": None,
+                "effective_end": None,
+            },
+            "mapped assignment.effective_start must be a canonical ISO date",
+        ),
+        (
+            {
+                "account_id": "reserve-account",
+                "strategy_id": None,
+                "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+                "effective_start": None,
+                "effective_end": None,
+            },
+            None,
+        ),
+    ],
+)
+def test_partition_assignments_allows_null_start_only_for_non_strategy_rows(
+    manifest_module: Any, assignment: dict[str, Any], message: str | None
+) -> None:
+    """Mapped epochs require a canonical lower bound; reserve history does not."""
+    if message is None:
+        assert manifest_module.partition_assignments([assignment]).full_chains
+    else:
+        with pytest.raises(manifest_module.ManifestError, match=message):
+            manifest_module.partition_assignments([assignment])
+
+
+def test_partition_assignments_rejects_interval_inside_unbounded_history(
+    manifest_module: Any,
+) -> None:
+    """An unbounded history row owns every date for its account."""
+    assignments = [
+        {
+            "account_id": "reserve-account",
+            "strategy_id": None,
+            "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+            "effective_start": None,
+            "effective_end": None,
+        },
+        {
+            "account_id": "reserve-account",
+            "strategy_id": None,
+            "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        },
+    ]
+
+    with pytest.raises(manifest_module.ManifestError, match="assignments overlap"):
+        manifest_module.partition_assignments(assignments)
+
+
+def test_partition_assignments_rejects_overlapping_unbounded_prior_intervals(
+    manifest_module: Any,
+) -> None:
+    """Two finite prior-history intervals without lower bounds overlap by definition."""
+    assignments = [
+        {
+            "account_id": "reserve-account",
+            "strategy_id": None,
+            "strategy_mapping_disposition": "RESERVE_NOT_APPLICABLE",
+            "effective_start": None,
+            "effective_end": "2025-12-31",
+        },
+        {
+            "account_id": "reserve-account",
+            "strategy_id": None,
+            "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY",
+            "effective_start": None,
+            "effective_end": "2025-06-30",
+        },
+    ]
+
+    with pytest.raises(manifest_module.ManifestError, match="assignments overlap"):
+        manifest_module.partition_assignments(assignments)
+
+
 def test_cli_accepts_real_shape_null_strategies_without_calculating_them(
     manifest_module: Any,
     tmp_path: Path,
@@ -1925,6 +2446,79 @@ def test_partition_assignments_rejects_full_perimeter_overlap(
             "effective_end": None,
         }
     )
+
+    with pytest.raises(manifest_module.ManifestError, match="assignments overlap"):
+        manifest_module.partition_assignments(assignments)
+
+
+def test_partition_assignments_accepts_historical_to_mapped_shared_boundary(
+    manifest_module: Any,
+) -> None:
+    """Rejecting the sanctioned shared day would block the accepted baseline."""
+    assignments = [
+        {
+            "account_id": "synthetic-transition",
+            "strategy_id": None,
+            "strategy_mapping_disposition": "HISTORICAL_POOL_ONLY",
+            "effective_start": "2025-01-01",
+            "effective_end": "2026-01-01",
+        },
+        {
+            "account_id": "synthetic-transition",
+            "strategy_id": "synthetic-successor",
+            "strategy_mapping_disposition": "STRATEGY_MAPPED",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        },
+    ]
+
+    perimeter = manifest_module.partition_assignments(assignments)
+    manifest_module.validate_evidence_coverage(
+        {
+            "nav_observations": [
+                {
+                    "account_id": "synthetic-transition",
+                    "as_of_date": "2026-01-01",
+                }
+            ],
+            "flows": [],
+        },
+        [
+            {
+                "account_id": "synthetic-transition",
+                "event_date": "2026-01-01",
+            }
+        ],
+        perimeter.full_chains,
+        {"synthetic-transition": {}},
+    )
+
+    assert [
+        row["strategy_mapping_disposition"]
+        for row in perimeter.full_chains["synthetic-transition"]
+    ] == ["HISTORICAL_POOL_ONLY", "STRATEGY_MAPPED"]
+
+
+def test_partition_assignments_rejects_mapped_to_mapped_shared_boundary(
+    manifest_module: Any,
+) -> None:
+    """Mapped epochs remain next-day contiguous, never same-day overlapping."""
+    assignments = [
+        {
+            "account_id": "synthetic-transition",
+            "strategy_id": "synthetic-first",
+            "strategy_mapping_disposition": "STRATEGY_MAPPED",
+            "effective_start": "2025-01-01",
+            "effective_end": "2026-01-01",
+        },
+        {
+            "account_id": "synthetic-transition",
+            "strategy_id": "synthetic-second",
+            "strategy_mapping_disposition": "STRATEGY_MAPPED",
+            "effective_start": "2026-01-01",
+            "effective_end": None,
+        },
+    ]
 
     with pytest.raises(manifest_module.ManifestError, match="assignments overlap"):
         manifest_module.partition_assignments(assignments)
@@ -2277,6 +2871,20 @@ def _replace_manifest_rows_for_semantic_test(
     manifest["source_identities"]["admission_policy"][
         "assignment"
     ] = assignment_identity
+    if any(row["status"] == "OK" for row in serialized_rows):
+        manifest["source_identities"]["flow_coverage"].setdefault(
+            "receipt_authority",
+            {
+                "artifact_id": "authority/account-interval-retrieval-receipt-authority.json",
+                "as_of_date": "2026-01-06",
+                "schema": {
+                    "name": "account-interval-retrieval-receipt-authority",
+                    "version": "1",
+                },
+                "sha256": "a" * 64,
+                "size_bytes": 1,
+            },
+        )
     return manifest
 
 
@@ -2287,6 +2895,16 @@ def _manifest_with_test_local_numeric_row(
 ) -> dict[str, Any]:
     """Make a semantic-validator fixture without asking production to authorize it."""
     manifest = _manifest_from_cli(manifest_module, _write_valid_inputs(tmp_path), capsys)
+    manifest["source_identities"]["flow_coverage"]["receipt_authority"] = {
+        "artifact_id": "authority/account-interval-retrieval-receipt-authority.json",
+        "as_of_date": "2026-01-06",
+        "schema": {
+            "name": "account-interval-retrieval-receipt-authority",
+            "version": "1",
+        },
+        "sha256": "a" * 64,
+        "size_bytes": 1,
+    }
     epoch_key = (
         "synthetic-account",
         "synthetic-strategy-a",
@@ -3081,10 +3699,15 @@ def test_xirr_diagnostic_includes_internal_capital_legs(
         ("2026-12-31", "110"),
         ("2027-01-01", "110"),
         ("2027-01-02", "110"),
+        ("2026-12-31", "90"),
         ("2027-01-01", "90"),
+        ("2027-01-02", "90"),
+        ("2026-12-31", "100"),
+        ("2027-01-01", "100"),
+        ("2027-01-02", "100"),
     ],
 )
-def test_annualized_return_on_net_capital_is_consistently_linear(
+def test_annualized_return_on_net_capital_uses_governed_piecewise_policy(
     manifest_module: Any,
     end: str,
     current: str,
@@ -3109,78 +3732,109 @@ def test_annualized_return_on_net_capital_is_consistently_linear(
         manifest_module.date.fromisoformat(end)
         - manifest_module.date.fromisoformat("2026-01-01")
     ).days
-    expected = (
-        (manifest_module.Decimal(current) - manifest_module.Decimal("100"))
-        / manifest_module.Decimal("100")
-        * manifest_module.Decimal("365")
-        / manifest_module.Decimal(span_days)
-    )
+    with manifest_module.localcontext(manifest_module._DECIMAL_CONTEXT):
+        simple_return = (
+            manifest_module.Decimal(current) - manifest_module.Decimal("100")
+        ) / manifest_module.Decimal("100")
+        expected = (
+            simple_return
+            * manifest_module.Decimal("365")
+            / manifest_module.Decimal(span_days)
+            if span_days < 365
+            else (
+                (manifest_module.Decimal(1) + simple_return)
+                ** (manifest_module.Decimal("365") / manifest_module.Decimal(span_days))
+                - manifest_module.Decimal(1)
+            )
+        )
     assert stats["annualized_return_on_net_capital"] == expected
 
 
 @pytest.mark.parametrize(
-    ("ledger", "events"),
+    ("return_on_net_capital", "span_days"),
     [
-        (
-            {
-                "accounting_currency": "USD",
-                "nav_observations": [
-                    {
-                        "record_id": "synthetic-nav-fractional-cent",
-                        "account_id": "synthetic-account",
-                        "as_of_date": "2026-01-01",
-                        "nav": {
-                            "currency": "USD",
-                            "status": "AVAILABLE",
-                            "value": "1.001",
-                        },
-                    }
-                ],
-                "flows": [],
-            },
-            None,
-        ),
-        (
-            {
-                "accounting_currency": "USD",
-                "nav_observations": [],
-                "flows": [
-                    {
-                        "record_id": "raw-flow-1",
-                        "account_id": "synthetic-account",
-                        "event_date": "2026-01-01",
-                        "flow_type": "EXTERNAL_CONTRIBUTION",
-                        "amount": {
-                            "currency": "USD",
-                            "status": "AVAILABLE",
-                            "value": "1.00",
-                        },
-                    }
-                ],
-            },
-            [
-                {
-                    "event_id": "classified-flow-1",
-                    "source_record_id": "raw-flow-1",
-                    "account_id": "synthetic-account",
-                    "event_date": "2026-01-01",
-                    "amount": "1.001",
-                    "disposition": "EXTERNAL",
-                }
-            ],
-        ),
+        ("-1", 365),
+        ("-1", 366),
+        ("-1.1", 365),
+        ("-1.1", 366),
     ],
 )
-def test_source_money_values_must_be_exactly_cent_representable(
-    manifest_module: Any, ledger: dict[str, Any], events: list[dict[str, Any]] | None
+def test_compounded_annualized_ronc_rejects_nonpositive_growth_base(
+    manifest_module: Any,
+    independent_verifier_module: Any,
+    return_on_net_capital: str,
+    span_days: int,
 ) -> None:
-    with pytest.raises(manifest_module.ManifestError, match="cent"):
-        if events is None:
-            manifest_module.nav_series(ledger)
-        else:
-            manifest_module.validate_classified_flow_coverage(
-                ledger, events, _flow_classification_rules()
-            )
+    ronc = Decimal(return_on_net_capital)
+    with pytest.raises(manifest_module.ManifestError, match="annualized RONC"):
+        manifest_module._annualize_return_on_net_capital(ronc, span_days)
+    with pytest.raises(independent_verifier_module.IndependentVerificationError):
+        independent_verifier_module._annualize_return_on_net_capital(ronc, span_days)
+
+
+def test_source_nav_preserves_provider_decimal_precision(
+    manifest_module: Any,
+) -> None:
+    ledger = {
+        "accounting_currency": "USD",
+        "nav_observations": [
+            {
+                "record_id": "synthetic-nav-provider-precision",
+                "account_id": "synthetic-account",
+                "as_of_date": "2026-01-01",
+                "nav": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "24009.8771286",
+                },
+            }
+        ],
+        "flows": [],
+    }
+
+    assert manifest_module.nav_series(ledger) == {
+        "synthetic-account": {
+            "2026-01-01": manifest_module.Decimal("24009.8771286")
+        }
+    }
+
+
+def test_classified_flow_preserves_provider_decimal_precision(
+    manifest_module: Any,
+) -> None:
+    ledger = {
+        "accounting_currency": "USD",
+        "nav_observations": [],
+        "flows": [
+            {
+                "record_id": "raw-flow-1",
+                "account_id": "synthetic-account",
+                "event_date": "2026-01-01",
+                "flow_type": "EXTERNAL_CONTRIBUTION",
+                "amount": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "25027.43294966",
+                },
+            }
+        ],
+    }
+    events = [
+        {
+            "event_id": "classified-flow-1",
+            "source_record_id": "raw-flow-1",
+            "account_id": "synthetic-account",
+            "event_date": "2026-01-01",
+            "amount": "25027.43294966",
+            "disposition": "EXTERNAL",
+        }
+    ]
+
+    reconciled = manifest_module.validate_classified_flow_coverage(
+        ledger, events, _flow_classification_rules()
+    )
+
+    assert reconciled[0]["amount"] == manifest_module.Decimal("25027.43294966")
 
 
 @pytest.mark.parametrize(
@@ -3257,6 +3911,64 @@ def test_semantic_validation_rejects_money_and_observed_index_mutations(
         manifest_module.ManifestError,
         match="observation trace summary|observed max drawdown",
     ):
+        manifest_module.validate_manifest_schema(manifest)
+
+
+def test_semantic_validation_rejects_linear_annualization_for_long_epoch(
+    manifest_module: Any,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    manifest = _manifest_with_test_local_numeric_row(
+        manifest_module, tmp_path, capsys
+    )
+    original = manifest["rows"][0]
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-01": Decimal("100"),
+            "2026-06-01": Decimal("100"),
+            "2027-01-02": Decimal("110"),
+        },
+        {},
+        {},
+        {},
+        {},
+        None,
+        "2026-01-01",
+        "2027-01-02",
+    )
+    assert stats is not None
+    row = {
+        **{
+            key: original[key]
+            for key in (
+                "account_id",
+                "provider",
+                "strategy_id",
+                "admission_status",
+                "admission_policy_reference",
+                "admission_authority_kind",
+                "funded_nav_record_ids",
+                "continuity_to_successor",
+            )
+        },
+        "effective_start": "2026-01-01",
+        "effective_end": "2027-01-02",
+        "status": "OK",
+        **stats,
+    }
+    manifest = _replace_manifest_rows_for_semantic_test(
+        manifest_module, manifest, [row]
+    )
+    manifest_module.validate_manifest_schema(manifest)
+
+    linear = (
+        Decimal(row["return_on_net_capital"])
+        * Decimal(365)
+        / Decimal(366)
+    )
+    manifest["rows"][0]["annualized_return_on_net_capital"] = str(linear)
+    with pytest.raises(manifest_module.ManifestError, match="annualized RONC"):
         manifest_module.validate_manifest_schema(manifest)
 
 
@@ -4472,6 +5184,221 @@ def test_epoch_reports_positive_drawdown_magnitude_from_observed_links(
     assert stats["observed_hwm_index"] == Decimal("120")
     assert stats["observed_max_drawdown"] == Decimal("0.25")
     assert stats["observation_trace"]["links"][1]["drawdown"] == Decimal("0.25")
+
+
+def test_ibkr_january_economic_flow_moves_only_schwab_recognition_link(
+    manifest_module: Any,
+) -> None:
+    """An IBKR Jan-30 event stays January capital when Schwab recognizes it Feb-02."""
+
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-30": Decimal("100"),
+            "2026-01-31": Decimal("100"),
+            "2026-02-02": Decimal("200"),
+            "2026-02-03": Decimal("200"),
+        },
+        {("2026-01-30", "2026-02-02"): Decimal("100")},
+        {},
+        {},
+        {},
+        Decimal("100"),
+        "2026-01-01",
+        None,
+        "2025-12-31",
+    )
+
+    assert stats is not None
+    assert stats["invested"] == Decimal("200")
+    assert stats["net_capital"] == Decimal("200")
+    assert stats["current_value"] == Decimal("200")
+    assert stats["gain"] == Decimal("0")
+    assert stats["return_on_net_capital"] == Decimal("0")
+    assert stats["xirr_diagnostic"] == Decimal("0")
+    assert [link["net_flow"] for link in stats["observation_trace"]["links"]] == [
+        Decimal("0"), Decimal("0"), Decimal("100"), Decimal("0")
+    ]
+    assert all(
+        link["factor"] == Decimal("1")
+        for link in stats["observation_trace"]["links"]
+    )
+    assert stats["observed_hwm_index"] == Decimal("100")
+    assert stats["observed_max_drawdown"] == Decimal("0")
+    assert stats["capital_flow_trace"] == [
+        {
+            "class": "EXTERNAL_IN",
+            "event_date": "2026-01-30",
+            "nav_recognition_date": "2026-02-02",
+            "amount": Decimal("100"),
+        }
+    ]
+
+
+def test_epoch_keeps_same_economic_day_flows_as_distinct_recognition_legs(
+    manifest_module: Any,
+) -> None:
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-01": Decimal("100"),
+            "2026-01-02": Decimal("150"),
+            "2026-01-03": Decimal("200"),
+            "2026-01-04": Decimal("200"),
+        },
+        {
+            ("2026-01-01", "2026-01-02"): Decimal("50"),
+            ("2026-01-01", "2026-01-03"): Decimal("50"),
+        },
+        {},
+        {},
+        {},
+        Decimal("100"),
+        "2026-01-01",
+        None,
+        "2025-12-31",
+    )
+
+    assert stats is not None
+    assert [link["net_flow"] for link in stats["observation_trace"]["links"]] == [
+        Decimal("0"), Decimal("50"), Decimal("50"), Decimal("0")
+    ]
+    assert [
+        (leg["event_date"], leg["nav_recognition_date"])
+        for leg in stats["capital_flow_trace"]
+    ] == [
+        ("2026-01-01", "2026-01-02"),
+        ("2026-01-01", "2026-01-03"),
+    ]
+
+
+def test_epoch_fails_closed_when_recognition_cannot_attach_to_observed_interval(
+    manifest_module: Any,
+) -> None:
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-01": Decimal("100"),
+            "2026-01-02": Decimal("100"),
+            "2026-01-03": Decimal("100"),
+        },
+        {("2026-01-02", "2026-01-04"): Decimal("10")},
+        {},
+        {},
+        {},
+        None,
+        "2026-01-01",
+        None,
+    )
+
+    assert stats == {
+        "unavailable_status": "BLOCKED_RETURN_LINKAGE",
+        "blocking_reason": "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL",
+    }
+
+
+def test_provider_opening_anchor_sets_basis_and_first_observation_factor(
+    manifest_module: Any,
+) -> None:
+    stats = manifest_module.analyze_epoch(
+        {
+            "2024-10-15": Decimal("985.44"),
+            "2024-10-16": Decimal("985.44"),
+            "2024-10-17": Decimal("985.44"),
+        },
+        {},
+        {},
+        {},
+        {},
+        None,
+        "2024-10-15",
+        None,
+        opening_anchor={
+            "event_date": "2024-10-13",
+            "nav_recognition_date": "2024-10-15",
+            "amount": Decimal("1000"),
+        },
+    )
+
+    assert stats is not None
+    assert stats["opening_basis"] == "PROVIDER_CAPITAL_ANCHOR"
+    assert stats["opening_capital"] == Decimal("1000")
+    assert stats["deposits"] == Decimal("0")
+    assert stats["internal_in"] == Decimal("0")
+    assert stats["observation_trace"]["links"][0] == {
+        "start_date": "2024-10-13",
+        "end_date": "2024-10-15",
+        "base_nav": Decimal("1000"),
+        "ending_nav": Decimal("985.44"),
+        "net_flow": Decimal("0"),
+        "factor": Decimal("0.98544"),
+        "cumulative_index": Decimal("98.54400"),
+        "running_hwm_index": Decimal("100"),
+        "drawdown": Decimal("0.01456"),
+    }
+
+
+def test_provider_strategy_allocation_before_epoch_is_not_admitted_by_recognition(
+    manifest_module: Any,
+) -> None:
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-02": Decimal("150"),
+            "2026-01-03": Decimal("150"),
+            "2026-01-04": Decimal("150"),
+        },
+        {},
+        {},
+        {},
+        {},
+        None,
+        "2026-01-01",
+        None,
+        opening_anchor={
+            "event_date": "2025-12-30",
+            "nav_recognition_date": "2026-01-02",
+            "amount": Decimal("100"),
+        },
+        capital_allocation_legs={
+            ("2025-12-31", "2026-01-02"): Decimal("50")
+        },
+    )
+
+    assert stats is not None
+    assert stats["opening_capital"] == Decimal("100")
+    assert stats["deposits"] == Decimal("0")
+    assert stats["internal_in"] == Decimal("0")
+    assert stats["invested"] == stats["net_capital"] == Decimal("100")
+    assert stats["gain"] == Decimal("50")
+    assert stats["observation_trace"]["links"][0]["net_flow"] == Decimal("0")
+    assert stats["capital_flow_trace"] == []
+
+
+def test_same_economic_and_recognition_dates_keep_distinct_flow_classes(
+    manifest_module: Any,
+) -> None:
+    """IBKR external cash and Schwab internal allocation never merge by date alone."""
+
+    stats = manifest_module.analyze_epoch(
+        {
+            "2026-01-30": Decimal("100"),
+            "2026-01-31": Decimal("200"),
+            "2026-02-01": Decimal("200"),
+        },
+        {("2026-01-31", "2026-01-31"): Decimal("50")},
+        {},
+        {("2026-01-31", "2026-01-31"): Decimal("50")},
+        {},
+        Decimal("100"),
+        "2026-01-01",
+        None,
+        "2025-12-31",
+    )
+
+    assert stats is not None
+    assert stats["deposits"] == stats["internal_in"] == Decimal("50")
+    assert stats["observation_trace"]["links"][1]["net_flow"] == Decimal("100")
+    assert [leg["class"] for leg in stats["capital_flow_trace"]] == [
+        "EXTERNAL_IN",
+        "INTERNAL_IN",
+    ]
 
 
 @pytest.mark.parametrize(

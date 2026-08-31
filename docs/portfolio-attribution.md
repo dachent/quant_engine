@@ -1,8 +1,10 @@
 # Strategy attribution runbook
 
 `tools/portfolio_attribution.py` creates a private, content-addressed comparison
-catalog for the nine current strategies. It never calls a provider and never
-changes an allocation, account, or readiness control.
+catalog for all nine retained strategy registry records: seven REQUIRED active
+current strategies, Echo as `DEPRECATED_HISTORY_ONLY`, and Composer as
+`IMMATERIAL_EXCLUDED`. It never calls a provider and never changes an
+allocation, account, or readiness control.
 
 The private return source is a normalized long CSV with exact dates, evidence
 layers, version references, and raw-source artifact IDs. A separate verified
@@ -43,8 +45,9 @@ uv run --frozen --no-sync python tools/portfolio_attribution.py publish `
 ## Strategy return-source attribution contract
 
 `contracts/strategy-return-sources-v1.json` records the per-strategy economic
-return-source attribution for all nine current strategies. The contract is the
-single authoritative record of what economic source of excess return (if any)
+return-source attribution for all nine retained strategy registry records. The
+contract is the single authoritative record of what economic source of excess
+return (if any)
 each strategy is deemed to exploit, grounded in the analysis at
 [issue #269 content-phase record](https://github.com/dachent/quant_engine/issues/269).
 
@@ -69,8 +72,8 @@ required fields, enum validity, and the consistency constraint
 strategy coverage (all nine registry strategies, in registry order) and
 text-field quality (non-placeholder, minimum length) against the registry.
 
-All nine strategies currently have `no_identified_source: true` — no admitted
-economic source of excess return has been established. Six carry `weak`
-confidence (hypotheses pending admitted evidence); three carry `none` because
+All nine retained registry records have `no_identified_source: true` — no
+admitted economic source of excess return has been established. Six carry
+`weak` confidence (hypotheses pending admitted evidence); three carry `none` because
 the evidence is not sufficient for a current source hypothesis. Those evidence
 states do not override the financial-MVP product perimeter.

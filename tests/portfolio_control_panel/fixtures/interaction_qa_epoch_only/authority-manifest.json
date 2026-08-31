@@ -1,0 +1,157 @@
+{
+  "schema_version": 9,
+  "accounting_currency": "USD",
+  "calculation_cutoff_date": "2026-08-13",
+  "source_identities": {
+    "classified_flows": {
+      "ledger_identity": {
+        "artifact": {
+          "as_of_date": "2026-08-16"
+        }
+      }
+    }
+  },
+  "rows": [
+    {
+      "account_id": "acct-ok",
+      "account_label": "Alpha •1234",
+      "last_four": "1234",
+      "strategy_id": "qsi",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "OK",
+      "start": "2026-01-01",
+      "end": "2026-08-13",
+      "invested": "1000",
+      "withdrawn": "0",
+      "net_capital": "1000",
+      "current_value": "1100",
+      "gain": "100",
+      "return_on_net_capital": "0.1",
+      "annualized_return_on_net_capital": "0.2",
+      "observation_linked_return": "0.1",
+      "observed_hwm_index": "110",
+      "observed_max_drawdown": "0.05"
+    },
+    {
+      "account_id": "acct-01",
+      "account_label": "Beta •0001",
+      "last_four": "0001",
+      "strategy_id": "p123-ai-factor",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "BLOCKED_ADMISSION",
+      "blocking_reason": "MISSING"
+    },
+    {
+      "account_id": "acct-02",
+      "account_label": "Beta •0002",
+      "last_four": "0002",
+      "strategy_id": "p123-eu",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "BLOCKED_ADMISSION",
+      "blocking_reason": "MISSING"
+    },
+    {
+      "account_id": "acct-03",
+      "account_label": "Beta •0003",
+      "last_four": "0003",
+      "strategy_id": "grizzlybears-vtma",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "BLOCKED_ADMISSION",
+      "blocking_reason": "MISSING"
+    },
+    {
+      "account_id": "acct-04",
+      "account_label": "Beta •0004",
+      "last_four": "0004",
+      "strategy_id": "robuxio-crypto",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "BLOCKED_ADMISSION",
+      "blocking_reason": "MISSING"
+    },
+    {
+      "account_id": "acct-05",
+      "account_label": "Beta •0005",
+      "last_four": "0005",
+      "strategy_id": "tt-portfolio",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "BLOCKED_ADMISSION",
+      "blocking_reason": "MISSING"
+    },
+    {
+      "account_id": "acct-06",
+      "account_label": "Beta •0006",
+      "last_four": "0006",
+      "strategy_id": "volatis-strategy",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "BLOCKED_ADMISSION",
+      "blocking_reason": "MISSING"
+    },
+    {
+      "account_id": "acct-07",
+      "account_label": "Beta •0007",
+      "last_four": "0007",
+      "strategy_id": "qsi",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "BLOCKED_ADMISSION",
+      "blocking_reason": "MISSING"
+    },
+    {
+      "account_id": "acct-08",
+      "account_label": "Beta •0008",
+      "last_four": "0008",
+      "strategy_id": "qsi",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "BLOCKED_ADMISSION",
+      "blocking_reason": "MISSING"
+    },
+    {
+      "account_id": "acct-09",
+      "account_label": "Beta •0009",
+      "last_four": "0009",
+      "strategy_id": "qsi",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "BLOCKED_ADMISSION",
+      "blocking_reason": "MISSING"
+    },
+    {
+      "account_id": "acct-10",
+      "account_label": "Beta •0010",
+      "last_four": "0010",
+      "strategy_id": "qsi",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "BLOCKED_ADMISSION",
+      "blocking_reason": "MISSING"
+    },
+    {
+      "account_id": "acct-11",
+      "account_label": "Beta •0011",
+      "last_four": "0011",
+      "strategy_id": "qsi",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "BLOCKED_ADMISSION",
+      "blocking_reason": "MISSING"
+    },
+    {
+      "account_id": "acct-12",
+      "account_label": "Beta •0012",
+      "last_four": "0012",
+      "strategy_id": "qsi",
+      "effective_start": "2026-01-01",
+      "effective_end": null,
+      "status": "BLOCKED_ADMISSION",
+      "blocking_reason": "MISSING"
+    }
+  ]
+}

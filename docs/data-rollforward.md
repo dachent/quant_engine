@@ -176,13 +176,16 @@ under `DATA-RECOVERY-001` before this workflow is accepted for perpetual use.
 A manual cycle may evaluate accepted immutable evidence without authorizing a
 provider call or advancing a pointer. First build freshness for the local
 operational date. Then independently recompute the headline correlation-one
-control from each component's allocation weight and adverse-loss fraction and
-reconcile it to the accepted correlation generation, portfolio report, and
-staged panel. The recomputation tolerance is `1e-12`.
+control from each component's allocation weight and conservative-loss fraction
+(falling back to adverse-loss fraction only when conservative loss is absent)
+and reconcile it to the accepted correlation generation, portfolio report, and
+staged panel. The recomputation tolerance is `1e-12`. The recomputation binds
+the selected freshness file and current provider-ledger generation to the exact
+`data/freshness-health.json` bytes and candidate record in that staged panel.
 
 ```powershell
 python tools/portfolio_freshness.py --provider-ledger-root 'C:\Tools\quant-engine\data\provider-ledger' --provider-ledger-generation-id <current-id> --evaluation-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'freshness-health.json')
-python tools/portfolio_control_recompute.py --correlation-root 'C:\Tools\quant-engine\data\analytics\correlation' --report-root <accepted-report-root> --panel-candidate <staged-panel-candidate> --evaluation-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'control-recomputation.json')
+python tools/portfolio_control_recompute.py --correlation-root 'C:\Tools\quant-engine\data\analytics\correlation' --report-root <accepted-report-root> --panel-candidate <staged-panel-candidate> --freshness (Join-Path $cycleRoot 'freshness-health.json') --provider-ledger-root 'C:\Tools\quant-engine\data\provider-ledger' --provider-ledger-generation-id <current-id> --evaluation-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'control-recomputation.json')
 python tools/portfolio_rollforward_cycle.py --provider-ledger-root 'C:\Tools\quant-engine\data\provider-ledger' --provider-ledger-generation-id <current-id> --freshness (Join-Path $cycleRoot 'freshness-health.json') --recomputation (Join-Path $cycleRoot 'control-recomputation.json') --evaluation-date <yyyy-mm-dd> --previous-cycle-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'cycle-receipt.json')
 ```
 

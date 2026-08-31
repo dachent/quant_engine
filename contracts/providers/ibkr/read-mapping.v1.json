@@ -233,6 +233,7 @@
       "target_fields": {
         "account_id": "restricted_crosswalk(accountId)",
         "event_date": "date(dateTime_or_reportDate)",
+        "nav_recognition_date": "reportDate",
         "amount.value": "amount",
         "amount.currency": "currency",
         "kind_or_flow_type": "classified(type, code, description)",
@@ -257,14 +258,18 @@
       "target_fields": {
         "account_id": "restricted_crosswalk(accountId)",
         "event_date": "date(dateTime_or_date)",
+        "nav_recognition_date": "reportDate",
         "flow_type": "classified(direction, type, cashTransfer, code)",
-        "amount.value": "cash_amount_or_position_value_under_accepted_policy",
-        "amount.currency": "currency",
+        "amount.value": "cashTransfer when nonzero; otherwise exact positionAmountInBase only after a proved paired internal transfer",
+        "amount.currency": "currency for cashTransfer; statement base currency for positionAmountInBase",
+        "value_basis": "POSITION_AMOUNT_IN_BASE only for the proved positionAmountInBase projection",
         "mapping_status": "accepted_assignment_or_UNMAPPED"
       },
       "verification": [
-        "Pair account-to-account transfers for consolidated-portfolio elimination.",
-        "Do not infer cash value for a position transfer when source valuation is absent."
+        "Use event_date for economic cash timing and nav_recognition_date for flow-adjusted NAV return links; never substitute one for the other.",
+        "A positionAmountInBase projection requires exactly two distinct internal accounts with one shared transaction/activity identity, same date and conid, IN/OUT directions, and exactly opposite retained source-base values.",
+        "Do not infer cash value from quantity or price; a missing or unproved positionAmountInBase remains UNAVAILABLE.",
+        "Both paired rows must be type INTERNAL, have identical statement base currencies, and use positive IN / negative OUT positionAmountInBase signs."
       ]
     },
     {

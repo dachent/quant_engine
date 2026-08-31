@@ -80,9 +80,9 @@ _ACCOUNT_FACTS: Final = {
         "positions",
         "transactions",
     ),
-    "matrixport": ("nav_observations",),
+    "matrixport": ("capital_anchors", "nav_observations"),
     "portfolio123": (),
-    "quantbase": ("flows", "nav_observations"),
+    "quantbase": ("capital_anchors", "nav_observations"),
     "schwab": ("nav_observations", "positions", "transactions"),
 }
 _PROVIDER_SOURCE_SEGMENTS: Final = {
@@ -107,6 +107,7 @@ def _canonical_json_value_bytes(value: object) -> bytes:
 
 _DATA_CLASS_TARGET_FACT: Final = {
     "ACCOUNT_NAV": "nav_observations",
+    "CAPITAL_ANCHOR": "capital_anchors",
     "POSITION": "positions",
     "TRANSACTION": "transactions",
     "EXTERNAL_FLOW": "flows",
@@ -115,6 +116,7 @@ _DATA_CLASS_TARGET_FACT: Final = {
 }
 _TARGET_ADMISSION_FACT: Final = {
     "corporate_actions": "CORPORATE_ACTION",
+    "capital_anchors": "CAPITAL_ANCHOR",
     "flows": "EXTERNAL_FLOW",
     "nav_observations": "NAV_OBSERVATION",
     "positions": "POSITION",
@@ -138,6 +140,8 @@ _DATA_CLASS_ADMISSION_FACT: Final = {
     "TRANSACTION": "TRANSACTION",
 }
 _SOURCE_FACT_TARGET: Final = {
+    "account_activity": "capital_anchors",
+    "subscription_details": "capital_anchors",
     "cash_flows": "flows",
     "corporate_actions": "corporate_actions",
     "flows": "flows",
@@ -149,6 +153,8 @@ _CSV_FACT_ACCOUNT: Final[dict[str, str]] = {
     "matrixport": "account-d2e5821e608e25f1",
     "quantbase": "account-58e75e8d952fa1b8",
 }
+_MATRIXPORT_ROBUXIO_PRODUCT_ID: Final = "7361599360326447104"
+_MATRIXPORT_ROBUXIO_ORDER_ID: Final = "7402822649690198016"
 _QUANTBASE_FUND_ID: Final = "107"
 _SCHWAB_FLOW_KINDS: Final = frozenset(
     {
@@ -159,7 +165,47 @@ _SCHWAB_FLOW_KINDS: Final = frozenset(
         "Wire Sent",
     }
 )
-_DATE_FIELDS: Final = ("as_of_date", "event_date", "effective_date")
+_SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS: Final = {
+    (
+        "account-38b653b91ff43a10",
+        "txn-55861c64ba8de7d6a1fa2e6d",
+        "2025-12-29",
+        Decimal("7000"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-02.json",
+        "source_artifact_sha256": (
+            "7c6f8d00a21b7f71b5e52627a89a611da73b02b4f30eb86b541492e4a23c7afe"
+        ),
+    },
+    (
+        "account-38b653b91ff43a10",
+        "txn-ab66e92846c1cfb18f4222e2",
+        "2026-01-02",
+        Decimal("7500"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-02.json",
+        "source_artifact_sha256": (
+            "7c6f8d00a21b7f71b5e52627a89a611da73b02b4f30eb86b541492e4a23c7afe"
+        ),
+    },
+    (
+        "account-702c489650e59956",
+        "txn-1699da38ec4afacd94bd2876",
+        "2026-01-02",
+        Decimal("-50000"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-04.json",
+        "source_artifact_sha256": (
+            "842ad4fde31ad20206cef1de7eb6f9bba699828fe5602008c18c45cb71c1b5e5"
+        ),
+    },
+}
+_DATE_FIELDS: Final = (
+    "as_of_date",
+    "event_date",
+    "effective_date",
+    "nav_recognition_date",
+)
 _NAV_VALUE_BASIS_BY_PROVIDER: Final = {
     "ibkr": "ACCOUNT_TOTAL",
     "matrixport": "ACCOUNT_TOTAL",
@@ -592,6 +638,184 @@ def _matrixport_nav_observations(
     return observations
 
 
+def _matrixport_capital_anchors(
+    generation_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Admit exact strategy subscriptions without allocating wallet deposits.
+
+    A wallet deposit proves only account-level funding.  It does not establish
+    the strategy's funded amount across currencies, fees, or retained cash.
+    The subscription record, by contrast, names the product and its exact
+    source-declared subscription amount.
+    """
+    account_id = _CSV_FACT_ACCOUNT["matrixport"]
+    source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
+    run_root = root / "output" / source_run_id
+    artifact_id = "csv/subscription_details.csv"
+    artifact = _find_manifest_artifact(
+        manifest, artifact_id, "matrixport subscription details"
+    )
+    rows = _verified_csv_rows(
+        _exact_file(run_root, Path(artifact_id), "matrixport subscription details"),
+        artifact.sha256,
+        {
+            "actual_subscription_amount",
+            "confirm_nav_time_utc",
+            "order_id",
+            "product_id",
+            "subscription_amount",
+            "subscription_currency",
+            "subscription_time_utc",
+        },
+        "matrixport subscription details",
+    )
+    matching_rows = [
+        row
+        for row in rows
+        if row.get("product_id") == _MATRIXPORT_ROBUXIO_PRODUCT_ID
+        and row.get("order_id") == _MATRIXPORT_ROBUXIO_ORDER_ID
+    ]
+    if len(rows) != 1 or len(matching_rows) != 1:
+        raise ProviderLedgerError("MATRIXPORT_ROBUXIO_SUBSCRIPTION_IDENTITY_DIFFERS")
+    rows = matching_rows
+    nav_artifact_id = "csv/daily_portfolio_totals.csv"
+    nav_artifact = _find_manifest_artifact(
+        manifest, nav_artifact_id, "matrixport daily portfolio totals"
+    )
+    nav_rows = _verified_csv_rows(
+        _exact_file(run_root, Path(nav_artifact_id), "matrixport daily portfolio totals"),
+        nav_artifact.sha256,
+        {
+            "portfolio_value_usd_observed",
+            "portfolio_value_usd_strict",
+            "strict_complete",
+            "utc_date",
+        },
+        "matrixport daily portfolio totals",
+    )
+
+    def timestamp_day(value: object, name: str) -> date:
+        try:
+            return datetime.fromisoformat(_text(value, name).replace("Z", "+00:00")).date()
+        except ValueError as exc:
+            raise ProviderLedgerError(f"{name} is not an ISO timestamp") from exc
+
+    nav_rows_by_day: dict[date, list[dict[str, str]]] = defaultdict(list)
+    for row in nav_rows:
+        nav_rows_by_day[_day(row.get("utc_date"), "matrixport portfolio utc_date")].append(
+            row
+        )
+
+    anchors: list[dict[str, Any]] = []
+    for row in sorted(rows, key=lambda item: (item["subscription_time_utc"], item["order_id"])):
+        amount = _observed_decimal(
+            row.get("subscription_amount"), "matrixport subscription amount"
+        )
+        actual_amount = _observed_decimal(
+            row.get("actual_subscription_amount"),
+            "matrixport actual subscription amount",
+        )
+        if amount is None or amount <= 0 or actual_amount is None or actual_amount != amount:
+            raise ProviderLedgerError(
+                "matrixport subscription amount is absent, non-positive, or inconsistent"
+            )
+        event_day = timestamp_day(
+            row["subscription_time_utc"], "matrixport subscription time"
+        )
+        recognition_day = timestamp_day(
+            row["confirm_nav_time_utc"], "matrixport subscription confirmation time"
+        )
+        if recognition_day < event_day:
+            raise ProviderLedgerError(
+                "matrixport subscription recognition predates subscription"
+            )
+        # The subscription's economic date remains evidence of when capital
+        # was committed.  Its funded epoch starts only when that capital is
+        # recognized in the account NAV.
+        strategy_id, mapping_status = _mapped_strategy_for_account(
+            account_id, recognition_day, accounts, strategies, assignments
+        )
+        source_record_id = _text(row.get("order_id"), "matrixport subscription order_id")
+        opening = not anchors
+        anchor: dict[str, Any] = {
+                "account_id": account_id,
+                "amount": {
+                    "currency": _text(
+                        row.get("subscription_currency"),
+                        "matrixport subscription currency",
+                    ),
+                    "status": "AVAILABLE",
+                    "value": format(amount.normalize(), "f"),
+                },
+                "capital_type": (
+                    "OPENING_CAPITAL_ANCHOR"
+                    if opening
+                    else "STRATEGY_CAPITAL_ALLOCATION"
+                ),
+                "event_date": event_day.isoformat(),
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": generation_id,
+                "mapping_basis": "EXACT_STRATEGY_SUBSCRIPTION",
+                "mapping_status": mapping_status,
+                "nav_recognition_date": recognition_day.isoformat(),
+                "provider_id": "matrixport",
+                "record_id": f"matrixport-capital-anchor:{source_record_id}",
+                "source_artifact_id": artifact_id,
+                "source_product_id": _text(
+                    row.get("product_id"), "matrixport subscription product_id"
+                ),
+                "source_record_id": source_record_id,
+                "strategy_id": strategy_id,
+            }
+        if opening:
+            matched_nav_rows = nav_rows_by_day.get(recognition_day, [])
+            if len(matched_nav_rows) != 1:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_OPENING_NAV_UNAVAILABLE: expected one daily "
+                    "account total at subscription recognition"
+                )
+            matched_nav = matched_nav_rows[0]
+            observed_nav = _observed_decimal(
+                matched_nav.get("portfolio_value_usd_observed"),
+                "matrixport opening portfolio_value_usd_observed",
+            )
+            strict_nav = _observed_decimal(
+                matched_nav.get("portfolio_value_usd_strict"),
+                "matrixport opening portfolio_value_usd_strict",
+            )
+            if (
+                matched_nav.get("strict_complete") != "true"
+                or observed_nav is None
+                or strict_nav is None
+                or observed_nav <= 0
+                or observed_nav != strict_nav
+            ):
+                raise ProviderLedgerError(
+                    "MATRIXPORT_OPENING_NAV_UNAVAILABLE: first account total "
+                    "is partial, absent, non-positive, or inconsistent"
+                )
+            if observed_nav.quantize(Decimal("0.01")) != amount.quantize(
+                Decimal("0.01")
+            ):
+                raise ProviderLedgerError(
+                    "MATRIXPORT_OPENING_NAV_SUBSCRIPTION_MISMATCH"
+                )
+            anchor["opening_nav"] = {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": format(observed_nav.normalize(), "f"),
+            }
+            anchor["nav_source_artifact_id"] = nav_artifact_id
+        anchors.append(anchor)
+    return anchors
+
+
 def _quantbase_nav_observations(
     generation_id: str,
     manifest: GenerationManifest,
@@ -658,7 +882,7 @@ def _quantbase_nav_observations(
     return observations
 
 
-def _quantbase_flows(
+def _quantbase_capital_anchors(
     generation_id: str,
     manifest: GenerationManifest,
     catalog: Mapping[str, Any],
@@ -667,13 +891,13 @@ def _quantbase_flows(
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> list[dict[str, Any]]:
-    """Admit Quantbase capital contributions as flows.
+    """Admit Quantbase strategy funding without inventing external cash flow.
 
-    Mirrors the legacy reconciliation (tools/portfolio_target_series.py):
-    contributions are filled_txn BUY rows on the fund, matched in order
-    against cost-basis increases in the dashboard history, and booked on the
-    day the cost basis rises. A contribution that does not reconcile is a
-    hard failure — never a silently mis-booked flow."""
+    A filled fund BUY is an economic strategy allocation.  The dashboard's
+    cost-basis increase supplies its later NAV-recognition date, but must not
+    overwrite the source activity date or turn the allocation into an
+    account-external deposit.
+    """
     account_id = _CSV_FACT_ACCOUNT["quantbase"]
     run_id = _run_id(
         _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
@@ -689,7 +913,7 @@ def _quantbase_flows(
     price_rows = _verified_csv_rows(
         _exact_file(run_root, price_rel, "quantbase Volatis pricehistory"),
         price_artifact.sha256,
-        {"time", "cost_basis"},
+        {"time", "cost_basis", "value"},
         "quantbase Volatis pricehistory",
     )
     activity_rel = Path("csv/account_activity.csv")
@@ -723,22 +947,26 @@ def _quantbase_flows(
         contributions.append((observed, amount))
     contributions.sort(key=lambda item: item[0])
 
-    history: list[tuple[date, Decimal]] = []
+    history: list[tuple[date, Decimal, Decimal | None]] = []
     for row in price_rows:
         cost_basis = _observed_decimal(row.get("cost_basis"), "quantbase cost basis")
         if cost_basis is None or cost_basis < 0:
             continue
         history.append(
-            (_quantbase_day(row["time"], "quantbase Volatis time"), cost_basis)
+            (
+                _quantbase_day(row["time"], "quantbase Volatis time"),
+                cost_basis,
+                _observed_decimal(row.get("value"), "quantbase Volatis value"),
+            )
         )
     history.sort(key=lambda item: item[0])
 
     pending: list[tuple[datetime, Decimal]] = []
     contribution_index = 0
     previous_cost_basis = Decimal(0)
-    booked_flows: dict[date, Decimal] = {}
+    booked_anchors: list[tuple[datetime, Decimal, date, Decimal]] = []
     tolerance = Decimal("0.02")
-    for day, cost_basis in history:
+    for day, cost_basis, nav_value in history:
         while (
             contribution_index < len(contributions)
             and contributions[contribution_index][0].date() <= day
@@ -757,40 +985,62 @@ def _quantbase_flows(
                 if running > delta + tolerance:
                     break
             if matched_count:
-                booked_flows[day] = running
+                if nav_value is None or nav_value <= 0:
+                    raise ProviderLedgerError(
+                        "quantbase capital recognition lacks a positive NAV"
+                    )
+                booked_anchors.extend(
+                    (timestamp, amount, day, nav_value)
+                    for timestamp, amount in pending[:matched_count]
+                )
                 pending = pending[matched_count:]
         previous_cost_basis = cost_basis
     if contribution_index != len(contributions) or pending:
         raise ProviderLedgerError("quantbase capital additions do not reconcile")
 
-    flows: list[dict[str, Any]] = []
-    for day, amount in sorted(booked_flows.items()):
+    anchors: list[dict[str, Any]] = []
+    for index, (timestamp, amount, recognition_day, nav_value) in enumerate(
+        sorted(booked_anchors, key=lambda item: item[0])
+    ):
+        event_day = timestamp.date()
+        # Keep the activity timestamp as the economic capital date, but map
+        # against the first dashboard NAV that recognizes the allocation.
         strategy_id, mapping_status = _mapped_strategy_for_account(
-            account_id, day, accounts, strategies, assignments
+            account_id, recognition_day, accounts, strategies, assignments
         )
-        flows.append(
-            {
-                "account_id": account_id,
-                "amount": {
-                    # The wrapped money shape the ledger contract requires.
-                    "currency": "USD",
-                    "status": "AVAILABLE",
-                    "value": format(amount.normalize(), "f"),
-                },
-                "event_date": day.isoformat(),
-                "evidence_layer": "ACCOUNT_LIVE",
-                "flow_type": "EXTERNAL_PROVIDER_TRANSFER",
-                "generation_id": generation_id,
-                "mapping_basis": "RECONCILED_COST_BASIS_INCREASE",
-                "mapping_status": mapping_status,
-                "provider_id": "quantbase",
-                "record_id": f"quantbase-flow:{day.isoformat()}",
-                "source_artifact_id": f"source/{activity_rel.as_posix()}",
-                "source_record_id": day.isoformat(),
-                "strategy_id": strategy_id,
+        anchor: dict[str, Any] = {
+            "account_id": account_id,
+            "amount": {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": format(amount.normalize(), "f"),
+            },
+            "capital_type": (
+                "OPENING_CAPITAL_ANCHOR"
+                if index == 0
+                else "STRATEGY_CAPITAL_ALLOCATION"
+            ),
+            "event_date": event_day.isoformat(),
+            "evidence_layer": "ACCOUNT_LIVE",
+            "generation_id": generation_id,
+            "mapping_basis": "RECONCILED_PROVIDER_STRATEGY_CAPITAL",
+            "mapping_status": mapping_status,
+            "nav_recognition_date": recognition_day.isoformat(),
+            "nav_source_artifact_id": f"source/{price_rel.as_posix()}",
+            "provider_id": "quantbase",
+            "record_id": f"quantbase-capital-anchor:{timestamp.isoformat()}",
+            "source_artifact_id": f"source/{activity_rel.as_posix()}",
+            "source_record_id": timestamp.isoformat(),
+            "strategy_id": strategy_id,
+        }
+        if index == 0:
+            anchor["opening_nav"] = {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": format(nav_value.normalize(), "f"),
             }
-        )
-    return flows
+        anchors.append(anchor)
+    return anchors
 
 
 def _load_spec(path: Path) -> dict[str, Any]:
@@ -1063,6 +1313,7 @@ def _provider(
 
 def _assignment_index(
     provenance: Mapping[str, Any],
+    financial_contract: Mapping[str, Any] | None = None,
 ) -> tuple[set[str], set[str], dict[str, list[dict[str, Any]]]]:
     accounts = {
         _text(item.get("account_id"), "account_id")
@@ -1084,6 +1335,44 @@ def _assignment_index(
         assignments[_text(item.get("account_id"), "assignment.account_id")].append(
             normalized
         )
+    if financial_contract is not None:
+        expected_start: date | None = None
+        for strategy in _objects(
+            financial_contract.get("strategies"), "financial MVP strategies"
+        ):
+            if strategy.get("strategy_id") != "robuxio-crypto":
+                continue
+            membership = _object(
+                strategy.get("funded_membership"), "Robuxio funded_membership"
+            )
+            if membership.get("status") != "EVIDENCED":
+                break
+            expected_start = _day(
+                membership.get("effective_start"),
+                "Robuxio funded_membership.effective_start",
+            )
+            break
+        if expected_start is None:
+            raise ProviderLedgerError("MATRIXPORT_OWNER_FUNDING_BOUNDARY_DIFFERS")
+        owner_assignments = [
+            item
+            for item in assignments.get(_CSV_FACT_ACCOUNT["matrixport"], [])
+            if item.get("mapping_status") == "MAPPED"
+            and item.get("strategy_id") == "robuxio-crypto"
+        ]
+        if len(owner_assignments) != 1:
+            raise ProviderLedgerError("MATRIXPORT_OWNER_FUNDING_BOUNDARY_DIFFERS")
+        owner_assignment = owner_assignments[0]
+        if (
+            _day(
+                owner_assignment.get("effective_start"),
+                "Matrixport owner assignment.effective_start",
+            )
+            != expected_start
+            or owner_assignment.get("source_classification")
+            != "financial_mvp_funded_membership_reconciled"
+        ):
+            raise ProviderLedgerError("MATRIXPORT_OWNER_FUNDING_BOUNDARY_DIFFERS")
     return accounts, strategies, assignments
 
 
@@ -1142,6 +1431,7 @@ def _project_account_facts(
     for source_fact in _ACCOUNT_FACTS[provider_id]:
         target_fact = "flows" if source_fact == "cash_flows" else source_fact
         if provider_id in _CSV_FACT_ACCOUNT and source_fact in {
+            "capital_anchors",
             "flows",
             "nav_observations",
         }:
@@ -1150,9 +1440,29 @@ def _project_account_facts(
                     f"{provider_id} CSV facts require a manifest and root"
                 )
             if provider_id == "matrixport":
-                if source_fact != "nav_observations":
-                    continue
-                rows: list[dict[str, Any]] = _matrixport_nav_observations(
+                rows = (
+                    _matrixport_capital_anchors(
+                        generation_id,
+                        manifest,
+                        catalog,
+                        root,
+                        accounts,
+                        strategies,
+                        assignments,
+                    )
+                    if source_fact == "capital_anchors"
+                    else _matrixport_nav_observations(
+                        generation_id,
+                        manifest,
+                        catalog,
+                        root,
+                        accounts,
+                        strategies,
+                        assignments,
+                    )
+                )
+            elif source_fact == "capital_anchors":
+                rows = _quantbase_capital_anchors(
                     generation_id,
                     manifest,
                     catalog,
@@ -1172,14 +1482,8 @@ def _project_account_facts(
                     assignments,
                 )
             else:
-                rows = _quantbase_flows(
-                    generation_id,
-                    manifest,
-                    catalog,
-                    root,
-                    accounts,
-                    strategies,
-                    assignments,
+                raise ProviderLedgerError(
+                    f"unsupported CSV fact mapping: {provider_id}.{source_fact}"
                 )
             projections[target_fact].extend(rows)
             for row in rows:
@@ -1205,9 +1509,16 @@ def _project_account_facts(
         for row in rows:
             day = _row_day(row)
             account_id = str(row.get("account_id") or "")
-            strategy_id, mapping_status = _mapped_strategy(
-                row, accounts, strategies, assignments
-            )
+            if (
+                provider_id == "ibkr"
+                and source_fact == "flows"
+                and row.get("provider_account_scope") != "STATEMENT_ACCOUNT"
+            ):
+                strategy_id, mapping_status = None, "UNMAPPED"
+            else:
+                strategy_id, mapping_status = _mapped_strategy(
+                    row, accounts, strategies, assignments
+                )
             source_id = _text(
                 row.get("record_id"), f"{provider_id}.{source_fact}.record_id"
             )
@@ -1224,19 +1535,29 @@ def _project_account_facts(
             for field in (
                 "amount",
                 "as_of_date",
+                "effective_date",
                 "event_date",
                 "flow_type",
                 "kind",
                 "market_value",
+                "nav_recognition_date",
                 "nav",
                 "price",
                 "quantity",
                 "security_id",
                 "source_artifact_id",
+                "settle_date",
+                "provider_activity_id_sha256",
+                "provider_account_scope",
                 "value_basis",
             ):
                 if field in row:
                     record[field] = row[field]
+            if source_fact == "flows" and record.get("flow_type") == "DEPOSIT_OR_WITHDRAWAL":
+                amount = _observed_decimal(record.get("amount"), "flow amount")
+                record["capital_disposition"] = (
+                    "NON_CAPITAL" if amount == 0 else "EXTERNAL_CAPITAL"
+                )
             projections[target_fact].append(record)
             if mapping_status == "UNMAPPED":
                 exceptions.append(
@@ -1260,9 +1581,28 @@ def _project_account_facts(
                         **record,
                         "flow_type": "EXTERNAL_PROVIDER_TRANSFER",
                         "mapping_basis": "INFERRED_PROVIDER_KIND",
+                        "nav_recognition_date": record.get("effective_date")
+                        or record.get("event_date"),
                         "record_id": f"schwab-flow:{source_id}",
                     }
                 )
+            elif provider_id == "schwab" and source_fact == "transactions":
+                pinned_journal = _schwab_pinned_journal_external_flow(
+                    row,
+                    manifest,
+                )
+                if pinned_journal is not None:
+                    projections["flows"].append(
+                        {
+                            **record,
+                            **pinned_journal,
+                            "flow_type": "EXTERNAL_PROVIDER_TRANSFER",
+                            "mapping_basis": "PINNED_RETAINED_JOURNAL",
+                            "nav_recognition_date": record.get("effective_date")
+                            or record.get("event_date"),
+                            "record_id": f"schwab-flow:{source_id}",
+                        }
+                    )
 
     for rows in projections.values():
         rows.sort(
@@ -1276,6 +1616,43 @@ def _project_account_facts(
                 f"{provider_id} projected fact identifiers collide"
             )
     return dict(projections), exceptions
+
+
+def _schwab_pinned_journal_external_flow(
+    row: Mapping[str, Any],
+    manifest: GenerationManifest | None,
+) -> dict[str, str] | None:
+    """Classify only three retained, independently audited Schwab Journals."""
+
+    if str(row.get("kind") or "").strip().upper() != "JOURNAL":
+        return None
+    effective_date = row.get("effective_date") or row.get("event_date")
+    if not isinstance(effective_date, str):
+        return None
+    try:
+        amount = _observed_decimal(row.get("amount"), "Schwab Journal amount")
+    except ProviderLedgerError:
+        return None
+    key = (
+        str(row.get("account_id") or ""),
+        str(row.get("record_id") or ""),
+        effective_date,
+        amount,
+    )
+    pinned = _SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS.get(key)
+    if pinned is None:
+        return None
+    if manifest is None:
+        raise ProviderLedgerError("pinned Journal source requires a Schwab manifest")
+    source_artifact_id = pinned["source_artifact_id"]
+    source_artifact_sha256 = pinned["source_artifact_sha256"]
+    artifact_by_id = {artifact.artifact_id: artifact for artifact in manifest.artifacts}
+    source_artifact = artifact_by_id.get(source_artifact_id)
+    if source_artifact is None or source_artifact.sha256 != source_artifact_sha256:
+        raise ProviderLedgerError(
+            "pinned Journal source artifact is absent or has a different hash"
+        )
+    return dict(pinned)
 
 
 _CASH_TRANSACTION_KINDS: Final = frozenset(
@@ -1393,7 +1770,12 @@ def _validate_nav_observation_moves(
         key = (
             str(row["provider_id"]),
             str(row["account_id"]),
-            str(row.get("event_date") or row.get("as_of_date") or ""),
+            str(
+                row.get("nav_recognition_date")
+                or row.get("event_date")
+                or row.get("as_of_date")
+                or ""
+            ),
         )
         activity_amounts[key] += abs(amount)
     by_account: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
@@ -1641,17 +2023,41 @@ def _broker_strategy_returns(
     """
 
     declared_gaps = declared_nav_gap_dates_by_provider or {}
+    internal_accounts_by_activity: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for row in flow_rows:
+        if not str(row.get("flow_type") or "").startswith("TRANSFER:INTERNAL"):
+            continue
+        activity_id = row.get("provider_activity_id_sha256")
+        if not isinstance(activity_id, str) or not activity_id:
+            continue
+        account_id = str(row.get("account_id") or "")
+        if account_id:
+            internal_accounts_by_activity[
+                (str(row.get("provider_id") or ""), activity_id)
+            ].add(account_id)
     flows: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
+    flow_timing_by_provider: dict[str, set[str]] = defaultdict(set)
     for row in flow_rows:
         if row.get("mapping_status") != "MAPPED":
             continue
         provider_id = str(row["provider_id"])
         if provider_id not in authoritative_provider_ids:
             continue
+        if (
+            provider_id == "ibkr"
+            and row.get("provider_account_scope") != "STATEMENT_ACCOUNT"
+        ):
+            raise ProviderLedgerError("IBKR flow lacks STATEMENT_ACCOUNT scope")
         account_id = str(row["account_id"])
-        day = str(row.get("event_date") or "")
+        recognition_day = row.get("nav_recognition_date")
+        day = str(recognition_day or row.get("event_date") or "")
         if not day:
             continue
+        flow_timing_by_provider[provider_id].add(
+            "PROVIDER_NAV_RECOGNITION_DATE"
+            if recognition_day is not None
+            else "DATE_ONLY_END_OF_DAY"
+        )
         raw_amount = row.get("amount")
         amount_missing = raw_amount is None or (
             isinstance(raw_amount, str) and not raw_amount.strip()
@@ -1659,18 +2065,35 @@ def _broker_strategy_returns(
         amount = (
             None if amount_missing else _observed_decimal(raw_amount, "flow amount")
         )
-        if str(row.get("flow_type") or "").startswith("TRANSFER:INTERNAL") and (
-            amount_missing or amount is None
-        ):
-            # Intra-account currency-ledger moves without a USD amount net to
-            # zero at account level; they are never contributions. An internal
-            # transfer WITH an available amount is real capital movement and
-            # is counted (both sides net out within an account; across
-            # accounts each side adjusts its own sleeve).
+        if row.get("capital_disposition") == "NON_CAPITAL":
+            if (
+                row.get("flow_type") != "DEPOSIT_OR_WITHDRAWAL"
+                or amount_missing
+                or amount != 0
+            ):
+                raise ProviderLedgerError("non-capital flow declaration is invalid")
             continue
         if amount_missing:
             raise ProviderLedgerError("mapped flow amount is missing")
         if amount is None:
+            activity_id = row.get("provider_activity_id_sha256")
+            if str(row.get("flow_type") or "").startswith("TRANSFER:INTERNAL"):
+                if (
+                    isinstance(activity_id, str)
+                    and len(
+                        internal_accounts_by_activity.get(
+                            (provider_id, activity_id), set()
+                        )
+                    )
+                    > 1
+                ):
+                    raise ProviderLedgerError(
+                        "unresolved cross-account internal transfer amount"
+                    )
+                # A one-sided/unpaired internal FX row has no usable USD
+                # amount. It is retained as evidence but cannot be imputed as
+                # either external capital or a zero-valued cash movement.
+                continue
             raise ProviderLedgerError("mapped flow amount is unavailable")
         flows[(provider_id, account_id, day)] += amount
 
@@ -1742,6 +2165,13 @@ def _broker_strategy_returns(
             / denominator
         )
         providers = sorted({item[2] for item in items})
+        timing_modes = {
+            mode
+            for provider in providers
+            for mode in flow_timing_by_provider.get(
+                provider, {"DATE_ONLY_END_OF_DAY"}
+            )
+        }
         account_ids = sorted({item[3] for item in items})
         source_record_ids = sorted(item[4] for item in items)
         result.append(
@@ -1761,7 +2191,11 @@ def _broker_strategy_returns(
                 "beginning_capital": format(denominator, "f"),
                 "date": day,
                 "evidence_layer": "ACCOUNT_LIVE",
-                "flow_timing": "DATE_ONLY_END_OF_DAY",
+                "flow_timing": (
+                    next(iter(timing_modes))
+                    if len(timing_modes) == 1
+                    else "MIXED_PROVIDER_FLOW_TIMING"
+                ),
                 "provider_id": providers[0]
                 if len(providers) == 1
                 else "multi-provider",
@@ -2706,6 +3140,59 @@ def _source_segment(
     return source
 
 
+def _validate_current_census_provider_generations(
+    authority: Mapping[str, Any],
+    identities: Sequence[ProviderGenerationIdentity],
+    manifests: Mapping[str, GenerationManifest],
+) -> None:
+    """Bind candidate inputs to the contract's direct provider-lane census.
+
+    The accepted provider-ledger generation is retained history evidence.  It
+    is not the authority for a new candidate's provider inputs; those inputs
+    must match the frozen direct lanes in ``current_census`` independently.
+    """
+
+    contract = _object(authority.get("contract"), "financial MVP contract")
+    census = _object(contract.get("current_census"), "current_census")
+    lanes = _objects(census.get("provider_lanes"), "current_census.provider_lanes")
+    expected: dict[str, dict[str, Any]] = {}
+    for lane in lanes:
+        provider_id = _text(
+            lane.get("provider_id"), "current census provider_id"
+        ).lower()
+        generation = lane.get("generation")
+        if generation is None:
+            continue
+        if provider_id in expected:
+            raise ProviderLedgerError(
+                f"current census provider generation is duplicated: {provider_id}"
+            )
+        expected[provider_id] = _object(
+            generation, f"current census provider generation {provider_id}"
+        )
+
+    selected = {identity.provider_id: identity for identity in identities}
+    if (
+        set(expected) != set(_PROVIDER_CATALOGS)
+        or len(selected) != len(identities)
+        or set(selected) != set(expected)
+        or set(manifests) != set(expected)
+    ):
+        raise ProviderLedgerError("current census provider generation set differs")
+
+    for provider_id, generation in expected.items():
+        identity = selected[provider_id]
+        manifest = manifests[provider_id]
+        if (
+            identity.generation_id != generation.get("generation_id")
+            or identity.manifest_sha256 != generation.get("manifest_sha256")
+            or manifest.as_of_date.isoformat() != generation.get("as_of")
+        ):
+            raise ProviderLedgerError(
+                f"{provider_id} generation differs from current census authority"
+            )
+
+
 def _catalog_dataset_items(
     provider_id: str, catalog: Mapping[str, Any], schema_version: str
 ) -> list[ProviderDatasetInventoryItem]:
@@ -3260,7 +3747,9 @@ def build_catalog(
     authority = _financial_mvp_authority(spec)
     as_of = _day(spec["as_of_date"], "spec.as_of_date")
     provenance, provenance_artifact = _provenance(spec)
-    accounts, strategies, assignments = _assignment_index(provenance)
+    accounts, strategies, assignments = _assignment_index(
+        provenance, _object(authority.get("contract"), "financial MVP contract")
+    )
     identities: list[ProviderGenerationIdentity] = []
     provider_coverage: list[dict[str, Any]] = []
     provider_artifacts: list[SourceArtifact] = []
@@ -3302,6 +3791,8 @@ def build_catalog(
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
+
+    _validate_current_census_provider_generations(authority, identities, manifests)
 
     source_strategy_returns, evidence_rows, strategy_artifacts = _strategy_inputs(
         spec["strategy_inputs"],
@@ -3461,6 +3952,7 @@ def build_catalog(
     catalog: dict[str, Any] = {
         "admissions": [item.to_dict() for item in admissions],
         "as_of_date": as_of.isoformat(),
+        "capital_anchors": combined.get("capital_anchors", []),
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
         "corporate_actions": combined.get("corporate_actions", []),
         "fact_counts": fact_counts,

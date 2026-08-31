@@ -36,6 +36,38 @@ current = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = current
 SPEC.loader.exec_module(current)
 
+# The unmocked dependence fixture deliberately manufactures different segment
+# bytes from the production history authority.  Validate that independent
+# synthetic contract against its explicit copied schema, rather than asking the
+# production #319 historical-authority gate to accept an invented generation.
+# The production validator retains responsibility for accepted-authority lineage
+# in its own contract tests; this adapter keeps the consumer fixture's expected
+# values independent of the producer output it is testing.
+_PRODUCTION_FINANCIAL_MODULE = current._financial_module()
+
+
+def _synthetic_financial_module() -> SimpleNamespace:
+    def load_contract(*, contract_path: Path) -> dict[str, Any]:
+        content = contract_path.read_bytes()
+        contract = json.loads(content.decode("utf-8"))
+        locator = contract.get("$schema")
+        if locator != "../schemas/portfolio/financial-mvp-source-contract.schema.json":
+            raise ValueError("synthetic financial contract schema locator differs")
+        schema = json.loads(
+            (contract_path.parent / locator).resolve().read_text(encoding="utf-8")
+        )
+        errors = _PRODUCTION_FINANCIAL_MODULE.schema_errors(schema, contract, schema)
+        if errors:
+            raise ValueError("synthetic financial contract schema validation failed")
+        return contract
+
+    return SimpleNamespace(
+        census_digest=_PRODUCTION_FINANCIAL_MODULE.census_digest,
+        contract_digest=_PRODUCTION_FINANCIAL_MODULE.contract_digest,
+        load_contract=load_contract,
+        schema_errors=_PRODUCTION_FINANCIAL_MODULE.schema_errors,
+    )
+
 
 _SYNTHETIC_LAYERED_HISTORY_SEGMENT_FIELDS = (
     "strategy_id",
@@ -94,6 +126,7 @@ def _fixture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     evaluated_on: current.date = current.date(2026, 1, 3),
+    epoch_hpr_receipts: list[dict[str, Any]] | None = None,
 ) -> tuple[Path, dict[str, Any], dict[str, Any]]:
     rows = _rows()
     identities = []
@@ -235,6 +268,10 @@ def _fixture(
         current._csv_content(current.SEGMENT_FIELDS, rows)
     )
     projected = [{field: row[field] for field in current.RETURN_FIELDS} for row in rows]
+    coverage_content = canonical_json_bytes(
+        {"epoch_hpr_receipts": epoch_hpr_receipts or []}
+    )
+    (history / "coverage.json").write_bytes(coverage_content)
     monkeypatch.setattr(
         current,
         "_verified_history",
@@ -243,6 +280,7 @@ def _fixture(
             identities,
             current.date(2026, 1, 2),
             {"generation_id": "a" * 64},
+            coverage_content,
         ),
     )
     monkeypatch.setattr(
@@ -264,7 +302,13 @@ def _fixture(
     assert isinstance(receipt, dict)
     source = tmp_path / str(receipt["bundle_id"])
     source.mkdir()
-    for name in ("dependence-source.json", "returns.csv", "segments.csv", "spec.json"):
+    for name in (
+        "dependence-source.json",
+        "history-coverage.json",
+        "returns.csv",
+        "segments.csv",
+        "spec.json",
+    ):
         value = built[name]
         assert isinstance(value, bytes)
         (source / name).write_bytes(value)
@@ -299,6 +343,7 @@ def test_packaged_current_dependence_is_exact_and_self_verifying(
     assert result == {
         "bundle_id": source.name,
         "complete_through": "2026-01-02",
+        "epoch_hpr_receipts": [],
         "pair_count": 3,
         "pair_mode_count": 6,
         "verification": "VALID",
@@ -331,6 +376,51 @@ def test_packaged_current_dependence_is_exact_and_self_verifying(
         "status": "CURRENT_WITHIN_AGE_THRESHOLD",
         "warning_after_days": 2,
     }
+
+
+def test_packaged_dependence_projects_only_hash_bound_epoch_hpr_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report-facing receipt projection comes from the packaged byte,
+    rather than a mutable producer-side coverage sibling."""
+
+    epoch_hpr_receipts = [
+        {
+            "evidence_layer": "ACCOUNT_LIVE",
+            "receipt": {"epoch_cumulative_return": "-0.0123875290080184841010757599"},
+            "source_generation_id": "a" * 64,
+            "source_id": "matrixport-account-generation",
+            "strategy_id": "robuxio-crypto",
+        }
+    ]
+    source, _contract, _policy = _fixture(
+        tmp_path,
+        monkeypatch,
+        epoch_hpr_receipts=epoch_hpr_receipts,
+    )
+    producer_coverage = (
+        tmp_path / "history" / "coverage.json"
+    ).read_bytes()
+
+    verified = current.verify_packaged_source(
+        source,
+        contract_path=tmp_path / "contract.json",
+        policy_path=tmp_path / "policy.json",
+    )
+    assert verified["epoch_hpr_receipts"] == epoch_hpr_receipts
+
+    # Mutating only the packaged copy leaves the producer-side receipt byte
+    # untouched and must fail against the dependence receipt's coverage hash.
+    (source / "history-coverage.json").write_bytes(
+        canonical_json_bytes({"epoch_hpr_receipts": []})
+    )
+    assert (tmp_path / "history" / "coverage.json").read_bytes() == producer_coverage
+    with pytest.raises(current.CurrentDependenceError, match="history coverage differs"):
+        current.verify_packaged_source(
+            source,
+            contract_path=tmp_path / "contract.json",
+            policy_path=tmp_path / "policy.json",
+        )
 
 
 def test_dependence_age_warning_binds_threshold_limiters_and_rejects_rewrite(
@@ -501,7 +591,12 @@ def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _unmocked_fixture(tmp_path: Path, *, return_shift: str = "0") -> dict[str, Any]:
+def _unmocked_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    return_shift: str = "0",
+) -> dict[str, Any]:
     authority_root = tmp_path / "authority"
     contracts = authority_root / "contracts"
     schemas = authority_root / "schemas" / "portfolio"
@@ -788,6 +883,7 @@ def _unmocked_fixture(tmp_path: Path, *, return_shift: str = "0") -> dict[str, A
     policy_path = contracts / "portfolio-dependence-policy-v1.json"
     contract_path.write_bytes(canonical_json_bytes(contract))
     policy_path.write_bytes(canonical_json_bytes(policy))
+    monkeypatch.setattr(current, "_financial_module", _synthetic_financial_module)
     return {
         "allocation_identity": allocation_identity,
         "allocation_root": allocation_root,
@@ -800,8 +896,9 @@ def _unmocked_fixture(tmp_path: Path, *, return_shift: str = "0") -> dict[str, A
 
 def test_current_dependence_builds_and_verifies_from_real_synthetic_authorities(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixture = _unmocked_fixture(tmp_path)
+    fixture = _unmocked_fixture(tmp_path, monkeypatch)
 
     built = current.build_source(
         contract_path=fixture["contract_path"],
@@ -814,7 +911,13 @@ def test_current_dependence_builds_and_verifies_from_real_synthetic_authorities(
     assert isinstance(receipt, dict)
     source = tmp_path / str(receipt["bundle_id"])
     source.mkdir()
-    for name in ("dependence-source.json", "returns.csv", "segments.csv", "spec.json"):
+    for name in (
+        "dependence-source.json",
+        "history-coverage.json",
+        "returns.csv",
+        "segments.csv",
+        "spec.json",
+    ):
         value = built[name]
         assert isinstance(value, bytes)
         (source / name).write_bytes(value)
@@ -826,10 +929,23 @@ def test_current_dependence_builds_and_verifies_from_real_synthetic_authorities(
     ) == {
         "bundle_id": source.name,
         "complete_through": "2026-01-02",
+        "epoch_hpr_receipts": [],
         "pair_count": 21,
         "pair_mode_count": 42,
         "verification": "VALID",
     }
+    assert (source / "history-coverage.json").read_bytes() == (
+        fixture["history_root"] / "coverage.json"
+    ).read_bytes()
+    (source / "history-coverage.json").write_bytes(
+        canonical_json_bytes({"fixture": "mutated-after-packaging"})
+    )
+    with pytest.raises(current.CurrentDependenceError, match="history coverage differs"):
+        current.verify_packaged_source(
+            source,
+            contract_path=fixture["contract_path"],
+            policy_path=fixture["policy_path"],
+        )
     assert receipt["required_strategy_ids"] == [
         "p123-ai-factor",
         "p123-eu",
@@ -849,15 +965,15 @@ def test_current_dependence_builds_and_verifies_from_real_synthetic_authorities(
         "generation_id": "1f090daf866656fbb43c9a6f0077668e9cdd85d825481c1809a206098f990467",
         "manifest_sha256": "b7fda826a4ad224352e1690d44d4579ee0841a5b5c0b5c4e0fc1c7111c9c7a11",
     }
-    assert receipt["history_authority"]["generation_id"] == (
-            "441e8bcaa16d314b60a8a6276b1a878476702393eef332f75efc39a2f6782912"
-    )
+    assert receipt["history_authority"]["generation_id"] == fixture[
+        "history_generation_id"
+    ]
 
 
 def test_current_dependence_policy_pinned_producer_seam_kills_newer_version_mutant(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fixture = _unmocked_fixture(tmp_path)
+    fixture = _unmocked_fixture(tmp_path, monkeypatch)
 
     with monkeypatch.context() as probe:
         probe.setattr(current, "LAYERED_HISTORY_BUILDER_VERSION", "1.15.0")
@@ -884,8 +1000,9 @@ def _assert_build_rejected(fixture: dict[str, Any], message: str) -> None:
 
 def test_current_dependence_rejects_unbound_policy_perimeter(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixture = _unmocked_fixture(tmp_path)
+    fixture = _unmocked_fixture(tmp_path, monkeypatch)
     policy = json.loads(fixture["policy_path"].read_text(encoding="utf-8"))
     policy["series"][0]["series_id"] = "FORGED SERIES"
     fixture["policy_path"].write_bytes(canonical_json_bytes(policy))
@@ -897,8 +1014,9 @@ def test_current_dependence_rejects_unbound_policy_perimeter(
 
 def test_current_dependence_rejects_changed_layered_history_bytes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixture = _unmocked_fixture(tmp_path)
+    fixture = _unmocked_fixture(tmp_path, monkeypatch)
     segments_path = fixture["history_root"] / "segments.csv"
     segments_path.write_bytes(
         segments_path.read_bytes().replace(b"-0.001", b"-0.101", 1)
@@ -909,8 +1027,9 @@ def test_current_dependence_rejects_changed_layered_history_bytes(
 
 def test_current_dependence_rejects_changed_allocation_catalog_bytes(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixture = _unmocked_fixture(tmp_path)
+    fixture = _unmocked_fixture(tmp_path, monkeypatch)
     catalog_path = fixture["allocation_root"] / "portfolio-baseline.json"
     catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
     catalog["allocations"][0]["systematic_weight"] = "0.999"
@@ -921,9 +1040,10 @@ def test_current_dependence_rejects_changed_allocation_catalog_bytes(
 
 def test_current_dependence_rejects_mixed_valid_history_generations(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first = _unmocked_fixture(tmp_path / "first")
-    second = _unmocked_fixture(tmp_path / "second", return_shift="0.1")
+    first = _unmocked_fixture(tmp_path / "first", monkeypatch)
+    second = _unmocked_fixture(tmp_path / "second", monkeypatch, return_shift="0.1")
     (first["history_root"] / "segments.csv").write_bytes(
         (second["history_root"] / "segments.csv").read_bytes()
     )
@@ -934,7 +1054,7 @@ def test_current_dependence_rejects_mixed_valid_history_generations(
 def test_current_dependence_unmocked_reader_negative_cases_kill_bypass_mutants(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    policy_fixture = _unmocked_fixture(tmp_path / "policy")
+    policy_fixture = _unmocked_fixture(tmp_path / "policy", monkeypatch)
     contract, policy, identities = current._load_authorities(
         policy_fixture["contract_path"], policy_fixture["policy_path"]
     )
@@ -956,7 +1076,7 @@ def test_current_dependence_unmocked_reader_negative_cases_kill_bypass_mutants(
                 "dependence series differs from product authority: p123-ai-factor",
             )
 
-    history_fixture = _unmocked_fixture(tmp_path / "history")
+    history_fixture = _unmocked_fixture(tmp_path / "history", monkeypatch)
     history_contract, history_policy, _ = current._load_authorities(
         history_fixture["contract_path"], history_fixture["policy_path"]
     )
@@ -978,7 +1098,7 @@ def test_current_dependence_unmocked_reader_negative_cases_kill_bypass_mutants(
                 history_fixture, "layered history authority differs: segments.csv"
             )
 
-    allocation_fixture = _unmocked_fixture(tmp_path / "allocation")
+    allocation_fixture = _unmocked_fixture(tmp_path / "allocation", monkeypatch)
     _, allocation_policy, _ = current._load_authorities(
         allocation_fixture["contract_path"], allocation_fixture["policy_path"]
     )

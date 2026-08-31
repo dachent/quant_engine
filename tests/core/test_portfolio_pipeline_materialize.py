@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime, timezone
 import hashlib
 import importlib.util
 import json
@@ -17,6 +17,7 @@ from quant_engine.core import (
     CoverageClaim,
     CoverageStatus,
     GenerationManifest,
+    PipelineGate,
     PipelineSpec,
     PipelineValidationError,
     SourceArtifact,
@@ -24,6 +25,9 @@ from quant_engine.core import (
     inventory_generation,
     pipeline_status,
     plan_pipeline,
+    read_generation_bundle,
+    stage_generation,
+    stage_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
 
@@ -47,6 +51,779 @@ FIXTURE_SPEC.loader.exec_module(financial_fixture)
 
 AS_OF = date(2026, 8, 3)
 ROLES = ("ledger", "baseline", "report", "panel")
+PREWIRE_MANIFEST_BYTES = b'{"fixture":"synthetic-task-6","version":8}\n'
+PREWIRE_REPORT_BYTES = b'{"fixture":"synthetic-task-6-report"}\n'
+PREWIRE_MANIFEST_SHA256 = (
+    "810eb288a0d472414c805824cf91283fb3fa5b3c394ce5edec685ab9c3c64834"
+)
+PREWIRE_REPORT_SHA256 = (
+    "eee8288e0f9ac185d75cf3c7d36947cf1521bf0561e39d178649ba69b865829e"
+)
+
+
+def _stage_prewire_generation(root: Path) -> tuple[GenerationManifest, object]:
+    """Build the real detached-control envelope around hand-authored bytes."""
+
+    as_of = date(2026, 8, 24)
+    manifest_artifact = SourceArtifact(
+        artifact_id="outputs/account-strategy-manifest.json",
+        sha256=PREWIRE_MANIFEST_SHA256,
+        size_bytes=43,
+        as_of_date=as_of,
+        schema_name="account-strategy-manifest",
+        schema_version="8",
+    )
+    report_artifact = SourceArtifact(
+        artifact_id="verification/independent-verification.json",
+        sha256=PREWIRE_REPORT_SHA256,
+        size_bytes=38,
+        as_of_date=as_of,
+        schema_name="independent-verification",
+        schema_version="1",
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-task-6-prewire", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic Task-6 prewire fixture",
+            fact_types=("synthetic",),
+            observed_start=as_of,
+            observed_end=as_of,
+            known_gaps=(),
+        ),
+        artifacts=(manifest_artifact, report_artifact),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        root,
+        manifest,
+        {
+            "outputs/account-strategy-manifest.json": PREWIRE_MANIFEST_BYTES,
+            "verification/independent-verification.json": PREWIRE_REPORT_BYTES,
+        },
+    )
+    return manifest, read_generation_bundle(root, manifest.generation_id)
+
+
+def _verified_materialization_fixture(
+    tmp_path: Path,
+) -> tuple[dict[str, object], Path, Path]:
+    source_root = tmp_path / "epoch-source"
+    account_manifest = {
+        "accounting_currency": "USD",
+        "artifact": "account-strategy-manifest",
+        "authority_readiness": {
+            "authority_status": "SOURCE_BOUND_CANDIDATE",
+            "independent_authority_verification": "NOT_PERFORMED",
+            "publication_readiness": "NOT_READY",
+        },
+        "rows": [],
+        "schema_version": 8,
+    }
+    account_bytes = canonical_json_bytes(account_manifest)
+    report_bytes = canonical_json_bytes(
+        {"status": "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"}
+    )
+    source_generation = GenerationManifest.build(
+        as_of_date=date(2026, 8, 24),
+        adapter=AdapterIdentity("synthetic-schema10-source", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic schema-10 materialization source",
+            fact_types=("synthetic",),
+            observed_start=date(2026, 8, 24),
+            observed_end=date(2026, 8, 24),
+            known_gaps=(),
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="outputs/account-strategy-manifest.json",
+                sha256=hashlib.sha256(account_bytes).hexdigest(),
+                size_bytes=len(account_bytes),
+                as_of_date=date(2026, 8, 24),
+                schema_name="account-strategy-manifest",
+                schema_version="8",
+            ),
+            SourceArtifact(
+                artifact_id="verification/independent-verification.json",
+                sha256=hashlib.sha256(report_bytes).hexdigest(),
+                size_bytes=len(report_bytes),
+                as_of_date=date(2026, 8, 24),
+                schema_name="independent-verification",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        source_root,
+        source_generation,
+        {
+            "outputs/account-strategy-manifest.json": account_bytes,
+            "verification/independent-verification.json": report_bytes,
+        },
+    )
+    source_bundle = read_generation_bundle(source_root, source_generation.generation_id)
+    financial_module = materializer._financial_mvp_module()
+    source = financial_module.epoch_manifest_source_from_bundle(source_bundle)
+    output_root = tmp_path / "materialized"
+    bound_contract = json.loads(
+        (ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    bound_contract["contract_schema_version"] = 7
+    bound_contract["epoch_manifest_source"] = source
+    registry = json.loads(
+        materializer.CURRENT_STRATEGY_REGISTRY.read_text(encoding="utf-8")
+    )
+    financial_module.validate_contract(
+        bound_contract,
+        registry=registry,
+        epoch_manifest_bundle=source_bundle,
+    )
+    bound_contract_path = output_root / "financial-mvp-bound-contract.json"
+    bound_contract_path.parent.mkdir(parents=True, exist_ok=True)
+    bound_contract_path.write_bytes(canonical_json_bytes(bound_contract))
+
+    verification = {
+        "epoch_manifest_source": source,
+        "independent_report": {"status": "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"},
+        "method": "READ_GENERATION_BUNDLE_EXACT_BYTES_AND_FINANCIAL_MVP_BINDER",
+        "producer_readiness": account_manifest["authority_readiness"],
+        "publication_readiness": "NOT_READY",
+        "status": "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES",
+    }
+    dashboard = {
+        "account_manifest": account_manifest,
+        "meta": {
+            "account_manifest_authority_profile": (
+                "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"
+            ),
+            "account_manifest_sha256": hashlib.sha256(account_bytes).hexdigest(),
+            "account_manifest_size_bytes": len(account_bytes),
+            "account_manifest_verification": verification,
+        },
+    }
+    dashboard_bytes = canonical_json_bytes(dashboard)
+    candidate = {
+        "account_manifest_authority_profile": (
+            "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"
+        ),
+        "account_manifest_verification": verification,
+        "artifact_sha256": {
+            "data/dashboard_data.json": hashlib.sha256(dashboard_bytes).hexdigest()
+        },
+    }
+    candidate_bytes = canonical_json_bytes(candidate)
+    staged = output_root / "stages" / "panel" / "account-strategy-manifest.json"
+    staged.parent.mkdir(parents=True, exist_ok=True)
+    staged.write_bytes(account_bytes)
+    panel_manifest = GenerationManifest.build(
+        as_of_date=date(2026, 8, 24),
+        adapter=AdapterIdentity("synthetic-schema10-panel", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic schema-10 materialized panel",
+            fact_types=("synthetic",),
+            observed_start=date(2026, 8, 24),
+            observed_end=date(2026, 8, 24),
+            known_gaps=(),
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="input/account-strategy-manifest.json",
+                sha256=hashlib.sha256(account_bytes).hexdigest(),
+                size_bytes=len(account_bytes),
+                as_of_date=date(2026, 8, 24),
+                schema_name="account-strategy-manifest",
+                schema_version="8",
+            ),
+            SourceArtifact(
+                artifact_id="panel/data/dashboard_data.json",
+                sha256=hashlib.sha256(dashboard_bytes).hexdigest(),
+                size_bytes=len(dashboard_bytes),
+                as_of_date=date(2026, 8, 24),
+                schema_name="portfolio-control-panel-artifact",
+                schema_version="1",
+            ),
+            SourceArtifact(
+                artifact_id="panel/candidate.json",
+                sha256=hashlib.sha256(candidate_bytes).hexdigest(),
+                size_bytes=len(candidate_bytes),
+                as_of_date=date(2026, 8, 24),
+                schema_name="portfolio-control-panel-artifact",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    panel_manifest_path = stage_generation(
+        output_root / "stages" / "panel", panel_manifest
+    )
+    panel_generation = panel_manifest_path.parent
+    for relative, content in {
+        "input/account-strategy-manifest.json": account_bytes,
+        "data/dashboard_data.json": dashboard_bytes,
+        "candidate.json": candidate_bytes,
+    }.items():
+        target = panel_generation / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+    inventory = inventory_generation(panel_generation)
+    recipe = {
+        "epoch_manifest_generation": {
+            "runtime_root": str(source_root.resolve()),
+            "generation_id": source_generation.generation_id,
+            "source": source,
+        },
+        "expected_generations": {
+            "panel": {
+                "files": inventory["files"],
+                "generation_id": inventory["generation_id"],
+                "manifest_sha256": inventory["manifest_sha256"],
+            }
+        },
+    }
+    return recipe, output_root, panel_generation
+
+
+def test_epoch_manifest_bundle_prewire_binds_once_and_stages_exact_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A raw-five rebuild, duplicate read, alias, or re-encoding breaks this seam."""
+
+    generation_root = tmp_path / "accepted"
+    manifest, expected_bundle = _stage_prewire_generation(generation_root)
+    real_reader = read_generation_bundle
+    reader_calls: list[tuple[Path, str]] = []
+    reader_results: list[object] = []
+
+    def read_once(root: Path, generation_id: str) -> object:
+        reader_calls.append((root, generation_id))
+        result = real_reader(root, generation_id)
+        reader_results.append(result)
+        return result
+
+    real_financial_module = materializer._financial_mvp_module()
+    binder_calls: list[object] = []
+    validator_calls: list[tuple[object, object, object]] = []
+
+    class ExactBinder:
+        def epoch_manifest_source_from_bundle(self, bundle: object) -> object:
+            binder_calls.append(bundle)
+            return real_financial_module.epoch_manifest_source_from_bundle(bundle)
+
+        def validate_contract(
+            self,
+            contract: object,
+            *,
+            registry: object,
+            epoch_manifest_bundle: object,
+        ) -> object:
+            validator_calls.append((contract, registry, epoch_manifest_bundle))
+            real_financial_module.validate_epoch_manifest_source(
+                contract["epoch_manifest_source"], bundle=epoch_manifest_bundle
+            )
+            return contract
+
+    producer_calls: list[bool] = []
+
+    def forbidden_producer() -> object:
+        producer_calls.append(True)
+        raise AssertionError("raw-five epoch producer must be unreachable")
+
+    monkeypatch.setattr(materializer, "read_generation_bundle", read_once)
+    monkeypatch.setattr(materializer, "_financial_mvp_module", ExactBinder)
+    monkeypatch.setattr(
+        materializer, "_account_strategy_manifest_module", forbidden_producer
+    )
+    supplied_contract = {
+        "contract_schema_version": 6,
+        "contract_id": "synthetic-prewire-contract",
+        "nested": {"rows": [{"value": "17.25"}]},
+        "schema_version": 3,
+    }
+    original_contract = json.loads(json.dumps(supplied_contract))
+    output_root = tmp_path / "output"
+
+    augmented, staged_identity = materializer._stage_epoch_manifest_bundle_prewire(
+        generation_root,
+        manifest.generation_id,
+        supplied_contract,
+        output_root,
+    )
+
+    literal_source = {
+        "generation_id": (
+            "b4888a18780058e777f8147530062a882a473aaef19596562480a1bf43425cd8"
+        ),
+        "generation_manifest_sha256": (
+            "2d88627c2283c31aa3c5a9333bc6ee423a1fcdd22d7df495a69c1768d384bb3d"
+        ),
+        "generation_receipt_sha256": (
+            "041b1343070f24c99488b27e227264bf6ff9d8d9a0047f8732c7bcc3887bb25f"
+        ),
+        "full_directory_inventory_sha256": (
+            "50769d0200857b7fe43c67cc814a21dea8e2564f916ab65ebfcb635b0910cfb1"
+        ),
+        "artifact": {
+            "path": "outputs/account-strategy-manifest.json",
+            "sha256": PREWIRE_MANIFEST_SHA256,
+            "size_bytes": 43,
+            "schema": {"name": "account-strategy-manifest", "version": "8"},
+        },
+    }
+    staged_path = output_root / "stages" / "panel" / "account-strategy-manifest.json"
+    assert reader_calls == [(generation_root, manifest.generation_id)]
+    assert len(binder_calls) == 1
+    assert binder_calls[0] is reader_results[0]
+    assert binder_calls[0] == expected_bundle
+    assert type(binder_calls[0]) is type(expected_bundle)
+    assert producer_calls == []
+    assert supplied_contract == original_contract
+    assert set(augmented) == {*original_contract, "epoch_manifest_source"}
+    assert augmented["contract_schema_version"] == 7
+    assert augmented["epoch_manifest_source"] == literal_source
+    assert len(validator_calls) == 1
+    assert validator_calls[0][0] is augmented
+    assert validator_calls[0][2] is reader_results[0]
+    assert augmented["nested"] is not supplied_contract["nested"]
+    assert staged_path.read_bytes() == PREWIRE_MANIFEST_BYTES
+    assert staged_identity == {
+        "path": str(staged_path.resolve()),
+        "sha256": PREWIRE_MANIFEST_SHA256,
+        "size_bytes": 43,
+    }
+    augmented["nested"]["rows"][0]["value"] = "changed"
+    assert supplied_contract == original_contract
+
+
+def test_epoch_manifest_bundle_prewire_passes_real_financial_contract_validator(
+    tmp_path: Path,
+) -> None:
+    """The production validator, not a fixture echo, authorizes the v7 contract."""
+
+    generation_root = tmp_path / "accepted"
+    manifest, bundle = _stage_prewire_generation(generation_root)
+    contract = json.loads(
+        (
+            materializer.REPOSITORY_ROOT
+            / "contracts"
+            / "portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    bound, staged = materializer._stage_epoch_manifest_bundle_prewire(
+        generation_root,
+        manifest.generation_id,
+        contract,
+        tmp_path / "output",
+    )
+
+    assert bound["contract_schema_version"] == 7
+    module = materializer._financial_mvp_module()
+    assert (
+        module.validate_contract(
+            bound,
+            registry=json.loads(
+                materializer.CURRENT_STRATEGY_REGISTRY.read_text(encoding="utf-8")
+            ),
+            epoch_manifest_bundle=bundle,
+        )
+        == bound
+    )
+    assert staged["sha256"] == PREWIRE_MANIFEST_SHA256
+
+
+def test_real_financial_v7_contract_rejects_shape_only_or_invented_authority(
+    tmp_path: Path,
+) -> None:
+    generation_root = tmp_path / "accepted"
+    _manifest, bundle = _stage_prewire_generation(generation_root)
+    module = materializer._financial_mvp_module()
+    contract = json.loads(
+        (
+            materializer.REPOSITORY_ROOT
+            / "contracts"
+            / "portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    contract["contract_schema_version"] = 7
+    contract["epoch_manifest_source"] = module.epoch_manifest_source_from_bundle(bundle)
+    registry = json.loads(
+        materializer.CURRENT_STRATEGY_REGISTRY.read_text(encoding="utf-8")
+    )
+
+    with pytest.raises(
+        module.FinancialMvpContractError,
+        match="requires a verified epoch-manifest bundle",
+    ):
+        module.validate_contract(contract, registry=registry)
+
+    contract["epoch_manifest_source"]["generation_manifest_sha256"] = "0" * 64
+    with pytest.raises(module.FinancialMvpContractError, match="verified bundle"):
+        module.validate_contract(
+            contract,
+            registry=registry,
+            epoch_manifest_bundle=bundle,
+        )
+
+
+def test_schema10_materialization_proof_reopens_bundle_and_panel_bytes(
+    tmp_path: Path,
+) -> None:
+    recipe, output_root, _panel_generation = _verified_materialization_fixture(tmp_path)
+
+    proof = materializer._verified_epoch_manifest_materialization_proof(
+        recipe, output_root
+    )
+
+    assert proof is not None
+    assert proof["status"] == "PASS"
+    assert proof["authority_profile"] == "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"
+    assert (
+        proof["epoch_manifest_source_sha256"]
+        == hashlib.sha256(
+            canonical_json_bytes(recipe["epoch_manifest_generation"]["source"])
+        ).hexdigest()
+    )
+    assert (
+        proof["financial_mvp_bound_contract_sha256"]
+        == hashlib.sha256(
+            (output_root / "financial-mvp-bound-contract.json").read_bytes()
+        ).hexdigest()
+    )
+
+
+def test_schema10_materialization_proof_rejects_one_byte_stage_drift(
+    tmp_path: Path,
+) -> None:
+    recipe, output_root, _panel_generation = _verified_materialization_fixture(tmp_path)
+    staged = output_root / "stages" / "panel" / "account-strategy-manifest.json"
+    staged.write_bytes(staged.read_bytes() + b" ")
+
+    with pytest.raises(materializer.MaterializationError, match="verified bundle"):
+        materializer._verified_epoch_manifest_materialization_proof(recipe, output_root)
+
+
+def test_schema10_materialization_proof_rejects_invented_bound_contract_authority(
+    tmp_path: Path,
+) -> None:
+    recipe, output_root, _panel_generation = _verified_materialization_fixture(tmp_path)
+    bound_path = output_root / "financial-mvp-bound-contract.json"
+    bound = json.loads(bound_path.read_text(encoding="utf-8"))
+    bound["epoch_manifest_source"]["generation_receipt_sha256"] = "0" * 64
+    bound_path.write_bytes(canonical_json_bytes(bound))
+
+    with pytest.raises(materializer.MaterializationError, match="bound financial"):
+        materializer._verified_epoch_manifest_materialization_proof(recipe, output_root)
+
+
+@pytest.mark.parametrize("include_raw_five", [False, True])
+def test_epoch_manifest_bundle_prewire_rejects_missing_detached_controls(
+    tmp_path: Path, include_raw_five: bool
+) -> None:
+    """A manifest, even beside the historical raw-five inputs, is not a bundle."""
+
+    manifest, _bundle = _stage_prewire_generation(tmp_path / "valid")
+    generation = tmp_path / "broken" / "generations" / manifest.generation_id
+    generation.mkdir(parents=True)
+    (generation / "generation.json").write_bytes(manifest.to_json_bytes())
+    if include_raw_five:
+        for filename in (
+            "account-strategy-ledger.json",
+            "account-strategy-ledger-identity.json",
+            "account-strategy-classified-flows.json",
+            "account-strategy-flow-coverage.json",
+            "account-strategy-admission-policy.json",
+        ):
+            (generation / filename).write_bytes(b"{}\n")
+    output_root = tmp_path / "output"
+
+    with pytest.raises(materializer.MaterializationError, match="bundle"):
+        materializer._stage_epoch_manifest_bundle_prewire(
+            tmp_path / "broken",
+            manifest.generation_id,
+            {"schema_version": 3},
+            output_root,
+        )
+
+    assert not output_root.exists()
+
+
+def test_epoch_manifest_bundle_prewire_rejects_bare_generation_manifest(
+    tmp_path: Path,
+) -> None:
+    """Accepting a GenerationManifest where a bundle ID belongs breaks authority."""
+
+    generation_root = tmp_path / "accepted"
+    manifest, _bundle = _stage_prewire_generation(generation_root)
+    output_root = tmp_path / "output"
+
+    with pytest.raises(materializer.MaterializationError, match="bundle"):
+        materializer._stage_epoch_manifest_bundle_prewire(
+            generation_root,
+            manifest,  # type: ignore[arg-type]
+            {"schema_version": 3},
+            output_root,
+        )
+
+    assert not output_root.exists()
+
+
+@pytest.mark.parametrize("mutation", ["payload", "receipt"])
+def test_epoch_manifest_bundle_prewire_rejects_mutation_before_staging(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Trusting manifest metadata without immutable readback would stage drift."""
+
+    generation_root = tmp_path / "accepted"
+    manifest, _bundle = _stage_prewire_generation(generation_root)
+    generation = generation_root / "generations" / manifest.generation_id
+    if mutation == "payload":
+        target = generation / "outputs" / "account-strategy-manifest.json"
+        target.write_bytes(target.read_bytes().replace(b'"version":8', b'"version":9'))
+    else:
+        target = generation / "generation-receipt.json"
+        changed = bytearray(target.read_bytes())
+        changed[0] = ord("[")
+        target.write_bytes(changed)
+    output_root = tmp_path / "output"
+
+    with pytest.raises(materializer.MaterializationError, match="bundle"):
+        materializer._stage_epoch_manifest_bundle_prewire(
+            generation_root,
+            manifest.generation_id,
+            {"schema_version": 3},
+            output_root,
+        )
+
+    assert not output_root.exists()
+
+
+def test_epoch_manifest_bundle_prewire_wraps_binder_failure_before_staging(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A rejected bundle-to-contract binding must not emit panel bytes."""
+
+    generation_root = tmp_path / "accepted"
+    manifest, _bundle = _stage_prewire_generation(generation_root)
+
+    class RejectingBinder:
+        @staticmethod
+        def epoch_manifest_source_from_bundle(_bundle: object) -> object:
+            raise ValueError("synthetic binder rejection")
+
+    monkeypatch.setattr(materializer, "_financial_mvp_module", RejectingBinder)
+    output_root = tmp_path / "output"
+
+    with pytest.raises(materializer.MaterializationError, match="binding"):
+        materializer._stage_epoch_manifest_bundle_prewire(
+            generation_root,
+            manifest.generation_id,
+            {"schema_version": 3},
+            output_root,
+        )
+
+    assert not output_root.exists()
+
+
+def test_epoch_manifest_bundle_prewire_preserves_different_staged_file(
+    tmp_path: Path,
+) -> None:
+    """Replacing create-only staging with overwrite would destroy prior evidence."""
+
+    generation_root = tmp_path / "accepted"
+    manifest, _bundle = _stage_prewire_generation(generation_root)
+    staged_path = (
+        tmp_path / "output" / "stages" / "panel" / "account-strategy-manifest.json"
+    )
+    staged_path.parent.mkdir(parents=True)
+    prior_bytes = b'{"different":true}\n'
+    staged_path.write_bytes(prior_bytes)
+
+    with pytest.raises(materializer.MaterializationError, match="create-only"):
+        materializer._stage_epoch_manifest_bundle_prewire(
+            generation_root,
+            manifest.generation_id,
+            json.loads(
+                (
+                    materializer.REPOSITORY_ROOT
+                    / "contracts"
+                    / "portfolio-financial-mvp-source-v1.json"
+                ).read_text(encoding="utf-8")
+            ),
+            tmp_path / "output",
+        )
+
+    assert staged_path.read_bytes() == prior_bytes
+
+
+def test_schema10_pipeline_recipe_accepts_exact_epoch_manifest_generation(
+    tmp_path: Path,
+) -> None:
+    source_recipe, _proof_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    generation_root = tmp_path / "accepted"
+    manifest, _bundle = _stage_prewire_generation(generation_root)
+    vertical_path = Path(source["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    vertical["schema_version"] = 10
+    vertical["epoch_manifest_generation"] = {
+        "runtime_root": str(generation_root.resolve()),
+        "generation_id": manifest.generation_id,
+        "source": {
+            "generation_id": "b4888a18780058e777f8147530062a882a473aaef19596562480a1bf43425cd8",
+            "generation_manifest_sha256": "2d88627c2283c31aa3c5a9333bc6ee423a1fcdd22d7df495a69c1768d384bb3d",
+            "generation_receipt_sha256": "041b1343070f24c99488b27e227264bf6ff9d8d9a0047f8732c7bcc3887bb25f",
+            "full_directory_inventory_sha256": "50769d0200857b7fe43c67cc814a21dea8e2564f916ab65ebfcb635b0910cfb1",
+            "artifact": {
+                "path": "outputs/account-strategy-manifest.json",
+                "sha256": PREWIRE_MANIFEST_SHA256,
+                "size_bytes": 43,
+                "schema": {"name": "account-strategy-manifest", "version": "8"},
+            },
+        },
+    }
+    _write_json(vertical_path, vertical)
+    pipeline = json.loads(source_recipe.read_text(encoding="utf-8"))
+    pipeline["vertical_recipe"] = _definition(vertical_path)
+    pipeline["epoch_manifest_generation"] = vertical["epoch_manifest_generation"]
+    pipeline_path = tmp_path / "schema10-pipeline-recipe.json"
+    _write_json(pipeline_path, pipeline)
+
+    accepted = materializer._recipe(pipeline_path)
+
+    assert (
+        accepted["epoch_manifest_generation"] == vertical["epoch_manifest_generation"]
+    )
+
+
+def test_schema10_pipeline_recipe_rejects_declared_source_drift(
+    tmp_path: Path,
+) -> None:
+    source_recipe, _proof_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    generation_root = tmp_path / "accepted"
+    manifest, _bundle = _stage_prewire_generation(generation_root)
+    vertical_path = Path(source["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    vertical["schema_version"] = 10
+    vertical["epoch_manifest_generation"] = {
+        "runtime_root": str(generation_root.resolve()),
+        "generation_id": manifest.generation_id,
+        "source": {"forged": True},
+    }
+    _write_json(vertical_path, vertical)
+    pipeline = json.loads(source_recipe.read_text(encoding="utf-8"))
+    pipeline["vertical_recipe"] = _definition(vertical_path)
+    pipeline["epoch_manifest_generation"] = vertical["epoch_manifest_generation"]
+    pipeline_path = tmp_path / "schema10-pipeline-recipe.json"
+    _write_json(pipeline_path, pipeline)
+
+    with pytest.raises(materializer.MaterializationError, match="source identity"):
+        materializer._recipe(pipeline_path)
+
+
+def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The public spec path must invoke the prewire seam exactly once."""
+    source_recipe, proof_root = _fixture(tmp_path)
+    source = json.loads(source_recipe.read_text(encoding="utf-8"))
+    product = financial_fixture.build_financial_mvp_fixture(tmp_path / "product")
+    generation_root = tmp_path / "accepted"
+    epoch_manifest, epoch_bundle = _stage_prewire_generation(generation_root)
+    epoch_source = (
+        materializer._financial_mvp_module().epoch_manifest_source_from_bundle(
+            epoch_bundle
+        )
+    )
+    contract = json.loads(product.contract_path.read_text(encoding="utf-8"))
+    real_financial_module = materializer._financial_mvp_module()
+    product_module = financial_fixture.SimpleNamespace(
+        **{
+            **vars(product.financial_module),
+            "load_contract": lambda _path, _registry, _schema: contract,
+            "epoch_manifest_source_from_bundle": real_financial_module.epoch_manifest_source_from_bundle,
+            "validate_contract": lambda value, **_kwargs: value,
+        }
+    )
+    monkeypatch.setattr(materializer, "_financial_mvp_module", lambda: product_module)
+    vertical_path = Path(source["vertical_recipe"]["path"])
+    vertical = json.loads(vertical_path.read_text(encoding="utf-8"))
+    vertical["provider_ledger_generation"] = _dir_definition(product.generation)
+    vertical["schema_version"] = 7
+    _write_json(vertical_path, vertical)
+    vertical.pop("provider_ledger_spec")
+    vertical["provider_ledger_generation"] = _dir_definition(product.generation)
+    vertical["schema_version"] = 10
+    vertical["epoch_manifest_generation"] = {
+        "runtime_root": str(generation_root.resolve()),
+        "generation_id": epoch_manifest.generation_id,
+        "source": epoch_source,
+    }
+    _write_json(vertical_path, vertical)
+    pipeline_recipe = tmp_path / "schema10-pipeline-recipe.json"
+    materializer.create_recipe(
+        vertical_recipe=vertical_path,
+        proof_root=proof_root,
+        qa_dir=Path(source["qa_dir"]["path"]),
+        pipeline_id="schema10-public-materialization",
+        output=pipeline_recipe,
+        financial_mvp_contract=product.contract_path,
+        financial_mvp_source_matrix=product.matrix_path,
+    )
+    calls: list[tuple[Path, str]] = []
+    real_prewire = materializer._stage_epoch_manifest_bundle_prewire
+
+    def observed_prewire(*args: object, **kwargs: object) -> object:
+        calls.append((args[0], args[1]))  # type: ignore[arg-type]
+        return real_prewire(*args, **kwargs)
+
+    monkeypatch.setattr(
+        materializer, "_stage_epoch_manifest_bundle_prewire", observed_prewire
+    )
+    monkeypatch.setenv("QE_PIPELINE_PYTHON", sys.executable)
+    monkeypatch.setattr(
+        materializer,
+        "_git",
+        lambda _repo, *args: "a" * 40 if args == ("rev-parse", "HEAD") else "",
+    )
+    monkeypatch.setattr(
+        materializer, "_validate_output_path_budget", lambda _root, _recipe: None
+    )
+    output_root = tmp_path / "schema10-dag"
+    spec_path = output_root / "pipeline-spec.json"
+
+    materializer.build_spec(pipeline_recipe, output_root, spec_path)
+
+    staged = output_root / "stages" / "panel" / "account-strategy-manifest.json"
+    assert calls == [(generation_root, epoch_manifest.generation_id)]
+    assert staged.read_bytes() == PREWIRE_MANIFEST_BYTES
+    orchestration = json.loads(
+        spec_path.with_name("portfolio-orchestration-contract.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert orchestration["epoch_manifest_generation"]["source"] == epoch_source
+    assert (
+        orchestration["epoch_manifest_source_sha256"]
+        == hashlib.sha256(canonical_json_bytes(epoch_source)).hexdigest()
+    )
+    bound_contract = json.loads(
+        (output_root / "financial-mvp-bound-contract.json").read_text(encoding="utf-8")
+    )
+    assert bound_contract["contract_schema_version"] == 7
+    assert bound_contract["epoch_manifest_source"] == epoch_source
+    assert (
+        orchestration["financial_mvp_bound_contract_sha256"]
+        == hashlib.sha256(
+            (output_root / "financial-mvp-bound-contract.json").read_bytes()
+        ).hexdigest()
+    )
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -195,7 +972,6 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
         "report",
         {
             "portfolio-report-data.json": report_payload,
-            "portfolio-report.xlsx": b"synthetic workbook",
             "workbook-validation.json": {"all_passed": True},
             "xlsx-win-result.json": {"final_state": "SUCCEEDED", "ok": True},
         },
@@ -305,6 +1081,41 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
             {"generation_id": generation.name},
         )
     return recipe_path, output_root
+
+
+@pytest.mark.parametrize(
+    "relative_path",
+    (
+        "portfolio-report.xlsx",
+        "nested/portfolio-report.XLSX",
+        "deliveries/smuggled.json",
+        "nested/deliveries/smuggled.json",
+        "Deliveries/smuggled.json",
+    ),
+)
+def test_report_generation_inventory_rejects_non_authority_delivery_paths(
+    tmp_path: Path, relative_path: str
+) -> None:
+    """An immutable report target must contain authority JSON/evidence only."""
+
+    recipe_path, _output_root = _fixture(tmp_path)
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    report_files = recipe["expected_generations"]["report"]["files"]
+    assert isinstance(report_files, list)
+    report_files.append(
+        {
+            "relative_path": relative_path,
+            "sha256": hashlib.sha256(b"untrusted workbook").hexdigest(),
+            "size_bytes": len(b"untrusted workbook"),
+        }
+    )
+    _write_json(recipe_path, recipe)
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="report generation cannot inventory non-authority workbook delivery",
+    ):
+        materializer._recipe(recipe_path)
 
 
 def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]:
@@ -437,8 +1248,19 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
             "mapped_assignments_identity": {
                 "sha256": hashlib.sha256(
                     json.dumps(
-                        [{key: assignments[0][key] for key in ("account_id", "strategy_id", "effective_start", "effective_end")}],
-                        sort_keys=True, separators=(",", ":"),
+                        [
+                            {
+                                key: assignments[0][key]
+                                for key in (
+                                    "account_id",
+                                    "strategy_id",
+                                    "effective_start",
+                                    "effective_end",
+                                )
+                            }
+                        ],
+                        sort_keys=True,
+                        separators=(",", ":"),
                     ).encode()
                 ).hexdigest(),
                 "count": 1,
@@ -446,7 +1268,15 @@ def _install_real_epoch_proof(proof_root: Path, target: Path) -> dict[str, Path]
             "receipt_artifacts": [],
             "rows": [
                 {
-                    "assignment": {key: assignments[0][key] for key in ("account_id", "strategy_id", "effective_start", "effective_end")},
+                    "assignment": {
+                        key: assignments[0][key]
+                        for key in (
+                            "account_id",
+                            "strategy_id",
+                            "effective_start",
+                            "effective_end",
+                        )
+                    },
                     "requested_start": AS_OF.isoformat(),
                     "requested_end": AS_OF.isoformat(),
                     "status": "BLOCKED",
@@ -918,9 +1748,7 @@ def test_schema_v9_rebinds_exact_epoch_manifest_inputs_into_every_stage(
         "--manifest-classified-flows": manifest_inputs[
             "account_strategy_classified_flows"
         ],
-        "--manifest-flow-coverage": manifest_inputs[
-            "account_strategy_flow_coverage"
-        ],
+        "--manifest-flow-coverage": manifest_inputs["account_strategy_flow_coverage"],
         "--manifest-admission-policy": manifest_inputs[
             "account_strategy_admission_policy"
         ],
@@ -1049,6 +1877,109 @@ def test_schema_v9_rebinds_exact_epoch_manifest_inputs_into_every_stage(
         match="post-build epoch-manifest proof differs",
     ):
         materializer._semantic_gate_payload(accepted, epoch_manifest_proof=forged_proof)
+
+
+def test_core_pipeline_rejects_legacy_provider_admission_adapter_v4(
+    tmp_path: Path,
+) -> None:
+    """Core product authority accepts only the current provider-admission adapter."""
+
+    receipt_bytes = canonical_json_bytes({"fixture": "receipt"})
+    catalog_bytes = canonical_json_bytes({"catalog_schema_version": 2})
+    manifest = GenerationManifest.build(
+        as_of_date=AS_OF,
+        adapter=AdapterIdentity("quant-engine-provider-ledger", "4"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic legacy provider-admission adapter",
+            fact_types=("provider-admission-receipt",),
+            observed_start=AS_OF,
+            observed_end=AS_OF,
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/admit-or-declare-receipt.json",
+                sha256=hashlib.sha256(receipt_bytes).hexdigest(),
+                size_bytes=len(receipt_bytes),
+                as_of_date=AS_OF,
+                schema_name="provider-admission-receipt",
+                schema_version="1",
+            ),
+            SourceArtifact(
+                artifact_id="normalized/provider-ledger.json",
+                sha256=hashlib.sha256(catalog_bytes).hexdigest(),
+                size_bytes=len(catalog_bytes),
+                as_of_date=AS_OF,
+                schema_name="provider-ledger-catalog",
+                schema_version="2",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = tmp_path / "generation.json"
+    receipt_path = tmp_path / "receipt.json"
+    catalog_path = tmp_path / "catalog.json"
+    contract_path = tmp_path / "contract.json"
+    matrix_path = tmp_path / "matrix.json"
+    manifest_path.write_bytes(manifest.to_json_bytes())
+    receipt_path.write_bytes(receipt_bytes)
+    catalog_path.write_bytes(catalog_bytes)
+    contract_path.write_bytes(canonical_json_bytes({}))
+    matrix_path.write_bytes(canonical_json_bytes({}))
+
+    authority_paths = {
+        "financial-mvp-contract-authority": contract_path,
+        "financial-mvp-provider-catalog-authority": catalog_path,
+        "financial-mvp-provider-manifest-authority": manifest_path,
+        "financial-mvp-provider-admission-authority": receipt_path,
+        "financial-mvp-source-matrix-authority": matrix_path,
+    }
+    authority_hashes = {
+        "contract_raw_sha256": hashlib.sha256(contract_path.read_bytes()).hexdigest(),
+        "provider_catalog_sha256": hashlib.sha256(catalog_path.read_bytes()).hexdigest(),
+        "provider_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "provider_receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+        "source_matrix_sha256": hashlib.sha256(matrix_path.read_bytes()).hexdigest(),
+    }
+    product_path = tmp_path / "product.json"
+    product_path.write_bytes(
+        canonical_json_bytes(
+            {
+                "authority_hashes": authority_hashes,
+                "conformance": {},
+                "schema_version": 3,
+            }
+        )
+    )
+    gates = tuple(
+        PipelineGate(
+            gate_id=gate_id,
+            path=path,
+            sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+        )
+        for gate_id, path in {
+            **authority_paths,
+            "financial-mvp-product-conformance": product_path,
+        }.items()
+    )
+    spec = PipelineSpec(
+        pipeline_id="legacy-provider-admission-adapter",
+        as_of_date=AS_OF,
+        code_commit="a" * 40,
+        created_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
+        coordination_root=tmp_path,
+        state_root=tmp_path,
+        roots={},
+        nodes=(),
+        gates=gates,
+        companions=(),
+    )
+
+    with pytest.raises(
+        PipelineValidationError,
+        match="provider admission manifest authority differs",
+    ):
+        core_pipeline._financial_mvp_product_authority(spec)  # noqa: SLF001
 
 
 def test_schema_v9_declares_the_authority_snapshot_it_emits(
@@ -1972,7 +2903,9 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
     )
 
     spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
-    production_contract = json.loads(Path(result["contract"]).read_text(encoding="utf-8"))
+    production_contract = json.loads(
+        Path(result["contract"]).read_text(encoding="utf-8")
+    )
     assert production_contract["schema_version"] == 3
     assert (
         production_contract["financial_epoch_manifest_inputs_sha256"]
@@ -2347,10 +3280,14 @@ def test_generated_semantic_command_declares_exact_gate_file(
     )
     assert {
         str(report_candidate / "portfolio-report-data.json"),
-        str(report_candidate / "portfolio-report.xlsx"),
         str(report_candidate / "workbook-contract.json"),
         str(report_candidate / "xlsx-job.json"),
     } <= set(nodes["build-report"]["declared_writes"])
+    report_generation_paths = {
+        row["relative_path"] for row in nodes["report-generation"]["files"]
+    }
+    assert "portfolio-report.xlsx" not in report_generation_paths
+    assert not any(path.startswith("deliveries/") for path in report_generation_paths)
     assert (
         str(output_root / "stages" / "report") in nodes["build-panel"]["declared_reads"]
     )

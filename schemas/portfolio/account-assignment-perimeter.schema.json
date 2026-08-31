@@ -5,19 +5,29 @@
   "description": "Canonical count-only partition of retained account facts.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "artifact_id", "as_of_date", "selected_baseline_identity", "full_perimeter_identity", "account_count", "assignment_count", "partition_counts", "fact_bijection_status", "unassigned_fact_count", "unassigned_facts", "rows"],
+  "required": ["schema_version", "artifact_id", "as_of_date", "selected_baseline_identity", "full_perimeter_identity", "selected_baseline_account_count", "account_count", "assignment_count", "partition_counts", "fact_bijection_status", "unassigned_fact_count", "unassigned_projection_count", "unassigned_facts", "rows"],
   "properties": {
     "schema_version": {"const": 1},
     "artifact_id": {"const": "account-assignment-perimeter"},
     "as_of_date": {"$ref": "#/$defs/date"},
     "selected_baseline_identity": {"$ref": "#/$defs/baseline_identity"},
     "full_perimeter_identity": {"$ref": "#/$defs/perimeter_identity"},
+    "selected_baseline_account_count": {"type": "integer", "minimum": 1},
     "account_count": {"type": "integer", "minimum": 1},
     "assignment_count": {"type": "integer", "minimum": 1},
     "partition_counts": {"$ref": "#/$defs/partition_counts"},
-    "fact_bijection_status": {"const": "ONE_TO_ONE_VERIFIED"},
-    "unassigned_fact_count": {"const": 0},
-    "unassigned_facts": {"type": "array", "maxItems": 0},
+    "fact_bijection_status": {"enum": ["ONE_TO_ONE_VERIFIED", "BLOCKED_UNASSIGNED_FACTS"]},
+    "unassigned_fact_count": {"type": "integer", "minimum": 0},
+    "unassigned_projection_count": {"type": "integer", "minimum": 0},
+    "unassigned_facts": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/unassigned_nav"},
+          {"$ref": "#/$defs/unassigned_raw_flow"}
+        ]
+      }
+    },
     "rows": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/row"}}
   },
   "$defs": {
@@ -61,6 +71,50 @@
         "count": {"type": "integer", "minimum": 1}
       }
     },
+    "record_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["record_id"],
+      "properties": {"record_id": {"type": "string", "minLength": 1}}
+    },
+    "classified_projection_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["event_id", "source_record_id"],
+      "properties": {
+        "event_id": {"type": "string", "minLength": 1},
+        "source_record_id": {"type": "string", "minLength": 1}
+      }
+    },
+    "unassigned_nav": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_kind", "source_identity", "account_id", "fact_date", "assignment_match_count", "status", "blocker_code"],
+      "properties": {
+        "source_kind": {"const": "NAV"},
+        "source_identity": {"$ref": "#/$defs/record_identity"},
+        "account_id": {"type": "string", "minLength": 1},
+        "fact_date": {"$ref": "#/$defs/date"},
+        "assignment_match_count": {"const": 0},
+        "status": {"const": "BLOCKED"},
+        "blocker_code": {"enum": ["NO_ASSIGNMENT_MATCH", "ACCOUNT_NOT_IN_SELECTED_BASELINE"]}
+      }
+    },
+    "unassigned_raw_flow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_kind", "source_identity", "classified_projection_identity", "account_id", "fact_date", "assignment_match_count", "status", "blocker_code"],
+      "properties": {
+        "source_kind": {"const": "RAW_FLOW"},
+        "source_identity": {"$ref": "#/$defs/record_identity"},
+        "classified_projection_identity": {"$ref": "#/$defs/classified_projection_identity"},
+        "account_id": {"type": "string", "minLength": 1},
+        "fact_date": {"$ref": "#/$defs/date"},
+        "assignment_match_count": {"const": 0},
+        "status": {"const": "BLOCKED"},
+        "blocker_code": {"enum": ["NO_ASSIGNMENT_MATCH", "ACCOUNT_NOT_IN_SELECTED_BASELINE"]}
+      }
+    },
     "assignment_identity": {
       "type": "object",
       "additionalProperties": false,
@@ -87,7 +141,7 @@
         "provider": {"type": "string", "minLength": 1},
         "strategy_mapping_disposition": {"enum": ["STRATEGY_MAPPED", "HISTORICAL_POOL_ONLY", "RESERVE_NOT_APPLICABLE"]},
         "strategy_id": {"anyOf": [{"type": "string", "minLength": 1}, {"type": "null"}]},
-        "effective_start": {"$ref": "#/$defs/date"},
+        "effective_start": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
         "effective_end": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]},
         "calculation_eligible": {"type": "boolean"},
         "available_nav": {"type": "integer", "minimum": 0},
@@ -98,7 +152,7 @@
       "allOf": [
         {
           "if": {"properties": {"strategy_mapping_disposition": {"const": "STRATEGY_MAPPED"}}, "required": ["strategy_mapping_disposition"]},
-          "then": {"properties": {"strategy_id": {"type": "string", "minLength": 1}, "calculation_eligible": {"const": true}}}
+          "then": {"properties": {"strategy_id": {"type": "string", "minLength": 1}, "effective_start": {"$ref": "#/$defs/date"}, "calculation_eligible": {"const": true}}}
         },
         {
           "if": {"properties": {"strategy_mapping_disposition": {"enum": ["HISTORICAL_POOL_ONLY", "RESERVE_NOT_APPLICABLE"]}}, "required": ["strategy_mapping_disposition"]},
@@ -106,5 +160,33 @@
         }
       ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["fact_bijection_status"],
+        "properties": {"fact_bijection_status": {"const": "ONE_TO_ONE_VERIFIED"}}
+      },
+      "then": {
+        "properties": {
+          "unassigned_fact_count": {"const": 0},
+          "unassigned_projection_count": {"const": 0},
+          "unassigned_facts": {"maxItems": 0}
+        }
+      }
+    },
+    {
+      "if": {
+        "required": ["fact_bijection_status"],
+        "properties": {"fact_bijection_status": {"const": "BLOCKED_UNASSIGNED_FACTS"}}
+      },
+      "then": {
+        "properties": {
+          "unassigned_fact_count": {"minimum": 1},
+          "unassigned_projection_count": {"minimum": 1},
+          "unassigned_facts": {"minItems": 1}
+        }
+      }
+    }
+  ]
 }

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import csv
-from datetime import date
+from datetime import date, timedelta
 import hashlib
 import importlib.util
 import json
+import math
 from pathlib import Path
 import sys
 
@@ -28,6 +29,17 @@ if SPEC is None or SPEC.loader is None:
 replication = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = replication
 SPEC.loader.exec_module(replication)
+
+
+DECOMPOSITION_MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_decomposition.py"
+DECOMPOSITION_SPEC = importlib.util.spec_from_file_location(
+    "portfolio_decomposition_for_replication", DECOMPOSITION_MODULE_PATH
+)
+if DECOMPOSITION_SPEC is None or DECOMPOSITION_SPEC.loader is None:
+    raise RuntimeError("unable to load portfolio decomposition builder")
+producer = importlib.util.module_from_spec(DECOMPOSITION_SPEC)
+sys.modules[DECOMPOSITION_SPEC.name] = producer
+DECOMPOSITION_SPEC.loader.exec_module(producer)
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -164,6 +176,157 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     return spec, source_root
 
 
+def _rebuild_generation(
+    spec: Path, source_root: Path, artifacts: tuple[SourceArtifact, ...]
+) -> None:
+    generation_path = source_root / "generation.json"
+    current = GenerationManifest.from_json_bytes(generation_path.read_bytes())
+    replacement = GenerationManifest.build(
+        as_of_date=current.as_of_date,
+        adapter=current.adapter,
+        coverage=current.coverage,
+        artifacts=artifacts,
+        verification=current.verification,
+    )
+    generation_path.write_bytes(replacement.to_json_bytes())
+    spec_value = json.loads(spec.read_text(encoding="utf-8"))
+    spec_value["sources"]["decomposition_generation"] = _source(generation_path)
+    spec_value["sources"]["decomposition_generation_id"] = replacement.generation_id
+    _write_json(spec, spec_value)
+
+
+def _replace_decomposition_artifact(
+    spec: Path,
+    source_root: Path,
+    **overrides: object,
+) -> None:
+    generation_path = source_root / "generation.json"
+    current = GenerationManifest.from_json_bytes(generation_path.read_bytes())
+    original = next(
+        artifact
+        for artifact in current.artifacts
+        if artifact.artifact_id == "analytics/decomposition.json"
+    )
+    replacement = SourceArtifact(
+        artifact_id=original.artifact_id,
+        sha256=str(overrides.get("sha256", original.sha256)),
+        size_bytes=int(overrides.get("size_bytes", original.size_bytes)),
+        as_of_date=overrides.get("as_of_date", original.as_of_date),
+        schema_name=str(overrides.get("schema_name", original.schema_name)),
+        schema_version=str(overrides.get("schema_version", original.schema_version)),
+    )
+    _rebuild_generation(
+        spec,
+        source_root,
+        tuple(
+            replacement
+            if artifact.artifact_id == "analytics/decomposition.json"
+            else artifact
+            for artifact in current.artifacts
+        ),
+    )
+
+
+def _producer_fixture(
+    root: Path, *, analysis_lens: str | None = None
+) -> tuple[Path, Path]:
+    root.mkdir()
+    days: list[date] = []
+    current = date(2025, 1, 2)
+    while len(days) < 150:
+        if current.weekday() < 5:
+            days.append(current)
+        current += timedelta(days=1)
+    target = root / "targets.csv"
+    factors = root / "factors.csv"
+    with (
+        target.open("w", encoding="utf-8", newline="") as target_handle,
+        factors.open("w", encoding="utf-8", newline="") as factor_handle,
+    ):
+        target_writer = csv.writer(target_handle)
+        factor_writer = csv.writer(factor_handle)
+        target_writer.writerow(producer.TARGET_HEADERS)
+        factor_writer.writerow(["date", "RF", "F1", "F2"])
+        for index, observed in enumerate(days):
+            factor_one = 0.012 * math.sin(index / 3.7) + 0.004 * math.cos(index / 13)
+            factor_two = 0.010 * math.cos(index / 5.1) - 0.003 * math.sin(index / 17)
+            beta_one = 0.15 + 0.70 * index / (len(days) - 1)
+            beta_two = -0.35 + 0.30 * math.sin(index / 28)
+            risk_free = 0.00005
+            target_writer.writerow(
+                [
+                    "synthetic-strategy",
+                    observed.isoformat(),
+                    format(0.00015 + beta_one * factor_one + beta_two * factor_two + risk_free, ".17g"),
+                    "ACCOUNT_LIVE",
+                    "NET",
+                    "TOTAL",
+                    "",
+                ]
+            )
+            factor_writer.writerow(
+                [
+                    observed.isoformat(),
+                    format(risk_free, ".17g"),
+                    format(factor_one, ".17g"),
+                    format(factor_two, ".17g"),
+                ]
+            )
+    target_hash, target_size = _source(target)["sha256"], _source(target)["size_bytes"]
+    factor_hash, factor_size = _source(factors)["sha256"], _source(factors)["size_bytes"]
+    specification: dict[str, object] = {
+        "as_of_date": days[-1].isoformat(),
+        "factor_source": {
+            "artifact_id": "frozen/factors.csv",
+            "date_column": "date",
+            "expected_sha256": factor_hash,
+            "expected_size_bytes": factor_size,
+            "factors": [
+                {"column": "F1", "factor_id": "F1", "return_type": "EXCESS"},
+                {"column": "F2", "factor_id": "F2", "return_type": "EXCESS"},
+            ],
+            "relative_path": "factors.csv",
+            "risk_free_column": "RF",
+            "schema_name": "synthetic-factor-returns",
+            "schema_version": "1",
+        },
+        "maximum_factor_staleness_days": 7,
+        "models": [
+            {
+                "constraint": "UNCONSTRAINED",
+                "cost_coverage": "INCOMPLETE",
+                "cv_folds": 3,
+                "estimator": "DYNAMIC_FLS",
+                "factor_ids": ["F1", "F2"],
+                "minimum_test_observations": 20,
+                "minimum_train_observations": 60,
+                "model_id": "dynamic-fls",
+                "parsimony_tolerance": "0.000001",
+                "periods_per_year": 252,
+                "ridge_candidates": ["0.0000000001"],
+                "series_id": "synthetic-strategy",
+                "smoothness_candidates": ["0.00000001", "0.0000001", "0.000001", "0.00001", "0.0001", "0.001"],
+                "test_start": days[105].isoformat(),
+                "train_end": days[104].isoformat(),
+            }
+        ],
+        "schema_version": 1,
+        "target_source": {
+            "artifact_id": "frozen/targets.csv",
+            "expected_sha256": target_hash,
+            "expected_size_bytes": target_size,
+            "relative_path": "targets.csv",
+            "schema_name": "synthetic-target-returns",
+            "schema_version": "1",
+        },
+    }
+    if analysis_lens is not None:
+        specification["analysis_lens"] = analysis_lens
+    spec = root / "spec.json"
+    _write_json(spec, specification)
+    return spec, factors
+
+
 def test_builds_forward_only_costed_tracker_and_dispositions(tmp_path: Path) -> None:
     spec, source_root = _fixture(tmp_path)
 
@@ -190,6 +353,139 @@ def test_builds_forward_only_costed_tracker_and_dispositions(tmp_path: Path) -> 
     assert manifest.coverage.status.value == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
 
 
+@pytest.mark.parametrize(
+    ("overrides", "error"),
+    [
+        ({"sha256": "0" * 64}, "artifact hash differs"),
+        ({"size_bytes": 1}, "artifact size differs"),
+        ({"as_of_date": date(2026, 7, 30)}, "artifact as_of_date differs"),
+        ({"schema_name": "other-schema"}, "artifact schema_name differs"),
+        ({"schema_version": "2"}, "artifact schema_version differs"),
+    ],
+    ids=["hash", "size", "date", "schema-name", "schema-version"],
+)
+def test_decomposition_manifest_artifact_must_match_source(
+    tmp_path: Path, overrides: dict[str, object], error: str
+) -> None:
+    spec, source_root = _fixture(tmp_path)
+    _replace_decomposition_artifact(spec, source_root, **overrides)
+
+    with pytest.raises(replication.ReplicationError, match=error):
+        replication.build_replication(spec, source_root)
+
+
+def test_legacy_generation_without_decomposition_artifact_fails_closed(
+    tmp_path: Path,
+) -> None:
+    spec, source_root = _fixture(tmp_path)
+    current = GenerationManifest.from_json_bytes(
+        (source_root / "generation.json").read_bytes()
+    )
+    original = current.artifacts[0]
+    _rebuild_generation(
+        spec,
+        source_root,
+        (
+            SourceArtifact(
+                artifact_id="legacy/decomposition.json",
+                sha256=original.sha256,
+                size_bytes=original.size_bytes,
+                as_of_date=original.as_of_date,
+                schema_name=original.schema_name,
+                schema_version=original.schema_version,
+            ),
+        ),
+    )
+
+    with pytest.raises(replication.ReplicationError, match="artifact is missing"):
+        replication.build_replication(spec, source_root)
+
+
+def test_decomposition_analytics_schema_version_must_be_an_integer(
+    tmp_path: Path,
+) -> None:
+    spec, source_root = _fixture(tmp_path)
+    decomposition_path = source_root / "decomposition.json"
+    value = json.loads(decomposition_path.read_text(encoding="utf-8"))
+    value["analytics_schema_version"] = "1"
+    _write_json(decomposition_path, value)
+    source = _source(decomposition_path)
+    spec_value = json.loads(spec.read_text(encoding="utf-8"))
+    spec_value["sources"]["decomposition"] = source
+    _write_json(spec, spec_value)
+    _replace_decomposition_artifact(
+        spec,
+        source_root,
+        sha256=source["sha256"],
+        size_bytes=source["size_bytes"],
+    )
+
+    with pytest.raises(
+        replication.ReplicationError,
+        match="analytics_schema_version must be an integer",
+    ):
+        replication.build_replication(spec, source_root)
+
+
+def test_real_producer_manifest_rejects_cross_paired_decomposition_bytes(
+    tmp_path: Path,
+) -> None:
+    first_root = tmp_path / "producer-first"
+    first_spec, factors = _producer_fixture(first_root)
+    _first_payload, first_manifest, first_bytes = producer.build_decomposition(
+        first_spec, first_root
+    )
+    second_root = tmp_path / "producer-second"
+    second_spec, _second_factors = _producer_fixture(
+        second_root, analysis_lens="ETF_STYLE"
+    )
+    _second_payload, _second_manifest, second_bytes = producer.build_decomposition(
+        second_spec, second_root
+    )
+    assert first_bytes != second_bytes
+
+    source_root = tmp_path / "replication-source"
+    source_root.mkdir()
+    decomposition_path = source_root / "decomposition.json"
+    generation_path = source_root / "generation.json"
+    factor_path = source_root / "factors.csv"
+    decomposition_path.write_bytes(first_bytes)
+    generation_path.write_bytes(first_manifest.to_json_bytes())
+    factor_path.write_bytes(factors.read_bytes())
+    spec = tmp_path / "replication-spec.json"
+    _write_json(
+        spec,
+        {
+            "as_of_date": "2025-07-30",
+            "method_label": replication.METHOD_LABEL,
+            "policy": {
+                "cost_sensitivities_bps": [0, 10],
+                "max_absolute_factor_weight": "1.5",
+                "max_gross_factor_exposure": "2",
+                "periods_per_year": 252,
+                "selected_cost_bps": 10,
+            },
+            "schema_version": 1,
+            "sources": {
+                "decomposition": _source(decomposition_path),
+                "decomposition_generation": _source(generation_path),
+                "decomposition_generation_id": first_manifest.generation_id,
+                "factors": _source(factor_path),
+            },
+        },
+    )
+
+    matched, _manifest, _content = replication.build_replication(spec, source_root)
+    assert matched["replication_results"]
+
+    decomposition_path.write_bytes(second_bytes)
+    spec_value = json.loads(spec.read_text(encoding="utf-8"))
+    spec_value["sources"]["decomposition"] = _source(decomposition_path)
+    _write_json(spec, spec_value)
+    with pytest.raises(replication.ReplicationError, match="artifact hash differs"):
+        replication.build_replication(spec, source_root)
+
+
 def test_diagnostic_source_model_cannot_be_promoted(tmp_path: Path) -> None:
     spec, source_root = _fixture(tmp_path)
     decomposition_path = source_root / "decomposition.json"
@@ -199,6 +495,13 @@ def test_diagnostic_source_model_cannot_be_promoted(tmp_path: Path) -> None:
     spec_value = json.loads(spec.read_text(encoding="utf-8"))
     spec_value["sources"]["decomposition"] = _source(decomposition_path)
     _write_json(spec, spec_value)
+    source = _source(decomposition_path)
+    _replace_decomposition_artifact(
+        spec,
+        source_root,
+        sha256=source["sha256"],
+        size_bytes=source["size_bytes"],
+    )
 
     payload, _manifest, _content = replication.build_replication(spec, source_root)
 
@@ -259,6 +562,13 @@ def test_source_forecast_must_independently_reproduce(tmp_path: Path) -> None:
     spec_value = json.loads(spec.read_text(encoding="utf-8"))
     spec_value["sources"]["decomposition"] = _source(decomposition_path)
     _write_json(spec, spec_value)
+    source = _source(decomposition_path)
+    _replace_decomposition_artifact(
+        spec,
+        source_root,
+        sha256=source["sha256"],
+        size_bytes=source["size_bytes"],
+    )
 
     with pytest.raises(replication.ReplicationError, match="does not reproduce"):
         replication.build_replication(spec, source_root)

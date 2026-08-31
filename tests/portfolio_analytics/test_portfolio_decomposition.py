@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import csv
 from datetime import date, timedelta
-from decimal import Decimal
 import hashlib
 import importlib.util
 import json
@@ -265,6 +264,61 @@ def _selected(result: dict[str, object]) -> dict[str, Any]:
     return selected[0]
 
 
+def _independent_dynamic_loo_predictions(
+    matrix: np.ndarray,
+    target: np.ndarray,
+    *,
+    smoothness: float,
+    ridge: float,
+) -> np.ndarray:
+    """Solve each penalized leave-one-out problem without production helpers."""
+    observation_count, factor_count = matrix.shape
+    parameter_count = 1 + observation_count * factor_count
+    design = np.zeros((observation_count, parameter_count), dtype=np.float64)
+    design[:, 0] = 1.0
+    for index, factor_row in enumerate(matrix):
+        start = 1 + index * factor_count
+        design[index, start : start + factor_count] = factor_row
+
+    ridge_penalty = np.zeros((observation_count * factor_count, parameter_count))
+    ridge_penalty[:, 1:] = math.sqrt(ridge) * np.eye(
+        observation_count * factor_count
+    )
+    smoothness_penalty = np.zeros(
+        ((observation_count - 1) * factor_count, parameter_count)
+    )
+    for index in range(observation_count - 1):
+        start = 1 + index * factor_count
+        next_start = start + factor_count
+        for factor in range(factor_count):
+            row = index * factor_count + factor
+            smoothness_penalty[row, start + factor] = math.sqrt(smoothness)
+            smoothness_penalty[row, next_start + factor] = -math.sqrt(smoothness)
+
+    predictions = []
+    for omitted in range(observation_count):
+        retained = np.ones(observation_count, dtype=bool)
+        retained[omitted] = False
+        coefficients, *_ = np.linalg.lstsq(
+            np.vstack(
+                (
+                    design[retained],
+                    ridge_penalty,
+                    smoothness_penalty,
+                )
+            ),
+            np.concatenate(
+                (
+                    target[retained],
+                    np.zeros(len(ridge_penalty) + len(smoothness_penalty)),
+                )
+            ),
+            rcond=None,
+        )
+        predictions.append(float(design[omitted] @ coefficients))
+    return np.asarray(predictions, dtype=np.float64)
+
+
 def test_dynamic_press_predictions_equal_direct_leave_one_out() -> None:
     matrix = np.asarray(
         [[math.sin(index / 2), math.cos(index / 3)] for index in range(12)],
@@ -280,19 +334,14 @@ def test_dynamic_press_predictions_equal_direct_leave_one_out() -> None:
         smoothness=0.01,
         ridge=0.0001,
     )
-    direct = []
-    for omitted in range(len(target)):
-        weights = np.ones(len(target), dtype=np.float64)
-        weights[omitted] = 0.0
-        fit = decomposition._dynamic_fit(
-            matrix,
-            target,
-            smoothness=0.01,
-            ridge=0.0001,
-            weights=weights,
-        )
-        direct.append(fit.intercept + matrix[omitted] @ fit.exposures[omitted])
-    assert optimized == pytest.approx(direct, abs=1e-10)
+    expected = _independent_dynamic_loo_predictions(
+        matrix,
+        target,
+        smoothness=0.01,
+        ridge=0.0001,
+    )
+
+    assert optimized == pytest.approx(expected, abs=1e-10)
 
 
 def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -> None:
@@ -365,6 +414,27 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
         assert reconstructed == pytest.approx(
             float(row["actual_excess_return"]), abs=5e-11
         )
+
+
+def test_manifest_binds_exact_returned_decomposition_bytes(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    target_path, days = _write_sources(source)
+    spec_path = _spec(source, target_path, days)
+
+    result, manifest, result_bytes = decomposition.build_decomposition(spec_path, source)
+
+    artifacts = [
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == "analytics/decomposition.json"
+    ]
+    assert len(artifacts) == 1
+    artifact = artifacts[0]
+    assert artifact.sha256 == hashlib.sha256(result_bytes).hexdigest()
+    assert artifact.size_bytes == len(result_bytes)
+    assert artifact.as_of_date == date.fromisoformat(str(result["as_of_date"]))
+    assert artifact.schema_name == "portfolio-factor-decomposition"
+    assert artifact.schema_version == str(result["analytics_schema_version"])
 
 
 def test_hac_and_residual_diagnostics_capture_serial_and_scale_dependence() -> None:
@@ -797,48 +867,60 @@ def test_dynamic_selection_and_training_path_do_not_consume_holdout(
     assert changed_model["model_quality"]["decision_status"] == "DIAGNOSTIC_ONLY"
 
 
-def test_canonical_live_series_digest_normalizes_decimal_spelling(
+def test_canonical_live_series_digest_has_a_literal_live_series_oracle(
     tmp_path: Path,
 ) -> None:
-    source = tmp_path / "canonical"
-    target_path, days = _write_sources(source)
-    first_spec = _spec(source, target_path, days)
-    first, _manifest, _content = decomposition.build_decomposition(first_spec, source)
-    first_digest = _selected(first)["coverage"]["canonical_live_series_sha256"]
+    expected_digest = "832f69b180eacf3ab88848736a1d3dc99eca33215a51bea851f02382d3331917"
+    target_path = tmp_path / "targets.csv"
+    target_path.write_text(
+        "\n".join(
+            (
+                ",".join(decomposition.TARGET_HEADERS),
+                "small-live,2026-01-02,0.0100,ACCOUNT_LIVE,NET,TOTAL,",
+                "small-live,2026-01-05,-0.002500,ACCOUNT_LIVE,NET,TOTAL,",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    live_rows = decomposition._read_targets(target_path, date(2026, 1, 31))["small-live"]
 
-    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
-    for row in rows[1:]:
-        row[2] = f"{Decimal(row[2]):.20f}"
-    with target_path.open("w", encoding="utf-8", newline="") as handle:
-        csv.writer(handle).writerows(rows)
-    second_spec = _spec(source, target_path, days)
-    second, _manifest, _content = decomposition.build_decomposition(second_spec, source)
+    assert decomposition._canonical_live_series_sha256(live_rows) == expected_digest
 
-    assert _selected(second)["coverage"]["canonical_live_series_sha256"] == (
-        first_digest
+    target_path.write_text(
+        "\n".join(
+            (
+                ",".join(decomposition.TARGET_HEADERS),
+                "small-live,2026-01-02,0.01,ACCOUNT_LIVE,NET,TOTAL,",
+                "small-live,2026-01-05,-0.0025,ACCOUNT_LIVE,NET,TOTAL,",
+                "small-live,2025-12-31,0.25,BACKTEST,NET,TOTAL,",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    normalized_and_backtest_rows = decomposition._read_targets(
+        target_path, date(2026, 1, 31), evidence_mode="LIVE_PLUS_BACKTEST"
+    )["small-live"]
+
+    assert (
+        decomposition._canonical_live_series_sha256(normalized_and_backtest_rows)
+        == expected_digest
     )
 
+    target_path.write_text(
+        "\n".join(
+            (
+                ",".join(decomposition.TARGET_HEADERS),
+                "small-live,2026-01-02,0.02,ACCOUNT_LIVE,NET,TOTAL,",
+                "small-live,2026-01-05,-0.0025,ACCOUNT_LIVE,NET,TOTAL,",
+            )
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    changed_live_rows = decomposition._read_targets(target_path, date(2026, 1, 31))[
+        "small-live"
+    ]
 
-def test_canonical_live_series_digest_excludes_backtest_rows() -> None:
-    live = decomposition.TargetRow(
-        date(2026, 1, 2),
-        0.01,
-        "0.01",
-        "ACCOUNT_LIVE",
-        "NET",
-        "TOTAL",
-        None,
-    )
-    backtest = decomposition.TargetRow(
-        date(2025, 12, 31),
-        0.02,
-        "0.02",
-        "BACKTEST",
-        "NET",
-        "TOTAL",
-        None,
-    )
-
-    assert decomposition._canonical_live_series_sha256([backtest, live]) == (
-        decomposition._canonical_live_series_sha256([live])
-    )
+    assert decomposition._canonical_live_series_sha256(changed_live_rows) != expected_digest

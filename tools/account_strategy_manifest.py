@@ -42,13 +42,15 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
 import re
 from collections import defaultdict
 from datetime import date, timedelta
-from decimal import Decimal, getcontext
+from decimal import Context, Decimal, getcontext, localcontext
+from functools import wraps
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
@@ -57,9 +59,21 @@ from quant_engine.core import InputSnapshot
 from quant_engine.core.contracts import (
     ManifestValidationError,
     SourceArtifact,
+    canonical_json_bytes,
 )
 
-getcontext().prec = 40
+_DECIMAL_CONTEXT = Context(prec=40)
+
+
+def _isolated_decimal_context(function: Any) -> Any:
+    """Run numeric work deterministically without mutating caller process state."""
+
+    @wraps(function)
+    def run(*args: Any, **kwargs: Any) -> Any:
+        with localcontext(_DECIMAL_CONTEXT):
+            return function(*args, **kwargs)
+
+    return run
 
 
 class ManifestError(RuntimeError):
@@ -70,6 +84,8 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
 _MANIFEST_SCHEMA_VERSION = 7
 _FLOW_CLASSES_SCHEMA_VERSION = 3
+_CURRENT_MANIFEST_SCHEMA_VERSION = 9
+_CURRENT_FLOW_CLASSES_SCHEMA_VERSION = 4
 _FLOW_CLASSIFICATION_POLICY_SCHEMA_VERSION = 1
 _FLOW_COVERAGE_SCHEMA_VERSION = 2
 _CENT = Decimal("0.01")
@@ -82,6 +98,7 @@ _FLOW_COVERAGE_STATUSES = frozenset({"COMPLETE", "BLOCKED"})
 _FLOW_COVERAGE_AUTHORITY_KINDS = frozenset(
     {
         "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2",
+        "STATIC_SNAPSHOT_COVERAGE_V1",
         "NONE",
     }
 )
@@ -98,6 +115,12 @@ _FLOW_COVERAGE_BLOCKERS = frozenset(
         "LEGACY_RECEIPT_UNVERIFIABLE",
     }
 )
+
+_RECEIPT_AUTHORITY_ARTIFACT_ID = (
+    "authority/account-interval-retrieval-receipt-authority.json"
+)
+_RECEIPT_AUTHORITY_SCHEMA_NAME = "account-interval-retrieval-receipt-authority"
+_RECEIPT_AUTHORITY_SCHEMA_VERSION = 1
 
 
 # Retained receipt contracts are lexically owned by the closed coverage loader.
@@ -200,11 +223,8 @@ def _dec(value: object, field: str) -> Decimal:
 
 
 def _money(value: object, field: str) -> Decimal:
-    """Parse a source monetary value that can be represented exactly in cents."""
-    parsed = _dec(value, field)
-    if parsed.quantize(_CENT) != parsed:
-        raise ManifestError(f"{field} must be exactly cent-representable")
-    return parsed
+    """Parse a finite source monetary decimal without discarding precision."""
+    return _dec(value, field)
 
 
 def _fixed_decimal(value: Decimal) -> str:
@@ -494,6 +514,7 @@ def _validate_flow_coverage_payload(
     receipt_snapshots: Mapping[str, InputSnapshot],
     mapped_assignments: list[dict[str, Any]],
     receipt_validator: Any,
+    ledger_payload: Mapping[str, Any] | None = None,
 ) -> tuple[tuple[Mapping[str, object], ...], dict[str, object]]:
     """Validate coverage facts without constructing numeric-row authority.
 
@@ -594,14 +615,21 @@ def _validate_flow_coverage_payload(
             raise ManifestError(f"flow coverage row {index} interval is reversed")
         if requested_end > coverage_as_of_date:
             raise ManifestError(f"flow coverage row {index} interval exceeds coverage as_of_date")
-        assignment_requested_end = effective_end or coverage_as_of_date
-        if requested_start != effective_start or requested_end != assignment_requested_end:
-            raise ManifestError(f"flow coverage row {index} interval does not bind assignment")
         status = _require_nonempty_text(
             value["status"], f"flow coverage row {index}.status"
         )
         if status not in _FLOW_COVERAGE_STATUSES:
             raise ManifestError(f"flow coverage row {index}.status is invalid")
+        if (
+            requested_start != effective_start
+            or (effective_end is not None and requested_end != effective_end)
+            or (
+                effective_end is None
+                and status == "BLOCKED"
+                and requested_end != coverage_as_of_date
+            )
+        ):
+            raise ManifestError(f"flow coverage row {index} interval does not bind assignment")
         authority_kind = _require_nonempty_text(
             value["authority_kind"], f"flow coverage row {index}.authority_kind"
         )
@@ -613,7 +641,7 @@ def _validate_flow_coverage_payload(
         blocker = value["blocker_code"]
         detail = value["blocker_detail"]
         if status == "COMPLETE":
-            if authority_kind != "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2" or not isinstance(receipt_id, str) or not receipt_id:
+            if authority_kind not in {"ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2", "STATIC_SNAPSHOT_COVERAGE_V1"} or not isinstance(receipt_id, str) or not receipt_id:
                 raise ManifestError(
                     f"flow coverage row {index} COMPLETE authority is invalid"
                 )
@@ -623,6 +651,14 @@ def _validate_flow_coverage_payload(
             if snapshot is None:
                 raise ManifestError(f"flow coverage row {index} receipt is missing")
             receipt = snapshot.json_object(f"retrieval receipt {receipt_id}")
+            if (
+                authority_kind == "STATIC_SNAPSHOT_COVERAGE_V1"
+                and receipt.get("coverage_mode") != "STATIC_SNAPSHOT_COVERAGE_V1"
+            ) or (
+                authority_kind == "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2"
+                and receipt.get("schema_version") != 2
+            ):
+                raise ManifestError(f"flow coverage row {index} receipt authority differs")
             receipt_validator(
                 receipt,
                 receipt_id,
@@ -668,18 +704,26 @@ def _validate_flow_coverage_payload(
 def _make_coverage_loader(receipt_predicate: Any) -> Any:
     """Bind coverage construction inside this module, never at a call site."""
     capability = object()
-    retained_contracts: Mapping[tuple[str, str, str], Mapping[str, object]] = (
-        MappingProxyType({})
-    )
 
     class _CoverageIndex:
-        __slots__ = ("_rows",)
+        __slots__ = ("_rows", "_receipt_authority")
 
-        def __init__(self, rows: list[dict[str, object]], *, _capability: object) -> None:
+        def __init__(
+            self,
+            rows: list[dict[str, object]],
+            receipt_authority: dict[str, object] | None,
+            *,
+            _capability: object,
+        ) -> None:
             if _capability is not capability:
                 raise ManifestError("coverage authority construction is denied")
             object.__setattr__(
                 self, "_rows", tuple(MappingProxyType(dict(row)) for row in rows)
+            )
+            object.__setattr__(
+                self,
+                "_receipt_authority",
+                None if receipt_authority is None else deepcopy(receipt_authority),
             )
 
         def __setattr__(self, _name: str, _value: object) -> None:
@@ -703,6 +747,14 @@ def _make_coverage_loader(receipt_predicate: Any) -> Any:
                 for row in self._rows
             )
 
+        @property
+        def receipt_authority(self) -> dict[str, object] | None:
+            return (
+                None
+                if self._receipt_authority is None
+                else deepcopy(self._receipt_authority)
+            )
+
     coverage_validator = _validate_flow_coverage_payload
 
     def validate_complete_receipt(
@@ -712,37 +764,26 @@ def _make_coverage_loader(receipt_predicate: Any) -> Any:
         requested_start: str,
         requested_end: str,
         coverage_as_of_date: str,
+        contracts: Mapping[str, Mapping[str, object]],
     ) -> None:
-        issuer = receipt.get("issuer")
-        if not isinstance(issuer, Mapping) or set(issuer) != {
-            "adapter_name",
-            "adapter_version",
-            "code_sha256",
-        }:
-            raise ManifestError("retrieval receipt issuer is invalid")
-        issuer_name = _require_nonempty_text(
-            issuer.get("adapter_name"), "retrieval receipt issuer.adapter_name"
-        )
-        issuer_version = _require_nonempty_text(
-            issuer.get("adapter_version"), "retrieval receipt issuer.adapter_version"
-        )
-        issuer_code = issuer.get("code_sha256")
-        if not isinstance(issuer_code, str) or _SHA256.fullmatch(issuer_code) is None:
-            raise ManifestError("retrieval receipt issuer is invalid")
-        contract = retained_contracts.get(
-            (issuer_name, issuer_version, issuer_code)
-        )
+        contract = contracts.get(receipt_id)
         if contract is None:
-            raise ManifestError("retrieval receipt issuer is not admissible")
-        receipt_predicate(
-            receipt,
-            receipt_id,
-            account_id,
-            requested_start,
-            requested_end,
-            coverage_as_of_date,
-            contract,
-        )
+            raise ManifestError("retrieval receipt is not selected by receipt authority")
+        if contract.get("coverage_mode") == "STATIC_SNAPSHOT_COVERAGE_V1":
+            _validate_static_snapshot_receipt(
+                receipt, receipt_id, account_id, requested_start, requested_end,
+                coverage_as_of_date, contract,
+            )
+        else:
+            receipt_predicate(
+                receipt,
+                receipt_id,
+                account_id,
+                requested_start,
+                requested_end,
+                coverage_as_of_date,
+                contract,
+            )
 
     def load_flow_coverage(
         coverage_snapshot: InputSnapshot,
@@ -750,8 +791,9 @@ def _make_coverage_loader(receipt_predicate: Any) -> Any:
         classified_flows_artifact: Mapping[str, object],
         receipt_snapshots: Mapping[str, InputSnapshot],
         mapped_assignments: list[dict[str, Any]],
+        receipt_authority_snapshot: InputSnapshot | None = None,
     ) -> tuple[object, dict[str, object]]:
-        """Load coverage against retained authority only."""
+        """Load coverage against one selected immutable receipt authority."""
         if type(coverage_snapshot) is not InputSnapshot:
             raise ManifestError("flow coverage must be an InputSnapshot")
         if not isinstance(receipt_snapshots, Mapping):
@@ -763,16 +805,49 @@ def _make_coverage_loader(receipt_predicate: Any) -> Any:
             for key, value in receipt_snapshots.items()
         ):
             raise ManifestError("retrieval receipts must be InputSnapshots")
+        coverage_payload = coverage_snapshot.json_object("flow coverage")
+        coverage_as_of_date = _iso_date(
+            coverage_payload.get("as_of_date"), "flow coverage.as_of_date"
+        )
+        receipt_contracts, receipt_authority = _load_selected_receipt_authority(
+            receipt_authority_snapshot,
+            receipt_snapshots,
+            coverage_as_of_date,
+        )
+
+        def validate_selected_receipt(
+            receipt: Mapping[str, object],
+            receipt_id: str,
+            account_id: str,
+            requested_start: str,
+            requested_end: str,
+            requested_coverage_as_of_date: str,
+        ) -> None:
+            validate_complete_receipt(
+                receipt,
+                receipt_id,
+                account_id,
+                requested_start,
+                requested_end,
+                requested_coverage_as_of_date,
+                receipt_contracts,
+            )
+
         rows, artifact = coverage_validator(
-            coverage_snapshot.json_object("flow coverage"),
+            coverage_payload,
             coverage_snapshot,
             ledger_identity,
             classified_flows_artifact,
             receipt_snapshots,
             mapped_assignments,
-            validate_complete_receipt,
+            validate_selected_receipt,
         )
-        return _CoverageIndex(list(rows), _capability=capability), artifact
+        return (
+            _CoverageIndex(
+                list(rows), receipt_authority, _capability=capability
+            ),
+            artifact,
+        )
 
     return load_flow_coverage
 
@@ -900,6 +975,89 @@ def _validate_receipt_contract(
         categories,
         pagination,
     )
+
+
+def _validate_static_snapshot_contract(contract: Mapping[str, object]) -> None:
+    """Validate the deliberately narrower retained-static receipt authority."""
+    required = {
+        "coverage_mode", "account_id", "strategy_id", "requested_start",
+        "requested_end", "provider_generation", "staged_inputs",
+    }
+    if set(contract) != required or contract.get("coverage_mode") != "STATIC_SNAPSHOT_COVERAGE_V1":
+        raise ManifestError("static receipt authority contract is invalid")
+    for field in ("account_id", "strategy_id", "requested_start", "requested_end"):
+        _require_nonempty_text(contract.get(field), f"static receipt authority.{field}")
+    _iso_date(contract["requested_start"], "static receipt authority.requested_start")
+    _iso_date(contract["requested_end"], "static receipt authority.requested_end")
+    generation = contract.get("provider_generation")
+    staged = contract.get("staged_inputs")
+    if not isinstance(generation, Mapping) or set(generation) != {"generation_id", "catalog_sha256", "manifest_sha256", "generation_as_of_date"}:
+        raise ManifestError("static receipt authority provider generation is invalid")
+    if not isinstance(staged, Mapping) or set(staged) != {"provider_ledger_generation_id", "provider_ledger_artifact", "baseline_sha256", "baseline_size_bytes", "crosswalk_sha256", "crosswalk_size_bytes"}:
+        raise ManifestError("static receipt authority staged inputs are invalid")
+    for field in ("generation_id", "catalog_sha256", "manifest_sha256"):
+        if not isinstance(generation.get(field), str) or _SHA256.fullmatch(str(generation.get(field))) is None:
+            raise ManifestError("static receipt authority provider generation is invalid")
+    _iso_date(generation.get("generation_as_of_date"), "static receipt authority generation_as_of_date")
+    if not isinstance(staged.get("provider_ledger_generation_id"), str) or _SHA256.fullmatch(str(staged.get("provider_ledger_generation_id"))) is None:
+        raise ManifestError("static receipt authority staged inputs are invalid")
+    _validate_artifact_shape(staged.get("provider_ledger_artifact"), "static receipt authority provider_ledger_artifact")
+    for hash_field, size_field in (("baseline_sha256", "baseline_size_bytes"), ("crosswalk_sha256", "crosswalk_size_bytes")):
+        if not isinstance(staged.get(hash_field), str) or _SHA256.fullmatch(str(staged.get(hash_field))) is None or isinstance(staged.get(size_field), bool) or not isinstance(staged.get(size_field), int) or int(staged.get(size_field)) < 0:
+            raise ManifestError("static receipt authority staged inputs are invalid")
+
+
+def _validate_static_snapshot_receipt(
+    receipt: Mapping[str, object], receipt_id: str, account_id: str,
+    requested_start: str, requested_end: str, coverage_as_of_date: str,
+    contract: Mapping[str, object],
+    ledger_payload: Mapping[str, Any] | None = None,
+) -> None:
+    required = {"schema_version", "artifact_id", "coverage_mode", "issuer", "provider", "account_id", "strategy_id", "requested_start", "requested_end", "calculation_cutoff_date", "date_convention", "provider_generation", "staged_inputs", "observed_facts", "missing_intervals", "coverage_as_of_date", "completeness"}
+    if set(receipt) != required or receipt.get("schema_version") != 3 or receipt.get("artifact_id") != receipt_id or receipt.get("coverage_mode") != "STATIC_SNAPSHOT_COVERAGE_V1" or receipt.get("date_convention") != "EOD_PROVIDER_NAV_RECOGNITION_DATE" or receipt.get("completeness") != "RETAINED_STATIC_SNAPSHOT_ONLY":
+        raise ManifestError("static snapshot receipt identity is invalid")
+    issuer = receipt.get("issuer")
+    if not isinstance(issuer, Mapping) or set(issuer) != {"adapter_name", "adapter_version", "code_sha256"} or issuer.get("adapter_name") != "static-snapshot-coverage" or issuer.get("adapter_version") != "1" or not isinstance(issuer.get("code_sha256"), str) or _SHA256.fullmatch(str(issuer.get("code_sha256"))) is None:
+        raise ManifestError("static snapshot receipt issuer is invalid")
+    _validate_static_snapshot_contract(contract)
+    if receipt.get("account_id") != account_id or receipt.get("strategy_id") != contract["strategy_id"] or receipt.get("requested_start") != requested_start or receipt.get("requested_end") != requested_end or receipt.get("provider_generation") != contract["provider_generation"] or receipt.get("staged_inputs") != contract["staged_inputs"]:
+        raise ManifestError("static snapshot receipt source binding differs")
+    cutoff = _iso_date(receipt.get("calculation_cutoff_date"), "static snapshot receipt calculation_cutoff_date")
+    receipt_as_of = _iso_date(receipt.get("coverage_as_of_date"), "static snapshot receipt coverage_as_of_date")
+    if cutoff > coverage_as_of_date or receipt_as_of < cutoff:
+        raise ManifestError("static snapshot receipt exceeds coverage as_of_date")
+    facts = receipt.get("observed_facts")
+    if not isinstance(facts, Mapping) or set(facts) != {"nav", "flows", "capital_anchors"}:
+        raise ManifestError("static snapshot receipt observed facts are invalid")
+    for summary in facts.values():
+        if not isinstance(summary, Mapping) or set(summary) != {"row_count", "first_date", "last_date"} or isinstance(summary.get("row_count"), bool) or not isinstance(summary.get("row_count"), int) or int(summary.get("row_count")) < 0:
+            raise ManifestError("static snapshot receipt observed facts are invalid")
+        count = int(summary["row_count"])
+        if count == 0 and (summary.get("first_date") is not None or summary.get("last_date") is not None):
+            raise ManifestError("static snapshot receipt observed facts are invalid")
+        if count and (_iso_date(summary.get("first_date"), "static snapshot receipt first_date") > _iso_date(summary.get("last_date"), "static snapshot receipt last_date")):
+            raise ManifestError("static snapshot receipt observed facts are invalid")
+    missing = receipt.get("missing_intervals")
+    if not isinstance(missing, list) or any(not isinstance(item, Mapping) or set(item) != {"start", "end", "reason"} or item.get("reason") != "PROVIDER_DECLARED_NAV_MISSING" or _iso_date(item.get("start"), "static snapshot receipt missing start") > _iso_date(item.get("end"), "static snapshot receipt missing end") for item in missing):
+        raise ManifestError("static snapshot receipt missing intervals are invalid")
+    if ledger_payload is None:
+        return
+    def fact_date(row: Mapping[str, object], kind: str) -> str:
+        return str(
+            row.get("as_of_date")
+            if kind == "nav"
+            else row.get("nav_recognition_date", row.get("event_date"))
+        )
+    expected_facts: dict[str, object] = {}
+    for kind, field in (("nav", "nav_observations"), ("flows", "flows"), ("capital_anchors", "capital_anchors")):
+        source_rows = ledger_payload.get(field)
+        if not isinstance(source_rows, list):
+            raise ManifestError("static snapshot receipt calculation ledger is invalid")
+        rows = [row for row in source_rows if isinstance(row, Mapping) and row.get("account_id") == account_id and (kind != "capital_anchors" or row.get("strategy_id") == receipt.get("strategy_id")) and requested_start <= fact_date(row, kind) <= requested_end]
+        dates = sorted(fact_date(row, kind) for row in rows)
+        expected_facts[kind] = {"row_count": len(rows), "first_date": dates[0] if dates else None, "last_date": dates[-1] if dates else None}
+    if facts != expected_facts:
+        raise ManifestError("static snapshot receipt observed facts differ from calculation ledger")
 
 
 def _validate_receipt_against_contract(
@@ -1037,6 +1195,119 @@ def _validate_receipt_against_contract(
         raise ManifestError("retrieval receipt pagination is not terminal")
 
 
+def _load_selected_receipt_authority(
+    authority_snapshot: InputSnapshot | None,
+    receipt_snapshots: Mapping[str, InputSnapshot],
+    coverage_as_of_date: str,
+) -> tuple[Mapping[str, Mapping[str, object]], dict[str, object] | None]:
+    """Load one canonical, byte-bound authority selected by the operator."""
+    if authority_snapshot is None:
+        if receipt_snapshots:
+            raise ManifestError("retrieval receipt authority is required")
+        return MappingProxyType({}), None
+    if type(authority_snapshot) is not InputSnapshot:
+        raise ManifestError("receipt authority must be an InputSnapshot")
+    payload = authority_snapshot.json_object("receipt authority")
+    if canonical_json_bytes(payload) != authority_snapshot.contents:
+        raise ManifestError("receipt authority must use canonical JSON bytes")
+    if set(payload) != {"schema_version", "artifact_id", "as_of_date", "receipts"}:
+        raise ManifestError("receipt authority keys are invalid")
+    if payload.get("schema_version") != _RECEIPT_AUTHORITY_SCHEMA_VERSION:
+        raise ManifestError("receipt authority schema_version is invalid")
+    if payload.get("artifact_id") != _RECEIPT_AUTHORITY_ARTIFACT_ID:
+        raise ManifestError("receipt authority artifact_id is invalid")
+    authority_as_of_date = _iso_date(
+        payload.get("as_of_date"), "receipt authority.as_of_date"
+    )
+    if authority_as_of_date > coverage_as_of_date:
+        raise ManifestError("receipt authority as_of_date exceeds flow coverage")
+    entries = payload.get("receipts")
+    if not isinstance(entries, list):
+        raise ManifestError("receipt authority receipts must be a list")
+
+    contracts: dict[str, Mapping[str, object]] = {}
+    folded_ids: set[str] = set()
+    authority_ids: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping) or set(entry) != {
+            "artifact_id",
+            "sha256",
+            "size_bytes",
+            "contract",
+        }:
+            raise ManifestError("receipt authority receipt is invalid")
+        receipt_id = _require_nonempty_text(
+            entry.get("artifact_id"), "receipt authority receipt.artifact_id"
+        )
+        if receipt_id.casefold() in folded_ids:
+            raise ManifestError("receipt authority receipt artifact IDs are not unique")
+        folded_ids.add(receipt_id.casefold())
+        authority_ids.append(receipt_id)
+        declared_sha256 = entry.get("sha256")
+        if (
+            not isinstance(declared_sha256, str)
+            or _SHA256.fullmatch(declared_sha256) is None
+        ):
+            raise ManifestError("receipt authority receipt.sha256 is invalid")
+        declared_size = entry.get("size_bytes")
+        if (
+            isinstance(declared_size, bool)
+            or not isinstance(declared_size, int)
+            or declared_size < 0
+        ):
+            raise ManifestError("receipt authority receipt.size_bytes is invalid")
+        contract = entry.get("contract")
+        if not isinstance(contract, Mapping):
+            raise ManifestError("receipt authority contract is invalid")
+        if contract.get("coverage_mode") == "STATIC_SNAPSHOT_COVERAGE_V1":
+            _validate_static_snapshot_contract(contract)
+        else:
+            _validate_receipt_contract(contract)
+        snapshot = receipt_snapshots.get(receipt_id)
+        if snapshot is None:
+            raise ManifestError("receipt authority receipt set differs from selected receipts")
+        if (
+            declared_sha256 != snapshot.sha256
+            or declared_size != snapshot.size_bytes
+        ):
+            raise ManifestError("receipt authority receipt bytes differ")
+        receipt = snapshot.json_object(f"retrieval receipt {receipt_id}")
+        receipt_account_id = _require_nonempty_text(
+            receipt.get("account_id"), "retrieval receipt.account_id"
+        )
+        requested_start = _iso_date(
+            receipt.get("requested_start"), "retrieval receipt.requested_start"
+        )
+        requested_end = _iso_date(
+            receipt.get("requested_end"), "retrieval receipt.requested_end"
+        )
+        if contract.get("coverage_mode") == "STATIC_SNAPSHOT_COVERAGE_V1":
+            _validate_static_snapshot_receipt(
+                receipt, receipt_id, receipt_account_id, requested_start,
+                requested_end, coverage_as_of_date, contract,
+            )
+        else:
+            _validate_receipt_against_contract(
+                receipt, receipt_id, receipt_account_id, requested_start,
+                requested_end, coverage_as_of_date, contract,
+            )
+        contracts[receipt_id] = MappingProxyType(dict(contract))
+    if authority_ids != sorted(authority_ids, key=str.casefold):
+        raise ManifestError("receipt authority receipts are not sorted")
+    if set(authority_ids) != set(receipt_snapshots):
+        raise ManifestError("receipt authority receipt set differs from selected receipts")
+    return (
+        MappingProxyType(dict(contracts)),
+        _source_artifact_from_snapshot(
+            authority_snapshot,
+            artifact_id=payload["artifact_id"],
+            as_of_date=authority_as_of_date,
+            schema_name=_RECEIPT_AUTHORITY_SCHEMA_NAME,
+            schema_version=str(_RECEIPT_AUTHORITY_SCHEMA_VERSION),
+        ),
+    )
+
+
 load_flow_coverage = _make_coverage_loader(_validate_receipt_against_contract)
 del _make_coverage_loader
 
@@ -1053,6 +1324,7 @@ def load_flow_classes(
     versioned schema, and supplies an explicit classification-policy identity.
     Individual events are reconciled separately against every raw ledger row.
     """
+    flow_schema_version = payload.get("schema_version")
     required = {
         "schema_version",
         "artifact_id",
@@ -1061,10 +1333,15 @@ def load_flow_classes(
         "classification_policy",
         "events",
     }
+    if flow_schema_version == _CURRENT_FLOW_CLASSES_SCHEMA_VERSION:
+        required.add("capital_anchors")
     if set(payload) != required:
         raise ManifestError("classified flows keys are invalid")
-    if payload["schema_version"] != _FLOW_CLASSES_SCHEMA_VERSION:
-        raise ManifestError("classified flows schema_version must be 3")
+    if flow_schema_version not in {
+        _FLOW_CLASSES_SCHEMA_VERSION,
+        _CURRENT_FLOW_CLASSES_SCHEMA_VERSION,
+    }:
+        raise ManifestError("classified flows schema_version must be 3 or 4")
     selected_ledger_identity = {
         "generation_id": ledger_identity.get("generation_id"),
         "artifact": ledger_identity.get("artifact"),
@@ -1116,7 +1393,7 @@ def load_flow_classes(
         artifact_id=payload["artifact_id"],
         as_of_date=payload["as_of_date"],
         schema_name="classified-flows",
-        schema_version=str(_FLOW_CLASSES_SCHEMA_VERSION),
+        schema_version=str(flow_schema_version),
     )
     return (
         events,
@@ -1193,6 +1470,113 @@ def nav_series(ledger: dict[str, Any]) -> dict[str, dict[str, Decimal]]:
     return parse_nav_observations(ledger)[0]
 
 
+def parse_capital_anchors(ledger: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Validate provider capital authority without coercing source currencies."""
+
+    raw_anchors = ledger.get("capital_anchors", [])
+    if not isinstance(raw_anchors, list):
+        raise ManifestError("ledger capital_anchors must be a list")
+    accounting_currency = _require_nonempty_text(
+        ledger.get("accounting_currency"), "ledger accounting_currency"
+    )
+    anchors: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for index, raw in enumerate(raw_anchors):
+        if not isinstance(raw, Mapping):
+            raise ManifestError(f"capital anchor {index} must be an object")
+        record_id = _require_nonempty_text(
+            raw.get("record_id"), f"capital anchor {index}.record_id"
+        )
+        if record_id in seen_ids:
+            raise ManifestError(f"duplicate capital anchor record_id '{record_id}'")
+        seen_ids.add(record_id)
+        capital_type = _require_nonempty_text(
+            raw.get("capital_type"), f"capital anchor {record_id}.capital_type"
+        )
+        if capital_type not in {
+            "OPENING_CAPITAL_ANCHOR",
+            "STRATEGY_CAPITAL_ALLOCATION",
+        }:
+            raise ManifestError(f"capital anchor {record_id} type is invalid")
+        if raw.get("mapping_status") != "MAPPED" or raw.get("evidence_layer") != (
+            "ACCOUNT_LIVE"
+        ):
+            raise ManifestError(f"capital anchor {record_id} mapping is unavailable")
+        amount = raw.get("amount")
+        if not isinstance(amount, Mapping) or set(amount) != {
+            "currency",
+            "status",
+            "value",
+        } or amount.get("status") != "AVAILABLE":
+            raise ManifestError(f"capital anchor {record_id} amount is unavailable")
+        source_currency = _require_nonempty_text(
+            amount.get("currency"), f"capital anchor {record_id}.amount.currency"
+        )
+        source_amount = _money(
+            amount.get("value"), f"capital anchor {record_id}.amount.value"
+        )
+        if source_amount <= 0:
+            raise ManifestError(f"capital anchor {record_id} amount is not positive")
+        if capital_type == "OPENING_CAPITAL_ANCHOR":
+            opening_nav = raw.get("opening_nav")
+            if not isinstance(opening_nav, Mapping) or set(opening_nav) != {
+                "currency",
+                "status",
+                "value",
+            } or opening_nav.get("status") != "AVAILABLE":
+                raise ManifestError(
+                    f"capital anchor {record_id} opening_nav is unavailable"
+                )
+            if opening_nav.get("currency") != accounting_currency:
+                raise ManifestError(
+                    f"capital anchor {record_id} opening_nav currency differs"
+                )
+            opening_nav_amount = _money(
+                opening_nav.get("value"),
+                f"capital anchor {record_id}.opening_nav.value",
+            )
+            if opening_nav_amount <= 0:
+                raise ManifestError(
+                    f"capital anchor {record_id} opening_nav is not positive"
+                )
+            basis_amount = source_amount
+        else:
+            if source_currency != accounting_currency:
+                raise ManifestError(
+                    f"capital allocation {record_id} currency differs from accounting currency"
+                )
+            if "opening_nav" in raw:
+                raise ManifestError(
+                    f"capital allocation {record_id} cannot declare opening_nav"
+                )
+            basis_amount = source_amount
+        anchors.append(
+            {
+                "record_id": record_id,
+                "account_id": _require_nonempty_text(
+                    raw.get("account_id"), f"capital anchor {record_id}.account_id"
+                ),
+                "strategy_id": _require_nonempty_text(
+                    raw.get("strategy_id"), f"capital anchor {record_id}.strategy_id"
+                ),
+                "capital_type": capital_type,
+                "event_date": _iso_date(
+                    raw.get("event_date"), f"capital anchor {record_id}.event_date"
+                ),
+                "nav_recognition_date": _iso_date(
+                    raw.get("nav_recognition_date"),
+                    f"capital anchor {record_id}.nav_recognition_date",
+                ),
+                "amount": basis_amount,
+            }
+        )
+        if anchors[-1]["nav_recognition_date"] < anchors[-1]["event_date"]:
+            raise ManifestError(
+                f"capital anchor {record_id} recognition precedes economic event"
+            )
+    return anchors
+
+
 def _raw_flow_records(ledger: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     raw: dict[str, dict[str, Any]] = {}
     flows = ledger.get("flows")
@@ -1235,6 +1619,10 @@ def _raw_flow_records(ledger: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
             ),
             "event_date": _iso_date(
                 row.get("event_date"), f"raw flow {record_id}.event_date"
+            ),
+            "nav_recognition_date": _iso_date(
+                row.get("nav_recognition_date", row.get("event_date")),
+                f"raw flow {record_id}.nav_recognition_date",
             ),
             "flow_type": _require_nonempty_text(
                 row.get("flow_type"), f"raw flow {record_id}.flow_type"
@@ -1321,6 +1709,7 @@ def _expected_flow_dispositions(
     return dispositions, counterparties
 
 
+@_isolated_decimal_context
 def validate_classified_flow_coverage(
     ledger: Mapping[str, Any],
     events: list[dict[str, Any]],
@@ -1346,7 +1735,8 @@ def validate_classified_flow_coverage(
         "disposition",
     }
     for index, event in enumerate(events):
-        if set(event) - {"counterparty_source_record_id"} != required:
+        allowed_optional = {"counterparty_source_record_id", "nav_recognition_date"}
+        if set(event) - allowed_optional != required:
             raise ManifestError(f"classified flow event {index} keys are invalid")
         event_id = _require_nonempty_text(
             event.get("event_id"), f"classified flow {index}.event_id"
@@ -1373,6 +1763,10 @@ def validate_classified_flow_coverage(
         event_date = _iso_date(
             event.get("event_date"), f"classified flow {event_id}.event_date"
         )
+        nav_recognition_date = _iso_date(
+            event.get("nav_recognition_date", event_date),
+            f"classified flow {event_id}.nav_recognition_date",
+        )
         amount = _money(event.get("amount"), f"classified flow {event_id}.amount")
         disposition = _require_nonempty_text(
             event.get("disposition"), f"classified flow {event_id}.disposition"
@@ -1382,6 +1776,7 @@ def validate_classified_flow_coverage(
         if (
             account_id != raw_record["account_id"]
             or event_date != raw_record["event_date"]
+            or nav_recognition_date != raw_record["nav_recognition_date"]
             or amount != raw_record["amount"]
             or disposition != expected_dispositions[source_record_id]
         ):
@@ -1403,6 +1798,7 @@ def validate_classified_flow_coverage(
             "source_record_id": source_record_id,
             "account_id": account_id,
             "event_date": event_date,
+            "nav_recognition_date": nav_recognition_date,
             "amount": amount,
             "disposition": disposition,
             **(
@@ -1419,9 +1815,10 @@ def validate_classified_flow_coverage(
     ]
 
 
+@_isolated_decimal_context
 def flow_buckets_from_classes(
     events: list[dict[str, Any]],
-) -> dict[str, dict[str, dict[str, Decimal]]]:
+) -> dict[str, dict[str, dict[tuple[str, str], Decimal]]]:
     """Build buckets only after exact event-level reconciliation."""
     external_in: dict[str, dict[str, Decimal]] = defaultdict(
         lambda: defaultdict(Decimal)
@@ -1437,19 +1834,21 @@ def flow_buckets_from_classes(
     )
     for event in events:
         account = str(event["account_id"])
-        day = str(event["event_date"])
+        event_day = str(event["event_date"])
+        recognition_day = str(event.get("nav_recognition_date", event_day))
+        leg = (event_day, recognition_day)
         amount = event["amount"]
         if not isinstance(amount, Decimal):
             raise ManifestError("validated classified flow amount is not Decimal")
         if event["disposition"] == "EXTERNAL":
             if amount >= 0:
-                external_in[account][day] += amount
+                external_in[account][leg] += amount
             else:
-                external_out[account][day] += -amount
+                external_out[account][leg] += -amount
         elif amount >= 0:
-            internal_in[account][day] += amount
+            internal_in[account][leg] += amount
         else:
-            internal_out[account][day] += -amount
+            internal_out[account][leg] += -amount
     return {
         "external_in": external_in,
         "external_out": external_out,
@@ -1458,6 +1857,7 @@ def flow_buckets_from_classes(
     }
 
 
+@_isolated_decimal_context
 def xirr(cashflows: list[tuple[date, Decimal]]) -> Decimal | None:
     """Unique-root bisection XIRR; None when uniqueness or convergence fails."""
     by_date: dict[date, Decimal] = defaultdict(Decimal)
@@ -1572,22 +1972,51 @@ class AssignmentPerimeter:
 
 def _assignment_interval_key(
     assignment: Mapping[str, Any],
-) -> tuple[str, str, str | None]:
+    *,
+    allow_null_start: bool,
+) -> tuple[str, str | None, str | None]:
     account_id = _require_nonempty_text(
         assignment.get("account_id"), "assignment.account_id"
     )
-    effective_start = _iso_date(
-        assignment.get("effective_start"), "assignment.effective_start"
-    )
+    effective_start_raw = assignment.get("effective_start")
+    if effective_start_raw is None and allow_null_start:
+        effective_start = None
+    else:
+        effective_start = _iso_date(
+            effective_start_raw, "assignment.effective_start"
+        )
     effective_end_raw = assignment.get("effective_end")
     effective_end = (
         None
         if effective_end_raw is None
         else _iso_date(effective_end_raw, "assignment.effective_end")
     )
-    if effective_end is not None and effective_end < effective_start:
+    if (
+        effective_start is not None
+        and effective_end is not None
+        and effective_end < effective_start
+    ):
         raise ManifestError(f"assignment {account_id} has reversed effective dates")
     return account_id, effective_start, effective_end
+
+
+def _is_historical_to_mapped_shared_boundary(
+    predecessor: Mapping[str, Any], successor: Mapping[str, Any]
+) -> bool:
+    predecessor_key = predecessor.get("_key")
+    successor_key = successor.get("_key")
+    return (
+        isinstance(predecessor_key, tuple)
+        and len(predecessor_key) == 4
+        and isinstance(successor_key, tuple)
+        and len(successor_key) == 4
+        and predecessor.get("strategy_mapping_disposition")
+        == "HISTORICAL_POOL_ONLY"
+        and successor.get("strategy_mapping_disposition") == "STRATEGY_MAPPED"
+        and predecessor_key[2] is not None
+        and predecessor_key[3] is not None
+        and predecessor_key[3] == successor_key[2]
+    )
 
 
 def partition_assignments(assignments: list[dict[str, Any]]) -> AssignmentPerimeter:
@@ -1604,19 +2033,29 @@ def partition_assignments(assignments: list[dict[str, Any]]) -> AssignmentPerime
     for assignment in assignments:
         if not isinstance(assignment, dict):
             raise ManifestError("baseline assignment must be an object")
-        account_id, effective_start, effective_end = _assignment_interval_key(assignment)
         disposition = _require_nonempty_text(
             assignment.get("strategy_mapping_disposition"),
             "assignment.strategy_mapping_disposition",
         )
         if disposition not in _ASSIGNMENT_DISPOSITIONS:
             raise ManifestError("assignment.strategy_mapping_disposition is invalid")
+        if (
+            disposition == "STRATEGY_MAPPED"
+            and assignment.get("effective_start") is None
+        ):
+            raise ManifestError(
+                "mapped assignment.effective_start must be a canonical ISO date"
+            )
+        account_id, effective_start, effective_end = _assignment_interval_key(
+            assignment,
+            allow_null_start=disposition != "STRATEGY_MAPPED",
+        )
         strategy_id = assignment.get("strategy_id")
         if disposition == "STRATEGY_MAPPED":
             mapped_strategy_id = _require_nonempty_text(
                 strategy_id, "mapped assignment.strategy_id"
             )
-            key: tuple[str, str | None, str, str | None] = (
+            key: tuple[str, str | None, str | None, str | None] = (
                 account_id,
                 mapped_strategy_id,
                 effective_start,
@@ -1642,10 +2081,17 @@ def partition_assignments(assignments: list[dict[str, Any]]) -> AssignmentPerime
         )
 
     for account_id, chain in full_chains.items():
-        chain.sort(key=lambda assignment: assignment["_key"][2])
+        chain.sort(
+            key=lambda assignment: (
+                assignment["_key"][2] is not None,
+                assignment["_key"][2] or "",
+            )
+        )
         for index, assignment in enumerate(chain):
             _, _, start, end = assignment["_key"]
             if end is None and index != len(chain) - 1:
+                if start is None:
+                    raise ManifestError(f"assignments overlap for account {account_id}")
                 if chain[index + 1]["_key"][2] <= start:
                     raise ManifestError(f"assignments overlap for account {account_id}")
                 raise ManifestError(
@@ -1655,11 +2101,20 @@ def partition_assignments(assignments: list[dict[str, Any]]) -> AssignmentPerime
                 continue
             previous_end = chain[index - 1]["_key"][3]
             if previous_end is None:
+                if chain[index - 1]["_key"][2] is None:
+                    raise ManifestError(f"assignments overlap for account {account_id}")
                 if start <= chain[index - 1]["_key"][2]:
                     raise ManifestError(f"assignments overlap for account {account_id}")
                 raise ManifestError(
                     f"open-ended assignment is not last for account {account_id}"
                 )
+            if start is None:
+                raise ManifestError(f"assignments overlap for account {account_id}")
+            previous = chain[index - 1]
+            if previous_end == start and _is_historical_to_mapped_shared_boundary(
+                previous, assignment
+            ):
+                continue
             if previous_end >= start:
                 raise ManifestError(f"assignments overlap for account {account_id}")
             expected_start = (date.fromisoformat(previous_end) + timedelta(days=1)).isoformat()
@@ -1670,7 +2125,8 @@ def partition_assignments(assignments: list[dict[str, Any]]) -> AssignmentPerime
         identity_rows,
         key=lambda row: (
             str(row["account_id"]),
-            str(row["effective_start"]),
+            row["effective_start"] is not None,
+            row["effective_start"] or "",
             str(row["effective_end"]),
             str(row["strategy_id"]),
         ),
@@ -2046,6 +2502,15 @@ def validate_evidence_coverage(
                 assignment["_key"][3],
             )
         ]
+        if len(matches) == 2:
+            predecessor, successor = matches
+            if (
+                event_date == successor["_key"][2]
+                and _is_historical_to_mapped_shared_boundary(
+                    predecessor, successor
+                )
+            ):
+                matches = [successor]
         if len(matches) != 1:
             raise ManifestError(
                 f"{field} does not map to exactly one baseline assignment interval: "
@@ -2073,31 +2538,87 @@ def validate_evidence_coverage(
         )
 
 
-def _in_window(day: str, w0: str, w1: str | None) -> bool:
-    return day >= w0 and (w1 is None or day <= w1)
+def _in_window(day: str, w0: str | None, w1: str | None) -> bool:
+    return (w0 is None or day >= w0) and (w1 is None or day <= w1)
 
 
+def _annualize_return_on_net_capital(
+    return_on_net_capital: Decimal,
+    span_days: int,
+) -> Decimal:
+    """Apply the governed piecewise annualization policy to simple RONC."""
+
+    if span_days < 365:
+        return (
+            return_on_net_capital
+            * Decimal(365)
+            / Decimal(max(span_days, 1))
+        )
+    if return_on_net_capital <= Decimal(-1):
+        raise ManifestError(
+            "annualized RONC requires a strictly positive compounded growth base"
+        )
+    return (
+        (Decimal(1) + return_on_net_capital)
+        ** (Decimal(365) / Decimal(span_days))
+        - Decimal(1)
+    )
+
+
+@_isolated_decimal_context
 def analyze_epoch(
     window_navs: dict[str, Decimal],
-    external_in_by_day: dict[str, Decimal],
-    external_out_by_day: dict[str, Decimal],
-    int_in_by_day: dict[str, Decimal],
-    int_out_by_day: dict[str, Decimal],
+    external_in_by_day: Mapping[object, Decimal],
+    external_out_by_day: Mapping[object, Decimal],
+    int_in_by_day: Mapping[object, Decimal],
+    int_out_by_day: Mapping[object, Decimal],
     prev_closing: Decimal | None,
     w0: str,
     w1: str | None,
     prev_closing_date: str | None = None,
+    *,
+    opening_anchor: Mapping[str, object] | None = None,
+    capital_allocation_legs: Mapping[object, Decimal] | None = None,
 ) -> dict[str, Any] | None:
     # Owner mandate: flows outside the assignment window never touch the
     # strategy (pre-window cash is prior-epoch business).
-    external_in_by_day = {
-        d: v for d, v in external_in_by_day.items() if _in_window(d, w0, w1)
-    }
-    external_out_by_day = {
-        d: v for d, v in external_out_by_day.items() if _in_window(d, w0, w1)
-    }
-    int_in_by_day = {d: v for d, v in int_in_by_day.items() if _in_window(d, w0, w1)}
-    int_out_by_day = {d: v for d, v in int_out_by_day.items() if _in_window(d, w0, w1)}
+    def normalize_legs(source: Mapping[object, Decimal]) -> dict[tuple[str, str], Decimal]:
+        legs: dict[tuple[str, str], Decimal] = {}
+        for raw_key, amount in source.items():
+            if isinstance(raw_key, tuple) and len(raw_key) == 2:
+                event_day = _iso_date(raw_key[0], "capital flow event_date")
+                recognition_day = _iso_date(
+                    raw_key[1], "capital flow nav_recognition_date"
+                )
+            else:
+                event_day = _iso_date(raw_key, "capital flow event_date")
+                recognition_day = event_day
+            if not _in_window(event_day, w0, w1):
+                continue
+            leg = (event_day, recognition_day)
+            legs[leg] = legs.get(leg, Decimal(0)) + amount
+        return legs
+
+    external_in_by_day = normalize_legs(external_in_by_day)
+    external_out_by_day = normalize_legs(external_out_by_day)
+    int_in_by_day = normalize_legs(int_in_by_day)
+    admitted_allocations: dict[tuple[str, str], Decimal] = {}
+    for raw_key, amount in (capital_allocation_legs or {}).items():
+        if not isinstance(raw_key, tuple) or len(raw_key) != 2:
+            raise ManifestError("capital allocation leg identity is invalid")
+        event_day = _iso_date(raw_key[0], "capital allocation event_date")
+        recognition_day = _iso_date(
+            raw_key[1], "capital allocation nav_recognition_date"
+        )
+        if recognition_day < event_day:
+            raise ManifestError("capital allocation recognition precedes economic event")
+        if not _in_window(event_day, w0, w1):
+            continue
+        leg = (event_day, recognition_day)
+        admitted_allocations[leg] = admitted_allocations.get(leg, Decimal(0)) + amount
+    for leg, amount in admitted_allocations.items():
+        int_in_by_day[leg] = int_in_by_day.get(leg, Decimal(0)) + amount
+    int_out_by_day = normalize_legs(int_out_by_day)
     capital_flow_trace: list[dict[str, Any]] = []
     for flow_class, source in (
         ("EXTERNAL_IN", external_in_by_day),
@@ -2105,15 +2626,26 @@ def analyze_epoch(
         ("INTERNAL_IN", int_in_by_day),
         ("INTERNAL_OUT", int_out_by_day),
     ):
-        for flow_date, amount in source.items():
+        for (event_date, nav_recognition_date), amount in source.items():
             if amount <= 0:
                 raise ManifestError(
-                    f"{flow_class} on {flow_date} must be a positive capital flow"
+                    f"{flow_class} on {event_date} must be a positive capital flow"
                 )
             capital_flow_trace.append(
-                {"class": flow_class, "date": flow_date, "amount": amount}
+                {
+                    "class": flow_class,
+                    "event_date": event_date,
+                    "nav_recognition_date": nav_recognition_date,
+                    "amount": amount,
+                }
             )
-    capital_flow_trace.sort(key=lambda entry: (str(entry["date"]), str(entry["class"])))
+    capital_flow_trace.sort(
+        key=lambda entry: (
+            str(entry["event_date"]),
+            str(entry["nav_recognition_date"]),
+            str(entry["class"]),
+        )
+    )
     # The only permitted NAV trimming is the deterministic leading pre-funding
     # prefix.  Once a strictly-positive AVAILABLE NAV is observed, every later
     # observation is a return base and must therefore itself be positive.
@@ -2134,29 +2666,29 @@ def analyze_epoch(
         return None
     closing_nav_date = days[-1]
     if any(
-        flow_date > closing_nav_date
+        event_date > closing_nav_date
         for source_days in (
             external_in_by_day,
             external_out_by_day,
             int_in_by_day,
             int_out_by_day,
         )
-        for flow_date in source_days
+        for event_date, _recognition_date in source_days
     ):
         # Fail-closed (reviewer P1): a flow after the last funded NAV would
         # corrupt the money identity while being absent from Current. The
         # epoch stays unavailable until a covering NAV observation exists.
         return {"unavailable_status": "FLOWS_AFTER_CLOSING_NAV"}
 
-    if prev_closing is None and any(
-        day <= first_funded
+    if prev_closing is None and opening_anchor is None and any(
+        event_day <= first_funded
         for source in (
             external_in_by_day,
             external_out_by_day,
             int_in_by_day,
             int_out_by_day,
         )
-        for day in source
+        for event_day, _recognition_day in source
     ):
         return {
             "unavailable_status": "BLOCKED_UNPROVABLE_OPENING_FLOWS",
@@ -2164,10 +2696,33 @@ def analyze_epoch(
                 "FLOW_ON_OR_BEFORE_FIRST_AVAILABLE_NAV_WITHOUT_PREDECESSOR_CLOSING"
             ),
         }
-    opening = prev_closing if prev_closing is not None else window_navs[first_funded]
-    opening_basis = (
-        "PREDECESSOR_CLOSING_NAV" if prev_closing is not None else "FIRST_AVAILABLE_NAV"
-    )
+    if prev_closing is not None and opening_anchor is not None:
+        raise ManifestError("provider opening anchor conflicts with predecessor continuity")
+    anchor_event_date: str | None = None
+    anchor_recognition_date: str | None = None
+    if opening_anchor is not None:
+        anchor_event_date = _iso_date(
+            opening_anchor.get("event_date"), "opening anchor event_date"
+        )
+        anchor_recognition_date = _iso_date(
+            opening_anchor.get("nav_recognition_date"),
+            "opening anchor nav_recognition_date",
+        )
+        opening = _money(opening_anchor.get("amount"), "opening anchor amount")
+        if (
+            opening <= 0
+            or not _in_window(anchor_recognition_date, w0, w1)
+            or anchor_recognition_date < anchor_event_date
+        ):
+            raise ManifestError("opening anchor is invalid or outside epoch")
+        opening_basis = "PROVIDER_CAPITAL_ANCHOR"
+    else:
+        opening = prev_closing if prev_closing is not None else window_navs[first_funded]
+        opening_basis = (
+            "PREDECESSOR_CLOSING_NAV"
+            if prev_closing is not None
+            else "FIRST_AVAILABLE_NAV"
+        )
     if prev_closing is not None and prev_closing_date is None:
         raise ManifestError(
             "predecessor closing date is required for observation trace"
@@ -2176,36 +2731,36 @@ def analyze_epoch(
     # on that date is unprovable and was blocked above.  A trusted predecessor
     # opening is distinct and must include every successor-epoch flow,
     # including the first observed day.
-    include_first_day_flow = prev_closing is not None
+    include_first_day_flow = prev_closing is not None or opening_anchor is not None
     dep = sum(
         (
             v
-            for d, v in external_in_by_day.items()
-            if include_first_day_flow or d != first_funded
+            for (event_day, _recognition_day), v in external_in_by_day.items()
+            if include_first_day_flow or event_day != first_funded
         ),
         Decimal(0),
     )
     wd = sum(
         (
             v
-            for d, v in external_out_by_day.items()
-            if include_first_day_flow or d != first_funded
+            for (event_day, _recognition_day), v in external_out_by_day.items()
+            if include_first_day_flow or event_day != first_funded
         ),
         Decimal(0),
     )
     int_in = sum(
         (
             v
-            for d, v in int_in_by_day.items()
-            if include_first_day_flow or d != first_funded
+            for (event_day, _recognition_day), v in int_in_by_day.items()
+            if include_first_day_flow or event_day != first_funded
         ),
         Decimal(0),
     )
     int_out = sum(
         (
             v
-            for d, v in int_out_by_day.items()
-            if include_first_day_flow or d != first_funded
+            for (event_day, _recognition_day), v in int_out_by_day.items()
+            if include_first_day_flow or event_day != first_funded
         ),
         Decimal(0),
     )
@@ -2216,15 +2771,17 @@ def analyze_epoch(
     current = window_navs[days[-1]]
     gain = current - net_capital
 
-    net_flow_by_day: dict[str, Decimal] = {}
+    net_flow_by_leg: dict[tuple[str, str], Decimal] = {}
     for source, sign in (
         (external_in_by_day, 1),
         (external_out_by_day, -1),
         (int_in_by_day, 1),
         (int_out_by_day, -1),
     ):
-        for d, v in source.items():
-            net_flow_by_day[d] = net_flow_by_day.get(d, Decimal(0)) + sign * v
+        for leg, v in source.items():
+            net_flow_by_leg[leg] = net_flow_by_leg.get(leg, Decimal(0)) + sign * v
+
+    linked_flow_legs: set[tuple[str, str]] = set()
 
     def _segment_flow(start_exclusive: str, end_inclusive: str) -> Decimal:
         # Every intervening flow date counts, including dates that carry no
@@ -2232,8 +2789,8 @@ def analyze_epoch(
         return sum(
             (
                 value
-                for day, value in net_flow_by_day.items()
-                if start_exclusive < day <= end_inclusive
+                for leg, value in net_flow_by_leg.items()
+                if start_exclusive < leg[1] <= end_inclusive
             ),
             Decimal(0),
         )
@@ -2291,15 +2848,57 @@ def analyze_epoch(
         )
         if blocked is not None:
             return blocked
+        linked_flow_legs.update(
+            leg
+            for leg in net_flow_by_leg
+            if prev_closing_date < leg[1] <= first_funded
+        )
+    elif opening_anchor is not None:
+        assert anchor_event_date is not None and anchor_recognition_date is not None
+        if anchor_recognition_date != first_funded or anchor_event_date > anchor_recognition_date:
+            return {
+                "unavailable_status": "BLOCKED_RETURN_LINKAGE",
+                "blocking_reason": "OPENING_ANCHOR_RECOGNITION_NOT_FIRST_NAV",
+            }
+        if anchor_event_date < anchor_recognition_date:
+            anchor_interval_flow = _segment_flow(
+                anchor_event_date, anchor_recognition_date
+            )
+            blocked = _apply_observation_link(
+                anchor_event_date,
+                anchor_recognition_date,
+                opening,
+                window_navs[first_funded],
+                anchor_interval_flow,
+            )
+            if blocked is not None:
+                return blocked
+            linked_flow_legs.update(
+                leg
+                for leg in net_flow_by_leg
+                if anchor_event_date < leg[1] <= anchor_recognition_date
+            )
     for prev_d, cur_d in zip(days, days[1:]):
         v0, v1 = window_navs[prev_d], window_navs[cur_d]
         flow = _segment_flow(prev_d, cur_d)
         blocked = _apply_observation_link(prev_d, cur_d, v0, v1, flow)
         if blocked is not None:
             return blocked
+        linked_flow_legs.update(
+            leg for leg in net_flow_by_leg if prev_d < leg[1] <= cur_d
+        )
+    if linked_flow_legs != set(net_flow_by_leg):
+        return {
+            "unavailable_status": "BLOCKED_RETURN_LINKAGE",
+            "blocking_reason": "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL",
+        }
     observation_linked_return = index / Decimal(100) - Decimal(1)
 
-    opening_cashflow_date = prev_closing_date if prev_closing is not None else days[0]
+    opening_cashflow_date = (
+        prev_closing_date
+        if prev_closing is not None
+        else anchor_event_date if opening_anchor is not None else days[0]
+    )
     assert opening_cashflow_date is not None
     span_days = (
         date.fromisoformat(days[-1]) - date.fromisoformat(opening_cashflow_date)
@@ -2311,7 +2910,10 @@ def analyze_epoch(
     if return_on_net_capital is None:
         annualized = None
     else:
-        annualized = return_on_net_capital * Decimal(365) / Decimal(max(span_days, 1))
+        annualized = _annualize_return_on_net_capital(
+            return_on_net_capital,
+            span_days,
+        )
 
     closing_cashflows: list[tuple[date, Decimal]] = [
         (date.fromisoformat(opening_cashflow_date), -opening)
@@ -2322,9 +2924,11 @@ def analyze_epoch(
         (int_in_by_day, -1),
         (int_out_by_day, 1),
     ):
-        for d, v in source.items():
-            if (include_first_day_flow or first_funded < d) and d <= days[-1]:
-                closing_cashflows.append((date.fromisoformat(d), sign * v))
+        for (event_day, _recognition_day), v in source.items():
+            if (
+                include_first_day_flow or first_funded < event_day
+            ) and event_day <= days[-1]:
+                closing_cashflows.append((date.fromisoformat(event_day), sign * v))
     closing_cashflows.append((date.fromisoformat(days[-1]), current))
     xirr_rate = xirr(closing_cashflows)
 
@@ -2363,9 +2967,13 @@ def _assemble_manifest_impl(
     source_identities: Mapping[str, object],
     flow_coverage: Any,
     unavailable_navs: Mapping[str, set[str]] | None = None,
+    *,
+    manifest_schema_version: int = _MANIFEST_SCHEMA_VERSION,
+    capital_anchors: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     rows: list[dict[str, Any]] = []
     unavailable_navs = unavailable_navs or {}
+    capital_anchors = capital_anchors or []
     for aid, chain in sorted(chains.items()):
         provider = accounts_index.get(aid, {}).get("provider", "")
         prev_closing: Decimal | None = None
@@ -2448,16 +3056,53 @@ def _assemble_manifest_impl(
                 prev_closing = None
                 prev_closing_date = None
                 continue
+            opening_anchors = [
+                anchor
+                for anchor in capital_anchors
+                if anchor["account_id"] == aid
+                and anchor["strategy_id"] == strategy_id
+                and anchor["capital_type"] == "OPENING_CAPITAL_ANCHOR"
+                and _in_window(str(anchor["nav_recognition_date"]), w0, w1)
+            ]
+            allocation_anchors = [
+                anchor
+                for anchor in capital_anchors
+                if anchor["account_id"] == aid
+                and anchor["strategy_id"] == strategy_id
+                and anchor["capital_type"] == "STRATEGY_CAPITAL_ALLOCATION"
+                and _in_window(str(anchor["event_date"]), w0, w1)
+            ]
+            if manifest_schema_version == _CURRENT_MANIFEST_SCHEMA_VERSION:
+                if prev_closing is None and len(opening_anchors) != 1:
+                    raise ManifestError(
+                        "funded current-product epoch requires exactly one opening capital anchor"
+                    )
+                if prev_closing is not None and opening_anchors:
+                    raise ManifestError(
+                        "successor continuity cannot also consume an opening capital anchor"
+                    )
+            local_internal_in = dict(buckets["internal_in"].get(aid, {}))
+            allocation_legs: dict[tuple[str, str], Decimal] = {}
+            for anchor in allocation_anchors:
+                leg = (
+                    str(anchor["event_date"]),
+                    str(anchor["nav_recognition_date"]),
+                )
+                allocation_legs[leg] = (
+                    allocation_legs.get(leg, Decimal(0)) + anchor["amount"]
+                )
             stats = analyze_epoch(
                 window,
                 buckets["external_in"].get(aid, {}),
                 buckets["external_out"].get(aid, {}),
-                buckets["internal_in"].get(aid, {}),
+                local_internal_in,
                 buckets["internal_out"].get(aid, {}),
                 prev_closing,
                 w0,
                 w1,
                 prev_closing_date,
+                opening_anchor=opening_anchors[0] if opening_anchors else None,
+                capital_allocation_legs=allocation_legs,
             )
             if stats is not None and stats.get("unavailable_status"):
                 unavailable_row = {
@@ -2498,6 +3143,15 @@ def _assemble_manifest_impl(
                 prev_closing = None
                 prev_closing_date = None
                 continue
+            if manifest_schema_version in {7, 8}:
+                stats["capital_flow_trace"] = [
+                    {
+                        "class": flow["class"],
+                        "date": flow["event_date"],
+                        "amount": flow["amount"],
+                    }
+                    for flow in stats["capital_flow_trace"]
+                ]
             stats.update({**base, "status": "OK"})
             rows.append(stats)
             prev_closing = (
@@ -2512,7 +3166,7 @@ def _assemble_manifest_impl(
             )
 
     return {
-        "schema_version": _MANIFEST_SCHEMA_VERSION,
+        "schema_version": manifest_schema_version,
         "artifact": "account-strategy-manifest",
         "authority_readiness": {
             "authority_status": "SOURCE_BOUND_CANDIDATE",
@@ -2564,16 +3218,18 @@ def _manifest_decimal(raw: object, field: str, *, money: bool = False) -> Decima
     value = _dec(raw, field)
     if raw != _fixed_decimal(value):
         raise ManifestError(f"{field} is not canonically spelled")
-    if money and value.quantize(_CENT) != value:
-        raise ManifestError(f"{field} must be exactly cent-representable")
     return value
 
 
+@_isolated_decimal_context
 def _validate_manifest_semantics(
     manifest: Mapping[str, Any],
     *,
     full_chains: Mapping[str, list[dict[str, Any]]] | None = None,
 ) -> None:
+    schema_version = manifest.get("schema_version")
+    if schema_version not in {7, 8, 9}:
+        raise ManifestError("manifest schema version is invalid")
     source_identities = manifest.get("source_identities")
     if not isinstance(source_identities, Mapping):
         raise ManifestError("manifest source identities must be an object")
@@ -2701,34 +3357,58 @@ def _validate_manifest_semantics(
             "INTERNAL_IN": Decimal(0),
             "INTERNAL_OUT": Decimal(0),
         }
-        flow_by_day: dict[str, Decimal] = {}
-        seen_capital_flows: set[tuple[str, str]] = set()
+        signed_flow_legs: dict[tuple[str, str, str], Decimal] = {}
+        seen_capital_flows: set[tuple[str, str, str]] = set()
         for flow_index, flow in enumerate(capital_flow_trace):
             if not isinstance(flow, Mapping):
                 raise ManifestError(f"row {index} capital flow trace entry is invalid")
             flow_class = flow.get("class")
             if flow_class not in gross_flows:
                 raise ManifestError(f"row {index} capital flow trace class is invalid")
-            flow_date = _iso_date(
-                flow.get("date"), f"row[{index}].capital_flow_trace[{flow_index}].date"
+            if schema_version == 9:
+                if set(flow) != {
+                    "class", "event_date", "nav_recognition_date", "amount"
+                }:
+                    raise ManifestError(
+                        f"row {index} capital flow trace entry is invalid"
+                    )
+                event_date = _iso_date(
+                    flow.get("event_date"),
+                    f"row[{index}].capital_flow_trace[{flow_index}].event_date",
+                )
+                recognition_date = _iso_date(
+                    flow.get("nav_recognition_date"),
+                    f"row[{index}].capital_flow_trace[{flow_index}].nav_recognition_date",
+                )
+            else:
+                if set(flow) != {"class", "date", "amount"}:
+                    raise ManifestError(
+                        f"row {index} capital flow trace entry is invalid"
+                    )
+                event_date = _iso_date(
+                    flow.get("date"),
+                    f"row[{index}].capital_flow_trace[{flow_index}].date",
+                )
+                recognition_date = event_date
+            in_economic_window = _in_window(
+                event_date, effective_start, effective_end
             )
-            if not _in_window(flow_date, effective_start, effective_end):
+            if not in_economic_window:
                 raise ManifestError(
-                    f"row {index} capital flow trace date is outside epoch"
+                    f"row {index} capital flow trace event date is outside epoch"
                 )
             amount = _manifest_decimal(
                 flow.get("amount"),
                 f"row[{index}].capital_flow_trace[{flow_index}].amount",
                 money=True,
             )
-            if amount <= 0 or (flow_class, flow_date) in seen_capital_flows:
+            leg_key = (str(flow_class), event_date, recognition_date)
+            if amount <= 0 or leg_key in seen_capital_flows:
                 raise ManifestError(f"row {index} capital flow trace entry is invalid")
-            seen_capital_flows.add((flow_class, flow_date))
+            seen_capital_flows.add(leg_key)
             gross_flows[flow_class] += amount
             sign = 1 if flow_class in {"EXTERNAL_IN", "INTERNAL_IN"} else -1
-            flow_by_day[flow_date] = (
-                flow_by_day.get(flow_date, Decimal(0)) + sign * amount
-            )
+            signed_flow_legs[leg_key] = sign * amount
 
         money = {
             field: _manifest_decimal(
@@ -2781,7 +3461,9 @@ def _validate_manifest_semantics(
             raise ManifestError(f"row {index} RONC identity is invalid")
         opening_basis = row.get("opening_basis")
         annualization_start = start
-        if opening_basis == "PREDECESSOR_CLOSING_NAV":
+        if opening_basis in {
+            "PREDECESSOR_CLOSING_NAV", "PROVIDER_CAPITAL_ANCHOR"
+        }:
             trace_for_span = row.get("observation_trace")
             if not isinstance(trace_for_span, Mapping) or not isinstance(
                 trace_for_span.get("links"), list
@@ -2800,7 +3482,9 @@ def _validate_manifest_semantics(
             date.fromisoformat(end) - date.fromisoformat(annualization_start)
         ).days
         expected_annualized = (
-            None if ronc is None else ronc * Decimal(365) / Decimal(max(span_days, 1))
+            None
+            if ronc is None
+            else _annualize_return_on_net_capital(ronc, span_days)
         )
         annualized_raw = row.get("annualized_return_on_net_capital")
         annualized = (
@@ -2844,7 +3528,7 @@ def _validate_manifest_semantics(
         max_drawdown = Decimal(0)
         prior_end: str | None = None
         prior_ending_nav: Decimal | None = None
-        linked_flow_dates: set[str] = set()
+        linked_flow_legs: set[tuple[str, str, str]] = set()
         for link_index, link in enumerate(links):
             if not isinstance(link, Mapping):
                 raise ManifestError(f"row {index} observation trace link is invalid")
@@ -2865,7 +3549,9 @@ def _validate_manifest_semantics(
                     raise ManifestError(
                         f"row {index} observation trace opening is invalid"
                     )
-                if opening_basis == "PREDECESSOR_CLOSING_NAV" and (
+                if opening_basis in {
+                    "PREDECESSOR_CLOSING_NAV", "PROVIDER_CAPITAL_ANCHOR"
+                } and (
                     start_date >= start or end_date != start
                 ):
                     raise ManifestError(
@@ -2890,20 +3576,20 @@ def _validate_manifest_semantics(
                 f"row[{index}].observation_trace[{link_index}].net_flow",
                 money=True,
             )
-            interval_flow_dates = {
-                flow_date
-                for flow_date in flow_by_day
-                if start_date < flow_date <= end_date
+            interval_flow_legs = {
+                leg
+                for leg in signed_flow_legs
+                if start_date < leg[2] <= end_date
             }
             expected_net_flow = sum(
-                (flow_by_day[flow_date] for flow_date in interval_flow_dates),
+                (signed_flow_legs[leg] for leg in interval_flow_legs),
                 Decimal(0),
             )
-            if net_flow != expected_net_flow or linked_flow_dates & interval_flow_dates:
+            if net_flow != expected_net_flow or linked_flow_legs & interval_flow_legs:
                 raise ManifestError(
                     f"row {index} observation trace net flow is invalid"
                 )
-            linked_flow_dates.update(interval_flow_dates)
+            linked_flow_legs.update(interval_flow_legs)
             factor = _manifest_decimal(
                 link.get("factor"),
                 f"row[{index}].observation_trace[{link_index}].factor",
@@ -2941,7 +3627,7 @@ def _validate_manifest_semantics(
             raise ManifestError(
                 f"row {index} observation trace current value is invalid"
             )
-        if linked_flow_dates != set(flow_by_day):
+        if linked_flow_legs != set(signed_flow_legs):
             raise ManifestError(
                 f"row {index} capital flow trace does not map to a link"
             )
@@ -2953,7 +3639,9 @@ def _validate_manifest_semantics(
             raise ManifestError(f"row {index} observation trace summary is invalid")
         opening_cashflow_date = (
             links[0].get("start_date")
-            if opening_basis == "PREDECESSOR_CLOSING_NAV"
+            if opening_basis in {
+                "PREDECESSOR_CLOSING_NAV", "PROVIDER_CAPITAL_ANCHOR"
+            }
             else start
         )
         if not isinstance(opening_cashflow_date, str):
@@ -2968,7 +3656,16 @@ def _validate_manifest_semantics(
             )
             sign = -1 if flow_class in {"EXTERNAL_IN", "INTERNAL_IN"} else 1
             xirr_cashflows.append(
-                (date.fromisoformat(str(flow["date"])), sign * amount)
+                (
+                    date.fromisoformat(
+                        str(
+                            flow["event_date"]
+                            if schema_version == 9
+                            else flow["date"]
+                        )
+                    ),
+                    sign * amount,
+                )
             )
         xirr_cashflows.append((date.fromisoformat(end), money["current_value"]))
         expected_xirr = xirr(xirr_cashflows)
@@ -3072,6 +3769,7 @@ def _validate_manifest_semantics(
                 raise ManifestError("manifest continuity capital handoff is invalid")
 
 
+@_isolated_decimal_context
 def validate_manifest_schema(
     manifest: Mapping[str, Any],
     *,
@@ -3111,6 +3809,7 @@ def validate_manifest_schema(
     _validate_manifest_semantics(serializable, full_chains=full_chains)
 
 
+@_isolated_decimal_context
 def format_table(manifest: dict[str, Any]) -> str:
     header = (
         "| Account | Strategy | Started | Ended | Invested | Withdrawn "
@@ -3160,6 +3859,8 @@ class ManifestCandidateSnapshots:
     calculation_code: InputSnapshot
     manifest_schema: InputSnapshot
     baseline_generation_id: str
+    receipt_authority: InputSnapshot | None = None
+    selected_assignment_keys: tuple[tuple[str, str, str, str | None], ...] | None = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -3176,9 +3877,23 @@ class ManifestCandidateSnapshots:
             for key, value in self.retrieval_receipts.items()
         ):
             raise ManifestError("retrieval receipts must be InputSnapshots")
+        if self.receipt_authority is not None and type(self.receipt_authority) is not InputSnapshot:
+            raise ManifestError("receipt_authority must be an InputSnapshot")
         object.__setattr__(
             self, "retrieval_receipts", MappingProxyType(dict(self.retrieval_receipts))
         )
+        if self.selected_assignment_keys is not None:
+            keys = tuple(self.selected_assignment_keys)
+            if any(
+                not isinstance(key, tuple) or len(key) != 4
+                or any(not isinstance(value, str) for value in key[:3])
+                or (key[3] is not None and not isinstance(key[3], str))
+                for key in keys
+            ):
+                raise ManifestError("selected_assignment_keys are invalid")
+            if len(keys) != len(set(keys)):
+                raise ManifestError("selected_assignment_keys must be unique")
+            object.__setattr__(self, "selected_assignment_keys", keys)
 
 
 def _build_manifest_candidate_from_snapshots_impl(
@@ -3236,14 +3951,26 @@ def _build_manifest_candidate_from_snapshots_impl(
         for chain in perimeter.mapped_chains.values()
         for assignment in chain
     ]
+    if inputs.selected_assignment_keys is not None:
+        full_keys = {_assignment_key(assignment) for assignment in mapped_assignments}
+        selected_keys = set(inputs.selected_assignment_keys)
+        if not selected_keys <= full_keys:
+            raise ManifestError("selected_assignment_keys differ from baseline mapped assignments")
+        mapped_assignments = [
+            assignment
+            for assignment in mapped_assignments
+            if _assignment_key(assignment) in selected_keys
+        ]
     classification_policy, classification_policy_identity = (
         load_flow_classification_policy(
             classification_policy_snapshot.json_object("flow classification policy"),
             classification_policy_snapshot,
         )
     )
+    classified_payload = classified_snapshot.json_object("classified flows")
+    flow_schema_version = classified_payload.get("schema_version")
     events, classified_artifact, classification_policy_reference = load_flow_classes(
-        classified_snapshot.json_object("classified flows"),
+        classified_payload,
         classified_snapshot,
         ledger_identity,
         classification_policy_identity,
@@ -3254,7 +3981,28 @@ def _build_manifest_candidate_from_snapshots_impl(
         classified_artifact,
         inputs.retrieval_receipts,
         mapped_assignments,
+        inputs.receipt_authority,
     )
+    if inputs.receipt_authority is not None:
+        contracts, _authority_artifact = _load_selected_receipt_authority(
+            inputs.receipt_authority, inputs.retrieval_receipts,
+            _iso_date(flow_coverage_snapshot.json_object("flow coverage").get("as_of_date"), "flow coverage.as_of_date"),
+        )
+        for row in flow_coverage_snapshot.json_object("flow coverage").get("rows", []):
+            if not isinstance(row, Mapping) or row.get("authority_kind") != "STATIC_SNAPSHOT_COVERAGE_V1":
+                continue
+            receipt_id = row.get("receipt_artifact_id")
+            assignment = row.get("assignment")
+            if not isinstance(receipt_id, str) or not isinstance(assignment, Mapping):
+                raise ManifestError("static snapshot coverage row is invalid")
+            receipt = inputs.retrieval_receipts[receipt_id].json_object("static snapshot receipt")
+            _validate_static_snapshot_receipt(
+                receipt, receipt_id, _require_nonempty_text(assignment.get("account_id"), "static coverage account_id"),
+                _iso_date(row.get("requested_start"), "static coverage requested_start"),
+                _iso_date(row.get("requested_end"), "static coverage requested_end"),
+                _iso_date(flow_coverage_snapshot.json_object("flow coverage").get("as_of_date"), "flow coverage.as_of_date"),
+                contracts[receipt_id], ledger,
+            )
     admissions, admission_policy_identity = load_admission_policy(
         admission_policy_snapshot.json_object("admission policy"),
         admission_policy_snapshot,
@@ -3267,11 +4015,31 @@ def _build_manifest_candidate_from_snapshots_impl(
     reconciled_events = validate_classified_flow_coverage(
         ledger, events, classification_policy
     )
+    capital_anchors = parse_capital_anchors(ledger)
+    if flow_schema_version == _CURRENT_FLOW_CLASSES_SCHEMA_VERSION:
+        if classified_payload.get("capital_anchors") != ledger.get(
+            "capital_anchors", []
+        ):
+            raise ManifestError(
+                "classified capital anchors differ from calculation ledger"
+            )
+        manifest_schema_version = _CURRENT_MANIFEST_SCHEMA_VERSION
+    else:
+        if capital_anchors:
+            raise ManifestError("legacy classified flows cannot consume capital anchors")
+        manifest_schema_version = _MANIFEST_SCHEMA_VERSION
     buckets = flow_buckets_from_classes(reconciled_events)
     series, unavailable_navs = parse_nav_observations(ledger)
     validate_evidence_coverage(
         ledger, reconciled_events, perimeter.full_chains, accounts_index
     )
+    flow_coverage_identity: dict[str, object] = {
+        "artifact": flow_coverage_artifact,
+        "ledger_identity": ledger_identity,
+        "classified_flows_artifact": classified_artifact,
+    }
+    if flow_coverage.receipt_authority is not None:
+        flow_coverage_identity["receipt_authority"] = flow_coverage.receipt_authority
     manifest = assembler(
         series,
         accounts_index,
@@ -3283,16 +4051,12 @@ def _build_manifest_candidate_from_snapshots_impl(
             "baseline": baseline_identity,
             "classified_flows": {
                 "artifact": classified_artifact,
-                "schema_version": _FLOW_CLASSES_SCHEMA_VERSION,
+                "schema_version": flow_schema_version,
                 "ledger_identity": ledger_identity,
                 "classification_policy": classification_policy_reference,
             },
             "flow_classification_policy": classification_policy_identity,
-            "flow_coverage": {
-                "artifact": flow_coverage_artifact,
-                "ledger_identity": ledger_identity,
-                "classified_flows_artifact": classified_artifact,
-            },
+            "flow_coverage": flow_coverage_identity,
             "admission_policy": admission_policy_identity,
             "assignment": admission_policy_identity["assignment"],
             "calculation_code": {
@@ -3305,7 +4069,13 @@ def _build_manifest_candidate_from_snapshots_impl(
         },
         flow_coverage,
         unavailable_navs,
+        manifest_schema_version=manifest_schema_version,
+        capital_anchors=capital_anchors,
     )
+    if manifest_schema_version == _CURRENT_MANIFEST_SCHEMA_VERSION:
+        manifest["calculation_cutoff_date"] = _iso_date(
+            ledger.get("calculation_cutoff_date"), "ledger calculation_cutoff_date"
+        )
     manifest["accounting_currency"] = ledger["accounting_currency"]
     validate_manifest_schema(
         manifest,
@@ -3326,6 +4096,7 @@ def _capture_manifest_candidate_inputs(
     admission_policy_path: Path,
     flow_coverage_path: Path,
     retrieval_receipt_paths: Mapping[str, Path] | None = None,
+    receipt_authority_path: Path | None = None,
 ) -> dict[str, Any]:
     """Capture every selected path once, then delegate to the byte-only producer."""
     selected_baseline_generation_id = _generation_id(
@@ -3366,6 +4137,13 @@ def _capture_manifest_candidate_inputs(
                     artifact_id: InputSnapshot.capture(path, f"retrieval receipt {artifact_id}")
                     for artifact_id, path in (retrieval_receipt_paths or {}).items()
                 },
+                receipt_authority=(
+                    None
+                    if receipt_authority_path is None
+                    else InputSnapshot.capture(
+                        receipt_authority_path, "receipt authority"
+                    )
+                ),
                 calculation_code=InputSnapshot.capture(
                     Path(__file__), "calculation code"
                 ),
@@ -3399,6 +4177,7 @@ def build_manifest_candidate(
     admission_policy_path: Path,
     flow_coverage_path: Path,
     retrieval_receipt_paths: Mapping[str, Path] | None = None,
+    receipt_authority_path: Path | None = None,
 ) -> dict[str, Any]:
     """Capture public inputs using only immutable retained receipt authority."""
     return _capture_manifest_candidate_inputs(
@@ -3411,6 +4190,7 @@ def build_manifest_candidate(
         admission_policy_path=admission_policy_path,
         flow_coverage_path=flow_coverage_path,
         retrieval_receipt_paths=retrieval_receipt_paths,
+        receipt_authority_path=receipt_authority_path,
     )
 
 
@@ -3465,6 +4245,11 @@ def main(argv: list[str] | None = None) -> int:
         metavar="ARTIFACT_ID=PATH",
         help="explicit selected v2 retrieval receipt; repeat for each receipt",
     )
+    parser.add_argument(
+        "--receipt-authority-json",
+        type=Path,
+        help="canonical selected receipt-authority snapshot for supplied receipts",
+    )
     parser.add_argument("--format", choices=("table", "json"), default="table")
     args = parser.parse_args(argv)
     receipt_paths: dict[str, Path] = {}
@@ -3483,6 +4268,7 @@ def main(argv: list[str] | None = None) -> int:
         admission_policy_path=args.admission_policy_json,
         flow_coverage_path=args.flow_coverage_json,
         retrieval_receipt_paths=receipt_paths,
+        receipt_authority_path=args.receipt_authority_json,
     )
     if args.format == "json":
         print(json.dumps(manifest, indent=2))

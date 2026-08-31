@@ -227,6 +227,217 @@ def _spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
     return spec_path, spec
 
 
+def _financial_mvp_binding() -> dict[str, str]:
+    paths = {
+        "contract": REPOSITORY_ROOT
+        / "contracts"
+        / "portfolio-financial-mvp-source-v1.json",
+        "registry": REPOSITORY_ROOT
+        / "docs"
+        / "analytics"
+        / "current-strategy-decomposition-plan.json",
+        "schema": REPOSITORY_ROOT
+        / "schemas"
+        / "portfolio"
+        / "financial-mvp-source-contract.schema.json",
+    }
+    return {
+        f"{name}_path": str(path)
+        for name, path in paths.items()
+    } | {
+        f"{name}_sha256": hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in paths.items()
+    }
+
+
+def _robuxio_provider_history_spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    spec_path, spec = _spec(tmp_path)
+    source_root = Path(spec["roots"]["synthetic-root"])
+    _csv(
+        source_root / "assignments.csv",
+        provenance._ASSIGNMENT_FIELDS,
+        [
+            {
+                "institution": "Matrixport",
+                "account": "",
+                "strategy": "Robuxio Crypto",
+                "period_start": "2025-08-26",
+                "period_end": "",
+                "source": "provider_account_live_start",
+            }
+        ],
+    )
+    spec["strategies"][0].update(
+        {
+            "aliases": ["Robuxio Crypto"],
+            "name": "Robuxio Crypto",
+            "strategy_id": "robuxio-crypto",
+        }
+    )
+    spec["strategy_version_catalog"]["strategies"][0]["strategy_id"] = (
+        "robuxio-crypto"
+    )
+    spec["financial_mvp"] = _financial_mvp_binding()
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    return spec_path, spec
+
+
+def test_provider_history_uses_pinned_funded_membership_without_output_cycle(
+    tmp_path: Path,
+) -> None:
+    spec_path, _ = _robuxio_provider_history_spec(tmp_path)
+    never_built_output = tmp_path / "provenance-output"
+
+    assert not never_built_output.exists()
+    catalog, _, _ = provenance.build_catalog(spec_path)
+
+    assignment = next(
+        item
+        for item in catalog["assignments"]
+        if item["strategy_id"] == "robuxio-crypto"
+    )
+    assert assignment["effective_start"] == "2025-12-06"
+    assert assignment["source_classification"] == (
+        "financial_mvp_funded_membership_reconciled"
+    )
+    assert not never_built_output.exists()
+
+
+def test_provider_history_rejects_missing_or_mismatched_financial_authority(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _robuxio_provider_history_spec(tmp_path / "missing")
+    del spec["financial_mvp"]
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(
+        provenance.ProvenanceValidationError,
+        match="requires financial MVP authority",
+    ):
+        provenance.build_catalog(spec_path)
+
+    spec_path, spec = _robuxio_provider_history_spec(tmp_path / "mismatched")
+    spec["financial_mvp"]["contract_sha256"] = "0" * 64
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    with pytest.raises(
+        provenance.ProvenanceValidationError,
+        match="financial MVP contract hash differs",
+    ):
+        provenance.build_catalog(spec_path)
+
+
+def _singleton_and_multi_assignment_spec(tmp_path: Path) -> tuple[Path, dict[str, Any]]:
+    spec_path, spec = _spec(tmp_path)
+    source_root = Path(spec["roots"]["synthetic-root"])
+    _csv(
+        source_root / "assignments.csv",
+        provenance._ASSIGNMENT_FIELDS,
+        [
+            {
+                "institution": "SYNTHETIC IBKR",
+                "account": "P123 EU",
+                "strategy": "P123 EU",
+                "period_start": "2025-11-12",
+                "period_end": "",
+                "source": "control_file",
+            },
+            {
+                "institution": "SYNTHETIC QUANTBASE",
+                "account": "VOLATIS",
+                "strategy": "Volatis",
+                "period_start": "2024-07-24",
+                "period_end": "",
+                "source": "audit_account_tax_map",
+            },
+            {
+                "institution": "SYNTHETIC SCHWAB",
+                "account": "TT A",
+                "strategy": "TT Portfolio",
+                "period_start": "2025-11-01",
+                "period_end": "",
+                "source": "control_file",
+            },
+            {
+                "institution": "SYNTHETIC SCHWAB",
+                "account": "TT B",
+                "strategy": "TT Portfolio",
+                "period_start": "2025-11-02",
+                "period_end": "",
+                "source": "control_file",
+            },
+        ],
+    )
+    for index, strategy_id, name, alias in (
+        (0, "p123-eu", "P123 EU", "P123 EU"),
+        (1, "volatis-strategy", "Volatis", "Volatis"),
+        (2, "tt-portfolio", "TT Portfolio", "TT Portfolio"),
+    ):
+        spec["strategies"][index].update(
+            {"aliases": [alias], "name": name, "strategy_id": strategy_id}
+        )
+        spec["strategy_version_catalog"]["strategies"][index]["strategy_id"] = (
+            strategy_id
+        )
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    return spec_path, spec
+
+
+def test_single_current_funded_memberships_reconcile_non_provider_tracker_starts(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _singleton_and_multi_assignment_spec(tmp_path)
+    stale_catalog, _, _ = provenance.build_catalog(spec_path)
+    stale_ids = {
+        item["strategy_id"]: item["assignment_id"]
+        for item in stale_catalog["assignments"]
+        if item["strategy_id"] in {"p123-eu", "volatis-strategy"}
+    }
+
+    spec["financial_mvp"] = _financial_mvp_binding()
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+    catalog, _, _ = provenance.build_catalog(spec_path)
+    reconciled = {
+        item["strategy_id"]: item
+        for item in catalog["assignments"]
+        if item["strategy_id"] in {"p123-eu", "volatis-strategy"}
+    }
+
+    assert reconciled["p123-eu"]["effective_start"] == "2025-11-20"
+    assert reconciled["volatis-strategy"]["effective_start"] == "2024-10-15"
+    assert {
+        item["source_classification"] for item in reconciled.values()
+    } == {"financial_mvp_funded_membership_reconciled"}
+    assert {
+        strategy_id: item["assignment_id"]
+        for strategy_id, item in reconciled.items()
+    } != stale_ids
+
+
+def test_multi_account_current_membership_does_not_rewrite_each_assignment(
+    tmp_path: Path,
+) -> None:
+    spec_path, spec = _singleton_and_multi_assignment_spec(tmp_path)
+    spec["financial_mvp"] = _financial_mvp_binding()
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    catalog, _, _ = provenance.build_catalog(spec_path)
+    assignments = sorted(
+        (
+            item
+            for item in catalog["assignments"]
+            if item["strategy_id"] == "tt-portfolio"
+        ),
+        key=lambda item: item["effective_start"],
+    )
+
+    assert [item["effective_start"] for item in assignments] == [
+        "2025-11-01",
+        "2025-11-02",
+    ]
+    assert {item["source_classification"] for item in assignments} == {
+        "control_file"
+    }
+
+
 def test_stage_is_deterministic_private_and_imports_explicit_tracker_evidence(
     tmp_path: Path,
 ) -> None:
@@ -242,6 +453,13 @@ def test_stage_is_deterministic_private_and_imports_explicit_tracker_evidence(
     assert first["correction_count"] == 1
     assert first["open_gap_count"] == 0
     generation_dir = output_root / "generations" / first["generation_id"]
+    generation = json.loads((generation_dir / "generation.json").read_text())
+    assert generation["coverage"]["boundary"] == (
+        "explicitly configured portfolio provenance sources, accounts, and nine "
+        "retained strategy registry records (seven REQUIRED active current, Echo "
+        "DEPRECATED_HISTORY_ONLY, and Composer IMMATERIAL_EXCLUDED); data completeness "
+        "remains in catalog gaps"
+    )
     catalog_bytes = (generation_dir / "portfolio-provenance.json").read_bytes()
     catalog = json.loads(catalog_bytes)
     assert str(spec["roots"]["synthetic-root"]) not in catalog_bytes.decode()
@@ -333,7 +551,7 @@ def test_hash_drift_unknown_labels_and_strategy_count_fail_closed(
         provenance.build_catalog(spec_path)
 
 
-def test_strategy_version_catalog_requires_one_row_per_current_strategy(
+def test_strategy_version_catalog_requires_one_row_per_retained_strategy(
     tmp_path: Path,
 ) -> None:
     spec_path, spec = _spec(tmp_path)

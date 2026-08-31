@@ -2,7 +2,7 @@
   "schema_version": 1,
   "rubric_id": "PORT-RUBRIC-1",
   "authority": "ADVISORY_RESEARCH_ONLY",
-  "current_portfolio_series_count": 9,
+  "current_portfolio_series_count": 7,
   "gate_statuses": ["PASS", "FAIL", "UNAVAILABLE"],
   "gates": [
     {

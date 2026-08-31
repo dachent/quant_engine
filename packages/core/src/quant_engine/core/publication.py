@@ -592,7 +592,8 @@ def _prepare_generation_bundle(
 
 def _lstat_or_none(path: Path) -> os.stat_result | None:
     try:
-        return path.lstat()
+        candidate = Path(_windows_api_path(path)) if os.name == "nt" else path
+        return candidate.lstat()
     except FileNotFoundError:
         return None
 
@@ -612,11 +613,27 @@ def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
         value.st_nlink,
         value.st_size,
         value.st_mtime_ns,
-        value.st_ctime_ns,
     )
+    # CPython 3.12 reports different Windows ``st_ctime`` semantics for a
+    # path stat and a stat of an open handle to the same object.  It is not a
+    # stable object-identity field there; dev/inode plus the remaining
+    # snapshot fields still detect replacement and content drift.
+    if os.name != "nt":
+        identity = (*identity, value.st_ctime_ns)
     if hasattr(value, "st_file_attributes"):
         return (*identity, value.st_file_attributes)
     return identity
+
+
+def _windows_api_path(path: Path) -> str:
+    """Return an absolute extended-length path for native Windows APIs."""
+
+    value = str(Path(path).absolute())
+    if value.startswith("\\\\?\\"):
+        return value
+    if value.startswith("\\\\"):
+        return f"\\\\?\\UNC\\{value[2:]}"
+    return f"\\\\?\\{value}"
 
 
 def _require_directory_stat(value: os.stat_result) -> None:
@@ -728,7 +745,7 @@ def _open_windows_nofollow(path: Path, *, directory: bool) -> int:
     if directory:
         flags |= 0x02000000  # FILE_FLAG_BACKUP_SEMANTICS
     handle = create_file(
-        str(path),
+        _windows_api_path(path),
         0x80000000,  # GENERIC_READ
         0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
         None,
@@ -813,6 +830,7 @@ def _capture_generation_directory(
     files: dict[str, bytes] = {}
     directories: set[str] = set()
     if os.name == "nt":
+        root = Path(_windows_api_path(root))
         root_stat = root.lstat()
         _require_directory_stat(root_stat)
         root_descriptor = _open_windows_nofollow(root, directory=True)
@@ -945,6 +963,8 @@ def _expected_bundle_directories(paths: Mapping[str, bytes]) -> set[str]:
 def _directory_matches_exact_files(
     directory: Path, expected_files: Mapping[str, bytes]
 ) -> bool:
+    if os.name == "nt":
+        directory = Path(_windows_api_path(directory))
     root_stat = _lstat_or_none(directory)
     if (
         root_stat is None
@@ -990,6 +1010,8 @@ def _directory_matches_exact_files(
 
 
 def _tree_contains_only_regular_entries(directory: Path) -> bool:
+    if os.name == "nt":
+        directory = Path(_windows_api_path(directory))
     root_stat = _lstat_or_none(directory)
     if (
         root_stat is None
@@ -1060,7 +1082,11 @@ def _rename_directory_noreplace(source: Path, target: Path) -> None:
         move_file = kernel32.MoveFileExW
         move_file.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
         move_file.restype = ctypes.c_int
-        if not move_file(str(source), str(target), _MOVEFILE_WRITE_THROUGH):
+        if not move_file(
+            _windows_api_path(source),
+            _windows_api_path(target),
+            _MOVEFILE_WRITE_THROUGH,
+        ):
             raise ctypes.WinError(ctypes.get_last_error())
         return
     if sys.platform.startswith("linux"):
@@ -1111,7 +1137,10 @@ def _remove_owned_stage(temporary: Path, generations: Path) -> None:
         and temporary.name.startswith(".stage-")
         and _tree_contains_only_regular_entries(temporary)
     ):
-        shutil.rmtree(temporary)
+        owned_stage = (
+            Path(_windows_api_path(temporary)) if os.name == "nt" else temporary
+        )
+        shutil.rmtree(owned_stage)
 
 
 def _sync_bundle_directory(path: Path) -> None:
@@ -1176,7 +1205,12 @@ def stage_generation_bundle(
     try:
         for relative, content in prepared.final_files.items():
             destination = temporary.joinpath(*relative.split("/"))
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination_parent = (
+                Path(_windows_api_path(destination.parent))
+                if os.name == "nt"
+                else destination.parent
+            )
+            destination_parent.mkdir(parents=True, exist_ok=True)
             _write_and_sync(destination, content)
         if not _directory_matches_exact_files(temporary, prepared.final_files):
             raise GenerationConflictError(
@@ -1495,7 +1529,8 @@ def generation_inventory_sha256(root: Path, generation_id: str) -> str:
 
 
 def _write_and_sync(path: Path, content: bytes) -> None:
-    with path.open("xb") as handle:
+    destination = Path(_windows_api_path(path)) if os.name == "nt" else path
+    with destination.open("xb") as handle:
         handle.write(content)
         handle.flush()
         os.fsync(handle.fileno())

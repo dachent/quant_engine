@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 import hashlib
@@ -8,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import quant_engine.ibkr.generation as ibkr_generation
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -44,6 +46,7 @@ def _xml(
     nav: str,
     *,
     cash_account: str | None = None,
+    cash_rows: str | None = None,
     omit_section: str | None = None,
     change_nav: str | None = None,
 ) -> str:
@@ -54,9 +57,17 @@ def _xml(
         ),
         "CashTransactions": (
             "<CashTransactions>"
-            f'<CashTransaction accountId="{cash_account or account}" '
-            f'dateTime="{observed};120000" transactionID="cash-{observed}" '
-            'type="Dividends" amount="1.25" currency="USD" conid="100" />'
+            + (
+                cash_rows
+                or (
+                    f'<CashTransaction accountId="{cash_account or account}" '
+                    f'levelOfDetail="DETAIL" dateTime="{observed};120000" '
+                    f'reportDate="{observed}" '
+                    f'transactionID="cash-{observed}" type="Dividends" '
+                    'amount="1.25" currency="USD" conid="100" />'
+                )
+            )
+            +
             "</CashTransactions>"
         ),
         "ChangeInNAV": (
@@ -373,6 +384,583 @@ def test_parser_rejects_missing_section_nav_mismatch_and_truncation(
     )
     with pytest.raises(FlexValidationError, match="DTD and entity"):
         parse_flex_file(declaration, artifact_id="synthetic/declaration.xml")
+
+
+def test_summary_cash_observations_are_excluded_without_dropping_detail_flows(
+    tmp_path: Path,
+) -> None:
+    xml = _xml(
+        "SYNTH-RAW",
+        date(2026, 1, 5),
+        "100",
+        cash_rows=(
+            '<CashTransaction accountId="-" levelOfDetail="SUMMARY" '
+            'dateTime="20260105;120000" reportDate="20260105" '
+            'type="Deposits/Withdrawals" '
+            'amount="35000" currency="USD" />'
+            '<CashTransaction accountId="SYNTH-RAW" levelOfDetail="DETAIL" '
+            'dateTime="20260105;120001" reportDate="20260105" '
+            'transactionID="detail-30000" '
+            'type="Deposits/Withdrawals" amount="30000" currency="USD" />'
+            '<CashTransaction accountId="SYNTH-RAW" levelOfDetail="DETAIL" '
+            'dateTime="20260105;120002" reportDate="20260105" '
+            'transactionID="detail-5000" '
+            'type="Deposits/Withdrawals" amount="5000" currency="USD" />'
+        ),
+    )
+    path = tmp_path / "summary-and-details.xml"
+    path.write_text(xml, encoding="utf-8")
+
+    document = parse_flex_file(path, artifact_id="synthetic/summary-and-details.xml")
+    statement = document.statements[0]
+    assert [cash.level_of_detail for cash in statement.cash_transactions] == [
+        "SUMMARY",
+        "DETAIL",
+        "DETAIL",
+    ]
+
+    catalog = ibkr_generation._normalize(
+        [statement],
+        {
+            "accounts": [
+                {
+                    "account_id": "account-ibkr-synthetic",
+                    "base_currency": "USD",
+                    "role": "INVESTMENT",
+                }
+            ],
+            "assignments": [
+                {
+                    "account_id": "account-ibkr-synthetic",
+                    "effective_end": None,
+                    "effective_start": "2026-01-01",
+                    "mapping_status": "MAPPED",
+                    "strategy_id": "strategy-synthetic",
+                }
+            ],
+        },
+        {"SYNTH-RAW": "account-ibkr-synthetic"},
+        [],
+        frozenset(),
+        0,
+        None,
+    )
+    assert sorted(flow["amount"]["value"] for flow in catalog["flows"]) == [
+        "30000",
+        "5000",
+    ]
+    assert sum(Decimal(flow["amount"]["value"]) for flow in catalog["flows"]) == Decimal(
+        "35000"
+    )
+
+
+def test_cross_report_summary_aggregate_is_not_an_additional_cash_flow(
+    tmp_path: Path,
+) -> None:
+    xml = _xml(
+        "SYNTH-RAW",
+        date(2025, 11, 25),
+        "100",
+        cash_rows=(
+            '<CashTransaction accountId="-" levelOfDetail="SUMMARY" '
+            'dateTime="20251125;120000" reportDate="20251202" '
+            'type="Deposits/Withdrawals" amount="1677.54" currency="USD" />'
+            '<CashTransaction accountId="SYNTH-RAW" levelOfDetail="DETAIL" '
+            'dateTime="20251124;153614" reportDate="20251202" '
+            'transactionID="cancel-3572" type="Deposits/Withdrawals" '
+            'amount="-3572.46" currency="USD" />'
+            '<CashTransaction accountId="SYNTH-RAW" levelOfDetail="DETAIL" '
+            'dateTime="20251125;120001" reportDate="20251202" '
+            'transactionID="deposit-5250" type="Deposits/Withdrawals" '
+            'amount="5250" currency="USD" />'
+        ),
+    )
+    path = tmp_path / "cross-report-summary.xml"
+    path.write_text(xml, encoding="utf-8")
+    statement = parse_flex_file(
+        path, artifact_id="synthetic/cross-report-summary.xml"
+    ).statements[0]
+
+    catalog = ibkr_generation._normalize(
+        [statement],
+        {
+            "accounts": [
+                {
+                    "account_id": "account-ibkr-synthetic",
+                    "base_currency": "USD",
+                    "role": "INVESTMENT",
+                }
+            ],
+            "assignments": [],
+        },
+        {"SYNTH-RAW": "account-ibkr-synthetic"},
+        [],
+        frozenset(),
+        0,
+        None,
+    )
+    assert sorted(flow["amount"]["value"] for flow in catalog["flows"]) == [
+        "-3572.46",
+        "5250",
+    ]
+    assert sum(Decimal(flow["amount"]["value"]) for flow in catalog["flows"]) == Decimal(
+        "1677.54"
+    )
+
+
+def _position_transfer_statement(
+    tmp_path: Path,
+    *,
+    raw_account: str,
+    direction: str,
+    position_amount_in_base: str | None,
+    cash_transfer: str | None = "0",
+    observed: date = date(2026, 1, 8),
+    event_day: date | None = None,
+    conid: str = "100",
+    statement_base_currency: str = "USD",
+    transfer_type: str = "INTERNAL",
+) -> object:
+    event_day = event_day or observed
+    report_day = observed.isoformat().replace("-", "")
+    attributes = [
+        f'accountId="{raw_account}"',
+        f'dateTime="{event_day.isoformat().replace("-", "")};120000"',
+        f'reportDate="{report_day}"',
+        'transactionID="paired-position-transfer"',
+        f'type="{transfer_type}"',
+        f'direction="{direction}"',
+        'currency="EUR"',
+        f'conid="{conid}"',
+        'quantity="7"',
+    ]
+    if cash_transfer is not None:
+        attributes.append(f'cashTransfer="{cash_transfer}"')
+    if position_amount_in_base is not None:
+        attributes.append(f'positionAmountInBase="{position_amount_in_base}"')
+    xml = _xml(raw_account, observed, "100").replace(
+        "<Transfers />", f"<Transfers><Transfer {' '.join(attributes)} /></Transfers>"
+    )
+    if statement_base_currency != "USD":
+        xml = xml.replace('currency="USD"', f'currency="{statement_base_currency}"')
+    path = tmp_path / f"{raw_account}-{direction}-{conid}.xml"
+    path.write_text(xml, encoding="utf-8")
+    return parse_flex_file(path, artifact_id=f"synthetic/{path.name}").statements[0]
+
+
+def _normalize_position_transfer_pair(
+    statements: list[object],
+) -> dict[str, object]:
+    base_currency_by_raw_account = {
+        statement.raw_account_id: statement.base_currency for statement in statements
+    }
+    return ibkr_generation._normalize(
+        statements,
+        {
+            "accounts": [
+                {
+                    "account_id": "account-in",
+                    "base_currency": base_currency_by_raw_account.get("RAW-IN", "USD"),
+                    "role": "INVESTMENT",
+                },
+                {
+                    "account_id": "account-out",
+                    "base_currency": base_currency_by_raw_account.get("RAW-OUT", "USD"),
+                    "role": "INVESTMENT",
+                },
+            ],
+            "assignments": [
+                {
+                    "account_id": "account-in",
+                    "effective_end": None,
+                    "effective_start": "2026-01-01",
+                    "mapping_status": "MAPPED",
+                    "strategy_id": "strategy-in",
+                },
+                {
+                    "account_id": "account-out",
+                    "effective_end": None,
+                    "effective_start": "2026-01-01",
+                    "mapping_status": "MAPPED",
+                    "strategy_id": "strategy-out",
+                },
+            ],
+        },
+        {"RAW-IN": "account-in", "RAW-OUT": "account-out"},
+        [],
+        frozenset(),
+        0,
+        None,
+    )
+
+
+def test_transfer_preserves_distinct_cash_and_nav_recognition_dates(
+    tmp_path: Path,
+) -> None:
+    """Moving the flow onto its transaction date would fabricate a daily return."""
+
+    statement = _position_transfer_statement(
+        tmp_path,
+        raw_account="RAW-IN",
+        direction="IN",
+        position_amount_in_base=None,
+        cash_transfer="4495.93",
+        observed=date(2026, 1, 23),
+        event_day=date(2026, 1, 22),
+    )
+
+    assert statement.transfers[0].event_date == date(2026, 1, 22)
+    assert statement.transfers[0].nav_recognition_date == date(2026, 1, 23)
+    flow = _normalize_position_transfer_pair([statement])["flows"][0]
+    assert {
+        "amount": flow["amount"],
+        "event_date": flow["event_date"],
+        "nav_recognition_date": flow["nav_recognition_date"],
+    } == {
+        "amount": {"currency": "EUR", "status": "AVAILABLE", "value": "4495.93"},
+        "event_date": "2026-01-22",
+        "nav_recognition_date": "2026-01-23",
+    }
+
+
+def test_cash_flow_preserves_distinct_cash_and_nav_recognition_dates(
+    tmp_path: Path,
+) -> None:
+    """A corrected or delayed cash row belongs to its provider report-date NAV."""
+
+    path = tmp_path / "cash-report-date.xml"
+    path.write_text(
+        _xml(
+            "RAW-IN",
+            date(2026, 1, 23),
+            "100",
+            cash_rows=(
+                '<CashTransaction accountId="RAW-IN" levelOfDetail="DETAIL" '
+                'dateTime="20260122;120000" reportDate="20260123" '
+                'transactionID="cash-report-date" type="Deposits/Withdrawals" '
+                'amount="4495.93" currency="USD" />'
+            ),
+        ),
+        encoding="utf-8",
+    )
+    statement = parse_flex_file(
+        path, artifact_id="synthetic/cash-report-date.xml"
+    ).statements[0]
+
+    assert statement.cash_transactions[0].event_date == date(2026, 1, 22)
+    assert statement.cash_transactions[0].nav_recognition_date == date(2026, 1, 23)
+    flow = _normalize_position_transfer_pair([statement])["flows"][0]
+    assert {
+        "amount": flow["amount"],
+        "event_date": flow["event_date"],
+        "nav_recognition_date": flow["nav_recognition_date"],
+    } == {
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "4495.93"},
+        "event_date": "2026-01-22",
+        "nav_recognition_date": "2026-01-23",
+    }
+
+
+def test_position_transfer_base_valuation_is_exactly_parsed_and_projected(
+    tmp_path: Path,
+) -> None:
+    incoming = _position_transfer_statement(
+        tmp_path,
+        raw_account="RAW-IN",
+        direction="IN",
+        position_amount_in_base="125.50",
+        cash_transfer=None,
+    )
+    outgoing = _position_transfer_statement(
+        tmp_path,
+        raw_account="RAW-OUT",
+        direction="OUT",
+        position_amount_in_base="-125.50",
+    )
+    assert incoming.transfers[0].position_amount_in_base == Decimal("125.50")
+    assert outgoing.transfers[0].position_amount_in_base == Decimal("-125.50")
+
+    catalog = _normalize_position_transfer_pair([incoming, outgoing])
+    flows = {flow["account_id"]: flow for flow in catalog["flows"]}
+    assert flows["account-in"]["amount"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "125.5",
+    }
+    assert flows["account-out"]["amount"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "-125.5",
+    }
+    assert {flow["value_basis"] for flow in flows.values()} == {
+        "POSITION_AMOUNT_IN_BASE"
+    }
+    assert len({flow["provider_activity_id_sha256"] for flow in flows.values()}) == 1
+
+
+def test_corrected_p123_eu_position_base_legs_are_eight_safe_internal_pairs(
+    tmp_path: Path,
+) -> None:
+    corrected_inbound_values = (
+        "437.955903",
+        "486.181872",
+        "750.841696",
+        "673.887004",
+        "890.336665",
+        "600.0507",
+        "871.356816",
+        "2111.143419",
+    )
+    inbound_total = Decimal()
+
+    for index, inbound_value in enumerate(corrected_inbound_values):
+        incoming = _position_transfer_statement(
+            tmp_path,
+            raw_account="RAW-IN",
+            direction="IN",
+            position_amount_in_base=inbound_value,
+            conid=str(100 + index),
+        )
+        outgoing = _position_transfer_statement(
+            tmp_path,
+            raw_account="RAW-OUT",
+            direction="OUT",
+            position_amount_in_base=f"-{inbound_value}",
+            conid=str(100 + index),
+        )
+        flows = _normalize_position_transfer_pair([incoming, outgoing])["flows"]
+
+        assert len(flows) == 2
+        assert {flow["provider_account_scope"] for flow in flows} == {
+            "STATEMENT_ACCOUNT"
+        }
+        assert {flow["value_basis"] for flow in flows} == {
+            "POSITION_AMOUNT_IN_BASE"
+        }
+        assert sum(Decimal(flow["amount"]["value"]) for flow in flows) == Decimal("0")
+        inbound_total += Decimal(inbound_value)
+
+    assert inbound_total == Decimal("6821.754075")
+
+
+def test_retained_p123_eu_position_transfers_project_exact_source_base_values() -> None:
+    """The eight admission inputs must come from the retained Flex bytes.
+
+    This is deliberately not a helper-XML test.  The checked source files live
+    outside the repository because they are large provider records; when they
+    are mounted, their pinned identity and the production parser/normalizer
+    jointly prove the actual P123-EU legs.  CI environments without the
+    retained governed input skip this integration check rather than replacing
+    it with a synthetic surrogate.
+    """
+
+    retained_root = (
+        Path(__file__).resolve().parents[3]
+        / "dataIBKR"
+        / "source-runs"
+        / "legacy-20260731"
+        / "files"
+    )
+    source_files = {
+        "legacy/legacy-001.xml": (
+            retained_root / "AllAccounts_Accounting_XML_20251231.xml",
+            "310dc4b16baf9e6ec73681e1141bcf51ba89a54568478214b73cd258684e85f6",
+        ),
+        "legacy/legacy-003.xml": (
+            retained_root / "AllAccounts_Accounting_XML_20260228.xml",
+            "e74518339486f07bbab188387cffb5eccec50bf9e5c9de01fd32895d01e2e6ef",
+        ),
+    }
+    if not all(path.is_file() for path, _ in source_files.values()):
+        pytest.skip("retained governed IBKR Flex source is not mounted")
+    assert {
+        artifact_id: hashlib.sha256(path.read_bytes()).hexdigest()
+        for artifact_id, (path, _) in source_files.items()
+    } == {artifact_id: digest for artifact_id, (_, digest) in source_files.items()}
+
+    expected_inbound = {
+        "36378355039": Decimal("486.181872"),
+        "36378355352": Decimal("750.841696"),
+        "36378355327": Decimal("673.887004"),
+        "36378355342": Decimal("890.336665"),
+        "36378355309": Decimal("600.050700"),
+        "36378355151": Decimal("437.955903"),
+        "36378355273": Decimal("871.356816"),
+        "38179693869": Decimal("2111.143419"),
+    }
+    statements = []
+    for artifact_id, (path, _) in source_files.items():
+        document = parse_flex_file(path, artifact_id=artifact_id)
+        for statement in document.statements:
+            transfers = tuple(
+                transfer
+                for transfer in statement.transfers
+                if transfer.transaction_id in expected_inbound
+            )
+            if transfers:
+                statements.append(replace(statement, transfers=transfers))
+
+    catalog = ibkr_generation._normalize(
+        statements,
+        {
+            "accounts": [
+                {
+                    "account_id": "account-source-counterpart",
+                    "base_currency": "USD",
+                    "role": "INVESTMENT",
+                },
+                {
+                    "account_id": "account-source-p123-eu",
+                    "base_currency": "USD",
+                    "role": "INVESTMENT",
+                },
+            ],
+            "assignments": [
+                {
+                    "account_id": "account-source-p123-eu",
+                    "effective_end": None,
+                    "effective_start": "2025-11-20",
+                    "mapping_status": "MAPPED",
+                    "strategy_id": "p123-eu",
+                }
+            ],
+        },
+        {"U21991024": "account-source-counterpart", "U22509054": "account-source-p123-eu"},
+        [],
+        frozenset(),
+        0,
+        None,
+    )
+    eu_flows = [
+        flow
+        for flow in catalog["flows"]
+        if flow["account_id"] == "account-source-p123-eu"
+    ]
+    counterpart_flows = [
+        flow
+        for flow in catalog["flows"]
+        if flow["account_id"] == "account-source-counterpart"
+    ]
+    assert len(eu_flows) == len(expected_inbound) == 8
+    assert len(counterpart_flows) == len(expected_inbound)
+    assert {flow["mapping_status"] for flow in eu_flows} == {"MAPPED"}
+    assert {flow["strategy_id"] for flow in eu_flows} == {"p123-eu"}
+    assert {flow["mapping_status"] for flow in counterpart_flows} == {"UNMAPPED"}
+    assert {flow["strategy_id"] for flow in counterpart_flows} == {None}
+    assert {flow["value_basis"] for flow in eu_flows} == {"POSITION_AMOUNT_IN_BASE"}
+    inbound_by_activity = {
+        flow["provider_activity_id_sha256"]: Decimal(flow["amount"]["value"])
+        for flow in eu_flows
+    }
+    assert inbound_by_activity == {
+        hashlib.sha256(activity.encode()).hexdigest(): amount
+        for activity, amount in expected_inbound.items()
+    }
+    assert sum(inbound_by_activity.values()) == Decimal("6821.754075")
+    assert sum(Decimal(flow["amount"]["value"]) for flow in counterpart_flows) == Decimal(
+        "-6821.754075"
+    )
+
+
+@pytest.mark.parametrize(
+    ("peer_value", "peer_conid"),
+    [("-125.51", "100"), ("-125.50", "101")],
+)
+def test_position_transfer_base_valuation_requires_an_exact_cross_account_pair(
+    tmp_path: Path, peer_value: str, peer_conid: str
+) -> None:
+    incoming = _position_transfer_statement(
+        tmp_path,
+        raw_account="RAW-IN",
+        direction="IN",
+        position_amount_in_base="125.50",
+    )
+    outgoing = _position_transfer_statement(
+        tmp_path,
+        raw_account="RAW-OUT",
+        direction="OUT",
+        position_amount_in_base=peer_value,
+        conid=peer_conid,
+    )
+
+    catalog = _normalize_position_transfer_pair([incoming, outgoing])
+    assert all(flow["amount"]["status"] == "UNAVAILABLE" for flow in catalog["flows"])
+    assert all("value_basis" not in flow for flow in catalog["flows"])
+
+
+@pytest.mark.parametrize(
+    ("incoming_type", "outgoing_type", "incoming_value", "outgoing_value", "outgoing_base_currency"),
+    [
+        ("EXTERNAL", "EXTERNAL", "125.50", "-125.50", "USD"),
+        ("INTERNAL", "INTERNAL", "125.50", "-125.50", "EUR"),
+        ("INTERNAL", "INTERNAL", "-125.50", "125.50", "USD"),
+    ],
+    ids=("external_transfer", "mismatched_statement_base_currency", "reversed_direction_signs"),
+)
+def test_position_transfer_base_valuation_rejects_noninternal_cross_currency_or_reversed_sign_pairs(
+    tmp_path: Path,
+    incoming_type: str,
+    outgoing_type: str,
+    incoming_value: str,
+    outgoing_value: str,
+    outgoing_base_currency: str,
+) -> None:
+    incoming = _position_transfer_statement(
+        tmp_path,
+        raw_account="RAW-IN",
+        direction="IN",
+        position_amount_in_base=incoming_value,
+        transfer_type=incoming_type,
+    )
+    outgoing = _position_transfer_statement(
+        tmp_path,
+        raw_account="RAW-OUT",
+        direction="OUT",
+        position_amount_in_base=outgoing_value,
+        statement_base_currency=outgoing_base_currency,
+        transfer_type=outgoing_type,
+    )
+
+    catalog = _normalize_position_transfer_pair([incoming, outgoing])
+    assert all(flow["amount"]["status"] == "UNAVAILABLE" for flow in catalog["flows"])
+    assert all("value_basis" not in flow for flow in catalog["flows"])
+
+
+def test_position_transfer_missing_base_valuation_stays_unavailable_and_cash_wins(
+    tmp_path: Path,
+) -> None:
+    missing = _position_transfer_statement(
+        tmp_path,
+        raw_account="RAW-IN",
+        direction="IN",
+        position_amount_in_base=None,
+    )
+    peer = _position_transfer_statement(
+        tmp_path,
+        raw_account="RAW-OUT",
+        direction="OUT",
+        position_amount_in_base="-125.50",
+    )
+    missing_catalog = _normalize_position_transfer_pair([missing, peer])
+    assert all(
+        flow["amount"] == {"currency": "EUR", "status": "UNAVAILABLE", "value": None}
+        for flow in missing_catalog["flows"]
+    )
+
+    cash = _position_transfer_statement(
+        tmp_path,
+        raw_account="RAW-IN",
+        direction="IN",
+        position_amount_in_base="125.50",
+        cash_transfer="99.25",
+    )
+    cash_catalog = _normalize_position_transfer_pair([cash])
+    assert cash_catalog["flows"][0]["amount"] == {
+        "currency": "EUR",
+        "status": "AVAILABLE",
+        "value": "99.25",
+    }
+    assert "value_basis" not in cash_catalog["flows"][0]
 
 
 def test_build_is_deterministic_and_account_scope_exception_is_explicit(

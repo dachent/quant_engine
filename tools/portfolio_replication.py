@@ -611,6 +611,31 @@ def build_replication(
         raise ReplicationError("decomposition generation as_of_date differs")
     if generation.adapter.name != "portfolio-decomposition":
         raise ReplicationError("decomposition generation adapter differs")
+    decomposition_artifacts = [
+        artifact
+        for artifact in generation.artifacts
+        if artifact.artifact_id == "analytics/decomposition.json"
+    ]
+    if len(decomposition_artifacts) != 1:
+        raise ReplicationError("decomposition manifest artifact is missing")
+    decomposition_artifact = decomposition_artifacts[0]
+    analytics_schema_version = _integer(
+        decomposition.get("analytics_schema_version"),
+        "decomposition.analytics_schema_version",
+        minimum=1,
+    )
+    if decomposition_artifact.sha256 != decomposition_hash:
+        raise ReplicationError("decomposition manifest artifact hash differs")
+    if decomposition_artifact.size_bytes != decomposition_size:
+        raise ReplicationError("decomposition manifest artifact size differs")
+    if decomposition_artifact.as_of_date != as_of:
+        raise ReplicationError("decomposition manifest artifact as_of_date differs")
+    if decomposition_artifact.schema_name != "portfolio-factor-decomposition":
+        raise ReplicationError("decomposition manifest artifact schema_name differs")
+    if decomposition_artifact.schema_version != str(analytics_schema_version):
+        raise ReplicationError(
+            "decomposition manifest artifact schema_version differs"
+        )
     if decomposition.get("method_label") != ALLOWED_SOURCE_METHOD_LABEL:
         raise ReplicationError("decomposition method label is not accepted")
     if decomposition.get("as_of_date") != as_of.isoformat():
@@ -750,7 +775,7 @@ def build_replication(
             size_bytes=decomposition_size,
             as_of_date=as_of,
             schema_name="portfolio-decomposition",
-            schema_version=str(decomposition.get("analytics_schema_version", "1")),
+            schema_version=str(analytics_schema_version),
         ),
         SourceArtifact(
             artifact_id="inputs/factors.csv",

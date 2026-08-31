@@ -65,10 +65,13 @@ uv run --frozen --no-sync python tools/portfolio_report.py bind-workbook-evidenc
   --evidence "<candidate>\workbook-evidence-binding.json"
 ```
 
-That binding is classified `REPO_BOUND_POSTRUN_ONLY` and is
-`INCOMPLETE_STAGING_ONLY`. It may be retained as staging/archive evidence, but
-does not claim native Excel execution or a passing workbook result. The raw
-xlsx-win `run_id` is preserved exactly; the repository never derives it from an
+`bind-workbook-evidence` validates the supplied xlsx-run result, validation
+receipt, job, independent workbook-cell parity, final-workbook bytes, and the
+successful `open`/`recalc`/`save_as` step facts. Its closed binding is
+`WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED` /
+`ELIGIBLE_FOR_NON_AUTHORITY_DELIVERY`; it binds delivery QA and the initial
+workbook hash, not native provenance or report authority. The raw xlsx-run
+`run_id` is preserved exactly; the repository never derives it from an
 idempotency key.
 
 The repository verifier can still compare a staged workbook to the current
@@ -85,17 +88,34 @@ The verifier rejects changed baseline inputs, candidate identity drift,
 external links, workbook connections, macros, missing sheets or tables, and a
 missing reconciliation formula.
 
-## Authoritative publication is blocked
+## Authority publication and workbook delivery
 
-`publish` is deliberately fail-closed and returns
-`NATIVE_EXCEL_RECEIPT_REQUIRED`. A repository or caller-created JSON receipt,
-schema-shaped sidecar, optional argument, or synthetic fixture cannot advance
-`CURRENT.json`, `CURRENT_RELEASE.json`, an accepted generation, or a release
-receipt. The previous accepted pointer remains byte-identical.
+`publish` creates two distinct, create-only outputs. The immutable report
+generation under `reporting\generations\<generation-id>` contains
+`portfolio-report-data.json`, its report verification, and JSON evidence and
+manifest artifacts. It contains no `.xlsx` file, so the current authority
+pointer and generation inventory are independent of Office or SharePoint
+workbook rewrites.
 
-`NATIVE_EXECUTION_PROVEN` is therefore currently unavailable. A separately
-authorized, externally owned xlsx-win runtime/schema must emit the native
-receipt before this transition can be implemented. That receipt must bind the
-original, staged, and published paths and SHA-256 values; the actual job,
-result, and event records; and the real xlsx-win run ID. This repository cannot
-establish native Excel execution from JSON.
+The sibling `reporting\deliveries\<generation-id>` contains the human-facing
+`portfolio-report.xlsx` and `report-delivery.json`. The delivery receipt is
+validated by `schemas/portfolio/report-delivery.schema.json`; it labels the
+workbook `NON_AUTHORITY_HUMAN_DELIVERY` and binds the exact authority generation
+ID, manifest hash, inventory hash, and canonical JSON payload hash used to
+materialize it.
+
+Both paths are create-only: exact-byte reruns are idempotent, while an existing
+different delivery workbook or receipt fails closed. A subsequent Office or
+SharePoint rewrite may make the delivery workbook drift from the receipt, but
+that drift neither changes nor invalidates the JSON report authority.
+
+`publish` recomputes and requires that exact closed delivery-evidence binding;
+manual label, hash, size, run, step, validation, missing-field, or extra-field
+changes fail before any authority output or current-pointer change. The JSON
+report remains the sole authority; the workbook evidence only gates creation of
+the optional static human-delivery artifact in this combined producer API.
+Unit fixtures model the evidence shape only. Final operational acceptance still
+requires an actual xlsx-win/Excel run and independently performed workbook-cell
+parity. This is producer-only contract work: the A1.3 consumers in the release
+builder and pipeline materializer remain pending their follow-up seam update,
+so this change does not close the cross-layer consumer contract.

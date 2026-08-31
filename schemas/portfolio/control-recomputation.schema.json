@@ -33,31 +33,55 @@
     "generation_checks": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["panel_correlation_matches_current", "panel_freshness_matches_evaluation_date", "panel_report_matches_current"],
+      "required": ["freshness_matches_current_provider_ledger", "panel_correlation_matches_current", "panel_freshness_matches_selected", "panel_report_matches_current"],
       "properties": {
+        "freshness_matches_current_provider_ledger": {"const": true},
         "panel_correlation_matches_current": {"const": true},
-        "panel_freshness_matches_evaluation_date": {"const": true},
+        "panel_freshness_matches_selected": {"const": true},
         "panel_report_matches_current": {"const": true}
       }
     },
     "inputs": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["correlation", "panel", "report"],
+      "required": ["correlation", "freshness", "panel", "provider_ledger", "report"],
       "properties": {
         "correlation": {"$ref": "#/$defs/generationIdentity"},
+        "freshness": {"$ref": "#/$defs/freshnessIdentity"},
         "panel": {"$ref": "#/$defs/panelIdentity"},
+        "provider_ledger": {"$ref": "#/$defs/providerLedgerIdentity"},
         "report": {"$ref": "#/$defs/generationIdentity"}
       }
     },
-    "method": {"const": "DECIMAL_SUM_ALLOCATION_WEIGHT_TIMES_ADVERSE_LOSS_FRACTION"},
+    "method": {"const": "DECIMAL_SUM_ALLOCATION_WEIGHT_TIMES_CONSERVATIVE_LOSS_FRACTION"},
     "recomputed_correlation_one_stress": {"$ref": "#/$defs/decimal"},
-    "receipt_schema_version": {"const": 1},
+    "receipt_schema_version": {"const": 2},
     "status": {"const": "PASS"},
     "tolerance": {"const": "0.000000000001"}
   },
   "$defs": {
     "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+    "fileIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/hash"},
+        "size_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
+    "freshnessIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["as_of_date", "path", "sha256", "size_bytes"],
+      "properties": {
+        "as_of_date": {"type": "string", "format": "date"},
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"$ref": "#/$defs/hash"},
+        "size_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
     "generationIdentity": {
       "type": "object",
       "additionalProperties": false,
@@ -74,12 +98,25 @@
     "panelIdentity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["panel_id", "path", "sha256", "size_bytes"],
+      "required": ["candidate_dir", "candidate_record", "dashboard", "declared_freshness_sha256", "freshness", "panel_id"],
       "properties": {
-        "panel_id": {"$ref": "#/$defs/hash"},
-        "path": {"type": "string", "minLength": 1},
-        "sha256": {"$ref": "#/$defs/hash"},
-        "size_bytes": {"type": "integer", "minimum": 1}
+        "candidate_dir": {"type": "string", "minLength": 1},
+        "candidate_record": {"$ref": "#/$defs/fileIdentity"},
+        "dashboard": {"$ref": "#/$defs/fileIdentity"},
+        "declared_freshness_sha256": {"$ref": "#/$defs/hash"},
+        "freshness": {"$ref": "#/$defs/fileIdentity"},
+        "panel_id": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "providerLedgerIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["as_of_date", "catalog", "generation_id", "manifest"],
+      "properties": {
+        "as_of_date": {"type": "string", "format": "date"},
+        "catalog": {"$ref": "#/$defs/fileIdentity"},
+        "generation_id": {"$ref": "#/$defs/hash"},
+        "manifest": {"$ref": "#/$defs/fileIdentity"}
       }
     }
   }

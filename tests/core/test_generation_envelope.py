@@ -128,6 +128,7 @@ def test_generation_bundle_verifier_public_round_trip_is_exact_and_immutable(
     assert bundle.receipt == publication.GenerationReceipt.from_json_bytes(
         (final / "generation-receipt.json").read_bytes()
     )
+
     assert bundle.inventory_bytes == (final / "generation-inventory.json").read_bytes()
     assert bundle.receipt_bytes == (final / "generation-receipt.json").read_bytes()
     assert bundle.full_directory_inventory_sha256 == generation_inventory_sha256(
@@ -157,6 +158,21 @@ def test_generation_bundle_verifier_public_round_trip_is_exact_and_immutable(
     assert public_core.stage_generation_bundle is publication.stage_generation_bundle
     assert public_core.verify_generation_bundle is publication.verify_generation_bundle
     assert public_core.read_generation_bundle is publication.read_generation_bundle
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows extended-path contract")
+def test_generation_bundle_round_trip_supports_windows_extended_paths(
+    tmp_path: Path,
+) -> None:
+    manifest, payloads = _envelope_manifest_and_payloads()
+    root = tmp_path.joinpath(*(["extended-path-segment-0123456789x"] * 3))
+
+    final = publication.stage_generation_bundle(root, manifest, payloads)
+    bundle = publication.read_generation_bundle(root, manifest.generation_id)
+
+    assert len(str(final)) > 260
+    assert dict(bundle.payloads) == payloads
+    assert bundle.manifest == manifest
 
 
 @pytest.mark.parametrize(
@@ -301,7 +317,7 @@ def test_generation_bundle_verifier_rejects_identity_drift_and_closes_descriptor
     def drifting_lstat(path: Path) -> object:
         nonlocal target_stats
         observed = original_lstat(path)
-        if path != target:
+        if path not in {target, Path(publication._windows_api_path(target))}:
             return observed
         target_stats += 1
         if target_stats == 2:

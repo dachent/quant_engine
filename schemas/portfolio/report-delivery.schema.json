@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/report-delivery.schema.json",
+  "title": "Portfolio report delivery receipt",
+  "description": "Create-only human workbook delivery bound to immutable JSON report authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "delivery_classification",
+    "authority",
+    "workbook"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "delivery_classification": {"const": "NON_AUTHORITY_HUMAN_DELIVERY"},
+    "authority": {"$ref": "#/$defs/authority"},
+    "workbook": {"$ref": "#/$defs/workbook"},
+    "epoch_crosswalk": {"$ref": "#/$defs/epoch_crosswalk"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "sha256", "size_bytes"],
+      "properties": {
+        "relative_path": {"const": "portfolio-report-data.json"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "generation_id",
+        "generation_manifest_sha256",
+        "generation_manifest_size_bytes",
+        "generation_inventory_sha256",
+        "payload"
+      ],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "generation_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "generation_manifest_size_bytes": {"type": "integer", "minimum": 1},
+        "generation_inventory_sha256": {"$ref": "#/$defs/sha256"},
+        "payload": {"$ref": "#/$defs/payload"}
+      }
+    },
+    "workbook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "sha256", "size_bytes"],
+      "properties": {
+        "relative_path": {"const": "portfolio-report.xlsx"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    },
+    "epoch_crosswalk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact", "generation_id", "relative_path", "sha256", "size_bytes"],
+      "properties": {
+        "artifact": {"const": "account-strategy-current-epoch-crosswalk"},
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "relative_path": {"const": "account-strategy-current-epoch-crosswalk.json"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}

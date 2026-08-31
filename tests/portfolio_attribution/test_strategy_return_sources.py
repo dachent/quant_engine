@@ -364,6 +364,36 @@ def test_positive_full_validity() -> None:
     _assert_valid_contract(_contract())
 
 
+def test_product_excluded_strategy_text_denies_current_obligations() -> None:
+    financial_product = json.loads(
+        FINANCIAL_MVP_CONTRACT_PATH.read_text(encoding="utf-8")
+    )
+    excluded_ids = {
+        row["strategy_id"]
+        for row in financial_product["strategies"]
+        if row["product_requirement"] == "EXCLUDED"
+    }
+    entries = {row["strategy_id"]: row for row in _contract()["strategies"]}
+
+    for strategy_id in excluded_ids:
+        text = json.dumps(entries[strategy_id], sort_keys=True).lower()
+        assert "no current-product" in text
+        assert "required-not-ready" not in text
+        assert "remain required" not in text
+
+
+def test_deprecated_echo_text_excludes_every_current_value_surface() -> None:
+    entries = {row["strategy_id"]: row for row in _contract()["strategies"]}
+    mechanism = entries["echotrade-growth-pivots"]["mechanism"].lower()
+
+    assert "historical" in mechanism
+    assert (
+        "excluded from current capital, allocation, and consolidated-value reporting"
+        in mechanism
+    )
+    assert "remains in capital, allocation, and consolidated-value reporting" not in mechanism
+
+
 # ===================================================================
 # Schema alignment checks
 # ===================================================================

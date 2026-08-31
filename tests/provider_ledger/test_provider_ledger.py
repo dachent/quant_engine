@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from typing import Any, Mapping
 
 from jsonschema import Draft202012Validator
@@ -38,6 +39,298 @@ if SPEC is None or SPEC.loader is None:
 ledger = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = ledger
 SPEC.loader.exec_module(ledger)
+
+
+def _current_census_provider_fixture() -> tuple[
+    dict[str, Any],
+    list[ProviderGenerationIdentity],
+    dict[str, SimpleNamespace],
+]:
+    """Literal current-census/provider identities for the chain boundary."""
+
+    providers = sorted(ledger._PROVIDER_CATALOGS)
+    identities = [
+        ProviderGenerationIdentity(
+            provider_id=provider_id,
+            generation_id=f"{index:x}" * 64,
+            manifest_sha256=f"{index + 7:x}" * 64,
+            catalog_sha256=f"{index + 1:x}" * 64,
+            qualification=GenerationQualification.PUBLISHED_COMPLETE,
+        )
+        for index, provider_id in enumerate(providers, start=1)
+    ]
+    manifests = {
+        provider_id: SimpleNamespace(as_of_date=date(2026, 8, 10 + index))
+        for index, provider_id in enumerate(providers, start=1)
+    }
+    lanes = [
+        {
+            "provider_id": identity.provider_id.upper(),
+            "generation": {
+                "as_of": manifests[identity.provider_id].as_of_date.isoformat(),
+                "generation_id": identity.generation_id,
+                "manifest_sha256": identity.manifest_sha256,
+                "pointer_sha256": "f" * 64,
+            },
+        }
+        for identity in identities
+    ]
+    lanes.extend(
+        [
+            {"provider_id": "COMPOSER", "generation": None},
+            {"provider_id": "INTERNAL", "generation": None},
+            {"provider_id": "JOHN_HANCOCK", "generation": None},
+        ]
+    )
+    return (
+        {"contract": {"current_census": {"provider_lanes": lanes}}},
+        identities,
+        manifests,
+    )
+
+
+def test_candidate_provider_inputs_match_every_frozen_current_census_lane() -> None:
+    """A candidate may use only the seven exact provider generations in C."""
+
+    authority, identities, manifests = _current_census_provider_fixture()
+    ledger._validate_current_census_provider_generations(
+        authority, identities, manifests
+    )
+
+
+@pytest.mark.parametrize("mutation", ("generation", "manifest", "as_of"))
+def test_candidate_provider_identity_mutation_breaks_the_contract_chain(
+    mutation: str,
+) -> None:
+    """A coherent provider candidate rewrite cannot inherit contract authority."""
+
+    authority, identities, manifests = _current_census_provider_fixture()
+    ibkr = next(item for item in identities if item.provider_id == "ibkr")
+    if mutation == "generation":
+        identities[identities.index(ibkr)] = ProviderGenerationIdentity(
+            provider_id=ibkr.provider_id,
+            generation_id="e" * 64,
+            manifest_sha256=ibkr.manifest_sha256,
+            catalog_sha256=ibkr.catalog_sha256,
+            qualification=ibkr.qualification,
+        )
+    elif mutation == "manifest":
+        identities[identities.index(ibkr)] = ProviderGenerationIdentity(
+            provider_id=ibkr.provider_id,
+            generation_id=ibkr.generation_id,
+            manifest_sha256="e" * 64,
+            catalog_sha256=ibkr.catalog_sha256,
+            qualification=ibkr.qualification,
+        )
+    else:
+        manifests["ibkr"] = SimpleNamespace(as_of_date=date(2026, 8, 30))
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="ibkr generation differs from current census authority",
+    ):
+        ledger._validate_current_census_provider_generations(
+            authority, identities, manifests
+        )
+
+
+def test_null_census_lane_cannot_become_a_candidate_provider_input() -> None:
+    authority, identities, manifests = _current_census_provider_fixture()
+    identities.append(
+        ProviderGenerationIdentity(
+            provider_id="composer",
+            generation_id="d" * 64,
+            manifest_sha256="c" * 64,
+            catalog_sha256="b" * 64,
+            qualification=GenerationQualification.PUBLISHED_COMPLETE,
+        )
+    )
+    manifests["composer"] = SimpleNamespace(as_of_date=date(2026, 8, 16))
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="current census provider generation set differs",
+    ):
+        ledger._validate_current_census_provider_generations(
+            authority, identities, manifests
+        )
+
+
+def test_duplicate_candidate_provider_input_fails_closed() -> None:
+    authority, identities, manifests = _current_census_provider_fixture()
+    identities.append(identities[0])
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="current census provider generation set differs",
+    ):
+        ledger._validate_current_census_provider_generations(
+            authority, identities, manifests
+        )
+
+
+def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None:
+    """Retained ledger history never becomes candidate provider authority."""
+
+    expected_history_receipts = {
+        "p123-eu-account-live": {
+            (
+                "provider-ledger-generation-manifest",
+                "cde06a404effc35c4c6ecdb96042abd7153638c6dabe758c60c65d77fbd64f53",
+                "cd106e04d11980097c77d2b6fe855837a498765b96f3a523f1b8a8c2b6216331",
+            ),
+            (
+                "provider-ledger-catalog",
+                "cde06a404effc35c4c6ecdb96042abd7153638c6dabe758c60c65d77fbd64f53",
+                "7f85049dc3111bf29dd8f7009fc3593c00743bc4f764871155c071a684514afa",
+            ),
+        },
+        "volatis-account-live": {
+            (
+                "provider-ledger-generation-manifest",
+                "cde06a404effc35c4c6ecdb96042abd7153638c6dabe758c60c65d77fbd64f53",
+                "cd106e04d11980097c77d2b6fe855837a498765b96f3a523f1b8a8c2b6216331",
+            ),
+        },
+        "echotrade-event-only-account-live-rejected": {
+            (
+                "provider-ledger-generation-manifest",
+                "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
+                "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db",
+            ),
+            (
+                "provider-ledger-catalog",
+                "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
+                "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56",
+            ),
+        },
+    }
+    expected_direct_provider_lanes = {
+        "alpaca": (
+            "7942ee08c1a3affa628c45b24f758cbe822aeb140f10845e155e042d70b593fc",
+            "6093190b3c593e935e76fc5071daa7d54788fb44fb81d43fcde54c466876323f",
+            "2026-07-17",
+        ),
+        "fidelity": (
+            "39ed0292a69cec1c7ab86437f8d252f6eec518c27bdf2f57e3f8dfa4e1bf97f9",
+            "54b46c2ab6a92fc6550a0bcd0c6aa323fcc657e107c92ca667111e1dfca4d285",
+            "2024-10-03",
+        ),
+        "ibkr": (
+            "b348d1ebcf882b099e64dba261b1877fd7a8efba9c1a4d8f443f7cb3e5a7715a",
+            "fa89abb805f4fdb83f752097f5aba13cab6f3d70f0a0afab98edd3495fb84891",
+            "2026-08-16",
+        ),
+        "matrixport": (
+            "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
+            "325c65ddc5985094799d2abfdce6a944d5443802333f734a40a34541c4d09f79",
+            "2026-08-16",
+        ),
+        "portfolio123": (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907",
+            "2026-08-14",
+        ),
+        "quantbase": (
+            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+            "fa5a8cf49572ebb66632909662f707f0072134234425f4fa1ceee049cefdf87f",
+            "2026-08-16",
+        ),
+        "schwab": (
+            "ad6d1fb65e44144a121f7d7bbe3cbd53ce57b47fe326c5dad5460176bfe4dbe7",
+            "1ac35c989b3a2341540c80898848c56781a0a8bd5420f6144afedc671bd2c463",
+            "2026-08-14",
+        ),
+    }
+
+    contract = json.loads(
+        (
+            REPOSITORY_ROOT
+            / "contracts"
+            / "portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    corrections = {
+        correction["correction_id"]: correction
+        for correction in contract["history_corrections"]["corrections"]
+    }
+    observed_history_receipts = {
+        correction_id: {
+            (
+                receipt["artifact_role"],
+                receipt["generation_id"],
+                receipt["sha256"],
+            )
+            for receipt in corrections[correction_id]["source_receipts"]
+            if receipt["authority_root"] == "PROVIDER_LEDGER"
+        }
+        for correction_id in expected_history_receipts
+    }
+    assert {
+        correction_id
+        for correction_id, correction in corrections.items()
+        if any(
+            receipt["authority_root"] == "PROVIDER_LEDGER"
+            for receipt in correction["source_receipts"]
+        )
+    } == set(expected_history_receipts)
+    assert observed_history_receipts == expected_history_receipts
+    expected_history_generations = {
+        generation_id
+        for receipts in expected_history_receipts.values()
+        for _, generation_id, _ in receipts
+    }
+    assert expected_history_generations == {
+        "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
+        "cde06a404effc35c4c6ecdb96042abd7153638c6dabe758c60c65d77fbd64f53",
+    }
+    accepted_history_generations = {
+        receipt["generation_id"]
+        for correction in corrections.values()
+        for receipt in correction["source_receipts"]
+        if receipt["authority_root"] == "PROVIDER_LEDGER"
+    }
+    assert accepted_history_generations == expected_history_generations
+
+    lanes = {
+        lane["provider_id"].lower(): lane["generation"]
+        for lane in contract["current_census"]["provider_lanes"]
+        if lane["generation"] is not None
+    }
+    assert {
+        provider_id: (
+            generation["generation_id"],
+            generation["manifest_sha256"],
+            generation["as_of"],
+        )
+        for provider_id, generation in lanes.items()
+    } == expected_direct_provider_lanes
+    identities = [
+        ProviderGenerationIdentity(
+            provider_id=provider_id,
+            generation_id=generation_id,
+            manifest_sha256=manifest_sha256,
+            catalog_sha256="a" * 64,
+            qualification=GenerationQualification.PUBLISHED_COMPLETE,
+        )
+        for provider_id, (generation_id, manifest_sha256, _) in sorted(
+            expected_direct_provider_lanes.items()
+        )
+    ]
+    manifests = {
+        provider_id: SimpleNamespace(as_of_date=date.fromisoformat(as_of))
+        for provider_id, (_, _, as_of) in expected_direct_provider_lanes.items()
+    }
+
+    ledger._validate_current_census_provider_generations(
+        {"contract": contract}, identities, manifests
+    )
+    assert {item.provider_id for item in identities} == set(
+        expected_direct_provider_lanes
+    )
+    assert accepted_history_generations.isdisjoint(
+        {item.generation_id for item in identities}
+    )
 
 
 def _p123_provider_generation(
@@ -597,6 +890,38 @@ def test_broker_returns_are_flow_adjusted_and_capital_weighted() -> None:
     assert rows[0]["beginning_capital"] == "400"
     assert len(rows[0]["account_reconciliation_sha256"]) == 64
     assert rows[0]["flow_timing"] == "DATE_ONLY_END_OF_DAY"
+
+
+def test_ibkr_return_uses_nav_recognition_date_not_cash_event_date() -> None:
+    """A prior-day transfer recognized in today's NAV must not fabricate returns."""
+
+    nav = [
+        {**_nav("a", "2026-01-21", "100", "a-21"), "provider_id": "ibkr"},
+        {**_nav("a", "2026-01-22", "100", "a-22"), "provider_id": "ibkr"},
+        {**_nav("a", "2026-01-23", "150", "a-23"), "provider_id": "ibkr"},
+    ]
+    flows = [
+        {
+            "account_id": "a",
+            "amount": "50",
+            "event_date": "2026-01-22",
+            "flow_type": "TRANSFER:INTERNAL:IN",
+            "mapping_status": "MAPPED",
+            "nav_recognition_date": "2026-01-23",
+            "provider_account_scope": "STATEMENT_ACCOUNT",
+            "provider_id": "ibkr",
+        }
+    ]
+
+    rows = ledger._broker_strategy_returns(nav, flows, {"ibkr"})
+
+    assert [(row["date"], row["return"]) for row in rows] == [
+        ("2026-01-22", "0"),
+        ("2026-01-23", "0"),
+    ]
+    assert {row["flow_timing"] for row in rows} == {
+        "PROVIDER_NAV_RECOGNITION_DATE"
+    }
 
 
 def test_single_account_return_preserves_direct_formula_precision() -> None:
@@ -1194,6 +1519,447 @@ def test_projected_provider_nav_preserves_source_proven_value_basis(
     assert projected["nav_observations"][0]["value_basis"] == value_basis
 
 
+def test_projected_ibkr_flow_retains_activity_identity_and_zero_noncapital_semantics() -> None:
+    """A zero cash row stays auditable without becoming an external capital leg."""
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["ibkr"]}
+    catalog["flows"] = [
+        {
+            "account_id": "account-ibkr",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "0"},
+            "event_date": "2026-01-01",
+            "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+            "nav_recognition_date": "2026-01-02",
+            "provider_activity_id_sha256": "a" * 64,
+            "record_id": "zero-deposit",
+        },
+        {
+            "account_id": "account-ibkr",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "0.01"},
+            "event_date": "2026-01-02",
+            "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+            "provider_activity_id_sha256": "b" * 64,
+            "record_id": "nonzero-deposit",
+        },
+    ]
+
+    projected, _ = ledger._project_account_facts(
+        "ibkr",
+        "a" * 64,
+        catalog,
+        {"account-ibkr"},
+        {"strategy-1"},
+        {
+            "account-ibkr": [
+                {
+                    "effective_start": "2026-01-01",
+                    "effective_end": None,
+                    "strategy_id": "strategy-1",
+                }
+            ]
+        },
+    )
+
+    zero, nonzero = projected["flows"]
+    assert zero["provider_activity_id_sha256"] == "a" * 64
+    assert zero["capital_disposition"] == "NON_CAPITAL"
+    assert zero["event_date"] == "2026-01-01"
+    assert zero["nav_recognition_date"] == "2026-01-02"
+    assert nonzero["provider_activity_id_sha256"] == "b" * 64
+    assert nonzero["capital_disposition"] == "EXTERNAL_CAPITAL"
+
+
+def test_projected_schwab_flow_uses_effective_date_for_nav_recognition() -> None:
+    """Cash stays economically dated while returns follow Schwab's NAV date."""
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    catalog["transactions"] = [
+        {
+            "account_id": "account-schwab",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "15000"},
+            "effective_date": "2025-08-25",
+            "event_date": "2025-08-26",
+            "kind": "MoneyLink Transfer",
+            "record_id": "moneylink-1",
+        }
+    ]
+
+    projected, _ = ledger._project_account_facts(
+        "schwab",
+        "a" * 64,
+        catalog,
+        {"account-schwab"},
+        {"strategy-1"},
+        {
+            "account-schwab": [
+                {
+                    "effective_start": "2025-08-01",
+                    "effective_end": None,
+                    "strategy_id": "strategy-1",
+                }
+            ]
+        },
+    )
+
+    flow = projected["flows"][0]
+    assert flow["event_date"] == "2025-08-26"
+    assert flow["effective_date"] == "2025-08-25"
+    assert flow["nav_recognition_date"] == "2025-08-25"
+
+    returns = ledger._broker_strategy_returns(
+        [
+            {
+                "account_id": "account-schwab",
+                "as_of_date": "2025-08-24",
+                "mapping_status": "MAPPED",
+                "nav": "100",
+                "provider_id": "schwab",
+                "record_id": "nav-1",
+                "strategy_id": "strategy-1",
+            },
+            {
+                "account_id": "account-schwab",
+                "as_of_date": "2025-08-25",
+                "mapping_status": "MAPPED",
+                "nav": "15100",
+                "provider_id": "schwab",
+                "record_id": "nav-2",
+                "strategy_id": "strategy-1",
+            },
+        ],
+        projected["flows"],
+        {"schwab"},
+    )
+    assert ledger._observed_decimal(returns[0]["return"], "return") == 0
+    assert returns[0]["flow_timing"] == "PROVIDER_NAV_RECOGNITION_DATE"
+
+
+def _schwab_journal_override_manifest(*, corrupt_4054_source: bool = False) -> GenerationManifest:
+    """The two retained WCH transaction artifacts that prove the exceptions."""
+
+    source_hashes = {
+        "wch/transactions/account-02.json": (
+            "7c6f8d00a21b7f71b5e52627a89a611da73b02b4f30eb86b541492e4a23c7afe"
+        ),
+        "wch/transactions/account-04.json": (
+            "842ad4fde31ad20206cef1de7eb6f9bba699828fe5602008c18c45cb71c1b5e5"
+        ),
+    }
+    if corrupt_4054_source:
+        source_hashes["wch/transactions/account-04.json"] = "f" * 64
+    return GenerationManifest.build(
+        as_of_date=date(2026, 8, 14),
+        adapter=AdapterIdentity(name="test-provider-ledger", version="1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="retained Schwab transaction artifacts",
+            fact_types=("transactions",),
+            observed_start=date(2025, 11, 25),
+            observed_end=date(2026, 8, 14),
+        ),
+        artifacts=tuple(
+            SourceArtifact(
+                artifact_id=artifact_id,
+                sha256=sha256,
+                size_bytes=1,
+                as_of_date=date(2026, 8, 14),
+                schema_name="schwab-wch-transaction-history",
+                schema_version="1",
+            )
+            for artifact_id, sha256 in source_hashes.items()
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+
+
+def _schwab_journal_row(
+    account_id: str,
+    record_id: str,
+    day: str,
+    amount: str,
+) -> dict[str, object]:
+    return {
+        "account_id": account_id,
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        "effective_date": day,
+        "event_date": day,
+        "kind": "Journal",
+        "record_id": record_id,
+    }
+
+
+def test_schwab_pinned_journal_flows_require_exact_record_and_retained_source() -> None:
+    """Only the three audited Journal records are capital; a nearby Journal is not."""
+
+    ira = "account-38b653b91ff43a10"
+    joint = "account-702c489650e59956"
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    catalog["transactions"] = [
+        _schwab_journal_row(ira, "txn-55861c64ba8de7d6a1fa2e6d", "2025-12-29", "7000"),
+        _schwab_journal_row(ira, "txn-ab66e92846c1cfb18f4222e2", "2026-01-02", "7500"),
+        _schwab_journal_row(joint, "txn-1699da38ec4afacd94bd2876", "2026-01-02", "-50000"),
+        _schwab_journal_row(ira, "nearby-journal", "2025-12-29", "7000"),
+    ]
+    assignments = {
+        ira: [{"effective_start": "2025-11-25", "effective_end": None, "strategy_id": "tt"}],
+        joint: [{"effective_start": "2025-11-25", "effective_end": None, "strategy_id": "tt"}],
+    }
+
+    projected, _ = ledger._project_account_facts(
+        "schwab",
+        "schwab-generation",
+        catalog,
+        {ira, joint},
+        {"tt"},
+        assignments,
+        manifest=_schwab_journal_override_manifest(),
+    )
+
+    flows = projected["flows"]
+    assert [(flow["source_record_id"], flow["amount"]["value"]) for flow in flows] == [
+        ("txn-55861c64ba8de7d6a1fa2e6d", "7000"),
+        ("txn-1699da38ec4afacd94bd2876", "-50000"),
+        ("txn-ab66e92846c1cfb18f4222e2", "7500"),
+    ]
+    assert {flow["mapping_basis"] for flow in flows} == {"PINNED_RETAINED_JOURNAL"}
+    assert {
+        (flow["source_artifact_id"], flow["source_artifact_sha256"])
+        for flow in flows
+    } == {
+        (
+            "wch/transactions/account-02.json",
+            "7c6f8d00a21b7f71b5e52627a89a611da73b02b4f30eb86b541492e4a23c7afe",
+        ),
+        (
+            "wch/transactions/account-04.json",
+            "842ad4fde31ad20206cef1de7eb6f9bba699828fe5602008c18c45cb71c1b5e5",
+        ),
+    }
+
+
+def test_schwab_pinned_journal_flow_rejects_changed_retained_source_hash() -> None:
+    """A catalog from a changed transaction source cannot inherit this exception."""
+
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    joint = "account-702c489650e59956"
+    catalog["transactions"] = [
+        _schwab_journal_row(joint, "txn-1699da38ec4afacd94bd2876", "2026-01-02", "-50000")
+    ]
+
+    with pytest.raises(ledger.ProviderLedgerError, match="pinned Journal source"):
+        ledger._project_account_facts(
+            "schwab",
+            "schwab-generation",
+            catalog,
+            {joint},
+            {"tt"},
+            {joint: [{"effective_start": "2025-11-25", "effective_end": None, "strategy_id": "tt"}]},
+            manifest=_schwab_journal_override_manifest(corrupt_4054_source=True),
+        )
+
+
+@pytest.mark.parametrize(
+    ("day", "amount"),
+    [
+        ("2025-12-29", "7000.01"),
+        ("2025-12-30", "7000"),
+    ],
+)
+def test_schwab_pinned_journal_flow_does_not_admit_changed_fact(
+    day: str,
+    amount: str,
+) -> None:
+    """The retained record identity is insufficient when date or amount differs."""
+
+    account_id = "account-38b653b91ff43a10"
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    catalog["transactions"] = [
+        _schwab_journal_row(
+            account_id, "txn-55861c64ba8de7d6a1fa2e6d", day, amount
+        )
+    ]
+    projected, _ = ledger._project_account_facts(
+        "schwab",
+        "schwab-generation",
+        catalog,
+        {account_id},
+        {"tt"},
+        {
+            account_id: [
+                {
+                    "effective_start": "2025-11-25",
+                    "effective_end": None,
+                    "strategy_id": "tt",
+                }
+            ]
+        },
+        manifest=_schwab_journal_override_manifest(),
+    )
+
+    assert "flows" not in projected
+
+
+def test_schwab_5722_twr_uses_two_pinned_journal_flows() -> None:
+    """The independently transcribed retained NAV sequence yields 2.286545%, not 55.4009%."""
+
+    observations = """2025-11-25,12714.14
+2025-11-26,12822.71
+2025-11-27,12822.71
+2025-11-28,12892.39
+2025-11-29,12892.39
+2025-11-30,12892.39
+2025-12-01,12735.89
+2025-12-02,12759
+2025-12-03,12848.56
+2025-12-04,12859.73
+2025-12-05,12856.65
+2025-12-06,12856.65
+2025-12-07,12856.65
+2025-12-08,12773.09
+2025-12-09,12751.29
+2025-12-10,12892.96
+2025-12-11,12996.98
+2025-12-12,12868.48
+2025-12-13,12868.48
+2025-12-14,12868.48
+2025-12-15,12889.62
+2025-12-16,27490.75
+2025-12-17,27369.07
+2025-12-18,27400.95
+2025-12-19,27561.87
+2025-12-20,27561.87
+2025-12-21,27561.87
+2025-12-22,27769.21
+2025-12-23,27891.38
+2025-12-24,28104.72
+2025-12-25,28104.72
+2025-12-26,28077.14
+2025-12-27,28077.14
+2025-12-28,28077.14
+2025-12-29,34981.2
+2025-12-30,34932.14
+2025-12-31,34678.1
+2026-01-01,34678.1
+2026-01-02,42342.77
+2026-01-03,42342.77
+2026-01-04,42342.77"""
+    account_id = "account-38b653b91ff43a10"
+    nav = [
+        _nav(account_id, day, value, f"nav-{index}")
+        for index, (day, value) in enumerate(
+            (line.split(",") for line in observations.splitlines()), start=1
+        )
+    ]
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    catalog["transactions"] = [
+        {
+            "account_id": account_id,
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "14663.08"},
+            "effective_date": "2025-12-16",
+            "event_date": "2025-12-16",
+            "kind": "Funds Received",
+            "record_id": "retained-funds-received",
+        },
+        _schwab_journal_row(
+            account_id, "txn-55861c64ba8de7d6a1fa2e6d", "2025-12-29", "7000"
+        ),
+        _schwab_journal_row(
+            account_id, "txn-ab66e92846c1cfb18f4222e2", "2026-01-02", "7500"
+        ),
+    ]
+    projected, _ = ledger._project_account_facts(
+        "schwab",
+        "schwab-generation",
+        catalog,
+        {account_id},
+        {"strategy-a"},
+        {
+            account_id: [
+                {
+                    "effective_start": "2025-11-25",
+                    "effective_end": None,
+                    "strategy_id": "strategy-a",
+                }
+            ]
+        },
+        manifest=_schwab_journal_override_manifest(),
+    )
+
+    rows = ledger._broker_strategy_returns(nav, projected["flows"], {"schwab"})
+    compounded = Decimal("1")
+    for row in rows:
+        compounded *= Decimal(row["return"]) + Decimal("1")
+
+    assert (compounded - Decimal("1")).quantize(Decimal("0.0000000001")) == Decimal(
+        "0.0228654456"
+    )
+
+
+def test_projected_ibkr_ambiguous_flow_stays_unmapped_and_retains_scope() -> None:
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["ibkr"]}
+    catalog["nav_observations"] = [
+        {
+            "account_id": "account-ibkr",
+            "as_of_date": "2026-01-05",
+            "mapping_status": "MAPPED",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+            "record_id": "nav-2026-01-05",
+        }
+    ]
+    catalog["flows"] = [
+        {
+            "account_id": "account-ibkr",
+            "amount": {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": "35000",
+            },
+            "event_date": "2026-01-05",
+            "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+            "mapping_status": "UNMAPPED",
+            "provider_account_scope": "AMBIGUOUS_REPORTED_ACCOUNT",
+            "provider_activity_id_sha256": "c" * 64,
+            "record_id": "ambiguous-summary",
+            "source_artifact_id": "legacy/summary.xml",
+            "strategy_id": None,
+        }
+    ]
+
+    projected, exceptions = ledger._project_account_facts(
+        "ibkr",
+        "d" * 64,
+        catalog,
+        {"account-ibkr"},
+        {"strategy-1"},
+        {
+            "account-ibkr": [
+                {
+                    "effective_start": "2026-01-01",
+                    "effective_end": None,
+                    "strategy_id": "strategy-1",
+                }
+            ]
+        },
+    )
+
+    row = projected["flows"][0]
+    assert row["mapping_status"] == "UNMAPPED"
+    assert row["strategy_id"] is None
+    assert row["provider_account_scope"] == "AMBIGUOUS_REPORTED_ACCOUNT"
+    assert row["source_artifact_id"] == "legacy/summary.xml"
+    nav = projected["nav_observations"][0]
+    assert nav["mapping_status"] == "MAPPED"
+    assert nav["strategy_id"] == "strategy-1"
+    assert exceptions == [
+        {
+            "account_in_provenance": True,
+            "effective_date": "2026-01-05",
+            "fact_type": "flows",
+            "provider_id": "ibkr",
+            "record_id": "ibkr:ambiguous-summary",
+            "status": "UNMAPPED",
+        }
+    ]
+
+
 @pytest.mark.parametrize(
     ("provider_id", "value_basis", "wrong_basis"),
     (
@@ -1365,6 +2131,24 @@ def test_provider_ledger_schema_requires_exact_known_provider_nav_basis() -> Non
             encoding="utf-8"
         )
     )
+    assert "capital_anchors" in schema["required"]
+    anchor_schema = schema["properties"]["capital_anchors"]["items"]
+    assert set(anchor_schema["required"]) == {
+        "account_id",
+        "amount",
+        "capital_type",
+        "event_date",
+        "evidence_layer",
+        "generation_id",
+        "mapping_basis",
+        "mapping_status",
+        "nav_recognition_date",
+        "provider_id",
+        "record_id",
+        "source_artifact_id",
+        "source_record_id",
+        "strategy_id",
+    }
     item_schema = schema["properties"]["nav_observations"]["items"]
     assert item_schema["required"] == ["provider_id"]
     controlled = {
@@ -1397,6 +2181,101 @@ def test_provider_ledger_schema_requires_exact_known_provider_nav_basis() -> Non
             },
         },
     }
+
+
+def test_provider_ledger_schema_accepts_capital_anchor_catalog_surface() -> None:
+    """A generated catalog containing capital anchors is schema-valid, and
+    the independent fact count/admission projections retain the new fact."""
+    schema = json.loads(
+        (REPOSITORY_ROOT / "schemas/portfolio/provider-ledger.schema.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    anchor = {
+        "account_id": "account-d2e5821e608e25f1",
+        "amount": {"currency": "USDT", "status": "AVAILABLE", "value": "49891.55"},
+        "capital_type": "OPENING_CAPITAL_ANCHOR",
+        "event_date": "2025-12-05",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "generation_id": "a" * 64,
+        "mapping_basis": "EXACT_STRATEGY_SUBSCRIPTION",
+        "mapping_status": "MAPPED",
+        "nav_recognition_date": "2025-12-06",
+        "nav_source_artifact_id": "csv/daily_portfolio_totals.csv",
+        "opening_nav": {"currency": "USD", "status": "AVAILABLE", "value": "49891.55"},
+        "provider_id": "matrixport",
+        "record_id": "matrixport-capital-anchor:7402822649690198016",
+        "source_artifact_id": "csv/subscription_details.csv",
+        "source_record_id": "7402822649690198016",
+        "strategy_id": "robuxio-crypto",
+    }
+    catalog = {
+        "admissions": [
+            {
+                "account_id": anchor["account_id"],
+                "account_reconciliation_sha256": "b" * 64,
+                "disposition": "AUTHORITATIVE",
+                "effective_end": "2025-12-05",
+                "effective_start": "2025-12-05",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "fact_type": "capital_anchors",
+                "pool_id": None,
+                "provider_id": "matrixport",
+                "strategy_id": None,
+            }
+        ],
+        "as_of_date": "2026-08-16",
+        "capital_anchors": [anchor],
+        "catalog_schema_version": 2,
+        "corporate_actions": [],
+        "fact_counts": [
+            {
+                "fact_type": fact_type,
+                "mapped_count": 1 if fact_type == "capital_anchors" else 0,
+                "record_count": 1 if fact_type == "capital_anchors" else 0,
+                "unmapped_count": 0,
+            }
+            for fact_type in (
+                "capital_anchors",
+                "flows",
+                "nav_observations",
+                "positions",
+                "transactions",
+            )
+        ],
+        "flows": [],
+        "nav_observations": [],
+        "positions": [],
+        "provider_coverage": [{} for _ in range(7)],
+        "provider_generations": [
+            {
+                "catalog_sha256": "c" * 64,
+                "generation_as_of_date": "2026-08-16",
+                "generation_id": "d" * 64,
+                "manifest_sha256": "e" * 64,
+                "provider_id": f"provider-{index}",
+                "qualification": "PUBLISHED_COMPLETE",
+            }
+            for index in range(7)
+        ],
+        "provider_strategy_returns": [],
+        "quality_findings": [],
+        "reconciliation_checks": [{}, {}, {}],
+        "securities": [],
+        "strategy_evidence": [{} for _ in range(8)],
+        "strategy_returns": [{}],
+        "transactions": [],
+    }
+
+    Draft202012Validator.check_schema(schema)
+    Draft202012Validator(schema).validate(catalog)
+    assert catalog["fact_counts"][0] == {
+        "fact_type": "capital_anchors",
+        "mapped_count": 1,
+        "record_count": 1,
+        "unmapped_count": 0,
+    }
+    assert catalog["admissions"][0]["fact_type"] == "capital_anchors"
 
 
 def test_account_and_provider_lanes_keep_independent_provider_identity() -> None:
@@ -2238,6 +3117,26 @@ def test_nav_observation_sanity_bound_allows_excessive_move_with_flow() -> None:
     ledger._validate_nav_observation_moves(nav, flows)
 
 
+def test_nav_move_guard_uses_provider_nav_recognition_date() -> None:
+    nav = [
+        _nav("a", "2026-01-21", "100", "a-21"),
+        _nav("a", "2026-01-22", "100", "a-22"),
+        _nav("a", "2026-01-23", "2000", "a-23"),
+    ]
+    flows = [
+        {
+            "account_id": "a",
+            "amount": "1900",
+            "event_date": "2026-01-22",
+            "mapping_status": "MAPPED",
+            "nav_recognition_date": "2026-01-23",
+            "provider_id": "schwab",
+        }
+    ]
+
+    ledger._validate_nav_observation_moves(nav, flows)
+
+
 def test_nav_observation_sanity_bound_rejects_move_beyond_flow_magnitude() -> None:
     """Codex PR review P2: a token same-day flow must not exempt an extreme
     NAV move — the flow magnitude has to explain the move."""
@@ -2493,12 +3392,11 @@ def _quantbase_fixture(tmp_path: Path) -> tuple[Path, dict[str, Any], Path, Path
     return tmp_path, catalog, price_path, activity_path
 
 
-def test_quantbase_contributions_admitted_as_reconciled_flows(
+def test_quantbase_contributions_admitted_as_reconciled_capital_anchors(
     tmp_path: Path,
 ) -> None:
-    """Codex PR review P1: Quantbase capital contributions must enter the
-    ledger as flows (booked on the cost-basis increase day, reconciled
-    against the dashboard history) — never as investment performance."""
+    """Quantbase strategy funding is a cost-basis-reconciled capital anchor,
+    not an account-external transfer or investment performance."""
     root, catalog, price_path, activity_path = _quantbase_fixture(tmp_path)
     manifest = _make_two_artifact_manifest(
         {
@@ -2516,7 +3414,7 @@ def test_quantbase_contributions_admitted_as_reconciled_flows(
         ]
     }
 
-    rows = ledger._quantbase_flows(
+    rows = ledger._quantbase_capital_anchors(
         "gen-1",
         manifest,
         catalog,
@@ -2529,17 +3427,18 @@ def test_quantbase_contributions_admitted_as_reconciled_flows(
     # Only the non-rebalance BUY on fund 107 (100000) reconciles against the
     # 50000 -> 150000 cost-basis increase on 2026-08-13.
     assert len(rows) == 1
-    assert rows[0]["event_date"] == "2026-08-13"
+    assert rows[0]["event_date"] == "2026-08-12"
+    assert rows[0]["nav_recognition_date"] == "2026-08-13"
     assert rows[0]["amount"] == {
         "currency": "USD",
         "status": "AVAILABLE",
         "value": "100000",
     }
-    assert rows[0]["flow_type"] == "EXTERNAL_PROVIDER_TRANSFER"
-    assert rows[0]["mapping_basis"] == "RECONCILED_COST_BASIS_INCREASE"
+    assert rows[0]["capital_type"] == "OPENING_CAPITAL_ANCHOR"
+    assert rows[0]["mapping_basis"] == "RECONCILED_PROVIDER_STRATEGY_CAPITAL"
     assert rows[0]["mapping_status"] == "MAPPED"
     assert rows[0]["strategy_id"] == "volatis-strategy"
-    assert rows[0]["record_id"] == "quantbase-flow:2026-08-13"
+    assert rows[0]["record_id"] == "quantbase-capital-anchor:2026-08-12T20:00:00+00:00"
 
 
 def test_quantbase_unreconciled_contribution_fails_closed(tmp_path: Path) -> None:
@@ -2565,7 +3464,7 @@ def test_quantbase_unreconciled_contribution_fails_closed(tmp_path: Path) -> Non
     with pytest.raises(
         ledger.ProviderLedgerError, match="capital additions do not reconcile"
     ):
-        ledger._quantbase_flows(
+        ledger._quantbase_capital_anchors(
             "gen-1",
             manifest,
             catalog,
@@ -2573,6 +3472,369 @@ def test_quantbase_unreconciled_contribution_fails_closed(tmp_path: Path) -> Non
             {"account-58e75e8d952fa1b8"},
             {"volatis-strategy"},
             assignments,
+        )
+
+
+def test_quantbase_capital_anchors_preserve_economic_and_nav_dates(
+    tmp_path: Path,
+) -> None:
+    """A strategy BUY is not an account-external transfer just because the
+    provider first recognizes it in a later dashboard NAV."""
+    run_id = "quantbase-source"
+    artifact_root = tmp_path / "source-runs" / run_id / "artifacts" / "csv"
+    artifact_root.mkdir(parents=True)
+    price_path = artifact_root / "dashboard_Volatis_Strategy_pricehistory.csv"
+    price_path.write_text(
+        "time,value,cost_basis\n"
+        "10/13/2024,0,0\n"
+        "10/15/2024,985.44,1000\n"
+        "11/08/2024,1061.44,1076\n",
+        encoding="utf-8-sig",
+    )
+    activity_path = artifact_root / "account_activity.csv"
+    activity_path.write_text(
+        "activity_type,amount,fund,is_rebalance,time,type\n"
+        "filled_txn,1000,107,False,2024-10-13T19:56:57.858890Z,BUY\n"
+        "filled_txn,76,107,False,2024-11-08T23:26:38.296395Z,BUY\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_two_artifact_manifest(
+        {
+            "source/csv/dashboard_Volatis_Strategy_pricehistory.csv": price_path,
+            "source/csv/account_activity.csv": activity_path,
+        }
+    )
+    catalog = {"catalog_schema_version": 1, "legacy_lineage": {"run_id": run_id}}
+    assignments = {
+        "account-58e75e8d952fa1b8": [
+            {
+                # Economic BUY predates account-live membership; its later
+                # dashboard recognition begins the funded epoch.
+                "effective_start": "2024-10-15",
+                "mapping_status": "MAPPED",
+                "strategy_id": "volatis-strategy",
+            }
+        ]
+    }
+
+    anchors = ledger._quantbase_capital_anchors(
+        "gen-1",
+        manifest,
+        catalog,
+        tmp_path,
+        {"account-58e75e8d952fa1b8"},
+        {"volatis-strategy"},
+        assignments,
+    )
+
+    assert [row["event_date"] for row in anchors] == ["2024-10-13", "2024-11-08"]
+    assert [row["nav_recognition_date"] for row in anchors] == [
+        "2024-10-15",
+        "2024-11-08",
+    ]
+    assert anchors[0]["amount"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "1000",
+    }
+    assert anchors[0]["capital_type"] == "OPENING_CAPITAL_ANCHOR"
+    assert anchors[0]["mapping_status"] == "MAPPED"
+    assert anchors[0]["strategy_id"] == "volatis-strategy"
+    assert anchors[0]["opening_nav"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "985.44",
+    }
+    assert anchors[1]["capital_type"] == "STRATEGY_CAPITAL_ALLOCATION"
+    assert {row["capital_type"] for row in anchors}.isdisjoint(
+        {"EXTERNAL_PROVIDER_TRANSFER", "EXTERNAL_CAPITAL"}
+    )
+
+
+def test_quantbase_source_coverage_keeps_last_nav_not_last_capital_recognition() -> None:
+    """Capital recognition stops in January, while the retained Volatis NAV
+    source remains authoritative through its August observation boundary."""
+    coverage = ledger._provider_coverage(
+        "quantbase",
+        CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="hash-bound Quantbase source",
+            fact_types=("account_activity", "dashboard_pricehistory"),
+            observed_start=date(2024, 10, 13),
+            observed_end=date(2026, 8, 13),
+        ),
+        {
+            "coverage": {
+                "known_gaps": [],
+                "out_of_boundary": [],
+                "observed_end": "2026-01-17",
+            }
+        },
+    )
+
+    assert coverage["observed_end"] == "2026-08-13"
+
+
+def test_matrixport_subscription_admits_strategy_anchor_not_wallet_deposits(
+    tmp_path: Path,
+) -> None:
+    """The exact Robuxio subscription is strategy funding; its preceding
+    USDC wallet deposits are account-level evidence and must not be allocated
+    to Robuxio without a proved FX/fee bridge."""
+    run_id = "matrixport-source"
+    csv_root = tmp_path / "output" / run_id / "csv"
+    csv_root.mkdir(parents=True)
+    subscription_path = csv_root / "subscription_details.csv"
+    subscription_path.write_text(
+        "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
+        "subscription_amount,subscription_currency,subscription_time_utc\n"
+        "49891.55,2025-12-06T00:00:00+00:00,7402822649690198016,7361599360326447104,49891.55,"
+        "USDT,2025-12-05T21:34:17.414000+00:00\n",
+        encoding="utf-8-sig",
+    )
+    wallet_path = csv_root / "wallet_deposits.csv"
+    wallet_path.write_text(
+        "amount,created_at_utc,currency,transaction_id\n"
+        "1,2025-12-05T15:42:18+00:00,USDC,wallet-1\n"
+        "49998,2025-12-05T16:55:29+00:00,USDC,wallet-2\n",
+        encoding="utf-8-sig",
+    )
+    totals_path = csv_root / "daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2025-12-06,49891.55,49891.55,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_two_artifact_manifest(
+        {
+            "csv/daily_portfolio_totals.csv": totals_path,
+            "csv/subscription_details.csv": subscription_path,
+            "csv/wallet_deposits.csv": wallet_path,
+        }
+    )
+    catalog = {"catalog_schema_version": 2, "source_run_id": run_id}
+    assignments = {
+        "account-d2e5821e608e25f1": [
+            {
+                # The USDT subscription is economic evidence on Dec 5, but
+                # account-live membership starts only when its USD NAV exists.
+                "effective_start": "2025-12-06",
+                "mapping_status": "MAPPED",
+                "strategy_id": "robuxio-crypto",
+            }
+        ]
+    }
+
+    anchors = ledger._matrixport_capital_anchors(
+        "gen-1",
+        manifest,
+        catalog,
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        assignments,
+    )
+
+    assert len(anchors) == 1
+    assert anchors[0]["event_date"] == "2025-12-05"
+    assert anchors[0]["nav_recognition_date"] == "2025-12-06"
+    assert anchors[0]["amount"] == {
+        "currency": "USDT",
+        "status": "AVAILABLE",
+        "value": "49891.55",
+    }
+    assert anchors[0]["capital_type"] == "OPENING_CAPITAL_ANCHOR"
+    assert anchors[0]["opening_nav"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "49891.55",
+    }
+    assert anchors[0]["nav_source_artifact_id"] == "csv/daily_portfolio_totals.csv"
+    assert anchors[0]["mapping_basis"] == "EXACT_STRATEGY_SUBSCRIPTION"
+    assert anchors[0]["mapping_status"] == "MAPPED"
+    assert anchors[0]["strategy_id"] == "robuxio-crypto"
+    assert anchors[0]["source_artifact_id"] == "csv/subscription_details.csv"
+    assert anchors[0]["source_record_id"] == "7402822649690198016"
+    assert anchors[0]["amount"]["value"] not in {"1", "49998", "49999"}
+
+
+def test_matrixport_pre_funding_assignment_cannot_be_promoted_to_owner_account(
+    ) -> None:
+    """A provider-live August row is not a funded owner-account assignment."""
+    provenance = {
+        "accounts": [{"account_id": "account-d2e5821e608e25f1"}],
+        "strategies": [{"strategy_id": "robuxio-crypto"}],
+        "assignments": [
+            {
+                "account_id": "account-d2e5821e608e25f1",
+                "effective_start": "2025-08-26",
+                "mapping_status": "MAPPED",
+                "source_classification": "provider_account_live_start",
+                "strategy_id": "robuxio-crypto",
+            }
+        ],
+    }
+    authority = {
+        "strategies": [
+            {
+                "strategy_id": "robuxio-crypto",
+                "funded_membership": {
+                    "status": "EVIDENCED",
+                    "effective_start": "2025-12-06",
+                },
+            }
+        ]
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="MATRIXPORT_OWNER_FUNDING_BOUNDARY_DIFFERS",
+    ):
+        ledger._assignment_index(provenance, authority)
+
+    provenance["assignments"][0].update(
+        {
+            "effective_start": "2025-12-06",
+            "source_classification": "financial_mvp_funded_membership_reconciled",
+        }
+    )
+    _accounts, _strategies, assignments = ledger._assignment_index(provenance, authority)
+    assert assignments["account-d2e5821e608e25f1"][0]["effective_start"] == "2025-12-06"
+
+
+def test_matrixport_opening_nav_requires_subscription_cent_match(tmp_path: Path) -> None:
+    run_id = "matrixport-source"
+    csv_root = tmp_path / "output" / run_id / "csv"
+    csv_root.mkdir(parents=True)
+    subscription_path = csv_root / "subscription_details.csv"
+    subscription_path.write_text(
+        "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
+        "subscription_amount,subscription_currency,subscription_time_utc\n"
+        "49891.55,2025-12-06T00:00:00+00:00,7402822649690198016,7361599360326447104,"
+        "49891.55,USDT,2025-12-05T21:34:17.414000+00:00\n",
+        encoding="utf-8-sig",
+    )
+    totals_path = csv_root / "daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2025-12-06,49891.54,49891.54,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_two_artifact_manifest(
+        {
+            "csv/daily_portfolio_totals.csv": totals_path,
+            "csv/subscription_details.csv": subscription_path,
+        }
+    )
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="MATRIXPORT_OPENING_NAV_SUBSCRIPTION_MISMATCH",
+    ):
+        ledger._matrixport_capital_anchors(
+            "gen-1",
+            manifest,
+            {"catalog_schema_version": 2, "source_run_id": run_id},
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            {
+                "account-d2e5821e608e25f1": [
+                    {
+                        "effective_start": "2025-12-06",
+                        "mapping_status": "MAPPED",
+                        "strategy_id": "robuxio-crypto",
+                    }
+                ]
+            },
+        )
+
+
+def test_matrixport_capital_anchor_rejects_extra_subscription_product(
+    tmp_path: Path,
+) -> None:
+    """A second authenticated subscription is not evidence that it funds
+    Robuxio; the governed product/order identity must be unique."""
+    run_id = "matrixport-source"
+    csv_root = tmp_path / "output" / run_id / "csv"
+    csv_root.mkdir(parents=True)
+    subscription_path = csv_root / "subscription_details.csv"
+    subscription_path.write_text(
+        "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
+        "subscription_amount,subscription_currency,subscription_time_utc\n"
+        "49891.55,2025-12-06T00:00:00+00:00,7402822649690198016,7361599360326447104,"
+        "49891.55,USDT,2025-12-05T21:34:17.414000+00:00\n"
+        "100,2025-12-07T00:00:00+00:00,unrelated-order,unrelated-product,100,"
+        "USDT,2025-12-06T21:34:17.414000+00:00\n",
+        encoding="utf-8-sig",
+    )
+    totals_path = csv_root / "daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2025-12-06,49891.55,49891.55,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_two_artifact_manifest(
+        {
+            "csv/daily_portfolio_totals.csv": totals_path,
+            "csv/subscription_details.csv": subscription_path,
+        }
+    )
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="MATRIXPORT_ROBUXIO_SUBSCRIPTION_IDENTITY_DIFFERS",
+    ):
+        ledger._matrixport_capital_anchors(
+            "gen-1",
+            manifest,
+            {"catalog_schema_version": 2, "source_run_id": run_id},
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            {
+                "account-d2e5821e608e25f1": [
+                    {
+                        "effective_start": "2025-12-05",
+                        "mapping_status": "MAPPED",
+                        "strategy_id": "robuxio-crypto",
+                    }
+                ]
+            },
+        )
+
+
+def test_matrixport_subscription_hash_tamper_fails_closed(tmp_path: Path) -> None:
+    """A capital anchor may only use the subscription file that the provider
+    generation manifest has authenticated."""
+    run_id = "matrixport-source"
+    csv_root = tmp_path / "output" / run_id / "csv"
+    csv_root.mkdir(parents=True)
+    subscription_path = csv_root / "subscription_details.csv"
+    subscription_path.write_text(
+        "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
+        "subscription_amount,subscription_currency,subscription_time_utc\n"
+        "49891.55,2025-12-06T00:00:00+00:00,order-1,robuxio-product,49891.55,"
+        "USDT,2025-12-05T21:34:17.414000+00:00\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_two_artifact_manifest(
+        {"csv/subscription_details.csv": subscription_path}
+    )
+    subscription_path.write_text(
+        subscription_path.read_text(encoding="utf-8-sig").replace("49891.55", "1"),
+        encoding="utf-8-sig",
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="hash differs"):
+        ledger._matrixport_capital_anchors(
+            "gen-1",
+            manifest,
+            {"catalog_schema_version": 2, "source_run_id": run_id},
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            {},
         )
 
 
@@ -2651,12 +3913,8 @@ def test_nav_observation_move_beyond_transaction_magnitude_still_raises() -> Non
         ledger._validate_nav_observation_moves(nav, [], transactions)
 
 
-def test_broker_returns_skip_internal_transfers_but_raise_on_external_unavailable() -> (
-    None
-):
-    """Pass-3: IBKR TRANSFER:INTERNAL currency-ledger moves are intra-account
-    (net zero, often no USD amount) — skipped. An EXTERNAL flow with an
-    unavailable amount still fails closed."""
+def test_broker_returns_reject_unavailable_cross_account_internal_transfer() -> None:
+    """An unpriced paired transfer is capital evidence, never a zero FX inference."""
     nav = [
         {
             "provider_id": "ibkr",
@@ -2680,20 +3938,189 @@ def test_broker_returns_skip_internal_transfers_but_raise_on_external_unavailabl
     internal = [
         {
             "provider_id": "ibkr",
+            "account_id": "account-source",
+            "event_date": "2026-08-14",
+            "flow_type": "TRANSFER:INTERNAL:OUT",
+            "amount": {"currency": "EUR", "status": "UNAVAILABLE", "value": None},
+            "mapping_status": "UNMAPPED",
+            "provider_account_scope": "STATEMENT_ACCOUNT",
+            "provider_activity_id_sha256": "a" * 64,
+        },
+        {
+            "provider_id": "ibkr",
             "account_id": "account-x",
             "event_date": "2026-08-14",
             "flow_type": "TRANSFER:INTERNAL:IN",
             "amount": {"currency": "EUR", "status": "UNAVAILABLE", "value": None},
             "mapping_status": "MAPPED",
+            "provider_account_scope": "STATEMENT_ACCOUNT",
+            "provider_activity_id_sha256": "a" * 64,
+        },
+    ]
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="unresolved cross-account internal transfer amount",
+    ):
+        ledger._broker_strategy_returns(nav, internal, {"ibkr"})
+    external = [
+        {
+            **internal[1],
+            "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+            "provider_activity_id_sha256": None,
         }
     ]
-    rows = ledger._broker_strategy_returns(nav, internal, {"ibkr"})
-    assert len(rows) == 1  # 1% return, no flow adjustment, no raise
-    external = [dict(internal[0], flow_type="DEPOSIT_OR_WITHDRAWAL")]
     with pytest.raises(
         ledger.ProviderLedgerError, match="mapped flow amount is unavailable"
     ):
         ledger._broker_strategy_returns(nav, external, {"ibkr"})
+
+
+@pytest.mark.parametrize(
+    "noise_account_ids",
+    ((), ("account-x",), ("",)),
+)
+def test_broker_returns_ignore_isolated_unavailable_internal_evidence(
+    noise_account_ids: tuple[str, ...],
+) -> None:
+    """Only a proven distinct-account pair makes unavailable FX ambiguous."""
+    nav = [
+        {
+            "provider_id": "ibkr",
+            "account_id": "account-x",
+            "as_of_date": "2026-08-13",
+            "nav": "100",
+            "mapping_status": "MAPPED",
+            "strategy_id": "s-1",
+            "record_id": "nav-1",
+        },
+        {
+            "provider_id": "ibkr",
+            "account_id": "account-x",
+            "as_of_date": "2026-08-14",
+            "nav": "101",
+            "mapping_status": "MAPPED",
+            "strategy_id": "s-1",
+            "record_id": "nav-2",
+        },
+    ]
+    activity_id = "b" * 64
+    internal = [
+        {
+            "provider_id": "ibkr",
+            "account_id": "account-x",
+            "event_date": "2026-08-14",
+            "flow_type": "TRANSFER:INTERNAL:IN",
+            "amount": {"currency": "EUR", "status": "UNAVAILABLE", "value": None},
+            "mapping_status": "MAPPED",
+            "provider_account_scope": "STATEMENT_ACCOUNT",
+            "provider_activity_id_sha256": activity_id,
+        },
+        *[
+            {
+                "provider_id": "ibkr",
+                "account_id": account_id,
+                "event_date": "2026-08-14",
+                "flow_type": "TRANSFER:INTERNAL:OUT",
+                "amount": {
+                    "currency": "EUR",
+                    "status": "UNAVAILABLE",
+                    "value": None,
+                },
+                "mapping_status": "UNMAPPED",
+                "provider_account_scope": "STATEMENT_ACCOUNT",
+                "provider_activity_id_sha256": activity_id,
+            }
+            for account_id in noise_account_ids
+        ],
+    ]
+
+    rows = ledger._broker_strategy_returns(nav, internal, {"ibkr"})
+    assert ledger._observed_decimal(rows[0]["return"], "return") == Decimal("0.01")
+
+
+def test_broker_returns_reject_ibkr_flow_without_statement_account_scope() -> None:
+    nav = [
+        {
+            "provider_id": "ibkr",
+            "account_id": "account-x",
+            "as_of_date": "2026-08-13",
+            "nav": "100",
+            "mapping_status": "MAPPED",
+            "strategy_id": "s-1",
+            "record_id": "nav-prior",
+        },
+        {
+            "provider_id": "ibkr",
+            "account_id": "account-x",
+            "as_of_date": "2026-08-14",
+            "nav": "101",
+            "mapping_status": "MAPPED",
+            "strategy_id": "s-1",
+            "record_id": "nav-current",
+        },
+    ]
+    ambiguous = [
+        {
+            "provider_id": "ibkr",
+            "account_id": "account-x",
+            "event_date": "2026-08-14",
+            "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+            "amount": {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": "50",
+            },
+            "mapping_status": "MAPPED",
+            "provider_account_scope": "AMBIGUOUS_REPORTED_ACCOUNT",
+        }
+    ]
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="IBKR flow lacks STATEMENT_ACCOUNT scope",
+    ):
+        ledger._broker_strategy_returns(nav, ambiguous, {"ibkr"})
+
+
+def test_broker_returns_treats_exact_zero_deposit_as_retained_noncapital_evidence() -> None:
+    """A zero row is visible but cannot alter a return; a cent remains capital."""
+    nav = [
+        {
+            "provider_id": "ibkr",
+            "account_id": "account-x",
+            "as_of_date": "2026-08-13",
+            "nav": "100",
+            "mapping_status": "MAPPED",
+            "strategy_id": "s-1",
+            "record_id": "ibkr:2026-08-13",
+        },
+        {
+            "provider_id": "ibkr",
+            "account_id": "account-x",
+            "as_of_date": "2026-08-14",
+            "nav": "101",
+            "mapping_status": "MAPPED",
+            "strategy_id": "s-1",
+            "record_id": "ibkr:2026-08-14",
+        },
+    ]
+    zero = {
+        "provider_id": "ibkr",
+        "account_id": "account-x",
+        "event_date": "2026-08-14",
+        "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "0"},
+        "mapping_status": "MAPPED",
+        "provider_account_scope": "STATEMENT_ACCOUNT",
+        "capital_disposition": "NON_CAPITAL",
+    }
+    cent = {
+        **zero,
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "0.01"},
+        "capital_disposition": "EXTERNAL_CAPITAL",
+    }
+
+    assert ledger._broker_strategy_returns(nav, [zero], {"ibkr"})[0]["return"] == "0.01"
+    assert ledger._broker_strategy_returns(nav, [cent], {"ibkr"})[0]["return"] == "0.0099"
 
 
 def test_nav_move_guard_ignores_trade_notionals() -> None:
@@ -2763,6 +4190,7 @@ def test_internal_transfer_with_available_amount_is_counted() -> None:
             "flow_type": "TRANSFER:INTERNAL:IN",
             "amount": "100",
             "mapping_status": "MAPPED",
+            "provider_account_scope": "STATEMENT_ACCOUNT",
         }
     ]
     rows = ledger._broker_strategy_returns(nav, transfer, {"ibkr"})

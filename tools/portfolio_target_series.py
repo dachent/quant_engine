@@ -43,6 +43,9 @@ TARGET_FIELDS: Final = (
 )
 MATRIXPORT_NAV_FIELDS: Final = frozenset({"nav", "product_id", "timestamp_utc"})
 MATRIXPORT_HOLDING_FIELDS: Final = frozenset({"product_id", "shares"})
+MATRIXPORT_DAILY_HOLDING_FIELDS: Final = frozenset(
+    {"nav", "nav_available", "product_id", "share", "utc_date"}
+)
 MATRIXPORT_SUBSCRIPTION_FIELDS: Final = frozenset(
     {
         "confirm_nav_time_utc",
@@ -62,7 +65,7 @@ CORRELATION_FIELDS: Final = ("series_id", "date", "return", "evidence_layer")
 CORRELATION_FIELDS_V2: Final = (*CORRELATION_FIELDS, "strategy_version")
 STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
 STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
-MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-3"
+MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-4"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
 LAYERED_HISTORY_BUILDER_VERSION: Final = "1.14.0"
 LAYERED_HISTORY_SCHEMA_VERSION: Final = 1
@@ -96,7 +99,15 @@ MATRIXPORT_RETURN_TRANSFORM_CAPABILITIES: Final = {
             "PROVIDER_LIVE_DAILY_RETURN",
             "DECLARED_GAP_COVERAGE",
         }
-    )
+    ),
+    ("matrixport-declared-gap-span-returns", "1"): frozenset(
+        {
+            "ACCOUNT_LIVE_DAILY_RETURN",
+            "ACCOUNT_LIVE_HOLDING_PERIOD_RETURN",
+            "DECLARED_GAP_COVERAGE",
+            "PROVIDER_LIVE_DAILY_RETURN",
+        }
+    ),
 }
 # The retained Matrixport generation materialized account totals with Python's
 # 28-significant-digit Decimal context.  Multiplication into account value and
@@ -591,6 +602,7 @@ def _matrixport_source_gap_policy(
     declared_missing_dates: frozenset[date],
     omitted_return_dates: frozenset[date],
     authority_policy: Mapping[str, Any] | None = None,
+    span_return_receipts: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     unavailable = sorted(declared_missing_dates | omitted_return_dates)
     derived: dict[str, object] = {
@@ -601,13 +613,25 @@ def _matrixport_source_gap_policy(
             item.isoformat() for item in sorted(omitted_return_dates)
         ],
         "unavailable_return_dates": [item.isoformat() for item in unavailable],
+        "span_return_receipts": [dict(item) for item in span_return_receipts],
     }
     if authority_policy is None:
         return {**derived, "authority_bound": False}
     accepted = dict(authority_policy)
-    if any(accepted.get(key) != value for key, value in derived.items()):
+    required_keys = (
+        "declared_missing_source_dates",
+        "omitted_return_dates",
+        "unavailable_return_dates",
+    )
+    if any(accepted.get(key) != derived[key] for key in required_keys):
         raise TargetSeriesError(
             "Matrixport source gap policy differs from observed omissions"
+        )
+    if span_return_receipts and (
+        accepted.get("span_return_receipts") != derived["span_return_receipts"]
+    ):
+        raise TargetSeriesError(
+            "Matrixport source span receipts differ from observed endpoints"
         )
     return accepted
 
@@ -634,6 +658,208 @@ def _matrixport_return_transform(policy: Mapping[str, Any]) -> None:
         raise TargetSeriesError("Matrixport return transform capability differs")
 
 
+def _matrixport_span_endpoint_identity(
+    *, product_id: str, observed: date, nav: Decimal, shares: Decimal
+) -> str:
+    """Redact one exact span endpoint while retaining all numeric identity inputs."""
+
+    return hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "date": observed.isoformat(),
+                "nav": format(nav.normalize(), "f"),
+                "product_id": product_id,
+                "shares": format(shares.normalize(), "f"),
+            }
+        )
+    ).hexdigest()
+
+
+def _matrixport_span_return_receipts(
+    *,
+    observations: Mapping[date, Decimal],
+    declared_missing_dates: frozenset[date],
+    product_id: str,
+    endpoint_shares: Mapping[date, Decimal],
+    funding_event_dates: Sequence[date],
+) -> list[dict[str, object]]:
+    """Derive only declared two-day, no-flow owner holding-period returns.
+
+    These receipts never turn a missing date into a daily return.  They retain
+    the exactly observed return from the preceding endpoint to the following
+    endpoint so epoch compounding does not silently lose a measured interval.
+    """
+
+    receipts: list[dict[str, object]] = []
+    for missing in sorted(declared_missing_dates):
+        start = missing - timedelta(days=1)
+        end = missing + timedelta(days=1)
+        start_nav = observations.get(start)
+        end_nav = observations.get(end)
+        start_shares = endpoint_shares.get(start)
+        end_shares = endpoint_shares.get(end)
+        if (
+            start_nav is None
+            or end_nav is None
+            or start_shares is None
+            or end_shares is None
+        ):
+            raise TargetSeriesError("Matrixport gap span lacks exact NAV endpoints")
+        if start_shares != end_shares:
+            raise TargetSeriesError("Matrixport gap span endpoint shares differ")
+        if any(start < observed <= end for observed in funding_event_dates):
+            raise TargetSeriesError(
+                "Matrixport gap span contains a subscription/funding event"
+            )
+        value = end_nav / start_nav - Decimal(1)
+        if value <= -1:
+            raise TargetSeriesError("Matrixport gap span return is invalid")
+        receipts.append(
+            {
+                "end_endpoint_sha256": _matrixport_span_endpoint_identity(
+                    product_id=product_id,
+                    observed=end,
+                    nav=end_nav,
+                    shares=end_shares,
+                ),
+                "missing_source_date": missing.isoformat(),
+                "return": format(value.normalize(), "f"),
+                "span_days": (end - start).days,
+                "span_end_date": end.isoformat(),
+                "span_start_date": start.isoformat(),
+                "start_endpoint_sha256": _matrixport_span_endpoint_identity(
+                    product_id=product_id,
+                    observed=start,
+                    nav=start_nav,
+                    shares=start_shares,
+                ),
+                "subscription_events_in_span": 0,
+            }
+        )
+    return receipts
+
+
+def _matrixport_epoch_hpr_receipt(
+    *,
+    returns: Sequence[Mapping[str, str]],
+    span_return_receipts: Sequence[Mapping[str, object]],
+    source_gap_policy: Mapping[str, object],
+    admission_cutoff: date | None,
+) -> dict[str, object]:
+    """Bind daily-only analytics to the separately admitted epoch HPR path.
+
+    A span is not a daily observation.  The receipt consequently hashes only
+    the retained daily path while supplying the independently hash-bound
+    holding-period links which cumulative/wealth consumers must compound.
+    """
+
+    if not returns:
+        raise TargetSeriesError("Matrixport epoch HPR receipt lacks daily returns")
+    daily_rows = [
+        {
+            "date": row["date"],
+            "return": format(_decimal(row["return"], "Matrixport return").normalize(), "f"),
+        }
+        for row in returns
+    ]
+    daily_wealth = Decimal(1)
+    for row in daily_rows:
+        daily_wealth *= Decimal(1) + Decimal(row["return"])
+    epoch_links = [
+        (date.fromisoformat(row["date"]), Decimal(row["return"]))
+        for row in daily_rows
+    ] + [
+        (
+            date.fromisoformat(str(span.get("span_end_date"))),
+            _decimal(span.get("return"), "Matrixport span return"),
+        )
+        for span in span_return_receipts
+    ]
+    epoch_links.sort(key=lambda item: item[0])
+    if len({item[0] for item in epoch_links}) != len(epoch_links):
+        raise TargetSeriesError("Matrixport epoch HPR links repeat an endpoint")
+    epoch_wealth = Decimal(1)
+    for _endpoint, value in epoch_links:
+        epoch_wealth *= Decimal(1) + value
+    return {
+        "admission_cutoff": admission_cutoff.isoformat()
+        if admission_cutoff is not None
+        else None,
+        "daily_cumulative_return": format((daily_wealth - Decimal(1)).normalize(), "f"),
+        "daily_return_observations": len(daily_rows),
+        "daily_return_series_schema": "ordered-date-return/1",
+        "daily_return_series_sha256": hashlib.sha256(
+            canonical_json_bytes(daily_rows)
+        ).hexdigest(),
+        "epoch_cumulative_return": format((epoch_wealth - Decimal(1)).normalize(), "f"),
+        "epoch_holding_period_link_observations": len(daily_rows)
+        + len(span_return_receipts),
+        "observed_end": daily_rows[-1]["date"],
+        "observed_start": daily_rows[0]["date"],
+        "source_gap_policy_sha256": hashlib.sha256(
+            canonical_json_bytes(source_gap_policy)
+        ).hexdigest(),
+        "span_return_receipts": [dict(item) for item in span_return_receipts],
+    }
+
+
+def _matrixport_daily_holding_shares(
+    daily_holdings_path: Path,
+    *,
+    product_id: str,
+    observations: Mapping[date, Decimal],
+    declared_missing_dates: frozenset[date],
+    account_live_start: date,
+) -> dict[date, Decimal]:
+    """Bind span endpoints to retained daily holdings, not a current snapshot."""
+
+    daily: dict[date, tuple[Decimal, Decimal | None, bool]] = {}
+    for row in _csv_rows(
+        daily_holdings_path,
+        MATRIXPORT_DAILY_HOLDING_FIELDS,
+        "Matrixport daily holdings",
+    ):
+        if row["product_id"] != product_id:
+            continue
+        try:
+            observed = date.fromisoformat(row["utc_date"])
+        except ValueError as exc:
+            raise TargetSeriesError("Matrixport daily holding date is invalid") from exc
+        shares = _positive_decimal(row["share"], "Matrixport daily holding shares")
+        nav_available = row["nav_available"].strip().lower()
+        if nav_available not in {"true", "false"}:
+            raise TargetSeriesError("Matrixport daily holding nav availability is invalid")
+        nav = (
+            _positive_decimal(row["nav"], "Matrixport daily holding NAV")
+            if nav_available == "true"
+            else None
+        )
+        candidate = (shares, nav, nav_available == "true")
+        if observed in daily and daily[observed] != candidate:
+            raise TargetSeriesError("Matrixport daily holdings have conflicting dates")
+        daily[observed] = candidate
+
+    required_dates = {account_live_start}
+    for missing in declared_missing_dates:
+        required_dates.update(
+            {missing - timedelta(days=1), missing, missing + timedelta(days=1)}
+        )
+    endpoint_shares: dict[date, Decimal] = {}
+    for observed in required_dates:
+        candidate = daily.get(observed)
+        if candidate is None:
+            raise TargetSeriesError("Matrixport daily holdings lack required span date")
+        shares, daily_nav, nav_available = candidate
+        expected_nav = observations.get(observed)
+        if observed in declared_missing_dates:
+            if nav_available or daily_nav is not None or expected_nav is not None:
+                raise TargetSeriesError("Matrixport daily holdings missing-date status differs")
+        elif not nav_available or daily_nav != expected_nav:
+            raise TargetSeriesError("Matrixport daily holdings NAV differs from endpoint")
+        endpoint_shares[observed] = shares
+    return endpoint_shares
+
+
 def _base_rows(
     path: Path, series_id: str, *, replace_existing: bool = False
 ) -> tuple[list[dict[str, str]], list[dict[str, str]]]:
@@ -658,10 +884,12 @@ def _matrixport_returns(
     nav_path: Path,
     holdings_path: Path,
     subscription_path: Path,
+    daily_holdings_path: Path | None,
     product_id: str,
     series_id: str,
     declared_missing_dates: frozenset[date],
     declared_gap_policy: Mapping[str, Any] | None = None,
+    admission_cutoff: date | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, object]]:
     holdings = [
         row
@@ -676,7 +904,7 @@ def _matrixport_returns(
         )
     shares = _positive_decimal(holdings[0]["shares"], "Matrixport holding shares")
 
-    funded: list[tuple[date, date]] = []
+    funded: list[tuple[date, date, Decimal]] = []
     for row in _csv_rows(
         subscription_path,
         MATRIXPORT_SUBSCRIPTION_FIELDS,
@@ -696,15 +924,18 @@ def _matrixport_returns(
             (
                 _utc_day(row["subscription_time_utc"]),
                 _utc_day(row["confirm_nav_time_utc"]),
+                subscription_share,
             )
         )
     if not funded:
         raise TargetSeriesError(
             "Matrixport product lacks a successful positive subscription"
         )
-    subscription_initiated_date, funding_event_date = min(
-        funded, key=lambda item: item[1]
-    )
+    (
+        subscription_initiated_date,
+        funding_event_date,
+        funded_shares,
+    ) = min(funded, key=lambda item: item[1])
     if funding_event_date < subscription_initiated_date:
         raise TargetSeriesError(
             "Matrixport subscription confirmation precedes its initiation"
@@ -716,6 +947,8 @@ def _matrixport_returns(
         if row["product_id"] != product_id:
             continue
         day = _utc_day(row["timestamp_utc"])
+        if admission_cutoff is not None and day > admission_cutoff:
+            continue
         nav = _positive_decimal(row["nav"], "Matrixport NAV")
         if day in observations and observations[day] != nav:
             raise TargetSeriesError(
@@ -734,14 +967,39 @@ def _matrixport_returns(
     omitted_return_dates = _matrixport_gap_endpoints(
         account_nav_dates, declared_missing_dates
     )
+    endpoint_shares: dict[date, Decimal]
+    if declared_missing_dates:
+        if daily_holdings_path is None:
+            raise TargetSeriesError("Matrixport gap spans require daily holdings")
+        endpoint_shares = _matrixport_daily_holding_shares(
+            daily_holdings_path,
+            product_id=product_id,
+            observations=observations,
+            declared_missing_dates=declared_missing_dates,
+            account_live_start=account_live_start,
+        )
+        if funded_shares != endpoint_shares[account_live_start]:
+            raise TargetSeriesError(
+                "Matrixport funding shares differ from the first held daily observation"
+            )
+    elif funded_shares != shares:
+        raise TargetSeriesError(
+            "Matrixport funding shares differ from the exact live holding"
+        )
+    span_return_receipts = _matrixport_span_return_receipts(
+        observations=observations,
+        declared_missing_dates=declared_missing_dates,
+        product_id=product_id,
+        endpoint_shares=endpoint_shares if declared_missing_dates else {},
+        funding_event_dates=[item[1] for item in funded],
+    )
     returns: list[dict[str, str]] = []
     provider_return_observations = 0
     boundary_return_excluded = False
+    epoch_wealth = Decimal(1)
     for (_previous_day, previous), (day, nav) in zip(
         ordered, ordered[1:], strict=False
     ):
-        if day in omitted_return_dates:
-            continue
         value = nav / previous - Decimal(1)
         if day < account_live_start:
             provider_return_observations += 1
@@ -749,6 +1007,10 @@ def _matrixport_returns(
         if day == account_live_start:
             boundary_return_excluded = True
             continue
+        if day in omitted_return_dates:
+            epoch_wealth *= Decimal(1) + value
+            continue
+        epoch_wealth *= Decimal(1) + value
         returns.append(
             {
                 "series_id": series_id,
@@ -765,10 +1027,41 @@ def _matrixport_returns(
         raise TargetSeriesError(
             "Matrixport funded product lacks a measurable account-live history"
         )
+    source_gap_policy = _matrixport_source_gap_policy(
+        declared_missing_dates,
+        omitted_return_dates,
+        declared_gap_policy,
+        span_return_receipts,
+    )
+    epoch_hpr_receipt = _matrixport_epoch_hpr_receipt(
+        returns=returns,
+        span_return_receipts=span_return_receipts,
+        source_gap_policy=source_gap_policy,
+        admission_cutoff=admission_cutoff,
+    )
+    if (
+        epoch_hpr_receipt["daily_cumulative_return"]
+        != format((_cumulative(returns)).normalize(), "f")
+        or epoch_hpr_receipt["epoch_cumulative_return"]
+        != format((epoch_wealth - Decimal(1)).normalize(), "f")
+    ):
+        raise TargetSeriesError("Matrixport epoch HPR receipt differs from return path")
     return returns, {
         "account_live_start": account_live_start.isoformat(),
+        "admission_cutoff": (
+            admission_cutoff.isoformat() if admission_cutoff is not None else None
+        ),
         "account_nav_observations": len(account_nav_dates),
         "boundary_return_excluded": boundary_return_excluded,
+        "daily_cumulative_return": format(
+            (_cumulative(returns)).normalize(), "f"
+        ),
+        "epoch_cumulative_return": format(
+            (epoch_wealth - Decimal(1)).normalize(), "f"
+        ),
+        "epoch_holding_period_link_observations": len(returns)
+        + len(span_return_receipts),
+        "epoch_hpr_receipt": epoch_hpr_receipt,
         "funding_event_date": funding_event_date.isoformat(),
         "holding_shares": format(shares.normalize(), "f"),
         "nav_observations": len(ordered),
@@ -784,9 +1077,8 @@ def _matrixport_returns(
         ),
         "provider_live_return_observations": provider_return_observations,
         "return_observations": len(returns),
-        "source_gap_policy": _matrixport_source_gap_policy(
-            declared_missing_dates, omitted_return_dates, declared_gap_policy
-        ),
+        "source_gap_policy": source_gap_policy,
+        "span_return_receipts": span_return_receipts,
         "subscription_initiated_date": subscription_initiated_date.isoformat(),
     }
 
@@ -1044,6 +1336,8 @@ def build_matrixport_targets(
     product_id: str,
     series_id: str,
     *,
+    admission_cutoff: date | None = None,
+    daily_holdings_path: Path | None = None,
     replace_existing: bool = False,
 ) -> tuple[bytes, bytes]:
     manifest = _load_json(manifest_path, "Matrixport generation manifest")
@@ -1055,6 +1349,11 @@ def build_matrixport_targets(
     artifacts = _manifest_artifacts(manifest.get("artifacts"))
     nav_artifact = _verify_artifact(nav_path, artifacts, "csv/nav_daily.csv")
     holding_artifact = _verify_artifact(holdings_path, artifacts, "csv/holdings.csv")
+    daily_holding_artifact = (
+        _verify_artifact(daily_holdings_path, artifacts, "csv/daily_holdings.csv")
+        if daily_holdings_path is not None
+        else None
+    )
     subscription_artifact = _verify_artifact(
         subscription_path, artifacts, "csv/subscription_details.csv"
     )
@@ -1067,9 +1366,11 @@ def build_matrixport_targets(
         nav_path,
         holdings_path,
         subscription_path,
+        daily_holdings_path,
         product_id,
         series_id,
         declared_missing_dates,
+        admission_cutoff=admission_cutoff,
     )
     combined = sorted(
         [*base, *provider_rows], key=lambda row: (row["series_id"], row["date"])
@@ -1096,6 +1397,17 @@ def build_matrixport_targets(
                 "sha256": holding_artifact.sha256,
                 "size_bytes": holding_artifact.size_bytes,
             },
+            **(
+                {
+                    "matrixport_daily_holding": {
+                        "artifact_id": daily_holding_artifact.artifact_id,
+                        "sha256": daily_holding_artifact.sha256,
+                        "size_bytes": daily_holding_artifact.size_bytes,
+                    }
+                }
+                if daily_holding_artifact is not None
+                else {}
+            ),
             "matrixport_subscription": {
                 "artifact_id": subscription_artifact.artifact_id,
                 "sha256": subscription_artifact.sha256,
@@ -1769,8 +2081,8 @@ def _verified_current_generation(
 ) -> tuple[dict[str, Any], str, str]:
     pointer_content = pointer_path.read_bytes()
     pointer = _load_json(pointer_path, f"{name} current pointer")
-    manifest_content = manifest_path.read_bytes()
     manifest = _load_json(manifest_path, f"{name} generation manifest")
+    manifest_content = manifest_path.read_bytes()
     current = source.get("current_generation")
     if not isinstance(current, dict):
         raise TargetSeriesError(f"{name} current generation is absent from contract")
@@ -1817,6 +2129,45 @@ def _verified_current_generation(
         raise TargetSeriesError(f"{name} generation as-of date is invalid") from exc
     if current.get("as_of") != as_of:
         raise TargetSeriesError(f"{name} generation as-of differs from contract")
+    return manifest, generation_id, as_of
+
+
+def _verified_immutable_generation(
+    *,
+    manifest_path: Path,
+    source: Mapping[str, Any],
+    name: str,
+) -> tuple[dict[str, Any], str, str]:
+    """Bind a retained generation directly to its contract pin, without a pointer."""
+
+    manifest_content = manifest_path.read_bytes()
+    manifest = _load_json(manifest_path, f"{name} generation manifest")
+    current = source.get("current_generation")
+    expected_schema = source.get("schema")
+    generation_id = str(manifest.get("generation_id", ""))
+    manifest_hash = hashlib.sha256(manifest_content).hexdigest()
+    as_of = str(manifest.get("as_of_date", ""))
+    if (
+        manifest_content != canonical_json_bytes(manifest)
+        or not isinstance(current, dict)
+        or not isinstance(expected_schema, dict)
+        or set(expected_schema) != {"name", "version"}
+        or manifest.get("$schema") != expected_schema.get("name")
+        or manifest.get("schema_version") != expected_schema.get("version")
+        or manifest.get("schema") != expected_schema
+        or manifest.get("verification") != "VERIFIED"
+        or len(generation_id) != 64
+        or current.get("generation_id") != generation_id
+        or current.get("sha256") != manifest_hash
+        or current.get("as_of") != as_of
+    ):
+        raise TargetSeriesError(f"{name} immutable generation differs from contract")
+    try:
+        observed_as_of = date.fromisoformat(as_of)
+    except ValueError as exc:
+        raise TargetSeriesError(f"{name} generation as-of date is invalid") from exc
+    if observed_as_of.isoformat() != as_of:
+        raise TargetSeriesError(f"{name} generation as-of date is invalid")
     return manifest, generation_id, as_of
 
 
@@ -2539,21 +2890,22 @@ def build_layered_history_generation(
     contract_path: Path,
     repository_sha: str,
     as_of_date: str,
-    provider_ledger_pointer_path: Path,
+    provider_ledger_pointer_path: Path | None,
     provider_ledger_manifest_path: Path,
     provider_ledger_catalog_path: Path,
-    matrixport_pointer_path: Path,
+    matrixport_pointer_path: Path | None,
     matrixport_manifest_path: Path,
     matrixport_nav_path: Path,
     matrixport_holdings_path: Path,
+    matrixport_daily_holdings_path: Path,
     matrixport_subscription_path: Path,
     matrixport_product_id: str,
-    quantbase_pointer_path: Path,
+    quantbase_pointer_path: Path | None,
     quantbase_manifest_path: Path,
     quantbase_history_path: Path,
     quantbase_activity_path: Path,
     quantbase_fund_id: str,
-    portfolio123_pointer_path: Path,
+    portfolio123_pointer_path: Path | None,
     portfolio123_manifest_path: Path,
     portfolio123_metadata_path: Path,
     portfolio123_performance_path: Path,
@@ -2562,6 +2914,7 @@ def build_layered_history_generation(
     portfolio123_relationships_path: Path,
     strategy_history_manifest_path: Path | None = None,
     strategy_history_returns_path: Path | None = None,
+    source_selection_mode: str = "CURRENT_POINTERS",
 ) -> tuple[dict[str, bytes], bytes]:
     """Build one deterministic, content-addressed current history generation.
 
@@ -2570,6 +2923,27 @@ def build_layered_history_generation(
     generation identities; it never contains roots or provider/account IDs.
     """
 
+    pointer_paths = {
+        "provider ledger": provider_ledger_pointer_path,
+        "Matrixport": matrixport_pointer_path,
+        "Quantbase": quantbase_pointer_path,
+        "Portfolio123": portfolio123_pointer_path,
+    }
+    if source_selection_mode not in {"CURRENT_POINTERS", "IMMUTABLE_GENERATIONS"}:
+        raise TargetSeriesError("layered history source selection mode differs")
+    if source_selection_mode == "IMMUTABLE_GENERATIONS" and any(
+        path is not None for path in pointer_paths.values()
+    ):
+        raise TargetSeriesError("immutable generations do not accept current pointers")
+    if source_selection_mode == "CURRENT_POINTERS" and any(
+        path is None for path in pointer_paths.values()
+    ):
+        raise TargetSeriesError("current-pointer mode requires all current pointers")
+    if source_selection_mode == "CURRENT_POINTERS":
+        assert provider_ledger_pointer_path is not None
+        assert matrixport_pointer_path is not None
+        assert quantbase_pointer_path is not None
+        assert portfolio123_pointer_path is not None
     if len(repository_sha) != 40 or any(
         ch not in "0123456789abcdef" for ch in repository_sha
     ):
@@ -2587,38 +2961,64 @@ def build_layered_history_generation(
     product = contract["product"]
     history_policy = contract["history_corrections"]
 
-    ledger_manifest, ledger_generation, ledger_as_of = _verified_current_generation(
-        pointer_path=provider_ledger_pointer_path,
-        manifest_path=provider_ledger_manifest_path,
-        source=sources["owner-account-live-history"],
-        name="provider ledger",
-        inventory_profile="provider-ledger",
-    )
-    matrixport_manifest, matrixport_generation, matrixport_as_of = (
-        _verified_current_generation(
-            pointer_path=matrixport_pointer_path,
-            manifest_path=matrixport_manifest_path,
-            source=sources["matrixport-account-generation"],
-            name="Matrixport",
-            inventory_profile="matrixport",
+    if source_selection_mode == "CURRENT_POINTERS":
+        ledger_manifest, ledger_generation, ledger_as_of = _verified_current_generation(
+            pointer_path=provider_ledger_pointer_path,
+            manifest_path=provider_ledger_manifest_path,
+            source=sources["owner-account-live-history"],
+            name="provider ledger",
+            inventory_profile="provider-ledger",
         )
-    )
-    quantbase_manifest, quantbase_generation, quantbase_as_of = (
-        _verified_current_generation(
-            pointer_path=quantbase_pointer_path,
-            manifest_path=quantbase_manifest_path,
-            source=sources["quantbase-account-generation"],
-            name="Quantbase",
-            inventory_profile="quantbase",
+        matrixport_manifest, matrixport_generation, matrixport_as_of = (
+            _verified_current_generation(
+                pointer_path=matrixport_pointer_path,
+                manifest_path=matrixport_manifest_path,
+                source=sources["matrixport-account-generation"],
+                name="Matrixport",
+                inventory_profile="matrixport",
+            )
         )
-    )
-    p123_manifest, p123_generation, p123_as_of = _verified_current_generation(
-        pointer_path=portfolio123_pointer_path,
-        manifest_path=portfolio123_manifest_path,
-        source=sources["portfolio123-model-generation"],
-        name="Portfolio123",
-        inventory_profile="portfolio123",
-    )
+        quantbase_manifest, quantbase_generation, quantbase_as_of = (
+            _verified_current_generation(
+                pointer_path=quantbase_pointer_path,
+                manifest_path=quantbase_manifest_path,
+                source=sources["quantbase-account-generation"],
+                name="Quantbase",
+                inventory_profile="quantbase",
+            )
+        )
+        p123_manifest, p123_generation, p123_as_of = _verified_current_generation(
+            pointer_path=portfolio123_pointer_path,
+            manifest_path=portfolio123_manifest_path,
+            source=sources["portfolio123-model-generation"],
+            name="Portfolio123",
+            inventory_profile="portfolio123",
+        )
+    else:
+        ledger_manifest, ledger_generation, ledger_as_of = _verified_immutable_generation(
+            manifest_path=provider_ledger_manifest_path,
+            source=sources["owner-account-live-history"],
+            name="provider ledger",
+        )
+        matrixport_manifest, matrixport_generation, matrixport_as_of = (
+            _verified_immutable_generation(
+                manifest_path=matrixport_manifest_path,
+                source=sources["matrixport-account-generation"],
+                name="Matrixport",
+            )
+        )
+        quantbase_manifest, quantbase_generation, quantbase_as_of = (
+            _verified_immutable_generation(
+                manifest_path=quantbase_manifest_path,
+                source=sources["quantbase-account-generation"],
+                name="Quantbase",
+            )
+        )
+        p123_manifest, p123_generation, p123_as_of = _verified_immutable_generation(
+            manifest_path=portfolio123_manifest_path,
+            source=sources["portfolio123-model-generation"],
+            name="Portfolio123",
+        )
     if (
         max(
             map(
@@ -2750,6 +3150,11 @@ def build_layered_history_generation(
     _verify_artifact(matrixport_nav_path, matrixport_artifacts, "csv/nav_daily.csv")
     _verify_artifact(matrixport_holdings_path, matrixport_artifacts, "csv/holdings.csv")
     _verify_artifact(
+        matrixport_daily_holdings_path,
+        matrixport_artifacts,
+        "csv/daily_holdings.csv",
+    )
+    _verify_artifact(
         matrixport_subscription_path,
         matrixport_artifacts,
         "csv/subscription_details.csv",
@@ -2763,6 +3168,16 @@ def build_layered_history_generation(
     matrixport_missing_dates = _matrixport_declared_missing_dates(
         matrixport_manifest, matrixport_gap_policy
     )
+    robuxio_correction = corrections["robuxio-account-live-after-funding"]
+    robuxio_interval = robuxio_correction.get("interval")
+    if not isinstance(robuxio_interval, dict):
+        raise TargetSeriesError("Robuxio account-live interval is absent from contract")
+    try:
+        matrixport_admission_cutoff = date.fromisoformat(
+            str(robuxio_interval.get("observed_end", ""))
+        )
+    except ValueError as exc:
+        raise TargetSeriesError("Robuxio account-live cutoff is invalid") from exc
     robuxio_series = series_by_strategy.get("robuxio-crypto")
     if robuxio_series is None:
         raise TargetSeriesError("provider ledger lacks Robuxio mapping")
@@ -2770,10 +3185,12 @@ def build_layered_history_generation(
         matrixport_nav_path,
         matrixport_holdings_path,
         matrixport_subscription_path,
+        matrixport_daily_holdings_path,
         matrixport_product_id,
         robuxio_series,
         matrixport_missing_dates,
         matrixport_gap_policy,
+        admission_cutoff=matrixport_admission_cutoff,
     )
     raw_gap_policy = robuxio_coverage.get("source_gap_policy")
     if not isinstance(raw_gap_policy, dict):
@@ -2784,13 +3201,15 @@ def build_layered_history_generation(
         raise TargetSeriesError(
             "Matrixport source gap policy differs from product authority"
         )
+    raw_epoch_hpr_receipt = robuxio_coverage.get("epoch_hpr_receipt")
+    if not isinstance(raw_epoch_hpr_receipt, dict):
+        raise TargetSeriesError("Matrixport epoch HPR receipt is absent")
+    robuxio_epoch_hpr_receipt = dict(raw_epoch_hpr_receipt)
     matrixport_unavailable_return_dates = frozenset(
         date.fromisoformat(str(item))
         for item in raw_gap_policy.get("unavailable_return_dates", [])
     )
-    robuxio_correction = corrections["robuxio-account-live-after-funding"]
-    robuxio_interval = robuxio_correction.get("interval")
-    if not isinstance(robuxio_interval, dict) or (
+    if (
         robuxio_live[0]["date"],
         robuxio_live[-1]["date"],
     ) != (
@@ -3350,6 +3769,15 @@ def build_layered_history_generation(
                 "status": "RESOLVED_BY_PIPE_HISTORY_001",
             },
         },
+        "epoch_hpr_receipts": [
+            {
+                "evidence_layer": "ACCOUNT_LIVE",
+                "receipt": robuxio_epoch_hpr_receipt,
+                "source_generation_id": matrixport_generation,
+                "source_id": "matrixport-account-generation",
+                "strategy_id": "robuxio-crypto",
+            }
+        ],
         "mode_policy": dict(LAYERED_HISTORY_MODE_POLICY),
         "schema_version": LAYERED_HISTORY_SCHEMA_VERSION,
         "strategies": sorted(coverage_rows, key=lambda item: str(item["strategy_id"])),
@@ -3371,13 +3799,6 @@ def build_layered_history_generation(
             path=contract_path,
         ),
         _artifact_identity(
-            input_id="provider-ledger-current",
-            artifact_role="CURRENT_POINTER",
-            path=provider_ledger_pointer_path,
-            generation_id=ledger_generation,
-            as_of_date=ledger_as_of,
-        ),
-        _artifact_identity(
             input_id="provider-ledger-manifest",
             artifact_role="GENERATION_MANIFEST",
             path=provider_ledger_manifest_path,
@@ -3391,13 +3812,6 @@ def build_layered_history_generation(
             artifact_id="normalized/provider-ledger.json",
             generation_id=ledger_generation,
             as_of_date=ledger_as_of,
-        ),
-        _artifact_identity(
-            input_id="matrixport-current",
-            artifact_role="CURRENT_POINTER",
-            path=matrixport_pointer_path,
-            generation_id=matrixport_generation,
-            as_of_date=matrixport_as_of,
         ),
         _artifact_identity(
             input_id="matrixport-manifest",
@@ -3431,13 +3845,6 @@ def build_layered_history_generation(
             as_of_date=matrixport_as_of,
         ),
         _artifact_identity(
-            input_id="quantbase-current",
-            artifact_role="CURRENT_POINTER",
-            path=quantbase_pointer_path,
-            generation_id=quantbase_generation,
-            as_of_date=quantbase_as_of,
-        ),
-        _artifact_identity(
             input_id="quantbase-manifest",
             artifact_role="GENERATION_MANIFEST",
             path=quantbase_manifest_path,
@@ -3459,13 +3866,6 @@ def build_layered_history_generation(
             artifact_id="source/csv/account_activity.csv",
             generation_id=quantbase_generation,
             as_of_date=quantbase_as_of,
-        ),
-        _artifact_identity(
-            input_id="portfolio123-current",
-            artifact_role="CURRENT_POINTER",
-            path=portfolio123_pointer_path,
-            generation_id=p123_generation,
-            as_of_date=p123_as_of,
         ),
         _artifact_identity(
             input_id="portfolio123-manifest",
@@ -3515,6 +3915,39 @@ def build_layered_history_generation(
             as_of_date=p123_as_of,
         ),
     ]
+    if source_selection_mode == "CURRENT_POINTERS":
+        inputs.extend(
+            [
+                _artifact_identity(
+                    input_id="provider-ledger-current",
+                    artifact_role="CURRENT_POINTER",
+                    path=provider_ledger_pointer_path,
+                    generation_id=ledger_generation,
+                    as_of_date=ledger_as_of,
+                ),
+                _artifact_identity(
+                    input_id="matrixport-current",
+                    artifact_role="CURRENT_POINTER",
+                    path=matrixport_pointer_path,
+                    generation_id=matrixport_generation,
+                    as_of_date=matrixport_as_of,
+                ),
+                _artifact_identity(
+                    input_id="quantbase-current",
+                    artifact_role="CURRENT_POINTER",
+                    path=quantbase_pointer_path,
+                    generation_id=quantbase_generation,
+                    as_of_date=quantbase_as_of,
+                ),
+                _artifact_identity(
+                    input_id="portfolio123-current",
+                    artifact_role="CURRENT_POINTER",
+                    path=portfolio123_pointer_path,
+                    generation_id=p123_generation,
+                    as_of_date=p123_as_of,
+                ),
+            ]
+        )
     if (
         strategy_history_manifest_path is not None
         and strategy_history_returns_path is not None
@@ -3596,15 +4029,18 @@ def build_layered_history_generation(
         "repository_sha": repository_sha,
         "schema_version": LAYERED_HISTORY_SCHEMA_VERSION,
         "source_manifests": source_manifest_contents,
-        "source_pointers": {
+        "source_selection_mode": source_selection_mode,
+        "tool_sha256": _sha256(Path(__file__))[0],
+        "verification": "VERIFIED",
+    }
+    if source_selection_mode == "CURRENT_POINTERS":
+        manifest_without_id["source_pointers"] = {
             "matrixport": matrixport_pointer_path.read_text(encoding="utf-8"),
             "portfolio123": portfolio123_pointer_path.read_text(encoding="utf-8"),
             "provider-ledger": provider_ledger_pointer_path.read_text(encoding="utf-8"),
             "quantbase": quantbase_pointer_path.read_text(encoding="utf-8"),
-        },
-        "tool_sha256": _sha256(Path(__file__))[0],
-        "verification": "VERIFIED",
-    }
+        }
+
     generation_id = hashlib.sha256(
         canonical_json_bytes(manifest_without_id)
     ).hexdigest()
@@ -3705,27 +4141,32 @@ def validate_layered_history_generation(
         raise TargetSeriesError("layered history generation manifest must be an object")
     if manifest_content != canonical_json_bytes(manifest):
         raise TargetSeriesError("layered history generation manifest is not canonical")
+    source_selection_mode = manifest.get("source_selection_mode", "CURRENT_POINTERS")
+    if source_selection_mode not in {"CURRENT_POINTERS", "IMMUTABLE_GENERATIONS"}:
+        raise TargetSeriesError("layered history source selection mode differs")
+    expected_manifest_keys = {
+        "$schema",
+        "as_of_date",
+        "builder",
+        "builder_version",
+        "generation_id",
+        "inputs",
+        "mode_status",
+        "outputs",
+        "product",
+        "repository_sha",
+        "schema_version",
+        "source_manifests",
+        "tool_sha256",
+        "verification",
+    }
+    if "source_selection_mode" in manifest:
+        expected_manifest_keys.add("source_selection_mode")
+    if source_selection_mode == "CURRENT_POINTERS":
+        expected_manifest_keys.add("source_pointers")
     _require_exact_keys(
         manifest,
-        frozenset(
-            {
-                "$schema",
-                "as_of_date",
-                "builder",
-                "builder_version",
-                "generation_id",
-                "inputs",
-                "mode_status",
-                "outputs",
-                "product",
-                "repository_sha",
-                "schema_version",
-                "source_manifests",
-                "source_pointers",
-                "tool_sha256",
-                "verification",
-            }
-        ),
+        frozenset(expected_manifest_keys),
         "layered history generation",
     )
     if (
@@ -3838,13 +4279,11 @@ def validate_layered_history_generation(
 
     expected_input_contracts: dict[str, tuple[str, str | None]] = {
         "financial-mvp-contract": ("PRODUCT_CONTRACT", None),
-        "provider-ledger-current": ("CURRENT_POINTER", None),
         "provider-ledger-manifest": ("GENERATION_MANIFEST", None),
         "provider-ledger-catalog": (
             "GENERATION_ARTIFACT",
             "normalized/provider-ledger.json",
         ),
-        "matrixport-current": ("CURRENT_POINTER", None),
         "matrixport-manifest": ("GENERATION_MANIFEST", None),
         "matrixport-nav": ("GENERATION_ARTIFACT", "csv/nav_daily.csv"),
         "matrixport-holdings": ("GENERATION_ARTIFACT", "csv/holdings.csv"),
@@ -3852,7 +4291,6 @@ def validate_layered_history_generation(
             "GENERATION_ARTIFACT",
             "csv/subscription_details.csv",
         ),
-        "quantbase-current": ("CURRENT_POINTER", None),
         "quantbase-manifest": ("GENERATION_MANIFEST", None),
         "quantbase-history": (
             "GENERATION_ARTIFACT",
@@ -3862,7 +4300,6 @@ def validate_layered_history_generation(
             "GENERATION_ARTIFACT",
             "source/csv/account_activity.csv",
         ),
-        "portfolio123-current": ("CURRENT_POINTER", None),
         "portfolio123-manifest": ("GENERATION_MANIFEST", None),
         "portfolio123-metadata": (
             "GENERATION_ARTIFACT",
@@ -3885,6 +4322,15 @@ def validate_layered_history_generation(
             "tables/strategy_relationships.parquet",
         ),
     }
+    if source_selection_mode == "CURRENT_POINTERS":
+        expected_input_contracts.update(
+            {
+                "provider-ledger-current": ("CURRENT_POINTER", None),
+                "matrixport-current": ("CURRENT_POINTER", None),
+                "quantbase-current": ("CURRENT_POINTER", None),
+                "portfolio123-current": ("CURRENT_POINTER", None),
+            }
+        )
     optional_input_ids = {"strategy-history-manifest", "strategy-history-returns"}
     if optional_input_ids & set(inputs):
         expected_input_contracts.update(
@@ -4010,19 +4456,15 @@ def validate_layered_history_generation(
             )
         source_manifests[source_name] = parsed
     input_source_names = {
-        "provider-ledger-current": "provider-ledger",
         "provider-ledger-manifest": "provider-ledger",
         "provider-ledger-catalog": "provider-ledger",
-        "matrixport-current": "matrixport",
         "matrixport-manifest": "matrixport",
         "matrixport-nav": "matrixport",
         "matrixport-holdings": "matrixport",
         "matrixport-subscriptions": "matrixport",
-        "quantbase-current": "quantbase",
         "quantbase-manifest": "quantbase",
         "quantbase-history": "quantbase",
         "quantbase-activity": "quantbase",
-        "portfolio123-current": "portfolio123",
         "portfolio123-manifest": "portfolio123",
         "portfolio123-metadata": "portfolio123",
         "portfolio123-performance": "portfolio123",
@@ -4030,6 +4472,15 @@ def validate_layered_history_generation(
         "portfolio123-returns": "portfolio123",
         "portfolio123-relationships": "portfolio123",
     }
+    if source_selection_mode == "CURRENT_POINTERS":
+        input_source_names.update(
+            {
+                "provider-ledger-current": "provider-ledger",
+                "matrixport-current": "matrixport",
+                "quantbase-current": "quantbase",
+                "portfolio123-current": "portfolio123",
+            }
+        )
     if "strategy-history" in source_manifests:
         input_source_names.update(
             {
@@ -4080,78 +4531,83 @@ def validate_layered_history_generation(
         raise TargetSeriesError(
             "Matrixport source gap policy differs from product authority"
         )
-    source_pointer_input_ids = {
-        "provider-ledger": "provider-ledger-current",
-        "matrixport": "matrixport-current",
-        "quantbase": "quantbase-current",
-        "portfolio123": "portfolio123-current",
-    }
-    raw_source_pointers = manifest.get("source_pointers")
-    if not isinstance(raw_source_pointers, dict) or set(raw_source_pointers) != set(
-        source_pointer_input_ids
-    ):
-        raise TargetSeriesError("layered history source pointers differ")
-    for source_name, pointer_input_id in source_pointer_input_ids.items():
-        raw_pointer = raw_source_pointers.get(source_name)
-        if not isinstance(raw_pointer, str):
-            raise TargetSeriesError("layered history source pointer is invalid")
-        try:
-            pointer = json.loads(raw_pointer)
-        except json.JSONDecodeError as exc:
-            raise TargetSeriesError(
-                "layered history source pointer is invalid"
-            ) from exc
-        if not isinstance(pointer, dict) or canonical_json_bytes(
-            pointer
-        ) != raw_pointer.encode("utf-8"):
-            raise TargetSeriesError("layered history source pointer is not canonical")
-        pointer_schema_version = pointer.get("pointer_schema_version")
-        expected_pointer_keys = {
-            "artifact_inventory_sha256",
-            "generation_id",
-            "manifest_sha256",
-            "pointer_schema_version",
-            "state",
+    if source_selection_mode == "CURRENT_POINTERS":
+        source_pointer_input_ids = {
+            "provider-ledger": "provider-ledger-current",
+            "matrixport": "matrixport-current",
+            "quantbase": "quantbase-current",
+            "portfolio123": "portfolio123-current",
         }
-        if set(pointer) != expected_pointer_keys or pointer_schema_version != 2:
-            raise TargetSeriesError("layered history source pointer contract differs")
-        pointer_input = inputs.get(pointer_input_id)
-        manifest_input = inputs[source_manifest_input_ids[source_name]]
-        if pointer_input is None or (
-            pointer_input.get("artifact_role"),
-            pointer_input.get("generation_id"),
-            pointer_input.get("sha256"),
-            pointer_input.get("size_bytes"),
-            pointer.get("generation_id"),
-            pointer.get("manifest_sha256"),
-            pointer.get("state"),
-        ) != (
-            "CURRENT_POINTER",
-            manifest_input.get("generation_id"),
-            hashlib.sha256(raw_pointer.encode("utf-8")).hexdigest(),
-            len(raw_pointer.encode("utf-8")),
-            manifest_input.get("generation_id"),
-            manifest_input.get("sha256"),
-            "PUBLISHED",
+        raw_source_pointers = manifest.get("source_pointers")
+        if not isinstance(raw_source_pointers, dict) or set(raw_source_pointers) != set(
+            source_pointer_input_ids
         ):
-            raise TargetSeriesError(
-                f"layered history current pointer differs: {source_name}"
-            )
-        inventory_sha = pointer.get("artifact_inventory_sha256")
-        if (
-            not isinstance(inventory_sha, str)
-            or len(inventory_sha) != 64
-            or any(ch not in "0123456789abcdef" for ch in inventory_sha)
-            or inventory_sha
-            != _source_generation_inventory_sha256(
-                source_name,
-                raw_source_manifests[source_name].encode("utf-8"),
-                source_manifests[source_name],
-            )
-        ):
-            raise TargetSeriesError(
-                f"layered history current pointer inventory differs: {source_name}"
-            )
+            raise TargetSeriesError("layered history source pointers differ")
+        for source_name, pointer_input_id in source_pointer_input_ids.items():
+            raw_pointer = raw_source_pointers.get(source_name)
+            if not isinstance(raw_pointer, str):
+                raise TargetSeriesError("layered history source pointer is invalid")
+            try:
+                pointer = json.loads(raw_pointer)
+            except json.JSONDecodeError as exc:
+                raise TargetSeriesError(
+                    "layered history source pointer is invalid"
+                ) from exc
+            if not isinstance(pointer, dict) or canonical_json_bytes(
+                pointer
+            ) != raw_pointer.encode("utf-8"):
+                raise TargetSeriesError(
+                    "layered history source pointer is not canonical"
+                )
+            pointer_schema_version = pointer.get("pointer_schema_version")
+            expected_pointer_keys = {
+                "artifact_inventory_sha256",
+                "generation_id",
+                "manifest_sha256",
+                "pointer_schema_version",
+                "state",
+            }
+            if set(pointer) != expected_pointer_keys or pointer_schema_version != 2:
+                raise TargetSeriesError(
+                    "layered history source pointer contract differs"
+                )
+            pointer_input = inputs.get(pointer_input_id)
+            manifest_input = inputs[source_manifest_input_ids[source_name]]
+            if pointer_input is None or (
+                pointer_input.get("artifact_role"),
+                pointer_input.get("generation_id"),
+                pointer_input.get("sha256"),
+                pointer_input.get("size_bytes"),
+                pointer.get("generation_id"),
+                pointer.get("manifest_sha256"),
+                pointer.get("state"),
+            ) != (
+                "CURRENT_POINTER",
+                manifest_input.get("generation_id"),
+                hashlib.sha256(raw_pointer.encode("utf-8")).hexdigest(),
+                len(raw_pointer.encode("utf-8")),
+                manifest_input.get("generation_id"),
+                manifest_input.get("sha256"),
+                "PUBLISHED",
+            ):
+                raise TargetSeriesError(
+                    f"layered history current pointer differs: {source_name}"
+                )
+            inventory_sha = pointer.get("artifact_inventory_sha256")
+            if (
+                not isinstance(inventory_sha, str)
+                or len(inventory_sha) != 64
+                or any(ch not in "0123456789abcdef" for ch in inventory_sha)
+                or inventory_sha
+                != _source_generation_inventory_sha256(
+                    source_name,
+                    raw_source_manifests[source_name].encode("utf-8"),
+                    source_manifests[source_name],
+                )
+            ):
+                raise TargetSeriesError(
+                    f"layered history current pointer inventory differs: {source_name}"
+                )
     manifests_by_generation = {
         str(value.get("generation_id") or value.get("bundle_id")): value
         for value in source_manifests.values()
@@ -4397,6 +4853,7 @@ def validate_layered_history_generation(
                 "builder",
                 "builder_version",
                 "correction_resolutions",
+                "epoch_hpr_receipts",
                 "mode_policy",
                 "schema_version",
                 "strategies",
@@ -4433,6 +4890,9 @@ def validate_layered_history_generation(
     )
     if mode_policy != LAYERED_HISTORY_MODE_POLICY:
         raise TargetSeriesError("layered history mode policy differs")
+    epoch_hpr_rows = coverage.get("epoch_hpr_receipts")
+    if not isinstance(epoch_hpr_rows, list):
+        raise TargetSeriesError("layered history epoch HPR receipts are absent")
     serialized_coverage = artifacts["coverage.json"].decode("utf-8")
     if any(
         token in serialized_coverage
@@ -5114,6 +5574,47 @@ def validate_layered_history_generation(
         "status": "RESOLVED_BY_PIPE_HISTORY_001",
     }:
         raise TargetSeriesError("Robuxio source gap coverage differs")
+    if len(epoch_hpr_rows) != 1 or not isinstance(epoch_hpr_rows[0], dict):
+        raise TargetSeriesError("layered history epoch HPR receipt set differs")
+    epoch_hpr_row = epoch_hpr_rows[0]
+    _require_exact_keys(
+        epoch_hpr_row,
+        frozenset(
+            {
+                "evidence_layer",
+                "receipt",
+                "source_generation_id",
+                "source_id",
+                "strategy_id",
+            }
+        ),
+        "layered history epoch HPR receipt",
+    )
+    raw_span_receipts = expected_matrixport_gap_policy.get("span_return_receipts")
+    if not isinstance(raw_span_receipts, list) or any(
+        not isinstance(item, dict) for item in raw_span_receipts
+    ):
+        raise TargetSeriesError("Matrixport epoch HPR span receipts are invalid")
+    expected_epoch_hpr_receipt = _matrixport_epoch_hpr_receipt(
+        returns=[
+            {
+                "date": row["date"],
+                "return": row["return"],
+            }
+            for row in robuxio_live
+        ],
+        span_return_receipts=raw_span_receipts,
+        source_gap_policy=expected_matrixport_gap_policy,
+        admission_cutoff=date.fromisoformat(str(robuxio_interval["observed_end"])),
+    )
+    if epoch_hpr_row != {
+        "evidence_layer": "ACCOUNT_LIVE",
+        "receipt": expected_epoch_hpr_receipt,
+        "source_generation_id": source_manifests["matrixport"]["generation_id"],
+        "source_id": "matrixport-account-generation",
+        "strategy_id": "robuxio-crypto",
+    }:
+        raise TargetSeriesError("layered history epoch HPR receipt differs")
     for strategy_id, correction_id in (
         ("p123-eu", "p123-eu-account-live"),
         ("volatis-strategy", "volatis-account-live"),
@@ -6230,6 +6731,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--nav", type=Path)
     parser.add_argument("--holdings", type=Path)
+    parser.add_argument("--daily-holdings", type=Path)
     parser.add_argument("--subscriptions", type=Path)
     parser.add_argument("--product-id")
     parser.add_argument("--series-id")
@@ -6269,6 +6771,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--quantbase-current", type=Path)
     parser.add_argument("--portfolio123-current", type=Path)
     parser.add_argument("--layered-history-generation", action="store_true")
+    parser.add_argument("--immutable-generations", action="store_true")
     parser.add_argument("--verify-layered-history", type=Path)
     parser.add_argument("--require-mode", choices=("LIVE_ONLY", "LIVE_PLUS_BACKTEST"))
     parser.add_argument(
@@ -6322,37 +6825,43 @@ def main() -> int:
             print(json.dumps(result, sort_keys=True, separators=(",", ":")))
             return 0
         if args.layered_history_generation:
-            _required(
-                args,
-                (
-                    "financial_mvp_contract",
-                    "repository_sha",
-                    "as_of_date",
-                    "provider_ledger_current",
-                    "provider_ledger_manifest",
-                    "provider_ledger_catalog",
-                    "matrixport_current",
-                    "manifest",
-                    "nav",
-                    "holdings",
-                    "subscriptions",
-                    "product_id",
-                    "quantbase_current",
-                    "quantbase_manifest",
-                    "quantbase_history",
-                    "quantbase_activity",
-                    "quantbase_fund_id",
-                    "portfolio123_current",
-                    "portfolio123_manifest",
-                    "portfolio123_metadata",
-                    "portfolio123_performance",
-                    "portfolio123_equity",
-                    "portfolio123_returns",
-                    "portfolio123_relationships",
-                    "output_root",
-                ),
-                "layered history generation",
+            pointer_names = (
+                "provider_ledger_current",
+                "matrixport_current",
+                "quantbase_current",
+                "portfolio123_current",
             )
+            if args.immutable_generations and any(
+                getattr(args, name) is not None for name in pointer_names
+            ):
+                raise TargetSeriesError(
+                    "immutable generations do not accept current pointers"
+                )
+            required_names = (
+                "financial_mvp_contract",
+                "repository_sha",
+                "as_of_date",
+                "provider_ledger_manifest",
+                "provider_ledger_catalog",
+                "manifest",
+                "nav",
+                "holdings",
+                "daily_holdings",
+                "subscriptions",
+                "product_id",
+                "quantbase_manifest",
+                "quantbase_history",
+                "quantbase_activity",
+                "quantbase_fund_id",
+                "portfolio123_manifest",
+                "portfolio123_metadata",
+                "portfolio123_performance",
+                "portfolio123_equity",
+                "portfolio123_returns",
+                "portfolio123_relationships",
+                "output_root",
+            ) + (() if args.immutable_generations else pointer_names)
+            _required(args, required_names, "layered history generation")
             artifacts, manifest_content = build_layered_history_generation(
                 contract_path=args.financial_mvp_contract,
                 repository_sha=args.repository_sha,
@@ -6364,6 +6873,7 @@ def main() -> int:
                 matrixport_manifest_path=args.manifest,
                 matrixport_nav_path=args.nav,
                 matrixport_holdings_path=args.holdings,
+                matrixport_daily_holdings_path=args.daily_holdings,
                 matrixport_subscription_path=args.subscriptions,
                 matrixport_product_id=args.product_id,
                 quantbase_pointer_path=args.quantbase_current,
@@ -6380,6 +6890,11 @@ def main() -> int:
                 portfolio123_relationships_path=args.portfolio123_relationships,
                 strategy_history_manifest_path=args.strategy_history_manifest,
                 strategy_history_returns_path=args.strategy_history_returns,
+                source_selection_mode=(
+                    "IMMUTABLE_GENERATIONS"
+                    if args.immutable_generations
+                    else "CURRENT_POINTERS"
+                ),
             )
             result = validate_layered_history_generation(
                 artifacts=artifacts,
@@ -6667,6 +7182,7 @@ def main() -> int:
                     "manifest",
                     "nav",
                     "holdings",
+                    "daily_holdings",
                     "subscriptions",
                     "product_id",
                     "series_id",
@@ -6681,6 +7197,7 @@ def main() -> int:
                 args.subscriptions,
                 args.product_id,
                 args.series_id,
+                daily_holdings_path=args.daily_holdings,
                 replace_existing=args.replace_series,
             )
             _write_exact(args.output_root / "targets.csv", targets)

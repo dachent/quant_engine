@@ -7,6 +7,7 @@
   "required": [
     "admissions",
     "as_of_date",
+    "capital_anchors",
     "catalog_schema_version",
     "corporate_actions",
     "fact_counts",
@@ -26,6 +27,39 @@
   "properties": {
     "admissions": {"type": "array", "items": {"$ref": "#/$defs/admission"}},
     "as_of_date": {"type": "string", "format": "date"},
+    "capital_anchors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["account_id", "amount", "capital_type", "event_date", "evidence_layer", "generation_id", "mapping_basis", "mapping_status", "nav_recognition_date", "provider_id", "record_id", "source_artifact_id", "source_record_id", "strategy_id"],
+        "properties": {
+          "account_id": {"type": "string", "minLength": 1},
+          "amount": {"$ref": "#/$defs/money"},
+          "capital_type": {"enum": ["OPENING_CAPITAL_ANCHOR", "STRATEGY_CAPITAL_ALLOCATION"]},
+          "event_date": {"type": "string", "format": "date"},
+          "evidence_layer": {"const": "ACCOUNT_LIVE"},
+          "generation_id": {"type": "string", "minLength": 1},
+          "mapping_basis": {"type": "string", "minLength": 1},
+          "mapping_status": {"enum": ["MAPPED", "UNMAPPED"]},
+          "nav_recognition_date": {"type": "string", "format": "date"},
+          "nav_source_artifact_id": {"type": "string", "minLength": 1},
+          "opening_nav": {"$ref": "#/$defs/money"},
+          "provider_id": {"type": "string", "minLength": 1},
+          "record_id": {"type": "string", "minLength": 1},
+          "source_artifact_id": {"type": "string", "minLength": 1},
+          "source_product_id": {"type": "string", "minLength": 1},
+          "source_record_id": {"type": "string", "minLength": 1},
+          "strategy_id": {"type": ["string", "null"]}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"capital_type": {"const": "OPENING_CAPITAL_ANCHOR"}}, "required": ["capital_type"]},
+            "then": {"required": ["opening_nav", "nav_source_artifact_id"]}
+          }
+        ]
+      }
+    },
     "catalog_schema_version": {"const": 2},
     "corporate_actions": {"type": "array", "items": {"type": "object"}},
     "fact_counts": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/factCount"}},
@@ -68,6 +102,16 @@
     "transactions": {"type": "array", "items": {"type": "object"}}
   },
   "$defs": {
+    "money": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "status", "value"],
+      "properties": {
+        "currency": {"type": "string", "minLength": 1},
+        "status": {"const": "AVAILABLE"},
+        "value": {"type": "string", "minLength": 1}
+      }
+    },
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "admission": {
       "type": "object",

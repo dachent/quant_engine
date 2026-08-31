@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import sys
 
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -24,6 +27,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_control_recompute.py"
+SCHEMA_PATH = REPOSITORY_ROOT / "schemas" / "portfolio" / "control-recomputation.schema.json"
 SPEC = importlib.util.spec_from_file_location(
     "portfolio_control_recompute", MODULE_PATH
 )
@@ -34,6 +38,7 @@ sys.modules[SPEC.name] = recompute
 SPEC.loader.exec_module(recompute)
 
 AS_OF = date(2026, 8, 6)
+PREVIOUS = date(2026, 8, 3)
 
 
 def _publish(root: Path, filename: str, payload: dict[str, object], name: str) -> str:
@@ -66,7 +71,132 @@ def _publish(root: Path, filename: str, payload: dict[str, object], name: str) -
     return manifest.generation_id
 
 
-def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
+def _ledger(root: Path, marker: str) -> tuple[str, dict[str, object]]:
+    source = canonical_json_bytes({"catalog": marker})
+    manifest = GenerationManifest.build(
+        as_of_date=PREVIOUS,
+        adapter=AdapterIdentity(f"synthetic-ledger-{marker}", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic provider ledger",
+            fact_types=("strategy_returns",),
+            observed_start=PREVIOUS,
+            observed_end=PREVIOUS,
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/provider-ledger.json",
+                sha256=hashlib.sha256(source).hexdigest(),
+                size_bytes=len(source),
+                as_of_date=PREVIOUS,
+                schema_name="synthetic-provider-ledger",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    staged = stage_generation(root, manifest)
+    catalog_path = staged.parent / "provider-ledger.json"
+    catalog_path.write_bytes(source)
+    publish_generation(root, manifest.generation_id)
+    manifest_path = staged.parent / "generation.json"
+    return manifest.generation_id, {
+        "as_of_date": PREVIOUS.isoformat(),
+        "catalog_sha256": hashlib.sha256(source).hexdigest(),
+        "catalog_size_bytes": len(source),
+        "generation_id": manifest.generation_id,
+        "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        "manifest_size_bytes": manifest_path.stat().st_size,
+    }
+
+
+def _freshness(
+    ledger_identity: dict[str, object], *, reason: str = "fresh"
+) -> dict[str, object]:
+    return {
+        "assessment_schema_version": 3,
+        "as_of_date": AS_OF.isoformat(),
+        "assessments": [
+            {
+                "acquired_at": None,
+                "blocks_current_consumers": False,
+                "coverage_status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                "escalation_required": False,
+                "evaluated_on": AS_OF.isoformat(),
+                "fact_type": "strategy-returns",
+                "lane": "ACCOUNT",
+                "last_accepted_date": AS_OF.isoformat(),
+                "next_expected_date": AS_OF.isoformat(),
+                "policy_id": "synthetic-daily",
+                "provider_id": "synthetic",
+                "reason": reason,
+                "required_for_current": True,
+                "revision_state": "ORIGINAL",
+                "state": "FRESH",
+                "subject_id": "synthetic",
+                "subject_type": "DATASET",
+            }
+        ],
+        "policies": [
+            {
+                "calendar": "CALENDAR_DAY",
+                "expected_interval_days": 1,
+                "grace_days": 0,
+                "mode": "RECURRING",
+                "policy_id": "synthetic-daily",
+                "stale_after_days": 1,
+            }
+        ],
+        "provider_ledger": ledger_identity,
+    }
+
+
+def _panel_id(artifact_sha256: dict[str, str]) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(dict(sorted(artifact_sha256.items())))
+    ).hexdigest()
+
+
+def _candidate(
+    root: Path,
+    correlation_generation: str,
+    report_generation: str,
+    freshness: dict[str, object],
+) -> tuple[Path, Path]:
+    dashboard = {
+        "advisory": {"correlation_one_stress": "0.3"},
+        "meta": {
+            "correlation_generation_id": correlation_generation,
+            "freshness_evaluated_on": AS_OF.isoformat(),
+            "report_generation_id": report_generation,
+        },
+    }
+    files = {
+        "data/dashboard_data.json": canonical_json_bytes(dashboard),
+        "data/freshness-health.json": canonical_json_bytes(freshness),
+    }
+    artifact_sha256 = {
+        name: hashlib.sha256(content).hexdigest() for name, content in files.items()
+    }
+    panel_id = _panel_id(artifact_sha256)
+    candidate = root / "candidates" / panel_id
+    for name, content in files.items():
+        path = candidate / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    (candidate / "candidate.json").write_bytes(
+        canonical_json_bytes(
+            {
+                "artifact_sha256": artifact_sha256,
+                "panel_id": panel_id,
+                "report_generation_id": report_generation,
+            }
+        )
+    )
+    return candidate, candidate / "data" / "freshness-health.json"
+
+
+def _inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path, str]:
     correlation_root = tmp_path / "correlation"
     correlation_generation = _publish(
         correlation_root,
@@ -101,88 +231,280 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path, Path]:
         {"portfolio_summary": [{"metric": "Correlation-one stress", "value": "0.3"}]},
         "synthetic-report",
     )
-    candidate = tmp_path / "candidate"
-    dashboard = {
-        "advisory": {"correlation_one_stress": "0.3"},
-        "meta": {
-            "correlation_generation_id": correlation_generation,
-            "freshness_evaluated_on": AS_OF.isoformat(),
-            "report_generation_id": report_generation,
-        },
-    }
-    dashboard_bytes = canonical_json_bytes(dashboard)
-    (candidate / "data").mkdir(parents=True)
-    (candidate / "data" / "dashboard_data.json").write_bytes(dashboard_bytes)
-    (candidate / "candidate.json").write_bytes(
-        canonical_json_bytes(
-            {
-                "artifact_sha256": {
-                    "data/dashboard_data.json": hashlib.sha256(
-                        dashboard_bytes
-                    ).hexdigest()
-                },
-                "panel_id": "a" * 64,
-                "report_generation_id": report_generation,
-            }
-        )
+    ledger_root = tmp_path / "provider-ledger-one"
+    ledger_generation, ledger_identity = _ledger(ledger_root, "one")
+    candidate, candidate_freshness = _candidate(
+        tmp_path,
+        correlation_generation,
+        report_generation,
+        _freshness(ledger_identity),
     )
-    return correlation_root, report_root, candidate
+    return (
+        correlation_root,
+        report_root,
+        candidate,
+        candidate_freshness,
+        ledger_root,
+        ledger_generation,
+    )
 
 
-def test_independently_recomputes_and_reconciles_all_three_surfaces(
+def _recompute(
+    correlation_root: Path,
+    report_root: Path,
+    candidate: Path,
+    freshness: Path,
+    ledger_root: Path,
+    ledger_generation: str,
+) -> dict[str, object]:
+    return recompute.build_receipt(
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+        AS_OF,
+    )
+
+
+def test_independently_recomputes_panel_freshness_and_selected_ledger(
     tmp_path: Path,
 ) -> None:
-    correlation_root, report_root, candidate = _inputs(tmp_path)
+    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
+        tmp_path
+    )
 
-    receipt = recompute.build_receipt(correlation_root, report_root, candidate, AS_OF)
+    receipt = _recompute(
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+    )
 
     assert receipt["status"] == "PASS"
     assert receipt["component_count"] == 2
     assert receipt["recomputed_correlation_one_stress"] == "0.3"
     assert set(receipt["differences"].values()) == {"0"}
     assert all(receipt["generation_checks"].values())
+    assert receipt["receipt_schema_version"] == 2
+    assert receipt["inputs"]["panel"]["freshness"]["sha256"] == receipt["inputs"][
+        "freshness"
+    ]["sha256"]
+    assert receipt["inputs"]["provider_ledger"]["generation_id"] == ledger_generation
+
+
+def test_same_date_cross_pair_is_rejected(tmp_path: Path) -> None:
+    correlation_root, report_root, candidate, _freshness_one, _ledger_one, _generation_one = _inputs(
+        tmp_path
+    )
+    ledger_two = tmp_path / "provider-ledger-two"
+    generation_two, identity_two = _ledger(ledger_two, "two")
+    selected_freshness = tmp_path / "selected-freshness-two.json"
+    selected_freshness.write_bytes(canonical_json_bytes(_freshness(identity_two)))
+
+    with pytest.raises(
+        recompute.ControlRecomputeError, match="panel freshness identity differs"
+    ):
+        _recompute(
+            correlation_root,
+            report_root,
+            candidate,
+            selected_freshness,
+            ledger_two,
+            generation_two,
+        )
+
+
+def test_same_date_freshness_byte_mutation_is_rejected(tmp_path: Path) -> None:
+    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
+        tmp_path
+    )
+    selected_freshness = tmp_path / "freshness-byte-mutation.json"
+    payload = json.loads(freshness.read_text(encoding="utf-8"))
+    payload["assessments"][0]["reason"] = "same date, different bytes"
+    selected_freshness.write_bytes(canonical_json_bytes(payload))
+
+    with pytest.raises(
+        recompute.ControlRecomputeError, match="panel freshness identity differs"
+    ):
+        _recompute(
+            correlation_root,
+            report_root,
+            candidate,
+            selected_freshness,
+            ledger_root,
+            ledger_generation,
+        )
+
+
+def test_candidate_record_declared_freshness_hash_mutation_is_rejected(
+    tmp_path: Path,
+) -> None:
+    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
+        tmp_path
+    )
+    record_path = candidate / "candidate.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["artifact_sha256"]["data/freshness-health.json"] = "b" * 64
+    recomputed_panel_id = _panel_id(record["artifact_sha256"])
+    record["panel_id"] = recomputed_panel_id
+    moved = candidate.parent / recomputed_panel_id
+    shutil.move(str(candidate), str(moved))
+    (moved / "candidate.json").write_bytes(canonical_json_bytes(record))
+
+    with pytest.raises(
+        recompute.ControlRecomputeError, match="candidate freshness hash differs"
+    ):
+        _recompute(
+            correlation_root,
+            report_root,
+            moved,
+            moved / "data" / "freshness-health.json",
+            ledger_root,
+            ledger_generation,
+        )
+
+
+def test_candidate_directory_panel_id_mismatch_is_rejected(tmp_path: Path) -> None:
+    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
+        tmp_path
+    )
+    moved = candidate.parent / ("c" * 64)
+    shutil.move(str(candidate), str(moved))
+
+    with pytest.raises(recompute.ControlRecomputeError, match="directory differs"):
+        _recompute(
+            correlation_root,
+            report_root,
+            moved,
+            moved / "data" / "freshness-health.json",
+            ledger_root,
+            ledger_generation,
+        )
+
+
+def test_provider_ledger_generation_identity_mutation_is_rejected(
+    tmp_path: Path,
+) -> None:
+    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
+        tmp_path
+    )
+    payload = json.loads(freshness.read_text(encoding="utf-8"))
+    payload["provider_ledger"]["generation_id"] = "b" * 64
+    freshness.write_bytes(canonical_json_bytes(payload))
+    record_path = candidate / "candidate.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["artifact_sha256"]["data/freshness-health.json"] = hashlib.sha256(
+        freshness.read_bytes()
+    ).hexdigest()
+    panel_id = _panel_id(record["artifact_sha256"])
+    record["panel_id"] = panel_id
+    moved = candidate.parent / panel_id
+    shutil.move(str(candidate), str(moved))
+    (moved / "candidate.json").write_bytes(canonical_json_bytes(record))
+
+    with pytest.raises(recompute.ControlRecomputeError, match="provider ledger identity differs"):
+        _recompute(
+            correlation_root,
+            report_root,
+            moved,
+            moved / "data" / "freshness-health.json",
+            ledger_root,
+            ledger_generation,
+        )
+
+
+def test_provider_ledger_catalog_byte_mutation_is_rejected(tmp_path: Path) -> None:
+    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
+        tmp_path
+    )
+    catalog_path = (
+        ledger_root / "generations" / ledger_generation / "provider-ledger.json"
+    )
+    expected_original = canonical_json_bytes({"catalog": "one"})
+    assert catalog_path.read_bytes() == expected_original
+    mutated_catalog = canonical_json_bytes({"catalog": "one-tampered"})
+    expected_mutated_hash = hashlib.sha256(mutated_catalog).hexdigest()
+    expected_mutated_size = len(mutated_catalog)
+    catalog_path.write_bytes(mutated_catalog)
+    assert hashlib.sha256(catalog_path.read_bytes()).hexdigest() == expected_mutated_hash
+    assert catalog_path.stat().st_size == expected_mutated_size
+
+    with pytest.raises(
+        recompute.ControlRecomputeError, match="current provider ledger files differ"
+    ):
+        _recompute(
+            correlation_root,
+            report_root,
+            candidate,
+            freshness,
+            ledger_root,
+            ledger_generation,
+        )
+
+
+def test_receipt_schema_requires_exact_v2_freshness_lineage_classes(
+    tmp_path: Path,
+) -> None:
+    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
+        tmp_path
+    )
+    receipt = _recompute(
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+    )
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+
+    validator.validate(receipt)
+    missing = deepcopy(receipt)
+    del missing["inputs"]["freshness"]
+    with pytest.raises(ValidationError):
+        validator.validate(missing)
+    extra = deepcopy(receipt)
+    extra["inputs"]["provider_ledger"]["unexpected"] = True
+    with pytest.raises(ValidationError):
+        validator.validate(extra)
 
 
 def test_mismatched_panel_headline_fails_closed(tmp_path: Path) -> None:
-    correlation_root, report_root, candidate = _inputs(tmp_path)
+    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
+        tmp_path
+    )
     dashboard_path = candidate / "data" / "dashboard_data.json"
     dashboard = json.loads(dashboard_path.read_text(encoding="utf-8"))
     dashboard["advisory"]["correlation_one_stress"] = "0.2"
-    content = canonical_json_bytes(dashboard)
-    dashboard_path.write_bytes(content)
-    manifest_path = candidate / "candidate.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["artifact_sha256"]["data/dashboard_data.json"] = hashlib.sha256(
-        content
+    dashboard_path.write_bytes(canonical_json_bytes(dashboard))
+    record_path = candidate / "candidate.json"
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    record["artifact_sha256"]["data/dashboard_data.json"] = hashlib.sha256(
+        dashboard_path.read_bytes()
     ).hexdigest()
-    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    panel_id = _panel_id(record["artifact_sha256"])
+    record["panel_id"] = panel_id
+    moved = candidate.parent / panel_id
+    shutil.move(str(candidate), str(moved))
+    (moved / "candidate.json").write_bytes(canonical_json_bytes(record))
 
     with pytest.raises(
         recompute.ControlRecomputeError,
         match="independent headline recomputation differs",
     ):
-        recompute.build_receipt(correlation_root, report_root, candidate, AS_OF)
-
-
-def test_prior_day_panel_freshness_fails_closed(tmp_path: Path) -> None:
-    correlation_root, report_root, candidate = _inputs(tmp_path)
-    dashboard_path = candidate / "data" / "dashboard_data.json"
-    dashboard = json.loads(dashboard_path.read_text(encoding="utf-8"))
-    dashboard["meta"]["freshness_evaluated_on"] = "2026-08-05"
-    content = canonical_json_bytes(dashboard)
-    dashboard_path.write_bytes(content)
-    manifest_path = candidate / "candidate.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["artifact_sha256"]["data/dashboard_data.json"] = hashlib.sha256(
-        content
-    ).hexdigest()
-    manifest_path.write_bytes(canonical_json_bytes(manifest))
-
-    with pytest.raises(
-        recompute.ControlRecomputeError,
-        match="independent headline recomputation differs",
-    ):
-        recompute.build_receipt(correlation_root, report_root, candidate, AS_OF)
+        _recompute(
+            correlation_root,
+            report_root,
+            moved,
+            moved / "data" / "freshness-health.json",
+            ledger_root,
+            ledger_generation,
+        )
 
 
 def test_receipt_is_create_only(tmp_path: Path) -> None:

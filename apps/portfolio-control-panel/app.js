@@ -2,6 +2,8 @@
   "use strict";
 
   const data = window.PORTFOLIO_DATA;
+  const performanceLineageMismatch = data.meta?.performance_lineage?.status === "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH";
+  const performanceLineageReason = String(data.meta?.performance_lineage?.reason || "Report performance is withheld because its source lineage does not match the accepted identity.");
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => Array.from(root.querySelectorAll(selector));
   const money = new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 });
@@ -50,6 +52,7 @@
     AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY: "Available live; no version-matched backtest prehistory",
     AVAILABLE_LIVE_ONLY: "Available: live only",
     AVAILABLE_HWM_QUALIFIED: "Available for HWM",
+    UNAVAILABLE_SOURCE_LINEAGE_MISMATCH: "Report performance withheld: source-lineage mismatch",
     EXCLUDED_DE_MINIMIS: "Excluded de minimis",
     UNAVAILABLE_MISSING_DAILY_NAV: "Daily NAV evidence missing",
     UNAVAILABLE_STALE_FOR_HWM: "Daily NAV present but stale for HWM",
@@ -67,6 +70,10 @@
     AVAILABLE_ACCOUNT_LIVE_RETURN_PATH: "Available account-live return path",
     NOT_APPLICABLE_RESERVE: "Reserve — strategy not applicable",
   };
+  const ACCOUNT_MANIFEST_AUTHORITY_LABELS = Object.freeze({
+    INDEPENDENT_EXACT_REBUILD: "Independent exact rebuild",
+    VERIFIED_GENERATION_BUNDLE_EXACT_BYTES: "Report-attested static publication — verified generation bundle exact bytes",
+  });
   const humanStatus = (status) => STATUS_LABELS[String(status)] || String(status || "Unknown").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
   const statusText = (status) => `<span class="status-text ${toneForStatus(status)}">${safe(humanStatus(status))}</span>`;
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;
@@ -84,6 +91,7 @@
     schwab: "Schwab",
   })[String(providerId || "").toLowerCase()] || String(providerId || "Provider");
   const evidenceCoverage = (row) => {
+    if (performanceLineageMismatch) return `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`;
     const evidence = row.provider_evidence;
     if (!evidence) return "No accepted provider overlay";
     const account = evidence.account;
@@ -95,6 +103,7 @@
     return parts.join(" · ");
   };
   const evidenceAvailability = (row) => {
+    if (performanceLineageMismatch) return `<span class="cell-secondary">— UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
     const accountAvailable = row.account_live_status === "AVAILABLE";
     const providerLiveAvailable = row.nav_status === "AVAILABLE" && row.nav_evidence_layer === "PROVIDER_LIVE" && Boolean(row.provider_evidence?.provider);
     const primary = providerLiveAvailable && !accountAvailable
@@ -109,6 +118,7 @@
     return `${primary}${accountQualification}${lineage}`;
   };
   const exactComparison = (row) => {
+    if (performanceLineageMismatch) return `<span class="cell-secondary">— UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
     const status = row.provider_comparison_status || row.implementation_gap_status;
     if (!String(status || "").startsWith("DESCRIPTIVE_EXACT_DATE")) {
       return `${statusText(status)}<span class="cell-secondary">${safe(row.provider_comparison_disposition || "No accepted exact-date provider/model comparison")}</span>`;
@@ -121,11 +131,13 @@
     return `<span class="cell-primary">${safe(row.cost_status)}</span><span class="cell-secondary">Fees ${statusText(row.fees_status)} · ${safe(amount)} · ${safe(rate)}</span><span class="cell-secondary">After-tax ${statusText(row.after_tax_status)}${number(row.after_tax_annual_cost_rate) == null ? "" : ` · ${pct(row.after_tax_annual_cost_rate, 2)}`}</span>`;
   };
   const benchmarkDisclosure = (row) => {
+    if (performanceLineageMismatch) return `<span class="cell-secondary">— UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
     const assignment = `<span class="cell-primary">Benchmark ${statusText(row.benchmark_assignment_status)}</span><span class="cell-secondary">Effective ${formatDate(row.benchmark_effective_start)}–${formatDate(row.benchmark_effective_end)} · ${safe(row.benchmark_id || "No admitted benchmark")}</span><span class="cell-secondary">${safe(row.benchmark_rationale || "No benchmark rationale recorded")}</span>`;
     if (!String(row.benchmark_comparison_status || "").startsWith("DESCRIPTIVE_EXACT_DATE")) return `${assignment}<span class="cell-secondary">${statusText(row.benchmark_comparison_status || "UNAVAILABLE")} · ${safe(row.benchmark_comparison_disposition || "No exact-date benchmark-relative comparison is admitted")}</span>`;
     return `${assignment}<span class="cell-secondary">Exact common dates ${formatDate(row.benchmark_comparison_observed_start)}–${formatDate(row.benchmark_comparison_observed_end)} · ${integer.format(row.benchmark_comparison_observations || 0)} observations</span><span class="cell-secondary">Strategy ${pct(row.benchmark_account_cumulative_return)} · benchmark ${pct(row.benchmark_reference_cumulative_return)} · gap ${pct(row.benchmark_cumulative_gap)} · active annualized ${pct(row.benchmark_active_return_annualized)}</span><span class="cell-secondary">Tracking error ${pct(row.benchmark_tracking_error_annualized)} · information ratio ${decimal(row.benchmark_information_ratio)} · beta ${decimal(row.benchmark_beta)} · correlation ${decimal(row.benchmark_correlation)}</span><span class="cell-secondary">Up capture ${pct(row.benchmark_upside_capture)} · down capture ${pct(row.benchmark_downside_capture)} · relative drawdown ${pct(row.benchmark_relative_drawdown)}</span><span class="cell-secondary">${safe(row.benchmark_comparison_disposition)}</span>`;
   };
   const hwmQualification = (row) => {
+    if (performanceLineageMismatch) return { status: "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH", note: performanceLineageReason };
     if (row.hwm_scope === "EXCLUDED_DE_MINIMIS") return { status: "EXCLUDED_DE_MINIMIS", note: row.hwm_exclusion_reason || "Explicit policy exclusion; not a computed size threshold" };
     if (row.nav_status !== "AVAILABLE") return { status: "UNAVAILABLE_MISSING_DAILY_NAV", note: "No daily NAV evidence is present" };
     if (row.hwm_evidence_status !== "ACCEPTED") return { status: "UNAVAILABLE_UNACCEPTED_EVIDENCE", note: "Daily NAV evidence is present but its evidence layer is not admitted for HWM" };
@@ -195,16 +207,25 @@
   };
 
   function renderCommand() {
-    $("#command-heading").textContent = data.advisory.readiness.replaceAll("_", " ");
-    $("#command-reason").textContent = data.advisory.reason;
-    renderKpis("#command-kpis", [
+    $("#command-heading").textContent = performanceLineageMismatch ? "REPORT PERFORMANCE WITHHELD" : data.advisory.readiness.replaceAll("_", " ");
+    $("#command-reason").textContent = performanceLineageMismatch
+      ? `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`
+      : data.advisory.reason;
+    renderKpis("#command-kpis", performanceLineageMismatch ? [
+      ["Total liquid", currency(data.capital.total_liquid), "Systematic plus reserve"],
+      ["Systematic capital", currency(data.capital.systematic), "Report-derived risk-control status withheld"],
+      ["Reserve", currency(data.capital.reserve), "Zero strategy risk budget", "reserve"],
+      ["Report coverage", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
+    ] : [
       ["Total liquid", currency(data.capital.total_liquid), "Systematic plus reserve"],
       ["Systematic capital", currency(data.capital.systematic), "Subject to the accepted HWM policy"],
       ["Reserve", currency(data.capital.reserve), "Zero strategy risk budget", "reserve"],
       ["Governed NAV coverage", pct(data.advisory.nav_coverage), `${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}; ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered. ${hwmExclusionNote()}`, "warning"],
     ]);
 
-    const gateRows = data.gates.map((gate) => {
+    const gateRows = performanceLineageMismatch ? [
+      `<div class="gate-row is-danger"><div class="gate-name">Daily NAV gate<small>UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</small></div><div class="gate-value">${statusText("UNAVAILABLE_SOURCE_LINEAGE_MISMATCH")}</div></div>`,
+    ] : data.gates.map((gate) => {
       const key = `${gate.item || ""} ${gate.label || ""}`.toLowerCase();
       const summary = key.includes("position")
         ? `${integer.format(data.counts.positions || 0)} accepted current position rows; provider-boundary exceptions remain in Data health.`
@@ -221,6 +242,9 @@
 
     $("#strategy-coverage-bars").innerHTML = data.strategies.map((row) => {
       const qualification = hwmQualification(row);
+      if (performanceLineageMismatch) {
+        return `<div class="coverage-status-row"><div class="bar-label"><span>${safe(row.strategy_name)}</span><span>Evidence UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · HWM UNAVAILABLE_SOURCE_LINEAGE_MISMATCH</span></div><div class="cell-secondary">— ${safe(performanceLineageReason)}</div></div>`;
+      }
       return `<div class="coverage-status-row"><div class="bar-label"><span>${safe(row.strategy_name)}</span><span>Evidence ${statusText(row.nav_status)} · HWM ${statusText(qualification.status)}</span></div><div class="cell-secondary">${safe(qualification.note)} · ${integer.format(row.available_twr_segments || 0)} coverage-qualified TWR segments · systematic weight ${pct(row.systematic_weight)}</div></div>`;
     }).join("");
     const currentMapped = data.positions.filter((row) => row.status === "AVAILABLE_MAPPED").length;
@@ -238,7 +262,9 @@
       "current-strategy-attribution-partial": { view: "capital", label: "Inspect assignment lifecycle" },
       "historical-strategy-attribution-unresolved": { view: "risk", label: "Inspect historical intervals" },
     };
-    $("#operator-queue").innerHTML = data.blocking_items.map((item) => {
+    const operatorItems = performanceLineageMismatch ? [
+      `<li><div><strong>Report performance lineage</strong><span>UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span><button type="button" class="text-action" data-open-view="risk" aria-label="Inspect withheld report evidence">Inspect withheld evidence →</button></div></li>`,
+    ] : data.blocking_items.map((item) => {
       const note = item.item === "current-strategy-attribution-partial"
         ? `${currentMapped}/${data.positions.length} accepted current positions are strategy-mapped; other current General intervals remain valid at the systematic-pool layer only. ${item.known_gap || ""}`
         : item.known_gap;
@@ -246,17 +272,25 @@
       const focus = route.view === "data" ? ` data-focus-coverage="${safe(item.item)}"` : "";
       return `<li><div><strong>${safe(operatorLabels[item.item] || humanStatus(item.item))}</strong><span>${safe(note)}</span><button type="button" class="text-action" data-open-view="${safe(route.view)}"${focus} aria-label="${safe(route.label)} for ${safe(humanStatus(item.item))}">${safe(route.label)} →</button></div></li>`;
     }).join("");
+    $("#operator-queue").innerHTML = Array.isArray(operatorItems) ? operatorItems.join("") : operatorItems;
     const implementationRows = data.strategies.map((row) => {
       const factorRow = (factorLensModes.LIVE_ONLY || activeFactorLenses()).flatMap((lens) => lens.series || []).find((item) => item.series_id === row.strategy_name);
       const factorState = factorRow ? modelState(factorRow) : "MODEL_UNAVAILABLE";
       return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td>${statusText(row.implementation_gap_status)}</td><td>${safe(row.cost_status)}</td><td>${statusText(factorState)}</td></tr>`;
     });
     $("#portfolio-implementation-table").innerHTML = tableMarkup([["Strategy"], ["Source evidence"], ["Implementation gap"], ["Cost"], ["Factor model"]], implementationRows);
-    $("#construction-points").innerHTML = [
-      `Correlation-one stress is ${pct(data.advisory.correlation_one_stress)} against a ${pct(data.advisory.hwm_limit)} systematic HWM boundary.`,
-      `${data.counts.twr_available} of ${data.counts.twr_rows} account-strategy segments have coverage-aware TWR.`,
-      "Provider, predecessor, shadow, backtest, and account-live evidence remain separate.",
-    ].map((point) => `<div class="thesis-point">${safe(point)}</div>`).join("");
+    const constructionPoints = performanceLineageMismatch
+      ? [
+        `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`,
+        "Report-derived strategy coverage and HWM qualification are withheld.",
+        "Provider, predecessor, shadow, backtest, and account-live evidence remain separate.",
+      ]
+      : [
+        `Correlation-one stress is ${pct(data.advisory.correlation_one_stress)} against a ${pct(data.advisory.hwm_limit)} systematic HWM boundary.`,
+        `${data.counts.twr_available} of ${data.counts.twr_rows} account-strategy segments have coverage-aware TWR.`,
+        "Provider, predecessor, shadow, backtest, and account-live evidence remain separate.",
+      ];
+    $("#construction-points").innerHTML = constructionPoints.map((point) => `<div class="thesis-point">${safe(point)}</div>`).join("");
   }
 
   let allocationFilter = "all";
@@ -316,7 +350,8 @@
     $("#provider-bars").innerHTML = providers.map(([provider, count]) => `<div><div class="bar-label"><span>${safe(provider)}</span><strong>${integer.format(count)}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${count / maxCount * 100}%"></div></div></div>`).join("");
     const rows = data.strategies.map((row) => {
       const qualification = hwmQualification(row);
-      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)} · version ${statusText(row.version_disposition || "UNRESOLVED")}</span></td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td><span class="cell-primary">Evidence ${statusText(row.nav_status)}</span><span class="cell-secondary">HWM ${statusText(qualification.status)} · ${safe(qualification.note)}</span><span class="cell-secondary">Design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · live boundary ${statusText(row.live_boundary_status)}</span>${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td>${costDisclosure(row)}</td><td>${exactComparison(row)}<span class="cell-secondary">Version compatibility ${statusText(row.version_compatibility_status)}</span>${benchmarkDisclosure(row)}</td></tr>`;
+      const navStatus = performanceLineageMismatch ? "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" : row.nav_status;
+      return `<tr><td><span class="cell-primary">${safe(row.strategy_name)}</span><span class="cell-secondary">${safe(row.strategy_id)} · version ${statusText(row.version_disposition || "UNRESOLVED")}</span></td><td>${safe(row.economic_family)}</td><td class="numeric">${currency(row.current_value_usd)}</td><td class="numeric">${pct(row.systematic_weight)}</td><td><span class="cell-primary">Evidence ${statusText(navStatus)}</span><span class="cell-secondary">HWM ${statusText(qualification.status)} · ${safe(qualification.note)}</span><span class="cell-secondary">Design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · live boundary ${statusText(row.live_boundary_status)}</span>${row.provider_evidence ? `<span class="cell-secondary">${safe(evidenceCoverage(row))}</span>` : ""}</td><td>${costDisclosure(row)}</td><td>${exactComparison(row)}<span class="cell-secondary">Version compatibility ${statusText(row.version_compatibility_status)}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
     $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV and evidence coverage"], ["Cost"], ["Implementation gap"]], rows);
     renderLifecycleTable();
@@ -324,6 +359,10 @@
   }
 
   function renderPerformanceComparison() {
+    if (performanceLineageMismatch) {
+      $("#performance-comparison").innerHTML = `<div class="metric-block"><div class="metric-label">Account context</div><div class="metric-value metric-value-compact">${safe(selectedContextAccount === "ALL" ? "All accounts" : accountLabel(selectedContextAccount))}</div><div class="metric-note">Context only; report performance is withheld</div></div><div class="metric-block"><div class="metric-label">Strategy context</div><div class="metric-value metric-value-compact">${safe(selectedContextStrategy === "ALL" ? "Select one strategy" : selectedContextStrategy)}</div><div class="metric-note">Context only; report performance is withheld</div></div><div class="metric-block"><div class="metric-label">13-week strategy return</div><div class="metric-value">—</div><div class="metric-note">Report performance withheld due to source-lineage mismatch</div></div><div class="metric-block"><div class="metric-label">Benchmark</div><div class="metric-value">—</div><div class="metric-note">Report performance withheld due to source-lineage mismatch</div></div><div class="metric-block"><div class="metric-label">Relative return</div><div class="metric-value">—</div><div class="metric-note">Report performance withheld due to source-lineage mismatch</div></div>`;
+      return;
+    }
     const weeklyData = data.weekly_returns;
     const strategyRow = selectedContextStrategy === "ALL" ? null : weeklyData?.series?.find((row) => row.primary_group === "STRATEGY" && (row.series_id === selectedContextStrategy || row.display_name === selectedContextStrategy));
     const benchmarkRow = weeklyData?.series?.find((row) => row.primary_group === "CORE_BENCHMARK" || row.display_groups?.includes("CORE_BENCHMARK"));
@@ -345,7 +384,12 @@
     const unavailableHwm = includedHwm.filter(({ qualification }) => qualification.status !== "AVAILABLE_HWM_QUALIFIED");
     const excludedNav = data.strategies.filter((row) => row.hwm_scope === "EXCLUDED_DE_MINIMIS").map((row) => row.strategy_name);
     const acceptedHwmEvidence = includedHwm.filter(({ qualification }) => qualification.status === "AVAILABLE_HWM_QUALIFIED").map(({ row }) => row);
-    renderKpis("#risk-kpis", [
+    renderKpis("#risk-kpis", performanceLineageMismatch ? [
+      ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Stress scenario", "danger"],
+      ["Systematic HWM", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
+      ["TWR evidence", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
+      ["MWR evidence", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"],
+    ] : [
       ["Correlation-one stress", pct(data.advisory.correlation_one_stress), "Accepted adverse scenario", "danger"],
       ["Systematic HWM", humanStatus(data.advisory.hwm_status), `${currencyExact(data.hwm_summary.uncovered_value_usd)} across ${unavailableHwm.length} unqualified included sleeve${unavailableHwm.length === 1 ? "" : "s"}; no numeric HWM is calculated while unavailable`, unavailableHwm.length ? "danger" : "positive"],
       ["TWR available", `${data.counts.twr_available}/${data.counts.twr_rows}`, "Account-strategy segments", "warning"],
@@ -361,12 +405,18 @@
     const portableProofCallout = portableProof ? `<div class="callout callout-neutral"><strong>DEVELOPMENT — NOT FINANCIAL ACCEPTANCE</strong><br>Portable PORT-HWM-4 proof only: path ${portableProof.index_path.map((point) => safe(point.index)).join(" → ")}; index ${safe(portableProof.current_index)}, HWM ${safe(portableProof.current_hwm)}, current drawdown ${pct(portableProof.current_drawdown)}, maximum drawdown ${pct(portableProof.maximum_drawdown)}. Complete data through ${formatDate(portableProof.complete_through)}, evaluated ${formatDate(portableProof.evaluated_on)} (${integer.format(portableProof.calculation_age_days)} days old; ${statusText(portableProof.age_status)}). Receipt ${safe(portableProof.receipt_sha256.slice(0, 12))}…. ${portableProofContext}</div>` : "";
     const governedProof = data.hwm_governed_proof;
     const governedProofCallout = governedProof ? `<div class="callout callout-neutral"><strong>GOVERNED REAL DATA — PENDING OWNER ACCEPTANCE</strong><br>Governed PORT-HWM-4 result (ACCEPTED_GOVERNED): path ${governedProof.index_path.map((point) => safe(point.index)).join(" → ")}; index ${safe(governedProof.current_index)}, HWM ${safe(governedProof.current_hwm)}, current drawdown ${pct(governedProof.current_drawdown)}, maximum drawdown ${pct(governedProof.maximum_drawdown)}. Complete data through ${formatDate(governedProof.complete_through)}, evaluated ${formatDate(governedProof.evaluated_on)} (${integer.format(governedProof.calculation_age_days)} days old; ${statusText(governedProof.age_status)}). Basis ${safe(governedProof.return_basis)}. Receipt ${safe(governedProof.receipt_sha256.slice(0, 12))}….</div>` : "";
-    $("#hwm-status").innerHTML = `${governedProofCallout}${portableProofCallout}<div class="validation-card"><div><strong>Governed systematic return / NAV evidence</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included HWM-perimeter sleeve has a qualified account-live or provider-live return path."} ${excludedNav.length ? `${safe(hwmExclusionNote())}.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)}: ${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}, with ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered and ${currencyExact(data.hwm_summary.excluded_value_usd)} visibly excluded. ${unavailableHwm.length ? "The numerical full-systematic HWM is not calculated while any included sleeve is unqualified." : "The governed perimeter is fully qualified."} ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No governed return/NAV evidence currently qualifies for HWM."} Account NAV observations and canonical account-live return paths remain separately labeled; missing NAV and FX are not interpolated.</div>`;
+    $("#hwm-status").innerHTML = performanceLineageMismatch
+      ? `<div class="validation-card"><div><strong>Report performance withheld</strong><span>— UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span></div><div class="validation-score">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH</div></div><div class="callout callout-neutral">Report-derived return, MWR, observation-count, return-path, and HWM qualification evidence is withheld until the source-lineage identity matches.</div>`
+      : `${governedProofCallout}${portableProofCallout}<div class="validation-card"><div><strong>Governed systematic return / NAV evidence</strong><span>${unavailableHwm.length ? safe(unavailableHwmSummary) : "Every included HWM-perimeter sleeve has a qualified account-live or provider-live return path."} ${excludedNav.length ? `${safe(hwmExclusionNote())}.` : ""}</span></div><div class="validation-score">${statusText(data.advisory.hwm_status)}</div></div><div class="callout callout-neutral">Coverage is ${pct(data.advisory.nav_coverage)}: ${currencyExact(data.hwm_summary.covered_value_usd)} covered of ${currencyExact(data.hwm_summary.governed_perimeter_value_usd)}, with ${currencyExact(data.hwm_summary.uncovered_value_usd)} uncovered and ${currencyExact(data.hwm_summary.excluded_value_usd)} visibly excluded. ${unavailableHwm.length ? "The numerical full-systematic HWM is not calculated while any included sleeve is unqualified." : "The governed perimeter is fully qualified."} ${acceptedHwmSummary ? `Accepted account-live/provider-overlay evidence: ${safe(acceptedHwmSummary)}.` : "No governed return/NAV evidence currently qualifies for HWM."} Account NAV observations and canonical account-live return paths remain separately labeled; missing NAV and FX are not interpolated.</div>`;
     renderPerformanceComparison();
     const contextualPerformance = data.performance.filter(matchesContext);
     const mappedPerformance = contextualPerformance.filter((row) => row.strategy_name);
     const historicalGaps = contextualPerformance.filter((row) => !row.strategy_name && row.strategy_mapping_disposition !== "RESERVE_NOT_APPLICABLE" && row.pool_id !== "reserve-capital");
     const rows = mappedPerformance.map((row) => {
+      if (performanceLineageMismatch) {
+        const withheld = `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
+        return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${withheld}</td><td>${withheld}</td><td class="numeric">${withheld}</td><td>${withheld}</td><td class="numeric">${withheld}</td><td>${withheld}</td></tr>`;
+      }
       const acceptedReturn = row.twr ?? row.return_path_cumulative_return;
       const returnStatus = row.twr != null ? row.twr_status : row.return_path_status || row.twr_status;
       const observedStart = row.observed_start || row.return_path_observed_start || row.effective_start || "—";
@@ -374,7 +424,10 @@
       const evidence = row.twr != null ? `${integer.format(row.nav_observations)} account NAV observations` : row.return_path_status ? `${integer.format(row.return_path_observations)} canonical account-live returns` : `${integer.format(row.nav_observations)} account NAV observations`;
       return `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td>${safe(row.strategy_name)}</td><td>${safe(observedStart)}<span class="cell-secondary">${safe(observedEnd)}</span></td><td>${safe(evidence)}</td><td class="numeric">${pct(acceptedReturn)}</td><td>${statusText(returnStatus)}</td><td class="numeric">${pct(row.mwr_xirr)}</td><td>${statusText(row.mwr_status)}</td></tr>`;
     });
-    $("#performance-table").innerHTML = tableMarkup([["Account"], ["Strategy"], ["Observed interval"], ["Accepted evidence"], ["Accepted return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]], rows);
+    const performanceHeaders = performanceLineageMismatch
+      ? [["Account"], ["Strategy"], ["Observed interval"], ["Evidence"], ["Report return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]]
+      : [["Account"], ["Strategy"], ["Observed interval"], ["Accepted evidence"], ["Accepted return", "numeric"], ["Return status"], ["MWR", "numeric"], ["MWR status"]];
+    $("#performance-table").innerHTML = tableMarkup(performanceHeaders, rows);
     $("#historical-gap-badge").textContent = `${historicalGaps.length} unresolved intervals`;
     const historicalRows = historicalGaps.map((row) => `<tr data-account-id="${safe(row.account_id)}"><td>${safe(accountLabel(row.account_id))}</td><td><code>${safe(row.assignment_id)}</code></td><td>${safe(row.effective_start || "Open/unknown")}<span class="cell-secondary">${safe(row.effective_end || "Open/unknown")}</span></td><td>${statusText(row.twr_status)}</td><td>${safe(row.strategy_mapping_disposition === "HISTORICAL_POOL_ONLY" ? "Systematic-pool interval requires historical strategy adjudication" : "Assignment requires adjudication")}</td></tr>`);
     $("#historical-gap-table").innerHTML = tableMarkup([["Account"], ["Assignment"], ["Effective interval"], ["Historical attribution"], ["Required disposition"]], historicalRows.length ? historicalRows : [emptyRow(5, "No unresolved historical assignment intervals")]);
@@ -451,11 +504,25 @@
     const authorityProfile = data.meta.account_manifest_authority_profile;
     const panelVerification = data.meta.account_manifest_verification;
     const accountingCurrency = String(manifest.accounting_currency || "UNAVAILABLE");
-    $("#account-manifest-authority").textContent = authorityProfile === "INDEPENDENT_EXACT_REBUILD"
-      ? "Independent exact rebuild"
-      : "Internal validation only — non-releaseable";
+    const schemaVersion = Number(manifest.schema_version);
+    const manifestLabel = (row) => {
+      if (schemaVersion >= 9) {
+        return safe(typeof row.account_label === "string" && row.account_label.length > 0
+          ? row.account_label
+          : "Account label unavailable — manifest validation required");
+      }
+      return safe(row.account_label || accountLabel(row.account_id));
+    };
+    const calculationCutoff = typeof manifest.calculation_cutoff_date === "string"
+      && manifest.calculation_cutoff_date.length > 0
+      ? `Calculations through ${safe(manifest.calculation_cutoff_date)}.`
+      : "Calculation cutoff unavailable — manifest validation required.";
+    const providerCaptureDate = manifest.source_identities?.classified_flows?.ledger_identity?.artifact?.as_of_date;
+    const captureDisclosure = `Artifact/provider capture date: ${safe(providerCaptureDate || "unavailable")}.`;
+    $("#account-manifest-authority").textContent = ACCOUNT_MANIFEST_AUTHORITY_LABELS[authorityProfile]
+      || "Unknown authority profile — non-releaseable";
     const rows = manifest.rows.map((row) => {
-      const label = safe(accountLabel(row.account_id));
+      const label = manifestLabel(row);
       if (row.status !== "OK") {
         return `<tr data-account-id="${safe(row.account_id)}"><td>${label}</td><td>${safe(row.strategy_id)}</td><td>${safe(row.effective_start)}<span class="cell-secondary">${safe(row.effective_end || "open")} · ${manifestBlockerText(row)}</span></td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td><td class="numeric">—</td></tr>`;
       }
@@ -468,11 +535,15 @@
       ["RONC", "numeric"], ["Ann. RONC", "numeric"], ["Observed return", "numeric"],
       ["Observed HWM", "numeric"], ["Observed Max DD", "numeric"],
     ], rows, `Epoch manifest by account and strategy — monetary values ${accountingCurrency}`);
-    legend.innerHTML = `<strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Invested = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Invested − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is a simple diagnostic. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.`;
+    legend.innerHTML = `<strong>${calculationCutoff}</strong> ${captureDisclosure} <strong>Observed diagnostics, not accepted TWR/MWR.</strong> All monetary values are ${safe(accountingCurrency)}. Invested = explicit opening capital + deposits + internal-in after start. A first-funded-day flow is used as opening basis only when predecessor continuity proves it; otherwise the row is blocked. Withdrawn = external withdrawals + internal-out. Net capital = Invested − Withdrawn. Current = last funded NAV in the epoch. Gain = Current − Net capital, exact to the cent. RONC = Gain ÷ Net capital; annualized RONC is a simple diagnostic. Observed return, observed HWM, and observed max drawdown use only the linked observed NAV intervals; they are not daily valuation performance, TWR, MWR, or Modified Dietz.`;
     const disclosure = $("#account-manifest-disclosure");
+    const producerReadiness = panelVerification.producer_readiness;
     const notes = [
       `Panel authority profile: ${authorityProfile}`,
       `Panel verification: ${panelVerification.status}; ${panelVerification.method}; publication ${panelVerification.publication_readiness}.`,
+      producerReadiness
+        ? `Producer readiness: ${producerReadiness.authority_status}; independent authority verification ${producerReadiness.independent_authority_verification}; publication ${producerReadiness.publication_readiness}.`
+        : "Producer readiness: not supplied.",
       `Manifest self-declared readiness: ${manifest.authority_readiness.authority_status}; independent verification ${manifest.authority_readiness.independent_authority_verification}; publication ${manifest.authority_readiness.publication_readiness}.`,
       `Flow reconciliation: ${manifest.flow_reconciliation.status}; ${manifest.flow_reconciliation.method}.`,
     ];
@@ -494,7 +565,8 @@
       ["Automated action", "NONE", "Read-only advisory surface", "reserve"],
     ]);
     const implementationRows = data.strategies.map((row) => {
-      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${pct(row.account_live_cumulative_return)}</td><td class="numeric">${pct(row.account_live_max_drawdown)}</td><td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDate(row.version_effective_start)}–${formatDate(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
+      const withheld = `—<span class="cell-secondary">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span>`;
+      return `<tr><td>${safe(row.strategy_name)}</td><td>${evidenceAvailability(row)}</td><td class="numeric">${performanceLineageMismatch ? withheld : pct(row.account_live_cumulative_return)}</td><td class="numeric">${performanceLineageMismatch ? withheld : pct(row.account_live_max_drawdown)}</td><td>${exactComparison(row)}</td><td>${costDisclosure(row)}</td><td><span class="cell-primary">${safe(row.version_ref || humanStatus(row.version_disposition || "UNRESOLVED"))}</span><span class="cell-secondary">Effective ${formatDate(row.version_effective_start)}–${formatDate(row.version_effective_end)} · design ${statusText(row.design_status)} · backtest ${statusText(row.backtest_status)} · ${statusText(row.version_compatibility_status)}</span><span class="cell-secondary">${safe(row.version_disposition_reason || "No version disposition recorded")}</span>${benchmarkDisclosure(row)}</td></tr>`;
     });
     $("#implementation-table").innerHTML = tableMarkup([["Strategy"], ["Evidence availability"], ["Account cumulative", "numeric"], ["Account max drawdown", "numeric"], ["Implementation gap"], ["Cost status"], ["Version"]], implementationRows);
     const reconciliationRows = [...data.reconciliation_checks, ...data.blocking_items].map((row) => `<tr><td>${safe(row.check_id || row.item)}</td><td>${statusText(row.status)}</td><td>${safe(row.known_gap || row.value_usd || row.value || "—")}</td></tr>`);
@@ -954,6 +1026,7 @@
   let selectedWeeklyCell = null;
 
   function weeklyValue(row, week) {
+    if (performanceLineageMismatch && row.primary_group === "STRATEGY") return null;
     if (row.primary_group === "STRATEGY") return row.values_by_mode?.[selectedWeeklyMode]?.[week] ?? null;
     return row.values?.[week] ?? null;
   }
@@ -994,6 +1067,11 @@
     }
     const row = weekly.series.find((item) => item.series_id === selectedWeeklyCell.seriesId);
     if (!row) return;
+    if (performanceLineageMismatch && row.primary_group === "STRATEGY") {
+      $("#weekly-detail-title").textContent = `${row.display_name} · week of ${selectedWeeklyCell.week}`;
+      $("#weekly-detail").innerHTML = `<div class="validation-card"><div><strong>Weekly return withheld</strong><span>— UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${safe(performanceLineageReason)}</span></div><div class="validation-score">UNAVAILABLE_SOURCE_LINEAGE_MISMATCH</div></div><div class="callout callout-neutral">Strategy weekly return, observation count, and return-path evidence are withheld until the source-lineage identity matches.</div>`;
+      return;
+    }
     const value = weeklyValue(row, selectedWeeklyCell.week);
     const meta = weeklyMeta(row, selectedWeeklyCell.week);
     $("#weekly-detail-title").textContent = `${row.display_name} · week of ${selectedWeeklyCell.week}`;
@@ -1014,7 +1092,9 @@
       ["Visible series", String(rows.length), weeklyGroupLabels[selectedWeeklyGroup] || selectedWeeklyGroup],
       ["Displayed weeks", String(weeks.length), selectedWeeklyWindow === "full" ? `Full-history page ${weeklyPage + 1}` : `Latest ${selectedWeeklyWindow}`],
       ["Unavailable cells", String(missingCells), "Missing is never zero", missingCells ? "warning" : "positive"],
-      ["Strategy evidence", selectedWeeklyMode, selectedWeeklyMode === "LIVE_ONLY" ? "Authoritative default" : "Version-matched pre-live backtest", selectedWeeklyMode === "LIVE_ONLY" ? "positive" : "warning"],
+      performanceLineageMismatch && selectedWeeklyGroup === "STRATEGY"
+        ? ["Strategy evidence", "—", `UNAVAILABLE_SOURCE_LINEAGE_MISMATCH · ${performanceLineageReason}`, "danger"]
+        : ["Strategy evidence", selectedWeeklyMode, selectedWeeklyMode === "LIVE_ONLY" ? "Authoritative default" : "Version-matched pre-live backtest", selectedWeeklyMode === "LIVE_ONLY" ? "positive" : "warning"],
     ]);
     const header = `<thead><tr><th scope="col">Series / basis</th>${weeks.map((week) => `<th scope="col"><span class="weekly-date">${safe(week.slice(5))}</span><span class="cell-secondary">${safe(week.slice(0, 4))}</span></th>`).join("")}</tr></thead>`;
     const body = rows.map((row) => `<tr><th scope="row"><span class="cell-primary">${safe(row.display_name)}</span><span class="cell-secondary">${safe(row.return_basis)} · ${safe(row.source_key)}</span></th>${weeks.map((week) => {
