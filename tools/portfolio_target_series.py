@@ -3104,10 +3104,29 @@ def build_layered_history_generation(
         if not isinstance(history_series_id, str) or not history_series_id.strip():
             raise TargetSeriesError("product history series identity is invalid")
         product_series_by_strategy[strategy_id] = history_series_id
-    if series_by_strategy != product_series_by_strategy:
+    required_product_series_by_strategy = {
+        strategy_id: series_id
+        for strategy_id, series_id in product_series_by_strategy.items()
+        if strategies[strategy_id].get("product_requirement") == "REQUIRED"
+    }
+    if (
+        any(
+            series_by_strategy.get(strategy_id) != series_id
+            for strategy_id, series_id in required_product_series_by_strategy.items()
+        )
+        or any(
+            product_series_by_strategy.get(strategy_id) != series_id
+            for strategy_id, series_id in series_by_strategy.items()
+        )
+    ):
         raise TargetSeriesError(
             "provider-ledger series mapping differs from product authority"
         )
+    # A provider ledger is authoritative only for the funded current product
+    # perimeter.  Retired strategies retain their product series identity for
+    # coverage, but a future current ledger need not carry their historical
+    # rejected evidence.
+    series_by_strategy = product_series_by_strategy
 
     evidence_value = json.loads(strategy_evidence_content)
     evidence_rows = evidence_value.get("strategies")
@@ -3146,25 +3165,24 @@ def build_layered_history_generation(
     echo_capture = echo_correction.get("capture")
     echo_modes = echo_correction.get("mode_admission")
     if (
-        not echo_candidate
+        not isinstance(strategies.get("echotrade-growth-pivots"), dict)
         or not isinstance(echo_interval, dict)
         or not isinstance(echo_capture, dict)
         or not isinstance(echo_modes, dict)
         or echo_correction.get("source_id") != "owner-account-live-history"
         or echo_correction.get("evidence_layer") != "ACCOUNT_LIVE"
-        or echo_correction.get("readiness") != "REQUIRED_NOT_READY"
+        or strategies["echotrade-growth-pivots"].get("product_requirement")
+        != "EXCLUDED"
+        or strategies["echotrade-growth-pivots"].get("lifecycle_status")
+        != "DEPRECATED_HISTORY_ONLY"
+        or echo_correction.get("readiness") != "READY"
+        or echo_correction.get("blockers") != []
         or echo_modes.get("LIVE_ONLY") != "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
         or echo_modes.get("LIVE_PLUS_BACKTEST") != "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
-        or echo_capture.get("generation_id") != ledger_generation
-        or (echo_candidate[0]["date"], echo_candidate[-1]["date"])
-        != (echo_interval.get("observed_start"), echo_interval.get("observed_end"))
+        or echo_capture.get("generation_id") == ledger_generation
     ):
         raise TargetSeriesError("EchoTrade event-only disposition differs")
-    echo_rejected_identity = _target_row_identity(echo_candidate)
     echo_expected_identity = echo_correction.get("rejected_evidence_identity")
-    provider_ledger_catalog_sha = hashlib.sha256(
-        provider_ledger_catalog_path.read_bytes()
-    ).hexdigest()
     if (
         not isinstance(echo_expected_identity, dict)
         or set(echo_expected_identity)
@@ -3176,20 +3194,38 @@ def build_layered_history_generation(
         }
         or echo_expected_identity.get("canonicalization")
         != "TARGET_FIELDS_CANONICAL_JSON_V1"
-        or {
-            "return_observations": echo_expected_identity.get("return_observations"),
-            "sha256": echo_expected_identity.get("sha256"),
-        }
-        != {
-            key: echo_rejected_identity[key]
-            for key in ("return_observations", "sha256")
-        }
-        or echo_expected_identity.get("source_receipt_sha256")
-        != provider_ledger_catalog_sha
     ):
         raise TargetSeriesError(
             "EchoTrade rejected evidence differs from product authority"
         )
+    echo_catalog_receipts = [
+        receipt
+        for receipt in echo_correction.get("source_receipts", [])
+        if isinstance(receipt, dict)
+        and receipt.get("artifact_role") == "provider-ledger-catalog"
+    ]
+    if (
+        len(echo_catalog_receipts) != 1
+        or echo_catalog_receipts[0].get("generation_id")
+        != echo_capture.get("generation_id")
+        or echo_catalog_receipts[0].get("sha256")
+        != echo_expected_identity.get("source_receipt_sha256")
+    ):
+        raise TargetSeriesError("EchoTrade rejected evidence differs from product authority")
+    if echo_candidate:
+        echo_rejected_identity = _target_row_identity(echo_candidate)
+        expected_echo_identity = {
+            "observed_end": echo_interval.get("observed_end"),
+            "observed_start": echo_interval.get("observed_start"),
+            "return_observations": echo_expected_identity.get(
+                "return_observations"
+            ),
+            "sha256": echo_expected_identity.get("sha256"),
+        }
+        if echo_rejected_identity != expected_echo_identity:
+            raise TargetSeriesError(
+                "EchoTrade rejected evidence differs from product authority"
+            )
     live_by_strategy["echotrade-growth-pivots"] = []
     matrixport_artifacts = _manifest_artifacts(matrixport_manifest.get("artifacts"))
     _verify_artifact(matrixport_nav_path, matrixport_artifacts, "csv/nav_daily.csv")
@@ -3786,8 +3822,15 @@ def build_layered_history_generation(
         "builder_version": LAYERED_HISTORY_BUILDER_VERSION,
         "correction_resolutions": {
             "echotrade-event-only-account-live-rejected": {
-                **echo_rejected_identity,
-                "source_generation_id": ledger_generation,
+                "canonicalization": echo_expected_identity["canonicalization"],
+                "observed_end": echo_interval["observed_end"],
+                "observed_start": echo_interval["observed_start"],
+                "return_observations": echo_expected_identity["return_observations"],
+                "sha256": echo_expected_identity["sha256"],
+                "source_generation_id": echo_capture["generation_id"],
+                "source_receipt_sha256": echo_expected_identity[
+                    "source_receipt_sha256"
+                ],
                 "status": "REJECTED_EVENT_ONLY_RECONSTRUCTION_NOT_DAILY_NAV",
             },
             "p123-ai-backtest": {
@@ -3830,7 +3873,10 @@ def build_layered_history_generation(
     }
     artifacts = {
         "segments.csv": _segment_view_bytes(segment_rows),
-        "excluded.csv": _target_bytes(echo_candidate),
+        # Deprecated Echo rows are validation-only rejected evidence.  The
+        # historical receipt stays hash-bound in coverage; no rejected row is
+        # emitted into the layered-history artifact set.
+        "excluded.csv": _target_bytes([]),
         "live-only.csv": _correlation_view_bytes(live_mode_rows),
         "live-plus-backtest.csv": _correlation_view_bytes(hybrid_rows),
     }
@@ -4026,7 +4072,7 @@ def build_layered_history_generation(
             artifacts[name],
             len(segment_rows)
             if name == "segments.csv"
-            else len(echo_candidate)
+            else 0
             if name == "excluded.csv"
             else len(live_mode_rows)
             if name == "live-only.csv"
@@ -5340,13 +5386,15 @@ def validate_layered_history_generation(
         if isinstance(echo_correction, dict)
         else None
     )
-    provider_ledger_catalog_input = inputs.get("provider-ledger-catalog")
+    echo_strategy = strategies.get("echotrade-growth-pivots")
+    current_ledger_generation = inputs["provider-ledger-manifest"].get(
+        "generation_id"
+    )
     echo_series_id = coverage_by_strategy.get("echotrade-growth-pivots", {}).get(
         "series_id"
     )
     if (
-        not excluded
-        or not isinstance(echo_series_id, str)
+        not isinstance(echo_series_id, str)
         or not echo_series_id
         or any(
             row["series_id"] != echo_series_id
@@ -5358,22 +5406,39 @@ def validate_layered_history_generation(
         or len({row["date"] for row in excluded}) != len(excluded)
     ):
         raise TargetSeriesError("EchoTrade excluded evidence differs")
-    expected_echo_identity = _target_row_identity(excluded)
+    if excluded:
+        raise TargetSeriesError(
+            "EchoTrade excluded evidence differs from product authority"
+        )
     if (
-        not isinstance(echo_contract_identity, dict)
+        not isinstance(echo_strategy, dict)
+        or echo_strategy.get("product_requirement") != "EXCLUDED"
+        or echo_strategy.get("lifecycle_status") != "DEPRECATED_HISTORY_ONLY"
+        or not isinstance(echo_correction, dict)
+        or echo_correction.get("readiness") != "READY"
+        or echo_correction.get("blockers") != []
+        or not isinstance(echo_capture, dict)
+        or echo_capture.get("generation_id") == current_ledger_generation
+        or not isinstance(echo_contract_identity, dict)
         or echo_contract_identity.get("canonicalization")
         != "TARGET_FIELDS_CANONICAL_JSON_V1"
-        or not isinstance(provider_ledger_catalog_input, dict)
-        or echo_contract_identity.get("source_receipt_sha256")
-        != provider_ledger_catalog_input.get("sha256")
-        or {
-            "return_observations": echo_contract_identity.get("return_observations"),
-            "sha256": echo_contract_identity.get("sha256"),
-        }
-        != {
-            key: expected_echo_identity[key]
-            for key in ("return_observations", "sha256")
-        }
+    ):
+        raise TargetSeriesError(
+            "EchoTrade excluded evidence differs from product authority"
+        )
+    echo_catalog_receipts = [
+        receipt
+        for receipt in echo_correction.get("source_receipts", [])
+        if isinstance(receipt, dict)
+        and receipt.get("artifact_role") == "provider-ledger-catalog"
+    ]
+    if (
+        not isinstance(echo_capture, dict)
+        or len(echo_catalog_receipts) != 1
+        or echo_catalog_receipts[0].get("generation_id")
+        != echo_capture.get("generation_id")
+        or echo_catalog_receipts[0].get("sha256")
+        != echo_contract_identity.get("source_receipt_sha256")
     ):
         raise TargetSeriesError(
             "EchoTrade excluded evidence differs from product authority"
@@ -5382,11 +5447,13 @@ def validate_layered_history_generation(
         not isinstance(echo_resolution, dict)
         or set(echo_resolution)
         != {
+            "canonicalization",
             "observed_end",
             "observed_start",
             "return_observations",
             "sha256",
             "source_generation_id",
+            "source_receipt_sha256",
             "status",
         }
         or not isinstance(echo_interval, dict)
@@ -5400,7 +5467,14 @@ def validate_layered_history_generation(
                 "sha256",
             )
         }
-        != expected_echo_identity
+        != {
+            "observed_end": echo_interval.get("observed_end"),
+            "observed_start": echo_interval.get("observed_start"),
+            "return_observations": echo_contract_identity.get(
+                "return_observations"
+            ),
+            "sha256": echo_contract_identity.get("sha256"),
+        }
         or (
             echo_resolution.get("observed_start"),
             echo_resolution.get("observed_end"),
@@ -5417,6 +5491,10 @@ def validate_layered_history_generation(
         or echo_resolution["return_observations"] < 1
         or not isinstance(echo_resolution.get("sha256"), str)
         or len(echo_resolution["sha256"]) != 64
+        or echo_resolution.get("canonicalization")
+        != echo_contract_identity.get("canonicalization")
+        or echo_resolution.get("source_receipt_sha256")
+        != echo_contract_identity.get("source_receipt_sha256")
     ):
         raise TargetSeriesError("EchoTrade event-only resolution differs")
     p123_ai_resolution = resolutions.get("p123-ai-backtest")

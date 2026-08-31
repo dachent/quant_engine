@@ -16,7 +16,14 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core.contracts import (
+    AdapterIdentity,
+    CoverageClaim,
+    GenerationManifest,
+    SourceArtifact,
+    VerificationStatus,
+    canonical_json_bytes,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -66,37 +73,46 @@ def _core_generation_manifest(
     artifacts: list[dict[str, object]],
     coverage_extra: dict[str, object] | None = None,
 ) -> str:
-    """Write a raw core GenerationManifest envelope without producer helpers."""
+    """Write a valid core GenerationManifest for a synthetic source fixture."""
 
-    manifest = {
-        "adapter": {"name": adapter_name, "version": "1.0.0"},
-        "artifacts": [
-            {
-                "artifact_id": artifact["artifact_id"],
-                "as_of_date": as_of,
-                "schema": {"name": "synthetic-source-artifact", "version": "1"},
-                "sha256": artifact["sha256"],
-                "size_bytes": artifact["size_bytes"],
-            }
-            for artifact in artifacts
-        ],
-        "as_of_date": as_of,
-        "coverage": {
-            "boundary": "synthetic provider-ledger fixture",
-            "fact_types": ["strategy_returns"],
-            "known_gaps": [],
-            "observed_end": as_of,
-            "observed_start": as_of,
-            "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
-        },
-        "manifest_schema_version": 1,
-        "verification": "VERIFIED",
+    coverage = {
+        "boundary": "synthetic provider-ledger fixture",
+        "fact_types": ["strategy_returns"],
+        "known_gaps": [],
+        "observed_end": as_of,
+        "observed_start": as_of,
+        "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
     }
     if coverage_extra is not None:
-        manifest["coverage"].update(coverage_extra)
-    generation_id = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
-    _write_json(path, {"generation_id": generation_id, **manifest})
-    return generation_id
+        coverage.update(coverage_extra)
+    manifest = GenerationManifest.build(
+        as_of_date=date.fromisoformat(as_of),
+        adapter=AdapterIdentity(name=adapter_name, version="1.0.0"),
+        coverage=CoverageClaim.from_dict(coverage),
+        artifacts=tuple(
+            SourceArtifact(
+                artifact_id=str(artifact["artifact_id"]),
+                sha256=str(artifact["sha256"]),
+                size_bytes=int(artifact["size_bytes"]),
+                as_of_date=date.fromisoformat(
+                    str(artifact.get("as_of_date", as_of))
+                ),
+                schema_name=str(
+                    (artifact.get("schema") or {}).get(
+                        "name", "synthetic-source-artifact"
+                    )
+                ),
+                schema_version=str(
+                    (artifact.get("schema") or {}).get("version", "1")
+                ),
+            )
+            for artifact in artifacts
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(manifest.to_json_bytes())
+    return manifest.generation_id
 
 
 def _pointer(path: Path, generation_id: str, manifest_path: Path) -> None:
@@ -520,6 +536,40 @@ def _update_source_generation(
         }
 
 
+def _refresh_p123_eu_version(
+    contract: dict[str, Any], generation_id: str
+) -> None:
+    """Keep the exact P123 EU version bound to a rebuilt source generation."""
+
+    version = target_series._strategy_version(
+        "p123-eu-connected-model",
+        {
+            "generation_id": generation_id,
+            "provider_entity_ids": ["exact-asset", "exact-portfolio"],
+            "strategy_name": "EU Multifactor Microcap",
+        },
+    )
+    strategy = next(
+        row for row in contract["strategies"] if row["strategy_id"] == "p123-eu"
+    )
+    strategy["strategy_version"] = {"status": "EVIDENCED", "version_ref": version}
+    for source in contract["source_segments"]:
+        version_refs = source["strategy_version"]["version_refs"]
+        if "p123-eu" in version_refs:
+            version_refs["p123-eu"] = version
+    for correction_id in (
+        "p123-eu-backtest-not-captured",
+        "p123-eu-provider-live",
+        "p123-eu-account-live",
+    ):
+        correction = next(
+            row
+            for row in contract["history_corrections"]["corrections"]
+            if row["correction_id"] == correction_id
+        )
+        correction["strategy_version"]["version_ref"] = version
+
+
 def _update_correction_generations(
     contract: dict[str, Any],
     source_id: str,
@@ -681,6 +731,79 @@ def _update_correction_interval(
     correction["interval"].update(values)
 
 
+def _retained_echo_correction() -> dict[str, Any]:
+    contract = json.loads(
+        (ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    return copy.deepcopy(
+        next(
+            row
+            for row in contract["history_corrections"]["corrections"]
+            if row["correction_id"] == "echotrade-event-only-account-live-rejected"
+        )
+    )
+
+
+def _restore_retained_echo_correction(contract: dict[str, Any]) -> None:
+    for index, correction in enumerate(contract["history_corrections"]["corrections"]):
+        if correction["correction_id"] == "echotrade-event-only-account-live-rejected":
+            contract["history_corrections"]["corrections"][index] = (
+                _retained_echo_correction()
+            )
+            return
+    raise AssertionError("synthetic contract lacks retained Echo correction")
+
+
+@pytest.fixture
+def synthetic_history_authority(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Opt-in parser for producer fixtures, deliberately separate from contract QC."""
+
+    def parse(path: Path) -> tuple[
+        dict[str, Any],
+        dict[str, dict[str, Any]],
+        dict[str, dict[str, Any]],
+        dict[str, dict[str, Any]],
+    ]:
+        contract = json.loads(path.read_text(encoding="utf-8"))
+        product = contract.get("product")
+        history = contract.get("history_corrections")
+        if (
+            not isinstance(product, dict)
+            or product.get("product_id") != "FINANCIAL_MVP"
+            or not isinstance(history, dict)
+            or history.get("policy_id") != "PORT-HISTORY-TRUTH-1"
+        ):
+            raise TargetSeriesError("synthetic financial MVP history contract differs")
+
+        def rows_by_id(
+            rows: object, id_field: str, label: str
+        ) -> dict[str, dict[str, Any]]:
+            if not isinstance(rows, list):
+                raise TargetSeriesError(f"synthetic {label} rows are invalid")
+            result: dict[str, dict[str, Any]] = {}
+            for row in rows:
+                if not isinstance(row, dict) or not isinstance(
+                    row.get(id_field), str
+                ):
+                    raise TargetSeriesError(f"synthetic {label} row is invalid")
+                key = row[id_field]
+                if not key or key in result:
+                    raise TargetSeriesError(f"synthetic {label} identity differs")
+                result[key] = dict(row)
+            return result
+
+        return (
+            contract,
+            rows_by_id(contract.get("strategies"), "strategy_id", "strategy"),
+            rows_by_id(contract.get("source_segments"), "source_id", "source"),
+            rows_by_id(history.get("corrections"), "correction_id", "correction"),
+        )
+
+    monkeypatch.setattr(target_series, "_history_contract", parse)
+
+
 def _history_fixture(tmp_path: Path) -> dict[str, Any]:
     as_of = "2026-01-10"
     contract = json.loads(
@@ -697,7 +820,6 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
 
     ledger_catalog = tmp_path / "ledger" / "provider-ledger.json"
     series = {
-        "echotrade-growth-pivots": "Growth at Market Pivot Points [EchoTrade]",
         "grizzlybears-vtma": "GrizzlyBears VTMA",
         "p123-ai-factor": "AI Factor [P123]",
         "p123-eu": "EU [P123]",
@@ -1201,21 +1323,6 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         effective_start="2024-10-15",
         effective_end=None,
     )
-    _update_correction_interval(
-        contract,
-        "echotrade-event-only-account-live-rejected",
-        observed_start="2026-01-05",
-        observed_end="2026-01-09",
-        effective_start=None,
-        effective_end=None,
-    )
-    echo_correction = next(
-        row
-        for row in contract["history_corrections"]["corrections"]
-        if row["correction_id"] == "echotrade-event-only-account-live-rejected"
-    )
-    echo_correction["readiness"] = "REQUIRED_NOT_READY"
-    echo_correction["blockers"] = [302]
     for source_id, manifest, authority_root in (
         ("owner-account-live-history", ledger_manifest, "PROVIDER_LEDGER"),
         ("matrixport-account-generation", matrix_manifest, "MATRIXPORT"),
@@ -1226,18 +1333,20 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         _update_correction_generations(
             contract, source_id, manifest, as_of, authority_root
         )
-    _update_echo_rejected_identity(
-        contract,
-        ledger_manifest,
-        ledger_catalog,
-        series["echotrade-growth-pivots"],
-    )
+    _restore_retained_echo_correction(contract)
     matrixport_source = next(
         row
         for row in contract["source_segments"]
         if row["source_id"] == "matrixport-account-generation"
     )
-    matrixport_source["declared_gap_policy"] = _matrixport_gap_policy("2025-12-09")
+    matrixport_source["declared_gap_policy"] = _matrixport_gap_policy(
+        "2025-12-09",
+        nav_path=matrix_nav,
+        holdings_path=matrix_holdings,
+        subscription_path=matrix_subscriptions,
+        daily_holdings_path=matrix_daily_holdings,
+        product_id="private-product",
+    )
     _append_p123_performance_receipt(contract, p123_manifest, performance_path)
     _append_p123_ai_receipts(contract, p123_manifest, returns_path, relationships_path)
     contract_path = tmp_path / "contract.json"
@@ -1291,6 +1400,95 @@ def _build(fixture: dict[str, Any]) -> tuple[dict[str, bytes], bytes]:
     )
 
 
+def _retained_echo_current_rows() -> list[dict[str, object]]:
+    """Exact target-field inputs for the retained 07c590 Echo evidence class."""
+
+    values = (
+        ("2025-10-01", "0.0"),
+        ("2025-10-02", "0.00023479000000015127"),
+        ("2025-10-13", "-0.0038220426226126536"),
+        ("2025-10-15", "0.007918322127541844"),
+        ("2025-10-20", "0.00019891431834184736"),
+        ("2025-10-21", "-0.001472620952603143"),
+        ("2025-10-27", "-0.0015977312089218154"),
+        ("2025-10-31", "0.00016621402262773088"),
+        ("2025-11-03", "0.0015724358494288992"),
+        ("2025-11-10", "0.0006259213998627278"),
+        ("2025-11-20", "-0.028731087907916897"),
+        ("2025-11-21", "-0.024562904082013337"),
+        ("2025-11-24", "-0.026112966996780673"),
+    )
+    return [
+        {
+            "cost": None,
+            "date": observed,
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "alpaca",
+            "return": value,
+            "return_basis": "NET",
+            "return_type": "TOTAL",
+            "strategy_id": "echotrade-growth-pivots",
+            "strategy_name": "Growth at Market Pivot Points [EchoTrade]",
+        }
+        for observed, value in values
+    ]
+
+
+def _add_retained_echo_to_current_ledger(
+    fixture: dict[str, Any], *, mutate: bool = False
+) -> None:
+    """Add exact legacy Echo rows to a current synthetic ledger without rebinding it."""
+
+    catalog_path = fixture["provider_ledger_catalog_path"]
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    echo_rows = _retained_echo_current_rows()
+    if mutate:
+        echo_rows[0]["return"] = "0.000001"
+    catalog["strategy_returns"].extend(echo_rows)
+    catalog["strategy_evidence"].append(
+        {
+            "account": {
+                "observed_end": "2025-11-24",
+                "observed_start": "2025-10-01",
+                "return_observations": 13,
+            },
+            "evidence_layer": "ACCOUNT_LIVE",
+            "generation_as_of_date": fixture["as_of_date"],
+            "generation_id": "synthetic-current-echo",
+            "provider_id": "alpaca",
+            "sources": {"account_returns": {"sha256": "e" * 64}},
+            "strategy_id": "echotrade-growth-pivots",
+            "strategy_name": "Growth at Market Pivot Points [EchoTrade]",
+        }
+    )
+    _write_json(catalog_path, catalog)
+    manifest_path = fixture["provider_ledger_manifest_path"]
+    generation_id = _core_generation_manifest(
+        manifest_path,
+        "quant-engine-provider-ledger",
+        fixture["as_of_date"],
+        [_artifact(catalog_path, "normalized/provider-ledger.json")],
+    )
+    _pointer(fixture["provider_ledger_pointer_path"], generation_id, manifest_path)
+    contract_path = fixture["contract_path"]
+    contract = json.loads(contract_path.read_text(encoding="utf-8"))
+    _update_source_generation(
+        contract,
+        "owner-account-live-history",
+        manifest_path,
+        fixture["as_of_date"],
+    )
+    _update_correction_generations(
+        contract,
+        "owner-account-live-history",
+        manifest_path,
+        fixture["as_of_date"],
+        "PROVIDER_LEDGER",
+    )
+    _restore_retained_echo_correction(contract)
+    _write_json(contract_path, contract)
+
+
 def _build_immutable(fixture: dict[str, Any]) -> tuple[dict[str, bytes], bytes]:
     immutable_inputs = dict(fixture)
     for key in (
@@ -1312,7 +1510,9 @@ def _build_immutable(fixture: dict[str, Any]) -> tuple[dict[str, bytes], bytes]:
 
 
 def test_layered_history_immutable_generations_builds_without_current_pointers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
 ) -> None:
     monkeypatch.setattr(
         target_series, "_require_trusted_layered_history_dependencies", lambda: None
@@ -1349,7 +1549,9 @@ def test_layered_history_immutable_generations_builds_without_current_pointers(
 
 
 def test_layered_history_immutable_generations_ignore_stale_current_pointer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
 ) -> None:
     monkeypatch.setattr(
         target_series, "_require_trusted_layered_history_dependencies", lambda: None
@@ -1374,7 +1576,9 @@ def test_layered_history_immutable_generations_ignore_stale_current_pointer(
 
 
 def test_layered_history_immutable_generations_reject_pointer_arguments(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
 ) -> None:
     monkeypatch.setattr(
         target_series, "_require_trusted_layered_history_dependencies", lambda: None
@@ -1409,6 +1613,7 @@ def test_layered_history_immutable_selector_rejects_pointer_before_reading_data(
             matrixport_manifest_path=unreadable,
             matrixport_nav_path=unreadable,
             matrixport_holdings_path=unreadable,
+            matrixport_daily_holdings_path=unreadable,
             matrixport_subscription_path=unreadable,
             matrixport_product_id="ordinary-product-selector",
             quantbase_pointer_path=None,
@@ -1427,7 +1632,9 @@ def test_layered_history_immutable_selector_rejects_pointer_before_reading_data(
 
 
 def test_layered_history_immutable_generations_reject_tampered_authority(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
 ) -> None:
     monkeypatch.setattr(
         target_series, "_require_trusted_layered_history_dependencies", lambda: None
@@ -1469,7 +1676,10 @@ def test_layered_history_immutable_generations_reject_tampered_authority(
 
 
 def test_layered_history_cli_forwards_immutable_mode_without_pointers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    synthetic_history_authority: None,
 ) -> None:
     monkeypatch.setattr(
         target_series, "_require_trusted_layered_history_dependencies", lambda: None
@@ -1526,7 +1736,9 @@ def test_layered_history_cli_forwards_immutable_mode_without_pointers(
 
 
 def test_layered_history_validator_preserves_legacy_pointer_receipts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
 ) -> None:
     monkeypatch.setattr(
         target_series, "_require_trusted_layered_history_dependencies", lambda: None
@@ -1553,7 +1765,9 @@ def test_layered_history_validator_preserves_legacy_pointer_receipts(
 
 
 def test_immutable_layered_history_never_reads_current_or_sibling_fallbacks(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
 ) -> None:
     monkeypatch.setattr(
         target_series, "_require_trusted_layered_history_dependencies", lambda: None
@@ -1591,7 +1805,9 @@ def test_immutable_layered_history_never_reads_current_or_sibling_fallbacks(
 
 
 def test_immutable_layered_history_rejects_each_provider_artifact_mismatch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
 ) -> None:
     monkeypatch.setattr(
         target_series, "_require_trusted_layered_history_dependencies", lambda: None
@@ -1610,7 +1826,9 @@ def test_immutable_layered_history_rejects_each_provider_artifact_mismatch(
 
 
 def test_immutable_artifact_checks_isolate_declared_size_and_declaration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
 ) -> None:
     monkeypatch.setattr(
         target_series, "_require_trusted_layered_history_dependencies", lambda: None
@@ -1635,7 +1853,9 @@ def test_immutable_artifact_checks_isolate_declared_size_and_declaration(
 
 
 def test_immutable_receipt_tampering_rejects_validate_and_reread(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
 ) -> None:
     monkeypatch.setattr(
         target_series, "_require_trusted_layered_history_dependencies", lambda: None
@@ -1753,7 +1973,14 @@ def _matrixport_exclusions(*dates: str) -> list[dict[str, str]]:
     ]
 
 
-def _matrixport_gap_policy(*dates: str) -> dict[str, object]:
+def _matrixport_gap_policy(
+    *dates: str,
+    nav_path: Path,
+    holdings_path: Path,
+    subscription_path: Path,
+    daily_holdings_path: Path,
+    product_id: str,
+) -> dict[str, object]:
     missing = frozenset(target_series.date.fromisoformat(value) for value in dates)
     omitted = target_series._matrixport_expected_gap_endpoints(missing)
     contract = json.loads(
@@ -1767,9 +1994,22 @@ def _matrixport_gap_policy(*dates: str) -> dict[str, object]:
         if row["source_id"] == "matrixport-account-generation"
     )
     policy = dict(source["declared_gap_policy"])
-    derived = target_series._matrixport_source_gap_policy(missing, omitted)
-    derived.pop("authority_bound")
-    policy.update(derived)
+    _returns, coverage = target_series._matrixport_returns(
+        nav_path,
+        holdings_path,
+        subscription_path,
+        daily_holdings_path,
+        product_id,
+        "Robuxio Crypto (High Sharpe High Vol)",
+        missing,
+    )
+    policy.update(coverage["source_gap_policy"])
+    assert policy["declared_missing_source_dates"] == [
+        item.isoformat() for item in sorted(missing)
+    ]
+    assert policy["omitted_return_dates"] == [
+        item.isoformat() for item in sorted(omitted)
+    ]
     return policy
 
 
@@ -1792,10 +2032,15 @@ def _inject_matrixport_gap(fixture: dict[str, Any], missing_date: str) -> None:
     )
     artifact.update(_artifact(nav_path, "csv/nav_daily.csv"))
     manifest["coverage"]["declared_exclusions"] = _matrixport_exclusions(missing_date)
-    _reidentify_manifest(manifest)
-    _write_json(manifest_path, manifest)
+    matrixport_generation_id = _core_generation_manifest(
+        manifest_path,
+        "quant-engine-matrixport",
+        fixture["as_of_date"],
+        manifest["artifacts"],
+        {"declared_exclusions": manifest["coverage"]["declared_exclusions"]},
+    )
     _pointer(
-        fixture["matrixport_pointer_path"], manifest["generation_id"], manifest_path
+        fixture["matrixport_pointer_path"], matrixport_generation_id, manifest_path
     )
 
     contract_path = fixture["contract_path"]
@@ -1818,7 +2063,14 @@ def _inject_matrixport_gap(fixture: dict[str, Any], missing_date: str) -> None:
         for row in contract["source_segments"]
         if row["source_id"] == "matrixport-account-generation"
     )
-    source["declared_gap_policy"] = _matrixport_gap_policy(missing_date)
+    source["declared_gap_policy"] = _matrixport_gap_policy(
+        missing_date,
+        nav_path=nav_path,
+        holdings_path=fixture["matrixport_holdings_path"],
+        subscription_path=fixture["matrixport_subscription_path"],
+        daily_holdings_path=fixture["matrixport_daily_holdings_path"],
+        product_id=fixture["matrixport_product_id"],
+    )
     _write_json(contract_path, contract)
     _refresh_materialized_segment_identities(fixture)
 
@@ -1864,9 +2116,9 @@ def test_layered_history_code_identity_ignores_inherited_git_selection(
 
 
 def test_layered_history_rejects_repository_dependency_outside_head(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    fixture = _history_fixture(tmp_path)
     committed = dict(target_series._committed_layered_history_dependency_sha256s())
     committed["tools/portfolio_financial_mvp_contract.py"] = "0" * 64
     monkeypatch.setattr(
@@ -1875,13 +2127,24 @@ def test_layered_history_rejects_repository_dependency_outside_head(
         lambda: committed,
     )
     with pytest.raises(TargetSeriesError, match="repository dependency differs"):
-        _build(fixture)
+        target_series._require_trusted_layered_history_dependencies()
 
 
 def test_layered_history_rejects_dynamic_validator_with_different_core(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    fixture = _history_fixture(tmp_path)
+    validator_path = ROOT / "tools" / "portfolio_financial_mvp_contract.py"
+    validator_spec = importlib.util.spec_from_file_location(
+        "portfolio_financial_mvp_contract_strict_test", validator_path
+    )
+    assert validator_spec is not None and validator_spec.loader is not None
+    validator = importlib.util.module_from_spec(validator_spec)
+    sys.modules[validator_spec.name] = validator
+    validator_spec.loader.exec_module(validator)
+    default_contract = validator.DEFAULT_CONTRACT
+    monkeypatch.setattr(
+        target_series, "_require_trusted_layered_history_dependencies", lambda: None
+    )
     fake_core_path = tmp_path / "foreign_core" / "contracts.py"
     fake_core_path.parent.mkdir()
     fake_core_path.write_text(
@@ -1897,12 +2160,114 @@ def test_layered_history_rejects_dynamic_validator_with_different_core(
     fake_core = importlib.util.module_from_spec(fake_spec)
     fake_spec.loader.exec_module(fake_core)
     monkeypatch.setitem(sys.modules, "quant_engine.core.contracts", fake_core)
+    with pytest.raises(
+        TargetSeriesError, match="financial MVP contract is invalid"
+    ):
+        target_series._history_contract(default_contract)
+
+
+def test_layered_history_real_contract_parser_rejects_unknown_top_level_key(
+    tmp_path: Path,
+) -> None:
+    """Strict contract QC is intentionally outside synthetic producer fixtures."""
+
+    contract_path = tmp_path / "portfolio-financial-mvp-source-v1.json"
+    contract = json.loads(
+        (ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    contract["uncontrolled_policy"] = "ACCEPT"
+    _write_json(contract_path, contract)
+
     with pytest.raises(TargetSeriesError, match="financial MVP contract is invalid"):
-        _build(fixture)
+        target_series._history_contract(contract_path)
+
+
+def test_layered_history_omits_current_echo_and_retains_historical_resolution(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    artifacts, _manifest_content = _build(fixture)
+
+    coverage = json.loads(artifacts["coverage.json"])
+    resolution = coverage["correction_resolutions"][
+        "echotrade-event-only-account-live-rejected"
+    ]
+    assert resolution["source_generation_id"] == (
+        "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
+    )
+    assert resolution["source_receipt_sha256"] == (
+        "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
+    )
+    assert resolution["sha256"] == (
+        "55d339e5299607daf72b44be72a03cc13998d34e81fc42d8e0a756152347ef4f"
+    )
+    assert not any(
+        row["series_id"] == "Growth at Market Pivot Points [EchoTrade]"
+        for artifact in (
+            "excluded.csv",
+            "live-only.csv",
+            "live-plus-backtest.csv",
+            "returns.csv",
+            "segments.csv",
+        )
+        for row in csv.DictReader(io.StringIO(artifacts[artifact].decode("utf-8")))
+    )
+
+
+def test_layered_history_accepts_exact_retained_echo_current_rows_without_emitting(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    _add_retained_echo_to_current_ledger(fixture)
+    _refresh_materialized_segment_identities(fixture)
+
+    artifacts, manifest_content = _build(fixture)
+    manifest = json.loads(manifest_content)
+    coverage = json.loads(artifacts["coverage.json"])
+    resolution = coverage["correction_resolutions"][
+        "echotrade-event-only-account-live-rejected"
+    ]
+    assert resolution["sha256"] == (
+        "55d339e5299607daf72b44be72a03cc13998d34e81fc42d8e0a756152347ef4f"
+    )
+    assert resolution["source_generation_id"] != next(
+        row["generation_id"]
+        for row in manifest["inputs"]
+        if row["input_id"] == "provider-ledger-manifest"
+    )
+    assert not any(
+        row["series_id"] == "Growth at Market Pivot Points [EchoTrade]"
+        for artifact in (
+            "excluded.csv",
+            "live-only.csv",
+            "live-plus-backtest.csv",
+            "returns.csv",
+            "segments.csv",
+        )
+        for row in csv.DictReader(io.StringIO(artifacts[artifact].decode("utf-8")))
+    )
+
+
+def test_layered_history_rejects_mutated_retained_echo_current_rows(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    _add_retained_echo_to_current_ledger(fixture, mutate=True)
+
+    with pytest.raises(
+        TargetSeriesError, match="EchoTrade rejected evidence differs from product authority"
+    ):
+        _refresh_materialized_segment_identities(fixture)
 
 
 def test_layered_history_generation_is_deterministic_and_fail_closed(
     tmp_path: Path,
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     artifacts, manifest_content = _build(fixture)
@@ -1984,24 +2349,20 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     echo_resolution = coverage["correction_resolutions"][
         "echotrade-event-only-account-live-rejected"
     ]
-    assert {
-        key: value for key, value in echo_resolution.items() if key != "sha256"
-    } == {
-        "observed_end": "2026-01-09",
-        "observed_start": "2026-01-05",
-        "return_observations": 5,
-        "source_generation_id": "1" * 64,
+    assert echo_resolution == {
+        "canonicalization": "TARGET_FIELDS_CANONICAL_JSON_V1",
+        "observed_end": "2025-11-24",
+        "observed_start": "2025-10-01",
+        "return_observations": 13,
+        "sha256": "55d339e5299607daf72b44be72a03cc13998d34e81fc42d8e0a756152347ef4f",
+        "source_generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
+        "source_receipt_sha256": "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56",
         "status": "REJECTED_EVENT_ONLY_RECONSTRUCTION_NOT_DAILY_NAV",
     }
-    assert len(echo_resolution["sha256"]) == 64
     excluded = list(
         csv.DictReader(io.StringIO(artifacts["excluded.csv"].decode("utf-8")))
     )
-    assert len(excluded) == echo_resolution["return_observations"]
-    assert {row["series_id"] for row in excluded} == {
-        coverage_by_strategy["echotrade-growth-pivots"]["series_id"]
-    }
-    assert {row["evidence_layer"] for row in excluded} == {"ACCOUNT_LIVE"}
+    assert excluded == []
     assert not any(
         row["strategy_id"] == "p123-ai-factor" and row["evidence_layer"] == "BACKTEST"
         for row in csv.DictReader(
@@ -2209,40 +2570,6 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
             contract_path=fixture["contract_path"],
         )
 
-    fabricated_echo = dict(artifacts)
-    fabricated_echo_manifest = json.loads(manifest_content)
-    fabricated_echo_rows = list(
-        csv.DictReader(io.StringIO(artifacts["excluded.csv"].decode("utf-8")))
-    )
-    fabricated_echo_rows[0]["return"] = "0.777"
-    fabricated_echo_content = _csv_bytes(
-        target_series.TARGET_FIELDS, fabricated_echo_rows
-    )
-    _replace_output(
-        fabricated_echo,
-        fabricated_echo_manifest,
-        "excluded.csv",
-        fabricated_echo_content,
-    )
-    fabricated_identity = target_series._target_row_identity(fabricated_echo_rows)
-    fabricated_coverage = json.loads(artifacts["coverage.json"])
-    fabricated_resolution = fabricated_coverage["correction_resolutions"][
-        "echotrade-event-only-account-live-rejected"
-    ]
-    fabricated_resolution.update(fabricated_identity)
-    _replace_output(
-        fabricated_echo,
-        fabricated_echo_manifest,
-        "coverage.json",
-        canonical_json_bytes(fabricated_coverage),
-    )
-    with pytest.raises(TargetSeriesError, match="product authority"):
-        validate_layered_history_generation(
-            artifacts=fabricated_echo,
-            manifest_content=_reidentify_manifest(fabricated_echo_manifest),
-            contract_path=fixture["contract_path"],
-        )
-
     baseline_coverage = json.loads(artifacts["coverage.json"])
     ledger_catalog_path = fixture["provider_ledger_catalog_path"]
     ledger_catalog = json.loads(ledger_catalog_path.read_text(encoding="utf-8"))
@@ -2252,11 +2579,16 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
     qsi_row["return"] = "0.123456"
     _write_json(ledger_catalog_path, ledger_catalog)
     ledger_manifest_path = fixture["provider_ledger_manifest_path"]
-    _core_generation_manifest(
+    ledger_generation_id = _core_generation_manifest(
         ledger_manifest_path,
         "quant-engine-provider-ledger",
         fixture["as_of_date"],
         [_artifact(ledger_catalog_path, "normalized/provider-ledger.json")],
+    )
+    _pointer(
+        fixture["provider_ledger_pointer_path"],
+        ledger_generation_id,
+        ledger_manifest_path,
     )
     contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
     _update_source_generation(
@@ -2272,12 +2604,7 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
         fixture["as_of_date"],
         "PROVIDER_LEDGER",
     )
-    _update_echo_rejected_identity(
-        contract,
-        ledger_manifest_path,
-        ledger_catalog_path,
-        "Growth at Market Pivot Points [EchoTrade]",
-    )
+    _restore_retained_echo_correction(contract)
     _write_json(fixture["contract_path"], contract)
     _refresh_materialized_segment_identities(fixture)
 
@@ -2312,6 +2639,7 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
 def test_layered_history_uses_ledger_account_return_after_matrixport_reconciliation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     baseline_artifacts, baseline_manifest = _build(fixture)
@@ -2349,6 +2677,7 @@ def test_layered_history_uses_ledger_account_return_after_matrixport_reconciliat
 def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     baseline_artifacts, baseline_manifest_content = _build(fixture)
@@ -2385,7 +2714,6 @@ def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage
     matrixport_manifest = json.loads(
         matrixport_manifest_path.read_text(encoding="utf-8")
     )
-    matrixport_manifest["generation_id"] = "9" * 64
     subscription_artifact = next(
         row
         for row in matrixport_manifest["artifacts"]
@@ -2394,10 +2722,20 @@ def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage
     subscription_artifact.update(
         _artifact(subscription_path, "csv/subscription_details.csv")
     )
-    _write_json(matrixport_manifest_path, matrixport_manifest)
+    matrixport_generation_id = _core_generation_manifest(
+        matrixport_manifest_path,
+        "quant-engine-matrixport",
+        fixture["as_of_date"],
+        matrixport_manifest["artifacts"],
+        {
+            "declared_exclusions": matrixport_manifest["coverage"][
+                "declared_exclusions"
+            ]
+        },
+    )
     _pointer(
         fixture["matrixport_pointer_path"],
-        matrixport_manifest["generation_id"],
+        matrixport_generation_id,
         matrixport_manifest_path,
     )
 
@@ -2433,15 +2771,6 @@ def test_layered_history_replays_robuxio_funding_correction_with_bounded_lineage
         "MATRIXPORT",
     )
     _write_json(contract_path, contract)
-    with pytest.raises(
-        TargetSeriesError, match="financial MVP contract is invalid"
-    ) as exc:
-        _build(fixture)
-    assert exc.value.__cause__ is not None
-    assert (
-        "materialized history segment source receipt differs: "
-        "robuxio-crypto:account-live"
-    ) in str(exc.value.__cause__)
     _refresh_materialized_segment_identities(fixture)
 
     corrected_artifacts, corrected_manifest_content = _build(fixture)
@@ -2655,6 +2984,7 @@ def test_layered_history_provider_interval_matches_current_product_authority() -
 
 def test_complete_account_history_age_is_warning_not_unavailability(
     tmp_path: Path,
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
@@ -2690,6 +3020,7 @@ def test_complete_account_history_age_is_warning_not_unavailability(
 
 def test_layered_history_verification_applies_assurance_profile_after_validation(
     tmp_path: Path,
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     artifacts, manifest_content = _build(fixture)
@@ -2827,7 +3158,9 @@ def test_layered_history_verification_applies_assurance_profile_after_validation
         "DEVELOPMENT"
     ] = "REUSE_WITHOUT_WARNING"
     _write_json(fixture["contract_path"], rewritten_contract)
-    with pytest.raises(TargetSeriesError, match="financial MVP contract is invalid"):
+    with pytest.raises(
+        TargetSeriesError, match="layered history product contract identity differs"
+    ):
         verify_layered_history_generation(
             destination,
             fixture["contract_path"],
@@ -2838,6 +3171,7 @@ def test_layered_history_verification_applies_assurance_profile_after_validation
 
 def test_layered_history_accepts_only_manifest_declared_matrixport_gap(
     tmp_path: Path,
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
 
@@ -2903,6 +3237,7 @@ def test_layered_history_accepts_only_manifest_declared_matrixport_gap(
 
 def test_layered_history_propagates_one_authoritative_gap_policy_edit(
     tmp_path: Path,
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     baseline_artifacts, baseline_manifest_content = _build(fixture)
@@ -2930,9 +3265,15 @@ def test_layered_history_propagates_one_authoritative_gap_policy_edit(
     for exclusion in manifest["coverage"]["declared_exclusions"]:
         exclusion["provenance"] = policy["provenance"]
         exclusion["reason"] = policy["reason"]
-    _write_json(manifest_path, manifest)
+    matrixport_generation_id = _core_generation_manifest(
+        manifest_path,
+        "quant-engine-matrixport",
+        fixture["as_of_date"],
+        manifest["artifacts"],
+        {"declared_exclusions": manifest["coverage"]["declared_exclusions"]},
+    )
     _pointer(
-        fixture["matrixport_pointer_path"], manifest["generation_id"], manifest_path
+        fixture["matrixport_pointer_path"], matrixport_generation_id, manifest_path
     )
     _update_source_generation(
         contract, "matrixport-account-generation", manifest_path, fixture["as_of_date"]
@@ -2975,13 +3316,32 @@ def test_layered_history_propagates_one_authoritative_gap_policy_edit(
     } == {
         "financial-mvp-contract",
         "matrixport-current",
+        "matrixport-holdings",
         "matrixport-manifest",
+        "matrixport-nav",
+        "matrixport-subscriptions",
     }
+    for input_id in (
+        "matrixport-holdings",
+        "matrixport-nav",
+        "matrixport-subscriptions",
+    ):
+        assert (
+            changed_inputs[input_id]["sha256"] == baseline_inputs[input_id]["sha256"]
+        )
+        assert (
+            changed_inputs[input_id]["size_bytes"]
+            == baseline_inputs[input_id]["size_bytes"]
+        )
+        assert (
+            changed_inputs[input_id]["generation_id"]
+            != baseline_inputs[input_id]["generation_id"]
+        )
     assert {
         name
         for name in baseline_artifacts
         if baseline_artifacts[name] != artifacts[name]
-    } == {"coverage.json"}
+    } == {"coverage.json", "segments.csv"}
     assert {
         name
         for name in baseline_manifest["source_manifests"]
@@ -3013,11 +3373,87 @@ def test_layered_history_propagates_one_authoritative_gap_policy_edit(
     coverage_with_baseline_policy["correction_resolutions"][
         "robuxio-account-live-after-funding"
     ]["source_gap_policy"] = baseline_policy
+    baseline_epoch_hpr = baseline_coverage["epoch_hpr_receipts"][0]
+    changed_epoch_hpr = coverage_with_baseline_policy["epoch_hpr_receipts"][0]
+    assert changed_epoch_hpr["strategy_id"] == "robuxio-crypto"
+    assert changed_epoch_hpr["receipt"]["source_gap_policy_sha256"] == (
+        hashlib.sha256(canonical_json_bytes(policy)).hexdigest()
+    )
+    assert (
+        changed_epoch_hpr["receipt"]["source_gap_policy_sha256"]
+        != baseline_epoch_hpr["receipt"]["source_gap_policy_sha256"]
+    )
+
+    baseline_robuxio = next(
+        row
+        for row in baseline_coverage["strategies"]
+        if row["strategy_id"] == "robuxio-crypto"
+    )
+    changed_robuxio = next(
+        row
+        for row in coverage_with_baseline_policy["strategies"]
+        if row["strategy_id"] == "robuxio-crypto"
+    )
+    baseline_segments = {
+        row["segment_id"]: row for row in baseline_robuxio["segments"]
+    }
+    changed_segments = {
+        row["segment_id"]: row for row in changed_robuxio["segments"]
+    }
+    account_live_lineage_path = (
+        "strategies[robuxio-crypto].segments[robuxio-crypto:account-live]."
+        "source_generation_id"
+    )
+    provider_live_lineage_path = (
+        "strategies[robuxio-crypto].segments[robuxio-crypto:provider-live-before-"
+        "funding].source_generation_id"
+    )
+    matrixport_generation_lineage = {
+        "epoch_hpr_receipts[0].source_generation_id": (
+            baseline_epoch_hpr["source_generation_id"],
+            changed_epoch_hpr["source_generation_id"],
+        ),
+        account_live_lineage_path: (
+            baseline_segments["robuxio-crypto:account-live"]["source_generation_id"],
+            changed_segments["robuxio-crypto:account-live"]["source_generation_id"],
+        ),
+        provider_live_lineage_path: (
+            baseline_segments["robuxio-crypto:provider-live-before-funding"][
+                "source_generation_id"
+            ],
+            changed_segments["robuxio-crypto:provider-live-before-funding"][
+                "source_generation_id"
+            ],
+        ),
+    }
+    assert set(matrixport_generation_lineage) == {
+        "epoch_hpr_receipts[0].source_generation_id",
+        account_live_lineage_path,
+        provider_live_lineage_path,
+    }
+    for baseline_generation_id, changed_generation_id in (
+        matrixport_generation_lineage.values()
+    ):
+        assert changed_generation_id == matrixport_generation_id
+        assert changed_generation_id != baseline_generation_id
+
+    changed_epoch_hpr["receipt"]["source_gap_policy_sha256"] = (
+        baseline_epoch_hpr["receipt"]["source_gap_policy_sha256"]
+    )
+    changed_epoch_hpr["source_generation_id"] = baseline_epoch_hpr["source_generation_id"]
+    for segment_id in (
+        "robuxio-crypto:account-live",
+        "robuxio-crypto:provider-live-before-funding",
+    ):
+        changed_segments[segment_id]["source_generation_id"] = baseline_segments[
+            segment_id
+        ]["source_generation_id"]
     assert coverage_with_baseline_policy == baseline_coverage
 
 
 def test_layered_history_rejects_unproduced_matrixport_transform_fact(
     tmp_path: Path,
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
@@ -3037,6 +3473,7 @@ def test_layered_history_rejects_unproduced_matrixport_transform_fact(
 
 def test_layered_history_does_not_admit_pre_live_p123_ai_without_product_version(
     tmp_path: Path,
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     returns_path = fixture["portfolio123_returns_path"]
@@ -3064,9 +3501,14 @@ def test_layered_history_does_not_admit_pre_live_p123_ai_without_product_version
         if row["artifact_id"] == "tables/returns_daily.parquet"
     )
     artifact.update(_artifact(returns_path, artifact["artifact_id"]))
-    _write_json(manifest_path, manifest)
+    portfolio123_generation_id = _core_generation_manifest(
+        manifest_path,
+        "quant-engine-portfolio123",
+        fixture["as_of_date"],
+        manifest["artifacts"],
+    )
     _pointer(
-        fixture["portfolio123_pointer_path"], manifest["generation_id"], manifest_path
+        fixture["portfolio123_pointer_path"], portfolio123_generation_id, manifest_path
     )
     contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
     _update_source_generation(
@@ -3082,6 +3524,7 @@ def test_layered_history_does_not_admit_pre_live_p123_ai_without_product_version
         fixture["as_of_date"],
         "PORTFOLIO123",
     )
+    _refresh_p123_eu_version(contract, portfolio123_generation_id)
     _append_p123_performance_receipt(
         contract, manifest_path, fixture["portfolio123_performance_path"]
     )
@@ -3092,6 +3535,7 @@ def test_layered_history_does_not_admit_pre_live_p123_ai_without_product_version
         fixture["portfolio123_relationships_path"],
     )
     _write_json(fixture["contract_path"], contract)
+    _refresh_materialized_segment_identities(fixture)
 
     artifacts, _manifest_content = _build(fixture)
     segments = list(
@@ -3118,6 +3562,7 @@ def test_layered_history_does_not_admit_pre_live_p123_ai_without_product_version
 
 def test_layered_history_registers_optional_strategy_history_manifest(
     tmp_path: Path,
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     returns_path = tmp_path / "strategy-history-returns.csv"
@@ -3263,6 +3708,7 @@ def test_layered_history_registers_optional_strategy_history_manifest(
 
 def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
     tmp_path: Path,
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     artifacts, manifest_content = _build(fixture)
@@ -3737,15 +4183,10 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
             contract_path=fixture["contract_path"],
         )
 
-    invalid_contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
-    invalid_contract["uncontrolled_policy"] = "ACCEPT"
-    _write_json(fixture["contract_path"], invalid_contract)
-    with pytest.raises(TargetSeriesError, match="contract is invalid"):
-        _build(fixture)
-    del invalid_contract["uncontrolled_policy"]
-    _write_json(fixture["contract_path"], invalid_contract)
-
-    semantic_bypass = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
+    baseline_contract = json.loads(
+        fixture["contract_path"].read_text(encoding="utf-8")
+    )
+    semantic_bypass = copy.deepcopy(baseline_contract)
     p123_provider = next(
         row
         for row in semantic_bypass["history_corrections"]["corrections"]
@@ -3754,9 +4195,15 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
     p123_provider["readiness"] = "READY"
     p123_provider["blockers"] = []
     _write_json(fixture["contract_path"], semantic_bypass)
-    with pytest.raises(TargetSeriesError, match="contract is invalid"):
-        _build(fixture)
-    _write_json(fixture["contract_path"], invalid_contract)
+    with pytest.raises(
+        TargetSeriesError, match="layered history product contract identity differs"
+    ):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=manifest_content,
+            contract_path=fixture["contract_path"],
+        )
+    _write_json(fixture["contract_path"], baseline_contract)
 
     reason_artifacts = dict(artifacts)
     reason_manifest = json.loads(manifest_content)
@@ -3938,6 +4385,7 @@ def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
 
 def test_layered_history_rejects_conflicting_p123_performance_capture(
     tmp_path: Path,
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     performance_path = fixture["portfolio123_performance_path"]
@@ -3954,10 +4402,15 @@ def test_layered_history_rejects_conflicting_p123_performance_capture(
         if row["artifact_id"] == "tables/har_managed_performance.parquet"
     )
     artifact.update(_artifact(performance_path, artifact["artifact_id"]))
-    _write_json(manifest_path, manifest)
+    portfolio123_generation_id = _core_generation_manifest(
+        manifest_path,
+        "quant-engine-portfolio123",
+        fixture["as_of_date"],
+        manifest["artifacts"],
+    )
     _pointer(
         fixture["portfolio123_pointer_path"],
-        manifest["generation_id"],
+        portfolio123_generation_id,
         manifest_path,
     )
     contract = json.loads(fixture["contract_path"].read_text(encoding="utf-8"))
@@ -3974,6 +4427,7 @@ def test_layered_history_rejects_conflicting_p123_performance_capture(
         fixture["as_of_date"],
         "PORTFOLIO123",
     )
+    _refresh_p123_eu_version(contract, portfolio123_generation_id)
     _append_p123_performance_receipt(contract, manifest_path, performance_path)
     _append_p123_ai_receipts(
         contract,
@@ -3987,7 +4441,10 @@ def test_layered_history_rejects_conflicting_p123_performance_capture(
         _build(fixture)
 
 
-def test_layered_history_rejects_relabel_and_admitted_overlap(tmp_path: Path) -> None:
+def test_layered_history_rejects_relabel_and_admitted_overlap(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+) -> None:
     fixture = _history_fixture(tmp_path)
     artifacts, manifest_content = _build(fixture)
     segments = list(
@@ -4074,7 +4531,10 @@ def test_layered_history_rejects_relabel_and_admitted_overlap(tmp_path: Path) ->
 
 
 def test_layered_history_cli_builds_verifies_and_requires_modes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    synthetic_history_authority: None,
 ) -> None:
     fixture = _history_fixture(tmp_path)
     output_root = tmp_path / "cli-candidate"
@@ -4087,6 +4547,7 @@ def test_layered_history_cli_builds_verifies_and_requires_modes(
         "--manifest": "matrixport_manifest_path",
         "--nav": "matrixport_nav_path",
         "--holdings": "matrixport_holdings_path",
+        "--daily-holdings": "matrixport_daily_holdings_path",
         "--subscriptions": "matrixport_subscription_path",
         "--quantbase-current": "quantbase_pointer_path",
         "--quantbase-manifest": "quantbase_manifest_path",
