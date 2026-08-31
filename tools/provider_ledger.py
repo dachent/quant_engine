@@ -2514,6 +2514,54 @@ def _account_live_returns_within_funded_boundaries(
     return result
 
 
+_ROLLFORWARD_FIELDS: Final = (
+    "account_reconciliation_sha256",
+    "beginning_capital",
+    "component_account_count",
+    "component_account_ids",
+    "flow_timing",
+    "source_record_ids",
+)
+_ROLLFORWARD_SHA256: Final = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _complete_broker_rollforward(row: Mapping[str, Any]) -> bool:
+    """Require a usable complete broker rollforward before enriching a return."""
+
+    digest = row.get("account_reconciliation_sha256")
+    if not isinstance(digest, str) or _ROLLFORWARD_SHA256.fullmatch(digest) is None:
+        return False
+    try:
+        beginning_capital = _decimal(
+            row.get("beginning_capital"), "broker beginning capital"
+        )
+    except ProviderLedgerError:
+        return False
+    if beginning_capital <= 0:
+        return False
+    account_ids = row.get("component_account_ids")
+    source_record_ids = row.get("source_record_ids")
+    component_count = row.get("component_account_count")
+    flow_timing = row.get("flow_timing")
+    return (
+        isinstance(account_ids, list)
+        and bool(account_ids)
+        and all(isinstance(value, str) and value.strip() for value in account_ids)
+        and len(set(account_ids)) == len(account_ids)
+        and isinstance(component_count, int)
+        and not isinstance(component_count, bool)
+        and component_count > 0
+        and component_count == len(account_ids)
+        and isinstance(flow_timing, str)
+        and bool(flow_timing.strip())
+        and isinstance(source_record_ids, list)
+        and bool(source_record_ids)
+        and all(
+            isinstance(value, str) and value.strip() for value in source_record_ids
+        )
+    )
+
+
 def _merge_account_returns(
     source_rows: Sequence[Mapping[str, Any]],
     broker_rows: Sequence[Mapping[str, Any]],
@@ -2531,6 +2579,11 @@ def _merge_account_returns(
             and str(item.get("strategy_id")) in provider_native_strategy_ids
         )
     ]
+    retained_account_rows = {
+        (str(row["strategy_id"]), str(row["date"])): row
+        for row in result
+        if row.get("evidence_layer") == "ACCOUNT_LIVE"
+    }
     last_source: dict[str, str] = {}
     for row in result:
         if row.get("evidence_layer") == "ACCOUNT_LIVE":
@@ -2544,6 +2597,13 @@ def _merge_account_returns(
             strategy_id not in provider_native_strategy_ids
             and str(broker_row["date"]) <= last_source.get(strategy_id, "")
         ):
+            retained = retained_account_rows.get(
+                (strategy_id, str(broker_row["date"]))
+            )
+            if retained is not None and _complete_broker_rollforward(broker_row):
+                retained.update(
+                    {field: broker_row[field] for field in _ROLLFORWARD_FIELDS}
+                )
             continue
         result.append(
             {

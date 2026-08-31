@@ -1314,6 +1314,144 @@ def test_account_rollforward_appends_only_dates_newer_than_accepted_history() ->
     assert rows[-1]["strategy_name"] == "Strategy A"
 
 
+def test_non_native_overlap_retains_source_return_and_projects_broker_rollforward() -> None:
+    """A retained non-native return still carries broker NAV rollforward proof."""
+
+    source = [
+        {
+            "cost": "0.0007",
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "matrixport",
+            "return": "0.0123",
+            "return_basis": "NET",
+            "return_type": "TOTAL",
+            "source_id": "owner-account-live-history",
+            "strategy_id": "strategy-owner",
+        }
+    ]
+    broker = [
+        {
+            "account_reconciliation_sha256": "a" * 64,
+            "beginning_capital": "12345.67",
+            "component_account_count": 2,
+            "component_account_ids": ["ibkr-b", "schwab-a"],
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "flow_timing": "MIXED_PROVIDER_FLOW_TIMING",
+            "provider_id": "schwab",
+            "return": "0.7777",
+            "return_basis": "NET",
+            "return_type": "TOTAL",
+            "source_record_ids": ["ibkr-nav-2", "schwab-nav-2"],
+            "strategy_id": "strategy-owner",
+        }
+    ]
+
+    rows = ledger._merge_account_returns(
+        source, broker, {"strategy-owner": "Owner Strategy"}
+    )
+
+    assert len(rows) == 1
+    row = rows[0]
+    assert {
+        field: row[field]
+        for field in (
+            "cost",
+            "provider_id",
+            "return",
+            "return_basis",
+            "return_type",
+            "source_id",
+        )
+    } == {
+        "cost": "0.0007",
+        "provider_id": "matrixport",
+        "return": "0.0123",
+        "return_basis": "NET",
+        "return_type": "TOTAL",
+        "source_id": "owner-account-live-history",
+    }
+    assert {
+        field: row[field]
+        for field in (
+            "account_reconciliation_sha256",
+            "beginning_capital",
+            "component_account_count",
+            "component_account_ids",
+            "flow_timing",
+            "source_record_ids",
+        )
+    } == {
+        "account_reconciliation_sha256": "a" * 64,
+        "beginning_capital": "12345.67",
+        "component_account_count": 2,
+        "component_account_ids": ["ibkr-b", "schwab-a"],
+        "flow_timing": "MIXED_PROVIDER_FLOW_TIMING",
+        "source_record_ids": ["ibkr-nav-2", "schwab-nav-2"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("rollforward_override", "missing_field"),
+    [
+        ({}, "flow_timing"),
+        ({}, "account_reconciliation_sha256"),
+        ({}, "beginning_capital"),
+        ({}, "component_account_count"),
+        ({}, "component_account_ids"),
+        ({}, "source_record_ids"),
+        ({"account_reconciliation_sha256": "A" * 64}, None),
+        ({"beginning_capital": ""}, None),
+        ({"beginning_capital": "NaN"}, None),
+        ({"beginning_capital": "0"}, None),
+        ({"beginning_capital": "-1"}, None),
+        ({"component_account_ids": ["ibkr-b", " "]}, None),
+        ({"component_account_ids": ["ibkr-b", "ibkr-b"]}, None),
+        ({"component_account_count": 2.0}, None),
+        ({"flow_timing": ""}, None),
+        ({"source_record_ids": ["schwab-nav-2", " "]}, None),
+    ],
+)
+def test_non_native_overlap_does_not_project_an_incomplete_broker_rollforward(
+    rollforward_override: dict[str, object],
+    missing_field: str | None,
+) -> None:
+    """A malformed broker bundle cannot partially enrich an inherited return."""
+
+    source = [
+        {
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "matrixport",
+            "return": "0.0123",
+            "strategy_id": "strategy-owner",
+        }
+    ]
+    broker = {
+        "account_reconciliation_sha256": "a" * 64,
+        "beginning_capital": "12345.67",
+        "component_account_count": 2,
+        "component_account_ids": ["ibkr-b", "schwab-a"],
+        "date": "2026-01-02",
+        "evidence_layer": "ACCOUNT_LIVE",
+        "flow_timing": "MIXED_PROVIDER_FLOW_TIMING",
+        "provider_id": "schwab",
+        "return": "0.7777",
+        "source_record_ids": ["ibkr-nav-2", "schwab-nav-2"],
+        "strategy_id": "strategy-owner",
+    }
+    broker.update(rollforward_override)
+    if missing_field is not None:
+        del broker[missing_field]
+
+    rows = ledger._merge_account_returns(
+        source, [broker], {"strategy-owner": "Owner Strategy"}
+    )
+
+    assert rows == source
+
+
 def test_native_provider_account_path_replaces_stale_retained_rows() -> None:
     source = [
         {
