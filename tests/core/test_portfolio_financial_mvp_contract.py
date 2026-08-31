@@ -1796,13 +1796,13 @@ def test_accepted_provider_ledger_history_identity_cannot_be_coherently_relabell
     """History lineage is a fixed receipt, not a replaceable generation label."""
 
     replacements = {
-        "cde06a404effc35c4c6ecdb96042abd7153638c6dabe758c60c65d77fbd64f53": (
+        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62": (
             "a" * 64
         ),
-        "cd106e04d11980097c77d2b6fe855837a498765b96f3a523f1b8a8c2b6216331": (
+        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2": (
             "b" * 64
         ),
-        "7f85049dc3111bf29dd8f7009fc3593c00743bc4f764871155c071a684514afa": (
+        "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1": (
             "c" * 64
         ),
     }
@@ -1828,17 +1828,17 @@ def test_accepted_provider_ledger_history_identity_cannot_be_coherently_relabell
         _validate(relabelled)
 
 
-def test_two_vintage_history_accepts_cde06_active_and_retains_07c590_echo() -> None:
+def test_two_vintage_history_accepts_2961_active_and_retains_07c590_echo() -> None:
     """Active owner history advances without relabelling deprecated Echo evidence."""
 
     active_generation = (
-        "cde06a404effc35c4c6ecdb96042abd7153638c6dabe758c60c65d77fbd64f53"
+        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
     )
     active_manifest = (
-        "cd106e04d11980097c77d2b6fe855837a498765b96f3a523f1b8a8c2b6216331"
+        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
     )
     active_catalog = (
-        "7f85049dc3111bf29dd8f7009fc3593c00743bc4f764871155c071a684514afa"
+        "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
     )
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
@@ -1933,14 +1933,60 @@ def test_two_vintage_history_accepts_cde06_active_and_retains_07c590_echo() -> N
     assert contract_tool._verify_strategy_version_history_evidence(contract) == 3
 
 
+def test_owner_account_history_rebinds_to_corrected_2961_ledger_generation() -> None:
+    """The active owner-history lineage follows the corrected governed ledger."""
+
+    generation_id = (
+        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
+    )
+    manifest_sha256 = (
+        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
+    )
+    catalog_sha256 = (
+        "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
+    )
+    contract = _contract()
+    owner_source = _source(contract, "owner-account-live-history")
+    assert owner_source["current_generation"] == {
+        "generation_id": generation_id,
+        "sha256": manifest_sha256,
+        "as_of": "2026-08-16",
+    }
+    active_segments = [
+        row
+        for row in contract["history_corrections"]["materialized_segment_identities"]
+        if row["source_id"] == "owner-account-live-history"
+    ]
+    assert len(active_segments) == 5
+    assert all(
+        row["source_generation_id"] == generation_id
+        and row["source_generation_sha256"] == manifest_sha256
+        for row in active_segments
+    )
+    expected_provider_receipts = {
+        "p123-eu-account-live": {manifest_sha256, catalog_sha256},
+        "volatis-account-live": {manifest_sha256},
+    }
+    for correction_id, expected_receipts in expected_provider_receipts.items():
+        correction = _history_correction(contract, correction_id)
+        assert correction["capture"]["generation_id"] == generation_id
+        assert correction["capture"]["generation_sha256"] == manifest_sha256
+        assert {
+            receipt["sha256"]
+            for receipt in correction["source_receipts"]
+            if receipt["authority_root"] == "PROVIDER_LEDGER"
+        } == expected_receipts
+    _validate(contract)
+
+
 def test_two_vintage_history_rejects_legacy_rollbacks_and_rewrites() -> None:
     """The deprecated event-only class cannot authorize active-lineage changes."""
 
     active_generation = (
-        "cde06a404effc35c4c6ecdb96042abd7153638c6dabe758c60c65d77fbd64f53"
+        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
     )
     active_manifest = (
-        "cd106e04d11980097c77d2b6fe855837a498765b96f3a523f1b8a8c2b6216331"
+        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
     )
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
