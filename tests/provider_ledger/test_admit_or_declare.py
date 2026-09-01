@@ -53,6 +53,15 @@ P123_EQUITY_CURVE_SHA256 = (
 )
 P123_RETURN_START = date(2025, 11, 13)
 P123_RETURN_END = date(2026, 8, 13)
+P123_GENERATION_ROOT = (
+    ROOT.parent / "dataPortfolio123" / "generations" / P123_GENERATION_ID
+)
+P123_RETAINED_INPUTS = (
+    P123_GENERATION_ROOT / "generation.json",
+    P123_GENERATION_ROOT / "portfolio123-generation.json",
+    P123_GENERATION_ROOT / "tables" / "har_managed_performance.parquet",
+    P123_GENERATION_ROOT / "tables" / "har_equity_curve.parquet",
+)
 
 
 def _retained_p123_admit_or_declare_fixture() -> tuple[
@@ -358,6 +367,10 @@ def _receipt(
     return receipt, receipt_bytes, authority, provider_generations
 
 
+@pytest.mark.skipif(
+    not all(path.is_file() for path in P123_RETAINED_INPUTS),
+    reason="retained P123 EU provider evidence is not mounted",
+)
 def test_retained_p123_receipt_admits_managed_returns_only() -> None:
     (
         authority,
