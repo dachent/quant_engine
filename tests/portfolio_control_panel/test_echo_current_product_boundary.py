@@ -1,25 +1,12 @@
 from __future__ import annotations
 
 import importlib.util
-import hashlib
 import json
 from pathlib import Path
 import sys
 
 import pytest
 from jsonschema import Draft202012Validator
-
-from quant_engine.core import (
-    AdapterIdentity,
-    CoverageClaim,
-    CoverageStatus,
-    GenerationManifest,
-    SourceArtifact,
-    VerificationStatus,
-    read_generation_bundle,
-    stage_generation_bundle,
-)
-
 
 ROOT = Path(__file__).resolve().parents[2]
 SPEC = importlib.util.spec_from_file_location(
@@ -50,7 +37,6 @@ REQUIRED_STRATEGY_IDS = {
     "volatis-strategy",
 }
 EXCLUDED_STRATEGY_IDS = {"composer-holy-grail", "echotrade-growth-pivots"}
-REAL_BASELINE_ROOT = ROOT.parent / "dataPortfolio" / "baseline"
 
 
 def _current_manifest_rows() -> list[dict[str, object]]:
@@ -173,216 +159,6 @@ def _schema9_epoch_fixture() -> tuple[
         },
     }
     return {"schema_version": 9, "rows": manifest_rows}, performance_rows, crosswalk
-
-
-def _real_baseline_catalog() -> dict[str, object]:
-    pointer = json.loads((REAL_BASELINE_ROOT / "CURRENT.json").read_text(encoding="utf-8"))
-    return json.loads(
-        (
-            REAL_BASELINE_ROOT
-            / "generations"
-            / pointer["generation_id"]
-            / "portfolio-baseline.json"
-        ).read_text(encoding="utf-8")
-    )
-
-
-def _build_governed_real_report(tmp_path: Path) -> dict[str, object]:
-    """Supply the mandatory epoch manifest, receipt, crosswalk, and generation."""
-
-    crosswalk_path = tmp_path / "crosswalk.json"
-    crosswalk = json.loads(
-        (ROOT / "contracts" / "account-strategy-current-epoch-crosswalk-v1.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    crosswalk_bytes = reporter.canonical_json_bytes(crosswalk)
-    crosswalk_path.write_bytes(crosswalk_bytes)
-    manifest = {
-        "rows": [
-            {
-                key: row[key]
-                for key in ("account_id", "strategy_id", "effective_start", "effective_end")
-            }
-            for row in crosswalk["rows"]
-            if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
-        ],
-        "schema_version": 8,
-    }
-    manifest_path = tmp_path / "manifest.json"
-    manifest_bytes = reporter.canonical_json_bytes(manifest)
-    manifest_path.write_bytes(manifest_bytes)
-    generation_root = tmp_path / "epoch-generation"
-    verification_bytes = reporter.canonical_json_bytes({"status": "VERIFIED"})
-    generation_manifest = GenerationManifest.build(
-        as_of_date=reporter.date(2026, 8, 16),
-        adapter=AdapterIdentity("synthetic-epoch-fixture", "1"),
-        coverage=CoverageClaim(
-            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="synthetic report epoch fixture",
-            fact_types=("account-strategy-manifest", "account-assignment-crosswalk"),
-            observed_start=reporter.date(2026, 8, 13),
-            observed_end=reporter.date(2026, 8, 16),
-        ),
-        artifacts=(
-            SourceArtifact(
-                artifact_id="outputs/account-strategy-manifest.json",
-                sha256=hashlib.sha256(manifest_bytes).hexdigest(),
-                size_bytes=len(manifest_bytes),
-                as_of_date=reporter.date(2026, 8, 16),
-                schema_name="account-strategy-manifest",
-                schema_version="8",
-            ),
-            SourceArtifact(
-                artifact_id="authority/account-assignment-crosswalk.json",
-                sha256=hashlib.sha256(crosswalk_bytes).hexdigest(),
-                size_bytes=len(crosswalk_bytes),
-                as_of_date=reporter.date(2026, 8, 16),
-                schema_name="account-strategy-current-epoch-crosswalk",
-                schema_version="1",
-            ),
-            SourceArtifact(
-                artifact_id="verification/independent-verification.json",
-                sha256=hashlib.sha256(verification_bytes).hexdigest(),
-                size_bytes=len(verification_bytes),
-                as_of_date=reporter.date(2026, 8, 16),
-                schema_name="account-manifest-independent-verification",
-                schema_version="3",
-            ),
-        ),
-        verification=VerificationStatus.VERIFIED,
-    )
-    stage_generation_bundle(
-        generation_root,
-        generation_manifest,
-        {
-            "outputs/account-strategy-manifest.json": manifest_bytes,
-            "authority/account-assignment-crosswalk.json": crosswalk_bytes,
-            "verification/independent-verification.json": verification_bytes,
-        },
-    )
-    bundle = read_generation_bundle(generation_root, generation_manifest.generation_id)
-    source_path = tmp_path / "source.json"
-    source_path.write_bytes(
-        reporter.canonical_json_bytes(
-            {
-                "generation_id": generation_manifest.generation_id,
-                "generation_manifest_sha256": hashlib.sha256(
-                    bundle.manifest.to_json_bytes()
-                ).hexdigest(),
-                "generation_receipt_sha256": hashlib.sha256(bundle.receipt_bytes).hexdigest(),
-                "full_directory_inventory_sha256": bundle.full_directory_inventory_sha256,
-                "artifact": {
-                    "path": "outputs/account-strategy-manifest.json",
-                    "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
-                    "size_bytes": len(manifest_bytes),
-                    "schema": {"name": "account-strategy-manifest", "version": "8"},
-                },
-                "crosswalk": {
-                    "path": "authority/account-assignment-crosswalk.json",
-                    "sha256": hashlib.sha256(crosswalk_bytes).hexdigest(),
-                    "size_bytes": len(crosswalk_bytes),
-                    "schema": {
-                        "name": "account-strategy-current-epoch-crosswalk",
-                        "version": "1",
-                    },
-                },
-            }
-        )
-    )
-    report, _content, _path = reporter.build_report_data(
-        REAL_BASELINE_ROOT,
-        epoch_manifest_path=manifest_path,
-        epoch_manifest_source_path=source_path,
-        epoch_crosswalk_path=crosswalk_path,
-        epoch_manifest_generation_root=generation_root,
-    )
-    return report
-
-
-def test_panel_independently_verifies_real_seven_strategy_projection(tmp_path: Path) -> None:
-    """Trusting the unfiltered baseline would restore excluded HWM subjects."""
-
-    report = _build_governed_real_report(tmp_path)
-    baseline = _real_baseline_catalog()
-    controls = panel._financial_mvp_product_controls()
-
-    projection = panel._current_product_baseline_projection(baseline, controls)
-    assert {row["strategy_id"] for row in projection["hwm_inputs"]["periods"]} == REQUIRED_STRATEGY_IDS
-    assert {row["strategy_id"] for row in projection["strategy_returns"]} == REQUIRED_STRATEGY_IDS
-    assert len(projection["hwm_inputs"]["periods"]) == 231
-    for field_name, rows in (
-        ("strategy_returns", projection["strategy_returns"]),
-        ("hwm_inputs.periods", projection["hwm_inputs"]["periods"]),
-    ):
-        for strategy_id in REQUIRED_STRATEGY_IDS:
-            membership = controls[strategy_id]["funded_membership"]
-            strategy_dates = [
-                row["date"] for row in rows if row["strategy_id"] == strategy_id
-            ]
-            assert strategy_dates, (field_name, strategy_id)
-            assert min(strategy_dates) >= membership["effective_start"]
-    panel_accounts = panel._current_product_account_summary_rows(
-        report["account_summary"], baseline, controls
-    )
-    assert {row["account_id"] for row in panel_accounts} == {
-        row["account_id"] for row in report["account_summary"]
-    }
-    panel_allocations = panel._current_product_rows(
-        report["allocation_history"], controls
-    )
-    assert len(panel_allocations) == 8
-    assert {
-        row["strategy_id"]
-        for row in panel_allocations
-        if row["scope"] == "SYSTEMATIC"
-    } == REQUIRED_STRATEGY_IDS
-    panel._validate_current_product_baseline_projection(report, baseline, controls)
-    panel_numerical = panel._compute_panel_numerical_hwm(projection)
-    assert panel_numerical == {
-        key: report["hwm_summary"][key]
-        for key in panel_numerical
-    }
-
-    for excluded_id in sorted(EXCLUDED_STRATEGY_IDS):
-        forged = json.loads(json.dumps(report))
-        excluded_period = next(
-            row
-            for row in baseline["hwm_inputs"]["periods"]
-            if row["strategy_id"] == excluded_id
-        )
-        forged["hwm_inputs"]["periods"].append(excluded_period)
-        with pytest.raises(
-            panel.ControlPanelValidationError,
-            match="report hwm_inputs differs from the current-product baseline projection",
-        ):
-            panel._validate_current_product_baseline_projection(
-                forged, baseline, controls
-            )
-
-
-def test_panel_rejects_excluded_return_reintroduced_after_projection(tmp_path: Path) -> None:
-    """Dropping return parity would let Echo regain a current return path."""
-
-    report = _build_governed_real_report(tmp_path)
-    baseline = _real_baseline_catalog()
-    controls = panel._financial_mvp_product_controls()
-    forged = json.loads(json.dumps(report))
-    forged["strategy_returns"].append(
-        next(
-            row
-            for row in baseline["strategy_returns"]
-            if row["strategy_id"] == "echotrade-growth-pivots"
-        )
-    )
-
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="report strategy_returns differ from the current-product baseline projection",
-    ):
-        panel._validate_current_product_baseline_projection(
-            forged, baseline, controls
-        )
 
 
 def test_panel_rejects_owner_control_snapshot_that_reactivates_echo() -> None:

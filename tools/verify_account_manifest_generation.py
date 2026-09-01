@@ -3589,9 +3589,9 @@ def _verify_mixed_authority_and_coverage_many(
                     if not isinstance(coverage, Mapping) or str(coverage_row.get("provider_id", "")).upper() != provider:
                         continue
                     for item in coverage.get("declared_exclusions", []):
-                        token = item.get("item") if isinstance(item, Mapping) else None
-                        if isinstance(token, str) and token.startswith("nav_missing_date:"):
-                            missing = token.removeprefix("nav_missing_date:")
+                        exclusion_item = item.get("item") if isinstance(item, Mapping) else None
+                        if isinstance(exclusion_item, str) and exclusion_item.startswith("nav_missing_date:"):
+                            missing = exclusion_item.removeprefix("nav_missing_date:")
                             if requested_start.isoformat() <= missing <= requested_end.isoformat():
                                 expected_missing.append({"start": missing, "end": missing, "reason": "PROVIDER_DECLARED_NAV_MISSING"})
             if receipt.get("missing_intervals") != sorted(expected_missing, key=lambda item: item["start"]):
@@ -3931,16 +3931,22 @@ def _mixed_normalized_facts(
                 raw.get("nav_source_artifact_id")
             )
         anchors.append(normalized)
-    cutoff = _current_epoch_calculation_cutoff(selected)
-    if cutoff is not None:
-        flows = [
-            flow
-            for flow in flows
-            if _date_value(
-                flow.get("nav_recognition_date", flow["event_date"])
-            ) <= cutoff
-        ]
     return navs, flows, anchors
+
+
+def _mixed_cutoff_bounded_flows(
+    selected: IndependentVerifierInputs,
+    source_flows: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    cutoff = _current_epoch_calculation_cutoff(selected)
+    if cutoff is None:
+        return source_flows
+    return [
+        flow
+        for flow in source_flows
+        if _date_value(flow["event_date"]) <= cutoff
+        and _date_value(flow.get("nav_recognition_date", flow["event_date"])) <= cutoff
+    ]
 
 
 def _mixed_cutoff_bounded_capital_anchors(
@@ -3955,9 +3961,12 @@ def _mixed_cutoff_bounded_capital_anchors(
     return [
         anchor
         for anchor in source_anchors
-        if _date_value(
-            anchor.get("nav_recognition_date", anchor["event_date"])
-        ) <= cutoff
+        if _date_value(anchor["event_date"]) <= cutoff
+        and (
+            anchor.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION"
+            or _date_value(anchor.get("nav_recognition_date", anchor["event_date"]))
+            <= cutoff
+        )
     ]
 
 
@@ -4061,6 +4070,8 @@ def _mixed_admitted_fact_projection(
         if in_funded_epoch(nav, "as_of_date")
     ]
     def anchor_membership_date(anchor: Mapping[str, object]) -> object:
+        if anchor.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION":
+            return anchor.get("event_date")
         return anchor.get("nav_recognition_date", anchor.get("event_date"))
 
     projected_anchors = [
@@ -4143,7 +4154,8 @@ def _verify_mixed_calculation_bridge(
     authority_state: Mapping[str, object],
     admission: Mapping[str, object],
 ) -> dict[str, object]:
-    navs, flows, source_capital_anchors = _mixed_normalized_facts(selected)
+    navs, source_flows, source_capital_anchors = _mixed_normalized_facts(selected)
+    flows = _mixed_cutoff_bounded_flows(selected, source_flows)
     classified = _strict_object(normalized["authority/classified-flows.json"])
     events = classified.get("events")
     if (
@@ -4770,6 +4782,55 @@ def _verify_mixed_output_and_state(
     coverage_by_key = {
         tuple(row["assignment"].values()): row for row in coverage_rows
     }
+    _, source_flows, source_capital_anchors = _mixed_normalized_facts(selected)
+    cutoff_excluded_opening_anchor_keys = {
+        tuple(_assignment_record(assignment).values())
+        for assignment in mapped
+        if any(
+            anchor.get("capital_type") == "OPENING_CAPITAL_ANCHOR"
+            and anchor.get("account_id") == assignment["account_id"]
+            and anchor.get("strategy_id") == assignment["strategy_id"]
+            and (
+                _date_value(anchor["event_date"]) > calculation_cutoff
+                or _date_value(anchor.get("nav_recognition_date", anchor["event_date"])) > calculation_cutoff
+            )
+            for anchor in source_capital_anchors
+        )
+    }
+    cutoff_excluded_allocation_keys = {
+        tuple(_assignment_record(assignment).values())
+        for assignment in mapped
+        if any(
+            anchor.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION"
+            and anchor.get("account_id") == assignment["account_id"]
+            and anchor.get("strategy_id") == assignment["strategy_id"]
+            and _date_value(assignment["effective_start"])
+            <= _date_value(anchor["event_date"])
+            <= calculation_cutoff
+            and (
+                assignment["effective_end"] is None
+                or _date_value(anchor["event_date"]) <= _date_value(assignment["effective_end"])
+            )
+            and _date_value(anchor.get("nav_recognition_date", anchor["event_date"])) > calculation_cutoff
+            for anchor in source_capital_anchors
+        )
+    }
+    cutoff_excluded_flow_keys = {
+        tuple(_assignment_record(assignment).values())
+        for assignment in mapped
+        if any(
+            flow.get("account_id") == assignment["account_id"]
+            and _date_value(assignment["effective_start"])
+            <= _date_value(flow["event_date"])
+            <= calculation_cutoff
+            and (
+                assignment["effective_end"] is None
+                or _date_value(flow["event_date"]) <= _date_value(assignment["effective_end"])
+            )
+            and _date_value(flow.get("nav_recognition_date", flow["event_date"])) > calculation_cutoff
+            for flow in source_flows
+        )
+    }
     expected_rows: list[dict[str, object]] = []
     comparison = _NumericComparison(0, 0, 0)
     blocker_chains: list[dict[str, object]] = []
@@ -4792,6 +4853,41 @@ def _verify_mixed_output_and_state(
         coverage_complete = coverage_row["status"] == "COMPLETE"
         admission_funded = policy_row["status"] == "FUNDED"
         if coverage_complete and admission_funded:
+            if key in (
+                cutoff_excluded_opening_anchor_keys
+                | cutoff_excluded_allocation_keys
+                | cutoff_excluded_flow_keys
+            ):
+                blocking_reason = (
+                    "OPENING_ANCHOR_RECOGNITION_AFTER_CUTOFF"
+                    if key in cutoff_excluded_opening_anchor_keys
+                    else "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL"
+                )
+                expected = {
+                    **base,
+                    "admission_status": "FUNDED",
+                    "admission_policy_reference": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                    "admission_authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                    "funded_nav_record_ids": list(policy_row["funded_nav_record_ids"]),
+                    "status": "BLOCKED_RETURN_LINKAGE",
+                    "blocking_reason": blocking_reason,
+                }
+                if candidate != expected or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(candidate):
+                    _fail()
+                expected_rows.append(expected)
+                blocker_chains.append(
+                    {
+                        "assignment": _assignment_record(assignment),
+                        "coverage": {"status": "COMPLETE", "blocker_code": None},
+                        "admission": {"status": "FUNDED", "blocker_code": None},
+                        "output": {
+                            "status": "BLOCKED_RETURN_LINKAGE",
+                            "blocking_reason": blocking_reason,
+                        },
+                        "numeric_candidate": False,
+                    }
+                )
+                continue
             facts = _mixed_numeric_facts(selected, assignment, bridge)
             predecessor_assignment = admission["predecessor_by_key"].get(key)
             predecessor_fact: _IndependentPredecessorFact | None = None

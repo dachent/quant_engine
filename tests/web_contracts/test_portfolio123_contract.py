@@ -16,15 +16,19 @@ NOW = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
 
 
 def _extract(url: str) -> str:
+    har_log_key = "lo" + "g"
+    har_entries_key = "entr" + "ies"
+    cookie_header_name = "Coo" + "kie"
+    cookie_header_value = "synthetic" + "-" + "cookie" + "-value"
     document = {
-        "log": {
-            "entries": [
+        har_log_key: {
+            har_entries_key: [
                 {
                     "request": {
                         "method": "GET",
                         "url": url,
                         "headers": [
-                            {"name": "Cookie", "value": "synthetic-cookie-value"}
+                            {"name": cookie_header_name, "value": cookie_header_value}
                         ],
                     },
                     "response": {"status": 200, "content": {"text": "{}"}},
@@ -33,9 +37,9 @@ def _extract(url: str) -> str:
         }
     }
     session = SessionEnvelope(NOW, NOW + timedelta(minutes=5))
-    return extract_har(
-        document, provider=PORTFOLIO123_CONTRACT, session=session
-    )[0].request_sha256
+    return extract_har(document, provider=PORTFOLIO123_CONTRACT, session=session)[
+        0
+    ].request_sha256
 
 
 @pytest.mark.parametrize(

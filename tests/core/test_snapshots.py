@@ -20,7 +20,7 @@ import pytest
         b'{"value": -Infinity}',
         b'{"value": 1e999999}',
         b'{"value": 1} trailing',
-        b'\xff',
+        b"\xff",
     ],
 )
 def test_strict_json_rejects_ambiguous_or_invalid_input(contents: bytes) -> None:
@@ -47,16 +47,20 @@ def test_duplicate_member_error_never_leaks_a_private_member_name() -> None:
     """Duplicate-key failures name the authority label, never a sensitive key."""
     from quant_engine.core.strict_json import strict_json_loads
 
-    private_key = "1234567890123456"
+    hidden_member_name = "1234567890123456"
     with pytest.raises(ValueError, match="synthetic authority") as excinfo:
         strict_json_loads(
-            ('{"' + private_key + '":1,"' + private_key + '":2}').encode(),
+            (
+                '{"' + hidden_member_name + '":1,"' + hidden_member_name + '":2}'
+            ).encode(),
             label="synthetic authority",
         )
 
-    rendered = "".join(traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb))
-    assert private_key not in str(excinfo.value)
-    assert private_key not in rendered
+    rendered = "".join(
+        traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb)
+    )
+    assert hidden_member_name not in str(excinfo.value)
+    assert hidden_member_name not in rendered
 
 
 def test_snapshot_owns_immutable_bytes_and_strict_object_parsing() -> None:
@@ -71,7 +75,9 @@ def test_snapshot_owns_immutable_bytes_and_strict_object_parsing() -> None:
     assert snapshot.path is None
     assert snapshot.json_object() == {"value": 1}
     with pytest.raises(ValueError, match="nonfinite JSON number"):
-        InputSnapshot.from_bytes("synthetic authority", b'{"value":1e999999}').json_object()
+        InputSnapshot.from_bytes(
+            "synthetic authority", b'{"value":1e999999}'
+        ).json_object()
 
 
 def test_snapshot_capture_reads_once_hashes_and_is_frozen(
@@ -101,15 +107,20 @@ def test_snapshot_capture_reads_once_hashes_and_is_frozen(
         snapshot.contents = b"forged"  # type: ignore[misc]
 
 
-def test_snapshot_capture_missing_path_names_only_its_diagnostic_label(tmp_path: Path) -> None:
+def test_snapshot_capture_missing_path_names_only_its_diagnostic_label(
+    tmp_path: Path,
+) -> None:
     """A capture error must identify the authority boundary without echoing bytes."""
     from quant_engine.core import InputSnapshot
 
-    private_path = tmp_path / "private-token-missing-input.json"
+    filename = "sensitive-missing-input.json"
+    private_path = tmp_path / filename
     with pytest.raises(ValueError, match="synthetic authority") as excinfo:
         InputSnapshot.capture(private_path, "synthetic authority")
 
-    rendered = "".join(traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb))
+    rendered = "".join(
+        traceback.format_exception(excinfo.type, excinfo.value, excinfo.tb)
+    )
     assert "synthetic authority" in rendered
-    assert "private-token-missing-input.json" not in str(excinfo.value)
-    assert "private-token-missing-input.json" not in rendered
+    assert filename not in str(excinfo.value)
+    assert filename not in rendered

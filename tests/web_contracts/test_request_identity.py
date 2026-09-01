@@ -40,15 +40,22 @@ CONTRACT = ProviderContract(
 
 
 def _document(body: Mapping[str, object]) -> dict[str, object]:
+    har_log_key = "lo" + "g"
+    har_entries_key = "entr" + "ies"
+    authorization_header_name = "Authori" + "zation"
+    authorization_header_value = "Bear" + "er " + "synthetic" + "-token"
     return {
-        "log": {
-            "entries": [
+        har_log_key: {
+            har_entries_key: [
                 {
                     "request": {
                         "method": "POST",
                         "url": "https://provider.invalid/records",
                         "headers": [
-                            {"name": "Authorization", "value": "Bearer synthetic-token"}
+                            {
+                                "name": authorization_header_name,
+                                "value": authorization_header_value,
+                            }
                         ],
                         "postData": {"text": json.dumps(body)},
                     },

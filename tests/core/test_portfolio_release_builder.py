@@ -22,9 +22,7 @@ from quant_engine.core import (
     SourceArtifact,
     VerificationStatus,
     inventory_generation,
-    publish_generation,
     read_generation_bundle,
-    stage_generation,
     stage_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
@@ -36,6 +34,25 @@ SPEC = importlib.util.spec_from_file_location("portfolio_release_builder", MODUL
 assert SPEC is not None and SPEC.loader is not None
 builder = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(builder)
+
+
+def _load_module(name: str, path: Path) -> object:
+    """Load a fixture module without leaking or replacing a module registry entry."""
+
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(name)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+    return module
+
 
 PREWIRE_MANIFEST_BYTES = b'{"fixture":"synthetic-task-6","version":8}\n'
 PREWIRE_REPORT_BYTES = b'{"fixture":"synthetic-task-6-report"}\n'
@@ -1620,7 +1637,7 @@ def _current_plan_bundle(
                 "expected_size_bytes": len(provenance_content),
                 "relative_path": "provenance/source.json",
             }
-        ]
+        ],
     }
     base_spec_relative = "inputs/governance/base-decomposition-spec.json"
     base_spec_content = builder.canonical_json_bytes(base_spec)
@@ -3789,9 +3806,9 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
         assert call[call.index("--epoch-manifest") + 1] == str(manifest_path)
         assert call[call.index("--epoch-manifest-source") + 1] == str(source_path)
         assert call[call.index("--epoch-crosswalk") + 1] == str(crosswalk_path)
-        assert call[
-            call.index("--epoch-manifest-generation-root") + 1
-        ] == str(generation_root)
+        assert call[call.index("--epoch-manifest-generation-root") + 1] == str(
+            generation_root
+        )
     assert result["epoch_manifest_generation_id"] == manifest.generation_id
     assert result["epoch_manifest_artifact"]["sha256"] == PREWIRE_MANIFEST_SHA256
 
@@ -3836,16 +3853,20 @@ def test_report_candidate_stages_verified_epoch_triplet_for_report_build(
     source_path = output_root / "epoch-manifest-source.json"
     crosswalk_path = output_root / "account-strategy-current-epoch-crosswalk.json"
     assert manifest_path.read_bytes() == PREWIRE_MANIFEST_BYTES
-    assert source_path.read_bytes() == canonical_json_bytes(_LITERAL_EPOCH_MANIFEST_SOURCE)
+    assert source_path.read_bytes() == canonical_json_bytes(
+        _LITERAL_EPOCH_MANIFEST_SOURCE
+    )
     assert crosswalk_path.read_bytes() == PREWIRE_CROSSWALK_BYTES
     build_call = calls[0]
     assert build_call[0:2] == ("portfolio_report.py", "build")
     assert build_call[build_call.index("--epoch-manifest") + 1] == str(manifest_path)
-    assert build_call[build_call.index("--epoch-manifest-source") + 1] == str(source_path)
+    assert build_call[build_call.index("--epoch-manifest-source") + 1] == str(
+        source_path
+    )
     assert build_call[build_call.index("--epoch-crosswalk") + 1] == str(crosswalk_path)
-    assert build_call[
-        build_call.index("--epoch-manifest-generation-root") + 1
-    ] == str(generation_root)
+    assert build_call[build_call.index("--epoch-manifest-generation-root") + 1] == str(
+        generation_root
+    )
     assert result["candidate_dir"] == str(output_root / "candidate")
 
 
@@ -3961,64 +3982,37 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
 ) -> None:
     """The wrapper consumes a real producer CLI candidate before workbook binding."""
 
-    producer_spec = importlib.util.spec_from_file_location(
-        "_report_build_cli_producer_for_release_builder",
-        ROOT / "tools" / "portfolio_report.py",
+    report_fixture = _load_module(
+        "_portfolio_report_fixture_for_release_builder",
+        ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py",
     )
-    assert producer_spec is not None and producer_spec.loader is not None
-    producer = importlib.util.module_from_spec(producer_spec)
-    sys.modules[producer_spec.name] = producer
-    try:
-        producer_spec.loader.exec_module(producer)
-        fixture_source = (
-            ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py"
-        ).read_text(encoding="utf-8")
-        start = fixture_source.index("def _amount(")
-        end = fixture_source.index("\ndef _published_dependence(")
-        namespace = {
-            "AdapterIdentity": AdapterIdentity,
-            "Any": object,
-            "CoverageClaim": CoverageClaim,
-            "CoverageStatus": CoverageStatus,
-            "Decimal": __import__("decimal").Decimal,
-            "GenerationManifest": GenerationManifest,
-            "SourceArtifact": SourceArtifact,
-            "VerificationStatus": VerificationStatus,
-            "canonical_json_bytes": canonical_json_bytes,
-            "date": __import__("datetime").date,
-            "hashlib": hashlib,
-            "publish_generation": __import__(
-                "quant_engine.core", fromlist=["publish_generation"]
-            ).publish_generation,
-            "stage_generation": __import__(
-                "quant_engine.core", fromlist=["stage_generation"]
-            ).stage_generation,
-        }
-        exec(compile(fixture_source[start:end], "producer-fixture", "exec"), namespace)
-        baseline_root = namespace["_published_baseline"](tmp_path / "baseline")
-        candidate_output = io.StringIO()
-        with contextlib.redirect_stdout(candidate_output):
-            assert (
-                producer.main(
-                    [
-                        "build",
-                        "--baseline-root",
-                        str(baseline_root),
-                        "--output-root",
-                        str(tmp_path / "candidate-output"),
-                    ]
-                )
-                == 0
+    producer = report_fixture.reporter
+    baseline_root = report_fixture._published_baseline(tmp_path / "baseline")
+    candidate_output = io.StringIO()
+    with contextlib.redirect_stdout(candidate_output):
+        assert (
+            producer.main(
+                [
+                    "build",
+                    "--baseline-root",
+                    str(baseline_root),
+                    "--output-root",
+                    str(tmp_path / "candidate-output"),
+                ]
             )
-        real_candidate = json.loads(candidate_output.getvalue())
-    finally:
-        sys.modules.pop(producer_spec.name, None)
+            == 0
+        )
+    real_candidate = json.loads(candidate_output.getvalue())
 
     candidate_path = Path(real_candidate["candidate_dir"])
+    epoch_root = tmp_path / "epoch-generation"
     calls: dict[str, object] = {}
 
     def real_candidate_boundary(*_args: object, **kwargs: object) -> dict[str, object]:
-        assert kwargs == {}
+        assert kwargs == {
+            "epoch_manifest_generation_root": epoch_root,
+            "epoch_manifest_generation_id": "d" * 64,
+        }
         return real_candidate
 
     def workbook_boundary(*args: object, **kwargs: object) -> dict[str, object]:
@@ -4028,7 +4022,6 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
 
     monkeypatch.setattr(builder, "build_report_candidate", real_candidate_boundary)
     monkeypatch.setattr(builder, "build_workbook", workbook_boundary)
-    epoch_root = tmp_path / "epoch-generation"
     result = builder.build_report(
         baseline_root,
         tmp_path / "ledger",
@@ -4051,354 +4044,6 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
     }
 
 
-def test_build_report_runs_real_candidate_workbook_and_delivery_with_epoch_binding(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Only the external xlsx command is stubbed in the complete report wrapper seam."""
-
-    fixture_source = (
-        ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py"
-    ).read_text(encoding="utf-8")
-    start = fixture_source.index("def _amount(")
-    end = fixture_source.index("\ndef _published_dependence(")
-    namespace = {
-        "AdapterIdentity": AdapterIdentity,
-        "Any": object,
-        "CoverageClaim": CoverageClaim,
-        "CoverageStatus": CoverageStatus,
-        "Decimal": __import__("decimal").Decimal,
-        "GenerationManifest": GenerationManifest,
-        "SourceArtifact": SourceArtifact,
-        "VerificationStatus": VerificationStatus,
-        "canonical_json_bytes": canonical_json_bytes,
-        "date": __import__("datetime").date,
-        "hashlib": hashlib,
-        "publish_generation": publish_generation,
-        "stage_generation": __import__(
-            "quant_engine.core", fromlist=["stage_generation"]
-        ).stage_generation,
-    }
-    exec(compile(fixture_source[start:end], "producer-fixture", "exec"), namespace)
-
-    provider_root = tmp_path / "provider-ledger"
-    provider_catalog = canonical_json_bytes({"reconciliation_checks": []})
-    provider_artifact = SourceArtifact(
-        artifact_id="normalized/provider-ledger.json",
-        sha256=hashlib.sha256(provider_catalog).hexdigest(),
-        size_bytes=len(provider_catalog),
-        as_of_date=builder.date(2026, 1, 3),
-        schema_name="provider-ledger-catalog",
-        schema_version="1",
-    )
-    provider_manifest = GenerationManifest.build(
-        as_of_date=builder.date(2026, 1, 3),
-        adapter=AdapterIdentity("synthetic-provider-ledger", "1"),
-        coverage=CoverageClaim(
-            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="synthetic report wrapper provider ledger",
-            fact_types=("provider-ledger",),
-            observed_start=builder.date(2026, 1, 3),
-            observed_end=builder.date(2026, 1, 3),
-        ),
-        artifacts=(provider_artifact,),
-        verification=VerificationStatus.VERIFIED,
-    )
-    provider_generation_path = stage_generation(provider_root, provider_manifest)
-    (provider_generation_path.parent / "provider-ledger.json").write_bytes(
-        provider_catalog
-    )
-    publish_generation(provider_root, provider_manifest.generation_id)
-    provider_generation = (
-        provider_root / "generations" / provider_manifest.generation_id
-    )
-    provider_identity = {
-        "as_of_date": "2026-01-03",
-        "catalog_sha256": provider_artifact.sha256,
-        "catalog_size_bytes": provider_artifact.size_bytes,
-        "generation_id": provider_manifest.generation_id,
-        "manifest_sha256": hashlib.sha256(
-            (provider_generation / "generation.json").read_bytes()
-        ).hexdigest(),
-        "manifest_size_bytes": (provider_generation / "generation.json").stat().st_size,
-    }
-    catalog = namespace["_baseline_catalog"]()
-    catalog["source_artifacts"].extend(
-        [
-            {
-                "artifact_id": "providers/provider-ledger/generation.json",
-                "as_of_date": "2026-01-03",
-                "schema_name": "generation-manifest",
-                "schema_version": "1",
-                "sha256": provider_identity["manifest_sha256"],
-                "source_key": "provider-ledger-generation",
-            },
-            {
-                "artifact_id": "providers/provider-ledger/provider-ledger.json",
-                "as_of_date": "2026-01-03",
-                "schema_name": "provider-ledger-catalog",
-                "schema_version": "1",
-                "sha256": provider_artifact.sha256,
-                "source_key": "provider-ledger-generation",
-            },
-        ]
-    )
-    baseline_root = namespace["_published_baseline"](tmp_path / "baseline", catalog)
-    freshness = tmp_path / "freshness.json"
-    freshness.write_bytes(
-        canonical_json_bytes(
-            {
-                "assessment_schema_version": 3,
-                "as_of_date": "2026-01-03",
-                "assessments": [{"evaluated_on": "2026-01-03"}],
-                "policies": [],
-                "provider_ledger": provider_identity,
-            }
-        )
-    )
-    strategy_names = [row["name"] for row in catalog["strategies"]]
-    history_root = tmp_path / "history-tree"
-    history_root.mkdir()
-    history = history_root / "history.json"
-    history.write_bytes(
-        canonical_json_bytes(
-            {
-                "as_of_date": "2026-01-03",
-                "builder": "portfolio-target-series/layered-correlation-1",
-                "evidence_mode_policy": {
-                    "default": "LIVE_ONLY",
-                    "hybrid": "BACKTEST_STRICTLY_BEFORE_FIRST_LIVE_THEN_LIVE",
-                    "post_inception_backtest_fill": False,
-                },
-                "series_mappings": [
-                    {
-                        "backtest_observations": 0,
-                        "history_status": "UNAVAILABLE_SYNTHETIC",
-                        "implementation_reconciliation_status": "NOT_APPLICABLE",
-                        "series_id": name,
-                        "strategy_version": "UNRESOLVED",
-                    }
-                    for name in strategy_names
-                ],
-                "target_sha256": "a" * 64,
-                "target_size_bytes": 1,
-            }
-        )
-    )
-    implementation_ids = ("grizzlybears-vtma", "p123-ai-factor", "tt-portfolio")
-    implementation = tmp_path / "implementation.json"
-    implementation.write_bytes(
-        canonical_json_bytes(
-            {
-                "as_of_date": "2026-01-03",
-                "builder": "portfolio-implementation-reconciliation",
-                "reconciliation_id": "synthetic-implementation",
-                "schema_version": 1,
-                "strategies": [
-                    {
-                        "return_reconciliation": {
-                            "observations": 2,
-                            "observed_end": "2026-01-03",
-                            "observed_start": "2026-01-01",
-                        },
-                        "root_causes": [{"status": "SYNTHETIC"}],
-                        "strategy_id": strategy_id,
-                        "verification": "VERIFIED",
-                    }
-                    for strategy_id in implementation_ids
-                ],
-                "verification": "VERIFIED",
-            }
-        )
-    )
-    return_attribution = tmp_path / "return-attribution.json"
-    return_attribution.write_bytes(
-        canonical_json_bytes(
-            {
-                "as_of_date": "2026-01-03",
-                "attribution_id": "synthetic-return-attribution",
-                "builder": "portfolio-implementation-return-attribution",
-                "schema_version": 1,
-                "strategies": [
-                    {
-                        "bridge": {
-                            "account_return": 0.0,
-                            "categories": [{"effect_pp": 0.0}],
-                            "gap_pp": 0.0,
-                            "model_return": 0.0,
-                        },
-                        "observed_end": "2026-01-03",
-                        "observed_start": "2026-01-01",
-                        "strategy_id": strategy_id,
-                        "verification": "VERIFIED_WITH_DECLARED_PROXY",
-                    }
-                    for strategy_id in implementation_ids
-                ],
-                "verification": "VERIFIED_WITH_DECLARED_PARTIAL_CAUSAL_BOUNDARIES",
-            }
-        )
-    )
-    attribution_root = tmp_path / "attribution"
-    baseline_pointer = builder.read_current(baseline_root)
-    attribution = canonical_json_bytes(
-        {
-            "baseline": {
-                "catalog_sha256": hashlib.sha256(
-                    (
-                        baseline_root
-                        / "generations"
-                        / baseline_pointer.generation_id
-                        / "portfolio-baseline.json"
-                    ).read_bytes()
-                ).hexdigest(),
-                "generation_id": baseline_pointer.generation_id,
-            },
-            "benchmark_assignments": [
-                {"strategy_id": row["strategy_id"]} for row in catalog["strategies"]
-            ],
-            "catalog_schema_version": 1,
-            "comparisons": [
-                {"strategy_id": row["strategy_id"]} for row in catalog["strategies"]
-            ],
-            "costs": [
-                {"strategy_id": row["strategy_id"]} for row in catalog["strategies"]
-            ],
-        }
-    )
-    attribution_manifest = GenerationManifest.build(
-        as_of_date=builder.date(2026, 1, 3),
-        adapter=AdapterIdentity("synthetic-attribution", "1"),
-        coverage=provider_manifest.coverage,
-        artifacts=(
-            SourceArtifact(
-                artifact_id="normalized/strategy-attribution.json",
-                sha256=hashlib.sha256(attribution).hexdigest(),
-                size_bytes=len(attribution),
-                as_of_date=builder.date(2026, 1, 3),
-                schema_name="strategy-attribution-catalog",
-                schema_version="1",
-            ),
-        ),
-        verification=VerificationStatus.VERIFIED,
-    )
-    attribution_generation_path = stage_generation(
-        attribution_root, attribution_manifest
-    )
-    (attribution_generation_path.parent / "strategy-attribution.json").write_bytes(
-        attribution
-    )
-    publish_generation(attribution_root, attribution_manifest.generation_id)
-    epoch_root = history_root / "epoch"
-    epoch_payload = canonical_json_bytes({"schema_version": 8})
-    epoch_verification = canonical_json_bytes({"status": "VERIFIED"})
-    epoch_manifest = GenerationManifest.build(
-        as_of_date=builder.date(2026, 1, 3),
-        adapter=AdapterIdentity("synthetic-epoch-manifest", "1"),
-        coverage=CoverageClaim(
-            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="synthetic report wrapper epoch manifest",
-            fact_types=("account-strategy-manifest",),
-            observed_start=builder.date(2026, 1, 3),
-            observed_end=builder.date(2026, 1, 3),
-        ),
-        artifacts=(
-            SourceArtifact(
-                artifact_id="outputs/account-strategy-manifest.json",
-                sha256=hashlib.sha256(epoch_payload).hexdigest(),
-                size_bytes=len(epoch_payload),
-                as_of_date=builder.date(2026, 1, 3),
-                schema_name="account-strategy-manifest",
-                schema_version="8",
-            ),
-            SourceArtifact(
-                artifact_id="verification/independent-verification.json",
-                sha256=hashlib.sha256(epoch_verification).hexdigest(),
-                size_bytes=len(epoch_verification),
-                as_of_date=builder.date(2026, 1, 3),
-                schema_name="independent-verification",
-                schema_version="1",
-            ),
-        ),
-        verification=VerificationStatus.VERIFIED,
-    )
-    stage_generation_bundle(
-        epoch_root,
-        epoch_manifest,
-        {
-            "outputs/account-strategy-manifest.json": epoch_payload,
-            "verification/independent-verification.json": epoch_verification,
-        },
-    )
-    runtime = tmp_path / "xlsx-runtime.exe"
-    cli = tmp_path / "xlsx-cli.py"
-    runtime.write_bytes(b"synthetic-runtime")
-    cli.write_bytes(b"synthetic-cli")
-    monkeypatch.setattr(builder, "XLSX_RUNTIME", runtime)
-    monkeypatch.setattr(builder, "XLSX_CLI", cli)
-    real_run = builder._run
-
-    def xlsx_command_boundary(command: object, **kwargs: object) -> dict[str, object]:
-        assert isinstance(command, tuple)
-        if command[:3] == (str(runtime), str(cli), "run"):
-            job_path = Path(command[3])
-            result_path = Path(command[command.index("--result") + 1])
-            job = json.loads(job_path.read_text(encoding="utf-8"))
-            candidate = job_path.parent
-            workbook = candidate / "excel" / "portfolio-report.xlsx"
-            workbook.parent.mkdir(exist_ok=True)
-            shutil.copyfile(candidate / "portfolio-report.xlsx", workbook)
-            result_path.write_bytes(
-                canonical_json_bytes(
-                    {
-                        "final_state": "SUCCEEDED",
-                        "idempotency_key": job["idempotency_key"],
-                        "invariants": [],
-                        "ok": True,
-                        "run_id": "b" * 32,
-                        "schema_version": "2.0",
-                        "steps": [
-                            {"status": "succeeded", "step_index": 0, "type": "open"},
-                            {"status": "succeeded", "step_index": 1, "type": "recalc"},
-                            {"status": "succeeded", "step_index": 2, "type": "save_as"},
-                        ],
-                    }
-                )
-            )
-            return {}
-        if command[:3] == (str(runtime), str(cli), "validate-contract"):
-            return {"all_passed": True, "invariants": [{"passed": True}]}
-        return real_run(command, **kwargs)
-
-    monkeypatch.setattr(builder, "_run", xlsx_command_boundary)
-    output_root = tmp_path / "nested-output-root" / "report"
-    result = builder.build_report(
-        baseline_root,
-        provider_root,
-        freshness,
-        history,
-        implementation,
-        return_attribution,
-        attribution_root,
-        output_root,
-        epoch_manifest_generation_root=epoch_root,
-        epoch_manifest_generation_id=epoch_manifest.generation_id,
-    )
-
-    generation_id = str(result["generation_id"])
-    authority = output_root / "generations" / generation_id
-    delivery = output_root / "deliveries" / generation_id
-    assert result["epoch_manifest_generation_id"] == epoch_manifest.generation_id
-    assert (
-        result["epoch_manifest_artifact"]["sha256"]
-        == hashlib.sha256(epoch_payload).hexdigest()
-    )
-    assert (authority / "portfolio-report-data.json").read_bytes() == (
-        Path(str(result["candidate_dir"])) / "portfolio-report-data.json"
-    ).read_bytes()
-    assert not any(path.suffix.lower() == ".xlsx" for path in authority.rglob("*"))
-    assert (delivery / "portfolio-report.xlsx").is_file()
-    assert result["report_delivery"]["workbook_status"] == "EXACT_NON_AUTHORITY"
-
-
 @pytest.mark.parametrize(
     "smuggled_path",
     (
@@ -4413,114 +4058,83 @@ def test_report_delivery_drift_is_non_authority_and_exact_acceptance_refuses_it(
 ) -> None:
     """The consumer reads real producer output without inventing workbook authority."""
 
-    producer_spec = importlib.util.spec_from_file_location(
-        "_report_delivery_producer_for_release_builder",
-        ROOT / "tools" / "portfolio_report.py",
+    report_fixture = _load_module(
+        "_portfolio_report_fixture_for_release_builder",
+        ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py",
     )
-    assert producer_spec is not None and producer_spec.loader is not None
-    producer = importlib.util.module_from_spec(producer_spec)
-    sys.modules[producer_spec.name] = producer
-    try:
-        producer_spec.loader.exec_module(producer)
-        fixture_source = (
-            ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py"
-        ).read_text(encoding="utf-8")
-        start = fixture_source.index("def _amount(")
-        end = fixture_source.index("\ndef _published_dependence(")
-        namespace = {
-            "AdapterIdentity": AdapterIdentity,
-            "Any": object,
-            "CoverageClaim": CoverageClaim,
-            "CoverageStatus": CoverageStatus,
-            "Decimal": __import__("decimal").Decimal,
-            "GenerationManifest": GenerationManifest,
-            "SourceArtifact": SourceArtifact,
-            "VerificationStatus": VerificationStatus,
-            "canonical_json_bytes": canonical_json_bytes,
-            "date": __import__("datetime").date,
-            "hashlib": hashlib,
-            "publish_generation": __import__(
-                "quant_engine.core", fromlist=["publish_generation"]
-            ).publish_generation,
-            "stage_generation": __import__(
-                "quant_engine.core", fromlist=["stage_generation"]
-            ).stage_generation,
-        }
-        exec(compile(fixture_source[start:end], "producer-fixture", "exec"), namespace)
-        baseline_root = namespace["_published_baseline"](tmp_path / "baseline")
-        candidate = Path(
-            producer.build_candidate(baseline_root, tmp_path / "candidates")[
-                "candidate_dir"
-            ]
-        )
-        initial_workbook = candidate / producer.WORKBOOK_NAME
-        workbook = candidate / "excel" / producer.WORKBOOK_NAME
-        workbook.parent.mkdir(parents=True)
-        shutil.copyfile(initial_workbook, workbook)
-        job = json.loads((candidate / "xlsx-job.json").read_text(encoding="utf-8"))
-        xlsx_result = candidate / "xlsx-result.json"
-        xlsx_result.write_text(
-            json.dumps(
-                {
-                    "final_state": "SUCCEEDED",
-                    "idempotency_key": job["idempotency_key"],
-                    "invariants": [],
-                    "ok": True,
-                    "run_id": "a" * 32,
-                    "schema_version": "2.0",
-                    "steps": [
-                        {
-                            "message": "Opened canonical staged workbook.",
-                            "status": "succeeded",
-                            "step_index": 0,
-                            "type": "open",
-                        },
-                        {
-                            "message": "Calculation reached xlDone.",
-                            "status": "succeeded",
-                            "step_index": 1,
-                            "type": "recalc",
-                        },
-                        {
-                            "message": "Saved canonical staged workbook.",
-                            "status": "succeeded",
-                            "step_index": 2,
-                            "type": "save_as",
-                        },
-                    ],
-                }
-            ),
-            encoding="utf-8",
-        )
-        validation = candidate / "workbook-validation.json"
-        validation.write_text(
-            json.dumps({"all_passed": True, "invariants": [{"passed": True}]}),
-            encoding="utf-8",
-        )
-        producer.canonicalize_workbook(
-            workbook, candidate / "workbook-canonicalization.json"
-        )
-        producer.canonicalize_xlsx_result(
-            xlsx_result, candidate / "xlsx-result-canonicalization.json"
-        )
-        binding = candidate / "workbook-evidence-binding.json"
-        producer.bind_workbook_evidence(
-            candidate, workbook, xlsx_result, validation, binding
-        )
-        authority_root = tmp_path / "published"
-        published = producer.publish_report(
-            baseline_root,
-            candidate,
-            workbook,
-            xlsx_result,
-            validation,
-            authority_root,
-            workbook_evidence_binding=binding,
-        )
-        generation_id = str(published["generation_id"])
-        delivery_dir = authority_root / "deliveries" / generation_id
-    finally:
-        sys.modules.pop(producer_spec.name, None)
+    producer = report_fixture.reporter
+    baseline_root = report_fixture._published_baseline(tmp_path / "baseline")
+    candidate = Path(
+        producer.build_candidate(baseline_root, tmp_path / "candidates")[
+            "candidate_dir"
+        ]
+    )
+    initial_workbook = candidate / producer.WORKBOOK_NAME
+    workbook = candidate / "excel" / producer.WORKBOOK_NAME
+    workbook.parent.mkdir(parents=True)
+    shutil.copyfile(initial_workbook, workbook)
+    job = json.loads((candidate / "xlsx-job.json").read_text(encoding="utf-8"))
+    xlsx_result = candidate / "xlsx-result.json"
+    xlsx_result.write_text(
+        json.dumps(
+            {
+                "final_state": "SUCCEEDED",
+                "idempotency_key": job["idempotency_key"],
+                "invariants": [],
+                "ok": True,
+                "run_id": "a" * 32,
+                "schema_version": "2.0",
+                "steps": [
+                    {
+                        "message": "Opened canonical staged workbook.",
+                        "status": "succeeded",
+                        "step_index": 0,
+                        "type": "open",
+                    },
+                    {
+                        "message": "Calculation reached xlDone.",
+                        "status": "succeeded",
+                        "step_index": 1,
+                        "type": "recalc",
+                    },
+                    {
+                        "message": "Saved canonical staged workbook.",
+                        "status": "succeeded",
+                        "step_index": 2,
+                        "type": "save_as",
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    validation = candidate / "workbook-validation.json"
+    validation.write_text(
+        json.dumps({"all_passed": True, "invariants": [{"passed": True}]}),
+        encoding="utf-8",
+    )
+    producer.canonicalize_workbook(
+        workbook, candidate / "workbook-canonicalization.json"
+    )
+    producer.canonicalize_xlsx_result(
+        xlsx_result, candidate / "xlsx-result-canonicalization.json"
+    )
+    binding = candidate / "workbook-evidence-binding.json"
+    producer.bind_workbook_evidence(
+        candidate, workbook, xlsx_result, validation, binding
+    )
+    authority_root = tmp_path / "published"
+    published = producer.publish_report(
+        baseline_root,
+        candidate,
+        workbook,
+        xlsx_result,
+        validation,
+        authority_root,
+        workbook_evidence_binding=binding,
+    )
+    generation_id = str(published["generation_id"])
+    delivery_dir = authority_root / "deliveries" / generation_id
 
     authority_generation = authority_root / "generations" / generation_id
     authority_report = (

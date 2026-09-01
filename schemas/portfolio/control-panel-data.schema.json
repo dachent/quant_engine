@@ -242,8 +242,6 @@
     "attribution_dispositions": { "$ref": "#/$defs/rows" },
     "canonical_strategy_series": {
       "type": "array",
-      "minItems": 7,
-      "maxItems": 7,
       "items": {
         "type": "object",
         "additionalProperties": false,
@@ -543,15 +541,9 @@
         "observation_meta_fields": { "const": ["daily_observation_count", "actual_observed_start", "actual_observed_end", "coverage_status", "boundary_reasons"] },
         "series": {
           "type": "array",
-          "items": { "type": "object" },
-          "contains": {
-            "type": "object",
-            "required": ["primary_group"],
-            "properties": { "primary_group": { "const": "STRATEGY" } }
-          },
-          "minContains": 7,
-          "maxContains": 7
+          "items": { "type": "object" }
         },
+        "status": { "enum": ["AVAILABLE", "UNAVAILABLE_NOT_CONFIGURED"] },
         "source_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
         "strategy_evidence_modes": {
           "oneOf": [
@@ -561,10 +553,51 @@
         },
         "week_policy": { "type": "object" },
         "weeks": { "type": "array", "items": { "type": "string", "format": "date" }, "uniqueItems": true }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "UNAVAILABLE_NOT_CONFIGURED" } },
+            "required": ["status"]
+          },
+          "then": { "properties": { "series": { "maxItems": 0 } } },
+          "else": {
+            "properties": {
+              "series": {
+                "contains": {
+                  "type": "object",
+                  "required": ["primary_group"],
+                  "properties": { "primary_group": { "const": "STRATEGY" } }
+                },
+                "minContains": 7,
+                "maxContains": 7
+              }
+            }
+          }
+        }
+      ]
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "weekly_returns": {
+            "properties": { "status": { "const": "UNAVAILABLE_NOT_CONFIGURED" } },
+            "required": ["status"]
+          }
+        },
+        "required": ["weekly_returns"]
+      },
+      "then": {
+        "properties": { "canonical_strategy_series": { "maxItems": 0 } }
+      },
+      "else": {
+        "properties": {
+          "canonical_strategy_series": { "minItems": 7, "maxItems": 7 }
+        }
+      }
+    },
     {
       "if": {
         "properties": {"meta": {"properties": {"account_manifest_authority_profile": {"const": "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"}}}},

@@ -116,6 +116,18 @@ report remains the sole authority; the workbook evidence only gates creation of
 the optional static human-delivery artifact in this combined producer API.
 Unit fixtures model the evidence shape only. Final operational acceptance still
 requires an actual xlsx-win/Excel run and independently performed workbook-cell
-parity. This is producer-only contract work: the A1.3 consumers in the release
-builder and pipeline materializer remain pending their follow-up seam update,
-so this change does not close the cross-layer consumer contract.
+parity. Production publication and accepted-pointer movement remain prohibited
+until that operational evidence is recorded.
+
+The current A1.3 seam is owned across these in-repository surfaces:
+
+- `tools/portfolio_report.py` is the producer of the JSON-only report authority
+  and the sibling non-authority human workbook delivery.
+- `tools/portfolio_release_builder.py` consumes the delivery receipt and
+  requires exact non-authority workbook evidence before accepting the report
+  release stage.
+- `tools/portfolio_pipeline_materialize.py` keeps the report generation free of
+  workbook and delivery paths while routing workbook work as its separate stage.
+- `tools/portfolio_control_panel.py` binds a hash-addressed report candidate for
+  the pre-publication panel path; this binding was added at `32bb7f8` and does
+  not promote the candidate or workbook to report authority.

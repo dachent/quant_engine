@@ -1648,6 +1648,39 @@ def _flow_classification_policy(as_of_date: str) -> dict[str, Any]:
     }
 
 
+def test_flow_classification_policy_accepts_internal_prefix_without_optional_unpaired_disposition(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    """A valid legacy internal prefix keeps its required counterparty rule."""
+    policy = _flow_classification_policy("2026-01-06")
+    policy_path = tmp_path / "flow-classification-policy.json"
+    _write_json(policy_path, policy)
+
+    rules, _identity = manifest_module.load_flow_classification_policy(
+        policy,
+        InputSnapshot.capture(policy_path, "flow classification policy"),
+    )
+
+    assert rules["prefix"] == [
+        {
+            "flow_type_prefix": "TRANSFER:INTERNAL:",
+            "disposition": "INTERNAL",
+            "amount_sign": "NONZERO",
+            "counterparty_rule": "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT",
+        }
+    ]
+    malformed = _flow_classification_policy("2026-01-06")
+    del malformed["event_dispositions"]["prefix"][0]["counterparty_rule"]
+    malformed["event_dispositions"]["prefix"][0]["unpaired_disposition"] = "EXTERNAL"
+    malformed_path = tmp_path / "malformed-flow-classification-policy.json"
+    _write_json(malformed_path, malformed)
+    with pytest.raises(manifest_module.ManifestError, match="prefix rule 0 keys are invalid"):
+        manifest_module.load_flow_classification_policy(
+            malformed,
+            InputSnapshot.capture(malformed_path, "malformed flow classification policy"),
+        )
+
+
 def test_loaded_coverage_rows_cannot_be_directly_mutated_into_complete(
     manifest_module: Any, tmp_path: Path
 ) -> None:
@@ -3506,7 +3539,7 @@ def test_nonpositive_nav_return_base_is_blocked_without_metrics(
     }
 
 
-def test_flow_before_first_available_nav_without_predecessor_is_blocked(
+def test_flow_before_first_available_nav_without_predecessor_is_absorbed_by_opening_nav(
     manifest_module: Any,
 ) -> None:
     stats = manifest_module.analyze_epoch(
@@ -3524,12 +3557,26 @@ def test_flow_before_first_available_nav_without_predecessor_is_blocked(
         None,
     )
 
-    assert stats == {
-        "unavailable_status": "BLOCKED_UNPROVABLE_OPENING_FLOWS",
-        "blocking_reason": (
-            "FLOW_ON_OR_BEFORE_FIRST_AVAILABLE_NAV_WITHOUT_PREDECESSOR_CLOSING"
-        ),
-    }
+    assert stats is not None
+    assert stats["opening_basis"] == "FIRST_AVAILABLE_NAV"
+    assert stats["opening_capital"] == manifest_module.Decimal("150")
+    assert stats["deposits"] == manifest_module.Decimal("0")
+    assert stats["internal_in"] == manifest_module.Decimal("0")
+    assert stats["invested"] == manifest_module.Decimal("150")
+    assert stats["external_withdrawals"] == manifest_module.Decimal("0")
+    assert stats["internal_out"] == manifest_module.Decimal("0")
+    assert stats["withdrawn"] == manifest_module.Decimal("0")
+    assert stats["net_capital"] == manifest_module.Decimal("150")
+    assert stats["current_value"] == manifest_module.Decimal("150")
+    assert stats["gain"] == manifest_module.Decimal("0")
+    assert stats["return_on_net_capital"] == manifest_module.Decimal("0")
+    assert stats["annualized_return_on_net_capital"] == manifest_module.Decimal("0")
+    assert stats["observation_linked_return"] == manifest_module.Decimal("0")
+    assert stats["capital_flow_trace"] == []
+    assert all(
+        link["net_flow"] == manifest_module.Decimal("0")
+        for link in stats["observation_trace"]["links"]
+    )
 
 
 def test_same_day_opposite_external_flows_preserve_gross_legs(

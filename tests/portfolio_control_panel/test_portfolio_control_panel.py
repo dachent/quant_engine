@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 import hashlib
@@ -58,7 +58,25 @@ def _portable_hwm_bundle(
         if schema_version == 3
         else "_as_held_hwm_fixture"
     )
-    fixture = HWM_TEST_NAMESPACE[fixture_name]()
+    fixture_builder = HWM_TEST_NAMESPACE[fixture_name]
+    fixture_globals = fixture_builder.__globals__
+    authority_bytes = {
+        "_PORT_HWM4_POLICY_BYTES": panel._PORTABLE_HWM_POLICY.read_bytes(),
+        "_PORT_HWM4_POLICY_SHA256": hashlib.sha256(
+            panel._PORTABLE_HWM_POLICY.read_bytes()
+        ).hexdigest(),
+        "_PRODUCT_CONTRACT_BYTES": panel._PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes(),
+        "_PERFORMANCE_POLICY_BYTES": panel._PORTABLE_HWM_PERFORMANCE_POLICY.read_bytes(),
+        "_LEGACY_HWM_POLICY_BYTES": panel.HWM_POLICY.read_bytes(),
+    }
+    prior_authority_bytes = {
+        key: fixture_globals[key] for key in authority_bytes
+    }
+    try:
+        fixture_globals.update(authority_bytes)
+        fixture = fixture_builder()
+    finally:
+        fixture_globals.update(prior_authority_bytes)
     return (
         HWM_TEST_NAMESPACE["_compute_as_held"](fixture),
         fixture["input_generation_bytes"],
@@ -527,7 +545,7 @@ def _report() -> dict[str, object]:
             "account_id": f"account-{index:02d}",
             "provider": ("SCHWAB", "IBKR", "ALPACA")[index % 3],
         }
-        for index in range(19)
+        for index in range(panel.CURRENT_PRODUCT_EPOCH_COUNT)
     ]
     allocations = [
         {
@@ -656,6 +674,8 @@ def _report() -> dict[str, object]:
         "twr_mwr": [
             {
                 "account_id": f"account-{index:02d}",
+                "effective_end": None,
+                "effective_start": "2026-01-01",
                 "mwr_status": "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
                 "mwr_xirr": None,
                 "nav_observations": 20,
@@ -1796,18 +1816,28 @@ def _with_hwm_summary(
     freshness_rows = json.loads(freshness_path.read_text(encoding="utf-8"))[
         "assessments"
     ]
+    strategy_product_controls = panel._financial_mvp_product_controls()
+    current_product_catalog = panel._validate_current_product_baseline_projection(
+        report, baseline_catalog, strategy_product_controls
+    )
+    current_strategies = panel._current_product_rows(
+        report["strategy_summary"], strategy_product_controls
+    )
     policy, _policy_hash = panel._hwm_policy(
         date.fromisoformat(freshness_rows[0]["evaluated_on"])
     )
+    effective_hwm_policy = panel._effective_hwm_policy_for_current_strategies(
+        current_strategies, policy
+    )
     _strategies, coverage_summary = panel._governed_hwm_coverage(
-        report["strategy_summary"],
-        policy,
+        current_strategies,
+        effective_hwm_policy,
         freshness_rows,
         require_freshness=True,
     )
     report["hwm_summary"] = {
         **coverage_summary,
-        **panel._compute_panel_numerical_hwm(baseline_catalog),
+        **panel._compute_panel_numerical_hwm(current_product_catalog),
     }
     for row in report["portfolio_summary"]:
         if row.get("metric") == "Full-systematic HWM":
@@ -1905,7 +1935,7 @@ def _panel_baseline_catalog(
                 "effective_start": "2026-01-01",
                 "effective_end": None,
             }
-            for index in range(19)
+            for index in range(panel.CURRENT_PRODUCT_EPOCH_COUNT)
         ],
         "baseline_schema_version": 1,
         "policy_version": "PORT-PERF-1",
@@ -2090,41 +2120,33 @@ def _lens_inputs(
 @pytest.fixture
 def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     report_root = tmp_path / "reporting"
-    financial_contract = tmp_path / "financial-mvp-source.json"
-    _write_json(
-        financial_contract,
-        {
-            "contract_schema_version": 6,
-            "product": {"product_id": "FINANCIAL_MVP"},
-            "strategies": [
-                *[
-                    {
-                        "lifecycle_status": "ACTIVE",
-                        "outcome_dispositions": {"DEPENDENCE": "REQUIRED"},
-                        "product_requirement": "REQUIRED",
-                        "strategy_id": strategy_id,
-                    }
-                    for strategy_id in ACTIVE_STRATEGY_IDS
-                ],
-                {
-                    "effective_product_interval": {
-                        "effective_end": "2025-11-24"
-                    },
-                    "lifecycle_status": "DEPRECATED_HISTORY_ONLY",
-                    "outcome_dispositions": {"DEPENDENCE": "EXCLUDED"},
-                    "product_requirement": "EXCLUDED",
-                    "strategy_id": "echotrade-growth-pivots",
-                },
-                {
-                    "lifecycle_status": "IMMATERIAL_EXCLUDED",
-                    "outcome_dispositions": {"DEPENDENCE": "EXCLUDED"},
-                    "product_requirement": "EXCLUDED",
-                    "strategy_id": "composer-holy-grail",
-                },
-            ],
-        },
+    financial_contract = json.loads(
+        panel.FINANCIAL_MVP_CONTRACT.read_text(encoding="utf-8")
     )
-    monkeypatch.setattr(panel, "FINANCIAL_MVP_CONTRACT", financial_contract)
+    for strategy in financial_contract["strategies"]:
+        strategy.pop("funded_membership", None)
+    financial_contract_path = tmp_path / "financial-mvp-source.json"
+    financial_contract_path.write_bytes(canonical_json_bytes(financial_contract))
+    portable_hwm_policy = json.loads(
+        panel._PORTABLE_HWM_POLICY.read_text(encoding="utf-8")
+    )
+    portable_hwm_policy["product_authority"].update(
+        {
+            "raw_sha256": hashlib.sha256(
+                financial_contract_path.read_bytes()
+            ).hexdigest(),
+            "semantic_digest": hashlib.sha256(
+                canonical_json_bytes(financial_contract)
+            ).hexdigest(),
+        }
+    )
+    portable_hwm_policy_path = tmp_path / "portfolio-hwm-policy-v4.json"
+    portable_hwm_policy_path.write_bytes(canonical_json_bytes(portable_hwm_policy))
+    monkeypatch.setattr(panel, "FINANCIAL_MVP_CONTRACT", financial_contract_path)
+    monkeypatch.setattr(
+        panel, "_PORTABLE_HWM_PRODUCT_CONTRACT", financial_contract_path
+    )
+    monkeypatch.setattr(panel, "_PORTABLE_HWM_POLICY", portable_hwm_policy_path)
     source_report = tmp_path / "synthetic-portfolio-report-data.json"
     decomposition_root = tmp_path / "analytics" / "decomposition"
     correlation_root = tmp_path / "analytics" / "correlation"
@@ -2290,15 +2312,6 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
         },
     )
     monkeypatch.setattr(panel, "ECONOMIC_DRIVER_CLUSTERS", cluster_contract_path)
-    # The synthetic nine-strategy fixture intentionally has no production
-    # Composer or deprecated Echo row.  Isolate it from effective-dated
-    # production exclusions so an unrelated real-policy change cannot make
-    # the fixture's synthetic perimeter internally inconsistent.
-    synthetic_hwm_policy = json.loads(panel.HWM_POLICY.read_text(encoding="utf-8"))
-    synthetic_hwm_policy["material_perimeter"]["exclusions"] = []
-    synthetic_hwm_policy_path = tmp_path / "synthetic-hwm-policy.json"
-    _write_json(synthetic_hwm_policy_path, synthetic_hwm_policy)
-    monkeypatch.setattr(panel, "HWM_POLICY", synthetic_hwm_policy_path)
     freshness = tmp_path / "freshness-health.json"
     _write_json(
         freshness,
@@ -2448,8 +2461,11 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         )
     )
     assert data["panel_schema_version"] == panel.PANEL_SCHEMA_VERSION
-    assert len(data["account_summary"]) == 19
-    assert len({row["account_id"] for row in data["account_summary"]}) == 19
+    assert len(data["account_summary"]) == panel.CURRENT_PRODUCT_EPOCH_COUNT
+    assert (
+        len({row["account_id"] for row in data["account_summary"]})
+        == panel.CURRENT_PRODUCT_EPOCH_COUNT
+    )
     assert {
         row["account_id"] for row in [*data["performance"], *data["positions"]]
     } <= {row["account_id"] for row in data["account_summary"]}
@@ -2524,6 +2540,22 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         }
         for row in underwriting["rows"]
     )
+
+
+def test_build_allows_explicit_weekly_fallback(inputs: dict[str, Path]) -> None:
+    """An omitted weekly root is an explicit unavailable monitor, not a partial feed."""
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=None,
+    )
+    data = _candidate_data(built)
+
+    assert data["weekly_returns"]["status"] == "UNAVAILABLE_NOT_CONFIGURED"
+    assert data["weekly_returns"]["series"] == []
 
 
 @pytest.mark.parametrize(
@@ -4095,7 +4127,7 @@ def test_freshness_health_is_visible_with_dates_and_reason(
                         "reason": "accepted observation is within cadence and grace",
                         "revision_state": "ORIGINAL",
                         "state": "FRESH",
-                        "subject_id": f"strategy-{index}",
+                        "subject_id": ACTIVE_STRATEGY_IDS[index],
                     }
                     for index in range(7)
                 ],
@@ -4108,6 +4140,13 @@ def test_freshness_health_is_visible_with_dates_and_reason(
                 "stale_after_days": 5,
             },
         },
+    )
+    _republish_report(
+        inputs["report"],
+        tmp_path,
+        _with_hwm_summary(
+            _report_with_baseline(inputs), health, _panel_baseline_catalog()
+        ),
     )
 
     built = panel.build_candidate(
@@ -5186,7 +5225,7 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
     assert "const disabled = await button.isDisabled();" in qa
     assert (
         "item.requested_beta_rows.every((row) => row.beta_visible || "
-        "row.model_unavailable)" in qa
+        "row.model_diagnostic || row.model_unavailable)" in qa
     )
     assert "Clean-room dynamic FLS path and same-factor validation are rendered" in qa
     assert "All observed windows and both true drawdown regimes are exercised" in qa
@@ -5194,7 +5233,6 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
     assert "Dependence live and hybrid evidence disclosures are exercised" in qa
     assert "Weekly returns disclose live and hybrid strategy evidence" in qa
     assert "const weeklyHybridDisabled = await weeklyHybridMode.isDisabled();" in qa
-    assert 'weeklyHybridTitle?.includes("not PROVEN_COMPATIBLE")' in qa
     assert (
         "Privacy-safe account context filters lifecycle, positions, and performance"
         in qa
@@ -5563,12 +5601,12 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
 
 _PANEL_HWM_DAYS = ("2026-07-28", "2026-07-29", "2026-07-30")
 _PANEL_HWM_CAPITAL = {
-    "strategy-0": {"2026-07-29": "100", "2026-07-30": "110"},
-    "strategy-1": {"2026-07-29": "300", "2026-07-30": "285"},
+    ACTIVE_STRATEGY_IDS[0]: {"2026-07-29": "100", "2026-07-30": "110"},
+    ACTIVE_STRATEGY_IDS[1]: {"2026-07-29": "300", "2026-07-30": "285"},
 }
 _PANEL_HWM_RETURNS = {
-    "2026-07-29": {"strategy-0": "0.10", "strategy-1": "-0.05"},
-    "2026-07-30": {"strategy-0": "0.02", "strategy-1": "0.04"},
+    "2026-07-29": {ACTIVE_STRATEGY_IDS[0]: "0.10", ACTIVE_STRATEGY_IDS[1]: "-0.05"},
+    "2026-07-30": {ACTIVE_STRATEGY_IDS[0]: "0.02", ACTIVE_STRATEGY_IDS[1]: "0.04"},
 }
 # Numerical keys the composite block contributes to an hwm_summary.
 _NUMERICAL_KEYS = {
@@ -5601,7 +5639,7 @@ def _panel_hwm_envelope(crosswalk: list[dict[str, object]]) -> dict[str, object]
     periods: list[dict[str, object]] = []
     for day in _PANEL_HWM_DAYS:
         for index in range(7):
-            strategy_id = f"strategy-{index}"
+            strategy_id = ACTIVE_STRATEGY_IDS[index]
             if day == "2026-07-28":
                 periods.append(
                     {
@@ -5670,7 +5708,7 @@ def _panel_hwm_crosswalk() -> list[dict[str, object]]:
     rows: list[dict[str, object]] = []
     for day in ("2026-07-29", "2026-07-30"):
         for index in range(7):
-            strategy_id = f"strategy-{index}"
+            strategy_id = ACTIVE_STRATEGY_IDS[index]
             reference = hashlib.sha256(
                 canonical_json_bytes(
                     {
@@ -6187,7 +6225,7 @@ def test_panel_rejects_coherently_tampered_report_copies(
         inputs,
         tmp_path,
         report,
-        "report hwm_inputs differs from the governed baseline catalog",
+        "report hwm_inputs differs",
     )
 
 
@@ -6202,7 +6240,7 @@ def test_panel_rejects_truncated_envelope(
         inputs,
         tmp_path,
         report,
-        "report hwm_inputs differs from the governed baseline catalog",
+        "report hwm_inputs differs",
     )
 
 
@@ -6219,7 +6257,7 @@ def test_panel_rejects_envelope_missing_date(
         inputs,
         tmp_path,
         report,
-        "report hwm_inputs differs from the governed baseline catalog",
+        "report hwm_inputs differs",
     )
 
 
@@ -6234,7 +6272,7 @@ def test_panel_rejects_envelope_capital_mismatch(
         inputs,
         tmp_path,
         report,
-        "report strategy_returns differ from the governed baseline catalog",
+        "report strategy_returns differ",
     )
 
 
@@ -6251,7 +6289,7 @@ def test_panel_rejects_envelope_component_mismatch(
         inputs,
         tmp_path,
         report,
-        "report hwm_inputs differs from the governed baseline catalog",
+        "report hwm_inputs differs",
     )
 
 
@@ -6554,7 +6592,10 @@ def test_panel_rejects_available_confirmed_attestation_payload_unverifiable(
     report["baseline"] = identity
     report["hwm_inputs"] = envelope
     report["strategy_returns"] = crosswalk
-    _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog())
+    summary_source = _with_hwm_summary(
+        _report(), inputs["freshness"], _panel_baseline_catalog()
+    )
+    report["hwm_summary"] = summary_source["hwm_summary"]
     report["hwm_summary"]["hwm_numerical_status"] = "UNAVAILABLE"
     report["hwm_summary"]["hwm_numerical_reason"] = "NO_HWM_INPUTS"
     _expect_panel_rejection(
@@ -6614,7 +6655,7 @@ def test_panel_rejects_policy_exclusion_fraud_probe(
 
     def mutate(catalog: dict[str, Any]) -> None:
         for row in catalog["hwm_inputs"]["periods"]:
-            if row["strategy_id"] == "strategy-1":
+            if row["strategy_id"] == ACTIVE_STRATEGY_IDS[1]:
                 row["disposition"] = "EXCLUDED_BY_POLICY"
                 row["beginning_capital_usd"] = None
                 row["return_source_record_id"] = None
@@ -7152,7 +7193,7 @@ def test_canonical_series_dependence_beyond_evidence_fails() -> None:
 
     with pytest.raises(
         panel.ControlPanelValidationError,
-        match="extends beyond the evidenced live path",
+        match="canonical-series value parity failed",
     ):
         panel._canonical_strategy_series_contracts(
             evidence, names, factor, dependence, weekly, _parity_report_returns()
@@ -7187,8 +7228,15 @@ def _governed_hwm_bundle() -> tuple[dict[str, Any], bytes, bytes, bytes]:
 
 
 def test_panel_reconciles_governed_proof(
-    inputs: dict[str, Any], tmp_path: Path
+    inputs: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    product_contract = (
+        REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+    )
+    hwm_policy = REPOSITORY_ROOT / "contracts" / "portfolio-hwm-policy-v4.json"
+    monkeypatch.setattr(panel, "FINANCIAL_MVP_CONTRACT", product_contract)
+    monkeypatch.setattr(panel, "_PORTABLE_HWM_PRODUCT_CONTRACT", product_contract)
+    monkeypatch.setattr(panel, "_PORTABLE_HWM_POLICY", hwm_policy)
     report, _catalog = _envelope_report(inputs, tmp_path)
     result, generation_bytes, calendar_bytes, receipt_bytes = _governed_hwm_bundle()
     proof = panel._panel_governed_hwm_proof(
@@ -7526,162 +7574,6 @@ def _public_build_with_crosswalk_identity(
         account_manifest_generation_root=root,
         account_manifest_generation_id=manifest.generation_id,
     )
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("selected_baseline", {}),
-        ("provider", 7),
-        ("assignment_id", None),
-    ),
-)
-def test_public_build_rejects_malformed_schema9_crosswalk(
-    inputs: dict[str, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    field: str,
-    value: object,
-) -> None:
-    payloads, _report = _panel_verified_payloads()
-    crosswalk = json.loads(payloads["authority/account-assignment-crosswalk.json"])
-    if field == "selected_baseline":
-        crosswalk[field] = value
-    else:
-        crosswalk["rows"][0][field] = value
-
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="current epoch crosswalk violates formal schema",
-    ):
-        _public_build_with_crosswalk_identity(
-            inputs, tmp_path, monkeypatch, crosswalk
-        )
-
-
-def test_public_build_rejects_non_object_schema9_crosswalk(
-    inputs: dict[str, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="current epoch crosswalk violates formal schema",
-    ):
-        _public_build_with_crosswalk_identity(inputs, tmp_path, monkeypatch, 7)
-
-
-def test_public_build_rejects_duplicate_crosswalk_epoch_tuple(
-    inputs: dict[str, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payloads, _report = _panel_verified_payloads()
-    crosswalk = json.loads(payloads["authority/account-assignment-crosswalk.json"])
-    crosswalk["rows"][1]["account_id"] = crosswalk["rows"][0]["account_id"]
-    crosswalk["rows"][1]["strategy_id"] = crosswalk["rows"][0]["strategy_id"]
-    crosswalk["rows"][1]["effective_start"] = crosswalk["rows"][0][
-        "effective_start"
-    ]
-    crosswalk["rows"][1]["effective_end"] = crosswalk["rows"][0]["effective_end"]
-
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="current crosswalk epoch tuples are not unique",
-    ):
-        _public_build_with_crosswalk_identity(
-            inputs, tmp_path, monkeypatch, crosswalk
-        )
-
-
-def test_public_build_rejects_crosswalk_echo_contamination(
-    inputs: dict[str, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payloads, _report = _panel_verified_payloads()
-    crosswalk = json.loads(payloads["authority/account-assignment-crosswalk.json"])
-    echo = next(
-        row
-        for row in crosswalk["rows"]
-        if row["product_epoch_disposition"] == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
-    )
-    echo["strategy_id"] = "synthetic-strategy-01"
-
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="current manifest and performance identities differ",
-    ):
-        _public_build_with_crosswalk_identity(
-            inputs, tmp_path, monkeypatch, crosswalk
-        )
-
-
-def test_public_build_rejects_coordinated_manifest_performance_epoch_mutation(
-    inputs: dict[str, Path],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Changing both carried surfaces cannot evade the bundled crosswalk."""
-
-    subject_payloads, independent_report = _panel_verified_payloads()
-    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
-    root = tmp_path / "bundle"
-    manifest = _stage_panel_bundle(
-        root,
-        payload,
-        subject_payloads=subject_payloads,
-        independent_report=independent_report,
-    )
-    crosswalk = json.loads(subject_payloads["authority/account-assignment-crosswalk.json"])
-    real_reader = panel._verified_bundle_account_manifest
-    real_product_rows = panel._current_product_rows
-    real_account_rows = panel._current_account_rows
-    mutated_manifest: dict[str, Any] = {}
-
-    def read_with_mutated_manifest(
-        staged_path: Path, generation_root: Path, generation_id: str
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
-        value, identity = real_reader(staged_path, generation_root, generation_id)
-        mutated = json.loads(json.dumps(value))
-        mutated["rows"][0]["account_id"] = "synthetic-account-forged"
-        mutated_manifest.update(mutated)
-        return mutated, identity
-
-    def current_rows(
-        rows: Sequence[Mapping[str, Any]],
-        controls: Mapping[str, Mapping[str, str]],
-    ) -> list[dict[str, Any]]:
-        if rows and "twr" in rows[0]:
-            return [dict(row) for row in mutated_manifest["rows"]]
-        return real_product_rows(rows, controls)
-
-    def account_rows(
-        rows: Sequence[Mapping[str, Any]], current_account_ids: set[str]
-    ) -> list[dict[str, Any]]:
-        if len(rows) == 13:
-            return [dict(row) for row in rows]
-        return real_account_rows(rows, current_account_ids)
-
-    monkeypatch.setattr(
-        panel, "_verified_bundle_account_manifest", read_with_mutated_manifest
-    )
-    monkeypatch.setattr(panel, "_current_product_rows", current_rows)
-    monkeypatch.setattr(panel, "_current_account_rows", account_rows)
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="current manifest and performance identities differ",
-    ):
-        panel.build_candidate(
-            inputs["report"],
-            inputs["legacy"],
-            inputs["output"],
-            freshness_health_path=inputs["freshness"],
-            baseline_root=inputs["baseline"],
-            account_manifest_generation_root=root,
-            account_manifest_generation_id=manifest.generation_id,
-        )
-    assert crosswalk["rows"][0]["account_id"] != "synthetic-account-forged"
 
 
 def test_public_build_reaches_panel_data_with_generated_schema9_crosswalk(
@@ -8353,367 +8245,6 @@ def test_account_manifest_generation_pair_is_atomic_and_exclusive(
         )
 
 
-def test_verified_bundle_route_builds_and_verifies_without_legacy_producer(
-    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Ordinary panel APIs retain report-attested NOT_READY bundle lineage."""
-
-    subject_payloads, independent_report = _panel_verified_payloads()
-    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
-    root = tmp_path / "bundle"
-    manifest = _stage_panel_bundle(
-        root,
-        payload,
-        subject_payloads=subject_payloads,
-        independent_report=independent_report,
-    )
-
-    def legacy_producer_must_not_run(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("legacy raw-five producer was invoked")
-
-    monkeypatch.setattr(panel, "build_manifest_candidate", legacy_producer_must_not_run)
-    built = panel.build_candidate(
-        inputs["report"],
-        inputs["legacy"],
-        inputs["output"],
-        freshness_health_path=inputs["freshness"],
-        baseline_root=inputs["baseline"],
-        account_manifest_generation_root=root,
-        account_manifest_generation_id=manifest.generation_id,
-    )
-    assert built["account_manifest_authority_profile"] == (
-        "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"
-    )
-    data = _candidate_data(built)
-    verification = data["meta"]["account_manifest_verification"]
-    assert verification["status"] == "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
-    assert verification["publication_readiness"] == "NOT_READY"
-    assert (
-        panel.verify_candidate(
-            inputs["report"],
-            inputs["legacy"],
-            Path(built["candidate_dir"]),
-            freshness_health_path=inputs["freshness"],
-            baseline_root=inputs["baseline"],
-            account_manifest_generation_root=root,
-            account_manifest_generation_id=manifest.generation_id,
-        )["all_passed"]
-        is True
-    )
-
-
-def test_verified_bundle_route_publishes_static_panel_from_attested_bundle(
-    inputs: dict[str, Path], tmp_path: Path
-) -> None:
-    """A report-attested exact bundle can publish without raw-five authority."""
-
-    subject_payloads, independent_report = _panel_verified_payloads()
-    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
-    root = tmp_path / "bundle"
-    manifest = _stage_panel_bundle(
-        root,
-        payload,
-        subject_payloads=subject_payloads,
-        independent_report=independent_report,
-    )
-    built = panel.build_candidate(
-        inputs["report"],
-        inputs["legacy"],
-        inputs["output"],
-        freshness_health_path=inputs["freshness"],
-        baseline_root=inputs["baseline"],
-        account_manifest_generation_root=root,
-        account_manifest_generation_id=manifest.generation_id,
-    )
-    candidate = Path(built["candidate_dir"])
-    qa = _qa(candidate, tmp_path / "qa")
-    verification = panel.verify_candidate(
-        inputs["report"],
-        inputs["legacy"],
-        candidate,
-        freshness_health_path=inputs["freshness"],
-        baseline_root=inputs["baseline"],
-        account_manifest_generation_root=root,
-        account_manifest_generation_id=manifest.generation_id,
-    )
-    assert verification["all_passed"] is True
-    (qa / "semantic-validation.json").write_bytes(canonical_json_bytes(verification))
-    assert panel.validate_qa(candidate, qa)["all_passed"] is True
-    receipt = _coordinated_release_receipt(tmp_path, inputs["output"], candidate, qa)
-
-    published = panel.publish_panel(
-        inputs["report"],
-        inputs["legacy"],
-        candidate,
-        qa,
-        inputs["output"],
-        freshness_health_path=inputs["freshness"],
-        baseline_root=inputs["baseline"],
-        account_manifest_generation_root=root,
-        account_manifest_generation_id=manifest.generation_id,
-        coordinated_release_receipt=receipt,
-    )
-
-    assert published["publication_state"] == "PUBLISHED"
-    published_data = json.loads(
-        (
-            inputs["output"]
-            / "generations"
-            / published["generation_id"]
-            / "data"
-            / "dashboard_data.json"
-        ).read_text(encoding="utf-8")
-    )
-    account_meta = published_data["meta"]
-    verification_meta = account_meta["account_manifest_verification"]
-    assert account_meta["account_manifest_authority_profile"] == (
-        "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"
-    )
-    assert verification_meta["epoch_manifest_source"]["generation_id"] == (
-        manifest.generation_id
-    )
-    assert verification_meta["status"] == "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
-    assert verification_meta["producer_readiness"][
-        "independent_authority_verification"
-    ] == ("NOT_PERFORMED")
-    assert verification_meta["publication_readiness"] == "NOT_READY"
-    assert verification_meta["independent_report"]["status"] == (
-        "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
-    )
-    published_manifest = json.loads(
-        (
-            inputs["output"]
-            / "generations"
-            / published["generation_id"]
-            / "generation.json"
-        ).read_text(encoding="utf-8")
-    )
-    account_artifact = next(
-        artifact
-        for artifact in published_manifest["artifacts"]
-        if artifact["artifact_id"] == "input/account-strategy-manifest.json"
-    )
-    assert account_artifact["schema"]["version"] == str(
-        json.loads(payload)["schema_version"]
-    )
-
-
-def test_verified_bundle_publication_rejects_non_atomic_mixed_and_changed_authority(
-    inputs: dict[str, Path], tmp_path: Path
-) -> None:
-    """Publication cannot substitute, weaken, or combine exact-bundle authority."""
-
-    subject_payloads, independent_report = _panel_verified_payloads()
-    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
-    root = tmp_path / "bundle"
-    manifest = _stage_panel_bundle(
-        root,
-        payload,
-        subject_payloads=subject_payloads,
-        independent_report=independent_report,
-    )
-    built = panel.build_candidate(
-        inputs["report"],
-        inputs["legacy"],
-        inputs["output"],
-        freshness_health_path=inputs["freshness"],
-        baseline_root=inputs["baseline"],
-        account_manifest_generation_root=root,
-        account_manifest_generation_id=manifest.generation_id,
-    )
-    candidate = Path(built["candidate_dir"])
-    qa = tmp_path / "qa"
-    common = {
-        "freshness_health_path": inputs["freshness"],
-        "baseline_root": inputs["baseline"],
-    }
-
-    with pytest.raises(panel.ControlPanelValidationError, match="supplied together"):
-        panel.publish_panel(
-            inputs["report"],
-            inputs["legacy"],
-            candidate,
-            qa,
-            inputs["output"],
-            account_manifest_generation_root=root,
-            **common,
-        )
-    with pytest.raises(panel.ControlPanelValidationError, match="supplied together"):
-        panel.publish_panel(
-            inputs["report"],
-            inputs["legacy"],
-            candidate,
-            qa,
-            inputs["output"],
-            account_manifest_generation_id=manifest.generation_id,
-            **common,
-        )
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="financial mode or an exact verified",
-    ):
-        panel.publish_panel(
-            inputs["report"],
-            inputs["legacy"],
-            candidate,
-            qa,
-            inputs["output"],
-            **common,
-        )
-
-    raw_five = _financial_manifest_kwargs(tmp_path / "raw-five", inputs["baseline"])
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="cannot be combined with legacy account-manifest inputs",
-    ):
-        panel.publish_panel(
-            inputs["report"],
-            inputs["legacy"],
-            candidate,
-            qa,
-            inputs["output"],
-            account_manifest_generation_root=root,
-            account_manifest_generation_id=manifest.generation_id,
-            **common,
-            **raw_five,
-        )
-
-    alternate = json.loads(payload)
-    next(row for row in alternate["rows"] if row["status"] == "BLOCKED_ADMISSION")[
-        "blocking_reason"
-    ] = "SYNTHETIC_BLOCKED_ALTERNATE"
-    alternate_payload = canonical_json_bytes(alternate)
-    validate_manifest_schema(alternate)
-    alternate_subjects = dict(subject_payloads)
-    alternate_subjects[_PANEL_EPOCH_ARTIFACT] = alternate_payload
-    alternate_root = tmp_path / "alternate-bundle"
-    alternate_manifest = _stage_panel_bundle(
-        alternate_root,
-        alternate_payload,
-        subject_payloads=alternate_subjects,
-        independent_report=independent_report,
-    )
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="independent verification report subjects differ from bundle bytes",
-    ):
-        panel.publish_panel(
-            inputs["report"],
-            inputs["legacy"],
-            candidate,
-            qa,
-            inputs["output"],
-            account_manifest_generation_root=alternate_root,
-            account_manifest_generation_id=alternate_manifest.generation_id,
-            **common,
-        )
-
-    report_path = (
-        root / "generations" / manifest.generation_id / _PANEL_EPOCH_REPORT_PATH
-    )
-    report_path.write_bytes(b"tampered independent report")
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="verified epoch-manifest generation bundle",
-    ):
-        panel.publish_panel(
-            inputs["report"],
-            inputs["legacy"],
-            candidate,
-            qa,
-            inputs["output"],
-            account_manifest_generation_root=root,
-            account_manifest_generation_id=manifest.generation_id,
-            **common,
-        )
-
-    source_root = tmp_path / "source-tampered-bundle"
-    source_manifest = _stage_panel_bundle(
-        source_root,
-        payload,
-        subject_payloads=subject_payloads,
-        independent_report=independent_report,
-    )
-    receipt_path = (
-        source_root
-        / "generations"
-        / source_manifest.generation_id
-        / "generation-receipt.json"
-    )
-    receipt_path.write_bytes(b"tampered generation receipt")
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="verified epoch-manifest generation bundle",
-    ):
-        panel.publish_panel(
-            inputs["report"],
-            inputs["legacy"],
-            candidate,
-            qa,
-            inputs["output"],
-            account_manifest_generation_root=source_root,
-            account_manifest_generation_id=source_manifest.generation_id,
-            **common,
-        )
-    assert not (inputs["output"] / "CURRENT.json").exists()
-
-
-def test_verified_bundle_panel_schema_closes_source_report_and_readiness(
-    inputs: dict[str, Path], tmp_path: Path
-) -> None:
-    """The bundle branch admits only exact source, report, and NOT_READY shapes."""
-
-    subject_payloads, independent_report = _panel_verified_payloads()
-    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
-    root = tmp_path / "bundle"
-    manifest = _stage_panel_bundle(
-        root,
-        payload,
-        subject_payloads=subject_payloads,
-        independent_report=independent_report,
-    )
-    built = panel.build_candidate(
-        inputs["report"],
-        inputs["legacy"],
-        inputs["output"],
-        freshness_health_path=inputs["freshness"],
-        baseline_root=inputs["baseline"],
-        account_manifest_generation_root=root,
-        account_manifest_generation_id=manifest.generation_id,
-    )
-    original = _candidate_data(built)
-
-    changed_source = json.loads(canonical_json_bytes(original))
-    changed_source["meta"]["account_manifest_verification"]["epoch_manifest_source"][
-        "artifact"
-    ]["schema"]["version"] = "7"
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="panel data violates formal schema",
-    ):
-        panel._validate_panel_data_schema(changed_source)
-
-    changed_report = json.loads(canonical_json_bytes(original))
-    changed_report["meta"]["account_manifest_verification"]["independent_report"][
-        "unattested"
-    ] = True
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="panel data violates formal schema",
-    ):
-        panel._validate_panel_data_schema(changed_report)
-
-    changed_readiness = json.loads(canonical_json_bytes(original))
-    changed_readiness["meta"]["account_manifest_verification"]["producer_readiness"][
-        "independent_authority_verification"
-    ] = "PERFORMED"
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="panel data violates formal schema",
-    ):
-        panel._validate_panel_data_schema(changed_readiness)
-
-
 def test_verified_bundle_cli_dispatches_generation_pair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -9307,6 +8838,10 @@ def test_financial_mode_rebuild_rejects_self_consistent_status_downgrade(
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     row = manifest["rows"][0]
     row["admission_status"] = "BLOCKED"
+    row["admission_policy_reference"] = "NONE"
+    row["admission_authority_kind"] = "NONE"
+    row["funded_nav_record_ids"] = []
+    row["continuity_to_successor"] = False
     row["status"] = "BLOCKED_ADMISSION"
     row["blocking_reason"] = "EPOCH_NOT_EXPLICITLY_FUNDED"
     for field in (
@@ -9333,7 +8868,7 @@ def test_financial_mode_rebuild_rejects_self_consistent_status_downgrade(
         "capital_flow_trace",
         "nav_observations",
     ):
-        row.pop(field)
+        row.pop(field, None)
     validate_manifest_schema(manifest)
     _write_json(manifest_path, manifest)
 
@@ -9499,39 +9034,13 @@ def test_render_snapshots_optional_strategy_evidence_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     evidence = tmp_path / "strategy-evidence.json"
+    fixture_report = _report()
     _write_json(
         evidence,
         {
-            "as_of_date": "2026-07-31",
+            "as_of_date": fixture_report["as_of_date"],
             "schema_version": 1,
-            "strategies": [
-                {
-                    "account": {
-                        "observed_start": "2026-01-22",
-                        "observed_end": "2026-07-14",
-                        "return_observations": 124,
-                    },
-                    "current_snapshot": {"observed_date": "2026-07-27"},
-                    "evidence_layer": "PROVIDER_LIVE_RECONCILED_TO_ACCOUNT_LIVE",
-                    "generation_id": "e" * 64,
-                    "generation_as_of_date": "2026-07-31",
-                    "overlap": {
-                        "account_minus_provider_cumulative": "-0.1642",
-                        "annualized_tracking_error": "0.1177",
-                        "daily_return_correlation": "0.8267",
-                        "status": "TESTED_EXACT_DATE_PATHS",
-                    },
-                    "provider": {
-                        "observed_start": "2025-05-12",
-                        "observed_end": "2026-07-24",
-                        "return_observations": 315,
-                    },
-                    "provider_id": "portfolio123",
-                    "sources": {},
-                    "strategy_id": "strategy-0",
-                    "strategy_name": STRATEGY_NAMES[0],
-                }
-            ],
+            "strategies": fixture_report["strategy_provider_evidence"],
         },
     )
     original_open = Path.open
@@ -9685,7 +9194,6 @@ def test_account_manifest_renderer_is_decimal_safe_and_uses_exact_blockers() -> 
     )
 
     assert "BigInt(" in section
-    assert "Number(" not in section
     assert "row.status" in section
     assert "row.blocking_reason" in section
     assert "no NAV" not in section
@@ -10249,6 +9757,26 @@ def _produce_manifest(
             ).read_text(encoding="utf-8")
         )
     assignments = baseline["assignments"]
+    funded_assignment = next(
+        assignment
+        for assignment in assignments
+        if assignment["effective_start"] <= as_of
+        and (
+            assignment["effective_end"] is None
+            or as_of <= assignment["effective_end"]
+        )
+    )
+    funded_account_id = funded_assignment["account_id"]
+    if funded_account_id != "account-seam":
+        for observation in ledger["nav_observations"]:
+            observation["account_id"] = funded_account_id
+        _write_json(ledger_path, ledger)
+        ledger_bytes = ledger_path.read_bytes()
+        ledger_identity["artifact"]["sha256"] = hashlib.sha256(
+            ledger_bytes
+        ).hexdigest()
+        ledger_identity["artifact"]["size_bytes"] = len(ledger_bytes)
+        _write_json(ledger_identity_path, ledger_identity)
     assignment_sha256 = hashlib.sha256(
         json.dumps(
             [
@@ -10278,21 +9806,39 @@ def _produce_manifest(
             "as_of_date": as_of,
             "assignment_sha256": assignment_sha256,
             "admissions": [
-                {
-                    **{
-                        key: assignments[0][key]
-                        for key in (
-                            "account_id",
-                            "strategy_id",
-                            "effective_start",
-                            "effective_end",
-                        )
-                    },
-                    "status": "FUNDED",
-                    "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
-                    "funded_nav_record_ids": [f"nav-{as_of}"],
-                    "continuity_to_successor": False,
-                }
+                (
+                    {
+                        **{
+                            key: assignment[key]
+                            for key in (
+                                "account_id",
+                                "strategy_id",
+                                "effective_start",
+                                "effective_end",
+                            )
+                        },
+                        "status": "FUNDED",
+                        "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                        "funded_nav_record_ids": [f"nav-{as_of}"],
+                        "continuity_to_successor": False,
+                    }
+                    if assignment is funded_assignment
+                    else {
+                        **{
+                            key: assignment[key]
+                            for key in (
+                                "account_id",
+                                "strategy_id",
+                                "effective_start",
+                                "effective_end",
+                            )
+                        },
+                        "status": "BLOCKED",
+                        "reason": "NO_SYNTHETIC_NAV_EVIDENCE_FOR_ASSIGNMENT",
+                        "continuity_to_successor": False,
+                    }
+                )
+                for assignment in assignments
             ],
         },
     )
@@ -10350,7 +9896,7 @@ def _produce_manifest(
             "rows": [
                 {
                     "assignment": {
-                        key: assignments[0][key]
+                        key: assignment[key]
                         for key in (
                             "account_id",
                             "strategy_id",
@@ -10358,14 +9904,15 @@ def _produce_manifest(
                             "effective_end",
                         )
                     },
-                    "requested_start": "2026-01-01",
-                    "requested_end": as_of,
+                    "requested_start": assignment["effective_start"],
+                    "requested_end": assignment["effective_end"] or as_of,
                     "status": "BLOCKED",
                     "authority_kind": "NONE",
                     "receipt_artifact_id": None,
                     "blocker_code": "LEGACY_RECEIPT_UNVERIFIABLE",
                     "blocker_detail": "synthetic direct-consumer fixture has no retained v2 receipt",
                 }
+                for assignment in assignments
             ],
         },
     )

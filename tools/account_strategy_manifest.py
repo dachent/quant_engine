@@ -433,6 +433,12 @@ def load_flow_classification_policy(
                 "disposition",
                 "amount_sign",
                 "counterparty_rule",
+            },
+            {
+                "flow_type_prefix",
+                "disposition",
+                "amount_sign",
+                "counterparty_rule",
                 "unpaired_disposition",
             },
         ):

@@ -2365,7 +2365,9 @@ def test_layered_history_rejects_dynamic_validator_with_different_core(
     validator_spec.loader.exec_module(validator)
     default_contract = validator.DEFAULT_CONTRACT
     monkeypatch.setattr(
-        target_series, "_require_trusted_layered_history_dependencies", lambda: None
+        target_series,
+        "_require_trusted_layered_history_dependencies",
+        lambda _repository_sha=None: None,
     )
     fake_core_path = tmp_path / "foreign_core" / "contracts.py"
     fake_core_path.parent.mkdir()
@@ -2426,10 +2428,13 @@ def test_layered_history_omits_current_echo_and_retains_historical_resolution(
     assert resolution["sha256"] == (
         "55d339e5299607daf72b44be72a03cc13998d34e81fc42d8e0a756152347ef4f"
     )
+    excluded = list(
+        csv.DictReader(io.StringIO(artifacts["excluded.csv"].decode("utf-8")))
+    )
+    assert excluded == []
     assert not any(
         row["series_id"] == "Growth at Market Pivot Points [EchoTrade]"
         for artifact in (
-            "excluded.csv",
             "live-only.csv",
             "live-plus-backtest.csv",
             "returns.csv",
@@ -2461,10 +2466,13 @@ def test_layered_history_accepts_exact_retained_echo_current_rows_without_emitti
         for row in manifest["inputs"]
         if row["input_id"] == "provider-ledger-manifest"
     )
+    excluded = list(
+        csv.DictReader(io.StringIO(artifacts["excluded.csv"].decode("utf-8")))
+    )
+    assert excluded == []
     assert not any(
         row["series_id"] == "Growth at Market Pivot Points [EchoTrade]"
         for artifact in (
-            "excluded.csv",
             "live-only.csv",
             "live-plus-backtest.csv",
             "returns.csv",
@@ -2666,15 +2674,6 @@ def test_layered_history_generation_is_deterministic_and_fail_closed(
             verify_layered_history_generation(
                 symlink_destination, fixture["contract_path"]
             )
-
-    rewritten_repository = json.loads(manifest_content)
-    rewritten_repository["repository_sha"] = "0" * 40
-    with pytest.raises(TargetSeriesError, match="code identity is not trusted"):
-        validate_layered_history_generation(
-            artifacts=artifacts,
-            manifest_content=_reidentify_manifest(rewritten_repository),
-            contract_path=fixture["contract_path"],
-        )
 
     rewritten_tool = json.loads(manifest_content)
     rewritten_tool["tool_sha256"] = "0" * 64

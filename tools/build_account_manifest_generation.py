@@ -2203,6 +2203,8 @@ def _mixed_admitted_fact_projection(
         if in_funded_epoch(nav, "as_of_date")
     ]
     def anchor_membership_date(anchor: Mapping[str, object]) -> str:
+        if anchor.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION":
+            return str(anchor["event_date"])
         return str(anchor.get("nav_recognition_date", anchor.get("event_date")))
 
     projected_anchors = [
@@ -2301,24 +2303,71 @@ def _build_mixed_account_manifest_payloads(
     baseline_source = {"generation_id": selected_payload["baseline"]["generation_id"], "artifact": selected_payload["baseline"]["artifact"]}
     classified, classified_snapshot, classified_artifact, policy_identity = _c3_classified_flows(selected_inputs, ledger_pair, flows, anchors)
     cutoff = _current_epoch_calculation_cutoff(selected_inputs)
+    cutoff_excluded_opening_anchor_keys: set[tuple[object, ...]] = set()
+    cutoff_excluded_allocation_keys: set[tuple[object, ...]] = set()
+    cutoff_excluded_flow_keys: set[tuple[object, ...]] = set()
     if cutoff is not None:
+        cutoff_excluded_opening_anchor_keys = {
+            tuple(_c3_assignment_record(assignment).values())
+            for assignment in mapped
+            if any(
+                anchor.get("capital_type") == "OPENING_CAPITAL_ANCHOR"
+                and anchor.get("account_id") == assignment["account_id"]
+                and anchor.get("strategy_id") == assignment["strategy_id"]
+                and (
+                    date.fromisoformat(str(anchor["event_date"])) > cutoff
+                    or date.fromisoformat(str(anchor.get("nav_recognition_date", anchor["event_date"]))) > cutoff
+                )
+                for anchor in anchors
+            )
+        }
+        cutoff_excluded_allocation_keys = {
+            tuple(_c3_assignment_record(assignment).values())
+            for assignment in mapped
+            if any(
+                anchor.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION"
+                and anchor.get("account_id") == assignment["account_id"]
+                and anchor.get("strategy_id") == assignment["strategy_id"]
+                and _c3_in_interval(str(anchor["event_date"]), assignment)
+                and date.fromisoformat(str(anchor["event_date"])) <= cutoff
+                and date.fromisoformat(str(anchor.get("nav_recognition_date", anchor["event_date"]))) > cutoff
+                for anchor in anchors
+            )
+        }
+        cutoff_excluded_flow_keys = {
+            tuple(_c3_assignment_record(assignment).values())
+            for assignment in mapped
+            if any(
+                flow.get("account_id") == assignment["account_id"]
+                and _c3_in_interval(str(flow["event_date"]), assignment)
+                and date.fromisoformat(str(flow["event_date"])) <= cutoff
+                and date.fromisoformat(str(flow.get("nav_recognition_date", flow["event_date"]))) > cutoff
+                for flow in flows
+            )
+        }
         navs = [item for item in navs if date.fromisoformat(str(item["as_of_date"])) <= cutoff]
         flows = [
             item
             for item in flows
-            if date.fromisoformat(
+            if date.fromisoformat(str(item["event_date"])) <= cutoff
+            and date.fromisoformat(
                 str(item.get("nav_recognition_date", item["event_date"]))
             ) <= cutoff
         ]
         anchors = [
             item for item in anchors
-            if date.fromisoformat(
-                str(item.get("nav_recognition_date", item["event_date"]))
-            ) <= cutoff
+            if date.fromisoformat(str(item["event_date"])) <= cutoff
+            and (
+                item.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION"
+                or date.fromisoformat(
+                    str(item.get("nav_recognition_date", item["event_date"]))
+                ) <= cutoff
+            )
         ]
         calculation_events = [
             item for item in classified["events"]
-            if date.fromisoformat(
+            if date.fromisoformat(str(item["event_date"])) <= cutoff
+            and date.fromisoformat(
                 str(item.get("nav_recognition_date", item["event_date"]))
             ) <= cutoff
         ]
@@ -2427,6 +2476,38 @@ def _build_mixed_account_manifest_payloads(
     admission_payload["assignment_sha256"] = hashlib.sha256(json.dumps(sorted([_c3_assignment_record(assignment) for assignment in mapped], key=lambda item: (item["account_id"], item["strategy_id"], item["effective_start"], str(item["effective_end"]))), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
     admission_snapshot = InputSnapshot.from_bytes("selected admission policy", canonical_json_bytes(admission_payload))
     candidate = build_manifest_candidate_from_snapshots(ManifestCandidateSnapshots(ledger=calculation_ledger_snapshot, ledger_identity=calculation_ledger_identity_snapshot, baseline=selected_inputs.baseline, classified_flows=calculation_classified_snapshot, classification_policy=policy_snapshot, admission_policy=admission_snapshot, flow_coverage=calculation_coverage_snapshot, retrieval_receipts=selected_inputs.retrieval_receipts, receipt_authority=selected_inputs.receipt_authority, calculation_code=selected_inputs.epoch_producer_source, manifest_schema=selected_inputs.manifest_schema, baseline_generation_id=selected_inputs.baseline_generation_id, selected_assignment_keys=tuple(tuple(_c3_assignment_record(assignment).values()) for assignment in mapped)))
+    candidate_rows = candidate.get("rows")
+    if not isinstance(candidate_rows, list):
+        raise AccountAssignmentPerimeterError("generic candidate rows are invalid")
+    numeric_projection_fields = {
+        "start", "end", "opening_capital", "deposits", "internal_in", "invested",
+        "external_withdrawals", "internal_out", "withdrawn", "net_capital",
+        "current_value", "gain", "return_on_net_capital", "annualized_return_on_net_capital",
+        "xirr_diagnostic", "observation_linked_return", "observed_return",
+        "observed_hwm_index", "observed_max_drawdown", "opening_basis",
+        "observation_trace", "capital_flow_trace", "nav_observation_trace", "nav_observations",
+    }
+    cutoff_excluded_keys = (
+        cutoff_excluded_opening_anchor_keys
+        | cutoff_excluded_allocation_keys
+        | cutoff_excluded_flow_keys
+    )
+    candidate["rows"] = [
+        {
+            **{field: value for field, value in row.items() if field not in numeric_projection_fields},
+            "status": "BLOCKED_RETURN_LINKAGE",
+            "blocking_reason": (
+                "OPENING_ANCHOR_RECOGNITION_AFTER_CUTOFF"
+                if key in cutoff_excluded_opening_anchor_keys
+                else "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL"
+            ),
+        }
+        if isinstance(row, dict)
+        and (key := tuple(row.get(field) for field in ("account_id", "strategy_id", "effective_start", "effective_end"))) in cutoff_excluded_keys
+        and row.get("status") == "OK"
+        else row
+        for row in candidate_rows
+    ]
     source_identities = candidate.get("source_identities")
     if not isinstance(source_identities, Mapping):
         raise AccountAssignmentPerimeterError("generic candidate source identities are invalid")

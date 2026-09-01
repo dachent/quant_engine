@@ -516,7 +516,8 @@
             "status": {
               "enum": [
                 "BLOCKED_ADMISSION",
-                "BLOCKED_UNPROVABLE_OPENING_FLOWS"
+                "BLOCKED_UNPROVABLE_OPENING_FLOWS",
+                "BLOCKED_RETURN_LINKAGE"
               ]
             },
             "blocking_reason": {"type": "string", "minLength": 1}
@@ -544,6 +545,20 @@
             "coverage": {"properties": {"status": {"const": "BLOCKED"}, "blocker_code": {"const": "NO_ADMISSIBLE_V2_RECEIPT"}}},
             "admission": {"properties": {"status": {"const": "FUNDED"}, "blocker_code": {"type": "null"}}},
             "output": {"properties": {"status": {"const": "BLOCKED_UNPROVABLE_OPENING_FLOWS"}, "blocking_reason": {"const": "FLOW_COMPLETENESS_NOT_PROVEN"}}}
+          }
+        },
+        {
+          "properties": {
+            "coverage": {"properties": {"status": {"const": "COMPLETE"}, "blocker_code": {"type": "null"}}},
+            "admission": {"properties": {"status": {"const": "FUNDED"}, "blocker_code": {"type": "null"}}},
+            "output": {"properties": {"status": {"const": "BLOCKED_RETURN_LINKAGE"}, "blocking_reason": {"const": "OPENING_ANCHOR_RECOGNITION_AFTER_CUTOFF"}}}
+          }
+        },
+        {
+          "properties": {
+            "coverage": {"properties": {"status": {"const": "COMPLETE"}, "blocker_code": {"type": "null"}}},
+            "admission": {"properties": {"status": {"const": "FUNDED"}, "blocker_code": {"type": "null"}}},
+            "output": {"properties": {"status": {"const": "BLOCKED_RETURN_LINKAGE"}, "blocking_reason": {"const": "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL"}}}
           }
         }
       ]
@@ -588,6 +603,7 @@
         "account_count": {"$ref": "#/$defs/nonnegative_integer"},
         "assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
         "mapped_assignment_count": {"const": 15},
+        "current_product_epoch_count": {"$ref": "#/$defs/nonnegative_integer"},
         "historical_assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
         "reserve_assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
         "nav_fact_count": {"$ref": "#/$defs/nonnegative_integer"},

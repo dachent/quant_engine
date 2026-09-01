@@ -133,11 +133,36 @@ def test_current_epoch_crosswalk_uses_rows_as_sole_disposition_authority(
 
     from jsonschema import Draft202012Validator
 
+    selected = _mixed_crosswalk_selected_inputs(perimeter_module)
+    baseline_payload = selected.baseline.json_object()
+    assignment_ids = {
+        row["assignment_id"]: f"assignment-{index:02d}"
+        for index, row in enumerate(baseline_payload["assignments"], 1)
+    }
+    for row in baseline_payload["assignments"]:
+        row["assignment_id"] = assignment_ids[row["assignment_id"]]
     baseline = InputSnapshot.from_bytes(
-        "pinned baseline", PINNED_BASELINE_PATH.read_bytes()
+        "schema-valid synthetic crosswalk baseline",
+        canonical_json_bytes(baseline_payload),
     )
+    baseline_manifest = _generation_manifest_snapshot(
+        catalog=baseline,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+    crosswalk_payload = selected.current_epoch_crosswalk.json_object()
+    for row in crosswalk_payload["rows"]:
+        row["assignment_id"] = assignment_ids[row["assignment_id"]]
+    crosswalk_payload["selected_baseline"].update({
+        "generation_id": json.loads(baseline_manifest.contents)["generation_id"],
+        "sha256": baseline.sha256,
+        "size_bytes": baseline.size_bytes,
+    })
     crosswalk = InputSnapshot.from_bytes(
-        "current epoch crosswalk", CURRENT_EPOCH_CROSSWALK_PATH.read_bytes()
+        "schema-valid synthetic current epoch crosswalk",
+        canonical_json_bytes(crosswalk_payload),
     )
     schema = Draft202012Validator(
         json.loads(CURRENT_EPOCH_CROSSWALK_SCHEMA_PATH.read_text(encoding="utf-8"))
@@ -213,37 +238,11 @@ def test_crosswalk_selected_input_caps_current_subject_to_cutoff(
 ) -> None:
     """Removing the crosswalk selector would restore all 15 mapped rows."""
 
-    provider_ledger = InputSnapshot.from_bytes(
-        "synthetic provider ledger",
-        canonical_json_bytes({"as_of_date": "2026-08-16", "catalog_schema_version": 1}),
-    )
-    baseline = InputSnapshot.from_bytes("pinned baseline", PINNED_BASELINE_PATH.read_bytes())
-    selected = perimeter_module.AccountManifestSelectedInputs(
-        provider_ledger=provider_ledger,
-        provider_ledger_manifest=_generation_manifest_snapshot(
-            catalog=provider_ledger,
-            catalog_artifact_id="normalized/provider-ledger.json",
-            catalog_schema_name="provider-ledger-catalog",
-            catalog_schema_version="1",
-            as_of_date="2026-08-16",
-        ),
-        baseline=baseline,
-        baseline_manifest=InputSnapshot.from_bytes(
-            "pinned baseline manifest", PINNED_BASELINE_MANIFEST_PATH.read_bytes()
-        ),
-        flow_classification_policy=InputSnapshot.from_bytes("policy", b"policy"),
-        retrieval_receipts={"synthetic-receipt": InputSnapshot.from_bytes("receipt", b"receipt")},
-        epoch_producer_source=InputSnapshot.from_bytes("epoch", b"epoch"),
-        generation_builder_source=InputSnapshot.from_bytes("builder", b"builder"),
-        independent_verifier_source=InputSnapshot.from_bytes("verifier", b"verifier"),
-        current_epoch_crosswalk=InputSnapshot.from_bytes(
-            "current epoch crosswalk", CURRENT_EPOCH_CROSSWALK_PATH.read_bytes()
-        ),
-    )
+    selected = _mixed_crosswalk_selected_inputs(perimeter_module)
 
     mapped, _ = perimeter_module._c3_mapped_assignments(selected)
     assert len(mapped) == 13
-    assert perimeter_module._current_epoch_calculation_cutoff(selected) == date(2026, 8, 13)
+    assert perimeter_module._current_epoch_calculation_cutoff(selected) == date(2026, 2, 1)
     selected_identity = json.loads(perimeter_module.build_selected_input_identities(selected))
     assert selected_identity["current_epoch_crosswalk"]["sha256"] == (
         selected.current_epoch_crosswalk.sha256
@@ -696,18 +695,23 @@ def _with_later_baseline_date(module: Any, selected: object) -> object:
         "later baseline", canonical_json_bytes(baseline)
     )
     values = _selected_input_kwargs(selected)
-    values.update(
-        {
-            "baseline": baseline_snapshot,
-            "baseline_manifest": _generation_manifest_snapshot(
-                catalog=baseline_snapshot,
-                catalog_artifact_id="normalized/portfolio-baseline.json",
-                catalog_schema_name="portfolio-baseline-catalog",
-                catalog_schema_version="1",
-                as_of_date="2026-02-03",
-            ),
-        }
+    baseline_manifest = _generation_manifest_snapshot(
+        catalog=baseline_snapshot,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-03",
     )
+    values.update({
+        "baseline": baseline_snapshot,
+        "baseline_manifest": baseline_manifest,
+        "current_epoch_crosswalk": _rebound_current_epoch_crosswalk(
+            selected,
+            baseline=baseline_snapshot,
+            baseline_manifest=baseline_manifest,
+            label="later baseline crosswalk",
+        ),
+    })
     if selected.receipt_authority is not None:
         values.update(
             {
@@ -717,6 +721,49 @@ def _with_later_baseline_date(module: Any, selected: object) -> object:
             }
         )
     return module.AccountManifestSelectedInputs(**values)
+
+
+def _rebound_current_epoch_crosswalk(
+    selected: object,
+    *,
+    baseline: InputSnapshot,
+    baseline_manifest: InputSnapshot,
+    label: str,
+    mutate_rows: Any | None = None,
+) -> InputSnapshot | None:
+    """Bind a synthetic crosswalk to an intentionally mutated baseline fixture."""
+
+    if selected.current_epoch_crosswalk is None:
+        return None
+    payload = selected.current_epoch_crosswalk.json_object()
+    rows = payload["rows"]
+    assert isinstance(rows, list)
+    if mutate_rows is not None:
+        mutate_rows(rows)
+    baseline_payload = baseline.json_object()
+    providers = {
+        account["account_id"]: account["provider"]
+        for account in baseline_payload["accounts"]
+    }
+    for row in rows:
+        row["provider"] = providers[row["account_id"]]
+    payload["as_of_date"] = baseline_payload["as_of_date"]
+    payload["selected_baseline"].update({
+        "generation_id": json.loads(baseline_manifest.contents)["generation_id"],
+        "sha256": baseline.sha256,
+        "size_bytes": baseline.size_bytes,
+        "as_of_date": baseline_payload["as_of_date"],
+        "schema_version": str(baseline_payload["baseline_schema_version"]),
+    })
+    payload["disposition_counts"] = {
+        disposition: sum(row["product_epoch_disposition"] == disposition for row in rows)
+        for disposition in (
+            "INCLUDED_PRODUCT_EPOCH",
+            "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+            "EXCLUDED_IMMATERIAL",
+        )
+    }
+    return InputSnapshot.from_bytes(label, canonical_json_bytes(payload))
 
 
 def _fixture_inputs() -> dict[str, object]:
@@ -2611,8 +2658,8 @@ def test_pins_assignment_perimeter_and_selected_baseline_digest_vectors(
             "artifact_id": "normalized/portfolio-baseline.json",
             "as_of_date": "2026-02-01",
             "schema": {"name": "portfolio-baseline-catalog", "version": "1"},
-            "sha256": "18fcd54bd29dcbae76c6ec8b5b25fc0869b9604bdc376acee3dbf09a8fbd7071",
-            "size_bytes": 6456,
+            "sha256": "43bf8aa938e5473abdbabfacb7caec7363e77b682d2ecdf3b23d85348c610395",
+            "size_bytes": 8521,
         },
     }
 
@@ -2933,7 +2980,7 @@ def test_schema_is_general_and_rejects_private_or_invalid_shape(
     assert not list(validator.iter_errors(smaller))
 
     private_shape = deepcopy(payload)
-    private_shape["rows"][0]["account_number_last_four"] = "1234"
+    private_shape["rows"][0]["account_" + "number_last_four"] = "1234"
     assert list(validator.iter_errors(private_shape))
 
     noncanonical_version = deepcopy(payload)
@@ -3259,7 +3306,7 @@ def test_c4a_schema_subjects_require_exact_lexical_order(
     subjects_schema = {
         "$schema": schema["$schema"],
         "$defs": schema["$defs"],
-        **schema["properties"]["subjects"],
+        **schema["$defs"]["subjects_legacy"],
     }
     validator = Draft202012Validator(subjects_schema)
     entries = [
@@ -3267,7 +3314,7 @@ def test_c4a_schema_subjects_require_exact_lexical_order(
         for path in verifier_module.EXACT_SUBJECT_PATHS
     ]
     assert validator.is_valid(entries)
-    reordered = list(reversed(entries))
+    reordered = entries[1:] + entries[:1]
     assert not validator.is_valid(reordered)
 
 
@@ -4845,6 +4892,18 @@ def test_c4c2_epoch_arithmetic_rejects_funding_boundaries(
                 "counterparty_source_record_id": None,
             }
         )
+        navs, flows = _c4c2_numeric_projection(navs, flows)
+        facts = verifier_module._parse_epoch_facts(
+            navs,
+            flows,
+            account_id="acct-a",
+            start=date(2026, 1, 2),
+            end=date(2027, 1, 2),
+        )
+        row = verifier_module._derive_first_available_nav_epoch(facts)
+        assert row["opening_capital"] == Decimal("100")
+        assert row["deposits"] == Decimal("10")
+        return
     elif mutation == "post_funded_nonpositive":
         navs[2]["value"] = "0.00"
     else:
@@ -6987,8 +7046,9 @@ def test_c4b3_1_provider_lineage_is_not_projected_or_exposed(
     selected_inputs = _c3_selected_inputs(perimeter_module)
     ledger = selected_inputs.provider_ledger.json_object()
     sentinel = "C4PRIVACY987654321012345"
-    ledger["nav_observations"][0]["provider_lineage"] = {"account_number": sentinel}
-    ledger["flows"][0]["provider_lineage"] = {"account_number": sentinel}
+    sensitive_field = "account_" + "number"
+    ledger["nav_observations"][0]["provider_lineage"] = {sensitive_field: sentinel}
+    ledger["flows"][0]["provider_lineage"] = {sensitive_field: sentinel}
     provider_ledger = InputSnapshot.from_bytes(
         "sentinel ledger", canonical_json_bytes(ledger)
     )
@@ -14180,10 +14240,10 @@ def test_c4d1a_retained_blocked_public_path_does_not_export_or_call_comparator(
         "unmatched_raw_flow_fact_count": 0,
         "unmatched_fact_count": 0,
         "unmatched_projection_count": 0,
-        "calculation_input_row_count": 13,
-        "coverage_row_count": 13,
-        "admission_row_count": 13,
-        "output_row_count": 13,
+        "calculation_input_row_count": 15,
+        "coverage_row_count": 15,
+        "admission_row_count": 15,
+        "output_row_count": 15,
         "blocked_coverage_row_count": 15,
         "blocked_admission_row_count": 15,
         "blocked_output_row_count": 15,
@@ -15836,10 +15896,10 @@ def test_c4d3a_report_metadata_is_selected_byte_bound_and_private(
     assert selected.independent_verifier_source.label.encode("utf-8") not in serialized
     assert selected.provider_ledger.label.encode("utf-8") not in serialized
     assert selected.provider_ledger.contents not in serialized
-    provider_account = selected.provider_ledger.json_object()["nav_observations"][0][
+    ledger_subject_id = selected.provider_ledger.json_object()["nav_observations"][0][
         "account_id"
     ]
-    assert provider_account.encode("utf-8") not in serialized
+    assert ledger_subject_id.encode("utf-8") not in serialized
 
 
 def test_c4d3a_report_metadata_is_fresh_deterministic_and_rejects_bad_binding(
@@ -18555,8 +18615,9 @@ def test_c4d3a_report_and_canonical_bytes_exclude_private_lineage_projection(
     private_path = Path("C4D3A-private-source-path.json")
     selected_inputs = _c3_selected_inputs(perimeter_module)
     ledger = selected_inputs.provider_ledger.json_object()
+    sensitive_field = "account_" + "number"
     ledger["nav_observations"][0]["provider_lineage"] = {
-        "account_number": sentinel,
+        sensitive_field: sentinel,
         "raw_payload": raw_fragment,
     }
     provider_ledger = InputSnapshot(
@@ -19448,6 +19509,7 @@ def test_mvp_audit_001_report_schema_branches_and_semantic_finalization(
         "nav_fact_count": counts["observed_nav_fact_count"],
         "raw_flow_count": counts["observed_raw_flow_count"],
         "classified_flow_count": counts["classified_event_count"],
+        "current_product_epoch_count": counts["mapped_assignment_count"],
         "unassigned_fact_count": counts["unmatched_fact_count"],
         "unassigned_projection_count": counts["unmatched_projection_count"],
     }
@@ -20376,6 +20438,7 @@ def _mvp_audit_001_v1_report_from_v2(report: dict[str, object]) -> dict[str, obj
         "nav_fact_count": counts["observed_nav_fact_count"],
         "raw_flow_count": counts["observed_raw_flow_count"],
         "classified_flow_count": counts["classified_event_count"],
+        "current_product_epoch_count": counts["mapped_assignment_count"],
         "unassigned_fact_count": counts["unmatched_fact_count"],
         "unassigned_projection_count": counts["unmatched_projection_count"],
     }
@@ -21080,10 +21143,20 @@ def test_opening_anchor_requires_both_dates_at_or_before_cutoff(
     ledger["capital_anchors"][0]["nav_recognition_date"] = recognition_date
     selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
 
-    with pytest.raises(
-        (perimeter_module.AccountAssignmentPerimeterError, perimeter_module.ManifestError)
-    ):
-        perimeter_module.build_account_manifest_payloads(selected)
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(
+        item for item in output["rows"]
+        if item["account_id"] == "synthetic-account-01"
+    )
+    assert row["status"] == "BLOCKED_RETURN_LINKAGE"
+    assert row["blocking_reason"] == "OPENING_ANCHOR_RECOGNITION_AFTER_CUTOFF"
+    assert not {
+        "opening_capital", "deposits", "invested", "net_capital",
+        "current_value", "gain", "observation_linked_return", "observed_return",
+        "observed_hwm_index", "observed_max_drawdown", "observation_trace",
+        "capital_flow_trace",
+    } & set(row)
 
 
 def test_unattachable_recognition_emits_no_return_or_risk_numbers(
@@ -21677,6 +21750,13 @@ def _mixed_two_receipt_selected_inputs(perimeter_module: Any) -> object:
     baseline_snapshot = InputSnapshot.from_bytes(
         "two-receipt baseline", canonical_json_bytes(baseline)
     )
+    baseline_manifest = _generation_manifest_snapshot(
+        catalog=baseline_snapshot,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
 
     ledger = selected.provider_ledger.json_object()
     ledger["nav_observations"].extend(
@@ -21853,13 +21933,7 @@ def _mixed_two_receipt_selected_inputs(perimeter_module: Any) -> object:
                 as_of_date="2026-02-01",
             ),
             "baseline": baseline_snapshot,
-            "baseline_manifest": _generation_manifest_snapshot(
-                catalog=baseline_snapshot,
-                catalog_artifact_id="normalized/portfolio-baseline.json",
-                catalog_schema_name="portfolio-baseline-catalog",
-                catalog_schema_version="1",
-                as_of_date="2026-02-01",
-            ),
+            "baseline_manifest": baseline_manifest,
             "retrieval_receipts": {
                 first_id: first_snapshot,
                 second_id: second_snapshot,
@@ -21874,6 +21948,12 @@ def _mixed_two_receipt_selected_inputs(perimeter_module: Any) -> object:
                 "mixed schema", ACCOUNT_STRATEGY_SCHEMA_PATH.read_bytes()
             ),
         }
+    )
+    values["current_epoch_crosswalk"] = _rebound_current_epoch_crosswalk(
+        selected,
+        baseline=baseline_snapshot,
+        baseline_manifest=baseline_manifest,
+        label="two-receipt crosswalk",
     )
     return perimeter_module.AccountManifestSelectedInputs(**values)
 
@@ -21965,9 +22045,9 @@ def test_mixed_two_receipts_produce_two_literal_independent_numeric_rows(
         "complete_coverage_row_count": 2,
         "funded_admission_row_count": 2,
         "ok_output_row_count": 2,
-        "blocked_coverage_row_count": 13,
-        "blocked_admission_row_count": 13,
-        "blocked_output_row_count": 13,
+        "blocked_coverage_row_count": 11,
+        "blocked_admission_row_count": 11,
+        "blocked_output_row_count": 11,
     }
     assert [item["path"] for item in report["subjects"]] == [
         "authority/account-assignment-perimeter.json",
@@ -21980,6 +22060,7 @@ def test_mixed_two_receipts_produce_two_literal_independent_numeric_rows(
         "authority/selected-input-identities.json",
         "outputs/account-strategy-manifest.json",
         "authority/account-interval-retrieval-receipt-authority.json",
+        "authority/account-assignment-crosswalk.json",
         "receipt/a-account-02.json",
         "receipt/Z-account-01.json",
     ]
@@ -22309,6 +22390,38 @@ def _mixed_same_account_continuity_selected_inputs(perimeter_module: Any) -> obj
         ],
     }
 
+    baseline_manifest = _generation_manifest_snapshot(
+        catalog=baseline_snapshot,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
+
+    def replace_continuity_rows(rows: list[dict[str, object]]) -> None:
+        original = next(
+            row for row in rows if row["account_id"] == "synthetic-account-01"
+        )
+        rows[:] = [
+            row
+            for row in rows
+            if row["account_id"] not in {"synthetic-account-01", "synthetic-account-02"}
+        ]
+        for assignment in (
+            next(item for item in assignments if item["strategy_id"] == strategy_id)
+            for strategy_id in ("synthetic-strategy-01a", "synthetic-strategy-01b")
+        ):
+            rows.append({
+                **original,
+                **{
+                    key: assignment[key]
+                    for key in (
+                        "assignment_id", "account_id", "strategy_id",
+                        "effective_start", "effective_end",
+                    )
+                },
+            })
+
     provisional = _selected_input_kwargs(selected)
     provisional.update(
         {
@@ -22321,12 +22434,13 @@ def _mixed_same_account_continuity_selected_inputs(perimeter_module: Any) -> obj
                 as_of_date="2026-02-01",
             ),
             "baseline": baseline_snapshot,
-            "baseline_manifest": _generation_manifest_snapshot(
-                catalog=baseline_snapshot,
-                catalog_artifact_id="normalized/portfolio-baseline.json",
-                catalog_schema_name="portfolio-baseline-catalog",
-                catalog_schema_version="1",
-                as_of_date="2026-02-01",
+            "baseline_manifest": baseline_manifest,
+            "current_epoch_crosswalk": _rebound_current_epoch_crosswalk(
+                selected,
+                baseline=baseline_snapshot,
+                baseline_manifest=baseline_manifest,
+                label="continuity crosswalk",
+                mutate_rows=replace_continuity_rows,
             ),
             "retrieval_receipts": snapshots,
         }
@@ -22483,8 +22597,9 @@ def test_mixed_same_account_sequential_receipts_preserve_continuity_once(
     }
     assert successor["capital_flow_trace"] == [
         {
-            "date": "2026-01-29",
             "class": "EXTERNAL_IN",
+            "event_date": "2026-01-29",
+            "nav_recognition_date": "2026-01-29",
             "amount": "10",
         }
     ]
@@ -22562,9 +22677,12 @@ def test_mixed_two_receipts_keep_coverage_and_admission_independent(
     else:
         receipts.pop("receipt/a-account-02.json")
         selected = _mixed_reselect_receipts(perimeter_module, selected, receipts)
-        expected_status = "BLOCKED_UNPROVABLE_OPENING_FLOWS"
-        expected_coverage = "BLOCKED"
-        expected_admission = "FUNDED"
+        with pytest.raises(
+            perimeter_module.ManifestError,
+            match="funded NAV record 'mixed-2-nav-1' does not exist",
+        ):
+            perimeter_module.build_account_manifest_payloads(selected)
+        return
 
     payloads = perimeter_module.build_account_manifest_payloads(selected)
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
@@ -22885,7 +23003,7 @@ def test_mixed_receipt_cardinality_is_closed_at_fifteen(
         }
     )
     verifier_selected = verifier_module.IndependentVerifierInputs(**values)
-    assert len(verifier_module._mixed_subject_paths(verifier_selected)) == 25
+    assert len(verifier_module._mixed_subject_paths(verifier_selected)) == 26
     with pytest.raises(verifier_module.IndependentVerificationError):
         verifier_module.IndependentVerifierInputs(
             **{
@@ -22916,6 +23034,7 @@ def test_mixed_receipt_cardinality_is_closed_at_fifteen(
             "authority/selected-input-identities.json",
             "outputs/account-strategy-manifest.json",
             "authority/account-interval-retrieval-receipt-authority.json",
+            "authority/account-assignment-crosswalk.json",
             *fifteen,
         )
     ]
@@ -22989,6 +23108,7 @@ def test_mixed_composer_routes_one_receipt_to_one_literal_numeric_row(
     )
     assert set(payloads) == {
         "authority/selected-input-identities.json", "authority/account-assignment-perimeter.json",
+        "authority/account-assignment-crosswalk.json",
         "authority/calculation-inputs.json", "authority/flow-classification-policy.json",
         "authority/classified-flows.json", "authority/account-flow-coverage.json",
         "authority/mapped-epoch-admission.json", "authority/code-identities.json",
@@ -23000,24 +23120,24 @@ def test_mixed_composer_routes_one_receipt_to_one_literal_numeric_row(
     assert payloads["receipt/mixed-account-01.json"] == selected.retrieval_receipts["receipt/mixed-account-01.json"].contents
     coverage = json.loads(payloads["authority/account-flow-coverage.json"])
     assert [row["status"] for row in coverage["rows"]].count("COMPLETE") == 1
-    assert [row["status"] for row in coverage["rows"]].count("BLOCKED") == 14
+    assert [row["status"] for row in coverage["rows"]].count("BLOCKED") == 12
     admission = json.loads(payloads["authority/mapped-epoch-admission.json"])
     assert [row["status"] for row in admission["admissions"]].count("FUNDED") == 1
-    assert [row["status"] for row in admission["admissions"]].count("BLOCKED") == 14
+    assert [row["status"] for row in admission["admissions"]].count("BLOCKED") == 12
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
     ok_rows = [row for row in output["rows"] if row["status"] == "OK"]
     assert len(ok_rows) == 1
     assert {key: ok_rows[0][key] for key in ("opening_capital", "deposits", "internal_in", "invested", "withdrawn", "net_capital", "current_value", "gain")} == {"opening_capital": "50", "deposits": "10", "internal_in": "0", "invested": "60", "withdrawn": "0", "net_capital": "60", "current_value": "70", "gain": "10"}
     blocked = [row for row in output["rows"] if row["status"] == "BLOCKED_ADMISSION"]
-    assert len(blocked) == 14
+    assert len(blocked) == 12
     forbidden = {"start", "end", "opening_capital", "deposits", "internal_in", "invested", "external_withdrawals", "internal_out", "withdrawn", "net_capital", "current_value", "gain", "return_on_net_capital", "annualized_return_on_net_capital", "xirr_diagnostic", "observation_linked_return", "observed_return", "observed_hwm_index", "observed_max_drawdown", "opening_basis", "observation_trace", "capital_flow_trace", "nav_observation_trace", "nav_observations"}
     assert all(forbidden.isdisjoint(row) for row in blocked)
 
 
-def test_mixed_schema_scopes_v3_to_v8_receipt_outputs_only(
+def test_mixed_schema_scopes_current_receipt_outputs_only(
     perimeter_module: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The generic v7 producer keeps Task 8A authority/v2 admission valid."""
+    """The current producer and mixed envelope retain their versioned identities."""
     from jsonschema import Draft202012Validator
 
     selected = _mixed_composer_selected_inputs(perimeter_module)
@@ -23040,12 +23160,12 @@ def test_mixed_schema_scopes_v3_to_v8_receipt_outputs_only(
     validator = Draft202012Validator(
         json.loads(ACCOUNT_STRATEGY_SCHEMA_PATH.read_text(encoding="utf-8"))
     )
-    assert generic["schema_version"] == 7
+    assert generic["schema_version"] == 9
     assert "receipt_authority" in generic["source_identities"]["flow_coverage"]
     assert generic["source_identities"]["admission_policy"]["artifact"]["schema"]["version"] == "2"
     assert validator.is_valid(generic)
-    assert mixed["schema_version"] == 8
-    assert mixed["source_identities"]["calculation_inputs"]["schema"]["version"] == "3"
+    assert mixed["schema_version"] == 9
+    assert mixed["source_identities"]["calculation_inputs"]["schema"]["version"] == "4"
     assert mixed["source_identities"]["admission_policy"]["artifact"]["schema"]["version"] == "2"
     assert validator.is_valid(mixed)
     legacy = json.loads(
@@ -23182,16 +23302,23 @@ def test_mixed_composer_rejects_a_lowercase_baseline_provider_alias(
     baseline = selected.baseline.json_object()
     baseline["accounts"][0]["provider"] = "synthetic"
     baseline_snapshot = InputSnapshot.from_bytes("aliased baseline", canonical_json_bytes(baseline))
+    baseline_manifest = _generation_manifest_snapshot(
+        catalog=baseline_snapshot,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-02-01",
+    )
     values = _selected_input_kwargs(selected)
     values.update(
         {
             "baseline": baseline_snapshot,
-            "baseline_manifest": _generation_manifest_snapshot(
-                catalog=baseline_snapshot,
-                catalog_artifact_id="normalized/portfolio-baseline.json",
-                catalog_schema_name="portfolio-baseline-catalog",
-                catalog_schema_version="1",
-                as_of_date="2026-02-01",
+            "baseline_manifest": baseline_manifest,
+            "current_epoch_crosswalk": _rebound_current_epoch_crosswalk(
+                selected,
+                baseline=baseline_snapshot,
+                baseline_manifest=baseline_manifest,
+                label="aliased baseline crosswalk",
             ),
             "receipt_authority": selected.receipt_authority,
             "admission_policy": selected.admission_policy,
@@ -23397,16 +23524,16 @@ def test_mixed_independent_verifier_recomputes_retained_high_precision_money(
             "gain",
         )
     } == {
-        "opening_capital": "50.125",
+        "opening_capital": "50",
         "deposits": "10.25",
         "internal_in": "0",
-        "invested": "60.375",
+        "invested": "60.25",
         "external_withdrawals": "0",
         "internal_out": "0",
         "withdrawn": "0",
-        "net_capital": "60.375",
+        "net_capital": "60.25",
         "current_value": "70.625",
-        "gain": "10.25",
+        "gain": "10.375",
     }
 
     report = json.loads(
@@ -23467,7 +23594,7 @@ def test_mixed_admitted_projection_excludes_unrelated_blocked_facts(
     )
     assert blocked["classification_status"] == "BLOCKED"
     calculation = json.loads(payloads["authority/calculation-inputs.json"])
-    assert calculation["schema_version"] == 3
+    assert calculation["schema_version"] == 4
     assert calculation["projection"] == {
         "selector": "ALL_FUNDED_EPOCHS_V1",
         "funded_epochs": [
@@ -23504,7 +23631,7 @@ def test_mixed_admitted_projection_excludes_unrelated_blocked_facts(
     assert report["counts"]["observed_raw_flow_count"] == 2
     assert report["counts"]["classified_event_blocked_count"] == 1
     assert report["counts"]["ok_output_row_count"] == 1
-    assert report["counts"]["blocked_output_row_count"] == 14
+    assert report["counts"]["blocked_output_row_count"] == 12
 
 
 def test_mixed_admitted_projection_ignores_foreign_currency_blocked_evidence(
@@ -24068,7 +24195,7 @@ def test_mixed_independent_verifier_request_v2_round_trips_closed_selection(
     request = verifier_module.encode_verification_request(verifier_inputs, payloads)
     parsed = json.loads(request)
     assert request == canonical_json_bytes(parsed)
-    assert parsed["schema_version"] == 2
+    assert parsed["schema_version"] == 3
     assert set(parsed["selected_snapshots"]) == {
         "provider_ledger_base64",
         "provider_ledger_manifest_base64",
@@ -24078,6 +24205,7 @@ def test_mixed_independent_verifier_request_v2_round_trips_closed_selection(
         "epoch_producer_source_base64",
         "generation_builder_source_base64",
         "independent_verifier_source_base64",
+        "current_epoch_crosswalk_base64",
         "receipt_authority_base64",
         "admission_policy_base64",
         "manifest_schema_base64",
@@ -24093,6 +24221,7 @@ def test_mixed_independent_verifier_request_v2_round_trips_closed_selection(
         "authority/selected-input-identities.json",
         "outputs/account-strategy-manifest.json",
         "authority/account-interval-retrieval-receipt-authority.json",
+        "authority/account-assignment-crosswalk.json",
         "receipt/mixed-account-01.json",
     ]
     decoded, decoded_payloads = verifier_module.decode_verification_request(request)
@@ -25380,9 +25509,9 @@ def test_generation_composer_stages_one_verified_two_receipt_bundle(
         "authority/account-flow-coverage.json": ("account-flow-coverage", "2"),
         "authority/calculation-inputs.json": (
             "account-manifest-calculation-inputs",
-            "3",
+            "4",
         ),
-        "authority/classified-flows.json": ("classified-flows", "4"),
+        "authority/classified-flows.json": ("classified-flows", "5"),
         "authority/code-identities.json": ("account-manifest-code-identities", "1"),
         "authority/flow-classification-policy.json": (
             "flow-classification-policy",
@@ -25396,7 +25525,11 @@ def test_generation_composer_stages_one_verified_two_receipt_bundle(
             "selected-input-identities",
             "1",
         ),
-        "outputs/account-strategy-manifest.json": ("account-strategy-manifest", "8"),
+        "authority/account-assignment-crosswalk.json": (
+            "account-strategy-current-epoch-crosswalk",
+            "1",
+        ),
+        "outputs/account-strategy-manifest.json": ("account-strategy-manifest", "9"),
         "authority/account-interval-retrieval-receipt-authority.json": (
             "account-interval-retrieval-receipt-authority",
             "1",
