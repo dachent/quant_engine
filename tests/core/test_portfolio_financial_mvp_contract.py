@@ -55,6 +55,14 @@ EPOCH_INDEPENDENT_REPORT_PATH = "verification/independent-verification.json"
 FRESH_V9_GENERATION_ID = (
     "177353fc5a0e3dd2144b57495593228b204714e26d7e1db0b11ae0ebcf98ab11"
 )
+FRESH_V9_BUNDLE_ROOT = ROOT / ".q" / "nlv2m2"
+FRESH_V9_BUNDLE_PATH = FRESH_V9_BUNDLE_ROOT / "generations" / FRESH_V9_GENERATION_ID
+FRESH_V9_SIDECAR_PATH = (
+    FRESH_V9_BUNDLE_ROOT
+    / "report-inputs"
+    / FRESH_V9_GENERATION_ID
+    / "epoch-manifest-source.json"
+)
 
 
 def _literal_epoch_manifest_source() -> dict[str, object]:
@@ -428,10 +436,14 @@ def test_v9_epoch_source_rejects_release_control_mutations(
         contract_tool.epoch_manifest_source_from_bundle(bundle)
 
 
+@pytest.mark.skipif(
+    not FRESH_V9_BUNDLE_PATH.is_dir(),
+    reason="retained real-data generation bundle is not available in this checkout",
+)
 def test_v9_binder_accepts_fresh_generation_bundle() -> None:
-    """The regenerated, coverage-corrected candidate must stay a usable fixture."""
+    """The retained coverage-corrected candidate remains a usable evidence check."""
 
-    bundle = read_generation_bundle(ROOT / ".q" / "nlv2m2", FRESH_V9_GENERATION_ID)
+    bundle = read_generation_bundle(FRESH_V9_BUNDLE_ROOT, FRESH_V9_GENERATION_ID)
 
     source = contract_tool.epoch_manifest_source_from_bundle(bundle)
 
@@ -464,20 +476,16 @@ def test_v9_binder_accepts_fresh_generation_bundle() -> None:
     }
 
 
+@pytest.mark.skipif(
+    not (FRESH_V9_BUNDLE_PATH.is_dir() and FRESH_V9_SIDECAR_PATH.is_file()),
+    reason="retained real-data generation bundle and sidecar are not available in this checkout",
+)
 def test_fresh_v9_sidecar_equals_bundle_derived_source() -> None:
-    """The persisted six-key sidecar cannot silently diverge from its bundle."""
+    """The retained sidecar cannot silently diverge from its verified bundle."""
 
-    bundle = read_generation_bundle(ROOT / ".q" / "nlv2m2", FRESH_V9_GENERATION_ID)
-    sidecar_path = (
-        ROOT
-        / ".q"
-        / "nlv2m2"
-        / "report-inputs"
-        / FRESH_V9_GENERATION_ID
-        / "epoch-manifest-source.json"
-    )
+    bundle = read_generation_bundle(FRESH_V9_BUNDLE_ROOT, FRESH_V9_GENERATION_ID)
 
-    assert json.loads(sidecar_path.read_text(encoding="utf-8")) == (
+    assert json.loads(FRESH_V9_SIDECAR_PATH.read_text(encoding="utf-8")) == (
         contract_tool.epoch_manifest_source_from_bundle(bundle)
     )
 
