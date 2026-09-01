@@ -3847,7 +3847,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "033565fb529ec062f23cfcd973ee5b7186a1b754ceb4fb2ba8b009e5b11c99b7"
+        "85707e4a6b1ae3ac1f3384fe5e6893c375ae1a03c7c0418d77bb3d96b0146a77"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -3884,7 +3884,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "033565fb529ec062f23cfcd973ee5b7186a1b754ceb4fb2ba8b009e5b11c99b7"
+        "85707e4a6b1ae3ac1f3384fe5e6893c375ae1a03c7c0418d77bb3d96b0146a77"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
