@@ -53,14 +53,16 @@ _quant_engine/
   dataPortfolio/            canonical portfolio data authority
   data*/                    provider-local governed inputs
   evidence/
-    MVP-AUDIT-001/           retained audit receipts and staged candidates
-      candidates/<id>/       candidate snapshots keyed by content identity
-      independent-checks/    independently produced verification artifacts
+    manifests/               hash-bound retention and validation records
+    MVP-AUDIT-001/           retained audit and recovery records
+      design-reviews/        historical design and hostile reviews
+      legacy-session-notes/  historical diagnostics and CI evidence
       recovery/              non-mergeable interrupted work
-    design-reviews/          retained design and hostile-review records
-    legacy-session-notes/    historical diagnostics retained for recovery
   docs/
     historical/2026-08/     dated local decision and handoff documents
+  .m2/ .q/ .t3/             root-level path-bound evidence
+  quant_engine_mvp_audit_001_20260824/
+    .q/                      selected path-bound panel candidate and receipt
 ```
 
 The canonical retained schema-21 staged panel candidate is candidate
