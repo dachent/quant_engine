@@ -6,12 +6,30 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 MODULE_PATH = Path(__file__).resolve().parents[2] / "tools" / "merge_readiness.py"
+WORKFLOW_PATH = (
+    Path(__file__).resolve().parents[2]
+    / ".github"
+    / "workflows"
+    / "merge-readiness.yml"
+)
 SPEC = importlib.util.spec_from_file_location("merge_readiness_under_test", MODULE_PATH)
 assert SPEC is not None and SPEC.loader is not None
 readiness = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(readiness)
+
+
+def test_workflow_grants_read_access_for_commit_status_census() -> None:
+    workflow = yaml.safe_load(WORKFLOW_PATH.read_text(encoding="utf-8"))
+
+    assert workflow["permissions"] == {
+        "contents": "read",
+        "pull-requests": "read",
+        "checks": "read",
+        "statuses": "read",
+    }
 
 
 def _run(
