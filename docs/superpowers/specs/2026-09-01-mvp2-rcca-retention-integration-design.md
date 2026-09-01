@@ -102,10 +102,13 @@ The following are not moved until their active branch closes:
 Reproducible caches and duplicate synthetic test trees may be removed only
 after the exact retained inventory and covering tests prove they are
 unnecessary.
-Git worktrees are deregistered through Git only after cleanliness, zero-stash,
-remote-reachability, and evidence-retention checks; they are never deleted as
-ordinary directories. Any inventory row classed as path-bound evidence blocks
-worktree removal regardless of Git status until a replacement receipt or an
+Linked Git worktrees are deregistered through Git only after cleanliness,
+zero-stash, remote-reachability, and evidence-retention checks. A primary
+checkout created with a centralized separate Git directory has no Git
+`worktree remove` operation; after the same gates and exact approval, its
+working directory may be removed while the centralized Git directory is
+retained as recovery. Any inventory row classed as path-bound evidence blocks
+either removal regardless of Git status until a replacement receipt or an
 explicit historical-snapshot disposition removes that dependency.
 
 Those proof gates do not authorize deletion. This cleanup's owner approval is
