@@ -761,6 +761,7 @@ def _provider_ledger_generation(
         "transactions": [],
     }
     if catalog_schema_version == 2:
+        catalog["capital_anchors"] = []
         schema = json.loads(
             (
                 REPOSITORY_ROOT / "schemas/portfolio/provider-ledger.schema.json"
