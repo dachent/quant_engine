@@ -18477,7 +18477,9 @@ def _c4d3c2b1_bound_request(
     _c4d1b_fake_tree(hostile_pythonpath, "C4D3C2B1_PYTHONPATH_SHADOW")
     controlled_temp = (tmp_path / "controlled-temp").resolve()
     controlled_temp.mkdir()
-    windows_root = os.environ["SystemRoot"]
+    windows_root = os.environ.get("SystemRoot") or str(
+        (tmp_path / "system-root-placeholder").resolve()
+    )
     monkeypatch.setenv("C4D3C2B1_PARENT_ONLY_SENTINEL", "parent-only")
     base_environment = {
         "SYSTEMROOT": windows_root,
