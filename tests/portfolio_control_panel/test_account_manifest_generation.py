@@ -14897,7 +14897,7 @@ def _c4d1b_run_fresh_verifier(
     pythonpath_sentinel = "D1B_PYTHONPATH_FAKE_CORE_SENTINEL"
     _c4d1b_fake_tree(cwd_root, cwd_sentinel)
     _c4d1b_fake_tree(pythonpath_root, pythonpath_sentinel)
-    interpreter = (REPOSITORY_ROOT / ".venv" / "Scripts" / "python.exe").resolve()
+    interpreter = Path(sys.executable).resolve()
     assert interpreter.is_file()
     environment = os.environ.copy()
     environment.update(
@@ -14955,7 +14955,7 @@ def _c4d1b_assert_child_evidence(
     result: dict[str, object], stdout: bytes, stderr: bytes, privacy_tokens: set[bytes]
 ) -> None:
     core_table, core_origin_tokens = _c4d1b_parent_core_table()
-    interpreter = (REPOSITORY_ROOT / ".venv" / "Scripts" / "python.exe").resolve()
+    interpreter = Path(sys.executable).resolve()
     assert result == {
         "core": core_table,
         "disposition": "BLOCKED_C4D_CANONICAL_BYTES",
