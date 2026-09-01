@@ -14,7 +14,8 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import tempfile
-from typing import Any, Callable, Final, Mapping, Self
+from types import ModuleType
+from typing import Any, Callable, Final, Mapping, Protocol, Self, cast
 
 from quant_engine.core.contracts import (
     CoverageStatus,
@@ -46,6 +47,26 @@ _FILE_SHARE_READ: Final = 0x1
 _FILE_SHARE_WRITE: Final = 0x2
 _OPEN_EXISTING: Final = 3
 _FILE_FLAG_BACKUP_SEMANTICS: Final = 0x02000000
+
+
+class _WindowsFunction(Protocol):
+    """Minimal callable surface exposed by dynamically loaded Win32 APIs."""
+
+    argtypes: object
+    restype: object
+
+    def __call__(self, *args: object) -> object: ...
+
+
+class _WindowsDLL(Protocol):
+    def __getattr__(self, name: str) -> _WindowsFunction: ...
+
+
+def _windows_kernel32(ctypes_module: ModuleType) -> _WindowsDLL:
+    """Load kernel32 without requiring non-Windows ctypes stubs to expose it."""
+
+    win_dll = cast(Callable[..., _WindowsDLL], getattr(ctypes_module, "WinDLL"))
+    return win_dll("kernel32", use_last_error=True)
 
 
 class ReleaseValidationError(ValueError):
@@ -226,7 +247,7 @@ class _DirectoryLease:
                 f"security directory lease requires a regular directory: {path.name}"
             )
         if os.name == "nt":
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32 = _windows_kernel32(ctypes)
             create_file = kernel32.CreateFileW
             create_file.argtypes = (
                 wintypes.LPCWSTR,
@@ -238,16 +259,19 @@ class _DirectoryLease:
                 wintypes.HANDLE,
             )
             create_file.restype = wintypes.HANDLE
-            raw_handle = create_file(
-                str(path),
-                _FILE_READ_ATTRIBUTES,
-                _FILE_SHARE_READ | _FILE_SHARE_WRITE,
-                None,
-                _OPEN_EXISTING,
-                _FILE_FLAG_BACKUP_SEMANTICS,
-                None,
+            raw_handle = cast(
+                int | None,
+                create_file(
+                    str(path),
+                    _FILE_READ_ATTRIBUTES,
+                    _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+                    None,
+                    _OPEN_EXISTING,
+                    _FILE_FLAG_BACKUP_SEMANTICS,
+                    None,
+                ),
             )
-            handle = int(raw_handle or 0)
+            handle = raw_handle if raw_handle is not None else 0
             if handle == int(ctypes.c_void_p(-1).value or -1):
                 raise ReleaseConflictError(
                     f"security directory lease could not be acquired: {path.name}"
@@ -302,7 +326,7 @@ class _DirectoryLease:
 
     def close(self) -> None:
         if self.windows:
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32 = _windows_kernel32(ctypes)
             kernel32.CloseHandle(wintypes.HANDLE(self.handle))
         else:
             os.close(self.handle)

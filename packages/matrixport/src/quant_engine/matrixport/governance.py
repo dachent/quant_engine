@@ -17,7 +17,8 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable
+from types import ModuleType
+from typing import Callable, Protocol, cast
 
 from .catalog import Endpoint, catalog_rows, get_endpoint
 from .util import canonical_json
@@ -36,6 +37,31 @@ _REPARSE_POINT = 0x0400
 _REVIEW_REFERENCE_RE = re.compile(
     r"^https://github\.com/dachent/quant_engine/issues/[1-9][0-9]*#issuecomment-[1-9][0-9]*$"
 )
+
+
+class _WindowsFunction(Protocol):
+    """Minimal callable surface exposed by dynamically loaded Win32 APIs."""
+
+    argtypes: object
+    restype: object
+
+    def __call__(self, *args: object) -> object: ...
+
+
+class _WindowsDLL(Protocol):
+    def __getattr__(self, name: str) -> _WindowsFunction: ...
+
+
+def _windows_kernel32(ctypes_module: ModuleType) -> _WindowsDLL:
+    """Load kernel32 without requiring non-Windows ctypes stubs to expose it."""
+
+    win_dll = cast(Callable[..., _WindowsDLL], getattr(ctypes_module, "WinDLL"))
+    return win_dll("kernel32", use_last_error=True)
+
+
+def _windows_last_error(ctypes_module: ModuleType) -> int:
+    get_last_error = cast(Callable[[], int], getattr(ctypes_module, "get_last_error"))
+    return get_last_error()
 
 
 class GovernanceError(RuntimeError):
@@ -343,7 +369,7 @@ def _replace_receipt(source: Path, destination: Path) -> None:
 
     import ctypes
 
-    move_file_ex = ctypes.WinDLL("kernel32", use_last_error=True).MoveFileExW
+    move_file_ex = _windows_kernel32(ctypes).MoveFileExW
     move_file_ex.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_ulong)
     move_file_ex.restype = ctypes.c_int
     movefile_replace_existing = 0x1
@@ -353,7 +379,7 @@ def _replace_receipt(source: Path, destination: Path) -> None:
         str(destination),
         movefile_replace_existing | movefile_write_through,
     ):
-        raise OSError(ctypes.get_last_error(), "MoveFileExW failed")
+        raise OSError(_windows_last_error(ctypes), "MoveFileExW failed")
 
 
 def _commit_receipt_directory_entry(receipt_path: Path) -> None:
@@ -392,7 +418,7 @@ def _flush_windows_receipt_entry(receipt_path: Path) -> None:
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _windows_kernel32(ctypes)
     create_file = kernel32.CreateFileW
     create_file.argtypes = (
         wintypes.LPCWSTR,

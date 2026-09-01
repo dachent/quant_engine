@@ -15,8 +15,8 @@ import stat
 import sys
 import tempfile
 import time
-from types import MappingProxyType
-from typing import Mapping
+from types import MappingProxyType, ModuleType
+from typing import Callable, Mapping, Protocol, cast
 
 from quant_engine.core.contracts import (
     CoverageStatus,
@@ -65,6 +65,43 @@ _WINDOWS_RESERVED_COMPONENT_STEMS = frozenset(
 _AT_FDCWD = -100
 _RENAME_NOREPLACE = 1
 _MOVEFILE_WRITE_THROUGH = 0x00000008
+
+
+class _WindowsFunction(Protocol):
+    """Minimal callable surface exposed by dynamically loaded Win32 APIs."""
+
+    argtypes: object
+    restype: object
+
+    def __call__(self, *args: object) -> object: ...
+
+
+class _WindowsDLL(Protocol):
+    def __getattr__(self, name: str) -> _WindowsFunction: ...
+
+
+def _windows_kernel32(ctypes_module: ModuleType) -> _WindowsDLL:
+    """Load kernel32 without requiring non-Windows ctypes stubs to expose it."""
+
+    win_dll = cast(Callable[..., _WindowsDLL], getattr(ctypes_module, "WinDLL"))
+    return win_dll("kernel32", use_last_error=True)
+
+
+def _windows_last_error(ctypes_module: ModuleType) -> int:
+    get_last_error = cast(Callable[[], int], getattr(ctypes_module, "get_last_error"))
+    return get_last_error()
+
+
+def _windows_error(ctypes_module: ModuleType) -> OSError:
+    win_error = cast(Callable[[int], OSError], getattr(ctypes_module, "WinError"))
+    return win_error(_windows_last_error(ctypes_module))
+
+
+def _windows_open_osfhandle(msvcrt_module: ModuleType, handle: int, flags: int) -> int:
+    open_osfhandle = cast(
+        Callable[[int, int], int], getattr(msvcrt_module, "open_osfhandle")
+    )
+    return open_osfhandle(handle, flags)
 
 
 class GenerationConflictError(RuntimeError):
@@ -620,8 +657,9 @@ def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
     # snapshot fields still detect replacement and content drift.
     if os.name != "nt":
         identity = (*identity, value.st_ctime_ns)
-    if hasattr(value, "st_file_attributes"):
-        return (*identity, value.st_file_attributes)
+    attributes = getattr(value, "st_file_attributes", None)
+    if isinstance(attributes, int):
+        return (*identity, attributes)
     return identity
 
 
@@ -731,7 +769,8 @@ def _capture_posix_directory(
 def _open_windows_nofollow(path: Path, *, directory: bool) -> int:
     import msvcrt
 
-    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    kernel32 = _windows_kernel32(ctypes)
+    create_file = kernel32.CreateFileW
     create_file.argtypes = (
         ctypes.c_wchar_p,
         ctypes.c_uint32,
@@ -745,22 +784,27 @@ def _open_windows_nofollow(path: Path, *, directory: bool) -> int:
     flags = 0x00200000  # FILE_FLAG_OPEN_REPARSE_POINT
     if directory:
         flags |= 0x02000000  # FILE_FLAG_BACKUP_SEMANTICS
-    handle = create_file(
-        _windows_api_path(path),
-        0x80000000,  # GENERIC_READ
-        0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
-        None,
-        3,  # OPEN_EXISTING
-        flags,
-        None,
+    handle = cast(
+        int | None,
+        create_file(
+            _windows_api_path(path),
+            0x80000000,  # GENERIC_READ
+            0x00000001 | 0x00000002,  # FILE_SHARE_READ | FILE_SHARE_WRITE
+            None,
+            3,  # OPEN_EXISTING
+            flags,
+            None,
+        ),
     )
     invalid_handle = ctypes.c_void_p(-1).value
-    if handle == invalid_handle:
-        raise ctypes.WinError(ctypes.get_last_error())
+    if handle is None or handle == invalid_handle:
+        raise _windows_error(ctypes)
     try:
-        return msvcrt.open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+        return _windows_open_osfhandle(
+            msvcrt, handle, os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        )
     except OSError:
-        ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(handle)
+        kernel32.CloseHandle(handle)
         raise
 
 
@@ -1081,7 +1125,7 @@ def _rename_directory_noreplace(source: Path, target: Path) -> None:
     """Commit one same-filesystem directory without replacing a destination."""
 
     if os.name == "nt":
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32 = _windows_kernel32(ctypes)
         move_file = kernel32.MoveFileExW
         move_file.argtypes = (ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32)
         move_file.restype = ctypes.c_int
@@ -1090,7 +1134,7 @@ def _rename_directory_noreplace(source: Path, target: Path) -> None:
             _windows_api_path(target),
             _MOVEFILE_WRITE_THROUGH,
         ):
-            raise ctypes.WinError(ctypes.get_last_error())
+            raise _windows_error(ctypes)
         return
     if sys.platform.startswith("linux"):
         libc = ctypes.CDLL(None, use_errno=True)

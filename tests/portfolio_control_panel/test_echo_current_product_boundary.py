@@ -9,6 +9,14 @@ import pytest
 from jsonschema import Draft202012Validator
 
 ROOT = Path(__file__).resolve().parents[2]
+# This module is deliberately loaded from its file path below so the boundary
+# tests exercise the published tool rather than an already-imported fixture.
+# A file-location spec does not add the repository root to ``sys.path``;
+# retain the normal package anchor required by the tool's
+# ``tools.account_strategy_manifest`` import on isolated CI collection.
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 SPEC = importlib.util.spec_from_file_location(
     "portfolio_control_panel_echo_current_product",
     ROOT / "tools" / "portfolio_control_panel.py",
