@@ -14815,8 +14815,8 @@ try:
         "disposition": "BLOCKED_C4D_CANONICAL_BYTES",
         "forbidden_trap_count": _real_forbidden_count,
         "interpreter": {
-            "path": str(Path(sys.executable).resolve()),
-            "sha256": hashlib.sha256(Path(sys.executable).resolve().read_bytes()).hexdigest(),
+            "path": str(Path(sys.executable).absolute()),
+            "sha256": hashlib.sha256(Path(sys.executable).absolute().read_bytes()).hexdigest(),
             "version": list(sys.version_info[:3]),
         },
     }
@@ -14897,7 +14897,7 @@ def _c4d1b_run_fresh_verifier(
     pythonpath_sentinel = "D1B_PYTHONPATH_FAKE_CORE_SENTINEL"
     _c4d1b_fake_tree(cwd_root, cwd_sentinel)
     _c4d1b_fake_tree(pythonpath_root, pythonpath_sentinel)
-    interpreter = Path(sys.executable).resolve()
+    interpreter = Path(sys.executable).absolute()
     assert interpreter.is_file()
     environment = os.environ.copy()
     environment.update(
@@ -14955,7 +14955,7 @@ def _c4d1b_assert_child_evidence(
     result: dict[str, object], stdout: bytes, stderr: bytes, privacy_tokens: set[bytes]
 ) -> None:
     core_table, core_origin_tokens = _c4d1b_parent_core_table()
-    interpreter = Path(sys.executable).resolve()
+    interpreter = Path(sys.executable).absolute()
     assert result == {
         "core": core_table,
         "disposition": "BLOCKED_C4D_CANONICAL_BYTES",
