@@ -108,6 +108,13 @@ ordinary directories. Any inventory row classed as path-bound evidence blocks
 worktree removal regardless of Git status until a replacement receipt or an
 explicit historical-snapshot disposition removes that dependency.
 
+Those proof gates do not authorize deletion. This cleanup's owner approval is
+limited to the exact named root artifacts and superseded documents recorded on
+issue #374, with the manifest or Git recovery procedure stated there. Before
+each destructive batch, the issue record must name the exact targets, effect,
+and recovery procedure. Any target outside that recorded set requires fresh
+owner approval; data roots and path-bound evidence are not deletion targets.
+
 ## RCCA contract
 
 The RCCA identifies:
