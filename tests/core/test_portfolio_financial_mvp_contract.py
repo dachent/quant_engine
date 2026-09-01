@@ -1039,7 +1039,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # spans confined to coverage) while retaining corrected P123 inputs and
     # the deprecated Echo boundary.
     assert contract_tool.contract_digest(contract) == (
-        "f3c537218d73e889c607e9dd0c1e7cf02cd5452c0d22eb644e133be92539b79a"
+        "887eef73757ed1f2410ea2d9c6b06b4d3a5b12cf38b2e94766016671d5a4a167"
     )
 
 
