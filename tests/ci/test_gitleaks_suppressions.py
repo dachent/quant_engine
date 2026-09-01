@@ -67,12 +67,14 @@ def _copy_trust_paths(root: Path) -> None:
 
 
 def _configure_source_alternate(root: Path) -> None:
-    source_objects = _git(
-        REPOSITORY_ROOT, "rev-parse", "--git-path", "objects"
+    source_git_dir = _git(
+        REPOSITORY_ROOT, "rev-parse", "--absolute-git-dir"
     ).stdout.strip()
     alternates = root / ".git" / "objects" / "info" / "alternates"
     alternates.parent.mkdir(parents=True, exist_ok=True)
-    alternates.write_text(f"{source_objects}\n", encoding="utf-8", newline="\n")
+    alternates.write_text(
+        f"{Path(source_git_dir) / 'objects'}\n", encoding="utf-8", newline="\n"
+    )
 
 
 def _commit(root: Path, message: str) -> None:
