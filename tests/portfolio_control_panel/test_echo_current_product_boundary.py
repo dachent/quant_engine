@@ -45,16 +45,20 @@ REQUIRED_STRATEGY_IDS = {
     "volatis-strategy",
 }
 EXCLUDED_STRATEGY_IDS = {"composer-holy-grail", "echotrade-growth-pivots"}
+RETAINED_STRATEGY_MANIFEST_PATH = (
+    ROOT.parent / "dataPortfolio" / "manifests" / "strategy-manifest.json"
+)
 
 
 def _current_manifest_rows() -> list[dict[str, object]]:
     """Project the explicit seven-strategy account authority into 13 epochs."""
 
-    manifest = json.loads(
-        (
-            ROOT.parent / "dataPortfolio" / "manifests" / "strategy-manifest.json"
-        ).read_text(encoding="utf-8")
-    )
+    if not RETAINED_STRATEGY_MANIFEST_PATH.is_file():
+        pytest.skip(
+            "requires retained strategy-manifest evidence outside the checkout: "
+            f"{RETAINED_STRATEGY_MANIFEST_PATH}"
+        )
+    manifest = json.loads(RETAINED_STRATEGY_MANIFEST_PATH.read_text(encoding="utf-8"))
     rows: list[dict[str, object]] = []
     for strategy in manifest["strategies"]:
         if strategy["strategy_id"] not in REQUIRED_STRATEGY_IDS:

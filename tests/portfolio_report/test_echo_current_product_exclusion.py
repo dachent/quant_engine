@@ -54,7 +54,31 @@ ACCEPTED_EPOCH_BASELINE_GENERATION_ID = (
 )
 
 
+def _require_retained_baseline() -> None:
+    """Skip only tests whose fixture is retained outside a source checkout."""
+
+    pointer_path = REAL_BASELINE_ROOT / "CURRENT.json"
+    if not pointer_path.is_file():
+        pytest.skip(
+            f"requires retained baseline evidence outside the checkout: {pointer_path}"
+        )
+    pointer = json.loads(pointer_path.read_text(encoding="utf-8"))
+    generation_id = pointer.get("generation_id")
+    baseline_path = (
+        REAL_BASELINE_ROOT
+        / "generations"
+        / str(generation_id)
+        / "portfolio-baseline.json"
+    )
+    if not baseline_path.is_file():
+        pytest.skip(
+            "requires retained baseline generation outside the checkout: "
+            f"{baseline_path}"
+        )
+
+
 def _real_baseline_catalog() -> dict[str, Any]:
+    _require_retained_baseline()
     pointer = json.loads(
         (REAL_BASELINE_ROOT / "CURRENT.json").read_text(encoding="utf-8")
     )
@@ -69,6 +93,7 @@ def _real_baseline_catalog() -> dict[str, Any]:
 
 
 def _real_baseline_generation_id() -> str:
+    _require_retained_baseline()
     pointer = json.loads(
         (REAL_BASELINE_ROOT / "CURRENT.json").read_text(encoding="utf-8")
     )
@@ -248,10 +273,15 @@ def test_deprecated_history_cannot_change_current_twr_or_allocation() -> None:
     assert canonical == {
         "current": {
             "cumulative_return": "0.1",
+            "cumulative_return_label": "DAILY_GEOMETRIC_TWR",
             "current_drawdown": "0",
+            "daily_cumulative_return": "0.1",
+            "epoch_holding_period_link_observations": 2,
             "maximum_drawdown": "0",
             "observed_end": "2026-01-02",
             "observed_start": "2026-01-01",
+            "path_dependent_metrics_reason": None,
+            "path_dependent_metrics_status": "AVAILABLE",
             "provider_ids": ["synthetic"],
             "return_observations": 2,
             "return_series_schema": "ordered-date-return/1",
@@ -908,6 +938,7 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
 
 
 def test_real_financial_baseline_rejects_all_none_epoch_triplet() -> None:
+    _require_retained_baseline()
     with pytest.raises(reporter.ReportValidationError, match="financial MVP-2"):
         reporter.build_report_data(REAL_BASELINE_ROOT)
 
@@ -915,6 +946,7 @@ def test_real_financial_baseline_rejects_all_none_epoch_triplet() -> None:
 def test_real_financial_candidate_bind_verify_publish_reject_all_none_epoch_triplet(
     tmp_path: Path,
 ) -> None:
+    _require_retained_baseline()
     with pytest.raises(reporter.ReportValidationError, match="financial MVP-2"):
         reporter.build_candidate(REAL_BASELINE_ROOT, tmp_path / "candidate-output")
     with pytest.raises(reporter.ReportValidationError, match="financial MVP-2"):
@@ -1205,10 +1237,37 @@ def _write_epoch_manifest_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path
         / "epoch-manifest-source.json"
     )
     if not retained_root.is_dir():
-        raise FileNotFoundError(f"accepted epoch generation is absent: {retained_root}")
+        pytest.skip(
+            "requires retained accepted epoch generation outside the checkout: "
+            f"{retained_root}"
+        )
     if not retained_source.is_file():
-        raise FileNotFoundError(
-            f"accepted epoch source descriptor is absent: {retained_source}"
+        pytest.skip(
+            "requires retained accepted epoch source descriptor outside the checkout: "
+            f"{retained_source}"
+        )
+    try:
+        next(retained_root.iterdir())
+    except OSError as error:
+        pytest.skip(
+            "requires readable retained accepted epoch generation outside the "
+            f"checkout: {retained_root} ({error})"
+        )
+    accepted_baseline_root = (
+        REAL_BASELINE_ROOT / "generations" / ACCEPTED_EPOCH_BASELINE_GENERATION_ID
+    )
+    accepted_baseline_files = (
+        accepted_baseline_root / "generation.json",
+        accepted_baseline_root / "portfolio-baseline.json",
+    )
+    absent_accepted_baseline_files = [
+        path for path in accepted_baseline_files if not path.is_file()
+    ]
+    if absent_accepted_baseline_files:
+        pytest.skip(
+            "requires retained accepted epoch baseline generation outside the "
+            "checkout: "
+            + ", ".join(str(path) for path in absent_accepted_baseline_files)
         )
     generation_root = tmp_path / "epoch-generation"
     generation_destination = Path(
@@ -1411,6 +1470,7 @@ def test_current_product_hwm_coverage_uses_only_required_strategy_perimeter(
     # This test targets the HWM report seam.  The real-baseline epoch fixture
     # is independently blocked at generation-authority validation, so bypass
     # only that prerequisite and retain the real baseline/control projection.
+    _require_retained_baseline()
     monkeypatch.setattr(reporter, "_is_governed_financial_mvp2_path", lambda *_: False)
 
     report, _content, _baseline_path = reporter.build_report_data(
@@ -1435,6 +1495,7 @@ def test_current_product_hwm_policy_exclusion_of_required_strategy_fails_before_
 ) -> None:
     """A policy/control conflict cannot reach numerical or kernel processing."""
 
+    _require_retained_baseline()
     monkeypatch.setattr(reporter, "_is_governed_financial_mvp2_path", lambda *_: False)
 
     def numerical_hwm_must_not_run(*_args: Any, **_kwargs: Any) -> dict[str, str]:
@@ -1956,6 +2017,7 @@ def test_cli_verify_does_not_drop_epoch_manifest_when_crosswalk_is_missing(
 def test_cli_financial_build_and_verify_reject_all_none_epoch_triplet(
     tmp_path: Path,
 ) -> None:
+    _require_retained_baseline()
     assert (
         reporter.main(
             [

@@ -26679,6 +26679,18 @@ def test_owner_correction_retains_closed_echo_baseline_without_assignment_overla
     )
     ledger_root = data_root / "provider-ledger" / "generations" / ledger_generation_id
     baseline_root = data_root / "baseline" / "generations" / baseline_generation_id
+    required_evidence = (
+        ledger_root / "provider-ledger.json",
+        ledger_root / "generation.json",
+        baseline_root / "portfolio-baseline.json",
+        baseline_root / "generation.json",
+    )
+    absent_evidence = [path for path in required_evidence if not path.is_file()]
+    if absent_evidence:
+        pytest.skip(
+            "requires retained owner-correction evidence outside the checkout: "
+            + ", ".join(str(path) for path in absent_evidence)
+        )
     selected = perimeter_module.AccountManifestSelectedInputs(
         provider_ledger=InputSnapshot.capture(
             ledger_root / "provider-ledger.json", "owner-correction provider ledger"
