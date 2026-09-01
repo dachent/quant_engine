@@ -19,6 +19,7 @@ from typing import Any, Callable, Iterable, Mapping, Sequence
 from .catalog import ENDPOINTS, Endpoint, catalog_rows, get_endpoint
 from .credentials import ApiCredentials, load_credentials
 from .exporters import export_datasets, write_csv
+from .governance import authorize_live_read
 from .normalization import enrich_timestamps, normalize_rows
 from .pagination import DAY_MS, paginate_rfq_bisection, utc_time_windows
 from .raw_store import RawStore
@@ -326,6 +327,8 @@ class MatrixportExtractor:
         resume: bool = False,
         credentials: ApiCredentials | None = None,
         transport: ReadOnlyTransport | None = None,
+        governance_evidence: str | Path | None = None,
+        live_operation: str = "extract",
         reporter: Callable[[str], None] | None = None,
     ) -> None:
         if mode not in {"full", "incremental"}:
@@ -334,6 +337,15 @@ class MatrixportExtractor:
         self.output_root = self.workspace / OUTPUT_FOLDER
         self.run_id = validate_run_id(run_id) if run_id is not None else utc_run_id()
         self.run_dir = self.output_root / self.run_id
+        governance = None
+        if transport is None:
+            if governance_evidence is None:
+                raise ExtractionError("live-read governance evidence is required")
+            governance = authorize_live_read(
+                governance_evidence,
+                operation=live_operation,
+                mode=mode,
+            )
         self.run_dir.mkdir(parents=True, exist_ok=resume)
         for child in ("raw", "state", "csv", "xlsx", "reports"):
             (self.run_dir / child).mkdir(parents=True, exist_ok=True)
@@ -382,7 +394,7 @@ class MatrixportExtractor:
             self.run_dir / "raw", storage=self.storage, run_id=self.run_id
         )
         self.transport = transport or ReadOnlyTransport(
-            credentials or load_credentials()
+            credentials or load_credentials(), governance=governance
         )
         self.previous_run_dir, self._previous_end_ms = self._find_previous_completed()
         if self.mode == "incremental" and self.previous_run_dir is not None:
@@ -1984,8 +1996,19 @@ def export_catalog(workspace: str | Path) -> tuple[Path, Path]:
     return csv_path, json_path
 
 
-def live_auth_test(credentials: ApiCredentials | None = None) -> dict[str, Any]:
-    transport = ReadOnlyTransport(credentials or load_credentials())
+def live_auth_test(
+    workspace: str | Path,
+    governance_evidence: str | Path,
+    credentials: ApiCredentials | None = None,
+) -> dict[str, Any]:
+    governance = authorize_live_read(
+        governance_evidence,
+        operation="auth-test",
+        mode=None,
+    )
+    transport = ReadOnlyTransport(
+        credentials or load_credentials(), governance=governance
+    )
     response = transport.get("/mapi/v1/wallet/balance")
     payload = _json_loads(response.content)
     code = _api_code(payload)

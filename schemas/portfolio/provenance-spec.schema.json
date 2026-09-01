@@ -44,6 +44,7 @@
     },
     "reserve_account": {"$ref": "#/$defs/reserve_account"},
     "tracker_imports": {"$ref": "#/$defs/tracker_imports"},
+    "financial_mvp": {"$ref": "#/$defs/financial_mvp"},
     "assumptions": {
       "type": "array",
       "items": {"$ref": "#/$defs/assumption"}
@@ -170,6 +171,26 @@
         "corrections": {"$ref": "#/$defs/source_ref"},
         "open_gaps": {"$ref": "#/$defs/source_ref"},
         "unmapped_labels": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "financial_mvp": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_path",
+        "contract_sha256",
+        "registry_path",
+        "registry_sha256",
+        "schema_path",
+        "schema_sha256"
+      ],
+      "properties": {
+        "contract_path": {"type": "string", "minLength": 1},
+        "contract_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "registry_path": {"type": "string", "minLength": 1},
+        "registry_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "schema_path": {"type": "string", "minLength": 1},
+        "schema_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
     },
     "assumption": {

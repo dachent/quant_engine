@@ -57,7 +57,7 @@ python tools\portfolio_diligence_rubric.py verify `
 
 The output binds all four input hashes, emits exactly eight gates, recomputes
 correlation-one and central-case loss for the add/replace/resize scenario,
-reports every affected cluster budget, and publishes nine current-sleeve
+reports every affected cluster budget, and publishes seven current-sleeve
 leave-one-out rows.
 The scenario weight is the candidate's post-scenario systematic-capital weight;
 retained sleeves are scaled pro rata to the remaining weight. This makes every

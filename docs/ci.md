@@ -20,7 +20,7 @@ to prove that each member's published metadata is complete.
 
 | Workflow | Purpose | Token authority |
 |---|---|---|
-| `quality.yml` | Six-cell Windows/Ubuntu and Python 3.11–3.13 matrix: frozen install, Ruff, mypy, bounded offline pytest, and all-package build | `contents: read` |
+| `quality.yml` | Six-cell Windows/Ubuntu and Python 3.11–3.13 matrix: frozen install, Ruff, mypy, pinned Gitleaks-suppression provenance, bounded offline pytest, and all-package build | `contents: read` |
 | `security.yml` | Local Git-history secret scan, locked dependency audit, and workflow policy validation | `contents: read` |
 | `data-boundary.yml` | Standard-library scan of the authoritative Git index and staged blobs | `contents: read` |
 | `issue-guard.yml` | Validate the issue graph; outside pull requests, reconcile native dependencies and reopen illegal closures | Pull requests: `contents: read`; reconcile only: `contents: read`, `issues: write` |
@@ -38,6 +38,23 @@ comment, summary, or report upload. The uv dependency audit queries OSV for the
 frozen lock graph at the supported Python 3.11 floor; it sends package
 identities and versions, not repository content or credentials. An unavailable
 vulnerability service fails the job.
+
+Before either the Quality or Security secret-scan step accepts a Gitleaks
+suppression, `tools/check_gitleaks_suppressions.py` requires exact LF worktree
+bytes for `.gitleaksignore` and its metadata, the pinned metadata SHA-256, a
+source-pinned accepted-review commit, exact reviewed raw ignore bytes, clean
+tracked trust paths, and a local no-replacement SHA-1 Git ancestry/object
+chain. The metadata records evidence and cannot choose the accepted commit.
+This is local Git provenance only: it does not authenticate live Issue #194,
+the checker itself, reviewer identity, or CODEOWNERS enforcement on GitHub.
+
+The merge-readiness probe reads the protected branch's live required-context
+set, preserves each required GitHub App identity, and paginates the exact-head
+check-run census. Legacy required contexts also consult commit statuses. Only
+`completed` + `success` from the required app (or `success` for a legacy status)
+satisfies readiness. Missing, pending, skipped, neutral, cancelled, failed, or
+same-named wrong-app evidence does not satisfy readiness; older duplicate runs
+cannot override the newest run for the same context and app.
 
 ## Issue guard
 
@@ -88,8 +105,9 @@ uv lock --check
 uv sync --frozen --all-groups --all-packages --python 3.11
 uv run --frozen --no-sync ruff format --check .
 uv run --frozen --no-sync ruff check .
-uv run --frozen --no-sync mypy packages/alpaca/src packages/ci-controls/src packages/core/src packages/fidelity/src packages/ibkr/src packages/matrixport/src packages/portfolio-ledger/src packages/schwab/src packages/web-contracts/src tools/alpaca_generation.py tools/check_repository_boundary.py tools/check_push_policy.py tools/issue_guard.py tools/fidelity_generation.py tools/ibkr_generation.py tools/matrixport_generation.py tools/schwab_generation.py tools/portfolio_provenance.py tools/portfolio_baseline.py tools/portfolio_report.py tools/portfolio_control_panel.py tools/portfolio_diligence_rubric.py tools/portfolio_driver_map.py tools/portfolio_release_builder.py tools/portfolio_pipeline_materialize.py tools/data_pipeline.py
-uv run --frozen --no-sync pytest -q --disable-socket tests/security tests/ci tests/core tests/fidelity tests/ibkr tests/matrixport tests/portfolio_ledger tests/portfolio_provenance tests/portfolio_baseline tests/portfolio_report tests/portfolio_control_panel tests/schwab tests/web_contracts tests/governance
+uv run --frozen --no-sync mypy packages/alpaca/src packages/ci-controls/src packages/core/src packages/fidelity/src packages/ibkr/src packages/matrixport/src packages/portfolio-ledger/src packages/portfolio123/src packages/schwab/src packages/web-contracts/src tools/account_strategy_manifest.py tools/alpaca_generation.py tools/check_repository_boundary.py tools/check_push_policy.py tools/issue_guard.py tools/fidelity_generation.py tools/ibkr_generation.py tools/matrixport_generation.py tools/portfolio123_generation.py tools/schwab_generation.py tools/quantbase_generation.py tools/portfolio_provenance.py tools/provider_ledger.py tools/portfolio_baseline.py tools/portfolio_report.py tools/portfolio_control_panel.py tools/portfolio_decomposition.py tools/portfolio_correlation.py tools/portfolio_driver_map.py tools/portfolio_target_series.py tools/portfolio_strategy_history.py tools/portfolio_implementation_reconciliation.py tools/portfolio_implementation_return_attribution.py tools/portfolio_release_builder.py tools/portfolio_pipeline_materialize.py tools/portfolio_financial_mvp_contract.py tools/data_pipeline.py tools/data_recovery_rehearsal.py tools/provider_security_quarantine.py tools/p123_security_quarantine.py tools/verify_portfolio123_skill_installation.py
+uv run --frozen --no-sync python tools/check_gitleaks_suppressions.py
+uv run --frozen --no-sync pytest -q --disable-socket tests/alpaca tests/security tests/ci tests/core tests/fidelity tests/ibkr tests/market_data tests/matrixport tests/portfolio123 tests/quantbase tests/portfolio_ledger tests/provider_ledger tests/portfolio_provenance tests/portfolio_baseline tests/portfolio_report tests/portfolio_control_panel tests/portfolio_analytics tests/portfolio_attribution tests/portfolio_operations tests/schwab tests/schwab_app tests/web_contracts tests/governance
 uv build --all-packages --no-sources --python 3.11
 uv audit --locked --python-version 3.11 --preview-features audit-command
 python tools/check_repository_boundary.py --root . --policy .policy/data-boundary.toml

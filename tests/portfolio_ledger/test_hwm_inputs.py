@@ -145,7 +145,7 @@ def test_policy_extractor_reads_the_admitted_contract() -> None:
     exclusions = hwm_policy_exclusions(json.loads(contract.read_text(encoding="utf-8")))
     assert exclusions == {
         "composer-holy-grail": date(2026, 8, 1),
-        "echotrade-growth-pivots": date(2026, 8, 6),
+        "echotrade-growth-pivots": date(2025, 11, 25),
     }
     assert _SHA256.fullmatch("a" * 64) is not None
 

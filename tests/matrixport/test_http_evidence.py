@@ -6,6 +6,7 @@ import pytest
 
 import quant_engine.matrixport.pipeline as pipeline_module
 from quant_engine.matrixport.credentials import ApiCredentials
+from quant_engine.matrixport.governance import authorize_live_read
 from quant_engine.matrixport.pipeline import ExtractionError, MatrixportExtractor
 from quant_engine.matrixport.raw_store import RawStore, request_fingerprint
 from quant_engine.matrixport.transport import (
@@ -55,7 +56,13 @@ class NoReplayTransport:
         raise AssertionError("orphan evidence must prevent network replay")
 
 
-def make_http_transport(session: FakeSession) -> ReadOnlyTransport:
+def make_http_transport(
+    session: FakeSession, synthetic_live_read_evidence
+) -> ReadOnlyTransport:
+    evidence = synthetic_live_read_evidence(
+        scope=(("GET", BALANCE_PATH),), max_requests=1
+    )
+    governance = authorize_live_read(evidence, operation="extract", mode="full")
     return ReadOnlyTransport(
         ApiCredentials("access-key-canary", "secret-key-canary"),
         session=session,
@@ -65,6 +72,7 @@ def make_http_transport(session: FakeSession) -> ReadOnlyTransport:
         clock=lambda: 1_731_931_956.0,
         monotonic=lambda: 100.0,
         random_source=lambda: 0.0,
+        governance=governance,
     )
 
 
@@ -77,14 +85,18 @@ def make_extractor(tmp_path, transport) -> MatrixportExtractor:
     )
 
 
-def test_final_non_2xx_bytes_are_archived_and_exception_is_sanitized(tmp_path):
+def test_final_non_2xx_bytes_are_archived_and_exception_is_sanitized(
+    tmp_path, synthetic_live_read_evidence
+):
     auth_field = "author" + "ization"
     body = json.dumps(
         {auth_field: "Basic auth-canary", "detail": "body-canary"},
         separators=(",", ":"),
     ).encode()
     session = FakeSession(FakeResponse(503, body))
-    extractor = make_extractor(tmp_path, make_http_transport(session))
+    extractor = make_extractor(
+        tmp_path, make_http_transport(session, synthetic_live_read_evidence)
+    )
     try:
         with pytest.raises(TransportHTTPError) as raised:
             extractor._call(BALANCE_PATH)

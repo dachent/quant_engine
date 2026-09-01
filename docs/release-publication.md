@@ -63,3 +63,18 @@ The control-panel publisher also compensates its local pointer and stable
 launcher if launcher publication fails. The complete source-to-panel workflow
 uses the coordinated release boundary so report, analytics, weekly-return, and
 panel authorities cannot silently diverge.
+
+## Windows publication boundary
+
+Windows pathname replacement can redirect a coordinated transaction after a
+directory has been checked. Therefore `commit_release`, `recover_release`, and
+`rollback_release` fail closed on Windows with
+`WINDOWS_NAMESPACE_UNTRUSTED`, before they read or change release state.
+`prepare_release` remains available to stage immutable evidence, but it does
+not authorize publication. Rehearsal entry points return the in-memory
+`PUBLICATION_UNAVAILABLE` result and do not create output on that platform.
+
+`publish_generation` remains a separate single-root primitive; it does not
+carry the coordinated hostile-writer guarantee. A future Windows broker must
+hold stable directory identities and handles across the complete coordinated
+transaction. Revalidating pathnames before individual operations is not enough.

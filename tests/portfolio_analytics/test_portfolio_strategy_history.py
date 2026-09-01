@@ -451,11 +451,16 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
     assert dispositions["Volatis Strategy"]["provider_live_return_observations"] == 3
     assert dispositions["Volatis Strategy"]["source_observed_end"] == "2026-08-04"
     assert dispositions["Volatis Strategy"]["source_rows_excluded_after_as_of"] == 1
-    assert (
-        dispositions["Growth at Market Pivot Points [EchoTrade]"][
-            "required_for_analysis"
-        ]
-        is False
+    echotrade = dispositions["Growth at Market Pivot Points [EchoTrade]"]
+    assert echotrade["required_for_analysis"] is False
+    assert echotrade["history_status"] == "RETAINED_REJECTED_HISTORY_DEPRECATED"
+    assert echotrade["status"] == "DEPRECATED_RETAINED_REJECTED_HISTORY_BY_GOVERNANCE"
+    assert echotrade["strategy_version"] == (
+        "echotrade-deprecated-retained-rejected-history:2026-08-29"
+    )
+    assert echotrade["reason"] == (
+        "EchoTrade is deprecated; retained event-only history is rejected "
+        "as non-daily account-live evidence."
     )
     assert (
         dispositions["[Composer] - The Holy Grail (Buy Copy)"]["required_for_analysis"]

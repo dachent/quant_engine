@@ -4,7 +4,8 @@ The builder consumes only derived or independently observed facts:
 
 - members: owner-validated funded-membership evidence (decision packet);
 - capital_observations: account NAV closing-capital observations;
-- return_observations: accepted account-live NET returns per interval.
+- return_observations: accepted returns carrying the canonical as-held HWM
+  return basis per interval.
 
 It emits component periods with beginning-capital weights taken strictly
 between observed brackets, binds every row to the governing policy and
@@ -21,6 +22,8 @@ from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Any, Final
+
+from quant_engine.portfolio_ledger.hwm import AS_HELD_HWM_RETURN_BASIS
 
 _SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 
@@ -229,7 +232,7 @@ def build_governed_hwm_inputs(
     for rows in capital_by_strategy.values():
         rows.sort(key=lambda item: item[0])
 
-    required_basis = "ACCOUNT_LIVE_NET"
+    required_basis = AS_HELD_HWM_RETURN_BASIS
     for obs in return_observations:
         strategy_id = _text(obs.get("strategy_id"), "return strategy_id")
         if strategy_id not in member_rows:

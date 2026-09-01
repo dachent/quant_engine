@@ -204,18 +204,20 @@ calculation cannot advance the accepted report or generation pointer.
 
 The repository owner amended the HWM perimeter on 2026-08-01. The governed
 machine-readable historical policy is `contracts/portfolio-hwm-policy-v2.json`
-(`PORT-HWM-2`). On 2026-08-06 the owner added an independently named $0.19
-EchoTrade de-minimis disposition. The current policy is
+(`PORT-HWM-2`). Effective 2025-11-25, the owner recorded the $0.19 EchoTrade
+historical-only disposition. The current policy is
 `contracts/portfolio-hwm-policy-v3.json` (`PORT-HWM-3`); v2 remains immutable
 for reproduction of earlier generations.
 
 1. Composer Holy Grail remains in capital, allocation, and consolidated-value
    reporting, but is excluded de minimis from the material HWM denominator.
    This is a named exception, not a general materiality threshold.
-2. Growth at Market Pivot Points [EchoTrade] remains in capital, allocation,
-   and consolidated-value reporting, but is excluded de minimis from the
-   material HWM denominator effective 2026-08-06. This is a named $0.19
-   disposition, not a general materiality threshold.
+2. Growth at Market Pivot Points [EchoTrade] is deprecated and historical-only.
+   Its $0.19 remains only as clearly labeled historical evidence and is excluded
+   from every current strategy, allocation, account-selector, count, manifest,
+   consolidated-value, decomposition, dependence, HWM, and funded-product
+   surface, effective 2025-11-25. This is a named historical disposition, not a
+   general materiality threshold.
 3. Every other current systematic strategy remains in the material perimeter.
 4. Hash-verified provider-custodied account NAV is acceptable HWM evidence when
    it is tied to exactly one positive live holding and normalized without

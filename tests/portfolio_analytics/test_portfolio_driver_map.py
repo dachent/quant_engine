@@ -29,50 +29,49 @@ SERIES = (
     "GrizzlyBears VTMA",
     "Robuxio Crypto (High Sharpe High Vol)",
     "EU [P123]",
-    "[Composer] - The Holy Grail (Buy Copy)",
-    "Growth at Market Pivot Points [EchoTrade]",
 )
 
 
-def _dependence() -> dict[str, Any]:
+def _dependence(series: tuple[str, ...] = SERIES) -> dict[str, Any]:
+    series_count = len(series)
     return {
         "analytics_schema_version": 2,
         "dependence": {
-            "series_ids": list(SERIES),
+            "series_ids": list(series),
             "blend_cells": [
                 {
-                    "left": SERIES[left],
-                    "right": SERIES[right],
+                    "left": series[left],
+                    "right": series[right],
                     "observed_correlation": "0.2",
                 }
-                for left in range(len(SERIES))
-                for right in range(left + 1, len(SERIES))
+                for left in range(series_count)
+                for right in range(left + 1, series_count)
             ],
             "correlation_one": {
-                "loss": "0.135",
+                "loss": format(series_count * 0.015, ".12g"),
                 "components": [
                     {
                         "series_id": series_id,
-                        "allocation_weight": "0.1111111111111111",
+                        "allocation_weight": format(1 / series_count, ".12g"),
                         "conservative_loss_fraction": "0.15",
                         "loss_contribution": "0.015",
                     }
-                    for series_id in SERIES
+                    for series_id in series
                 ],
             },
             "central_case": {
-                "loss": format(math.sqrt(9 * 0.01**2), ".12g"),
+                "loss": format(math.sqrt(series_count * 0.01**2), ".12g"),
                 "components": [
                     {
                         "series_id": series_id,
                         "loss_scale_contribution": "0.01",
                     }
-                    for series_id in SERIES
+                    for series_id in series
                 ],
                 "dependence_matrix": {
                     "values": [
-                        ["1" if left == right else "0" for right in range(9)]
-                        for left in range(9)
+                        ["1" if left == right else "0" for right in range(series_count)]
+                        for left in range(series_count)
                     ]
                 },
             },
@@ -170,7 +169,7 @@ def test_build_maps_33_candidates_and_four_tactical_leave_one_out_rows(
         ),
         "refresh_status": "UNAVAILABLE_RAW_RETURN_INPUTS_NOT_RETAINED",
     }
-    assert len(payload["driver_clusters"]) == 5
+    assert len(payload["driver_clusters"]) == 4
     assert len(payload["tactical_leave_one_out"]) == 4
     assert payload["authority_boundary"] == {
         "allocation_effect": "NONE",
@@ -190,6 +189,38 @@ def test_cluster_budget_uses_exact_source_contract_hash() -> None:
         accepted["economic_driver_cluster_budget"]["contract_sha256"]
         == exact_source_hash
     )
+
+
+def test_current_cluster_contract_budgets_only_product_required_series() -> None:
+    financial_contract = json.loads(
+        (
+            REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+        ).read_text(encoding="utf-8")
+    )
+    active_series = tuple(
+        row["history_series_id"]
+        for row in financial_contract["strategies"]
+        if row["product_requirement"] == "REQUIRED"
+    )
+    cluster_contract = json.loads(
+        driver_map.CLUSTER_CONTRACT.read_text(encoding="utf-8")
+    )
+
+    accepted, clusters = driver_map._cluster_map(
+        _dependence(active_series), cluster_contract, "c" * 64
+    )
+
+    budget = accepted["economic_driver_cluster_budget"]
+    assert len(active_series) == 7
+    assert {member for cluster in clusters for member in cluster["members"]} == set(
+        active_series
+    )
+    assert [row["cluster_id"] for row in budget["clusters"]] == [
+        "TACTICAL_TIMING_MULTI_ASSET",
+        "US_SYSTEMATIC_EQUITY",
+        "EUROPE_SYSTEMATIC_EQUITY",
+        "CRYPTO_DIRECTIONAL",
+    ]
 
 
 def test_partial_measurement_is_ranked_but_never_promoted_to_verdict(

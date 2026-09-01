@@ -14,8 +14,8 @@
       {
         "strategy_id": "echotrade-growth-pivots",
         "classification": "EXCLUDED_DE_MINIMIS",
-        "effective_date": "2026-08-06",
-        "reason": "User-directed de minimis disposition: retain the $0.19 sleeve in capital reporting without spending an operating cycle refreshing it or allowing it to block the systematic HWM governor."
+        "effective_date": "2025-11-25",
+        "reason": "Owner-confirmed deprecated strategy: its Alpaca assignment closed on 2025-11-24, so retain it only as historical evidence and exclude it from every later systematic HWM period."
       }
     ]
   },

@@ -30,7 +30,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 SCHEMA_VERSION: Final = 2
 CATALOG_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "1.1.0"
+BUILDER_VERSION: Final = "1.1.1"
 STRATEGY_COUNT: Final = 9
 CATALOG_NAME: Final = "strategy-attribution.json"
 AVAILABLE_STATUSES: Final = {
@@ -341,7 +341,9 @@ def build_catalog(
         if isinstance(item, dict)
     }
     if len(strategies) != STRATEGY_COUNT:
-        raise AttributionValidationError("baseline must contain exactly 9 strategies")
+        raise AttributionValidationError(
+            "baseline must contain exactly 9 retained strategy registry records"
+        )
     source = spec.get("return_source")
     if not isinstance(source, dict):
         raise AttributionValidationError("return_source must be an object")
@@ -374,7 +376,9 @@ def build_catalog(
         len(rows) != STRATEGY_COUNT
         for rows in (benchmark_rows, benchmark_comparison_rows, comparison_rows)
     ):
-        raise AttributionValidationError("attribution requires exactly 9 strategy rows")
+        raise AttributionValidationError(
+            "attribution requires exactly 9 retained strategy registry rows"
+        )
     benchmark_by_id = {
         _text(item.get("strategy_id"), "benchmark.strategy_id"): item
         for item in benchmark_rows
@@ -543,7 +547,11 @@ def stage_catalog(
         adapter=AdapterIdentity("portfolio-attribution-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="nine current strategies with exact-date metrics or explicit unavailable dispositions",
+            boundary=(
+                "nine retained registry strategies (seven REQUIRED active current, Echo "
+                "DEPRECATED_HISTORY_ONLY, Composer IMMATERIAL_EXCLUDED) with exact-date "
+                "metrics or explicit unavailable dispositions"
+            ),
             fact_types=(
                 "benchmark assignment",
                 "benchmark-relative attribution",

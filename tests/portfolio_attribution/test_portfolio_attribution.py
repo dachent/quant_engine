@@ -242,6 +242,16 @@ def test_stage_and_publish_are_content_addressed(tmp_path: Path) -> None:
     staged = attribution.stage_catalog(baseline, spec, output)
     repeated = attribution.stage_catalog(baseline, spec, output)
     assert staged == repeated
+    generation = json.loads(
+        (
+            output / "generations" / staged["generation_id"] / "generation.json"
+        ).read_text()
+    )
+    assert generation["coverage"]["boundary"] == (
+        "nine retained registry strategies (seven REQUIRED active current, Echo "
+        "DEPRECATED_HISTORY_ONLY, Composer IMMATERIAL_EXCLUDED) with exact-date metrics "
+        "or explicit unavailable dispositions"
+    )
     published = attribution.publish_catalog(
         baseline, spec, output, staged["generation_id"]
     )

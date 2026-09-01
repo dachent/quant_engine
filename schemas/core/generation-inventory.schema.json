@@ -1,0 +1,73 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-engine.local/schemas/core/generation-inventory.schema.json",
+  "title": "quant_engine detached generation inventory",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["files", "generation_id", "inventory_schema_version"],
+  "properties": {
+    "files": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/file"},
+      "allOf": [
+        {
+          "contains": {
+            "type": "object",
+            "required": ["relative_path"],
+            "properties": {"relative_path": {"const": "generation.json"}}
+          },
+          "minContains": 1,
+          "maxContains": 1
+        },
+        {
+          "contains": {
+            "type": "object",
+            "required": ["relative_path"],
+            "properties": {
+              "relative_path": {
+                "const": "verification/independent-verification.json"
+              }
+            }
+          },
+          "minContains": 1,
+          "maxContains": 1
+        }
+      ]
+    },
+    "generation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "inventory_schema_version": {"const": 1}
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["relative_path", "sha256", "size_bytes"],
+      "properties": {
+        "relative_path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?!/)(?!.*\\\\)(?!.*[<>:\\x22|?*])(?!.*//)(?!.*[/]$)(?!.*(?:^|/)\\.{1,2}(?:/|$))[^\\u0000-\\u001F\\u007F]+$",
+          "allOf": [
+            {
+              "not": {
+                "enum": ["generation-inventory.json", "generation-receipt.json"]
+              }
+            },
+            {
+              "not": {"pattern": "(?:^|/)[^/]*[. ](?:/|$)"}
+            },
+            {
+              "not": {
+                "pattern": "(?:^|/)(?:[Aa][Uu][Xx]|[Cc][Oo][Nn](?:[Ii][Nn]\\$|[Oo][Uu][Tt]\\$)?|[Nn][Uu][Ll]|[Pp][Rr][Nn]|[Cc][Oo][Mm][1-9¹²³]|[Ll][Pp][Tt][1-9¹²³])(?:\\.[^/]*)?(?:/|$)"
+              }
+            }
+          ]
+        },
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "size_bytes": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

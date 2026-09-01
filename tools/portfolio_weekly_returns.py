@@ -25,6 +25,7 @@ from quant_engine.core import (
     hash_file,
     publish_generation,
     read_current,
+    read_generation,
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
@@ -89,11 +90,25 @@ class WeeklyReturnError(ValueError):
     """An input or output violates the weekly-return contract."""
 
 
+def _filesystem_path(path: Path) -> Path:
+    if os.name != "nt":
+        return path
+    value = str(path.absolute())
+    if len(value) < 248:
+        return path
+    if value.startswith("\\\\?\\"):
+        return Path(value)
+    if value.startswith("\\\\"):
+        return Path(f"\\\\?\\UNC\\{value[2:]}")
+    return Path(f"\\\\?\\{value}")
+
+
 def _load_json(path: Path, label: str) -> dict[str, Any]:
-    if path.is_symlink() or not path.is_file():
+    candidate = _filesystem_path(path)
+    if candidate.is_symlink() or not candidate.is_file():
         raise WeeklyReturnError(f"{label} is missing or linked")
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(candidate.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise WeeklyReturnError(f"{label} is not readable JSON") from exc
     if not isinstance(value, dict):
@@ -145,6 +160,8 @@ def _weekly_series(
 ) -> tuple[dict[str, str], dict[str, list[Any]], str]:
     daily: dict[date, Decimal] = {}
     for observed_date, observed_return in observations:
+        if observed_date > as_of:
+            raise WeeklyReturnError("weekly observation is after correlation as_of")
         if observed_date in daily:
             raise WeeklyReturnError(f"duplicate daily observation: {observed_date}")
         daily[observed_date] = observed_return
@@ -239,39 +256,63 @@ def _coverage(values: Mapping[str, str]) -> dict[str, Any]:
 
 def _correlation_inputs(
     correlation_root: Path,
-) -> tuple[dict[str, Any], dict[str, Any], Path, Path]:
+) -> tuple[dict[str, Any], GenerationManifest, Path, Path]:
     try:
         pointer = read_current(correlation_root)
+        manifest = read_generation(correlation_root, pointer.generation_id)
     except (OSError, ValueError, RuntimeError) as exc:
         raise WeeklyReturnError("correlation pointer is not accepted") from exc
     generation = correlation_root / "generations" / pointer.generation_id
     correlation_path = generation / "correlation.json"
     manifest_path = generation / "generation.json"
+    expected = [
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == "normalized/correlation.json"
+    ]
+    if correlation_path.is_symlink() or not correlation_path.is_file():
+        raise WeeklyReturnError("correlation artifact binding differs")
+    actual_hash, actual_size = hash_file(correlation_path)
+    if (
+        len(expected) != 1
+        or expected[0].sha256 != actual_hash
+        or expected[0].size_bytes != actual_size
+    ):
+        raise WeeklyReturnError("correlation artifact binding differs")
     correlation = _load_json(correlation_path, "correlation analytics")
-    manifest = _load_json(manifest_path, "correlation generation manifest")
     if correlation.get("analytics_schema_version") != 2:
         raise WeeklyReturnError("layered correlation schema version 2 is required")
     if correlation.get("default_evidence_mode") != "LIVE_ONLY":
         raise WeeklyReturnError("weekly strategy authority must default to LIVE_ONLY")
-    if manifest.get("generation_id") != pointer.generation_id:
-        raise WeeklyReturnError("correlation generation identity differs")
     return correlation, manifest, correlation_path, manifest_path
 
 
 def _strategy_rows(
     strategy_returns: Path,
     correlation: Mapping[str, Any],
-    generation_manifest: Mapping[str, Any],
+    generation_manifest: GenerationManifest,
     as_of: date,
 ) -> list[dict[str, Any]]:
+    raw_source = correlation.get("source")
+    if not isinstance(raw_source, dict) or not all(
+        isinstance(key, str) for key in raw_source
+    ):
+        raise WeeklyReturnError("correlation source must be an object")
+    source = raw_source
+    artifact_id = _text(source.get("artifact_id"), "correlation source artifact_id")
     expected = [
         item
-        for item in _objects(generation_manifest.get("artifacts"), "artifacts")
-        if item.get("artifact_id")
-        == "provider-rollforward/layered-strategy-returns.csv"
+        for item in generation_manifest.artifacts
+        if item.artifact_id == artifact_id
     ]
-    actual_hash = hash_file(strategy_returns)[0]
-    if len(expected) != 1 or expected[0].get("sha256") != actual_hash:
+    actual_hash, actual_size = hash_file(strategy_returns)
+    if (
+        len(expected) != 1
+        or expected[0].sha256 != actual_hash
+        or expected[0].size_bytes != actual_size
+        or source.get("sha256") != actual_hash
+        or source.get("size_bytes") != actual_size
+    ):
         raise WeeklyReturnError("strategy return source hash differs from correlation")
     with strategy_returns.open("r", encoding="utf-8-sig", newline="") as handle:
         reader = csv.DictReader(handle)
@@ -305,8 +346,8 @@ def _strategy_rows(
         }
     if set(compositions["LIVE_ONLY"]) != set(compositions["LIVE_PLUS_BACKTEST"]):
         raise WeeklyReturnError("strategy mode boundaries differ")
-    if len(compositions["LIVE_ONLY"]) != 9:
-        raise WeeklyReturnError("weekly strategy boundary must contain nine strategies")
+    if not compositions["LIVE_ONLY"]:
+        raise WeeklyReturnError("weekly strategy boundary is empty")
 
     indexed: dict[tuple[str, str, str], list[tuple[date, Decimal]]] = {}
     for row in raw:
@@ -413,7 +454,6 @@ def _manifest_hashes(plan_bundle: Path) -> dict[str, str]:
         manifest.get("outputs"), "planning outputs"
     )
     expected: dict[str, str] = {}
-    root = plan_bundle.resolve()
     for item in rows:
         relative = _text(item.get("path"), "planning path")
         portable = PurePosixPath(relative)
@@ -428,18 +468,15 @@ def _manifest_hashes(plan_bundle: Path) -> dict[str, str]:
         ):
             raise WeeklyReturnError(f"planning path is invalid: {relative}")
         path = plan_bundle.joinpath(*portable.parts)
-        try:
-            path.resolve(strict=True).relative_to(root)
-        except (FileNotFoundError, ValueError, OSError) as exc:
-            raise WeeklyReturnError(
-                f"planning artifact escapes bundle: {relative}"
-            ) from exc
-        if path.is_symlink() or not path.is_file():
+        candidate = _filesystem_path(path)
+        if candidate.is_symlink() or not candidate.is_file():
             raise WeeklyReturnError(
                 f"planning artifact is missing or linked: {relative}"
             )
         expected_sha256 = _text(item.get("sha256"), "planning sha256")
-        actual_sha256, actual_size = hash_file(path)
+        content = candidate.read_bytes()
+        actual_sha256 = hashlib.sha256(content).hexdigest()
+        actual_size = len(content)
         if actual_sha256 != expected_sha256:
             raise WeeklyReturnError(f"planning input hash differs: {relative}")
         if schema_version == 2:
@@ -558,9 +595,7 @@ def build_weekly_returns(
     correlation, generation_manifest, correlation_path, manifest_path = (
         _correlation_inputs(correlation_root)
     )
-    as_of = date.fromisoformat(
-        _text(generation_manifest.get("as_of_date"), "correlation as_of_date")
-    )
+    as_of = generation_manifest.as_of_date
     strategy_rows = _strategy_rows(
         strategy_returns, correlation, generation_manifest, as_of
     )
@@ -668,6 +703,28 @@ def verify_candidate(
     candidate_dir: Path,
 ) -> dict[str, Any]:
     payload, _ = build_weekly_returns(correlation_root, strategy_returns, plan_bundle)
+    correlation, _manifest, _correlation_path, _manifest_path = _correlation_inputs(
+        correlation_root
+    )
+    dependence_modes = correlation.get("dependence_modes")
+    live_dependence = (
+        dependence_modes.get("LIVE_ONLY")
+        if isinstance(dependence_modes, dict)
+        else None
+    )
+    live_composition = (
+        live_dependence.get("series_composition")
+        if isinstance(live_dependence, dict)
+        else None
+    )
+    expected_strategies = (
+        set(live_composition) if isinstance(live_composition, dict) else set()
+    )
+    observed_strategies = {
+        str(row.get("display_name"))
+        for row in payload["series"]
+        if row.get("primary_group") == "STRATEGY"
+    }
     expected = canonical_json_bytes(payload)
     expected_id = hashlib.sha256(expected).hexdigest()
     path = candidate_dir / "weekly-returns.json"
@@ -680,10 +737,8 @@ def verify_candidate(
         is False,
         "evidence_modes_exact": payload["strategy_evidence_modes"]
         == list(STRATEGY_MODES),
-        "nine_strategies": sum(
-            row["primary_group"] == "STRATEGY" for row in payload["series"]
-        )
-        == 9,
+        "strategy_boundary": bool(expected_strategies)
+        and observed_strategies == expected_strategies,
         "nine_core_benchmarks": sum(
             "CORE_BENCHMARK" in row["display_groups"] for row in payload["series"]
         )

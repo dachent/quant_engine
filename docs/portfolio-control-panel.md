@@ -32,8 +32,9 @@ without preserving stale calculations or hard-coded operator conclusions.
   gaps. QSI, GrizzlyBears, TuringTrader, and Volatis have admitted version-bound
   history. EU is a named exact-model HAR export defect; long EU curves from
   different books are retained but rejected as substitutes. EchoTrade is
-  deprecated with no history, and Composer is immaterial with unconnected
-  history. Return evidence does not manufacture a design or backtest version.
+  deprecated with retained event-only history rejected as non-daily account-live
+  evidence, and Composer is immaterial with unconnected history. Return evidence
+  does not manufacture a design or backtest version.
 - Factor composition, net/gross alpha status, holdout fit, coverage,
   contribution reconciliation, and each dated dynamic exposure path come only
   from accepted analytics generations. The clean-room dynamic FLS lens remains
@@ -47,11 +48,13 @@ without preserving stale calculations or hard-coded operator conclusions.
   to undisclosed MPI production behavior. Dynamic smoothness selection uses
   training evidence only, reports a sealed holdout, and displays the same-factor
   static benchmark beside the effective-dated exposure path.
-- The material HWM perimeter is explicit: Composer and the $0.19 EchoTrade
-  sleeve remain visible in capital reporting but are separately excluded de
-  minimis with effective dates and reasons; Robuxio uses accepted Matrixport
-  account NAV and Volatis uses accepted Quantbase account value reconciled to
-  cash additions. Every other current systematic strategy remains included.
+- The current-product perimeter is explicit: EchoTrade is deprecated and
+  history-only, so its historical $0.19 evidence is excluded from every current
+  strategy, allocation, account-selector, count, manifest, consolidated-value,
+  and HWM surface. Composer is separately excluded as immaterial; Robuxio uses
+  accepted Matrixport account NAV and Volatis uses accepted Quantbase account
+  value reconciled to cash additions. All seven required current systematic
+  strategies remain included.
 - The provider-custodied account paths supply sleeve TWR, cumulative return,
   and maximum drawdown. They do not manufacture MWR, unrelated account cash
   flows, or a full-portfolio composite.
@@ -101,8 +104,10 @@ without preserving stale calculations or hard-coded operator conclusions.
   pre-inception backtest boundary as Dependence. Factor rows remain labeled as
   excess or long-short returns; strategy, ETF style, sector, industry, and core
   benchmark rows retain their declared total-return or proxy basis.
-- Layered strategy underwriting is recomputed for all nine current strategies
-  under `PORT-UNDERWRITE-1`. Authoritative design, exact-version backtest,
+- Layered strategy underwriting is recomputed under `PORT-UNDERWRITE-1` for
+  all nine retained registry records: seven REQUIRED active current strategies,
+  Echo as `DEPRECATED_HISTORY_ONLY`, and Composer as `IMMATERIAL_EXCLUDED`.
+  Authoritative design, exact-version backtest,
   provider/model live, account live, and implementation reconciliation remain
   separate. The result combines long-history statistical membership,
   model-versus-account diagnostics, pre-live-defined regime checks,
@@ -168,8 +173,8 @@ The command resolves the accepted analytics roots as siblings of `reporting`:
 `<portfolio-root>\analytics\decomposition` and
 `<portfolio-root>\analytics\correlation`. `--decomposition-root` and
 `--correlation-root` may override those paths for isolated tests. The panel is
-not built if any lens pointer, plan hash, schema, nine-strategy boundary,
-36-pair boundary, factor contribution identity, or correlation-one
+not built if any lens pointer, plan hash, schema, nine-record retained-registry
+boundary, 36-pair boundary, factor contribution identity, or correlation-one
 reconciliation differs.
 
 `--freshness-health` is mandatory. `--baseline-root` is likewise mandatory:
@@ -216,16 +221,16 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py verify `
 The verifier proves all nine views, local-only assets, lack of network or
 trade code, accepted capital/risk replay, the strategy, allocation, and account
 identity boundaries derived from the accepted report, five separate
-decomposition lenses with nine explicit
-strategy dispositions each, the available and unavailable factor counts bound
-to the analytics generations, dynamic
+decomposition lenses with nine explicit retained-strategy dispositions each
+(seven current and two excluded), the available and unavailable factor counts
+bound to the analytics generations, dynamic
 estimator disclosures when present, measured/unavailable dependence counts
 derived exactly from the accepted generation, live-only default authority,
 optional version-matched backtest composition, explicit unavailable facts, and
 frozen-appendix isolation. It also proves that all four previously passive
-evidence sections are consumed by the renderer and that the nine-strategy
-underwriting ledger for the accepted report reconciles without fabricated
-causal components or any
+evidence sections are consumed by the renderer and that the nine-record
+retained-strategy underwriting ledger for the accepted report reconciles
+without fabricated causal components or any
 automatic decision authority.
 
 The Windows-first end-to-end operator procedure, including the full evidence
@@ -253,10 +258,12 @@ $env:PLAYWRIGHT_EXECUTABLE_PATH = "<chromium-browser-executable>"
 $qa = Join-Path <candidate-directory> "qa"
 
 node apps/portfolio-control-panel/browser_qa.mjs `
-  --html (Join-Path <candidate-directory> "index.html") --output $qa
+  --html (Join-Path <candidate-directory> "index.html") --output $qa `
+  --expected-calculation-cutoff 2026-08-13
 node apps/portfolio-control-panel/interaction_qa.mjs `
   --html (Join-Path <candidate-directory> "index.html") `
-  --output (Join-Path $qa "interaction-results.json")
+  --output (Join-Path $qa "interaction-results.json") `
+  --expected-calculation-cutoff 2026-08-13
 uv run --frozen --no-sync python tools/portfolio_control_panel.py qa `
   --candidate-dir <candidate-directory> --qa-dir $qa
 ```
@@ -274,6 +281,10 @@ attribution separated from historical General intervals; candidate
 filter/search; a responsive provenance control; and
 absence of execution controls. Screenshots must also be inspected visually
 before publication.
+
+Pass the calculation cutoff explicitly from release acceptance. The scripts
+read the artifact/provider capture date from the manifest's bound ledger
+identity; it may be later than the calculation cutoff, but never expands it.
 
 ## Governed source-to-panel orchestration
 
@@ -322,6 +333,14 @@ mappings, analytics/report/panel equality, freshness, and generation-wide
 invariants; and report zero unwaived blocking exceptions. A failure prevents
 release preparation, leaving publication authority unchanged.
 
+For a financial release, the panel command also requires `--financial-mode`,
+the staged schema-3 `--account-manifest`, and exact ledger, ledger-identity,
+baseline-root, classified-flow, classification-policy, and admission-policy
+authorities. The release builder supplies these from schema 8 and reuses the
+same staged manifest for build, verify, and publish. Omitting them is permitted
+only for an explicitly non-financial development view; it cannot publish the
+financial product.
+
 Use the same CLI for the portfolio profile:
 
 ```powershell
@@ -345,6 +364,7 @@ pass, publish the already accepted local candidate:
 uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
   --report-root $report --baseline-root $baseline --legacy-panel $legacy `
   --candidate-dir <candidate-directory> --qa-dir $qa --output-root $output `
+  --coordinated-release-receipt <release-builder-stage-results/panel-publication-authorization.json> `
   --decomposition-lenses-root $lensRoot `
   --decomposition-plan-bundle $planBundle `
   --weekly-returns-root $weekly `
@@ -352,7 +372,11 @@ uv run --frozen --no-sync python tools/portfolio_control_panel.py publish `
   --freshness-health $freshness
 ```
 
-Publication hash-binds the accepted portfolio, decomposition, correlation, and
+Direct publication requires the release builder's hash-bound coordinated-release
+receipt for that exact output root, candidate, and frozen QA inventory. This is
+an honest-operator guard against accidental out-of-band authority advancement;
+it is not a security boundary against a local principal able to write the
+receipt and output trees. Publication hash-binds the accepted portfolio, decomposition, correlation, and
 weekly-return artifacts, stages an immutable generation, copies the panel and
 both the browser and content-addressed semantic validation results, then creates
 the relative stable launcher. Before coordinated release, run the same browser
@@ -362,7 +386,8 @@ the launcher and resolves to the expected immutable generation:
 ```powershell
 node apps/portfolio-control-panel/browser_qa.mjs `
   --html (Join-Path <staged-panel-root> "index.html") `
-  --output <stable-launcher-qa-directory>
+  --output <stable-launcher-qa-directory> `
+  --expected-calculation-cutoff 2026-08-13
 uv run --frozen --no-sync python tools/portfolio_control_panel.py launcher-qa `
   --launcher (Join-Path <staged-panel-root> "index.html") `
   --qa-dir <stable-launcher-qa-directory> `

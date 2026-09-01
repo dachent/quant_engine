@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { mkdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -14,15 +15,57 @@ function args(argv) {
   return parsed;
 }
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function isCalendarDate(value) {
+  const parsed = ISO_DATE.test(value || "") ? new Date(`${value}T00:00:00Z`) : null;
+  return Boolean(parsed && !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value);
+}
+
+function acceptedCutoff(value) {
+  if (!isCalendarDate(value)) {
+    throw new Error("--expected-calculation-cutoff must be an ISO calendar date");
+  }
+  return value;
+}
+
+function calculationDateFacts(manifest) {
+  const facts = [];
+  for (const row of manifest?.rows || []) {
+    for (const field of ["start", "end"]) {
+      if (typeof row?.[field] === "string") facts.push({ account_id: row.account_id, field, value: row[field] });
+    }
+    for (const link of row?.observation_trace?.links || []) {
+      for (const field of ["start_date", "end_date"]) {
+        if (typeof link?.[field] === "string") facts.push({ account_id: row.account_id, field: `observation_trace.${field}`, value: link[field] });
+      }
+    }
+    for (const observation of row?.nav_observation_trace || []) {
+      if (typeof observation?.date === "string") facts.push({ account_id: row.account_id, field: "nav_observation_trace.date", value: observation.date });
+    }
+    for (const flow of row?.capital_flow_trace || []) {
+      for (const field of ["date", "event_date", "nav_recognition_date"]) {
+        if (typeof flow?.[field] === "string") facts.push({ account_id: row.account_id, field: `capital_flow_trace.${field}`, value: flow[field] });
+      }
+    }
+  }
+  return facts;
+}
+
 const options = args(process.argv.slice(2));
 if (!options.html || !options.output || !process.env.PLAYWRIGHT_MODULE) {
   throw new Error("--html, --output, and PLAYWRIGHT_MODULE are required");
 }
+const expectedCalculationCutoff = acceptedCutoff(options["expected-calculation-cutoff"]);
 const moduleUrl = pathToFileURL(path.resolve(process.env.PLAYWRIGHT_MODULE)).href;
 const { chromium } = await import(moduleUrl);
 const html = path.resolve(options.html);
 const output = path.resolve(options.output);
 const baseUrl = pathToFileURL(html).href;
+const candidateRecordBytes = await readFile(path.join(path.dirname(html), "candidate.json"));
+const candidateRecord = JSON.parse(candidateRecordBytes.toString("utf8"));
+const candidateRecordSha256 = createHash("sha256").update(candidateRecordBytes).digest("hex");
+const dashboardData = JSON.parse(await readFile(path.join(path.dirname(html), "data", "dashboard_data.json"), "utf8"));
 const launchOptions = {
   headless: true,
   ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH
@@ -138,9 +181,45 @@ try {
     const target = `${baseUrl}${capture.view ? `#${capture.view}` : ""}`;
     await page.goto(target, { waitUntil: "load", timeout: 30000 });
     await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
+    let epochDisplay = null;
+    if (capture.view === "risk" && dashboardData.account_manifest?.schema_version >= 9) {
+      const manifest = dashboardData.account_manifest;
+      const rows = await page.locator("#account-manifest-table tbody tr").evaluateAll((nodes) => nodes.map((node) => ({
+        account_id: node.getAttribute("data-account-id"),
+        account_label: node.querySelector("td")?.textContent?.trim() ?? "",
+        strategy_id: node.querySelector("td:nth-child(2)")?.textContent?.trim() ?? "",
+      })));
+      const legend = (await page.locator("#account-manifest-legend").textContent())?.trim() ?? "";
+      const strategyIds = new Set(rows.map((row) => row.strategy_id));
+      const boundLedgerIdentity = manifest.source_identities?.classified_flows?.ledger_identity;
+      const boundLedgerArtifact = boundLedgerIdentity?.artifact;
+      const captureDate = boundLedgerArtifact?.as_of_date;
+      const calculationFactsAfterAcceptedCutoff = calculationDateFacts(manifest)
+        .filter((fact) => !isCalendarDate(fact.value) || fact.value > expectedCalculationCutoff);
+      if (rows.length !== 13 || strategyIds.size !== 7 || rows.some((row, index) => (
+        row.account_id !== manifest.rows[index]?.account_id
+        || row.account_label !== manifest.rows[index]?.account_label
+        || row.strategy_id !== manifest.rows[index]?.strategy_id
+      )) || rows.some((row) => /echo|composer/i.test(`${row.strategy_id} ${row.account_label}`))) {
+        throw new Error("schema-9 epoch manifest rendered rows diverge from the bound current subject");
+      }
+      if (manifest.calculation_cutoff_date !== expectedCalculationCutoff
+        || typeof boundLedgerIdentity !== "object"
+        || typeof boundLedgerArtifact !== "object"
+        || !isCalendarDate(captureDate)
+        || expectedCalculationCutoff > captureDate
+        || !legend.includes(`Calculations through ${manifest.calculation_cutoff_date}.`)
+        || !legend.includes(`Artifact/provider capture date: ${captureDate}.`)
+        || calculationFactsAfterAcceptedCutoff.length > 0) {
+        throw new Error("schema-9 epoch manifest temporal acceptance boundary is missing, divergent, or exceeded");
+      }
+      epochDisplay = { rows, legend };
+    }
     await page.screenshot({ path: path.join(folder, "screenshot.png"), fullPage: true });
     if (capture.pdf) await page.pdf({ path: path.join(folder, "page.pdf"), printBackground: true, preferCSSPageSize: true });
     const manifest = {
+      artifact_sha256: candidateRecord.artifact_sha256,
+      candidate_record_sha256: candidateRecordSha256,
       console_event_count: consoleEvents.length,
       console_events_path: path.join(folder, "console-events.json"),
       device_scale_factor: 1,
@@ -151,6 +230,7 @@ try {
       screenshot_path: path.join(folder, "screenshot.png"),
       target,
       final_url: page.url(),
+      epoch_display: epochDisplay,
       title: await page.title(),
       tool: "portfolio_control_panel_browser_qa",
       scope: excludeCandidates ? "NON_CANDIDATE" : "FULL",

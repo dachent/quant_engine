@@ -148,9 +148,11 @@ with hash-bound legacy-code disposition recorded in
 
 The baseline's coverage-aware performance tables and independent unified
 workbook are built with the [portfolio report runbook](docs/portfolio-report.md).
-The workbook is a generated, read-only deliverable: calculations originate in
-tested Python and accepted private data, then native Excel recalculates and a
-machine-readable contract validates the saved copy before publication.
+The workbook is a generated, read-only deliverable. Repository sidecars may be
+retained as `REPO_BOUND_POSTRUN_ONLY` staging evidence, but authoritative
+publication is blocked with `NATIVE_EXCEL_RECEIPT_REQUIRED` until an externally
+owned xlsx-win runtime/schema proves native Excel execution; this repository
+does not infer that proof from JSON.
 
 The accepted report feeds the existing local visual shell through the
 [portfolio control-panel runbook](docs/portfolio-control-panel.md). Current

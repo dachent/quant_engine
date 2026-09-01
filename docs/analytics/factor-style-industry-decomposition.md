@@ -208,14 +208,17 @@ becoming an indiscriminate mega-model. The first current-book assignments are:
   dimension-controlled 49-industry decomposition;
 - P123 EU: European economic factors only;
 - Robuxio: unavailable until an accepted crypto candidate source exists;
-- EchoTrade: required but not ready because the captured event-only
-  reconstruction is not an admissible daily NAV target; and
-- Composer: required but not ready because connected account-live target
-  history is missing.
+- EchoTrade: deprecated and historical-only, with no current decomposition,
+  dependence, HWM, or funded-product obligation; its retained $0.19 is
+  historical evidence only and excluded from every current or consolidated
+  capital/value surface; and
+- Composer: immaterial and excluded from current decomposition, dependence,
+  HWM, and funded-product obligations.
 
-The accepted de-minimis policy excludes EchoTrade and Composer only from the
-material HWM denominator. It does not remove their capital, decomposition, or
-dependence obligations from the current product.
+Composer's accepted immaterial-exclusion policy removes its current-product
+obligations, including the material HWM denominator. EchoTrade is not a
+current-product strategy; its $0.19 is retained solely as clearly labeled
+historical evidence, never current or consolidated capital/value.
 
 `tools/portfolio_current_decomposition_plan.py` verifies the plan, candidate
 catalog, target evidence, provider provenance, the operational evaluation date,

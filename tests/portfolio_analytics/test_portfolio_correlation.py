@@ -364,7 +364,11 @@ def test_invalid_priors_stress_and_mixed_layers_fail_closed(tmp_path: Path) -> N
 
 
 def _write_mode_fixture(
-    root: Path, *, backtest_version: str = "v1", duplicate_live: bool = False
+    root: Path,
+    *,
+    backtest_version: str = "v1",
+    duplicate_live: bool = False,
+    stale_live_series: str | None = None,
 ) -> tuple[Path, Path, list[date]]:
     root.mkdir(parents=True)
     days = _days(20)
@@ -382,7 +386,11 @@ def _write_mode_fixture(
                     backtest_version,
                 ]
             )
-            if index >= 10 and not (series_id == "a" and index == 14):
+            if (
+                index >= 10
+                and not (series_id == "a" and index == 14)
+                and not (series_id == stale_live_series and index == len(days) - 1)
+            ):
                 rows.append(
                     [
                         series_id,
@@ -503,6 +511,19 @@ def test_live_and_backtest_modes_are_separate_and_live_wins_overlap(
     assert live_performance["annualization_basis"] == "ACTUAL_DAYS_365_25"
     assert live_performance["cagr"] is not None
     assert combined_performance["maximum_drawdown"] is not None
+
+
+def test_schema_v2_complete_through_is_common_live_series_end(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "mode-source"
+    _source, spec, days = _write_mode_fixture(root, stale_live_series="a")
+
+    result, manifest, _content = correlation.build_correlation(spec, root)
+
+    assert result["as_of_date"] == days[-1].isoformat()
+    assert result["complete_through"] == days[-2].isoformat()
+    assert manifest.coverage.observed_end == days[-2]
 
 
 def test_live_version_ref_threads_into_dependence_composition(

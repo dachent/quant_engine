@@ -153,7 +153,9 @@ class FlexTrade:
 class FlexCashTransaction:
     raw_account_id: str
     event_date: date
+    nav_recognition_date: date
     transaction_id: str
+    level_of_detail: str
     activity_type: str
     amount: Decimal
     currency: str
@@ -166,10 +168,12 @@ class FlexCashTransaction:
 class FlexTransfer:
     raw_account_id: str
     event_date: date
+    nav_recognition_date: date
     transaction_id: str
     transfer_type: str
     direction: str
     cash_amount: Decimal | None
+    position_amount_in_base: Decimal | None
     currency: str
     conid: str | None
     quantity: Decimal | None
@@ -275,9 +279,15 @@ def _cash_transaction(element: ET.Element, raw_account_id: str) -> FlexCashTrans
             element.attrib.get("dateTime") or element.attrib.get("reportDate"),
             "cash_transaction.event_date",
         ),
+        nav_recognition_date=_day(
+            element.attrib.get("reportDate"), "cash_transaction.reportDate"
+        ),
         transaction_id=_text(
             _event_identity(element, "transactionID", "actionID"),
             "cash_transaction.identity",
+        ),
+        level_of_detail=_text(
+            element.attrib.get("levelOfDetail"), "cash_transaction.levelOfDetail"
         ),
         activity_type=_text(element.attrib.get("type"), "cash_transaction.type"),
         amount=_decimal(element.attrib.get("amount"), "cash_transaction.amount"),
@@ -295,6 +305,9 @@ def _transfer(element: ET.Element, raw_account_id: str) -> FlexTransfer:
             element.attrib.get("dateTime") or element.attrib.get("date"),
             "transfer.event_date",
         ),
+        nav_recognition_date=_day(
+            element.attrib.get("reportDate"), "transfer.reportDate"
+        ),
         transaction_id=_text(
             _event_identity(element, "transactionID", "positionInstructionID"),
             "transfer.identity",
@@ -303,6 +316,10 @@ def _transfer(element: ET.Element, raw_account_id: str) -> FlexTransfer:
         direction=_text(element.attrib.get("direction"), "transfer.direction"),
         cash_amount=_optional_decimal(
             element.attrib.get("cashTransfer"), "transfer.cashTransfer"
+        ),
+        position_amount_in_base=_optional_decimal(
+            element.attrib.get("positionAmountInBase"),
+            "transfer.positionAmountInBase",
         ),
         currency=_text(element.attrib.get("currency"), "transfer.currency"),
         conid=_optional(element.attrib.get("conid")),

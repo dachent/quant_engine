@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from datetime import datetime, timezone
 
 REPO = "dachent/quant_engine"
 SELF_CHECK_NAME = "readiness"
@@ -68,22 +69,155 @@ def _unresolved_thread_count(number: int) -> int:
         cursor = threads["pageInfo"]["endCursor"]
 
 
-def _other_check_states(head_sha: str) -> tuple[list[str], list[str]]:
-    """Return (failing_names, pending_names) for every check except SELF_CHECK_NAME."""
-    payload = json.loads(
-        _gh("api", f"repos/{REPO}/commits/{head_sha}/check-runs?per_page=100")
+def _parse_check_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _stable_check_run_id(raw: dict[str, object]) -> int | None:
+    for key in ("id", "run_id"):
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    check_suite = raw.get("check_suite")
+    if isinstance(check_suite, dict):
+        value = check_suite.get("id")
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _check_run_order_key(
+    raw: dict[str, object],
+) -> tuple[bool, datetime, bool, datetime, bool, int, str]:
+    minimum = datetime.min.replace(tzinfo=timezone.utc)
+    completed_at = _parse_check_timestamp(raw.get("completed_at"))
+    created_at = _parse_check_timestamp(raw.get("created_at"))
+    run_id = _stable_check_run_id(raw)
+    return (
+        completed_at is not None,
+        completed_at or minimum,
+        created_at is not None,
+        created_at or minimum,
+        run_id is not None,
+        run_id if run_id is not None else -1,
+        json.dumps(raw, sort_keys=True, separators=(",", ":")),
     )
-    failing: list[str] = []
-    pending: list[str] = []
-    for item in payload.get("check_runs", []):
-        name = item.get("name", "?")
-        if name == SELF_CHECK_NAME:
-            continue
+
+
+def _stable_status_id(raw: dict[str, object]) -> int | None:
+    for key in ("id", "status_id"):
+        value = raw.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def _status_order_key(
+    raw: dict[str, object],
+) -> tuple[bool, datetime, bool, datetime, bool, int, str]:
+    minimum = datetime.min.replace(tzinfo=timezone.utc)
+    updated_at = _parse_check_timestamp(raw.get("updated_at"))
+    created_at = _parse_check_timestamp(raw.get("created_at"))
+    status_id = _stable_status_id(raw)
+    return (
+        updated_at is not None,
+        updated_at or minimum,
+        created_at is not None,
+        created_at or minimum,
+        status_id is not None,
+        status_id if status_id is not None else -1,
+        json.dumps(raw, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _check_states(head_sha: str) -> tuple[list[str], list[str]]:
+    """Return failing and pending non-self checks for the exact head SHA.
+
+    Required-check membership is intentionally not queried here: the branch
+    protection endpoint needs repository-administration permission, which the
+    workflow token cannot receive. GitHub enforces required contexts and
+    approvals at its merge gate; this probe reports every observed non-self
+    check and that gate's mergeStateStatus.
+    """
+    latest_by_key: dict[tuple[str, int | None], dict[str, object]] = {}
+    page = 1
+    while True:
+        payload = json.loads(
+            _gh(
+                "api",
+                f"repos/{REPO}/commits/{head_sha}/check-runs?per_page=100&page={page}",
+            )
+        )
+        runs = payload.get("check_runs")
+        if not isinstance(runs, list):
+            raise RuntimeError("check-run census is unavailable")
+        for raw in runs:
+            if not isinstance(raw, dict):
+                raise RuntimeError("check-run census contains an invalid row")
+            name = raw.get("name")
+            if not isinstance(name, str) or not name or name == SELF_CHECK_NAME:
+                continue
+            app = raw.get("app")
+            app_id = app.get("id") if isinstance(app, dict) else None
+            if app_id is not None and not isinstance(app_id, int):
+                raise RuntimeError("check-run app identity is invalid")
+            key = (name, app_id)
+            current = latest_by_key.get(key)
+            if current is None or _check_run_order_key(raw) > _check_run_order_key(
+                current
+            ):
+                latest_by_key[key] = raw
+        if len(runs) < 100:
+            break
+        page += 1
+
+    latest_status_by_context: dict[str, dict[str, object]] = {}
+    page = 1
+    while True:
+        payload = json.loads(
+            _gh(
+                "api",
+                f"repos/{REPO}/commits/{head_sha}/statuses?per_page=100&page={page}",
+            )
+        )
+        if not isinstance(payload, list):
+            raise RuntimeError("commit-status census is unavailable")
+        for raw in payload:
+            if not isinstance(raw, dict):
+                raise RuntimeError("commit-status census contains an invalid row")
+            context = raw.get("context")
+            if not isinstance(context, str) or not context:
+                raise RuntimeError("commit-status context is invalid")
+            if context == SELF_CHECK_NAME:
+                continue
+            current = latest_status_by_context.get(context)
+            if current is None or _status_order_key(raw) > _status_order_key(current):
+                latest_status_by_context[context] = raw
+        if len(payload) < 100:
+            break
+        page += 1
+    failing: set[str] = set()
+    pending: set[str] = set()
+    for (name, _), item in latest_by_key.items():
         if item.get("status") != "completed":
-            pending.append(name)
-        elif item.get("conclusion") not in {"success", "skipped", "neutral"}:
-            failing.append(name)
-    return failing, pending
+            pending.add(name)
+        elif item.get("conclusion") not in {"success", "neutral", "skipped"}:
+            failing.add(name)
+    for context, item in latest_status_by_context.items():
+        state = item.get("state")
+        if state == "pending":
+            pending.add(context)
+        elif state != "success":
+            failing.add(context)
+    return sorted(failing), sorted(pending)
 
 
 def main() -> int:
@@ -106,7 +240,9 @@ def main() -> int:
     if unresolved:
         failures.append(f"{unresolved} unresolved review conversation(s)")
 
-    failing, pending = _other_check_states(head)
+    if not isinstance(head, str) or not head:
+        raise RuntimeError("pull request head SHA is unavailable")
+    failing, pending = _check_states(head)
     if failing:
         failures.append(f"failing checks: {', '.join(sorted(failing))}")
     if pending:

@@ -11,6 +11,8 @@ from pathlib import Path, PurePosixPath
 import re
 from typing import Any, Final, Mapping, Self
 
+from quant_engine.core.strict_json import StrictJSONError, strict_json_object
+
 
 MANIFEST_SCHEMA_VERSION: Final = 1
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -530,11 +532,9 @@ class GenerationManifest:
     @classmethod
     def from_json_bytes(cls, value: bytes) -> Self:
         try:
-            decoded = json.loads(value.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            decoded = strict_json_object(value, label="manifest")
+        except StrictJSONError as exc:
             raise ManifestValidationError("manifest is not valid UTF-8 JSON") from exc
-        if not isinstance(decoded, dict):
-            raise ManifestValidationError("manifest root must be an object")
         _strict_keys(
             decoded,
             {

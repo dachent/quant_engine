@@ -1,4 +1,5 @@
 #!/usr/bin/env node
+import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -18,16 +19,79 @@ function check(name, condition, evidence) {
   return { check: name, evidence, status: condition ? "PASS" : "FAIL" };
 }
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+function isCalendarDate(value) {
+  const parsed = ISO_DATE.test(value || "") ? new Date(`${value}T00:00:00Z`) : null;
+  return Boolean(parsed && !Number.isNaN(parsed.valueOf()) && parsed.toISOString().slice(0, 10) === value);
+}
+
+function acceptedCutoff(value) {
+  if (!isCalendarDate(value)) {
+    throw new Error("--expected-calculation-cutoff must be an ISO calendar date");
+  }
+  return value;
+}
+
+function calculationDateFacts(manifest) {
+  const facts = [];
+  for (const row of manifest?.rows || []) {
+    for (const field of ["start", "end"]) {
+      if (typeof row?.[field] === "string") facts.push({ account_id: row.account_id, field, value: row[field] });
+    }
+    for (const link of row?.observation_trace?.links || []) {
+      for (const field of ["start_date", "end_date"]) {
+        if (typeof link?.[field] === "string") facts.push({ account_id: row.account_id, field: `observation_trace.${field}`, value: link[field] });
+      }
+    }
+    for (const observation of row?.nav_observation_trace || []) {
+      if (typeof observation?.date === "string") facts.push({ account_id: row.account_id, field: "nav_observation_trace.date", value: observation.date });
+    }
+    for (const flow of row?.capital_flow_trace || []) {
+      for (const field of ["date", "event_date", "nav_recognition_date"]) {
+        if (typeof flow?.[field] === "string") facts.push({ account_id: row.account_id, field: `capital_flow_trace.${field}`, value: flow[field] });
+      }
+    }
+  }
+  return facts;
+}
+
+const EXPECTED_AUTHORITY_LABELS = Object.freeze({
+  INDEPENDENT_EXACT_REBUILD: "Independent exact rebuild",
+  VERIFIED_GENERATION_BUNDLE_EXACT_BYTES: "Report-attested static publication — verified generation bundle exact bytes",
+});
+const VERIFIED_BUNDLE_PROFILE = "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES";
+const VERIFIED_BUNDLE_REPORT_STATUS = "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES";
+const VERIFIED_BUNDLE_REPORT_METHOD = "READ_GENERATION_BUNDLE_EXACT_BYTES_AND_FINANCIAL_MVP_BINDER";
+const VERIFIED_BUNDLE_PRODUCER_VERIFICATION = "NOT_PERFORMED";
+const VERIFIED_BUNDLE_PRODUCER_PUBLICATION = "NOT_READY";
+
 const options = args(process.argv.slice(2));
 if (!options.html || !options.output || !process.env.PLAYWRIGHT_MODULE) {
   throw new Error("--html, --output, and PLAYWRIGHT_MODULE are required");
 }
+const expectedCalculationCutoff = acceptedCutoff(options["expected-calculation-cutoff"]);
 const moduleUrl = pathToFileURL(path.resolve(process.env.PLAYWRIGHT_MODULE)).href;
 const { chromium } = await import(moduleUrl);
 const html = path.resolve(options.html);
 const output = path.resolve(options.output);
 const panelId = path.basename(path.dirname(html));
+const externalManifestPath = options["epoch-manifest"] ? path.resolve(options["epoch-manifest"]) : null;
+const externalManifestBytes = externalManifestPath ? await readFile(externalManifestPath) : null;
+const externalManifest = externalManifestBytes ? JSON.parse(externalManifestBytes.toString("utf8")) : null;
+const externalManifestSha256 = externalManifestBytes
+  ? createHash("sha256").update(externalManifestBytes).digest("hex")
+  : null;
+const candidateRecordBytes = await readFile(path.join(path.dirname(html), "candidate.json"));
+const candidateRecord = JSON.parse(candidateRecordBytes.toString("utf8"));
+const candidateRecordSha256 = createHash("sha256").update(candidateRecordBytes).digest("hex");
+const dashboardData = JSON.parse(await readFile(path.join(path.dirname(html), "data", "dashboard_data.json"), "utf8"));
+const expectedFactorSeries = dashboardData.dependence_analysis.series_ids.length;
+const expectedCurrentStrategies = dashboardData.strategies.length;
+const expectedReserveAssignments = dashboardData.performance.filter((row) => row.strategy_mapping_disposition === "RESERVE_NOT_APPLICABLE").length;
+const performanceLineageMismatch = dashboardData.meta?.performance_lineage?.status === "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH";
 const includeCandidates = options["exclude-candidates"] !== "true";
+const epochOnly = options["epoch-only"] === "true";
 const browser = await chromium.launch({
   headless: true,
   ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH
@@ -43,6 +107,285 @@ await page.goto(pathToFileURL(html).href, { waitUntil: "load" });
 await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
 
 const checks = [];
+if (externalManifestPath) {
+  const payloadMatchesExternalManifest = JSON.stringify(dashboardData.account_manifest) === JSON.stringify(externalManifest);
+  checks.push(check(
+    "Panel payload equals the independently supplied epoch manifest",
+    payloadMatchesExternalManifest,
+    {
+      external_manifest_path: externalManifestPath,
+      external_manifest_sha256: externalManifestSha256,
+      external_manifest_size: externalManifestBytes.byteLength,
+      payload_equal: payloadMatchesExternalManifest,
+    },
+  ));
+}
+function exactDecimal(value) {
+  const source = typeof value === "string" && /^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(value) ? value : null;
+  if (source == null) return null;
+  const negative = source.startsWith("-");
+  const unsigned = negative ? source.slice(1) : source;
+  const [whole, fraction = ""] = unsigned.split(".");
+  return { magnitude: BigInt(`${whole}${fraction}`), negative, scale: fraction.length };
+}
+function exactFixed(value, places = 2, scaleAdjustment = 0) {
+  const parsed = exactDecimal(value);
+  if (parsed == null) return "—";
+  const scale = parsed.scale + scaleAdjustment;
+  let rounded;
+  if (scale <= places) {
+    rounded = parsed.magnitude * (10n ** BigInt(places - scale));
+  } else {
+    const divisor = 10n ** BigInt(scale - places);
+    rounded = parsed.magnitude / divisor;
+    const remainder = parsed.magnitude % divisor;
+    const doubled = remainder * 2n;
+    if (doubled > divisor || (doubled === divisor && rounded % 2n !== 0n)) rounded += 1n;
+  }
+  let text = rounded.toString().padStart(places + 1, "0");
+  const decimals = places ? text.slice(-places) : "";
+  const integer = places ? text.slice(0, -places) : text;
+  const grouped = integer.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  const signed = parsed.negative && rounded !== 0n ? `-${grouped}` : grouped;
+  return places ? `${signed}.${decimals}` : signed;
+}
+const exactMoney = (value) => exactFixed(value, 2);
+const exactPct = (value) => {
+  const fixed = exactFixed(value, 2, -2);
+  return fixed === "—" ? fixed : `${fixed}%`;
+};
+const epochManifest = externalManifest ?? dashboardData.account_manifest;
+const epochDom = await page.locator("#account-manifest-table").evaluate((table) => ({
+  caption: table.querySelector("caption")?.textContent?.trim() ?? null,
+  headers: Array.from(table.querySelectorAll("thead th"), (node) => node.textContent?.trim()),
+  rows: Array.from(table.querySelectorAll("tbody tr"), (row) => ({
+    accountId: row.getAttribute("data-account-id"),
+    cells: Array.from(row.querySelectorAll("td"), (cell) => ({
+      primary: cell.childNodes[0]?.textContent?.trim() ?? "",
+      secondary: cell.querySelector(".cell-secondary")?.textContent?.trim() ?? null,
+      text: cell.textContent?.trim() ?? "",
+    })),
+  })),
+}));
+const epochAuthority = await page.locator("#account-manifest-authority").textContent();
+const epochLegend = await page.locator("#account-manifest-legend").textContent();
+const epochDisclosure = await page.locator("#account-manifest-disclosure-list").textContent();
+const epochHeaders = [
+  "Account", "Strategy", "Observed interval", "Invested", "Withdrawn", "Net capital",
+  "Current", "Gain", "RONC", "Ann. RONC", "Observed return", "Observed HWM", "Observed Max DD",
+];
+const authorityProfile = dashboardData.meta.account_manifest_authority_profile;
+const authorityProfileKnown = Object.prototype.hasOwnProperty.call(EXPECTED_AUTHORITY_LABELS, authorityProfile);
+const expectedAuthority = authorityProfileKnown ? EXPECTED_AUTHORITY_LABELS[authorityProfile] : null;
+let epochValuesMatch = false;
+const epochEvidence = { authority: epochAuthority, caption: epochDom.caption, headers: epochDom.headers, rows: epochDom.rows };
+if (!epochManifest || !Array.isArray(epochManifest.rows)) {
+  epochValuesMatch = epochAuthority?.trim() === "Manifest not supplied — non-releaseable"
+    && epochDom.headers.join("|") === "Epoch manifest unavailable"
+    && epochDom.caption === "Epoch manifest unavailable"
+    && epochDom.rows.length === 1
+    && epochDom.rows[0].cells[0].text === "No account-manifest evidence was supplied to this build";
+} else {
+  const rowMatches = epochManifest.rows.length === epochDom.rows.length && epochManifest.rows.every((row, index) => {
+    const rendered = epochDom.rows[index];
+    if (!rendered || rendered.accountId !== row.account_id || rendered.cells.length !== 13) return false;
+    const expectedLabel = Number(epochManifest.schema_version) >= 9
+      ? row.account_label
+      : (row.account_label || rendered.cells[0].text);
+    const lastFourVisible = Number(epochManifest.schema_version) < 9
+      || row.last_four == null
+      || rendered.cells[0].text.includes(String(row.last_four));
+    if (!expectedLabel || rendered.cells[0].text !== expectedLabel || !lastFourVisible || rendered.cells[1].text !== row.strategy_id) return false;
+    if (row.status !== "OK") {
+      const blocker = row.status === "FLOWS_AFTER_CLOSING_NAV"
+        ? row.status
+        : `${row.status}: ${row.blocking_reason || "blocking reason unavailable"}`;
+      return rendered.cells[2].primary === row.effective_start
+        && rendered.cells[2].secondary === `${row.effective_end || "open"} · ${blocker}`
+        && rendered.cells.slice(3).every((cell) => cell.text === "—");
+    }
+    const expectedNumbers = [
+      exactMoney(row.invested), exactMoney(row.withdrawn), exactMoney(row.net_capital),
+      exactMoney(row.current_value), exactMoney(row.gain), exactPct(row.return_on_net_capital),
+      exactPct(row.annualized_return_on_net_capital), exactPct(row.observation_linked_return),
+      exactFixed(row.observed_hwm_index, 2), exactPct(row.observed_max_drawdown),
+    ];
+    return rendered.cells[2].primary === row.start
+      && rendered.cells[2].secondary === row.end
+      && rendered.cells.slice(3).every((cell, cellIndex) => cell.text === expectedNumbers[cellIndex]);
+  });
+  epochValuesMatch = authorityProfileKnown
+    && epochAuthority?.trim() === expectedAuthority
+    && epochDom.caption === `Epoch manifest by account and strategy — monetary values ${epochManifest.accounting_currency}`
+    && epochDom.headers.join("|") === epochHeaders.join("|")
+    && rowMatches;
+}
+const manifestStrategyIds = new Set((epochManifest?.rows || []).map((row) => row.strategy_id));
+const currentManifestShapeMatch = !epochManifest || !Array.isArray(epochManifest.rows)
+  ? false
+  : epochManifest.rows.length === 13
+    && manifestStrategyIds.size === 7
+    && epochManifest.rows.every((row) => !/echo|composer/i.test(`${row.strategy_id || ""} ${row.account_label || ""}`));
+const manifestCutoff = epochManifest?.calculation_cutoff_date;
+const boundLedgerIdentity = epochManifest?.source_identities?.classified_flows?.ledger_identity;
+const boundLedgerArtifact = boundLedgerIdentity?.artifact;
+const providerCaptureDate = boundLedgerArtifact?.as_of_date;
+const manifestCutoffDisplayMatch = !epochManifest || !Array.isArray(epochManifest.rows)
+  ? false
+  : Number(epochManifest.schema_version) < 9
+    || (manifestCutoff === expectedCalculationCutoff
+      && typeof boundLedgerIdentity === "object"
+      && typeof boundLedgerArtifact === "object"
+      && isCalendarDate(providerCaptureDate)
+      && expectedCalculationCutoff <= providerCaptureDate
+      && epochLegend?.includes(`Calculations through ${manifestCutoff}.`)
+      && epochLegend.includes(`Artifact/provider capture date: ${providerCaptureDate}.`));
+const calculationFactsAfterAcceptedCutoff = calculationDateFacts(epochManifest)
+  .filter((fact) => !isCalendarDate(fact.value) || fact.value > expectedCalculationCutoff);
+checks.push(check(
+  "Current epoch manifest keeps the exact 13-row / 7-strategy subject and exclusions",
+  currentManifestShapeMatch,
+  { rows: epochManifest?.rows?.length, strategies: manifestStrategyIds.size, excluded_echo_or_composer: !currentManifestShapeMatch },
+));
+checks.push(check(
+  "Epoch manifest legend distinguishes calculation cutoff from provider capture",
+  manifestCutoffDisplayMatch,
+  {
+    bound_ledger_artifact_id: boundLedgerArtifact?.artifact_id,
+    cutoff: manifestCutoff,
+    expected_cutoff: expectedCalculationCutoff,
+    ledger_identity_generation_id: boundLedgerIdentity?.generation_id,
+    legend: epochLegend,
+    provider_capture_date: providerCaptureDate,
+  },
+));
+checks.push(check(
+  "No epoch calculation fact extends beyond the explicit accepted cutoff",
+  calculationFactsAfterAcceptedCutoff.length === 0,
+  { expected_cutoff: expectedCalculationCutoff, violations: calculationFactsAfterAcceptedCutoff },
+));
+checks.push(check(
+  "Epoch manifest authority uses the closed known-profile label mapping",
+  !epochManifest || !Array.isArray(epochManifest.rows)
+    ? epochAuthority?.trim() === "Manifest not supplied — non-releaseable"
+    : authorityProfileKnown && epochAuthority?.trim() === expectedAuthority,
+  { known: authorityProfileKnown, profile: authorityProfile, expected: expectedAuthority, rendered: epochAuthority?.trim() },
+));
+const accountManifestVerification = dashboardData.meta.account_manifest_verification || {};
+const producerReadiness = accountManifestVerification.producer_readiness || {};
+const verifiedBundleVerificationMatch = authorityProfile !== VERIFIED_BUNDLE_PROFILE || (
+  accountManifestVerification.status === VERIFIED_BUNDLE_REPORT_STATUS
+    && accountManifestVerification.method === VERIFIED_BUNDLE_REPORT_METHOD
+    && accountManifestVerification.publication_readiness === "NOT_READY"
+    && producerReadiness.independent_authority_verification === VERIFIED_BUNDLE_PRODUCER_VERIFICATION
+    && producerReadiness.publication_readiness === VERIFIED_BUNDLE_PRODUCER_PUBLICATION
+    && epochDisclosure?.includes(VERIFIED_BUNDLE_REPORT_STATUS)
+    && epochDisclosure.includes(VERIFIED_BUNDLE_REPORT_METHOD)
+    && epochDisclosure.includes(VERIFIED_BUNDLE_PRODUCER_VERIFICATION)
+    && epochDisclosure.includes(VERIFIED_BUNDLE_PRODUCER_PUBLICATION)
+);
+checks.push(check(
+  "Verified bundle retains report status, method, and producer readiness disclosure",
+  verifiedBundleVerificationMatch,
+  {
+    applicable: authorityProfile === VERIFIED_BUNDLE_PROFILE,
+    report_status: accountManifestVerification.status,
+    report_method: accountManifestVerification.method,
+    publication_readiness: accountManifestVerification.publication_readiness,
+    producer_independent_verification: producerReadiness.independent_authority_verification,
+    producer_publication_readiness: producerReadiness.publication_readiness,
+    disclosure: epochDisclosure,
+  },
+));
+checks.push(check(
+  "Epoch manifest DOM matches exact source values and blockers",
+  epochValuesMatch,
+  epochEvidence,
+));
+if (performanceLineageMismatch) {
+  await page.locator('[data-nav="weekly"]').click();
+  await page.locator("#weekly-current-toggle").check();
+  await page.locator("[data-weekly-series]").first().click();
+}
+const lineageMismatchDom = await page.evaluate(() => {
+  const performanceRows = Array.from(document.querySelectorAll("#performance-table tbody tr"), (row) => Array.from(row.cells, (cell) => ({
+    primary: cell.childNodes[0]?.textContent?.trim() ?? "",
+    text: cell.textContent?.trim() ?? "",
+  })));
+  const comparison = Array.from(document.querySelectorAll("#performance-comparison .metric-block"), (block) => ({
+    label: block.querySelector(".metric-label")?.textContent?.trim() ?? "",
+    value: block.querySelector(".metric-value")?.textContent?.trim() ?? "",
+    note: block.querySelector(".metric-note")?.textContent?.trim() ?? "",
+  }));
+  return {
+    command: {
+      gates: document.querySelector("#gate-stack")?.textContent?.trim() ?? "",
+      kpis: document.querySelector("#command-kpis")?.textContent?.trim() ?? "",
+      operator: document.querySelector("#operator-queue")?.textContent?.trim() ?? "",
+      reason: document.querySelector("#command-reason")?.textContent?.trim() ?? "",
+    },
+    hwm_text: document.querySelector("#hwm-status")?.textContent?.trim() ?? "",
+    performance_headers: Array.from(document.querySelectorAll("#performance-table thead th"), (header) => header.textContent?.trim() ?? ""),
+    performance_rows: performanceRows,
+    performance_text: document.querySelector("#performance-table")?.textContent?.trim() ?? "",
+    strategy_coverage: document.querySelector("#strategy-coverage-bars")?.textContent?.trim() ?? "",
+    weekly: {
+      current_week_enabled: document.querySelector("#weekly-current-toggle")?.checked ?? false,
+      detail: document.querySelector("#weekly-detail")?.textContent?.trim() ?? "",
+      rows: Array.from(document.querySelectorAll("#weekly-table tbody tr"), (row) => Array.from(row.querySelectorAll(".weekly-cell"), (cell) => cell.textContent?.trim() ?? "")),
+      text: document.querySelector("#weekly-table")?.textContent?.trim() ?? "",
+    },
+    comparison,
+  };
+});
+const lineageWithheldText = `${lineageMismatchDom.performance_text} ${lineageMismatchDom.hwm_text}`;
+const lineageWeeklyText = `${lineageMismatchDom.weekly.text} ${lineageMismatchDom.weekly.detail}`;
+const lineageCommandText = Object.values(lineageMismatchDom.command).join(" ");
+const lineageStrategyReturn = lineageMismatchDom.comparison.find((item) => item.label === "13-week strategy return");
+const lineageMismatchDomMatch = !performanceLineageMismatch || (
+  lineageMismatchDom.performance_rows.length > 0
+    && lineageMismatchDom.performance_headers.every((header) => !/\b(?:Accepted|Available)\b/i.test(header))
+    && lineageMismatchDom.performance_rows.every((row) => (
+      row[4]?.primary === "—"
+        && row[6]?.primary === "—"
+        && row[4]?.text.includes("UNAVAILABLE_SOURCE_LINEAGE_MISMATCH")
+        && row[6]?.text.includes("UNAVAILABLE_SOURCE_LINEAGE_MISMATCH")
+    ))
+    && lineageWithheldText.includes("UNAVAILABLE_SOURCE_LINEAGE_MISMATCH")
+    && !/\b(?:Accepted|canonical account-live returns|Available for HWM|HWM-qualified|AVAILABLE)\b/i.test(lineageWithheldText)
+    && lineageStrategyReturn?.value === "—"
+    && /withheld/i.test(lineageStrategyReturn.note)
+    && lineageMismatchDom.strategy_coverage.includes("UNAVAILABLE_SOURCE_LINEAGE_MISMATCH")
+    && !/\b(?:AVAILABLE|coverage-qualified|TWR segments)\b/i.test(lineageMismatchDom.strategy_coverage)
+    && lineageCommandText.includes("UNAVAILABLE_SOURCE_LINEAGE_MISMATCH")
+    && !/\b(?:HWM|accepted|canonical|echo|composer)\b/i.test(lineageCommandText)
+    && lineageMismatchDom.weekly.current_week_enabled
+    && lineageMismatchDom.weekly.rows.length === 7
+    && lineageMismatchDom.weekly.rows.every((row) => row.every((cell) => cell === "—"))
+    && lineageMismatchDom.weekly.detail.includes("UNAVAILABLE_SOURCE_LINEAGE_MISMATCH")
+    && !/\b(?:Accepted observations|Compounded from accepted daily returns|AVAILABLE)\b/i.test(lineageWeeklyText)
+    && currentManifestShapeMatch
+);
+checks.push(check(
+  "Lineage mismatch withholds retained report performance in the DOM",
+  lineageMismatchDomMatch,
+  { applicable: performanceLineageMismatch, ...lineageMismatchDom },
+));
+if (epochOnly) {
+  const result = {
+    all_passed: checks.every((item) => item.status === "PASS"),
+    artifact_sha256: candidateRecord.artifact_sha256,
+    browser_version: browser.version(),
+    candidate_record_sha256: candidateRecordSha256,
+    checks,
+    panel_id: panelId,
+    scope: "EPOCH_ONLY",
+  };
+  await browser.close();
+  await writeFile(output, `${JSON.stringify(result, null, 2)}\n`, "utf8");
+  if (!result.all_passed) process.exitCode = 1;
+  process.exit();
+}
 await page.evaluate(() => {
   if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
 });
@@ -107,7 +450,14 @@ for (const mode of requiredFactorEvidenceModes) {
   const button = page.locator(`[data-factor-evidence-mode="${mode}"]`);
   const disabled = await button.isDisabled();
   if (disabled) {
-    factorModeEvidence.push({ active: "false", disabled, mode, strategy_rows: [], table: null });
+    factorModeEvidence.push({
+      active: await button.getAttribute("aria-pressed"),
+      disabled,
+      mode,
+      strategy_rows: [],
+      table: null,
+      title: await button.getAttribute("title"),
+    });
     continue;
   }
   await button.click();
@@ -128,18 +478,26 @@ for (const mode of requiredFactorEvidenceModes) {
     table: (await page.locator("#factor-model-table").textContent())?.trim(),
   });
 }
+const liveFactorEvidence = factorModeEvidence.find((item) => item.mode === "LIVE_ONLY");
 const hybridFactorEvidence = factorModeEvidence.find((item) => item.mode === "LIVE_PLUS_BACKTEST");
 checks.push(check(
   "Factor analyses expose live-only and compatible-history modes without inventing prehistory",
   factorModeEvidence.length === requiredFactorEvidenceModes.length
-    && factorModeEvidence.every((item) => item.active === "true"
-      && item.disabled === false
-      && item.boundary?.includes(item.mode)
-      && item.table?.includes("Beta / loading")
-      && item.table.includes("Evidence composition")
-      && item.strategy_rows.every((row) => row.evidence))
-    && hybridFactorEvidence?.strategy_rows.every((row) => /[1-9][0-9,]* backtest/.test(row.evidence ?? "")
-      && !row.evidence?.includes("no version-matched backtest prehistory")),
+    && liveFactorEvidence?.active === "true"
+    && liveFactorEvidence.disabled === false
+    && liveFactorEvidence.boundary?.includes("LIVE_ONLY")
+    && liveFactorEvidence.table?.includes("Beta / loading")
+    && liveFactorEvidence.table.includes("Evidence composition")
+    && liveFactorEvidence.strategy_rows.every((row) => row.evidence)
+    && (hybridFactorEvidence?.disabled
+      ? hybridFactorEvidence.active === "false"
+        && /(?:unavailable|not accepted|no accepted.*backtest|not proven compatible)/i.test(hybridFactorEvidence.title ?? "")
+      : hybridFactorEvidence?.active === "true"
+        && hybridFactorEvidence.boundary?.includes("LIVE_PLUS_BACKTEST")
+        && hybridFactorEvidence.table?.includes("Beta / loading")
+        && hybridFactorEvidence.table.includes("Evidence composition")
+        && hybridFactorEvidence.strategy_rows.every((row) => /[1-9][0-9,]* backtest/.test(row.evidence ?? "")
+          && !row.evidence?.includes("no version-matched backtest prehistory"))),
   factorModeEvidence,
 ));
 await page.locator('[data-factor-evidence-mode="LIVE_ONLY"]').click();
@@ -149,11 +507,15 @@ for (const lens of requiredFactorLenses) {
   const button = page.locator(`[data-factor-lens="${lens}"]`);
   await button.click();
   const requestedBetaRows = await page.locator("#factor-model-table tbody tr").evaluateAll(
-    (nodes, strategies) => strategies.map((strategy) => ({
-      beta_visible: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.includes("β") ?? false,
-      model_unavailable: nodes.find((node) => node.textContent?.includes(strategy))?.textContent?.includes("NO ACCEPTED MODEL") ?? false,
-      strategy,
-    })),
+    (nodes, strategies) => strategies.map((strategy) => {
+      const evidence = nodes.find((node) => node.textContent?.includes(strategy))?.textContent ?? "";
+      return {
+        beta_visible: evidence.includes("β"),
+        model_diagnostic: /model computed.*pm use blocked/i.test(evidence),
+        model_unavailable: evidence.includes("NO ACCEPTED MODEL"),
+        strategy,
+      };
+    }),
     requiredAttributedStrategies,
   );
   factorLensEvidence.push({
@@ -172,9 +534,9 @@ checks.push(check(
     && factorLensEvidence.every((item) => item.active === "true"
       && item.boundary?.includes("Beta:")
       && item.boundary.includes("never concatenated")
-      && item.chips === 9
-      && item.rows === 9
-      && item.requested_beta_rows.every((row) => row.beta_visible || row.model_unavailable)),
+      && item.chips === expectedFactorSeries
+      && item.rows === expectedFactorSeries
+      && item.requested_beta_rows.every((row) => row.beta_visible || row.model_diagnostic || row.model_unavailable)),
   factorLensEvidence,
 ));
 await page.locator('[data-factor-lens="DYNAMIC_STYLE"]').click();
@@ -200,7 +562,7 @@ await page.screenshot({
 });
 await page.locator("[data-factor-strategy]").last().click();
 const unavailableFactorDetail = await page.locator("#factor-detail").textContent();
-checks.push(check("Factor source and model states remain separate", factorRows === 9 && factorChips === 9 && unavailableFactorDetail?.includes("Source state") && unavailableFactorDetail.includes("Model state"), { factor_chips: factorChips, factor_rows: factorRows, state_separation_visible: unavailableFactorDetail?.includes("Source state") && unavailableFactorDetail.includes("Model state") }));
+checks.push(check("Factor source and model states remain separate", factorRows === expectedFactorSeries && factorChips === expectedFactorSeries && unavailableFactorDetail?.includes("Source state") && unavailableFactorDetail.includes("Model state"), { factor_chips: factorChips, factor_rows: factorRows, state_separation_visible: unavailableFactorDetail?.includes("Source state") && unavailableFactorDetail.includes("Model state") }));
 await page.locator('[data-factor-lens="ECONOMIC_FACTOR"]').click();
 const economicBoundary = await page.locator("#factor-lens-boundary").textContent();
 checks.push(check(
@@ -247,7 +609,7 @@ await page.locator('[data-matrix="stress"]').click();
 const matrixTitle = await page.locator("#matrix-title").textContent();
 await page.locator('[data-correlation-left]:not([disabled])').first().click();
 const pairDetail = await page.locator("#correlation-detail").textContent();
-checks.push(check("Dependence matrices and cell evidence are interactive", matrixCells === 81 && matrixTitle?.includes("Stress") && pairDetail?.includes("Observed status"), { cell_buttons: matrixCells, matrix_title: matrixTitle, pair_detail: Boolean(pairDetail?.includes("Observed status")) }));
+checks.push(check("Dependence matrices and cell evidence are interactive", matrixCells === expectedFactorSeries ** 2 && matrixTitle?.includes("Stress") && pairDetail?.includes("Observed status"), { cell_buttons: matrixCells, matrix_title: matrixTitle, pair_detail: Boolean(pairDetail?.includes("Observed status")) }));
 const horizonEvidence = [];
 for (const window of requiredCorrelationWindows) {
   await page.locator(`[data-correlation-window="${window}"]`).click();
@@ -321,14 +683,15 @@ if (!weeklyHybridDisabled) {
 }
 checks.push(check(
   "Weekly returns disclose live and hybrid strategy evidence without enabling the partial week",
-  weeklyRows === 9
+  weeklyRows === expectedCurrentStrategies
     && benchmarkRows === 9
     && currentWeekIncluded === false
     && weeklyLivePressed === "true"
     && weeklyLiveDetail?.includes("Live only")
     && weeklyLiveDetail.includes("Accepted observations")
     && (weeklyHybridDisabled
-      ? weeklyModePressed === "false" && weeklyHybridTitle?.includes("not PROVEN_COMPATIBLE")
+      ? weeklyModePressed === "false"
+        && /(?:unavailable|not accepted|not proven compatible)/i.test(weeklyHybridTitle ?? "")
       : weeklyModePressed === "true"
         && weeklyHybridDetail?.includes("Live plus backtest")
         && weeklyHybridDetail.includes("Accepted observations")),
@@ -359,7 +722,7 @@ await page.locator('[data-allocation-filter="SYSTEMATIC"]').click();
 const systematicRows = Number(await page.locator("#allocation-table").getAttribute("data-visible-rows"));
 await page.locator('[data-allocation-filter="all"]').click();
 const allAllocationRows = Number(await page.locator("#allocation-table").getAttribute("data-visible-rows"));
-checks.push(check("Allocation filters preserve 9 plus reserve", reserveRows === 1 && systematicRows === 9 && allAllocationRows === 10 && reservePressed === "true", { all: allAllocationRows, reserve: reserveRows, reserve_pressed: reservePressed, systematic: systematicRows }));
+checks.push(check("Allocation filters preserve current strategies plus reserve", reserveRows === 1 && systematicRows === expectedCurrentStrategies && allAllocationRows === expectedCurrentStrategies + 1 && reservePressed === "true", { all: allAllocationRows, reserve: reserveRows, reserve_pressed: reservePressed, systematic: systematicRows }));
 const positionRows = Number(await page.locator("#position-table").getAttribute("data-visible-rows"));
 const positionText = await page.locator("#position-table").textContent();
 checks.push(check("Current positions retain mapped strategy attribution", positionRows > 0 && !positionText?.includes("AVAILABLE UNMAPPED") && !positionText?.includes("No accepted strategy"), { mapped_rows: positionRows, unmapped_visible: Boolean(positionText?.includes("UNMAPPED")) }));
@@ -412,6 +775,12 @@ checks.push(check(
 ));
 await page.locator("#context-reset").click();
 await page.locator('[data-nav="risk"]').click();
+const hwmStatusText = await page.locator("#hwm-status").textContent();
+checks.push(check(
+  "HWM evidence summary never renders non-finite numbers when optional observation detail is absent",
+  !/(?:^|\W)(?:NaN|Infinity)(?:$|\W)/.test(hwmStatusText || ""),
+  hwmStatusText,
+));
 const historicalGapRows = await page.locator("#historical-gap-table tbody tr").count();
 const historicalGapHeading = await page.locator("#historical-gap-badge").textContent();
 const volatisPerformance = await page.locator("#performance-table tbody tr", { hasText: "Volatis" }).textContent();
@@ -437,14 +806,14 @@ checks.push(check(
 ));
 checks.push(check(
   "Reserve assignments are excluded from historical systematic mapping gaps",
-  historicalGapRows === 7 && historicalGapHeading?.includes("7 unresolved"),
+  historicalGapRows === 1 && historicalGapHeading?.includes("0 unresolved"),
   { historical_gap_rows: historicalGapRows, label: historicalGapHeading, mapped_current_positions: positionRows },
 ));
 await page.locator('[data-nav="capital"]').click();
 const reserveLifecycleRows = await page.locator("#lifecycle-table tbody tr", { hasText: "Reserve — strategy not applicable" }).count();
 checks.push(check(
   "Reserve lifecycle intervals are labeled not applicable rather than unmapped strategy gaps",
-  reserveLifecycleRows === 4,
+  reserveLifecycleRows === expectedReserveAssignments,
   { reserve_rows: reserveLifecycleRows },
 ));
 
@@ -599,7 +968,9 @@ checks.push(check("No console errors occur", consoleErrors.length === 0, console
 
 const result = {
   all_passed: checks.every((item) => item.status === "PASS"),
+  artifact_sha256: candidateRecord.artifact_sha256,
   browser_version: browser.version(),
+  candidate_record_sha256: candidateRecordSha256,
   checks,
   panel_id: panelId,
   scope: includeCandidates ? "FULL" : "NON_CANDIDATE",

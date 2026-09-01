@@ -14,6 +14,7 @@ import json
 
 import pytest
 
+from quant_engine.portfolio_ledger.hwm import AS_HELD_HWM_RETURN_BASIS
 from quant_engine.portfolio_ledger.hwm_input_builder import (
     HwmInputBuilderError,
     build_governed_hwm_inputs,
@@ -74,7 +75,7 @@ def _return_obs(
         "interval_start": interval_start,
         "interval_end": interval_end,
         "net_return": net_return,
-        "return_basis": "ACCOUNT_LIVE_NET",
+        "return_basis": AS_HELD_HWM_RETURN_BASIS,
         "source_artifact_sha256": GENERATION_SHA,
     }
 
@@ -212,15 +213,17 @@ def test_trailing_capital_anchor_required_for_every_period() -> None:
         )
 
 
-def test_non_account_live_net_basis_rejected() -> None:
+def test_account_live_net_basis_rejected() -> None:
     members_rows = [_member("grizzlybears-vtma", "2026-01-02")]
     caps = [
         _capital_obs("grizzlybears-vtma", "2026-01-02", "1000"),
         _capital_obs("grizzlybears-vtma", "2026-01-07", "1100"),
     ]
     rets = [_return_obs("grizzlybears-vtma", "2026-01-03", "2026-01-04", "0.01")]
-    rets[0]["return_basis"] = "BACKTEST_SIMULATED"
-    with pytest.raises(HwmInputBuilderError, match="ACCOUNT_LIVE_NET"):
+    rets[0]["return_basis"] = "ACCOUNT_LIVE_NET"
+    with pytest.raises(
+        HwmInputBuilderError, match="LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL"
+    ):
         build_governed_hwm_inputs(
             members=members_rows,
             capital_observations=caps,

@@ -130,12 +130,12 @@
         "secondary": null
       },
       "no_identified_source": true,
-      "mechanism": "No admitted economic source of excess return is established. The captured 2025 evidence is an event-to-event reconstruction on fill dates using last-trade marks, not an admissible daily NAV return series. Decomposition is therefore REQUIRED_NOT_READY; only the material HWM denominator is excluded by accepted policy, while capital and dependence remain required.",
-      "persistence": "Unresolved. There is no admissible daily target history or accepted design evidence from which to establish a persistent mechanism.",
+      "mechanism": "No admitted economic source of excess return is established. EchoTrade is deprecated and historical-only: the captured 2025 event-to-event reconstruction on fill dates using last-trade marks is retained historical evidence, not an admissible daily NAV return series. It has no current-product decomposition, dependence, HWM, or funded-product obligation; its $0.19 is retained solely as clearly labeled historical evidence and is excluded from current capital, allocation, and consolidated-value reporting.",
+      "persistence": "Unresolved historical evidence only. There is no admissible daily target history or accepted design evidence from which to establish a persistent mechanism, and no current-product investigation is required while the strategy remains deprecated.",
       "alternative_explanation": "Returns inferred from sparse fill-date marks can reflect observation timing, stale marks, and trade selection rather than a repeatable economic source.",
       "falsification": [
-        "Capture and admit daily account NAV with exact funding, flow, and strategy-version evidence.",
-        "Test any proposed mechanism on the admitted daily history without substituting the rejected event-only reconstruction."
+        "Any future reintroduction requires newly captured and admitted daily account NAV with exact funding, flow, and strategy-version evidence.",
+        "A future mechanism test must use that admitted daily history and not substitute the retained event-only reconstruction."
       ],
       "confidence": "none"
     },
@@ -146,12 +146,12 @@
         "secondary": null
       },
       "no_identified_source": true,
-      "mechanism": "No admitted economic source of excess return is established. Connected account-live target history and authoritative design evidence are missing, so decomposition is REQUIRED_NOT_READY. The named sleeve remains required for capital and dependence; accepted policy excludes it only from the material HWM denominator.",
-      "persistence": "Unresolved. No admitted target history or design evidence exists from which to establish a persistent mechanism.",
+      "mechanism": "No admitted economic source of excess return is established. Composer is immaterial and excluded from every current financial-MVP outcome, so it has no current-product decomposition, dependence, HWM, or funded-product obligation.",
+      "persistence": "Historical context only. No admitted target history or design evidence establishes a persistent mechanism, and no current-product investigation is required while Composer remains excluded.",
       "alternative_explanation": "Without connected history, any apparent result could reflect account aggregation, implementation timing, or an unrelated strategy rather than this sleeve's economic source.",
       "falsification": [
-        "Bind the funded sleeve to an admissible account-live return series and exact strategy version.",
-        "Test any proposed mechanism against that admitted history and the required decomposition lenses."
+        "Any future reintroduction requires an explicit funded-product decision plus an admissible account-live return series and exact strategy version.",
+        "Test any reintroduced mechanism against that admitted history and owner-approved decomposition lenses."
       ],
       "confidence": "none"
     }

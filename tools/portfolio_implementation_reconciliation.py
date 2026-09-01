@@ -29,7 +29,6 @@ from quant_engine.core.contracts import canonical_json_bytes
 from portfolio_strategy_history import (
     _cell,
     _excel_date,
-    _grizzly_manual_histories,
     _xlsx_rows,
 )
 
@@ -37,11 +36,19 @@ from portfolio_strategy_history import (
 SCHEMA_VERSION: Final = 1
 BUILDER_VERSION: Final = "1.2.0"
 TRADE_SIDES: Final = frozenset({"BUY", "SELL"})
+INSUFFICIENT_EXACT_COMMON_DATA: Final = (
+    "accepted as_of leaves insufficient exact-common data"
+)
+UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT: Final = "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT"
 _TICKER_ENTRY = re.compile(r"(?:^|\s)([^\s|]+):USA\|")
 
 
 class ImplementationReconciliationError(ValueError):
     """Source evidence or a requested reconciliation violates the contract."""
+
+
+def _insufficient_exact_common_data() -> ImplementationReconciliationError:
+    return ImplementationReconciliationError(INSUFFICIENT_EXACT_COMMON_DATA)
 
 
 @dataclass(frozen=True)
@@ -76,6 +83,141 @@ def _source(path: Path, source_id: str) -> dict[str, object]:
         "size_bytes": size,
         "source_id": source_id,
     }
+
+
+def _grizzly_manual_history_rows(
+    path: Path,
+    source_id: str,
+    *,
+    accepted_as_of: date,
+) -> tuple[list[dict[str, Any]], dict[str, object]]:
+    source = _source(path, source_id)
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            required = {
+                "Action",
+                "Buy & Hold",
+                "Date (ET)",
+                "Model",
+                "PnL %",
+                "SPX",
+            }
+            if not required <= set(reader.fieldnames or ()):
+                raise ImplementationReconciliationError(
+                    "Grizzly trade-history headers differ"
+                )
+            raw_rows = list(reader)
+    except (OSError, UnicodeDecodeError, csv.Error) as exc:
+        raise ImplementationReconciliationError(
+            "Grizzly trade history is invalid"
+        ) from exc
+
+    rows: list[dict[str, Any]] = []
+    for raw in raw_rows:
+        timestamp = str(raw.get("Date (ET)") or "").strip()
+        if timestamp.endswith(" ET"):
+            timestamp = timestamp[:-3]
+        try:
+            observed = datetime.strptime(timestamp, "%Y-%m-%d %H:%M")
+        except ValueError as exc:
+            raise ImplementationReconciliationError(
+                "Grizzly trade-history timestamp is invalid"
+            ) from exc
+        if observed.date() > accepted_as_of:
+            continue
+        action = str(raw.get("Action") or "").strip().upper()
+        if action not in {"BUY", "REBUY", "SELL"}:
+            raise ImplementationReconciliationError(
+                "Grizzly trade-history action differs"
+            )
+        model = _decimal(raw.get("Model"))
+        spx = _decimal(raw.get("SPX"))
+        buy_and_hold = _decimal(raw.get("Buy & Hold"))
+        if (
+            model is None
+            or spx is None
+            or buy_and_hold is None
+            or model <= 0
+            or spx <= 0
+        ):
+            raise ImplementationReconciliationError(
+                "Grizzly trade-history level is invalid"
+            )
+        pnl_text = str(raw.get("PnL %") or "").strip()
+        pnl_value = _decimal(pnl_text) if pnl_text else None
+        rows.append(
+            {
+                "action": action,
+                "buy_and_hold": buy_and_hold,
+                "model": model,
+                "observed": observed,
+                "pnl_fraction": (
+                    pnl_value / Decimal(100) if pnl_value is not None else None
+                ),
+                "spx": spx,
+            }
+        )
+    if (
+        len(rows) < 100
+        or rows != sorted(rows, key=lambda item: item["observed"])
+        or len({item["observed"] for item in rows}) != len(rows)
+    ):
+        raise _insufficient_exact_common_data()
+    return rows, source
+
+
+def _grizzly_manual_histories(
+    blended_path: Path,
+    live_path: Path,
+    *,
+    accepted_as_of: date,
+) -> tuple[list[dict[str, Any]], dict[str, object], list[dict[str, object]]]:
+    blended, blended_source = _grizzly_manual_history_rows(
+        blended_path,
+        "grizzlybulls-all-backtest-live-trade-history",
+        accepted_as_of=accepted_as_of,
+    )
+    live, live_source = _grizzly_manual_history_rows(
+        live_path,
+        "grizzlybulls-live-only-trade-history",
+        accepted_as_of=accepted_as_of,
+    )
+    by_timestamp = {item["observed"]: item for item in blended}
+    exact_overlap = [
+        item for item in live if by_timestamp.get(item["observed"]) == item
+    ]
+    missing = [item for item in live if item["observed"] not in by_timestamp]
+    differing = [
+        item
+        for item in live
+        if item["observed"] in by_timestamp and by_timestamp[item["observed"]] != item
+    ]
+    if (
+        differing
+        or len(missing) > 1
+        or (missing and (missing[0] != live[0] or missing[0]["action"] != "BUY"))
+        or live[-1]["observed"] != blended[-1]["observed"]
+        or len(exact_overlap) != len(live) - len(missing)
+    ):
+        raise ImplementationReconciliationError(
+            "Grizzly bounded all-history and live-only files are inconsistent"
+        )
+    sell_rows = [item for item in blended if item["action"] == "SELL"]
+    if len(sell_rows) < 50 or any(item["pnl_fraction"] is None for item in sell_rows):
+        raise _insufficient_exact_common_data()
+    validation = {
+        "all_history_observations": len(blended),
+        "all_history_observed_start": blended[0]["observed"].isoformat(),
+        "exact_live_overlap_observations": len(exact_overlap),
+        "last_trade_timestamp": blended[-1]["observed"].isoformat(),
+        "live_initialization_rows_not_repeated_in_all_history": len(missing),
+        "live_only_observations": len(live),
+        "live_only_observed_start": live[0]["observed"].isoformat(),
+        "realized_model_return_observations": len(sell_rows),
+        "status": "CONSISTENT_EXCEPT_LIVE_INITIALIZATION_ROW",
+    }
+    return blended, validation, [blended_source, live_source]
 
 
 def _json(path: Path, name: str) -> dict[str, Any]:
@@ -167,13 +309,16 @@ def _relative_drawdown(model: Sequence[float], actual: Sequence[float]) -> float
 
 
 def relative_metrics(
-    model: Mapping[date, float], actual: Mapping[date, float]
+    model: Mapping[date, float],
+    actual: Mapping[date, float],
+    *,
+    accepted_as_of: date,
 ) -> dict[str, Any]:
-    common = sorted(set(model) & set(actual))
+    common = sorted(
+        observed for observed in set(model) & set(actual) if observed <= accepted_as_of
+    )
     if len(common) < 2:
-        raise ImplementationReconciliationError(
-            "model/account exact-common-date overlap is insufficient"
-        )
+        raise _insufficient_exact_common_data()
     model_values = [model[observed] for observed in common]
     actual_values = [actual[observed] for observed in common]
     active = [
@@ -244,6 +389,7 @@ def _returns(
     *,
     strategy_id: str,
     evidence_layer: str | None = None,
+    accepted_as_of: date,
 ) -> dict[date, float]:
     result: dict[date, float] = {}
     for row in rows:
@@ -252,6 +398,8 @@ def _returns(
         if evidence_layer is not None and row.get("evidence_layer") != evidence_layer:
             continue
         observed = date.fromisoformat(str(row.get("date") or ""))
+        if observed > accepted_as_of:
+            continue
         value = _float(row.get("return"), f"{strategy_id} return")
         if observed in result and result[observed] != value:
             raise ImplementationReconciliationError(
@@ -386,7 +534,10 @@ def event_coverage(
 
 
 def _ibkr_actual_trades(
-    catalog: Mapping[str, Any], xml_paths: Sequence[Path]
+    catalog: Mapping[str, Any],
+    xml_paths: Sequence[Path],
+    *,
+    accepted_as_of: date,
 ) -> tuple[list[TradeEvent], dict[str, object]]:
     accepted = {
         str(row.get("provider_execution_id_sha256"))
@@ -400,6 +551,7 @@ def _ibkr_actual_trades(
             "IBKR AI execution crosswalk is unavailable"
         )
     events: dict[str, TradeEvent] = {}
+    seen: set[str] = set()
     raw_count = 0
     for path in xml_paths:
         for _, element in ElementTree.iterparse(path, events=("end",)):
@@ -421,11 +573,15 @@ def _ibkr_actual_trades(
             if digest not in accepted:
                 element.clear()
                 continue
-            raw_count += 1
+            seen.add(digest)
             observed_text = str(
                 element.attrib.get("tradeDate") or element.attrib.get("dateTime") or ""
             )[:8]
             observed = datetime.strptime(observed_text, "%Y%m%d").date()
+            if observed > accepted_as_of:
+                element.clear()
+                continue
+            raw_count += 1
             side = str(element.attrib.get("buySell") or "").upper()
             symbol = str(element.attrib.get("symbol") or "").upper().strip()
             quantity = _decimal(element.attrib.get("quantity"))
@@ -447,13 +603,13 @@ def _ibkr_actual_trades(
                 )
             events[digest] = event
             element.clear()
-    missing = accepted - set(events)
+    missing = accepted - seen
     if missing:
         raise ImplementationReconciliationError(
             f"IBKR raw execution detail is missing for {len(missing)} accepted trades"
         )
     return _aggregate_events(events.values()), {
-        "accepted_execution_rows": len(accepted),
+        "accepted_execution_rows": len(events),
         "deduplicated_raw_execution_rows": len(events),
         "overlapping_raw_rows": raw_count - len(events),
         "status": "PASS_ALL_ACCEPTED_EXECUTIONS_JOINED_TO_RAW_DETAIL",
@@ -570,7 +726,10 @@ def _p123_book_ids(
 
 
 def _p123_trade_events(
-    rows: Sequence[Mapping[str, Any]], entity_id: str
+    rows: Sequence[Mapping[str, Any]],
+    entity_id: str,
+    *,
+    accepted_as_of: date,
 ) -> list[TradeEvent]:
     events = []
     for row in rows:
@@ -581,6 +740,8 @@ def _p123_trade_events(
             continue
         raw_date = str(row.get("Date") or "").strip()
         observed = _excel_date(raw_date, "Portfolio123 transaction date")
+        if observed > accepted_as_of:
+            continue
         symbol = str(row.get("Symbol") or row.get("Ticker") or "").upper().strip()
         quantity = _decimal(row.get("Shares"))
         price = _decimal(row.get("Price"))
@@ -602,60 +763,12 @@ def _model_account_cash(
     primary: Mapping[str, Any],
     account_metadata: Sequence[Mapping[str, Any]],
     equity_rows: Sequence[Mapping[str, Any]],
+    *,
+    accepted_as_of: date,
 ) -> dict[str, object]:
-    reference = str(primary.get("account") or "")
-    matches = [
-        row
-        for row in account_metadata
-        if reference
-        and reference
-        in {
-            str(row.get(field) or "") for field in ("_entity_id", "id", "name", "label")
-        }
-    ]
-    if len(matches) != 1:
-        raise ImplementationReconciliationError(
-            "Portfolio123 AI account metadata is not unique"
-        )
-    account = matches[0]
-    account_net = _decimal(account.get("netWorth") or account.get("value"))
-    account_cash = _decimal(account.get("tradeCash") or account.get("cash"))
-    actual_cash_weight = (
-        float(account_cash / account_net)
-        if account_cash is not None and account_net not in {None, Decimal(0)}
-        else None
-    )
-    tickers = set(_TICKER_ENTRY.findall(str(account.get("tickers") or "")))
-    managed_count = int(
-        str(primary.get("strategyTotalHoldCount") or primary.get("posCnt") or 0)
-    )
-
-    entity_id = str(primary.get("assetUid") or "")
-    model_rows = [
-        row
-        for row in equity_rows
-        if str(row.get("_entity_id") or "") == entity_id
-        and row.get("Date")
-        and row.get("Total Equity")
-    ]
-    model_rows.sort(key=lambda row: str(row.get("Date")))
-    model_cash_weight = None
-    if model_rows:
-        latest = model_rows[-1]
-        total = _decimal(latest.get("Total Equity"))
-        cash = _decimal(latest.get("Cash"))
-        if total not in {None, Decimal(0)} and cash is not None:
-            model_cash_weight = float(cash / total)
+    del primary, account_metadata, equity_rows, accepted_as_of
     return {
-        "account_is_net_borrowed": (
-            actual_cash_weight is not None and actual_cash_weight < 0
-        ),
-        "account_net_cash_weight": actual_cash_weight,
-        "account_position_count": len(tickers),
-        "model_net_cash_weight": model_cash_weight,
-        "model_position_count": managed_count,
-        "position_count_excess": len(tickers) - managed_count,
-        "status": "CURRENT_CONNECTED_ACCOUNT_VERSUS_PRIMARY_MODEL",
+        "status": UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT,
     }
 
 
@@ -664,6 +777,8 @@ def _ai_reconciliation(
     ibkr_catalog: Mapping[str, Any],
     ibkr_xml_paths: Sequence[Path],
     ledger: Mapping[str, Any],
+    *,
+    accepted_as_of: date,
 ) -> dict[str, Any]:
     tables = p123_root / "tables"
     managed = parquet.read_table(
@@ -716,17 +831,25 @@ def _ai_reconciliation(
         columns=["Cash", "Date", "Total Equity", "_entity_id"],
     ).to_pylist()
     book_inventory, primary = _p123_book_ids(managed, registry)
-    actual, join = _ibkr_actual_trades(ibkr_catalog, ibkr_xml_paths)
+    actual, join = _ibkr_actual_trades(
+        ibkr_catalog, ibkr_xml_paths, accepted_as_of=accepted_as_of
+    )
+    if not actual:
+        raise _insufficient_exact_common_data()
     actual_start = min(row.observed for row in actual)
     actual_end = max(row.observed for row in actual)
     books = {
         role: [
             row
-            for row in _p123_trade_events(transactions, item["entity_id"])
+            for row in _p123_trade_events(
+                transactions, item["entity_id"], accepted_as_of=accepted_as_of
+            )
             if actual_start <= row.observed <= actual_end
         ]
         for role, item in book_inventory.items()
     }
+    if not books.get("PRIMARY_AI_FACTOR"):
+        raise _insufficient_exact_common_data()
     coverage = {role: event_coverage(rows, actual) for role, rows in books.items()}
     classification = {
         "AMBIGUOUS_PRIMARY_AND_TEMPORARY": 0,
@@ -754,13 +877,15 @@ def _ai_reconciliation(
     provider = _returns(
         ledger.get("provider_strategy_returns", []),
         strategy_id="p123-ai-factor",
+        accepted_as_of=accepted_as_of,
     )
     account = _returns(
         ledger.get("strategy_returns", []),
         strategy_id="p123-ai-factor",
         evidence_layer="ACCOUNT_LIVE",
+        accepted_as_of=accepted_as_of,
     )
-    metrics = relative_metrics(provider, account)
+    metrics = relative_metrics(provider, account, accepted_as_of=accepted_as_of)
     declared_rows = [
         row
         for row in ledger.get("strategy_evidence", [])
@@ -780,19 +905,16 @@ def _ai_reconciliation(
         (row.fees or Decimal(0) for row in books["PRIMARY_AI_FACTOR"]),
         Decimal(0),
     )
-    temporary_unique = classification["TEMPORARY_ONLY"]
     union_coverage = event_coverage(
         [event for role, rows in books.items() for event in rows], actual
-    )
-    current_temporary_count = sum(
-        item["connection_status"].startswith("CURRENT_CONNECTED")
-        for role, item in book_inventory.items()
-        if role != "PRIMARY_AI_FACTOR"
     )
     return {
         "broker_execution_join": join,
         "connected_account_snapshot": _model_account_cash(
-            primary, account_metadata, equity
+            primary,
+            account_metadata,
+            equity,
+            accepted_as_of=accepted_as_of,
         ),
         "costs": {
             "account_commissions_and_taxes_usd": float(actual_fees),
@@ -828,16 +950,10 @@ def _ai_reconciliation(
             {
                 "cause": "MULTI_MODEL_ACCOUNT_CONTAMINATION",
                 "evidence": (
-                    f"The accepted P123 snapshot maps {current_temporary_count} other "
-                    "currently connected models to the AI account; "
-                    f"{temporary_unique} broker events have a temporary-book candidate "
-                    "but no primary-book candidate within the declared lag."
+                    "The current connected-model roster is an undated snapshot and is "
+                    "not historical authority for the accepted as-of reconciliation."
                 ),
-                "status": (
-                    "CONFIRMED"
-                    if current_temporary_count and temporary_unique
-                    else "NOT_OBSERVED"
-                ),
+                "status": UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT,
             },
             {
                 "cause": "PRIMARY_MODEL_EVENTS_NOT_IMPLEMENTED_WITHIN_LAG",
@@ -855,10 +971,10 @@ def _ai_reconciliation(
             {
                 "cause": "RESIDUAL_HOLDINGS_OUTSIDE_PRIMARY_MODEL",
                 "evidence": (
-                    "The connected broker snapshot contains more positions than the "
-                    "primary model snapshot."
+                    "The current account and model holdings are undated snapshots and "
+                    "cannot establish a historical residual-holdings difference."
                 ),
-                "status": "CONFIRMED",
+                "status": UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT,
             },
             {
                 "cause": "BROKER_ACTIVITY_NOT_ATTRIBUTED_TO_ADMITTED_MODEL_BOOKS",
@@ -912,7 +1028,9 @@ def _tt_components(workbook: Path) -> list[str]:
     return result
 
 
-def _tt_model_returns(workbook: Path, components: Sequence[str]) -> dict[date, float]:
+def _tt_model_returns(
+    workbook: Path, components: Sequence[str], *, accepted_as_of: date
+) -> dict[date, float]:
     rows = _xlsx_rows(workbook, "raw_ttdata")
     columns = {}
     for index, raw_name in enumerate(rows[0]):
@@ -930,6 +1048,9 @@ def _tt_model_returns(workbook: Path, components: Sequence[str]) -> dict[date, f
     for row in rows[1:]:
         if _cell(row, 0) is None:
             continue
+        observed = _excel_date(_cell(row, 0), "TT return date")
+        if observed > accepted_as_of:
+            continue
         levels = {
             component: _decimal(_cell(row, column))
             for component, column in columns.items()
@@ -938,7 +1059,6 @@ def _tt_model_returns(workbook: Path, components: Sequence[str]) -> dict[date, f
             continue
         accepted = {key: value for key, value in levels.items() if value is not None}
         if set(previous) == set(accepted):
-            observed = _excel_date(_cell(row, 0), "TT return date")
             result[observed] = float(
                 sum(
                     (accepted[key] / previous[key] - Decimal(1) for key in components),
@@ -951,7 +1071,7 @@ def _tt_model_returns(workbook: Path, components: Sequence[str]) -> dict[date, f
 
 
 def _tt_allocation_events(
-    workbook: Path, components: Sequence[str]
+    workbook: Path, components: Sequence[str], *, accepted_as_of: date
 ) -> tuple[list[TradeEvent], dict[str, dict[str, Decimal]]]:
     rows = _xlsx_rows(workbook, "raw_tt_allochist")
     if rows[0][:4] != ["strategy", "Date", "Ticker", "Weight"]:
@@ -962,6 +1082,8 @@ def _tt_allocation_events(
         if component not in components:
             continue
         observed = _excel_date(_cell(row, 1), "TT allocation date")
+        if observed > accepted_as_of:
+            continue
         symbol = str(_cell(row, 2) or "").upper().strip()
         weight = _decimal(_cell(row, 3))
         if not symbol or weight is None:
@@ -1004,27 +1126,67 @@ def _tt_allocation_events(
     return _aggregate_events(events), latest
 
 
-def _tt_actual_events(
-    ledger: Mapping[str, Any], schwab: Mapping[str, Any]
-) -> list[TradeEvent]:
-    accepted = {
-        str(row.get("source_record_id") or "").removeprefix("schwab:")
-        for row in ledger.get("transactions", [])
-        if isinstance(row, dict)
-        and row.get("strategy_id") == "tt-portfolio"
-        and row.get("kind") in {"Buy", "Sell"}
-    }
-    events = []
-    for row in schwab.get("transactions", []):
-        if not isinstance(row, dict) or str(row.get("record_id")) not in accepted:
+def _mapped_transaction_rows(
+    ledger: Mapping[str, Any],
+    provider: Mapping[str, Any],
+    *,
+    strategy_id: str,
+    accepted_as_of: date,
+) -> list[tuple[Mapping[str, Any], date]]:
+    mapped_accounts: dict[str, str] = {}
+    for row in ledger.get("transactions", []):
+        if not isinstance(row, dict) or row.get("strategy_id") != strategy_id:
             continue
+        record_id = str(row.get("source_record_id") or "").removeprefix("schwab:")
+        account_id = str(row.get("account_id") or "")
+        if not record_id or not account_id:
+            continue
+        prior = mapped_accounts.get(record_id)
+        if prior is not None and prior != account_id:
+            raise ImplementationReconciliationError(
+                f"mapped transaction account conflicts: {strategy_id}"
+            )
+        mapped_accounts[record_id] = account_id
+
+    result: list[tuple[Mapping[str, Any], date]] = []
+    for row in provider.get("transactions", []):
+        if not isinstance(row, dict):
+            continue
+        record_id = str(row.get("record_id") or "")
+        mapped_account = mapped_accounts.get(record_id)
+        if mapped_account is None:
+            continue
+        observed = date.fromisoformat(str(row.get("event_date") or ""))
+        if observed > accepted_as_of:
+            continue
+        if str(row.get("account_id") or "") != mapped_account:
+            raise ImplementationReconciliationError(
+                f"mapped transaction account differs: {strategy_id}"
+            )
+        result.append((row, observed))
+    return result
+
+
+def _tt_actual_events(
+    ledger: Mapping[str, Any],
+    schwab: Mapping[str, Any],
+    *,
+    accepted_as_of: date,
+) -> list[TradeEvent]:
+    events = []
+    for row, observed in _mapped_transaction_rows(
+        ledger,
+        schwab,
+        strategy_id="tt-portfolio",
+        accepted_as_of=accepted_as_of,
+    ):
         side = str(row.get("kind") or "").upper()
         if side not in TRADE_SIDES:
             continue
         quantity = _decimal(row.get("quantity"))
         events.append(
             TradeEvent(
-                date.fromisoformat(str(row.get("event_date"))),
+                observed,
                 str(row.get("symbol") or "").upper().strip(),
                 side,
                 abs(quantity) if quantity is not None else None,
@@ -1033,7 +1195,7 @@ def _tt_actual_events(
             )
         )
     if not events:
-        raise ImplementationReconciliationError("TT broker executions are unavailable")
+        raise _insufficient_exact_common_data()
     return _aggregate_events(events)
 
 
@@ -1042,110 +1204,12 @@ def _tt_current_weights(
     components: Sequence[str],
     ledger: Mapping[str, Any],
     schwab: Mapping[str, Any],
+    *,
+    accepted_as_of: date,
 ) -> dict[str, object]:
-    holdings = _xlsx_rows(workbook, "raw_tt_holdings")
-    target: dict[str, Decimal] = {}
-    for row in holdings[1:]:
-        component = str(_cell(row, 0) or "").strip()
-        if component not in components:
-            continue
-        allocation = _decimal(_cell(row, 3))
-        symbol = str(_cell(row, 1) or "").upper().strip()
-        if allocation is None or not symbol:
-            continue
-        target[symbol] = target.get(symbol, Decimal(0)) + allocation / Decimal(
-            len(components)
-        )
-
-    accepted_positions = {
-        str(row.get("source_record_id") or "").removeprefix("schwab:")
-        for row in ledger.get("positions", [])
-        if isinstance(row, dict) and row.get("strategy_id") == "tt-portfolio"
-    }
-    current_account_ids: set[str] = set()
-    actual_values: dict[str, Decimal] = {}
-    for row in schwab.get("positions", []):
-        if (
-            not isinstance(row, dict)
-            or str(row.get("record_id")) not in accepted_positions
-        ):
-            continue
-        value = row.get("market_value")
-        if not isinstance(value, dict) or value.get("status") != "AVAILABLE":
-            continue
-        symbol = str(row.get("symbol") or "").upper().strip()
-        amount = _decimal(value.get("value"))
-        if symbol and amount is not None:
-            actual_values[symbol] = actual_values.get(symbol, Decimal(0)) + amount
-            current_account_ids.add(str(row.get("account_id")))
-
-    current_nav = sum(
-        (
-            _decimal(row.get("liquidation_value", {}).get("value")) or Decimal(0)
-            for row in schwab.get("current_accounts", [])
-            if isinstance(row, dict)
-            and str(row.get("account_id")) in current_account_ids
-            and isinstance(row.get("liquidation_value"), dict)
-            and row["liquidation_value"].get("status") == "AVAILABLE"
-        ),
-        Decimal(0),
-    )
-    nav_rows = [
-        row
-        for row in ledger.get("nav_observations", [])
-        if isinstance(row, dict)
-        and row.get("strategy_id") == "tt-portfolio"
-        and str(row.get("account_id")) in current_account_ids
-    ]
-    latest_nav_by_account: dict[str, tuple[str, Decimal]] = {}
-    for nav_row in nav_rows:
-        amount = (
-            _decimal(nav_row.get("nav", {}).get("value"))
-            if isinstance(nav_row.get("nav"), dict)
-            else None
-        )
-        account_id = str(nav_row.get("account_id"))
-        observed = str(nav_row.get("as_of_date"))
-        if amount is not None and (
-            account_id not in latest_nav_by_account
-            or observed > latest_nav_by_account[account_id][0]
-        ):
-            latest_nav_by_account[account_id] = (observed, amount)
-    nav = current_nav or sum(
-        (value for _, value in latest_nav_by_account.values()), Decimal(0)
-    )
-    if nav <= 0:
-        nav = sum(actual_values.values(), Decimal(0))
-    actual = {symbol: value / nav for symbol, value in actual_values.items()}
-    cash = max(Decimal(0), Decimal(1) - sum(actual.values(), Decimal(0)))
-    strict_symbols = set(target) | set(actual) | {"CASH"}
-    strict_distance = sum(
-        abs(
-            (actual.get(symbol, cash if symbol == "CASH" else Decimal(0)))
-            - target.get(symbol, Decimal(0))
-        )
-        for symbol in strict_symbols
-    ) / Decimal(2)
-    economic_target = dict(target)
-    economic_actual = dict(actual)
-    economic_target["CASH_OR_BIL"] = economic_target.pop("BIL", Decimal(0))
-    economic_actual["CASH_OR_BIL"] = cash + economic_actual.pop("BIL", Decimal(0))
-    economic_symbols = set(economic_target) | set(economic_actual)
-    economic_distance = sum(
-        abs(
-            economic_actual.get(symbol, Decimal(0))
-            - economic_target.get(symbol, Decimal(0))
-        )
-        for symbol in economic_symbols
-    ) / Decimal(2)
+    del workbook, components, ledger, schwab, accepted_as_of
     return {
-        "account_cash_weight": float(cash),
-        "actual_position_count": len(actual),
-        "cash_proxy_target_weight": float(target.get("BIL", Decimal(0))),
-        "economic_cash_or_bil_l1_half_distance": float(economic_distance),
-        "model_position_count": len(target),
-        "strict_position_l1_half_distance": float(strict_distance),
-        "status": "CURRENT_MODEL_TARGET_VERSUS_MAPPED_ACCOUNT_POSITIONS",
+        "status": UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT,
     }
 
 
@@ -1153,20 +1217,32 @@ def _tt_reconciliation(
     workbook: Path,
     ledger: Mapping[str, Any],
     schwab: Mapping[str, Any],
+    *,
+    accepted_as_of: date,
 ) -> dict[str, object]:
     components = _tt_components(workbook)
-    model_returns = _tt_model_returns(workbook, components)
+    model_returns = _tt_model_returns(
+        workbook, components, accepted_as_of=accepted_as_of
+    )
     account_returns = _returns(
         ledger.get("strategy_returns", []),
         strategy_id="tt-portfolio",
         evidence_layer="ACCOUNT_LIVE",
+        accepted_as_of=accepted_as_of,
     )
-    model_events, _ = _tt_allocation_events(workbook, components)
-    actual_events = _tt_actual_events(ledger, schwab)
+    model_events, _ = _tt_allocation_events(
+        workbook, components, accepted_as_of=accepted_as_of
+    )
+    actual_events = _tt_actual_events(ledger, schwab, accepted_as_of=accepted_as_of)
+    common_dates = sorted(set(model_returns) & set(account_returns))
+    if len(common_dates) < 2 or not model_events or not actual_events:
+        raise _insufficient_exact_common_data()
     start = max(min(model_returns), min(row.observed for row in model_events))
     end = min(max(model_returns), max(account_returns))
     comparable_model = [row for row in model_events if start <= row.observed <= end]
     comparable_actual = [row for row in actual_events if start <= row.observed <= end]
+    if not comparable_model or not comparable_actual:
+        raise _insufficient_exact_common_data()
     fees = sum((row.fees or Decimal(0) for row in comparable_actual), Decimal(0))
     component_counts = sorted(
         {
@@ -1175,25 +1251,29 @@ def _tt_reconciliation(
             if isinstance(row, dict)
             and row.get("strategy_id") == "tt-portfolio"
             and isinstance(row.get("component_account_count"), int)
+            and date.fromisoformat(str(row.get("date") or "")) <= accepted_as_of
         }
     )
     historical_accounts = {
         str(row.get("account_id"))
-        for row in ledger.get("transactions", [])
-        if isinstance(row, dict) and row.get("strategy_id") == "tt-portfolio"
-    }
-    current_accounts = {
-        str(row.get("account_id"))
-        for row in ledger.get("positions", [])
-        if isinstance(row, dict) and row.get("strategy_id") == "tt-portfolio"
+        for row, _ in _mapped_transaction_rows(
+            ledger,
+            schwab,
+            strategy_id="tt-portfolio",
+            accepted_as_of=accepted_as_of,
+        )
     }
     component_count_changed = len(component_counts) > 1
-    account_boundary_differs = len(historical_accounts) != len(current_accounts)
     coverage = event_coverage(comparable_model, comparable_actual)
-    common_dates = sorted(set(model_returns) & set(account_returns))
 
-    def segment(first: date, last: date) -> dict[str, object]:
-        observed = [item for item in common_dates if first <= item <= last]
+    def segment(first: date, last: date, *, accepted_as_of: date) -> dict[str, object]:
+        observed = [
+            item
+            for item in common_dates
+            if first <= item <= last and item <= accepted_as_of
+        ]
+        if not observed:
+            raise _insufficient_exact_common_data()
         model_value = _compound([model_returns[item] for item in observed])
         account_value = _compound([account_returns[item] for item in observed])
         return {
@@ -1207,23 +1287,29 @@ def _tt_reconciliation(
 
     first_allocation_date = min(row.observed for row in comparable_model)
     before_allocation = segment(
-        common_dates[0], first_allocation_date - timedelta(days=1)
+        common_dates[0],
+        first_allocation_date - timedelta(days=1),
+        accepted_as_of=accepted_as_of,
     )
-    after_allocation = segment(first_allocation_date, common_dates[-1])
-    concentrated_gap = segment(date(2026, 3, 31), date(2026, 4, 1))
+    after_allocation = segment(
+        first_allocation_date, common_dates[-1], accepted_as_of=accepted_as_of
+    )
+    concentrated_gap = segment(
+        date(2026, 3, 31),
+        date(2026, 4, 1),
+        accepted_as_of=accepted_as_of,
+    )
     return {
         "account_composition": {
             "component_account_counts_observed": component_counts,
-            "current_position_account_count": len(current_accounts),
+            "current_position_snapshot": {
+                "status": UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT,
+            },
             "historical_transaction_account_count": len(historical_accounts),
             "status": (
                 "CHANGED_DURING_LIVE_PERIOD"
                 if component_count_changed
-                else (
-                    "BOUNDARY_DIFFERS_EFFECTIVE_DATED_MEMBERSHIP_UNAVAILABLE"
-                    if account_boundary_differs
-                    else "STABLE_WITHIN_OBSERVED_ROWS"
-                )
+                else "CURRENT_BOUNDARY_UNAVAILABLE_UNDATED_SNAPSHOT"
             ),
         },
         "costs": {
@@ -1232,7 +1318,11 @@ def _tt_reconciliation(
             "status": "PRE_TAX_OBSERVED_EXECUTION_COSTS_ONLY",
         },
         "current_target_reconciliation": _tt_current_weights(
-            workbook, components, ledger, schwab
+            workbook,
+            components,
+            ledger,
+            schwab,
+            accepted_as_of=accepted_as_of,
         ),
         "evidence_layers": [
             "CURRENT_SIX_COMPONENT_MODEL_HISTORY",
@@ -1240,7 +1330,9 @@ def _tt_reconciliation(
             "BROKER_ACTUAL_TRADES",
             "ACCOUNT_LIVE_RETURNS",
         ],
-        "return_reconciliation": relative_metrics(model_returns, account_returns),
+        "return_reconciliation": relative_metrics(
+            model_returns, account_returns, accepted_as_of=accepted_as_of
+        ),
         "return_window_decomposition": {
             "before_complete_allocation_history": before_allocation,
             "from_complete_allocation_history": after_allocation,
@@ -1251,16 +1343,11 @@ def _tt_reconciliation(
             {
                 "cause": "EFFECTIVE_DATED_ACCOUNT_AND_MODEL_MEMBERSHIP_UNAVAILABLE",
                 "evidence": (
-                    "Six accounts appear in historical mapped transactions, three in "
-                    "the current position perimeter, while every retained daily return "
-                    "row reports three components. Those facts do not prove when or why "
-                    "membership changed."
+                    f"{len(historical_accounts)} accounts appear in bounded mapped "
+                    "transactions. The undated current position perimeter is not "
+                    "historical authority, so no current numeric comparison is emitted."
                 ),
-                "status": (
-                    "UNRESOLVED_BLOCKING"
-                    if account_boundary_differs
-                    else "NOT_OBSERVED"
-                ),
+                "status": UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT,
             },
             {
                 "cause": "MODEL_EVENT_IMPLEMENTATION_GAPS",
@@ -1277,10 +1364,10 @@ def _tt_reconciliation(
             {
                 "cause": "CASH_PROXY_AND_POSITION_SIZING_DIFFERENCES",
                 "evidence": (
-                    "Current mapped account weights differ from the equal-weight current-six "
-                    "model, with BIL and uninvested cash treated separately and together."
+                    "The current workbook targets and Schwab positions are undated "
+                    "snapshots and are not historical authority for a measured weight gap."
                 ),
-                "status": "CONFIRMED",
+                "status": UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT,
             },
             {
                 "cause": "MARCH_31_APRIL_1_CAPTURE_BREAK",
@@ -1310,7 +1397,7 @@ def _tt_reconciliation(
     }
 
 
-def _market_prices(path: Path) -> dict[date, float]:
+def _market_prices(path: Path, *, accepted_as_of: date) -> dict[date, float]:
     payload = _json(path, "SPXL market-data artifact")
     if (
         payload.get("provider") != "yahoo"
@@ -1319,26 +1406,34 @@ def _market_prices(path: Path) -> dict[date, float]:
     ):
         raise ImplementationReconciliationError("SPXL market-data authority differs")
     result = {}
+    source_observations = 0
     for row in payload.get("rows", []):
         if not isinstance(row, dict) or row.get("Ticker") != "SPXL":
             continue
+        source_observations += 1
         observed = datetime.fromisoformat(str(row.get("Date"))).date()
+        if observed > accepted_as_of:
+            continue
         value = row.get("Adj Close") or row.get("Close")
         result[observed] = _float(value, "SPXL adjusted close")
-    if len(result) < 100:
+    if source_observations < 100:
         raise ImplementationReconciliationError("SPXL market history is insufficient")
+    if len(result) < 2:
+        raise _insufficient_exact_common_data()
     return result
 
 
-def _next_trading_day(observed: date, calendar: Sequence[date]) -> date:
-    matches = [item for item in calendar if item >= observed]
+def _next_trading_day(
+    observed: date, calendar: Sequence[date], *, accepted_as_of: date
+) -> date:
+    matches = [item for item in calendar if observed <= item <= accepted_as_of]
     if not matches:
-        raise ImplementationReconciliationError("signal is beyond market-data coverage")
+        raise _insufficient_exact_common_data()
     return matches[0]
 
 
 def _grizzly_model_states(
-    signal_path: Path, calendar: Sequence[date]
+    signal_path: Path, calendar: Sequence[date], *, accepted_as_of: date
 ) -> tuple[dict[date, bool], list[TradeEvent]]:
     try:
         with signal_path.open("r", encoding="utf-8-sig", newline="") as handle:
@@ -1369,12 +1464,16 @@ def _grizzly_model_states(
             raise ImplementationReconciliationError(
                 "Grizzly signal timestamp is invalid"
             )
+        if parsed_observed.date() > accepted_as_of:
+            continue
         action = str(row.get("Trade") or row.get("Action") or "").casefold()
         if action not in {"sell", "rebuy", "buy"}:
             continue
         signals.append((parsed_observed, action))
     signals.sort()
-    calendar = sorted(calendar)
+    calendar = sorted(item for item in calendar if item <= accepted_as_of)
+    if len(calendar) < 2:
+        raise _insufficient_exact_common_data()
     first = calendar[0]
     invested = False
     for observed, action in signals:
@@ -1388,7 +1487,7 @@ def _grizzly_model_states(
         )
         if raw_day > calendar[-1]:
             continue
-        trade_day = _next_trading_day(raw_day, calendar)
+        trade_day = _next_trading_day(raw_day, calendar, accepted_as_of=accepted_as_of)
         effective.setdefault(trade_day, []).append((observed, action))
     states: dict[date, bool] = {}
     events: list[TradeEvent] = []
@@ -1405,26 +1504,24 @@ def _grizzly_model_states(
 
 
 def _grizzly_actual(
+    ledger: Mapping[str, Any],
     schwab: Mapping[str, Any],
+    *,
+    accepted_as_of: date,
 ) -> tuple[dict[date, bool], list[TradeEvent]]:
-    by_account: dict[str, set[str]] = {}
-    for row in schwab.get("positions", []):
-        if not isinstance(row, dict):
-            continue
-        by_account.setdefault(str(row.get("account_id")), set()).add(
-            str(row.get("symbol") or "").upper()
-        )
-    matches = [
-        account for account, symbols in by_account.items() if symbols == {"SPXL"}
-    ]
-    if len(matches) != 1:
-        raise ImplementationReconciliationError(
-            "dedicated Grizzly SPXL account is not unique"
-        )
-    account = matches[0]
+    mapped_rows = _mapped_transaction_rows(
+        ledger,
+        schwab,
+        strategy_id="grizzlybears-vtma",
+        accepted_as_of=accepted_as_of,
+    )
+    accounts = {str(row.get("account_id") or "") for row, _ in mapped_rows}
+    if len(accounts) != 1:
+        raise _insufficient_exact_common_data()
+    account = next(iter(accounts))
     events = []
-    for row in schwab.get("transactions", []):
-        if not isinstance(row, dict) or str(row.get("account_id")) != account:
+    for row, observed in mapped_rows:
+        if str(row.get("account_id")) != account:
             continue
         if str(row.get("symbol") or "").upper() != "SPXL":
             continue
@@ -1434,7 +1531,7 @@ def _grizzly_actual(
         quantity = _decimal(row.get("quantity"))
         events.append(
             TradeEvent(
-                date.fromisoformat(str(row.get("event_date"))),
+                observed,
                 "SPXL",
                 side,
                 abs(quantity) if quantity is not None else None,
@@ -1443,6 +1540,8 @@ def _grizzly_actual(
             )
         )
     aggregated = _aggregate_events(events)
+    if not aggregated:
+        raise _insufficient_exact_common_data()
     states: dict[date, bool] = {}
     invested = False
     for event in aggregated:
@@ -1452,14 +1551,19 @@ def _grizzly_actual(
 
 
 def _expand_actual_states(
-    events: Sequence[TradeEvent], calendar: Sequence[date]
+    events: Sequence[TradeEvent],
+    calendar: Sequence[date],
+    *,
+    accepted_as_of: date,
 ) -> dict[date, bool]:
     by_date: dict[date, list[TradeEvent]] = {}
     for event in events:
+        if event.observed > accepted_as_of:
+            continue
         by_date.setdefault(event.observed, []).append(event)
     position = Decimal(0)
     result = {}
-    for observed in sorted(calendar):
+    for observed in sorted(item for item in calendar if item <= accepted_as_of):
         for event in by_date.get(observed, []):
             if event.quantity is None:
                 raise ImplementationReconciliationError(
@@ -1477,12 +1581,17 @@ def _expand_actual_states(
 
 
 def _state_returns(
-    prices: Mapping[date, float], states: Mapping[date, bool]
+    prices: Mapping[date, float],
+    states: Mapping[date, bool],
+    *,
+    accepted_as_of: date,
 ) -> dict[date, float]:
     result = {}
     previous_day = None
     previous_price = None
     for observed in sorted(prices):
+        if observed > accepted_as_of:
+            continue
         if previous_day is not None and previous_price is not None:
             result[observed] = (
                 prices[observed] / previous_price - 1.0
@@ -1499,31 +1608,64 @@ def _grizzly_reconciliation(
     market_data: Path,
     ledger: Mapping[str, Any],
     schwab: Mapping[str, Any],
+    *,
+    accepted_as_of: date,
 ) -> dict[str, object]:
-    prices = _market_prices(market_data)
+    prices = _market_prices(market_data, accepted_as_of=accepted_as_of)
     calendar = sorted(prices)
-    model_states, model_events = _grizzly_model_states(signals, calendar)
-    _, actual_events = _grizzly_actual(schwab)
-    actual_states = _expand_actual_states(actual_events, calendar)
+    model_states, model_events = _grizzly_model_states(
+        signals, calendar, accepted_as_of=accepted_as_of
+    )
+    _, actual_events = _grizzly_actual(ledger, schwab, accepted_as_of=accepted_as_of)
+    actual_states = _expand_actual_states(
+        actual_events, calendar, accepted_as_of=accepted_as_of
+    )
     start = max(calendar[0], min(row.observed for row in actual_events))
     end = min(calendar[-1], max(row.observed for row in actual_events))
     comparable_calendar = [item for item in calendar if start <= item <= end]
+    if len(comparable_calendar) < 2:
+        raise _insufficient_exact_common_data()
+    comparable_model_events = [
+        event for event in model_events if start <= event.observed <= end
+    ]
+    comparable_actual_events = [
+        event for event in actual_events if start <= event.observed <= end
+    ]
+    if not comparable_model_events or not comparable_actual_events:
+        raise _insufficient_exact_common_data()
     mismatches = [
         observed
         for observed in comparable_calendar
         if model_states[observed] != actual_states[observed]
     ]
-    model_proxy = _state_returns(prices, model_states)
-    actual_state_proxy = _state_returns(prices, actual_states)
+    model_proxy = _state_returns(prices, model_states, accepted_as_of=accepted_as_of)
+    actual_state_proxy = _state_returns(
+        prices, actual_states, accepted_as_of=accepted_as_of
+    )
     account_returns = _returns(
         ledger.get("strategy_returns", []),
         strategy_id="grizzlybears-vtma",
         evidence_layer="ACCOUNT_LIVE",
+        accepted_as_of=accepted_as_of,
     )
     fees = sum((event.fees or Decimal(0) for event in actual_events), Decimal(0))
     coverage = event_coverage(
-        [event for event in model_events if start <= event.observed <= end],
-        [event for event in actual_events if start <= event.observed <= end],
+        comparable_model_events,
+        comparable_actual_events,
+    )
+    bounded_pairs = _pair_events_one_to_one(
+        comparable_model_events,
+        comparable_actual_events,
+    )
+    delayed_rebuys = [
+        (model, actual, delay)
+        for model, actual, delay in bounded_pairs
+        if model.side == "BUY" and delay > 0
+    ]
+    missed_model_rebuys = max(
+        0,
+        sum(event.side == "BUY" for event in comparable_model_events)
+        - sum(model.side == "BUY" for model, _, _ in bounded_pairs),
     )
     march_13 = [
         event
@@ -1531,6 +1673,8 @@ def _grizzly_reconciliation(
         if event.observed == date(2026, 3, 13) and event.side == "SELL"
     ]
     common = sorted(set(model_proxy) & set(actual_state_proxy) & set(account_returns))
+    if len(common) < 2:
+        raise _insufficient_exact_common_data()
     model_common = _compound([model_proxy[item] for item in common])
     state_common = _compound([actual_state_proxy[item] for item in common])
     account_common = _compound([account_returns[item] for item in common])
@@ -1571,7 +1715,9 @@ def _grizzly_reconciliation(
             ),
         },
         "return_reconciliation": {
-            **relative_metrics(model_proxy, account_returns),
+            **relative_metrics(
+                model_proxy, account_returns, accepted_as_of=accepted_as_of
+            ),
             "model_authority": "DIAGNOSTIC_SIGNAL_STATE_TIMES_SPXL_ADJUSTED_CLOSE",
             "status": "DIAGNOSTIC_PROXY_NOT_OFFICIAL_PROVIDER_NAV",
         },
@@ -1579,26 +1725,28 @@ def _grizzly_reconciliation(
             {
                 "cause": "DELAYED_SELL_EXECUTED_AFTER_REBUY_SIGNAL",
                 "evidence": (
-                    "The March 11 model sell was executed by the account on March 13, "
-                    "the same date as the model rebuy signal."
+                    "The bounded mapped execution set contains the March 13 delayed "
+                    "sell after the model rebuy signal."
+                    if march_13
+                    else "No such delayed sell is present in bounded mapped evidence."
                 ),
                 "status": "CONFIRMED" if march_13 else "NOT_OBSERVED",
             },
             {
                 "cause": "MISSED_REBUY_AND_SUBSEQUENT_SIGNAL_SEQUENCE",
                 "evidence": (
-                    "After the March 13 sell, the account remained in cash through the "
-                    "remaining March model state changes."
+                    f"{missed_model_rebuys} bounded model rebuy events lack a mapped "
+                    "account execution within the declared lag."
                 ),
-                "status": "CONFIRMED",
+                "status": "CONFIRMED" if missed_model_rebuys else "NOT_OBSERVED",
             },
             {
                 "cause": "FINAL_REBUY_DELAYED",
                 "evidence": (
-                    "The April 8 model rebuy was executed on April 10, two calendar days "
-                    "later."
+                    f"{len(delayed_rebuys)} bounded model rebuy events have a delayed "
+                    "mapped account execution."
                 ),
-                "status": "CONFIRMED",
+                "status": "CONFIRMED" if delayed_rebuys else "NOT_OBSERVED",
             },
             {
                 "cause": "EXECUTION_PRICE_TIMING_SIZING_AND_CASH_RESIDUAL",
@@ -1747,7 +1895,9 @@ def build_reconciliation(
     grizzly_history_validation = None
     if grizzly_blended_history is not None:
         _, grizzly_history_validation, _ = _grizzly_manual_histories(
-            grizzly_blended_history, grizzly_signals
+            grizzly_blended_history,
+            grizzly_signals,
+            accepted_as_of=accepted_as_of,
         )
         sources.append(
             _source(
@@ -1756,13 +1906,25 @@ def build_reconciliation(
             )
         )
 
-    grizzly = _grizzly_reconciliation(grizzly_signals, spxl_market_data, ledger, schwab)
+    grizzly = _grizzly_reconciliation(
+        grizzly_signals,
+        spxl_market_data,
+        ledger,
+        schwab,
+        accepted_as_of=accepted_as_of,
+    )
     if grizzly_history_validation is not None:
         grizzly["signal_history_validation"] = grizzly_history_validation
     strategies = [
-        _ai_reconciliation(p123_generation_root, ibkr_catalog, xml_paths, ledger),
+        _ai_reconciliation(
+            p123_generation_root,
+            ibkr_catalog,
+            xml_paths,
+            ledger,
+            accepted_as_of=accepted_as_of,
+        ),
         grizzly,
-        _tt_reconciliation(tt_workbook, ledger, schwab),
+        _tt_reconciliation(tt_workbook, ledger, schwab, accepted_as_of=accepted_as_of),
     ]
     payload: dict[str, object] = {
         "as_of_date": accepted_as_of.isoformat(),

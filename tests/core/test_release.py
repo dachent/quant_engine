@@ -2,9 +2,16 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 import hashlib
+import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
+from threading import Event, Thread
 
+from jsonschema import Draft202012Validator
 import pytest
+from referencing import Registry, Resource
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -18,7 +25,9 @@ from quant_engine.core import (
     ReleaseCommitError,
     ReleaseConflictError,
     ReleaseManifest,
+    ReleasePublicationUnavailableError,
     ReleaseState,
+    ReleaseTarget,
     ReleaseValidationError,
     SourceArtifact,
     VerificationStatus,
@@ -30,11 +39,23 @@ from quant_engine.core import (
     recover_release,
     stage_generation,
 )
-from quant_engine.core.release import read_current_release
+from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import release as release_module
+from quant_engine.core.release import _DirectoryLease, read_current_release
 
 
 AS_OF = date(2026, 8, 2)
 COMMIT = "b" * 40
+
+
+@pytest.fixture(autouse=True)
+def _skip_posix_release_behavior_on_windows(request: pytest.FixtureRequest) -> None:
+    if (
+        os.name == "nt"
+        and not request.node.name.startswith("test_windows_")
+        and "schema" not in request.node.name
+    ):
+        pytest.skip("POSIX coordinated-release behavior is verified on POSIX")
 
 
 def _manifest(label: str) -> GenerationManifest:
@@ -78,6 +99,80 @@ def _gate() -> tuple[GateEvidence, ...]:
     return (GateEvidence("bounded-tests", hashlib.sha256(b"pass\n").hexdigest()),)
 
 
+def _legacy_migration_gates() -> tuple[GateEvidence, ...]:
+    return (
+        *_gate(),
+        GateEvidence(
+            "predecessor-authority-repair",
+            hashlib.sha256(b"legacy inventory reviewed\n").hexdigest(),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "invoke"),
+    (
+        (
+            "commit_release",
+            lambda: commit_release(
+                coordination_root=Path("unread-coordination"),
+                release_id="a" * 64,
+                roots={},
+            ),
+        ),
+        (
+            "recover_release",
+            lambda: recover_release(
+                coordination_root=Path("unread-coordination"),
+                release_id="a" * 64,
+                roots={},
+            ),
+        ),
+        (
+            "rollback_release",
+            lambda: release_module.rollback_release(
+                coordination_root=Path("unread-coordination"),
+                manifest=object(),  # type: ignore[arg-type]
+                journal=object(),  # type: ignore[arg-type]
+                roots={},
+            ),
+        ),
+    ),
+)
+def test_windows_coordinated_publication_fails_before_any_release_read(
+    monkeypatch: pytest.MonkeyPatch, operation: str, invoke: object
+) -> None:
+    def forbidden_read(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("release state must not be read on Windows")
+
+    monkeypatch.setattr(release_module, "_is_windows_platform", lambda: True)
+    monkeypatch.setattr(release_module, "read_release", forbidden_read)
+
+    with pytest.raises(ReleasePublicationUnavailableError) as raised:
+        assert callable(invoke)
+        invoke()
+
+    assert raised.value.code == "WINDOWS_NAMESPACE_UNTRUSTED"
+    assert raised.value.operation == operation
+
+
+def _link_directory(link: Path, target: Path) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=True)
+        return
+    except OSError as symlink_error:
+        if os.name != "nt":
+            pytest.skip(f"directory symlink creation unavailable: {symlink_error}")
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"directory junction creation unavailable: {result.stderr}")
+
+
 def test_prepare_is_non_mutating_and_manifest_round_trips(tmp_path: Path) -> None:
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
@@ -106,6 +201,150 @@ def test_prepare_is_non_mutating_and_manifest_round_trips(tmp_path: Path) -> Non
     reread, journal = read_release(tmp_path / "coordination", manifest.release_id)
     assert reread == manifest
     assert journal.state is ReleaseState.PREPARED
+
+
+@pytest.mark.parametrize("mutation", ("null", "missing"))
+def test_schema_three_release_rejects_unbound_proposed_inventory(
+    tmp_path: Path, mutation: str
+) -> None:
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, f"inventory-{mutation}")
+    manifest = prepare_release(
+        coordination_root=tmp_path / "coordination",
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    decoded = json.loads(manifest.to_json_bytes())
+    if mutation == "null":
+        decoded["targets"][0]["proposed_inventory_sha256"] = None
+    else:
+        del decoded["targets"][0]["proposed_inventory_sha256"]
+    identity = {key: value for key, value in decoded.items() if key != "release_id"}
+    decoded["release_id"] = hashlib.sha256(
+        json.dumps(
+            identity, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        + b"\n"
+    ).hexdigest()
+
+    with pytest.raises(
+        ReleaseValidationError,
+        match="release_target keys differ|proposed inventory.*mandatory",
+    ):
+        ReleaseManifest.from_json_bytes(
+            json.dumps(decoded, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            + b"\n"
+        )
+
+
+def test_release_manifest_schema_has_disjoint_legacy_and_current_versions(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "schema-versions")
+    manifest = prepare_release(
+        coordination_root=tmp_path / "coordination",
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    schema = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "schemas"
+            / "core"
+            / "release-manifest.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    Draft202012Validator.check_schema(schema)
+    authority_schema = json.loads(
+        (
+            Path(__file__).parents[2]
+            / "schemas"
+            / "core"
+            / "release-authority.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    validator = Draft202012Validator(
+        schema,
+        registry=Registry().with_resource(
+            authority_schema["$id"], Resource.from_contents(authority_schema)
+        ),
+    )
+    v3 = json.loads(manifest.to_json_bytes())
+    v2 = json.loads(json.dumps(v3))
+    v2["release_schema_version"] = 2
+    v2["targets"][0].pop("root_identity")
+    v2["targets"][0].pop("previous_inventory_sha256")
+    v2["companions"] = []
+    v1 = json.loads(json.dumps(v2))
+    v1["release_schema_version"] = 1
+    v1.pop("previous_authority")
+    v1["targets"][0].pop("proposed_inventory_sha256")
+
+    for valid in (v1, v2, v3):
+        assert not list(validator.iter_errors(valid))
+
+    cross_version = json.loads(json.dumps(v2))
+    cross_version["targets"][0]["root_identity"] = "d" * 64
+    missing = json.loads(json.dumps(v3))
+    missing["targets"][0].pop("root_identity")
+    extra = json.loads(json.dumps(v3))
+    extra["unexpected"] = True
+    wrong_type = json.loads(json.dumps(v3))
+    wrong_type["release_schema_version"] = True
+
+    for invalid in (cross_version, missing, extra, wrong_type):
+        assert list(validator.iter_errors(invalid))
+
+    legacy_with_v2_target_field = json.loads(json.dumps(v1))
+    legacy_with_v2_target_field["targets"][0]["proposed_inventory_sha256"] = "e" * 64
+    legacy_identity = json.loads(json.dumps(legacy_with_v2_target_field))
+    legacy_identity["targets"][0].pop("proposed_inventory_sha256")
+    legacy_identity.pop("release_id")
+    legacy_with_v2_target_field["release_id"] = hashlib.sha256(
+        canonical_json_bytes(legacy_identity)
+    ).hexdigest()
+    with pytest.raises(ReleaseValidationError, match="release_target keys differ"):
+        ReleaseManifest.from_json_bytes(
+            canonical_json_bytes(legacy_with_v2_target_field)
+        )
+
+
+def test_release_manifest_constructor_rejects_boolean_schema_version() -> None:
+    target = ReleaseTarget(
+        root_id="root",
+        root_identity="a" * 64,
+        proposed_generation_id="b" * 64,
+        proposed_manifest_sha256="c" * 64,
+        proposed_inventory_sha256="d" * 64,
+        previous_pointer=None,
+    )
+    created_at = datetime(2026, 8, 2, 10, tzinfo=UTC)
+    identity = {
+        "code_commit": COMMIT,
+        "companions": [],
+        "created_at": created_at.isoformat(),
+        "gates": [GateEvidence("bounded-tests", "e" * 64).to_dict()],
+        "release_schema_version": True,
+        "targets": [target.to_dict(release_schema_version=True)],
+    }
+
+    with pytest.raises(ReleaseValidationError, match="schema version is unsupported"):
+        ReleaseManifest(
+            release_id=hashlib.sha256(canonical_json_bytes(identity)).hexdigest(),
+            code_commit=COMMIT,
+            created_at=created_at,
+            targets=(target,),
+            gates=(GateEvidence("bounded-tests", "e" * 64),),
+            companions=(),
+            release_schema_version=True,
+        )
 
 
 def test_commit_updates_all_roots_and_companion(tmp_path: Path) -> None:
@@ -945,6 +1184,225 @@ def test_release_rejects_root_aliases(tmp_path: Path) -> None:
         )
 
 
+def test_prepare_rejects_linked_companion_parent(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "linked-parent-prepare")
+    external = tmp_path / "external-launcher"
+    external.mkdir()
+    _link_directory(root / "launcher", external)
+
+    with pytest.raises(ReleaseConflictError, match="companion parent.*reparse"):
+        prepare_release(
+            coordination_root=tmp_path / "coordination",
+            roots={"root": root},
+            proposed_generations={"root": proposed.generation_id},
+            code_commit=COMMIT,
+            created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+            gates=_gate(),
+            companions=(
+                CompanionInput(
+                    "launcher", "root", "launcher/index.html", b"proposed\n"
+                ),
+            ),
+        )
+
+
+def test_commit_rejects_companion_parent_replaced_by_link(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    previous, proposed = _stage_pair(root, "linked-parent-commit")
+    launcher_dir = root / "launcher"
+    launcher_dir.mkdir()
+    (launcher_dir / "index.html").write_bytes(b"previous\n")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+        companions=(
+            CompanionInput("launcher", "root", "launcher/index.html", b"proposed\n"),
+        ),
+    )
+    preserved = tmp_path / "preserved-launcher"
+    launcher_dir.rename(preserved)
+    _link_directory(launcher_dir, preserved)
+
+    with pytest.raises(ReleaseConflictError, match="companion parent.*reparse"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            companion_contents={"launcher": b"proposed\n"},
+        )
+
+    assert read_current(root).generation_id == previous.generation_id
+    assert (preserved / "index.html").read_bytes() == b"previous\n"
+
+
+def test_commit_rejects_same_path_release_root_replacement(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    previous, proposed = _stage_pair(root, "root-replacement")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+    displaced = tmp_path / "displaced-root"
+    root.rename(displaced)
+    shutil.copytree(displaced, root)
+
+    with pytest.raises(ReleaseConflictError, match="release root identity changed"):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+
+    assert read_current(root).generation_id == previous.generation_id
+
+
+def _assert_windows_directory_lease_does_not_block_rename(
+    path: Path, displaced: Path
+) -> None:
+    replacement_started = Event()
+    replacement_finished = Event()
+    replacement_errors: list[OSError] = []
+
+    def attack() -> None:
+        replacement_started.set()
+        try:
+            path.rename(displaced)
+        except OSError as exc:
+            replacement_errors.append(exc)
+        finally:
+            replacement_finished.set()
+
+    lease = _DirectoryLease.acquire(path)
+    attacker = Thread(target=attack)
+    try:
+        attacker.start()
+        assert replacement_started.wait(timeout=1)
+        assert replacement_finished.wait(timeout=5)
+    finally:
+        lease.close()
+        attacker.join()
+    assert not replacement_errors
+    assert displaced.is_dir()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows delete-sharing lease contract")
+def test_windows_directory_lease_does_not_prevent_release_root_replacement(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir()
+    _assert_windows_directory_lease_does_not_block_rename(
+        root, tmp_path / "displaced-by-attacker"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows delete-sharing lease contract")
+def test_windows_directory_lease_does_not_prevent_companion_parent_replacement(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    launcher_dir = root / "launcher"
+    launcher_dir.mkdir(parents=True)
+    _assert_windows_directory_lease_does_not_block_rename(
+        launcher_dir, tmp_path / "displaced-launcher"
+    )
+
+
+def test_recovery_rejects_root_replacement_before_rollback(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "recovery-root-replacement")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+    )
+
+    def crash(step: str, item: str) -> None:
+        if (step, item) == ("after-target-intent", "root"):
+            raise _HardCrash()
+
+    with pytest.raises(_HardCrash):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            fault_hook=crash,
+        )
+    displaced = tmp_path / "interrupted-root"
+    root.rename(displaced)
+    shutil.copytree(displaced, root)
+
+    with pytest.raises(ReleaseConflictError, match="release root identity changed"):
+        recover_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+
+
+def test_recovery_rejects_companion_parent_replaced_by_link(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "root"
+    _, proposed = _stage_pair(root, "recovery-linked-parent")
+    launcher_dir = root / "launcher"
+    launcher_dir.mkdir()
+    (launcher_dir / "index.html").write_bytes(b"previous\n")
+    coordination = tmp_path / "coordination"
+    manifest = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": proposed.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+        gates=_gate(),
+        companions=(
+            CompanionInput("launcher", "root", "launcher/index.html", b"proposed\n"),
+        ),
+    )
+
+    def crash(step: str, item: str) -> None:
+        if (step, item) == ("after-companion-intent", "launcher"):
+            raise _HardCrash()
+
+    with pytest.raises(_HardCrash):
+        commit_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+            companion_contents={"launcher": b"proposed\n"},
+            fault_hook=crash,
+        )
+    preserved = tmp_path / "recovery-launcher"
+    launcher_dir.rename(preserved)
+    _link_directory(launcher_dir, preserved)
+
+    with pytest.raises(ReleaseConflictError, match="companion parent.*reparse"):
+        recover_release(
+            coordination_root=coordination,
+            release_id=manifest.release_id,
+            roots={"root": root},
+        )
+    _, interrupted = read_release(coordination, manifest.release_id)
+    assert interrupted.state is ReleaseState.COMMITTING
+    assert (preserved / "index.html").read_bytes() == b"previous\n"
+
+
 def test_failure_after_authority_switch_restores_prior_release_authority(
     tmp_path: Path,
 ) -> None:
@@ -991,26 +1449,53 @@ def test_failure_after_authority_switch_restores_prior_release_authority(
     assert read_current_release(coordination, {"root": root}) == first
 
 
-def test_rollback_restores_exact_legacy_pointer_bytes(tmp_path: Path) -> None:
+def test_explicit_legacy_pointer_migration_preserves_governed_rollback(
+    tmp_path: Path,
+) -> None:
     root = tmp_path / "root"
     previous = _manifest("legacy-previous")
     proposed = _manifest("legacy-proposed")
     stage_generation(root, previous)
     stage_generation(root, proposed)
+    publish_generation(root, previous.generation_id)
+    coordination = tmp_path / "coordination"
+    baseline = prepare_release(
+        coordination_root=coordination,
+        roots={"root": root},
+        proposed_generations={"root": previous.generation_id},
+        code_commit=COMMIT,
+        created_at=datetime(2026, 8, 2, 9, tzinfo=UTC),
+        gates=_gate(),
+    )
+    commit_release(
+        coordination_root=coordination,
+        release_id=baseline.release_id,
+        roots={"root": root},
+    )
     legacy = CurrentPointer(
         generation_id=previous.generation_id,
         manifest_sha256=hashlib.sha256(previous.to_json_bytes()).hexdigest(),
     )
     root.mkdir(parents=True, exist_ok=True)
     (root / "CURRENT.json").write_bytes(legacy.to_json_bytes())
-    coordination = tmp_path / "coordination"
+    with pytest.raises(PointerIntegrityError, match="legacy pointer schema"):
+        prepare_release(
+            coordination_root=coordination,
+            roots={"root": root},
+            proposed_generations={"root": proposed.generation_id},
+            code_commit=COMMIT,
+            created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
+            gates=_gate(),
+        )
+
     manifest = prepare_release(
         coordination_root=coordination,
         roots={"root": root},
         proposed_generations={"root": proposed.generation_id},
         code_commit=COMMIT,
         created_at=datetime(2026, 8, 2, 10, tzinfo=UTC),
-        gates=_gate(),
+        gates=_legacy_migration_gates(),
+        allow_invalid_previous_artifact_inventory=True,
     )
 
     def fail(step: str, _item: str) -> None:
@@ -1026,4 +1511,5 @@ def test_rollback_restores_exact_legacy_pointer_bytes(tmp_path: Path) -> None:
         )
 
     assert (root / "CURRENT.json").read_bytes() == legacy.to_json_bytes()
-    assert read_current(root) == legacy
+    with pytest.raises(PointerIntegrityError, match="legacy pointer schema"):
+        read_current(root)

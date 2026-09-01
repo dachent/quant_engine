@@ -808,13 +808,18 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
         },
         {
             "action": "NONE",
-            "history_status": "UNAVAILABLE_DEPRECATED_NO_HISTORY",
+            "history_status": "RETAINED_REJECTED_HISTORY_DEPRECATED",
             "implementation_reconciliation_status": "NOT_APPLICABLE_DEPRECATED",
-            "reason": "EchoTrade is deprecated and has no retained history.",
+            "reason": (
+                "EchoTrade is deprecated; retained event-only history is rejected "
+                "as non-daily account-live evidence."
+            ),
             "required_for_analysis": False,
             "series_id": "Growth at Market Pivot Points [EchoTrade]",
-            "status": "DEPRECATED_NO_HISTORY_BY_GOVERNANCE",
-            "strategy_version": "echotrade-deprecated-no-history:2026-08-08",
+            "status": "DEPRECATED_RETAINED_REJECTED_HISTORY_BY_GOVERNANCE",
+            "strategy_version": (
+                "echotrade-deprecated-retained-rejected-history:2026-08-29"
+            ),
         },
         {
             "action": "NONE_UNLESS_MATERIALITY_CHANGES",

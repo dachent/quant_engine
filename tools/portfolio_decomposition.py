@@ -2616,6 +2616,14 @@ def build_decomposition(
             schema_name="decomposition-methodology-catalog",
             schema_version="1",
         ),
+        SourceArtifact(
+            artifact_id="analytics/decomposition.json",
+            sha256=hashlib.sha256(result_bytes).hexdigest(),
+            size_bytes=len(result_bytes),
+            as_of_date=spec.as_of_date,
+            schema_name="portfolio-factor-decomposition",
+            schema_version=str(ANALYTICS_SCHEMA_VERSION),
+        ),
     )
     manifest = GenerationManifest.build(
         as_of_date=spec.as_of_date,
