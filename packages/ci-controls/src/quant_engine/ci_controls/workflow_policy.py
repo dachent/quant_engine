@@ -39,6 +39,8 @@ ACTION_REFERENCE = re.compile(r"^(?P<target>[^@]+)@(?P<sha>[0-9a-f]{40})$")
 LOCKED_AUDIT_COMMAND = (
     "uv audit --locked --python-version 3.11 --preview-features audit-command"
 )
+DEFAULT_WORKFLOW_TIMEOUT_MAXIMUM = 15
+QUALITY_WORKFLOW_TIMEOUT_MAXIMUM = 20
 ISSUE_GUARD_RECONCILE_COMMAND = (
     'python tools/issue_guard.py reconcile --repository "${{ github.repository }}" '
     "--format json --max-pages 20 --timeout-seconds 20 "
@@ -432,10 +434,17 @@ def validate_workflow_document(
             timeout = int(str(raw_timeout))
         except (TypeError, ValueError):
             timeout = 0
-        if timeout < 1 or timeout > 15:
+        maximum_timeout = (
+            QUALITY_WORKFLOW_TIMEOUT_MAXIMUM
+            if (workflow_name, job_name) == ("quality.yml", "quality")
+            else DEFAULT_WORKFLOW_TIMEOUT_MAXIMUM
+        )
+        if timeout < 1 or timeout > maximum_timeout:
             findings.append(
                 Finding(
-                    locator, "WORKFLOW_TIMEOUT_INVALID", "timeout must be 1-15 minutes"
+                    locator,
+                    "WORKFLOW_TIMEOUT_INVALID",
+                    f"timeout must be 1-{maximum_timeout} minutes",
                 )
             )
         job_permissions = _permissions(raw_job.get("permissions"))
