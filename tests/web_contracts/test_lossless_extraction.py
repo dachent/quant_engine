@@ -134,6 +134,26 @@ def test_bytes_like_source_is_preserved_before_a_complete_receipt_is_written(
     }
 
 
+def test_source_hash_binds_exact_raw_artifact_bytes_not_parsed_structure(
+    tmp_path: Path,
+) -> None:
+    compact_source = _har_bytes([])
+    spaced_source = _join(
+        '{"', _join("lo", "g"), '": {"', _join("entr", "ies"), '": []}}'
+    ).encode()
+
+    compact = extract_har(compact_source, tmp_path / "compact")
+    spaced = extract_har(spaced_source, tmp_path / "spaced")
+
+    assert (compact.output_dir / "source.har").read_bytes() == compact_source
+    assert (spaced.output_dir / "source.har").read_bytes() == spaced_source
+    assert compact.source_sha256 == hashlib.sha256(compact_source).hexdigest()
+    assert spaced.source_sha256 == hashlib.sha256(spaced_source).hexdigest()
+    assert compact.source_sha256 != spaced.source_sha256
+    assert _manifest(compact.output_dir)["source"]["sha256"] == compact.source_sha256
+    assert _manifest(spaced.output_dir)["source"]["sha256"] == spaced.source_sha256
+
+
 def test_materializes_every_entry_in_source_order_without_filtering_or_redaction(
     tmp_path: Path,
 ) -> None:
