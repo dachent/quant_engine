@@ -18549,7 +18549,7 @@ def test_c4d3c2b1_fresh_request_cli_matches_bound_report_and_isolates_startup(
     ) = _c4d3c2b1_bound_request(  # type: ignore[name-defined]
         perimeter_module, verifier_module, monkeypatch, tmp_path
     )
-    interpreter = (REPOSITORY_ROOT / ".venv" / "Scripts" / "python.exe").resolve()
+    interpreter = Path(sys.executable).absolute()
     verifier_script = VERIFIER_MODULE_PATH.resolve()
     expected_cli_argv = [
         str(interpreter),
@@ -18735,7 +18735,7 @@ def test_c4d3c2b2_rejects_noncanonical_and_source_mismatch_requests_without_leak
     assert direct.out == "" and direct.err == ""
     assert constructor_calls == []
 
-    interpreter = (REPOSITORY_ROOT / ".venv" / "Scripts" / "python.exe").resolve()
+    interpreter = Path(sys.executable).absolute()
     verifier_script = VERIFIER_MODULE_PATH.resolve()
     calls: list[tuple[object, dict[str, object]]] = []
     original_run = subprocess.run
