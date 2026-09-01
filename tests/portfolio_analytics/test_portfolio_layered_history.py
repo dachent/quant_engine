@@ -919,52 +919,64 @@ def _restore_retained_echo_correction(contract: dict[str, Any]) -> None:
     raise AssertionError("synthetic contract lacks retained Echo correction")
 
 
+def _synthetic_history_contract(
+    path: Path, _repository_sha: str | None = None
+) -> tuple[
+    dict[str, Any],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, Any]],
+]:
+    contract = json.loads(path.read_text(encoding="utf-8"))
+    product = contract.get("product")
+    history = contract.get("history_corrections")
+    if (
+        not isinstance(product, dict)
+        or product.get("product_id") != "FINANCIAL_MVP"
+        or not isinstance(history, dict)
+        or history.get("policy_id") != "PORT-HISTORY-TRUTH-1"
+    ):
+        raise TargetSeriesError("synthetic financial MVP history contract differs")
+
+    def rows_by_id(
+        rows: object, id_field: str, label: str
+    ) -> dict[str, dict[str, Any]]:
+        if not isinstance(rows, list):
+            raise TargetSeriesError(f"synthetic {label} rows are invalid")
+        result: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get(id_field), str):
+                raise TargetSeriesError(f"synthetic {label} row is invalid")
+            key = row[id_field]
+            if not key or key in result:
+                raise TargetSeriesError(f"synthetic {label} identity differs")
+            result[key] = dict(row)
+        return result
+
+    return (
+        contract,
+        rows_by_id(contract.get("strategies"), "strategy_id", "strategy"),
+        rows_by_id(contract.get("source_segments"), "source_id", "source"),
+        rows_by_id(history.get("corrections"), "correction_id", "correction"),
+    )
+
+
+def _install_synthetic_history_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    target_series_module: Any = target_series,
+) -> None:
+    """Install the opt-in parser used only by synthetic producer fixtures."""
+
+    monkeypatch.setattr(
+        target_series_module, "_history_contract", _synthetic_history_contract
+    )
+
+
 @pytest.fixture
 def synthetic_history_authority(monkeypatch: pytest.MonkeyPatch) -> None:
     """Opt-in parser for producer fixtures, deliberately separate from contract QC."""
 
-    def parse(
-        path: Path, _repository_sha: str | None = None
-    ) -> tuple[
-        dict[str, Any],
-        dict[str, dict[str, Any]],
-        dict[str, dict[str, Any]],
-        dict[str, dict[str, Any]],
-    ]:
-        contract = json.loads(path.read_text(encoding="utf-8"))
-        product = contract.get("product")
-        history = contract.get("history_corrections")
-        if (
-            not isinstance(product, dict)
-            or product.get("product_id") != "FINANCIAL_MVP"
-            or not isinstance(history, dict)
-            or history.get("policy_id") != "PORT-HISTORY-TRUTH-1"
-        ):
-            raise TargetSeriesError("synthetic financial MVP history contract differs")
-
-        def rows_by_id(
-            rows: object, id_field: str, label: str
-        ) -> dict[str, dict[str, Any]]:
-            if not isinstance(rows, list):
-                raise TargetSeriesError(f"synthetic {label} rows are invalid")
-            result: dict[str, dict[str, Any]] = {}
-            for row in rows:
-                if not isinstance(row, dict) or not isinstance(row.get(id_field), str):
-                    raise TargetSeriesError(f"synthetic {label} row is invalid")
-                key = row[id_field]
-                if not key or key in result:
-                    raise TargetSeriesError(f"synthetic {label} identity differs")
-                result[key] = dict(row)
-            return result
-
-        return (
-            contract,
-            rows_by_id(contract.get("strategies"), "strategy_id", "strategy"),
-            rows_by_id(contract.get("source_segments"), "source_id", "source"),
-            rows_by_id(history.get("corrections"), "correction_id", "correction"),
-        )
-
-    monkeypatch.setattr(target_series, "_history_contract", parse)
+    _install_synthetic_history_authority(monkeypatch)
 
 
 def _history_fixture(tmp_path: Path) -> dict[str, Any]:
@@ -2179,6 +2191,7 @@ def _matrixport_gap_policy(
         missing,
     )
     policy.update(coverage["source_gap_policy"])
+    policy.pop("authority_bound", None)
     assert policy["declared_missing_source_dates"] == [
         item.isoformat() for item in sorted(missing)
     ]
