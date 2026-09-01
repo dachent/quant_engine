@@ -12,7 +12,9 @@ from jsonschema import Draft202012Validator, FormatChecker
 
 ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = ROOT / "tools" / "static_snapshot_coverage_receipts.py"
-GENERATION_TEST_PATH = ROOT / "tests" / "portfolio_control_panel" / "test_account_manifest_generation.py"
+GENERATION_TEST_PATH = (
+    ROOT / "tests" / "portfolio_control_panel" / "test_account_manifest_generation.py"
+)
 PRODUCER_PATH = ROOT / "tools" / "build_account_manifest_generation.py"
 VERIFIER_PATH = ROOT / "tools" / "verify_account_manifest_generation.py"
 
@@ -162,17 +164,32 @@ def test_static_snapshot_receipt_binds_exact_observed_facts(
 
     assert authority["as_of_date"] == "2026-08-13"
     assert len(authority["receipts"]) == 1
-    receipt = receipts["receipt/static-snapshot/account-one/strategy-one/2026-01-01-2026-08-13.json"]
+    receipt = receipts[
+        "receipt/static-snapshot/account-one/strategy-one/2026-01-01-2026-08-13.json"
+    ]
     assert receipt["coverage_mode"] == "STATIC_SNAPSHOT_COVERAGE_V1"
     assert receipt["date_convention"] == "EOD_PROVIDER_NAV_RECOGNITION_DATE"
     assert receipt["observed_facts"] == {
-        "capital_anchors": {"first_date": "2026-01-01", "last_date": "2026-01-01", "row_count": 1},
-        "flows": {"first_date": "2026-02-01", "last_date": "2026-02-01", "row_count": 1},
+        "capital_anchors": {
+            "first_date": "2026-01-01",
+            "last_date": "2026-01-01",
+            "row_count": 1,
+        },
+        "flows": {
+            "first_date": "2026-02-01",
+            "last_date": "2026-02-01",
+            "row_count": 1,
+        },
         "nav": {"first_date": "2026-01-01", "last_date": "2026-08-13", "row_count": 2},
     }
     assert receipt["missing_intervals"] == []
     schema = json.loads(
-        (ROOT / "schemas" / "portfolio" / "account-interval-retrieval-receipt.schema.json").read_text(encoding="utf-8")
+        (
+            ROOT
+            / "schemas"
+            / "portfolio"
+            / "account-interval-retrieval-receipt.schema.json"
+        ).read_text(encoding="utf-8")
     )
     Draft202012Validator(schema, format_checker=FormatChecker()).validate(receipt)
     receipts_module.verify_static_snapshot_receipt(
@@ -189,7 +206,9 @@ def test_ibkr_flow_after_nav_recognition_cutoff_is_not_admitted(
 ) -> None:
     """A provider event is not an EOD calculation fact before its recognition date."""
 
-    ledger_path, manifest_path, baseline_path, crosswalk_path = _snapshot_payload(tmp_path)
+    ledger_path, manifest_path, baseline_path, crosswalk_path = _snapshot_payload(
+        tmp_path
+    )
     ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
     ledger["as_of_date"] = "2026-08-14"
     ledger["provider_generations"][0]["provider_id"] = "ibkr"
@@ -254,7 +273,9 @@ def test_static_snapshot_receipt_rejects_coherent_ledger_and_receipt_rebind(
         }
     )
     ledger.write_bytes(_canonical_bytes(payload))
-    with pytest.raises(receipts_module.StaticSnapshotReceiptError, match="provider ledger differs"):
+    with pytest.raises(
+        receipts_module.StaticSnapshotReceiptError, match="provider ledger differs"
+    ):
         receipts_module.issue_static_snapshot_receipts(
             ledger_path=ledger,
             provider_ledger_manifest_path=manifest,
@@ -262,7 +283,9 @@ def test_static_snapshot_receipt_rejects_coherent_ledger_and_receipt_rebind(
             crosswalk_path=crosswalk,
             issuer_code_path=MODULE_PATH,
         )
-    with pytest.raises(receipts_module.StaticSnapshotReceiptError, match="provider ledger differs"):
+    with pytest.raises(
+        receipts_module.StaticSnapshotReceiptError, match="provider ledger differs"
+    ):
         receipts_module.verify_static_snapshot_receipt(
             receipts[next(iter(receipts))],
             ledger_path=ledger,
@@ -288,21 +311,34 @@ def test_public_manifest_predicate_rejects_rebound_static_fact_count(
     receipt_id, receipt = next(iter(receipts.items()))
     contract = authority["receipts"][0]["contract"]
     manifest_spec = importlib.util.spec_from_file_location(
-        "account_strategy_manifest_static_test", ROOT / "tools" / "account_strategy_manifest.py"
+        "account_strategy_manifest_static_test",
+        ROOT / "tools" / "account_strategy_manifest.py",
     )
     assert manifest_spec is not None and manifest_spec.loader is not None
     manifest_module = importlib.util.module_from_spec(manifest_spec)
     sys.modules[manifest_spec.name] = manifest_module
     manifest_spec.loader.exec_module(manifest_module)
     manifest_module._validate_static_snapshot_receipt(
-        receipt, receipt_id, "account-one", "2026-01-01", "2026-08-13", "2026-08-13", contract,
+        receipt,
+        receipt_id,
+        "account-one",
+        "2026-01-01",
+        "2026-08-13",
+        "2026-08-13",
+        contract,
         json.loads(ledger.read_text(encoding="utf-8")),
     )
     rebound = json.loads(json.dumps(receipt))
     rebound["observed_facts"]["nav"]["row_count"] = 3
     with pytest.raises(manifest_module.ManifestError, match="observed facts"):
         manifest_module._validate_static_snapshot_receipt(
-            rebound, receipt_id, "account-one", "2026-01-01", "2026-08-13", "2026-08-13", contract,
+            rebound,
+            receipt_id,
+            "account-one",
+            "2026-01-01",
+            "2026-08-13",
+            "2026-08-13",
+            contract,
             json.loads(ledger.read_text(encoding="utf-8")),
         )
 
@@ -408,9 +444,9 @@ def test_static_receipts_pass_the_public_producer_and_independent_verifier(
     )
     coverage = json.loads(payloads["authority/account-flow-coverage.json"])
     assert len(coverage["rows"]) == 13
-    assert {
-        row["authority_kind"] for row in coverage["rows"]
-    } == {"STATIC_SNAPSHOT_COVERAGE_V1"}
+    assert {row["authority_kind"] for row in coverage["rows"]} == {
+        "STATIC_SNAPSHOT_COVERAGE_V1"
+    }
     calculation = json.loads(payloads["authority/calculation-inputs.json"])
     assert calculation["calculation_ledger"]["flows"] == []
     assert report["status"] == "VERIFIED"
@@ -426,7 +462,8 @@ def test_static_receipts_pass_the_public_producer_and_independent_verifier(
             "admission_policy": static_selected.admission_policy,
             "manifest_schema": static_selected.manifest_schema,
             "epoch_producer_source": fixture.InputSnapshot.from_bytes(
-                "attested epoch producer", (ROOT / "tools" / "account_strategy_manifest.py").read_bytes()
+                "attested epoch producer",
+                (ROOT / "tools" / "account_strategy_manifest.py").read_bytes(),
             ),
             "generation_builder_source": fixture.InputSnapshot.from_bytes(
                 "attested generation builder", PRODUCER_PATH.read_bytes()

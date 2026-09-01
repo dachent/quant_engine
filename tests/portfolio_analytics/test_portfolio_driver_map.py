@@ -70,10 +70,7 @@ def _dependence(series: tuple[str, ...] = SERIES) -> dict[str, Any]:
                 ],
                 "dependence_matrix": {
                     "values": [
-                        [
-                            "1" if left == right else "0"
-                            for right in range(series_count)
-                        ]
+                        ["1" if left == right else "0" for right in range(series_count)]
                         for left in range(series_count)
                     ]
                 },
@@ -197,9 +194,7 @@ def test_cluster_budget_uses_exact_source_contract_hash() -> None:
 def test_current_cluster_contract_budgets_only_product_required_series() -> None:
     financial_contract = json.loads(
         (
-            REPOSITORY_ROOT
-            / "contracts"
-            / "portfolio-financial-mvp-source-v1.json"
+            REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
         ).read_text(encoding="utf-8")
     )
     active_series = tuple(

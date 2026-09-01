@@ -27,7 +27,9 @@ from quant_engine.core.contracts import canonical_json_bytes
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 RECOMPUTE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_control_recompute.py"
 CYCLE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_rollforward_cycle.py"
-SCHEMA_PATH = REPOSITORY_ROOT / "schemas" / "portfolio" / "control-recomputation.schema.json"
+SCHEMA_PATH = (
+    REPOSITORY_ROOT / "schemas" / "portfolio" / "control-recomputation.schema.json"
+)
 
 
 def _load_tool(name: str, path: Path):
@@ -131,7 +133,9 @@ def _freshness(
                 "evaluated_on": CURRENT.isoformat(),
                 "fact_type": "strategy-returns",
                 "lane": "ACCOUNT",
-                "last_accepted_date": PREVIOUS.isoformat() if stale else CURRENT.isoformat(),
+                "last_accepted_date": PREVIOUS.isoformat()
+                if stale
+                else CURRENT.isoformat(),
                 "next_expected_date": CURRENT.isoformat(),
                 "policy_id": "synthetic-daily",
                 "provider_id": "portfolio123" if stale else "synthetic",
@@ -337,9 +341,7 @@ def test_cycle_rejects_real_recomputation_cross_paired_to_other_valid_freshness_
     recomputation_path = tmp_path / "cross-paired-recomputation.json"
     _write(recomputation_path, cross_paired)
 
-    with pytest.raises(
-        cycle.RollforwardCycleError, match="freshness identity differs"
-    ):
+    with pytest.raises(cycle.RollforwardCycleError, match="freshness identity differs"):
         cycle.build_receipt(
             ledger_one,
             generation_one,

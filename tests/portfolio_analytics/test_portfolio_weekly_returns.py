@@ -210,7 +210,9 @@ def _plan_fixture(
     manifest_inputs = []
     for relative, (columns, values) in sources.items():
         path = bundle / relative
-        rows = [{"date": observed_date, **values} for observed_date in observation_dates]
+        rows = [
+            {"date": observed_date, **values} for observed_date in observation_dates
+        ]
         _write_csv(path, columns, rows)
         manifest_inputs.append({"path": relative, "sha256": _sha(path)})
     _write_json(

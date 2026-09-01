@@ -593,10 +593,10 @@ def _proven_position_transfer_pairs(
     candidates: dict[str, list[tuple[str, str, FlexTransfer]]] = {}
     for statement in statements:
         for transfer in statement.transfers:
-            if (
-                transfer.cash_amount not in (None, Decimal("0"))
-                or transfer.position_amount_in_base in (None, Decimal("0"))
-            ):
+            if transfer.cash_amount not in (
+                None,
+                Decimal("0"),
+            ) or transfer.position_amount_in_base in (None, Decimal("0")):
                 continue
             candidates.setdefault(transfer.transaction_id, []).append(
                 (statement.raw_account_id, statement.base_currency, transfer)
@@ -606,10 +606,13 @@ def _proven_position_transfer_pairs(
     for legs in candidates.values():
         if len(legs) != 2:
             continue
-        (left_raw_account, left_base_currency, left), (
-            right_raw_account,
-            right_base_currency,
-            right,
+        (
+            (left_raw_account, left_base_currency, left),
+            (
+                right_raw_account,
+                right_base_currency,
+                right,
+            ),
         ) = legs
         if {left.direction.upper(), right.direction.upper()} != {"IN", "OUT"}:
             continue

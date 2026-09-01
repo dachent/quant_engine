@@ -140,7 +140,9 @@ def test_current_repository_has_pinned_lf_metadata_and_reviewed_provenance(
     tmp_path: Path,
 ) -> None:
     checker = _checker()
-    metadata_bytes = (REPOSITORY_ROOT / ".github" / "gitleaks-suppressions.json").read_bytes()
+    metadata_bytes = (
+        REPOSITORY_ROOT / ".github" / "gitleaks-suppressions.json"
+    ).read_bytes()
 
     assert b"\r" not in metadata_bytes
     assert hashlib.sha256(metadata_bytes).hexdigest() == METADATA_SHA256
@@ -176,8 +178,14 @@ def test_metadata_rejects_duplicate_keys_and_wrong_shape(
     (
         (lambda payload: payload.__setitem__("unexpected", 1), "shape differs"),
         (lambda payload: payload.__setitem__("schema_version", True), "schema differs"),
-        (lambda payload: payload["review"].__setitem__("reviewed_on", "2026-02-31"), "identity differs"),  # type: ignore[index]
-        (lambda payload: payload["review"].__setitem__("accepted_commit", "F" * 40), "identity differs"),  # type: ignore[index]
+        (
+            lambda payload: payload["review"].__setitem__("reviewed_on", "2026-02-31"),
+            "identity differs",
+        ),  # type: ignore[index]
+        (
+            lambda payload: payload["review"].__setitem__("accepted_commit", "F" * 40),
+            "identity differs",
+        ),  # type: ignore[index]
     ),
 )
 def test_metadata_rejects_extra_keys_bool_as_integer_invalid_date_and_uppercase_sha(
@@ -244,7 +252,9 @@ def test_rejects_review_commit_that_is_not_an_ancestor_of_head(tmp_path: Path) -
         "tools/check_gitleaks_suppressions.py",
     ),
 )
-def test_rejects_dirty_or_untracked_trust_surface_paths(tmp_path: Path, relative: str) -> None:
+def test_rejects_dirty_or_untracked_trust_surface_paths(
+    tmp_path: Path, relative: str
+) -> None:
     checker = _checker()
     root = _trusted_repo(tmp_path)
     path = root / relative

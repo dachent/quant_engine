@@ -69,9 +69,7 @@ def _portable_hwm_bundle(
         "_PERFORMANCE_POLICY_BYTES": panel._PORTABLE_HWM_PERFORMANCE_POLICY.read_bytes(),
         "_LEGACY_HWM_POLICY_BYTES": panel.HWM_POLICY.read_bytes(),
     }
-    prior_authority_bytes = {
-        key: fixture_globals[key] for key in authority_bytes
-    }
+    prior_authority_bytes = {key: fixture_globals[key] for key in authority_bytes}
     try:
         fixture_globals.update(authority_bytes)
         fixture = fixture_builder()
@@ -172,7 +170,9 @@ def test_json_snapshot_reads_an_ordinary_file_beyond_legacy_windows_max_path(
     tmp_path: Path,
 ) -> None:
     path = tmp_path
-    while len(str((path / "current-strategy-decomposition-plan.json").absolute())) <= 270:
+    while (
+        len(str((path / "current-strategy-decomposition-plan.json").absolute())) <= 270
+    ):
         path /= "long-decomposition-component"
     path /= "current-strategy-decomposition-plan.json"
     storage_path = (
@@ -182,9 +182,7 @@ def test_json_snapshot_reads_an_ordinary_file_beyond_legacy_windows_max_path(
     expected = canonical_json_bytes({"schema_version": 3})
     storage_path.write_bytes(expected)
 
-    payload, content, sha256 = panel._json_snapshot(
-        path, "current decomposition plan"
-    )
+    payload, content, sha256 = panel._json_snapshot(path, "current decomposition plan")
 
     assert payload == {"schema_version": 3}
     assert content == expected
@@ -251,9 +249,7 @@ def test_weekly_parser_accepts_seven_source_bound_current_strategies() -> None:
         {"generation_id": "a" * 64, "sha256": "b" * 64},
     )
 
-    assert sum(
-        row["primary_group"] == "STRATEGY" for row in accepted["series"]
-    ) == 7
+    assert sum(row["primary_group"] == "STRATEGY" for row in accepted["series"]) == 7
 
 
 def test_report_panel_expectations_follow_accepted_rollforward() -> None:
@@ -278,9 +274,7 @@ def test_report_panel_expectations_follow_accepted_rollforward() -> None:
     }
 
 
-def test_primary_factor_consumer_derives_seven_row_perimeter_from_contract() -> (
-    None
-):
+def test_primary_factor_consumer_derives_seven_row_perimeter_from_contract() -> None:
     """Fails if _current_primary_factor_analyses stops applying contract scope."""
 
     strategy_names = {
@@ -681,9 +675,7 @@ def _report() -> dict[str, object]:
                 "nav_observations": 20,
                 "observed_end": "2026-07-30",
                 "observed_start": "2026-07-01",
-                "strategy_id": ACTIVE_STRATEGY_IDS[
-                    index % len(ACTIVE_STRATEGY_IDS)
-                ],
+                "strategy_id": ACTIVE_STRATEGY_IDS[index % len(ACTIVE_STRATEGY_IDS)],
                 "twr": "0.01",
                 "twr_status": "AVAILABLE_WITH_INFERRED_FLOW_TIMING",
             }
@@ -1383,7 +1375,10 @@ def _nine_series_live_only_correlation() -> dict[str, object]:
         },
         "observed_cells": observed_cells,
         "performance": {
-            series_id: {"cumulative_return": f"0.{index + 1:02d}", "status": "AVAILABLE"}
+            series_id: {
+                "cumulative_return": f"0.{index + 1:02d}",
+                "status": "AVAILABLE",
+            }
             for index, series_id in enumerate(source_order)
         },
         "series_composition": {
@@ -1470,7 +1465,10 @@ def test_nine_series_live_only_projection_is_exact_and_recomputes_losses(
     assert analysis["matrices"]["posterior"]["values"][1][2] == "0.324"
     assert "projection" not in analysis["matrices"]["posterior"]
     assert analysis["horizon_matrices"]["21"]["values"][1][2] == "0.224"
-    assert analysis["drawdown_matrices"]["both_strategies_underwater"]["values"][1][2] == "0.424"
+    assert (
+        analysis["drawdown_matrices"]["both_strategies_underwater"]["values"][1][2]
+        == "0.424"
+    )
     assert list(projected["dependence"]["performance"]) == expected_names
     assert list(analysis["series_composition"]) == expected_names
 
@@ -1488,7 +1486,9 @@ def test_nine_series_live_only_projection_is_exact_and_recomputes_losses(
     ] == ["0.11", "0.13", "0.15", "0.16", "0.17", "0.18", "0.19"]
 
     central = analysis["central_case"]
-    assert [component["series_id"] for component in central["components"]] == expected_names
+    assert [
+        component["series_id"] for component in central["components"]
+    ] == expected_names
     vectors_by_id = {
         STRATEGY_NAMES[3]: Decimal("0.11") * Decimal("0.21"),
         STRATEGY_NAMES[0]: Decimal("0.13") * Decimal("0.23"),
@@ -1548,10 +1548,15 @@ def test_projected_semantic_hash_ignores_excluded_data_but_binds_retained_data(
         retained_mutation, ALL_STRATEGY_NAMES_BY_ID, include_hybrid=False
     )
 
-    assert identity != hashlib.sha256(canonical_json_bytes(excluded_mutation)).hexdigest()
+    assert (
+        identity != hashlib.sha256(canonical_json_bytes(excluded_mutation)).hexdigest()
+    )
     assert projected_excluded == projected
     assert projected_excluded["analytics_hash"] == projected["analytics_hash"]
-    assert projected_retained["dependence"]["matrices"]["posterior"]["values"][0][1] == "0.987"
+    assert (
+        projected_retained["dependence"]["matrices"]["posterior"]["values"][0][1]
+        == "0.987"
+    )
     assert projected_retained["analytics_hash"] != projected["analytics_hash"]
     source_analysis = panel._dependence_analysis(
         projected,
@@ -1579,7 +1584,8 @@ def test_projected_semantic_hash_ignores_excluded_data_but_binds_retained_data(
 
 
 def test_candidate_uses_projected_seven_series_stress_not_stale_report_stress(
-    inputs: dict[str, Path], tmp_path: Path,
+    inputs: dict[str, Path],
+    tmp_path: Path,
 ) -> None:
     """A retained nine-series report value must not replace projected analytics."""
 
@@ -1635,7 +1641,8 @@ def test_candidate_uses_projected_seven_series_stress_not_stale_report_stress(
 
 
 def test_exact_nine_candidate_without_optional_decomposition_plan_projects_and_verifies(
-    inputs: dict[str, Path], tmp_path: Path,
+    inputs: dict[str, Path],
+    tmp_path: Path,
 ) -> None:
     """Removing the optional plan must not hide governed Echo/Composer identities."""
 
@@ -1928,9 +1935,7 @@ def _panel_baseline_catalog(
         "assignments": [
             {
                 "account_id": f"account-{index:02d}",
-                "strategy_id": ACTIVE_STRATEGY_IDS[
-                    index % len(ACTIVE_STRATEGY_IDS)
-                ],
+                "strategy_id": ACTIVE_STRATEGY_IDS[index % len(ACTIVE_STRATEGY_IDS)],
                 "strategy_mapping_disposition": "STRATEGY_MAPPED",
                 "effective_start": "2026-01-01",
                 "effective_end": None,
@@ -2173,9 +2178,7 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
                     "canonical_live_series_sha256": canonical[name][
                         "canonical_live_series_sha256"
                     ],
-                    "live_daily_observations": canonical[name][
-                        "return_observations"
-                    ],
+                    "live_daily_observations": canonical[name]["return_observations"],
                     "strategy_version": canonical[name]["strategy_version"],
                 }
                 for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
@@ -2566,7 +2569,12 @@ def test_build_allows_explicit_weekly_fallback(inputs: dict[str, Path]) -> None:
         (True, "report"),
         (True, "manifest"),
     ),
-    ids=("mismatch", "match", "report-identity-divergence", "manifest-identity-divergence"),
+    ids=(
+        "mismatch",
+        "match",
+        "report-identity-divergence",
+        "manifest-identity-divergence",
+    ),
 )
 def test_composed_schema9_performance_lineage_paths(
     inputs: dict[str, Path],
@@ -2751,12 +2759,14 @@ def test_composed_schema9_performance_lineage_paths(
             "generation_id": baseline_reference["generation_id"],
             "schema_name": "portfolio-baseline-catalog",
             "schema_version": "1",
-                "sha256": baseline_reference["catalog_sha256"],
+            "sha256": baseline_reference["catalog_sha256"],
             "size_bytes": 1,
         },
     }
 
-    def account_manifest_reader(*_args: object, **_kwargs: object) -> tuple[dict[str, Any], dict[str, Any]]:
+    def account_manifest_reader(
+        *_args: object, **_kwargs: object
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         return account_manifest, {
             "authority_profile": "INTERNAL_VALIDATION_ONLY_NON_RELEASEABLE",
             "sha256": "3" * 64,
@@ -2822,13 +2832,23 @@ def test_composed_schema9_performance_lineage_paths(
         for row in data["performance"]
     } == _LINEAGE_EXPECTED_IDENTITIES
     account_suppressed_fields = {
-        "flow_count", "flow_timing", "mwr_xirr", "nav_observations",
-        "observed_start", "observed_end", "return_path_account_binding",
-        "return_path_assignment_id", "return_path_authority",
-        "return_path_cumulative_return", "return_path_evidence_layer",
-        "return_path_generation_id", "return_path_observations",
-        "return_path_observed_start", "return_path_observed_end",
-        "return_path_series_sha256", "twr",
+        "flow_count",
+        "flow_timing",
+        "mwr_xirr",
+        "nav_observations",
+        "observed_start",
+        "observed_end",
+        "return_path_account_binding",
+        "return_path_assignment_id",
+        "return_path_authority",
+        "return_path_cumulative_return",
+        "return_path_evidence_layer",
+        "return_path_generation_id",
+        "return_path_observations",
+        "return_path_observed_start",
+        "return_path_observed_end",
+        "return_path_series_sha256",
+        "twr",
     }
     assert all(
         row[field] is None
@@ -2841,34 +2861,71 @@ def test_composed_schema9_performance_lineage_paths(
         for field in ("twr_status", "mwr_status", "return_path_status")
     )
     strategy_suppressed_fields = {
-        "account_live_cagr", "account_live_cumulative_return",
-        "account_live_max_drawdown", "account_live_observed_end",
-        "account_live_observed_start", "account_live_return_authority",
-        "account_live_return_observations", "account_live_return_series_schema",
-        "account_live_return_series_sha256", "account_live_source_generation",
-        "account_live_source_generation_as_of_date", "account_live_source_provider",
-        "account_live_source_sha256", "available_twr_segments", "current_value_usd",
-        "hwm_current_drawdown", "hwm_freshness_status", "hwm_max_drawdown",
-        "hwm_source", "nav_evidence_layer", "nav_observed_end",
-        "nav_observed_start", "nav_return_observations", "benchmark_id",
-        "benchmark_effective_start", "benchmark_effective_end", "benchmark_version_ref",
-        "benchmark_rationale", "benchmark_comparison_observations",
-        "benchmark_comparison_observed_start", "benchmark_comparison_observed_end",
-        "benchmark_account_cumulative_return", "benchmark_reference_cumulative_return",
-        "benchmark_cumulative_gap", "benchmark_active_return_annualized",
-        "benchmark_tracking_error_annualized", "benchmark_information_ratio",
-        "benchmark_beta", "benchmark_correlation", "benchmark_upside_capture",
-        "benchmark_downside_capture", "benchmark_relative_drawdown",
-        "provider_comparison_observations", "provider_comparison_observed_start",
-        "provider_comparison_observed_end", "provider_account_cumulative_return",
-        "provider_reference_cumulative_return", "provider_cumulative_gap",
-        "provider_active_return_annualized", "provider_tracking_error_annualized",
-        "provider_information_ratio", "provider_beta", "provider_correlation",
-        "provider_upside_capture", "provider_downside_capture",
-        "provider_relative_drawdown", "provider_comparison_version_compatibility",
-        "cash_drag_status", "cash_drag_reason", "legacy_baseline_disposition",
-        "annual_external_cost_rate_pre_tax", "annual_external_cost_usd",
-        "after_tax_annual_cost_rate", "after_tax_status", "fees_status",
+        "account_live_cagr",
+        "account_live_cumulative_return",
+        "account_live_max_drawdown",
+        "account_live_observed_end",
+        "account_live_observed_start",
+        "account_live_return_authority",
+        "account_live_return_observations",
+        "account_live_return_series_schema",
+        "account_live_return_series_sha256",
+        "account_live_source_generation",
+        "account_live_source_generation_as_of_date",
+        "account_live_source_provider",
+        "account_live_source_sha256",
+        "available_twr_segments",
+        "current_value_usd",
+        "hwm_current_drawdown",
+        "hwm_freshness_status",
+        "hwm_max_drawdown",
+        "hwm_source",
+        "nav_evidence_layer",
+        "nav_observed_end",
+        "nav_observed_start",
+        "nav_return_observations",
+        "benchmark_id",
+        "benchmark_effective_start",
+        "benchmark_effective_end",
+        "benchmark_version_ref",
+        "benchmark_rationale",
+        "benchmark_comparison_observations",
+        "benchmark_comparison_observed_start",
+        "benchmark_comparison_observed_end",
+        "benchmark_account_cumulative_return",
+        "benchmark_reference_cumulative_return",
+        "benchmark_cumulative_gap",
+        "benchmark_active_return_annualized",
+        "benchmark_tracking_error_annualized",
+        "benchmark_information_ratio",
+        "benchmark_beta",
+        "benchmark_correlation",
+        "benchmark_upside_capture",
+        "benchmark_downside_capture",
+        "benchmark_relative_drawdown",
+        "provider_comparison_observations",
+        "provider_comparison_observed_start",
+        "provider_comparison_observed_end",
+        "provider_account_cumulative_return",
+        "provider_reference_cumulative_return",
+        "provider_cumulative_gap",
+        "provider_active_return_annualized",
+        "provider_tracking_error_annualized",
+        "provider_information_ratio",
+        "provider_beta",
+        "provider_correlation",
+        "provider_upside_capture",
+        "provider_downside_capture",
+        "provider_relative_drawdown",
+        "provider_comparison_version_compatibility",
+        "cash_drag_status",
+        "cash_drag_reason",
+        "legacy_baseline_disposition",
+        "annual_external_cost_rate_pre_tax",
+        "annual_external_cost_usd",
+        "after_tax_annual_cost_rate",
+        "after_tax_status",
+        "fees_status",
         "systematic_weight",
     }
     assert all(
@@ -2880,9 +2937,13 @@ def test_composed_schema9_performance_lineage_paths(
         row[field] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         for row in data["strategies"]
         for field in (
-            "account_live_cagr_status", "account_live_status", "nav_status",
-            "benchmark_assignment_status", "benchmark_comparison_status",
-            "benchmark_comparison_disposition", "provider_comparison_status",
+            "account_live_cagr_status",
+            "account_live_status",
+            "nav_status",
+            "benchmark_assignment_status",
+            "benchmark_comparison_status",
+            "benchmark_comparison_disposition",
+            "provider_comparison_status",
             "provider_comparison_disposition",
         )
     )
@@ -2913,8 +2974,7 @@ def test_composed_schema9_performance_lineage_paths(
         "empirical_regime_comparison": 0,
     }
     assert all(
-        row["model_account_gap"]["status"]
-        == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+        row["model_account_gap"]["status"] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         for row in data["strategy_underwriting"]["rows"]
     )
     panel._validate_panel_data_schema(data)
@@ -3549,9 +3609,7 @@ def test_current_analytics_walks_a_long_finalized_generation(
     )
     pointer = read_current(physical_root)
     root = physical_root / ("long-root-" + "x" * 100) / ".."
-    artifact_path = (
-        root / "generations" / pointer.generation_id / "decomposition.json"
-    )
+    artifact_path = root / "generations" / pointer.generation_id / "decomposition.json"
     assert len(str(artifact_path.absolute())) > 270
 
     value, identity, returned_path = panel._current_analytics(
@@ -3841,7 +3899,8 @@ def test_hybrid_gate_binds_the_compatible_backtest_version() -> None:
 
 
 def test_unresolved_versions_do_not_parse_invalid_hybrid_observations(
-    inputs: dict[str, Path], tmp_path: Path,
+    inputs: dict[str, Path],
+    tmp_path: Path,
 ) -> None:
     correlation = _correlation_v2()
     correlation["dependence_modes"]["LIVE_PLUS_BACKTEST"] = "INVALID_NOT_A_MAPPING"
@@ -4820,9 +4879,7 @@ def test_hwm_policy_enforces_exclusion_effective_date() -> None:
     composer_effective, _ = panel._hwm_policy(date(2026, 8, 1))
 
     assert before_echo_close["excluded_strategy_ids"] == []
-    assert after_echo_close["excluded_strategy_ids"] == [
-        "echotrade-growth-pivots"
-    ]
+    assert after_echo_close["excluded_strategy_ids"] == ["echotrade-growth-pivots"]
     assert composer_effective["excluded_strategy_ids"] == [
         "composer-holy-grail",
         "echotrade-growth-pivots",
@@ -7585,7 +7642,9 @@ def test_public_build_reaches_panel_data_with_generated_schema9_crosswalk(
 
     subject_payloads, independent_report = _panel_verified_payloads()
     payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
-    crosswalk = json.loads(subject_payloads["authority/account-assignment-crosswalk.json"])
+    crosswalk = json.loads(
+        subject_payloads["authority/account-assignment-crosswalk.json"]
+    )
     root = tmp_path / "bundle"
     manifest = _stage_panel_bundle(
         root,
@@ -7806,16 +7865,16 @@ def test_verified_bundle_panel_manifest_reads_its_long_finalized_path(
     subject_payloads, independent_report = _panel_verified_payloads()
     payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
     generation_root = tmp_path
-    while len(
-        str(
-            (
-                generation_root
-                / "generations"
-                / ("a" * 64)
-                / _PANEL_EPOCH_ARTIFACT
-            ).absolute()
+    while (
+        len(
+            str(
+                (
+                    generation_root / "generations" / ("a" * 64) / _PANEL_EPOCH_ARTIFACT
+                ).absolute()
+            )
         )
-    ) <= 270:
+        <= 270
+    ):
         generation_root /= "long-epoch-component"
     manifest = _stage_panel_bundle(
         generation_root,
@@ -7824,10 +7883,7 @@ def test_verified_bundle_panel_manifest_reads_its_long_finalized_path(
         independent_report=independent_report,
     )
     finalized = (
-        generation_root
-        / "generations"
-        / manifest.generation_id
-        / _PANEL_EPOCH_ARTIFACT
+        generation_root / "generations" / manifest.generation_id / _PANEL_EPOCH_ARTIFACT
     )
     if sys.platform == "win32":
         assert len(str(finalized.absolute())) > 260
@@ -7840,23 +7896,20 @@ def test_verified_bundle_panel_manifest_reads_its_long_finalized_path(
 
     assert decoded["rows"]
     assert identity["sha256"] == hashlib.sha256(payload).hexdigest()
-    assert identity["authority_profile"] == (
-        "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"
-    )
+    assert identity["authority_profile"] == ("VERIFIED_GENERATION_BUNDLE_EXACT_BYTES")
     source = identity["epoch_manifest_source"]
     assert source["generation_id"] == manifest.generation_id
     assert source["artifact"]["path"] == _PANEL_EPOCH_ARTIFACT
     assert source["artifact"]["sha256"] == hashlib.sha256(payload).hexdigest()
     assert source["artifact"]["size_bytes"] == len(payload)
-    assert source["artifact"]["schema"]["version"] == str(
-        decoded["schema_version"]
-    )
+    assert source["artifact"]["schema"]["version"] == str(decoded["schema_version"])
     assert identity["verification"]["status"] == (
         "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
     )
-    assert identity["verification"]["independent_report"]["report_schema_version"] == json.loads(
-        independent_report
-    )["schema_version"]
+    assert (
+        identity["verification"]["independent_report"]["report_schema_version"]
+        == json.loads(independent_report)["schema_version"]
+    )
 
 
 def test_verified_bundle_panel_manifest_rejects_legacy_manifest_only_generation(
@@ -8431,7 +8484,9 @@ def test_account_manifest_absent_leaves_panel_neutral(
     )
 
 
-def test_underwriting_projection_keeps_excluded_history_out_and_requires_all_active_ids() -> None:
+def test_underwriting_projection_keeps_excluded_history_out_and_requires_all_active_ids() -> (
+    None
+):
     controls = {
         **{
             f"strategy-{index}": {"product_requirement": "REQUIRED"}
@@ -8440,10 +8495,7 @@ def test_underwriting_projection_keeps_excluded_history_out_and_requires_all_act
         "composer-holy-grail": {"product_requirement": "EXCLUDED"},
         "echotrade-growth-pivots": {"product_requirement": "EXCLUDED"},
     }
-    rows = [
-        {"strategy_id": f"strategy-{index}"}
-        for index in range(7)
-    ]
+    rows = [{"strategy_id": f"strategy-{index}"} for index in range(7)]
     rows.extend(
         [
             {"strategy_id": "composer-holy-grail"},
@@ -8456,9 +8508,9 @@ def test_underwriting_projection_keeps_excluded_history_out_and_requires_all_act
     assert {row["strategy_id"] for row in projected} == {
         f"strategy-{index}" for index in range(7)
     }
-    assert {
-        row["strategy_id"] for row in projected
-    } == {row["strategy_id"] for row in rows[:7]}
+    assert {row["strategy_id"] for row in projected} == {
+        row["strategy_id"] for row in rows[:7]
+    }
     missing_active = projected[:-1]
     assert {row["strategy_id"] for row in missing_active} != {
         f"strategy-{index}" for index in range(7)
@@ -9254,7 +9306,10 @@ def _run_rendered_epoch_manifest_probe(html: Path) -> dict[str, object]:
     if not node or not runtime_node:
         pytest.skip("Chromium runtime is not available for rendered browser proof")
     playwright_module = (
-        Path(runtime_node).resolve().parent / "node_modules" / "playwright" / "index.mjs"
+        Path(runtime_node).resolve().parent
+        / "node_modules"
+        / "playwright"
+        / "index.mjs"
     )
     if not playwright_module.exists():
         pytest.skip("Playwright module is not available for rendered browser proof")
@@ -9267,7 +9322,7 @@ def _run_rendered_epoch_manifest_probe(html: Path) -> dict[str, object]:
     )
     if not Path(executable).exists():
         pytest.skip("Chromium executable is not available for rendered browser proof")
-    probe = r'''
+    probe = r"""
 import { pathToFileURL } from "node:url";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({
@@ -9293,7 +9348,7 @@ try {
 } finally {
   await browser.close();
 }
-'''
+"""
     env = dict(os.environ)
     env["PLAYWRIGHT_MODULE"] = str(playwright_module)
     env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
@@ -9340,7 +9395,9 @@ def _copy_epoch_browser_fixture(tmp_path: Path) -> Path:
     return candidate
 
 
-def _run_interaction_qa(candidate: Path, output: Path) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+def _run_interaction_qa(
+    candidate: Path, output: Path
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     """Run the shipped Chromium acceptance harness against one candidate."""
 
     node = shutil.which("node")
@@ -9348,7 +9405,10 @@ def _run_interaction_qa(candidate: Path, output: Path) -> tuple[subprocess.Compl
     if not node or not runtime_node:
         pytest.skip("Chromium runtime is not available for rendered browser proof")
     playwright_module = (
-        Path(runtime_node).resolve().parent / "node_modules" / "playwright" / "index.mjs"
+        Path(runtime_node).resolve().parent
+        / "node_modules"
+        / "playwright"
+        / "index.mjs"
     )
     executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
         Path(os.environ.get("LOCALAPPDATA", ""))
@@ -9396,7 +9456,9 @@ def test_schema9_epoch_manifest_browser_uses_authority_labels_and_cutoff(
     """The rendered schema-9 table binds labels/cutoff to the manifest itself."""
 
     candidate = _copy_epoch_browser_fixture(tmp_path)
-    data = json.loads((candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
     manifest = data["account_manifest"]
     assert isinstance(manifest, dict)
     assert manifest["schema_version"] == 9
@@ -9405,7 +9467,10 @@ def test_schema9_epoch_manifest_browser_uses_authority_labels_and_cutoff(
     assert len(rows) == 13
     assert len({row["strategy_id"] for row in rows}) == 7
     assert all(
-        not any(term in str(row.get("strategy_id", "")).lower() for term in ("echo", "composer"))
+        not any(
+            term in str(row.get("strategy_id", "")).lower()
+            for term in ("echo", "composer")
+        )
         for row in rows
     )
     first = rows[0]
@@ -9430,7 +9495,9 @@ def test_schema9_epoch_manifest_browser_tracks_label_mutations_and_discloses_mis
     """A changed bound label is rendered, while a missing cutoff is never invented."""
 
     candidate = _copy_epoch_browser_fixture(tmp_path)
-    data = json.loads((candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
     manifest = data["account_manifest"]
     assert isinstance(manifest, dict)
     rows = manifest["rows"]
@@ -9444,10 +9511,13 @@ def test_schema9_epoch_manifest_browser_tracks_label_mutations_and_discloses_mis
     _write_dashboard_data_script(candidate, data)
     changed_cutoff = _run_rendered_epoch_manifest_probe(candidate / "index.html")
     assert "Calculations through 2026-08-14" in changed_cutoff["legend"]
-    result, qa = _run_interaction_qa(candidate, tmp_path / "interaction-changed-cutoff.json")
+    result, qa = _run_interaction_qa(
+        candidate, tmp_path / "interaction-changed-cutoff.json"
+    )
     assert result.returncode != 0
     assert any(
-        item["check"] == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
+        item["check"]
+        == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
         and item["status"] == "FAIL"
         for item in qa["checks"]
     )
@@ -9457,10 +9527,13 @@ def test_schema9_epoch_manifest_browser_tracks_label_mutations_and_discloses_mis
     missing = _run_rendered_epoch_manifest_probe(candidate / "index.html")
     assert "Calculation cutoff unavailable" in missing["legend"]
     assert "Calculations through 2026-08-13" not in missing["legend"]
-    result, qa = _run_interaction_qa(candidate, tmp_path / "interaction-missing-cutoff.json")
+    result, qa = _run_interaction_qa(
+        candidate, tmp_path / "interaction-missing-cutoff.json"
+    )
     assert result.returncode != 0
     assert any(
-        item["check"] == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
+        item["check"]
+        == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
         and item["status"] == "FAIL"
         for item in qa["checks"]
     )
@@ -9472,7 +9545,9 @@ def test_schema9_epoch_manifest_browser_does_not_fallback_to_ledger_capture_date
     """A missing classified-flow capture date stays visibly unavailable."""
 
     candidate = _copy_epoch_browser_fixture(tmp_path)
-    data = json.loads((candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
     manifest = data["account_manifest"]
     assert isinstance(manifest, dict)
     identities = manifest["source_identities"]
@@ -9487,28 +9562,37 @@ def test_schema9_epoch_manifest_browser_does_not_fallback_to_ledger_capture_date
     _write_dashboard_data_script(candidate, data)
     changed = _run_rendered_epoch_manifest_probe(candidate / "index.html")
     assert "Artifact/provider capture date: 2026-08-17." in changed["legend"]
-    result, qa = _run_interaction_qa(candidate, tmp_path / "interaction-changed-capture.json")
+    result, qa = _run_interaction_qa(
+        candidate, tmp_path / "interaction-changed-capture.json"
+    )
     assert result.returncode == 0
     assert any(
-        item["check"] == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
+        item["check"]
+        == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
         and item["status"] == "PASS"
         for item in qa["checks"]
     )
     artifact["as_of_date"] = "2026-09-31"
     _write_dashboard_data_script(candidate, data)
-    result, qa = _run_interaction_qa(candidate, tmp_path / "interaction-invalid-capture.json")
+    result, qa = _run_interaction_qa(
+        candidate, tmp_path / "interaction-invalid-capture.json"
+    )
     assert result.returncode != 0
     assert any(
-        item["check"] == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
+        item["check"]
+        == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
         and item["status"] == "FAIL"
         for item in qa["checks"]
     )
     artifact["as_of_date"] = "2026-08-12"
     _write_dashboard_data_script(candidate, data)
-    result, qa = _run_interaction_qa(candidate, tmp_path / "interaction-early-capture.json")
+    result, qa = _run_interaction_qa(
+        candidate, tmp_path / "interaction-early-capture.json"
+    )
     assert result.returncode != 0
     assert any(
-        item["check"] == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
+        item["check"]
+        == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
         and item["status"] == "FAIL"
         for item in qa["checks"]
     )
@@ -9519,10 +9603,13 @@ def test_schema9_epoch_manifest_browser_does_not_fallback_to_ledger_capture_date
     evidence = _run_rendered_epoch_manifest_probe(candidate / "index.html")
     assert "Artifact/provider capture date: unavailable." in evidence["legend"]
     assert "UNAUTHORIZED-LEGACY-DATE" not in evidence["legend"]
-    result, qa = _run_interaction_qa(candidate, tmp_path / "interaction-missing-capture.json")
+    result, qa = _run_interaction_qa(
+        candidate, tmp_path / "interaction-missing-capture.json"
+    )
     assert result.returncode != 0
     assert any(
-        item["check"] == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
+        item["check"]
+        == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
         and item["status"] == "FAIL"
         for item in qa["checks"]
     )
@@ -9534,19 +9621,26 @@ def test_schema9_epoch_manifest_browser_acceptance_rejects_echo_and_composer(
     """The actual Chromium acceptance harness rejects deprecated/current contamination."""
 
     candidate = _copy_epoch_browser_fixture(tmp_path)
-    data = json.loads((candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
     manifest = data["account_manifest"]
     assert isinstance(manifest, dict)
     rows = manifest["rows"]
     assert isinstance(rows, list)
     assert len(rows) == 13
     assert len({row["strategy_id"] for row in rows}) == 7
-    for contamination in ("Growth at Market Pivot Points [EchoTrade]", "[Composer] - The Holy Grail (Buy Copy)"):
+    for contamination in (
+        "Growth at Market Pivot Points [EchoTrade]",
+        "[Composer] - The Holy Grail (Buy Copy)",
+    ):
         mutated = json.loads(json.dumps(data))
         mutated_manifest = mutated["account_manifest"]
         mutated_manifest["rows"][0]["strategy_id"] = contamination
         _write_dashboard_data_script(candidate, mutated)
-        result, qa = _run_interaction_qa(candidate, tmp_path / f"interaction-{contamination[:4]}.json")
+        result, qa = _run_interaction_qa(
+            candidate, tmp_path / f"interaction-{contamination[:4]}.json"
+        )
         assert result.returncode != 0
         failed = [item for item in qa["checks"] if item["status"] == "FAIL"]
         assert any("13-row / 7-strategy subject" in item["check"] for item in failed)
@@ -9762,8 +9856,7 @@ def _produce_manifest(
         for assignment in assignments
         if assignment["effective_start"] <= as_of
         and (
-            assignment["effective_end"] is None
-            or as_of <= assignment["effective_end"]
+            assignment["effective_end"] is None or as_of <= assignment["effective_end"]
         )
     )
     funded_account_id = funded_assignment["account_id"]
@@ -9772,9 +9865,7 @@ def _produce_manifest(
             observation["account_id"] = funded_account_id
         _write_json(ledger_path, ledger)
         ledger_bytes = ledger_path.read_bytes()
-        ledger_identity["artifact"]["sha256"] = hashlib.sha256(
-            ledger_bytes
-        ).hexdigest()
+        ledger_identity["artifact"]["sha256"] = hashlib.sha256(ledger_bytes).hexdigest()
         ledger_identity["artifact"]["size_bytes"] = len(ledger_bytes)
         _write_json(ledger_identity_path, ledger_identity)
     assignment_sha256 = hashlib.sha256(

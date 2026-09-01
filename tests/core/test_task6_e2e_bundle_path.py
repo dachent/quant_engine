@@ -44,7 +44,9 @@ def _load_module(name: str, path: Path) -> Any:
     return module
 
 
-def _stage_tracked_schema8_bundle(root: Path) -> tuple[Path, str, bytes, dict[str, Any]]:
+def _stage_tracked_schema8_bundle(
+    root: Path,
+) -> tuple[Path, str, bytes, dict[str, Any]]:
     """Build a genuine v8 bundle from tracked producer/verifier fixtures."""
 
     producer_tests = _load_module("_task6_account_manifest_fixture", _PRODUCER_TEST)
@@ -107,7 +109,12 @@ def _stage_tracked_schema8_bundle(root: Path) -> tuple[Path, str, bytes, dict[st
         verification=VerificationStatus.VERIFIED,
     )
     stage_generation_bundle(root, generation, payloads)
-    return root, generation.generation_id, payloads["outputs/account-strategy-manifest.json"], report
+    return (
+        root,
+        generation.generation_id,
+        payloads["outputs/account-strategy-manifest.json"],
+        report,
+    )
 
 
 def test_task6_real_mixed_bundle_preserves_exact_bytes_across_all_consumers(
@@ -121,14 +128,21 @@ def test_task6_real_mixed_bundle_preserves_exact_bytes_across_all_consumers(
     candidate = json.loads(payload)
 
     financial = _load_module(
-        "_task6_financial_mvp_contract", ROOT / "tools" / "portfolio_financial_mvp_contract.py"
+        "_task6_financial_mvp_contract",
+        ROOT / "tools" / "portfolio_financial_mvp_contract.py",
     )
     bundle = financial.read_generation_bundle(generation_root, generation_id)
 
     numeric_rows = {
         row["account_id"]: {
             key: row[key]
-            for key in ("opening_capital", "deposits", "invested", "current_value", "gain")
+            for key in (
+                "opening_capital",
+                "deposits",
+                "invested",
+                "current_value",
+                "gain",
+            )
         }
         for row in candidate["rows"]
         if row["status"] == "OK"
@@ -142,7 +156,8 @@ def test_task6_real_mixed_bundle_preserves_exact_bytes_across_all_consumers(
     }
 
     materializer = _load_module(
-        "_task6_pipeline_materializer", ROOT / "tools" / "portfolio_pipeline_materialize.py"
+        "_task6_pipeline_materializer",
+        ROOT / "tools" / "portfolio_pipeline_materialize.py",
     )
     release = _load_module(
         "_task6_release_builder", ROOT / "tools" / "portfolio_release_builder.py"
@@ -174,7 +189,9 @@ def test_task6_real_mixed_bundle_preserves_exact_bytes_across_all_consumers(
     monkeypatch.setattr(
         materializer, "_account_strategy_manifest_module", raw_five_must_not_run
     )
-    monkeypatch.setattr(release, "_stage_account_strategy_manifest", raw_five_must_not_run)
+    monkeypatch.setattr(
+        release, "_stage_account_strategy_manifest", raw_five_must_not_run
+    )
     monkeypatch.setattr(release, "_tool", raw_five_must_not_run)
     monkeypatch.setattr(panel, "build_manifest_candidate", raw_five_must_not_run)
 
@@ -183,11 +200,13 @@ def test_task6_real_mixed_bundle_preserves_exact_bytes_across_all_consumers(
             encoding="utf-8"
         )
     )
-    materialized, materialized_identity = materializer._stage_epoch_manifest_bundle_prewire(
-        generation_root,
-        bundle.manifest.generation_id,
-        financial_contract,
-        tmp_path / "materialized",
+    materialized, materialized_identity = (
+        materializer._stage_epoch_manifest_bundle_prewire(
+            generation_root,
+            bundle.manifest.generation_id,
+            financial_contract,
+            tmp_path / "materialized",
+        )
     )
     release_path, release_source, release_identity = (
         release._stage_verified_epoch_manifest_bundle(
@@ -195,13 +214,21 @@ def test_task6_real_mixed_bundle_preserves_exact_bytes_across_all_consumers(
         )
     )
     panel_value, panel_identity = panel._verified_bundle_account_manifest(
-        tmp_path / "materialized" / "stages" / "panel" / "account-strategy-manifest.json",
+        tmp_path
+        / "materialized"
+        / "stages"
+        / "panel"
+        / "account-strategy-manifest.json",
         generation_root,
         bundle.manifest.generation_id,
     )
 
     materialized_path = (
-        tmp_path / "materialized" / "stages" / "panel" / "account-strategy-manifest.json"
+        tmp_path
+        / "materialized"
+        / "stages"
+        / "panel"
+        / "account-strategy-manifest.json"
     )
     assert materialized["epoch_manifest_source"] == expected_source
     assert release_source == expected_source

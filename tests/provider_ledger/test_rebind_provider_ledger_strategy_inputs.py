@@ -110,7 +110,9 @@ def test_rebinds_only_declared_returns_identity_from_a_raw_generation(
     template_path = tmp_path / "provider-ledger-spec.json"
     template_path.write_text(json.dumps(template), encoding="utf-8")
     output = tmp_path / "provider-ledger-spec-rebound.json"
-    monkeypatch.setattr(runner, "_verify_layered_history_generation", _accepted_verifier)
+    monkeypatch.setattr(
+        runner, "_verify_layered_history_generation", _accepted_verifier
+    )
 
     result = runner.rebind_provider_ledger_strategy_inputs(
         template_path=template_path,
@@ -149,9 +151,13 @@ def test_rejects_a_mutated_declared_returns_artifact_after_verification(
     contract.write_text("{}", encoding="utf-8")
     template_path = tmp_path / "provider-ledger-spec.json"
     template_path.write_text(json.dumps(_template(contract)), encoding="utf-8")
-    monkeypatch.setattr(runner, "_verify_layered_history_generation", _accepted_verifier)
+    monkeypatch.setattr(
+        runner, "_verify_layered_history_generation", _accepted_verifier
+    )
 
-    with pytest.raises(runner.ProviderLedgerStrategyInputsRebindError, match="identity differs"):
+    with pytest.raises(
+        runner.ProviderLedgerStrategyInputsRebindError, match="identity differs"
+    ):
         runner.rebind_provider_ledger_strategy_inputs(
             template_path=template_path,
             layered_generation_dir=generation,
@@ -171,9 +177,13 @@ def test_rejects_an_output_path_that_aliases_the_template(
     contract.write_text("{}", encoding="utf-8")
     template_path = tmp_path / "provider-ledger-spec.json"
     template_path.write_text(json.dumps(_template(contract)), encoding="utf-8")
-    monkeypatch.setattr(runner, "_verify_layered_history_generation", _accepted_verifier)
+    monkeypatch.setattr(
+        runner, "_verify_layered_history_generation", _accepted_verifier
+    )
 
-    with pytest.raises(runner.ProviderLedgerStrategyInputsRebindError, match="aliases an input"):
+    with pytest.raises(
+        runner.ProviderLedgerStrategyInputsRebindError, match="aliases an input"
+    ):
         runner.rebind_provider_ledger_strategy_inputs(
             template_path=template_path,
             layered_generation_dir=generation,
@@ -193,9 +203,13 @@ def test_rejects_an_output_path_that_aliases_declared_returns(
     contract.write_text("{}", encoding="utf-8")
     template_path = tmp_path / "provider-ledger-spec.json"
     template_path.write_text(json.dumps(_template(contract)), encoding="utf-8")
-    monkeypatch.setattr(runner, "_verify_layered_history_generation", _accepted_verifier)
+    monkeypatch.setattr(
+        runner, "_verify_layered_history_generation", _accepted_verifier
+    )
 
-    with pytest.raises(runner.ProviderLedgerStrategyInputsRebindError, match="aliases an input"):
+    with pytest.raises(
+        runner.ProviderLedgerStrategyInputsRebindError, match="aliases an input"
+    ):
         runner.rebind_provider_ledger_strategy_inputs(
             template_path=template_path,
             layered_generation_dir=generation,
@@ -215,9 +229,13 @@ def test_rejects_an_output_path_inside_the_source_generation(
     contract.write_text("{}", encoding="utf-8")
     template_path = tmp_path / "provider-ledger-spec.json"
     template_path.write_text(json.dumps(_template(contract)), encoding="utf-8")
-    monkeypatch.setattr(runner, "_verify_layered_history_generation", _accepted_verifier)
+    monkeypatch.setattr(
+        runner, "_verify_layered_history_generation", _accepted_verifier
+    )
 
-    with pytest.raises(runner.ProviderLedgerStrategyInputsRebindError, match="aliases an input"):
+    with pytest.raises(
+        runner.ProviderLedgerStrategyInputsRebindError, match="aliases an input"
+    ):
         runner.rebind_provider_ledger_strategy_inputs(
             template_path=template_path,
             layered_generation_dir=generation,
@@ -238,10 +256,10 @@ def test_rejects_a_different_contract_than_the_template_binding(
     other_contract = tmp_path / "other-contract.json"
     other_contract.write_text('{"product":"template"}', encoding="utf-8")
     template_path = tmp_path / "provider-ledger-spec.json"
-    template_path.write_text(
-        json.dumps(_template(template_contract)), encoding="utf-8"
+    template_path.write_text(json.dumps(_template(template_contract)), encoding="utf-8")
+    monkeypatch.setattr(
+        runner, "_verify_layered_history_generation", _accepted_verifier
     )
-    monkeypatch.setattr(runner, "_verify_layered_history_generation", _accepted_verifier)
 
     with pytest.raises(
         runner.ProviderLedgerStrategyInputsRebindError,

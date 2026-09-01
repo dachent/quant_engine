@@ -217,7 +217,8 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "strategies",
             "strategy_version_catalog",
             "tracker_imports",
-        } | ({"financial_mvp"} if "financial_mvp" in spec else set()),
+        }
+        | ({"financial_mvp"} if "financial_mvp" in spec else set()),
         "spec",
     )
     if spec["schema_version"] != SPEC_SCHEMA_VERSION:
@@ -265,13 +266,9 @@ def _financial_mvp_memberships(value: object | None) -> dict[str, str]:
             authority[f"{name}_sha256"], f"financial_mvp.{name}_sha256"
         )
         if expected_hash is None:
-            raise ProvenanceValidationError(
-                f"financial MVP {name} hash is required"
-            )
+            raise ProvenanceValidationError(f"financial MVP {name} hash is required")
         if actual_hash != expected_hash:
-            raise ProvenanceValidationError(
-                f"financial MVP {name} hash differs"
-            )
+            raise ProvenanceValidationError(f"financial MVP {name} hash differs")
         paths[name] = resolved
 
     module_path = Path(__file__).with_name("portfolio_financial_mvp_contract.py")
@@ -279,7 +276,9 @@ def _financial_mvp_memberships(value: object | None) -> dict[str, str]:
         "portfolio_provenance_financial_mvp_contract", module_path
     )
     if module_spec is None or module_spec.loader is None:
-        raise ProvenanceValidationError("financial MVP contract validator is unavailable")
+        raise ProvenanceValidationError(
+            "financial MVP contract validator is unavailable"
+        )
     module = importlib.util.module_from_spec(module_spec)
     sys.modules[module_spec.name] = module
     module_spec.loader.exec_module(module)
@@ -1085,7 +1084,10 @@ def _import_tracker(
             raise ProvenanceValidationError("assignment interval is reversed")
         source_classification = _text(row["source"], "assignment.source")
         original_period_start = period_start
-        if strategy_id is not None and source_classification == "provider_account_live_start":
+        if (
+            strategy_id is not None
+            and source_classification == "provider_account_live_start"
+        ):
             try:
                 period_start = funded_memberships[strategy_id]
             except KeyError as exc:

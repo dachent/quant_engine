@@ -40,9 +40,7 @@ COMMIT = "d" * 40
 
 
 @pytest.fixture(autouse=True)
-def _skip_posix_pipeline_behavior_on_windows(
-    request: pytest.FixtureRequest
-) -> None:
+def _skip_posix_pipeline_behavior_on_windows(request: pytest.FixtureRequest) -> None:
     if (
         os.name == "nt"
         and "windows" not in request.node.name
@@ -761,7 +759,10 @@ def test_pipeline_stops_after_prepare_when_windows_publication_is_unavailable(
     spec = _parse(raw)
     prepared = execute_pipeline(spec)
     journal_path = (
-        spec.coordination_root / "releases" / str(prepared["release_id"]) / "journal.json"
+        spec.coordination_root
+        / "releases"
+        / str(prepared["release_id"])
+        / "journal.json"
     )
     before_journal = journal_path.read_bytes()
 

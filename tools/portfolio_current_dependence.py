@@ -235,9 +235,7 @@ def _verified_history(
     policy: Mapping[str, Any],
     contract: Mapping[str, Any],
     evaluated_on: date,
-) -> tuple[
-    list[dict[str, str]], list[dict[str, object]], date, dict[str, Any], bytes
-]:
+) -> tuple[list[dict[str, str]], list[dict[str, object]], date, dict[str, Any], bytes]:
     root = generation_root.resolve()
     if root.is_symlink() or not root.is_dir():
         raise CurrentDependenceError("layered history generation must be a directory")
@@ -912,9 +910,7 @@ def build_source(
         complete_through,
         history_manifest,
         history_coverage_content,
-    ) = (
-        _verified_history(history_generation_root, policy, contract, evaluated_on)
-    )
+    ) = _verified_history(history_generation_root, policy, contract, evaluated_on)
     policy_series = _objects(policy.get("series"), "dependence policy series")
     required_ids = [str(row["strategy_id"]) for row in policy_series]
     weights, allocation_identity = _verified_allocations(

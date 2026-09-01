@@ -271,7 +271,9 @@ class _DirectoryLease:
                 path, int(information.dwVolumeSerialNumber), inode
             )
             return cls(path, identity, handle, True)
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
         try:
             descriptor = os.open(path, flags)
         except OSError as exc:
@@ -697,10 +699,11 @@ class ReleaseManifest:
         if (
             isinstance(self.release_schema_version, bool)
             or not isinstance(self.release_schema_version, int)
-            or self.release_schema_version not in {
-            _LEGACY_SCHEMA_VERSION,
-            _COORDINATED_SCHEMA_VERSION,
-            _SCHEMA_VERSION,
+            or self.release_schema_version
+            not in {
+                _LEGACY_SCHEMA_VERSION,
+                _COORDINATED_SCHEMA_VERSION,
+                _SCHEMA_VERSION,
             }
         ):
             raise ReleaseValidationError("release schema version is unsupported")
@@ -742,8 +745,7 @@ class ReleaseManifest:
                 "schema-v3 companion parent identity is mandatory"
             )
         if self.release_schema_version >= _SCHEMA_VERSION and any(
-            (item.previous_pointer is None)
-            != (item.previous_inventory_sha256 is None)
+            (item.previous_pointer is None) != (item.previous_inventory_sha256 is None)
             for item in targets
         ):
             raise ReleaseValidationError(
@@ -878,16 +880,12 @@ class ReleaseManifest:
             code_commit=decoded["code_commit"],
             created_at=created_at,
             targets=tuple(
-                ReleaseTarget.from_dict(
-                    item, release_schema_version=schema_version
-                )
+                ReleaseTarget.from_dict(item, release_schema_version=schema_version)
                 for item in targets
             ),
             gates=tuple(GateEvidence.from_dict(item) for item in gates),
             companions=tuple(
-                CompanionPlan.from_dict(
-                    item, release_schema_version=schema_version
-                )
+                CompanionPlan.from_dict(item, release_schema_version=schema_version)
                 for item in companions
             ),
             previous_authority=(
@@ -1760,9 +1758,7 @@ def recover_release(
     try:
         _verify_directory_leases(directory_leases)
         if lock_present:
-            _clear_confirmed_stale_lock(
-                lock, release_id, confirmed=clear_stale_lock
-            )
+            _clear_confirmed_stale_lock(lock, release_id, confirmed=clear_stale_lock)
         _acquire_lock(lock, release_id)
     except Exception:
         _close_directory_leases(directory_leases)

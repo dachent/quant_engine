@@ -947,7 +947,9 @@ def _inspect_report_delivery(
     assert expected_manifest_sha256 is not None
     expected_delivery_dir = authority_root / "deliveries" / generation_id
     if delivery_dir.resolve() != expected_delivery_dir.resolve():
-        raise VerticalBuildError("report delivery directory differs from authority route")
+        raise VerticalBuildError(
+            "report delivery directory differs from authority route"
+        )
     try:
         manifest = read_generation(authority_root, generation_id)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -964,7 +966,9 @@ def _inspect_report_delivery(
         )
         for path in generation_dir.rglob("*")
     ):
-        raise VerticalBuildError("report authority generation inventories workbook delivery")
+        raise VerticalBuildError(
+            "report authority generation inventories workbook delivery"
+        )
     report_data_path = generation_dir / "portfolio-report-data.json"
     manifest_path = generation_dir / "generation.json"
     if manifest_path.is_symlink() or not manifest_path.is_file():
@@ -999,7 +1003,10 @@ def _inspect_report_delivery(
         raise VerticalBuildError("report authority payload differs from manifest")
     receipt_path = delivery_dir / "report-delivery.json"
     workbook_path = delivery_dir / "portfolio-report.xlsx"
-    if any(path.is_symlink() or not path.is_file() for path in (receipt_path, workbook_path)):
+    if any(
+        path.is_symlink() or not path.is_file()
+        for path in (receipt_path, workbook_path)
+    ):
         raise VerticalBuildError("report delivery is unavailable")
     receipt_bytes = receipt_path.read_bytes()
     try:
@@ -1021,7 +1028,8 @@ def _inspect_report_delivery(
     }
     workbook = receipt.get("workbook")
     if (
-        set(receipt) != {
+        set(receipt)
+        != {
             "authority",
             "delivery_classification",
             "schema_version",
@@ -3575,7 +3583,9 @@ def build_analytics(
             attribution_bundle, plan.get("inputs"), "attribution plan inputs"
         )
         if manifest_inputs.get(selected_targets_relative) != selected_target_identity:
-            raise VerticalBuildError("current selected targets differ from attribution input")
+            raise VerticalBuildError(
+                "current selected targets differ from attribution input"
+            )
         target_source = base_spec_value.get("target_source")
         if not isinstance(target_source, dict):
             raise VerticalBuildError("base decomposition target source is invalid")
@@ -3858,12 +3868,16 @@ def build_report_candidate(
     epoch_arguments: tuple[str, ...] = ()
     if epoch_manifest_generation_root is not None:
         assert epoch_manifest_generation_id is not None
-        epoch_manifest_path, epoch_source_path, epoch_crosswalk_path, _source, _identity = (
-            _stage_verified_epoch_manifest_triplet_bundle(
-                epoch_manifest_generation_root,
-                epoch_manifest_generation_id,
-                output_root,
-            )
+        (
+            epoch_manifest_path,
+            epoch_source_path,
+            epoch_crosswalk_path,
+            _source,
+            _identity,
+        ) = _stage_verified_epoch_manifest_triplet_bundle(
+            epoch_manifest_generation_root,
+            epoch_manifest_generation_id,
+            output_root,
         )
         epoch_arguments = (
             "--epoch-manifest",

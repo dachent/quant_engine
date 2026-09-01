@@ -2115,9 +2115,7 @@ def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
     if schema_version == 3:
         if epoch_authority is None or (
             canonical_json_bytes(raw["financial_epoch_manifest_inputs"])
-            != canonical_json_bytes(
-                cast(Mapping[str, Any], epoch_authority["inputs"])
-            )
+            != canonical_json_bytes(cast(Mapping[str, Any], epoch_authority["inputs"]))
             or _hash(
                 raw["financial_epoch_manifest_proof_sha256"],
                 "portfolio financial epoch manifest proof sha256",

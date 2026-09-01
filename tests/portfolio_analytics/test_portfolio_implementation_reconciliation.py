@@ -29,9 +29,7 @@ SPEC.loader.exec_module(reconciliation)
 
 ACCEPTED_AS_OF = date(2026, 1, 25)
 TT_ACCEPTED_AS_OF = date(2026, 4, 3)
-INSUFFICIENT_EXACT_COMMON_DATA = (
-    "accepted as_of leaves insufficient exact-common data"
-)
+INSUFFICIENT_EXACT_COMMON_DATA = "accepted as_of leaves insufficient exact-common data"
 
 
 class _SyntheticTable:
@@ -84,9 +82,12 @@ def _write_ai_xml(path: Path, *, post_price: str) -> dict[str, str]:
         )
         for identity, (observed, side, price) in identities.items()
     )
-    path.write_text(f"<FlexQueryResponse>{trades}</FlexQueryResponse>", encoding="utf-8")
+    path.write_text(
+        f"<FlexQueryResponse>{trades}</FlexQueryResponse>", encoding="utf-8"
+    )
     return {
-        identity: hashlib.sha256(identity.encode()).hexdigest() for identity in identities
+        identity: hashlib.sha256(identity.encode()).hexdigest()
+        for identity in identities
     }
 
 
@@ -784,11 +785,12 @@ def test_grizzly_reconciliation_is_bounded_and_post_cutoff_invariant(
     assert first == second
     _assert_temporally_bounded(first, ACCEPTED_AS_OF)
     assert first["return_reconciliation"]["observed_end"] == "2026-01-06"
-    assert next(
-        row
-        for row in first["root_causes"]
-        if row["cause"] == "FINAL_REBUY_DELAYED"
-    )["status"] == "NOT_OBSERVED"
+    assert (
+        next(
+            row for row in first["root_causes"] if row["cause"] == "FINAL_REBUY_DELAYED"
+        )["status"]
+        == "NOT_OBSERVED"
+    )
 
 
 def test_grizzly_reconciliation_fails_closed_when_cutoff_has_one_common_date(
@@ -886,9 +888,7 @@ def _top_level_grizzly_history_result(
     post_day: date,
     accepted_as_of: date | None = None,
 ) -> dict[str, Any]:
-    blended, live, last_pre = _manual_grizzly_histories(
-        tmp_path, post_day=post_day
-    )
+    blended, live, last_pre = _manual_grizzly_histories(tmp_path, post_day=post_day)
     boundary = accepted_as_of or last_pre
     manifest = {
         "artifacts": [
@@ -975,9 +975,7 @@ def test_optional_grizzly_history_is_post_cutoff_invariant(
 
     assert first == second
     grizzly = next(
-        row
-        for row in first["strategies"]
-        if row["strategy_id"] == "grizzlybears-vtma"
+        row for row in first["strategies"] if row["strategy_id"] == "grizzlybears-vtma"
     )
     validation = grizzly["signal_history_validation"]
     assert validation["all_history_observations"] == 100

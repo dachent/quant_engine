@@ -109,9 +109,7 @@ def test_governance_consumes_receipt_before_the_first_network_call(
     tmp_path: Path,
 ) -> None:
     evidence = _evidence(tmp_path)
-    grant = authorize_live_read(
-        evidence, operation="auth-test", mode=None
-    )
+    grant = authorize_live_read(evidence, operation="auth-test", mode=None)
     receipt = grant.receipt_path
     session = InspectingSession(receipt)
     transport = ReadOnlyTransport(
@@ -175,7 +173,9 @@ def test_request_reservation_uses_a_mode_0600_temp_and_commits_replacement(
 
     assert 0o600 in opened_modes
     assert committed == [grant.receipt_path]
-    assert json.loads(grant.receipt_path.read_text(encoding="utf-8"))["used_requests"] == 1
+    assert (
+        json.loads(grant.receipt_path.read_text(encoding="utf-8"))["used_requests"] == 1
+    )
 
 
 def test_transport_cannot_be_created_without_consumed_governance_evidence() -> None:
@@ -216,9 +216,7 @@ def test_governance_rejects_invalid_reviewed_evidence_before_transport_creation(
     evidence = _evidence(tmp_path, **kwargs)
 
     with pytest.raises(GovernanceError, match=match):
-        authorize_live_read(
-            evidence, operation=operation, mode=None
-        )
+        authorize_live_read(evidence, operation=operation, mode=None)
 
     assert not (tmp_path / ".governance" / "live-read-receipts").exists()
 
@@ -235,9 +233,7 @@ def test_governance_blocks_replay_and_allows_only_one_concurrent_consumer(
         start.wait()
         try:
             successes.append(
-                authorize_live_read(
-                    evidence, operation="auth-test", mode=None
-                )
+                authorize_live_read(evidence, operation="auth-test", mode=None)
             )
         except GovernanceError as error:
             failures.append(error)
@@ -272,9 +268,7 @@ def test_governance_blocks_a_request_outside_the_metered_allowance(
     tmp_path: Path,
 ) -> None:
     evidence = _evidence(tmp_path, max_requests=1)
-    grant = authorize_live_read(
-        evidence, operation="auth-test", mode=None
-    )
+    grant = authorize_live_read(evidence, operation="auth-test", mode=None)
     receipt = grant.receipt_path
     session = InspectingSession(receipt)
     transport = ReadOnlyTransport(
@@ -378,9 +372,7 @@ def test_copied_evidence_cannot_reset_the_governed_consumption_receipt(
     authorize_live_read(evidence, operation="auth-test", mode=None)
 
     with pytest.raises(GovernanceError, match="already consumed"):
-        authorize_live_read(
-            copied, operation="auth-test", mode=None
-        )
+        authorize_live_read(copied, operation="auth-test", mode=None)
 
 
 def test_changing_cwd_cannot_change_the_canonical_receipt_root(
@@ -394,9 +386,7 @@ def test_changing_cwd_cannot_change_the_canonical_receipt_root(
     monkeypatch.chdir(other_cwd)
 
     with pytest.raises(GovernanceError, match="already consumed"):
-        authorize_live_read(
-            evidence, operation="auth-test", mode=None
-        )
+        authorize_live_read(evidence, operation="auth-test", mode=None)
 
 
 def test_reparse_canonical_state_root_is_rejected_before_receipt_or_network(
@@ -443,6 +433,4 @@ def test_review_reference_must_be_a_quant_engine_issue_comment(tmp_path: Path) -
     )
 
     with pytest.raises(GovernanceError, match="issue comment"):
-        authorize_live_read(
-            evidence, operation="auth-test", mode=None
-        )
+        authorize_live_read(evidence, operation="auth-test", mode=None)

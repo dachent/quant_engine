@@ -1019,7 +1019,9 @@ def _report_candidate(
 
     candidate = _filesystem_path(candidate_dir)
     if candidate.is_symlink() or not candidate.is_dir():
-        raise ControlPanelValidationError("report candidate directory is missing or linked")
+        raise ControlPanelValidationError(
+            "report candidate directory is missing or linked"
+        )
     report_path = candidate / "portfolio-report-data.json"
     content, sha256 = _read_snapshot(report_path, "report candidate data")
     if candidate.name != sha256:
@@ -1878,9 +1880,7 @@ def _financial_mvp_product_controls(
     ):
         raise ControlPanelValidationError("financial MVP contract identity differs")
     controls: dict[str, dict[str, Any]] = {}
-    strategy_rows = _objects(
-        contract.get("strategies"), "financial MVP strategies"
-    )
+    strategy_rows = _objects(contract.get("strategies"), "financial MVP strategies")
     rows_by_id: dict[str, Mapping[str, Any]] = {}
     for row in strategy_rows:
         strategy_id = _text(row.get("strategy_id"), "financial MVP strategy_id")
@@ -1966,9 +1966,9 @@ def _financial_mvp_product_controls(
     # synthetic unit-test contract compatible, but once any owner strategy is
     # present require the complete named perimeter; a seven-row count alone
     # is not an authority check.
-    owner_bound_contract = bool(
-        set(controls) & CURRENT_PRODUCT_STRATEGY_IDS
-    ) or any("effective_product_interval" in row for row in strategy_rows)
+    owner_bound_contract = bool(set(controls) & CURRENT_PRODUCT_STRATEGY_IDS) or any(
+        "effective_product_interval" in row for row in strategy_rows
+    )
     if owner_bound_contract:
         if set(controls) != CURRENT_PRODUCT_STRATEGY_IDS:
             raise ControlPanelValidationError(
@@ -1977,9 +1977,7 @@ def _financial_mvp_product_controls(
     echo_control = controls.get("echotrade-growth-pivots")
     if echo_control is not None:
         echo_interval = _object(
-            rows_by_id["echotrade-growth-pivots"].get(
-                "effective_product_interval"
-            ),
+            rows_by_id["echotrade-growth-pivots"].get("effective_product_interval"),
             "EchoTrade effective_product_interval",
         )
         if {
@@ -2074,9 +2072,7 @@ def _current_product_baseline_projection(
                 projected.append(dict(row))
                 continue
             try:
-                start_date = date.fromisoformat(
-                    str(membership["effective_start"])
-                )
+                start_date = date.fromisoformat(str(membership["effective_start"]))
                 end_date = (
                     date.fromisoformat(str(membership["effective_end"]))
                     if membership.get("effective_end") is not None
@@ -2182,7 +2178,8 @@ def _validate_current_product_boundary(
         authority = row.get("account_live_return_authority")
         if (
             row.get("account_live_status") == "AVAILABLE"
-            or isinstance(authority, str) and authority.startswith("CANONICAL")
+            or isinstance(authority, str)
+            and authority.startswith("CANONICAL")
         ):
             raise ControlPanelValidationError(
                 "excluded strategy carries current account-live authority"
@@ -2193,9 +2190,7 @@ def _validate_current_product_boundary(
     for row in _objects(report.get("twr_mwr"), "twr_mwr"):
         strategy_id = row.get("strategy_id")
         if not isinstance(strategy_id, str):
-            raise ControlPanelValidationError(
-                "twr_mwr strategy_id must be text"
-            )
+            raise ControlPanelValidationError("twr_mwr strategy_id must be text")
         if strategy_id not in strategy_product_controls:
             raise ControlPanelValidationError(
                 "twr_mwr references an unknown product strategy"
@@ -2205,7 +2200,8 @@ def _validate_current_product_boundary(
         authority = row.get("return_path_authority")
         if (
             str(row.get("twr_status", "")).startswith("AVAILABLE")
-            or isinstance(authority, str) and authority.startswith("CANONICAL")
+            or isinstance(authority, str)
+            and authority.startswith("CANONICAL")
         ):
             raise ControlPanelValidationError(
                 "excluded strategy carries current account-live authority"
@@ -2219,9 +2215,7 @@ def _validate_current_product_boundary(
         strategy_id = row.get("strategy_id")
         if (
             not isinstance(strategy_id, str)
-            or strategy_product_controls.get(strategy_id, {}).get(
-                "product_requirement"
-            )
+            or strategy_product_controls.get(strategy_id, {}).get("product_requirement")
             != "REQUIRED"
         ):
             raise ControlPanelValidationError(
@@ -2244,9 +2238,7 @@ def _current_product_rows(
         if not isinstance(strategy_id, str):
             continue
         if (
-            strategy_product_controls.get(strategy_id, {}).get(
-                "product_requirement"
-            )
+            strategy_product_controls.get(strategy_id, {}).get("product_requirement")
             == "REQUIRED"
         ):
             accepted.append(dict(row))
@@ -2309,9 +2301,7 @@ def _referenced_current_account_ids(
     for row in rows:
         account_id = row.get("account_id")
         if not isinstance(account_id, str):
-            raise ControlPanelValidationError(
-                "account reference must be text"
-            )
+            raise ControlPanelValidationError("account reference must be text")
         result.add(_text(account_id, "account reference"))
     return result
 
@@ -2330,9 +2320,7 @@ def _validate_current_product_account_manifest(
     for row in _objects(account_manifest.get("rows"), "account_manifest.rows"):
         account_id = row.get("account_id")
         strategy_id = row.get("strategy_id")
-        identity_is_text = isinstance(account_id, str) and isinstance(
-            strategy_id, str
-        )
+        identity_is_text = isinstance(account_id, str) and isinstance(strategy_id, str)
         if not identity_is_text:
             raise ControlPanelValidationError(
                 "current account manifest row is outside the product boundary"
@@ -2341,9 +2329,7 @@ def _validate_current_product_account_manifest(
             continue
         if (
             account_id not in current_account_ids
-            or strategy_product_controls.get(strategy_id, {}).get(
-                "product_requirement"
-            )
+            or strategy_product_controls.get(strategy_id, {}).get("product_requirement")
             != "REQUIRED"
         ):
             raise ControlPanelValidationError(
@@ -2374,9 +2360,10 @@ def _current_epoch_crosswalk_included_tuples(
         raise ControlPanelValidationError(
             "current epoch crosswalk violates formal schema: root keys differ"
         )
-    if crosswalk.get("schema_version") != 1 or crosswalk.get(
-        "artifact_id"
-    ) != "account-strategy-current-epoch-crosswalk":
+    if (
+        crosswalk.get("schema_version") != 1
+        or crosswalk.get("artifact_id") != "account-strategy-current-epoch-crosswalk"
+    ):
         raise ControlPanelValidationError(
             "current epoch crosswalk violates formal schema: identity differs"
         )
@@ -2428,7 +2415,9 @@ def _current_epoch_crosswalk_included_tuples(
         raise ControlPanelValidationError(
             "current epoch crosswalk violates formal schema at selected_baseline: values differ"
         )
-    validate_iso_date(selected_baseline.get("as_of_date"), "selected_baseline.as_of_date")
+    validate_iso_date(
+        selected_baseline.get("as_of_date"), "selected_baseline.as_of_date"
+    )
 
     if set(crosswalk) != {
         "artifact_id",
@@ -2442,8 +2431,7 @@ def _current_epoch_crosswalk_included_tuples(
         raise ControlPanelValidationError("current crosswalk shape is invalid")
     if (
         crosswalk.get("schema_version") != 1
-        or crosswalk.get("artifact_id")
-        != "account-strategy-current-epoch-crosswalk"
+        or crosswalk.get("artifact_id") != "account-strategy-current-epoch-crosswalk"
     ):
         raise ControlPanelValidationError("current crosswalk identity is invalid")
     for field in ("as_of_date", "calculation_cutoff_date"):
@@ -2530,10 +2518,17 @@ def _current_epoch_crosswalk_included_tuples(
                 raise ControlPanelValidationError("current crosswalk dates are invalid")
         epoch_tuple = tuple(
             row.get(field)
-            for field in ("account_id", "strategy_id", "effective_start", "effective_end")
+            for field in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
         )
         if epoch_tuple in tuples:
-            raise ControlPanelValidationError("current crosswalk epoch tuples are not unique")
+            raise ControlPanelValidationError(
+                "current crosswalk epoch tuples are not unique"
+            )
         tuples.add(epoch_tuple)
         actual_counts[str(disposition)] += 1
     expected_counts = {
@@ -2541,12 +2536,22 @@ def _current_epoch_crosswalk_included_tuples(
         "EXCLUDED_IMMATERIAL": 1,
         "INCLUDED_PRODUCT_EPOCH": 13,
     }
-    if crosswalk.get("disposition_counts") != expected_counts or dict(actual_counts) != expected_counts:
-        raise ControlPanelValidationError("current crosswalk disposition counts are invalid")
+    if (
+        crosswalk.get("disposition_counts") != expected_counts
+        or dict(actual_counts) != expected_counts
+    ):
+        raise ControlPanelValidationError(
+            "current crosswalk disposition counts are invalid"
+        )
     return {
         tuple(
             row.get(field)
-            for field in ("account_id", "strategy_id", "effective_start", "effective_end")
+            for field in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
         )
         for row in rows
         if row.get("product_epoch_disposition") == "INCLUDED_PRODUCT_EPOCH"
@@ -2575,7 +2580,9 @@ def _validate_current_product_epoch_surface(
         if set(strategy_product_controls) == CURRENT_PRODUCT_STRATEGY_IDS:
             excluded_rows = [
                 row
-                for row in _objects(current_epoch_crosswalk.get("rows"), "current crosswalk.rows")
+                for row in _objects(
+                    current_epoch_crosswalk.get("rows"), "current crosswalk.rows"
+                )
                 if row.get("product_epoch_disposition") != "INCLUDED_PRODUCT_EPOCH"
             ]
             if {
@@ -2589,9 +2596,7 @@ def _validate_current_product_epoch_surface(
                 raise ControlPanelValidationError(
                     "current crosswalk excluded strategy boundary differs"
                 )
-            excluded_by_strategy = {
-                row["strategy_id"]: row for row in excluded_rows
-            }
+            excluded_by_strategy = {row["strategy_id"]: row for row in excluded_rows}
             if (
                 excluded_by_strategy["echotrade-growth-pivots"]["effective_end"]
                 != "2025-11-24"
@@ -2622,7 +2627,10 @@ def _validate_current_product_epoch_surface(
                 )
                 for row in surface_rows
             }
-            if len(surface_rows) != CURRENT_PRODUCT_EPOCH_COUNT or surface_tuples != crosswalk_tuples:
+            if (
+                len(surface_rows) != CURRENT_PRODUCT_EPOCH_COUNT
+                or surface_tuples != crosswalk_tuples
+            ):
                 raise ControlPanelValidationError(
                     "current manifest and performance identities differ"
                 )
@@ -2634,7 +2642,10 @@ def _validate_current_product_epoch_surface(
         return set()
 
     boundary_text = as_of_date or "2026-08-13"
-    if account_manifest.get("schema_version") == 9 and current_epoch_crosswalk is not None:
+    if (
+        account_manifest.get("schema_version") == 9
+        and current_epoch_crosswalk is not None
+    ):
         boundary_text = _text(
             current_epoch_crosswalk.get("calculation_cutoff_date"),
             "current crosswalk calculation_cutoff_date",
@@ -2719,7 +2730,12 @@ def _validate_current_product_epoch_surface(
         expected_epoch_tuples.add(
             tuple(
                 row.get(field)
-                for field in ("account_id", "strategy_id", "effective_start", "effective_end")
+                for field in (
+                    "account_id",
+                    "strategy_id",
+                    "effective_start",
+                    "effective_end",
+                )
             )
         )
     if crosswalk_tuples is not None and expected_epoch_tuples != crosswalk_tuples:
@@ -2954,13 +2970,9 @@ def _suppress_unmatched_strategy_performance(
         row["nav_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["benchmark_assignment_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["benchmark_comparison_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
-        row["benchmark_comparison_disposition"] = (
-            "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
-        )
+        row["benchmark_comparison_disposition"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         row["provider_comparison_status"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
-        row["provider_comparison_disposition"] = (
-            "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
-        )
+        row["provider_comparison_disposition"] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         suppressed.append(row)
     return suppressed
 
@@ -3020,9 +3032,7 @@ def _current_product_account_ids_from_baseline(
         if not isinstance(strategy_id, str):
             continue
         if (
-            strategy_product_controls.get(strategy_id, {}).get(
-                "product_requirement"
-            )
+            strategy_product_controls.get(strategy_id, {}).get("product_requirement")
             != "REQUIRED"
         ):
             continue
@@ -4599,15 +4609,18 @@ def _decomposition_plan_strategy_mapping(plan_bundle: Path) -> dict[str, str]:
         for item in _objects(manifest.get("inputs"), "plan inputs")
         + _objects(manifest.get("outputs"), "plan outputs")
     }
-    if declared.get(
-        "inputs/governance/current-strategy-decomposition-plan.json"
-    ) != plan_sha:
+    if (
+        declared.get("inputs/governance/current-strategy-decomposition-plan.json")
+        != plan_sha
+    ):
         raise ControlPanelValidationError("decomposition plan artifact hash differs")
     mapping: dict[str, str] = {}
     for item in _objects(plan.get("strategies"), "plan strategies"):
         strategy_id = _text(item.get("strategy_id"), "plan strategy_id")
         if strategy_id in mapping:
-            raise ControlPanelValidationError("decomposition plan contains duplicate strategy identities")
+            raise ControlPanelValidationError(
+                "decomposition plan contains duplicate strategy identities"
+            )
         mapping[strategy_id] = _text(item.get("series_id"), "plan series_id")
     return mapping
 
@@ -4627,9 +4640,7 @@ def _weekly_return_analysis(
     modes = weekly.get("strategy_evidence_modes")
     if include_hybrid and modes != ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]:
         raise ControlPanelValidationError("weekly strategy evidence modes differ")
-    if not include_hybrid and (
-        not isinstance(modes, list) or "LIVE_ONLY" not in modes
-    ):
+    if not include_hybrid and (not isinstance(modes, list) or "LIVE_ONLY" not in modes):
         raise ControlPanelValidationError("weekly LIVE_ONLY evidence mode is absent")
     week_policy = _object(weekly.get("week_policy"), "weekly week_policy")
     if (
@@ -4653,7 +4664,9 @@ def _weekly_return_analysis(
     if strategy_names is not None:
         current_ids = set(strategy_names)
         if current_ids != CURRENT_REQUIRED_STRATEGY_IDS:
-            raise ControlPanelValidationError("weekly strategy identity authority differs")
+            raise ControlPanelValidationError(
+                "weekly strategy identity authority differs"
+            )
         authoritative_names = dict(strategy_names)
         if plan_strategy_names is not None:
             plan_ids = set(plan_strategy_names)
@@ -4661,13 +4674,19 @@ def _weekly_return_analysis(
                 set(CURRENT_REQUIRED_STRATEGY_IDS),
                 set(CURRENT_PRODUCT_STRATEGY_IDS),
             ):
-                raise ControlPanelValidationError("weekly strategy identity authority differs")
+                raise ControlPanelValidationError(
+                    "weekly strategy identity authority differs"
+                )
             plan_names = list(plan_strategy_names.values())
             if len(plan_names) != len(set(plan_names)):
-                raise ControlPanelValidationError("weekly strategy display identity is duplicated")
+                raise ControlPanelValidationError(
+                    "weekly strategy display identity is duplicated"
+                )
             for strategy_id in CURRENT_REQUIRED_STRATEGY_IDS:
                 if strategy_names[strategy_id] != plan_strategy_names[strategy_id]:
-                    raise ControlPanelValidationError("weekly strategy mapping differs from plan")
+                    raise ControlPanelValidationError(
+                        "weekly strategy mapping differs from plan"
+                    )
             authoritative_names = dict(plan_strategy_names)
         raw_strategy_rows = [
             row for row in rows if row.get("primary_group") == "STRATEGY"
@@ -4677,20 +4696,30 @@ def _weekly_return_analysis(
             for row in raw_strategy_rows
         ]
         if len(raw_names) != len(set(raw_names)):
-            raise ControlPanelValidationError("weekly strategy display identity is duplicated")
+            raise ControlPanelValidationError(
+                "weekly strategy display identity is duplicated"
+            )
         raw_name_set = set(raw_names)
         expected_names = set(authoritative_names.values())
         current_names = set(strategy_names.values())
         if raw_name_set not in (current_names, expected_names):
-            raise ControlPanelValidationError("weekly strategy display identity differs")
-        raw_name_to_id = {name: strategy_id for strategy_id, name in authoritative_names.items()}
+            raise ControlPanelValidationError(
+                "weekly strategy display identity differs"
+            )
+        raw_name_to_id = {
+            name: strategy_id for strategy_id, name in authoritative_names.items()
+        }
         for row in raw_strategy_rows:
             name = _text(row.get("display_name"), "weekly strategy name")
             if name not in raw_name_to_id:
-                raise ControlPanelValidationError("weekly strategy display identity is unknown")
+                raise ControlPanelValidationError(
+                    "weekly strategy display identity is unknown"
+                )
             source_id = _text(row.get("series_id"), "weekly strategy_id")
             if source_id not in {name, f"strategy:{name}"}:
-                raise ControlPanelValidationError("weekly strategy source identity differs")
+                raise ControlPanelValidationError(
+                    "weekly strategy source identity differs"
+                )
         rows = [
             row
             for row in rows
@@ -4714,9 +4743,7 @@ def _weekly_return_analysis(
         "CORE_BENCHMARK",
     }
     if strategy_count != 7:
-        raise ControlPanelValidationError(
-            "weekly return strategy count must be 7"
-        )
+        raise ControlPanelValidationError("weekly return strategy count must be 7")
     if benchmark_count != 9:
         raise ControlPanelValidationError(
             "weekly strategy or benchmark boundary differs"
@@ -4749,10 +4776,10 @@ def _weekly_return_analysis(
             if not include_hybrid and (
                 "LIVE_ONLY" not in values_by_mode or "LIVE_ONLY" not in meta_by_mode
             ):
-                raise ControlPanelValidationError("weekly LIVE_ONLY strategy mode differs")
-            for mode in (
-                STRATEGY_EVIDENCE_MODES if include_hybrid else ("LIVE_ONLY",)
-            ):
+                raise ControlPanelValidationError(
+                    "weekly LIVE_ONLY strategy mode differs"
+                )
+            for mode in STRATEGY_EVIDENCE_MODES if include_hybrid else ("LIVE_ONLY",):
                 mode_values = _object(values_by_mode.get(mode), f"weekly values {mode}")
                 mode_meta = _object(meta_by_mode.get(mode), f"weekly metadata {mode}")
                 if set(mode_values) != set(mode_meta):
@@ -5138,8 +5165,12 @@ def _project_current_product_matrix(
         if values_field not in matrix:
             continue
         values = matrix[values_field]
-        if not isinstance(values, list) or len(values) != source_size or any(
-            not isinstance(row, list) or len(row) != source_size for row in values
+        if (
+            not isinstance(values, list)
+            or len(values) != source_size
+            or any(
+                not isinstance(row, list) or len(row) != source_size for row in values
+            )
         ):
             raise ControlPanelValidationError(
                 f"{field_name}.{values_field} dimensions differ"
@@ -5221,9 +5252,8 @@ def _project_current_product_dependence(
 ) -> dict[str, Any]:
     dependence = copy.deepcopy(dict(dependence_payload))
     mapping_ids = set(strategy_names_by_id)
-    if (
-        not set(CURRENT_REQUIRED_STRATEGY_IDS) <= mapping_ids
-        or not mapping_ids <= set(CURRENT_PRODUCT_STRATEGY_IDS)
+    if not set(CURRENT_REQUIRED_STRATEGY_IDS) <= mapping_ids or not mapping_ids <= set(
+        CURRENT_PRODUCT_STRATEGY_IDS
     ):
         raise ControlPanelValidationError(
             "current-product correlation strategy mapping identity differs"
@@ -5260,14 +5290,12 @@ def _project_current_product_dependence(
             "current-product correlation series identity contains an unknown extra"
         ) from exc
     source_id_set = set(source_ids)
-    native = (
-        len(source_ids) == len(CURRENT_REQUIRED_STRATEGY_IDS)
-        and source_id_set == set(CURRENT_REQUIRED_STRATEGY_IDS)
-    )
-    retained_source = (
-        len(source_ids) == len(CURRENT_PRODUCT_STRATEGY_IDS)
-        and source_id_set == set(CURRENT_PRODUCT_STRATEGY_IDS)
-    )
+    native = len(source_ids) == len(
+        CURRENT_REQUIRED_STRATEGY_IDS
+    ) and source_id_set == set(CURRENT_REQUIRED_STRATEGY_IDS)
+    retained_source = len(source_ids) == len(
+        CURRENT_PRODUCT_STRATEGY_IDS
+    ) and source_id_set == set(CURRENT_PRODUCT_STRATEGY_IDS)
     if not native and not retained_source:
         raise ControlPanelValidationError(
             "current-product correlation series identity is not exact seven or exact nine"
@@ -5385,20 +5413,16 @@ def _project_current_product_dependence(
         len(central_components) - central_case["measured_component_count"]
     )
     central_case["measured_pair_count"] = sum(
-        item.get("status") == "AVAILABLE"
-        for item in projected_pairs["observed_cells"]
+        item.get("status") == "AVAILABLE" for item in projected_pairs["observed_cells"]
     )
     central_case["prior_pair_count"] = (
-        len(projected_pairs["observed_cells"])
-        - central_case["measured_pair_count"]
+        len(projected_pairs["observed_cells"]) - central_case["measured_pair_count"]
     )
     dependence["central_case"] = central_case
 
     performance = dependence.get("performance")
     if performance is not None:
-        performance_rows = copy.deepcopy(
-            _object(performance, "dependence.performance")
-        )
+        performance_rows = copy.deepcopy(_object(performance, "dependence.performance"))
         if set(performance_rows) != set(source_names):
             raise ControlPanelValidationError(
                 "dependence performance source identities differ"
@@ -5432,13 +5456,10 @@ def _current_product_correlation_projection(
     projected = copy.deepcopy(dict(correlation))
     raw_dependence = _object(correlation.get("dependence"), "dependence")
     source_series_ids = raw_dependence.get("series_ids")
-    projected["_current_product_projection_applied"] = (
-        isinstance(source_series_ids, list)
-        and len(source_series_ids) == len(CURRENT_PRODUCT_STRATEGY_IDS)
-    )
-    live = _project_current_product_dependence(
-        raw_dependence, strategy_names_by_id
-    )
+    projected["_current_product_projection_applied"] = isinstance(
+        source_series_ids, list
+    ) and len(source_series_ids) == len(CURRENT_PRODUCT_STRATEGY_IDS)
+    live = _project_current_product_dependence(raw_dependence, strategy_names_by_id)
     projected["dependence"] = live
     raw_modes = correlation.get("dependence_modes")
     if raw_modes is not None:
@@ -5451,14 +5472,12 @@ def _current_product_correlation_projection(
         if include_hybrid:
             if set(modes) != {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}:
                 raise ControlPanelValidationError("dependence mode set differs")
-            projected_modes["LIVE_PLUS_BACKTEST"] = (
-                _project_current_product_dependence(
-                    _object(
-                        modes["LIVE_PLUS_BACKTEST"],
-                        "dependence_modes.LIVE_PLUS_BACKTEST",
-                    ),
-                    strategy_names_by_id,
-                )
+            projected_modes["LIVE_PLUS_BACKTEST"] = _project_current_product_dependence(
+                _object(
+                    modes["LIVE_PLUS_BACKTEST"],
+                    "dependence_modes.LIVE_PLUS_BACKTEST",
+                ),
+                strategy_names_by_id,
             )
         projected["dependence_modes"] = projected_modes
     semantic_payload = {"dependence": live}
@@ -7156,21 +7175,16 @@ def _panel_data(
     current_product_catalog = _validate_current_product_baseline_projection(
         report, baseline_catalog, strategy_product_controls
     )
-    _validate_current_product_boundary(
-        report, strategy_product_controls
-    )
+    _validate_current_product_boundary(report, strategy_product_controls)
     strategies = _current_product_rows(report_strategies, strategy_product_controls)
     if set(strategy_product_controls) == CURRENT_PRODUCT_STRATEGY_IDS:
         strategy_ids = [
-            _text(row.get("strategy_id"), "strategy.strategy_id")
-            for row in strategies
+            _text(row.get("strategy_id"), "strategy.strategy_id") for row in strategies
         ]
         if len(strategy_ids) != len(set(strategy_ids)) or set(strategy_ids) != set(
             CURRENT_REQUIRED_STRATEGY_IDS
         ):
-            raise ControlPanelValidationError(
-                "current strategy identities differ"
-            )
+            raise ControlPanelValidationError("current strategy identities differ")
     accounts = _current_product_account_summary_rows(
         _objects(report.get("account_summary"), "account_summary"),
         baseline_catalog,
@@ -7255,9 +7269,7 @@ def _panel_data(
         # rejected-lineage representation; otherwise a post-cutoff value could
         # be erased and silently admitted.
         performance = _suppress_unmatched_report_performance(performance)
-    referenced_account_ids = _referenced_current_account_ids(
-        (*performance, *positions)
-    )
+    referenced_account_ids = _referenced_current_account_ids((*performance, *positions))
     missing_account_ids = referenced_account_ids - set(account_ids)
     if missing_account_ids:
         raise ControlPanelValidationError(
@@ -7530,9 +7542,9 @@ def _panel_data(
         correlation_strategy_names or report_strategy_names,
         include_hybrid=globally_hybrid_eligible,
     )
-    correlation_projection_applied = correlation.get(
-        "_current_product_projection_applied"
-    ) is True
+    correlation_projection_applied = (
+        correlation.get("_current_product_projection_applied") is True
+    )
     raw_modes = correlation.get("dependence_modes")
     if raw_modes is None:
         default_dependence_mode = "LIVE_ONLY"
@@ -7676,14 +7688,12 @@ def _panel_data(
     }
     catalog_perimeter = {
         _text(item["strategy_id"], "catalog allocation.strategy_id")
-        for item in _objects(
-            current_product_catalog.get("allocations"), "allocations"
-        )
+        for item in _objects(current_product_catalog.get("allocations"), "allocations")
         if item.get("scope") == "SYSTEMATIC"
         and item.get("strategy_id")
-        and strategy_product_controls.get(
-            str(item["strategy_id"]), {}
-        ).get("product_requirement")
+        and strategy_product_controls.get(str(item["strategy_id"]), {}).get(
+            "product_requirement"
+        )
         != "EXCLUDED"
     }
     if report_perimeter != catalog_perimeter:
@@ -8092,7 +8102,9 @@ def _panel_data(
             "portfolio_summary.Correlation-one stress",
         )
         analytics_stress = _finite_float(
-            _object(dependence_analysis["correlation_one"], "correlation_one").get("loss"),
+            _object(dependence_analysis["correlation_one"], "correlation_one").get(
+                "loss"
+            ),
             "correlation_one.loss",
         )
         if abs(report_stress - analytics_stress) > 1e-10:
@@ -8199,29 +8211,29 @@ def _panel_data(
                 "performance, HWM, or readiness conclusion is accepted."
                 if not performance_lineage_available
                 else (
-                "Readiness is governed by the correlation-one conservative bound; "
-                "the measured-dependence central case is descriptive and does not govern readiness. "
-                "Canonical report admitted NAV now covers "
-                + (", ".join(admitted_nav_names) or "no included-perimeter sleeves")
-                + "; explicit de-minimis exclusions remain reported: "
-                + (
-                    ", ".join(
-                        f"{item['strategy_name']} (${item['current_value_usd']}; {item['reason']})"
-                        for item in hwm_summary.get("excluded_details", [])
+                    "Readiness is governed by the correlation-one conservative bound; "
+                    "the measured-dependence central case is descriptive and does not govern readiness. "
+                    "Canonical report admitted NAV now covers "
+                    + (", ".join(admitted_nav_names) or "no included-perimeter sleeves")
+                    + "; explicit de-minimis exclusions remain reported: "
+                    + (
+                        ", ".join(
+                            f"{item['strategy_name']} (${item['current_value_usd']}; {item['reason']})"
+                            for item in hwm_summary.get("excluded_details", [])
+                        )
+                        or "none"
                     )
-                    or "none"
-                )
-                + ". "
-                + (
-                    "Remaining HWM qualification gap: "
-                    + ", ".join(
-                        f"{item['strategy_name']} ({item['qualification_gap']})"
-                        for item in hwm_summary["uncovered_details"]
+                    + ". "
+                    + (
+                        "Remaining HWM qualification gap: "
+                        + ", ".join(
+                            f"{item['strategy_name']} ({item['qualification_gap']})"
+                            for item in hwm_summary["uncovered_details"]
+                        )
+                        + "."
+                        if hwm_summary["uncovered_strategies"]
+                        else "Every included HWM-perimeter sleeve has qualified governed account-live or provider-live return evidence."
                     )
-                    + "."
-                    if hwm_summary["uncovered_strategies"]
-                    else "Every included HWM-perimeter sleeve has qualified governed account-live or provider-live return evidence."
-                )
                 )
             ),
         },
@@ -8462,7 +8474,9 @@ def _epoch_manifest_source_from_bundle(
     try:
         validate_manifest_schema(value)
     except ManifestError as exc:
-        raise ControlPanelValidationError(f"account manifest is invalid: {exc}") from exc
+        raise ControlPanelValidationError(
+            f"account manifest is invalid: {exc}"
+        ) from exc
     if value.get("schema_version") != schema_version:
         raise ControlPanelValidationError(
             "epoch manifest source artifact schema version differs from payload"
@@ -8470,9 +8484,7 @@ def _epoch_manifest_source_from_bundle(
     source = {
         "generation_id": bundle.manifest.generation_id,
         "generation_manifest_sha256": bundle.receipt.manifest.sha256,
-        "generation_receipt_sha256": hashlib.sha256(
-            bundle.receipt_bytes
-        ).hexdigest(),
+        "generation_receipt_sha256": hashlib.sha256(bundle.receipt_bytes).hexdigest(),
         "full_directory_inventory_sha256": bundle.full_directory_inventory_sha256,
         "artifact": {
             "path": _EPOCH_MANIFEST_PATH,
@@ -10199,8 +10211,7 @@ def verify_candidate(
     )
     expected_canonical_count = len(required_analysis_series)
     canonical_series_ids = {
-        _text(row.get("series_id"), "canonical series_id")
-        for row in canonical_series
+        _text(row.get("series_id"), "canonical series_id") for row in canonical_series
     }
     factor_series_ids = {
         _text(row.get("series_id"), "factor series_id")
@@ -10421,19 +10432,19 @@ def verify_candidate(
                 "Provider evidence remains explicit and separate",
                 synthetic_provider_shape
                 or (
-                volatis.get("nav_status") == "AVAILABLE"
-                and volatis.get("hwm_source") == "PORTFOLIO_REPORT"
-                and volatis_evidence.get("provider_id") == "quantbase"
-                and robuxio.get("nav_status") == "AVAILABLE"
-                and robuxio.get("nav_evidence_layer") == "ACCOUNT_LIVE"
-                and robuxio.get("account_live_status") == "AVAILABLE"
-                and robuxio_evidence.get("provider_id") == "matrixport"
-                and isinstance(robuxio_evidence.get("account"), dict)
-                and p123_evidence.get("provider_id") == "ibkr"
-                and p123_account.get("observed_end")
-                != p123_provider.get("observed_end")
-                and isinstance(p123_evidence.get("overlap"), dict)
-                and isinstance(p123_evidence.get("current_snapshot"), dict)
+                    volatis.get("nav_status") == "AVAILABLE"
+                    and volatis.get("hwm_source") == "PORTFOLIO_REPORT"
+                    and volatis_evidence.get("provider_id") == "quantbase"
+                    and robuxio.get("nav_status") == "AVAILABLE"
+                    and robuxio.get("nav_evidence_layer") == "ACCOUNT_LIVE"
+                    and robuxio.get("account_live_status") == "AVAILABLE"
+                    and robuxio_evidence.get("provider_id") == "matrixport"
+                    and isinstance(robuxio_evidence.get("account"), dict)
+                    and p123_evidence.get("provider_id") == "ibkr"
+                    and p123_account.get("observed_end")
+                    != p123_provider.get("observed_end")
+                    and isinstance(p123_evidence.get("overlap"), dict)
+                    and isinstance(p123_evidence.get("current_snapshot"), dict)
                 ),
                 {
                     "p123_account_end": p123_account.get("observed_end"),
@@ -10728,10 +10739,7 @@ def verify_candidate(
             + data["factor_analysis"]["diagnostic_count"]
             + data["factor_analysis"]["unavailable_count"]
             == len(required_analysis_series)
-            and {
-                _text(row.get("series_id"), "factor series_id")
-                for row in factor_rows
-            }
+            and {_text(row.get("series_id"), "factor series_id") for row in factor_rows}
             == required_analysis_series
             and all(
                 row.get("contribution_summary") is None
@@ -11923,7 +11931,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ControlPanelValidationError(
                     "build requires exactly one of --report-root or --report-candidate"
                 )
-            if args.report_candidate is not None and args.strategy_history_contract is None:
+            if (
+                args.report_candidate is not None
+                and args.strategy_history_contract is None
+            ):
                 raise ControlPanelValidationError(
                     "build with --report-candidate requires --strategy-history-contract"
                 )
@@ -11965,7 +11976,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ControlPanelValidationError(
                     "verify requires exactly one of --report-root or --report-candidate"
                 )
-            if args.report_candidate is not None and args.strategy_history_contract is None:
+            if (
+                args.report_candidate is not None
+                and args.strategy_history_contract is None
+            ):
                 raise ControlPanelValidationError(
                     "verify with --report-candidate requires --strategy-history-contract"
                 )

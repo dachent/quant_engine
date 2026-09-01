@@ -281,9 +281,7 @@ def _independent_dynamic_loo_predictions(
         design[index, start : start + factor_count] = factor_row
 
     ridge_penalty = np.zeros((observation_count * factor_count, parameter_count))
-    ridge_penalty[:, 1:] = math.sqrt(ridge) * np.eye(
-        observation_count * factor_count
-    )
+    ridge_penalty[:, 1:] = math.sqrt(ridge) * np.eye(observation_count * factor_count)
     smoothness_penalty = np.zeros(
         ((observation_count - 1) * factor_count, parameter_count)
     )
@@ -421,7 +419,9 @@ def test_manifest_binds_exact_returned_decomposition_bytes(tmp_path: Path) -> No
     target_path, days = _write_sources(source)
     spec_path = _spec(source, target_path, days)
 
-    result, manifest, result_bytes = decomposition.build_decomposition(spec_path, source)
+    result, manifest, result_bytes = decomposition.build_decomposition(
+        spec_path, source
+    )
 
     artifacts = [
         artifact
@@ -883,7 +883,9 @@ def test_canonical_live_series_digest_has_a_literal_live_series_oracle(
         + "\n",
         encoding="utf-8",
     )
-    live_rows = decomposition._read_targets(target_path, date(2026, 1, 31))["small-live"]
+    live_rows = decomposition._read_targets(target_path, date(2026, 1, 31))[
+        "small-live"
+    ]
 
     assert decomposition._canonical_live_series_sha256(live_rows) == expected_digest
 
@@ -923,4 +925,7 @@ def test_canonical_live_series_digest_has_a_literal_live_series_oracle(
         "small-live"
     ]
 
-    assert decomposition._canonical_live_series_sha256(changed_live_rows) != expected_digest
+    assert (
+        decomposition._canonical_live_series_sha256(changed_live_rows)
+        != expected_digest
+    )

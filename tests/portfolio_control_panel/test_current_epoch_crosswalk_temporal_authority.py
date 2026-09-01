@@ -28,7 +28,9 @@ def _disposition_for_census_status(status: str) -> str:
     }[status]
 
 
-def test_explicit_crosswalk_intervals_exactly_match_independent_current_census() -> None:
+def test_explicit_crosswalk_intervals_exactly_match_independent_current_census() -> (
+    None
+):
     """Each of the 15 visible epochs has the census-funded temporal boundary."""
 
     crosswalk = json.loads(CROSSWALK_PATH.read_text(encoding="utf-8"))

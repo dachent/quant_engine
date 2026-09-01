@@ -391,7 +391,10 @@ def test_deprecated_echo_text_excludes_every_current_value_surface() -> None:
         "excluded from current capital, allocation, and consolidated-value reporting"
         in mechanism
     )
-    assert "remains in capital, allocation, and consolidated-value reporting" not in mechanism
+    assert (
+        "remains in capital, allocation, and consolidated-value reporting"
+        not in mechanism
+    )
 
 
 # ===================================================================

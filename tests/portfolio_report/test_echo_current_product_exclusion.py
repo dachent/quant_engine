@@ -13,7 +13,16 @@ from openpyxl import load_workbook
 from openpyxl.utils.cell import range_boundaries
 import pytest
 
-from quant_engine.core import read_generation_bundle
+from quant_engine.core import (
+    AdapterIdentity,
+    CoverageClaim,
+    CoverageStatus,
+    GenerationManifest,
+    SourceArtifact,
+    VerificationStatus,
+    read_generation_bundle,
+    stage_generation_bundle,
+)
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -230,7 +239,9 @@ def test_deprecated_history_cannot_change_current_twr_or_allocation() -> None:
     without_retired_returns = {
         **catalog,
         "strategy_returns": [
-            row for row in catalog["strategy_returns"] if row["strategy_id"] != "retired"
+            row
+            for row in catalog["strategy_returns"]
+            if row["strategy_id"] != "retired"
         ],
     }
 
@@ -255,9 +266,10 @@ def test_deprecated_history_cannot_change_current_twr_or_allocation() -> None:
     assert "return_path_status" not in retired
     assert current["twr"] == "0.1"
     assert current["return_path_status"] == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
-    assert reporter._account_strategy_performance(
-        without_retired_returns, controls
-    ) == performance
+    assert (
+        reporter._account_strategy_performance(without_retired_returns, controls)
+        == performance
+    )
     assert [row["strategy_id"] for row in allocation_rows] == ["current"]
     current_summary = {
         row["metric"]: row
@@ -324,9 +336,7 @@ def test_echo_only_residual_mutation_preserves_current_rows_and_hwm() -> None:
         if row["strategy_id"] == "echotrade-growth-pivots"
     )
     echo["current_value"] = _amount("0.38")
-    baseline["replay"]["systematic_total_usd"] = (
-        "446546.2793751776827506151026"
-    )
+    baseline["replay"]["systematic_total_usd"] = "446546.2793751776827506151026"
     baseline["replay"]["total_liquid_usd"] = "546589.8993751776827506151026"
 
     after_summary = {
@@ -344,10 +354,14 @@ def test_echo_only_residual_mutation_preserves_current_rows_and_hwm() -> None:
     assert before_summary["Total liquid"] == "546589.7093751776827506151026"
     assert after_summary["Total liquid"] == "546589.8993751776827506151026"
     assert before_projection == after_projection
-    assert {row["strategy_id"] for row in after_projection["hwm_inputs"]["periods"]} == (
-        REQUIRED_STRATEGY_IDS
-    )
-    assert {row["strategy_id"] for row in after_projection["allocations"] if row["scope"] == "SYSTEMATIC"} == REQUIRED_STRATEGY_IDS
+    assert {
+        row["strategy_id"] for row in after_projection["hwm_inputs"]["periods"]
+    } == (REQUIRED_STRATEGY_IDS)
+    assert {
+        row["strategy_id"]
+        for row in after_projection["allocations"]
+        if row["scope"] == "SYSTEMATIC"
+    } == REQUIRED_STRATEGY_IDS
 
 
 @pytest.mark.parametrize(
@@ -560,14 +574,18 @@ def test_reserve_mutation_changes_consolidated_total_not_current_systematic() ->
 
     before = {
         row["metric"]: row["value"]
-        for row in reporter._portfolio_summary(catalog, strategy_product_controls=controls)
+        for row in reporter._portfolio_summary(
+            catalog, strategy_product_controls=controls
+        )
     }
     catalog["allocations"][2]["current_value"] = _amount("20")
     catalog["replay"]["reserve_total_usd"] = "20"
     catalog["replay"]["total_liquid_usd"] = "120"
     after = {
         row["metric"]: row["value"]
-        for row in reporter._portfolio_summary(catalog, strategy_product_controls=controls)
+        for row in reporter._portfolio_summary(
+            catalog, strategy_product_controls=controls
+        )
     }
 
     assert before["Systematic capital"] == "80"
@@ -593,20 +611,57 @@ def test_current_account_summary_excludes_deprecated_account() -> None:
     }
     catalog = {
         "accounts": [
-            {"account_id": "reserve", "base_currency": "USD", "provider": "cash", "role": "RESERVE"},
-            {"account_id": "retired-account", "base_currency": "USD", "provider": "alpaca", "role": "STRATEGY"},
-            {"account_id": "current-account", "base_currency": "USD", "provider": "ibkr", "role": "STRATEGY"},
+            {
+                "account_id": "reserve",
+                "base_currency": "USD",
+                "provider": "cash",
+                "role": "RESERVE",
+            },
+            {
+                "account_id": "retired-account",
+                "base_currency": "USD",
+                "provider": "alpaca",
+                "role": "STRATEGY",
+            },
+            {
+                "account_id": "current-account",
+                "base_currency": "USD",
+                "provider": "ibkr",
+                "role": "STRATEGY",
+            },
         ],
         "allocations": [
-            {"as_of_date": "2026-01-02", "current_value": _amount("5"), "scope": "RESERVE"},
+            {
+                "as_of_date": "2026-01-02",
+                "current_value": _amount("5"),
+                "scope": "RESERVE",
+            },
         ],
         "assignments": [
-            {"account_id": "retired-account", "effective_end": None, "mapping_status": "MAPPED", "strategy_id": "retired"},
-            {"account_id": "current-account", "effective_end": None, "mapping_status": "MAPPED", "strategy_id": "current"},
+            {
+                "account_id": "retired-account",
+                "effective_end": None,
+                "mapping_status": "MAPPED",
+                "strategy_id": "retired",
+            },
+            {
+                "account_id": "current-account",
+                "effective_end": None,
+                "mapping_status": "MAPPED",
+                "strategy_id": "current",
+            },
         ],
         "nav_observations": [
-            {"account_id": "retired-account", "as_of_date": "2026-01-02", "nav": _amount("0.19")},
-            {"account_id": "current-account", "as_of_date": "2026-01-02", "nav": _amount("99.81")},
+            {
+                "account_id": "retired-account",
+                "as_of_date": "2026-01-02",
+                "nav": _amount("0.19"),
+            },
+            {
+                "account_id": "current-account",
+                "as_of_date": "2026-01-02",
+                "nav": _amount("99.81"),
+            },
         ],
     }
 
@@ -634,22 +689,34 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
     )
     assert echo_allocation["current_value"]["value"] == "0.19"
     assert composer_allocation["current_value"]["value"] == "1068.45"
-    assert sum(
-        row.get("strategy_id") == "echotrade-growth-pivots"
-        for row in baseline["strategy_returns"]
-    ) == 13
-    assert sum(
-        row.get("strategy_id") == "echotrade-growth-pivots"
-        for row in baseline["hwm_inputs"]["periods"]
-    ) == 33
-    assert sum(
-        row.get("strategy_id") == "composer-holy-grail"
-        for row in baseline["hwm_inputs"]["periods"]
-    ) == 33
-    assert sum(
-        row.get("strategy_id") == "echotrade-growth-pivots"
-        for row in baseline["transactions"]
-    ) == 120
+    assert (
+        sum(
+            row.get("strategy_id") == "echotrade-growth-pivots"
+            for row in baseline["strategy_returns"]
+        )
+        == 13
+    )
+    assert (
+        sum(
+            row.get("strategy_id") == "echotrade-growth-pivots"
+            for row in baseline["hwm_inputs"]["periods"]
+        )
+        == 33
+    )
+    assert (
+        sum(
+            row.get("strategy_id") == "composer-holy-grail"
+            for row in baseline["hwm_inputs"]["periods"]
+        )
+        == 33
+    )
+    assert (
+        sum(
+            row.get("strategy_id") == "echotrade-growth-pivots"
+            for row in baseline["transactions"]
+        )
+        == 120
+    )
 
     # The portable epoch-generation fixture is independently blocked at
     # verification authority.  Bypass only that prerequisite so this test can
@@ -659,8 +726,12 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
         REAL_BASELINE_ROOT,
     )
 
-    assert {row["strategy_id"] for row in report["strategy_summary"]} == REQUIRED_STRATEGY_IDS
-    assert {row["strategy_id"] for row in report["strategy_returns"]} == REQUIRED_STRATEGY_IDS
+    assert {
+        row["strategy_id"] for row in report["strategy_summary"]
+    } == REQUIRED_STRATEGY_IDS
+    assert {
+        row["strategy_id"] for row in report["strategy_returns"]
+    } == REQUIRED_STRATEGY_IDS
     assert {row["strategy_id"] for row in report["twr_mwr"]} == REQUIRED_STRATEGY_IDS
     systematic_allocations = [
         row for row in report["allocation_history"] if row["scope"] == "SYSTEMATIC"
@@ -670,10 +741,13 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
         for row in report["portfolio_summary"]
         if row["metric"] == "Systematic capital"
     )
-    assert sum(
-        (Decimal(row["current_value_usd"]) for row in systematic_allocations),
-        Decimal("0"),
-    ) == systematic_total
+    assert (
+        sum(
+            (Decimal(row["current_value_usd"]) for row in systematic_allocations),
+            Decimal("0"),
+        )
+        == systematic_total
+    )
     assert sum(
         (Decimal(row["systematic_weight"]) for row in systematic_allocations),
         Decimal("0"),
@@ -687,17 +761,17 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
         for row in systematic_allocations
     )
     allocation_weights = {
-        row["strategy_id"]: row["systematic_weight"]
-        for row in systematic_allocations
+        row["strategy_id"]: row["systematic_weight"] for row in systematic_allocations
     }
     assert {
         row["strategy_id"]: row["systematic_weight"]
         for row in report["strategy_summary"]
     } == allocation_weights
-    assert all(row.get("strategy_id") is not None for row in report["provider_admissions"])
     assert all(
-        row.get("strategy_id") is not None
-        for row in report["transactions_and_flows"]
+        row.get("strategy_id") is not None for row in report["provider_admissions"]
+    )
+    assert all(
+        row.get("strategy_id") is not None for row in report["transactions_and_flows"]
     )
     for current_surface in (
         "allocation_history",
@@ -714,7 +788,9 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
     assert "account-0acb9e17da731d0e" not in {
         row["account_id"] for row in report["account_summary"]
     }
-    assert {row["strategy_id"] for row in report["hwm_inputs"]["periods"]} == REQUIRED_STRATEGY_IDS
+    assert {
+        row["strategy_id"] for row in report["hwm_inputs"]["periods"]
+    } == REQUIRED_STRATEGY_IDS
     assert len(report["hwm_inputs"]["periods"]) == 231
     assert not EXCLUDED_STRATEGY_IDS & {
         row["strategy_id"] for row in report["hwm_inputs"]["periods"]
@@ -740,11 +816,7 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
     visible_current = sum(
         (
             Decimal(
-                str(
-                    workbook["Strategy Summary"].cell(
-                        row, current_value_column
-                    ).value
-                )
+                str(workbook["Strategy Summary"].cell(row, current_value_column).value)
             )
             for row in range(min_row + 1, max_row + 1)
         ),
@@ -762,17 +834,19 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
         (
             Decimal(
                 str(
-                    workbook["Allocation History"].cell(
+                    workbook["Allocation History"]
+                    .cell(
                         row,
                         allocation_min_col
                         + allocation_headers.index("Current Value Usd"),
-                    ).value
+                    )
+                    .value
                 )
             )
             for row in range(allocation_min_row + 1, allocation_max_row + 1)
-            if workbook["Allocation History"].cell(
-                row, allocation_min_col + allocation_headers.index("Scope")
-            ).value
+            if workbook["Allocation History"]
+            .cell(row, allocation_min_col + allocation_headers.index("Scope"))
+            .value
             == "RESERVE"
         ),
         Decimal("0"),
@@ -782,9 +856,8 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
     assert summary["Retained excluded systematic balance"] == "1068.64"
     assert summary["Reserve"] == "100043.62"
     assert summary["Total liquid"] == "546589.7093751776827506151026"
-    assert (
-        abs(visible_current - Decimal("445477.4493751776827506151026"))
-        < Decimal("0.02")
+    assert abs(visible_current - Decimal("445477.4493751776827506151026")) < Decimal(
+        "0.02"
     )
     assert reserve_allocation == Decimal("100043.62")
     assert abs(
@@ -806,9 +879,9 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
         assert formula == (
             "=IF(ABS(SUM(tblStrategies[Current Value Usd])+"
             'SUMIFS(tblAllocations[Current Value Usd],tblAllocations[Scope],"RESERVE")+'
-            'SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],'
+            "SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],"
             '"Retained excluded systematic balance")-'
-            'SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],'
+            "SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],"
             '"Total liquid"))<0.02,"PASS","FAIL")'
         )
         summary_table = formula_workbook["Portfolio Summary"].tables[
@@ -824,12 +897,12 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
         assert summary_headers == ["Metric", "Status", "Unit", "Value"]
         summary_metric_column = summary_min_col + summary_headers.index("Metric")
         assert {
-            formula_workbook["Portfolio Summary"].cell(
-                row, summary_metric_column
-            ).value
+            formula_workbook["Portfolio Summary"].cell(row, summary_metric_column).value
             for row in range(summary_min_row + 1, summary_max_row + 1)
         } >= {"Retained excluded systematic balance", "Total liquid"}
-        assert 'SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],' in formula
+        assert (
+            "SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric]," in formula
+        )
     finally:
         formula_workbook.close()
 
@@ -928,8 +1001,18 @@ def test_report_controls_reject_arbitrary_id_substitution(tmp_path: Path) -> Non
     ("strategy_id", "mutation"),
     [
         ("p123-ai-factor", lambda row: row["funded_membership"].pop("effective_start")),
-        ("p123-eu", lambda row: row["funded_membership"].update({"effective_start": "2026-08-18", "effective_end": "2026-08-17"})),
-        ("echotrade-growth-pivots", lambda row: row["effective_product_interval"].update({"effective_end": "2025-11-23"})),
+        (
+            "p123-eu",
+            lambda row: row["funded_membership"].update(
+                {"effective_start": "2026-08-18", "effective_end": "2026-08-17"}
+            ),
+        ),
+        (
+            "echotrade-growth-pivots",
+            lambda row: row["effective_product_interval"].update(
+                {"effective_end": "2025-11-23"}
+            ),
+        ),
         ("composer-holy-grail", lambda row: row.update({"lifecycle_status": "ACTIVE"})),
     ],
 )
@@ -939,7 +1022,9 @@ def test_report_controls_reject_missing_or_malformed_exact_attributes(
     contract = json.loads(
         reporter._PORTABLE_HWM_PRODUCT_CONTRACT.read_text(encoding="utf-8")
     )
-    row = next(item for item in contract["strategies"] if item["strategy_id"] == strategy_id)
+    row = next(
+        item for item in contract["strategies"] if item["strategy_id"] == strategy_id
+    )
     mutation(row)
     path = tmp_path / f"mutated-{strategy_id}.json"
     path.write_bytes(reporter.canonical_json_bytes(contract))
@@ -1021,10 +1106,38 @@ def test_report_account_manifest_requires_exact_admitted_thirteen_row_set() -> N
     mutations = []
     mutations.append({"rows": [*manifest["rows"], dict(manifest["rows"][0])]})
     mutations.append({"rows": manifest["rows"][:-1]})
-    mutations.append({"rows": [*manifest["rows"][:-1], {"account_id": "unknown", "strategy_id": "qsi"}]})
-    mutations.append({"rows": [{**row, "strategy_id": "echotrade-growth-pivots"} if index == 0 else row for index, row in enumerate(manifest["rows"]) ]})
-    mutations.append({"rows": [{**row, "account_id": None} if index == 0 else row for index, row in enumerate(manifest["rows"]) ]})
-    mutations.append({"rows": [{**row, "strategy_id": 17} if index == 0 else row for index, row in enumerate(manifest["rows"]) ]})
+    mutations.append(
+        {
+            "rows": [
+                *manifest["rows"][:-1],
+                {"account_id": "unknown", "strategy_id": "qsi"},
+            ]
+        }
+    )
+    mutations.append(
+        {
+            "rows": [
+                {**row, "strategy_id": "echotrade-growth-pivots"} if index == 0 else row
+                for index, row in enumerate(manifest["rows"])
+            ]
+        }
+    )
+    mutations.append(
+        {
+            "rows": [
+                {**row, "account_id": None} if index == 0 else row
+                for index, row in enumerate(manifest["rows"])
+            ]
+        }
+    )
+    mutations.append(
+        {
+            "rows": [
+                {**row, "strategy_id": 17} if index == 0 else row
+                for index, row in enumerate(manifest["rows"])
+            ]
+        }
+    )
     for mutation in mutations:
         with pytest.raises(reporter.ReportValidationError):
             reporter._validate_report_account_manifest(
@@ -1032,12 +1145,14 @@ def test_report_account_manifest_requires_exact_admitted_thirteen_row_set() -> N
             )
 
 
-def test_report_account_manifest_rejects_date_mutation_and_requires_full_epoch_tuple() -> None:
+def test_report_account_manifest_rejects_date_mutation_and_requires_full_epoch_tuple() -> (
+    None
+):
     controls, _ = reporter._report_product_controls(_real_baseline_catalog())
     crosswalk = json.loads(
-        (ROOT / "contracts" / "account-strategy-current-epoch-crosswalk-v1.json").read_text(
-            encoding="utf-8"
-        )
+        (
+            ROOT / "contracts" / "account-strategy-current-epoch-crosswalk-v1.json"
+        ).read_text(encoding="utf-8")
     )
     admitted = [
         row
@@ -1061,7 +1176,9 @@ def test_report_account_manifest_rejects_date_mutation_and_requires_full_epoch_t
     mutation = {"rows": [dict(row) for row in valid["rows"]]}
     mutation["rows"][0]["effective_start"] = "2025-11-20"
     with pytest.raises(reporter.ReportValidationError, match="crosswalk"):
-        reporter._validate_report_account_manifest(mutation, controls, crosswalk=crosswalk)
+        reporter._validate_report_account_manifest(
+            mutation, controls, crosswalk=crosswalk
+        )
 
     pair_only = {
         "rows": [
@@ -1070,7 +1187,9 @@ def test_report_account_manifest_rejects_date_mutation_and_requires_full_epoch_t
         ]
     }
     with pytest.raises(reporter.ReportValidationError, match="epoch tuple"):
-        reporter._validate_report_account_manifest(pair_only, controls, crosswalk=crosswalk)
+        reporter._validate_report_account_manifest(
+            pair_only, controls, crosswalk=crosswalk
+        )
 
 
 def _write_epoch_manifest_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
@@ -1117,19 +1236,26 @@ def _write_epoch_manifest_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path
     return manifest_path, source_path, crosswalk_path, generation_root
 
 
-def _legacy_write_epoch_manifest_inputs(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
+def _legacy_write_epoch_manifest_inputs(
+    tmp_path: Path,
+) -> tuple[Path, Path, Path, Path]:
     crosswalk_path = tmp_path / "crosswalk.json"
     crosswalk = json.loads(
-        (ROOT / "contracts" / "account-strategy-current-epoch-crosswalk-v1.json").read_text(
-            encoding="utf-8"
-        )
+        (
+            ROOT / "contracts" / "account-strategy-current-epoch-crosswalk-v1.json"
+        ).read_text(encoding="utf-8")
     )
     crosswalk_path.write_bytes(reporter.canonical_json_bytes(crosswalk))
     manifest = {
         "rows": [
             {
                 key: row[key]
-                for key in ("account_id", "strategy_id", "effective_start", "effective_end")
+                for key in (
+                    "account_id",
+                    "strategy_id",
+                    "effective_start",
+                    "effective_end",
+                )
             }
             for row in crosswalk["rows"]
             if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
@@ -1294,7 +1420,9 @@ def test_current_product_hwm_coverage_uses_only_required_strategy_perimeter(
 
     strategy_rows = report["strategy_summary"]
     assert {row["strategy_id"] for row in strategy_rows} == REQUIRED_STRATEGY_IDS
-    assert all(Decimal(row["current_value_usd"]) >= Decimal("0") for row in strategy_rows)
+    assert all(
+        Decimal(row["current_value_usd"]) >= Decimal("0") for row in strategy_rows
+    )
     assert report["hwm_summary"]["governed_perimeter_value_usd"] == (
         "445477.4493751776827506151026"
     )
@@ -1329,7 +1457,9 @@ def test_current_product_hwm_policy_exclusion_of_required_strategy_fails_before_
 def test_build_report_data_requires_explicit_crosswalk_and_baseline_bound_epoch_identity(
     tmp_path: Path,
 ) -> None:
-    manifest_path, source_path, crosswalk_path, generation_root = _write_epoch_manifest_inputs(tmp_path)
+    manifest_path, source_path, crosswalk_path, generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
+    )
 
     report, _content, _baseline_path = reporter.build_report_data(
         REAL_BASELINE_ROOT,
@@ -1339,7 +1469,9 @@ def test_build_report_data_requires_explicit_crosswalk_and_baseline_bound_epoch_
         epoch_manifest_generation_root=generation_root,
         baseline_generation_id=ACCEPTED_EPOCH_BASELINE_GENERATION_ID,
     )
-    assert {row["strategy_id"] for row in report["strategy_summary"]} == REQUIRED_STRATEGY_IDS
+    assert {
+        row["strategy_id"] for row in report["strategy_summary"]
+    } == REQUIRED_STRATEGY_IDS
     crosswalk_provenance = next(
         row
         for row in report["provenance"]
@@ -1347,9 +1479,10 @@ def test_build_report_data_requires_explicit_crosswalk_and_baseline_bound_epoch_
     )
     assert crosswalk_provenance["path"] == reporter.EPOCH_CROSSWALK_WORKBOOK_NAME
     assert crosswalk_provenance["size_bytes"] == crosswalk_path.stat().st_size
-    assert crosswalk_provenance["sha256"] == hashlib.sha256(
-        crosswalk_path.read_bytes()
-    ).hexdigest()
+    assert (
+        crosswalk_provenance["sha256"]
+        == hashlib.sha256(crosswalk_path.read_bytes()).hexdigest()
+    )
 
     mutated = json.loads(crosswalk_path.read_text(encoding="utf-8"))
     p123_eu = next(row for row in mutated["rows"] if row["strategy_id"] == "p123-eu")
@@ -1368,8 +1501,8 @@ def test_build_report_data_requires_explicit_crosswalk_and_baseline_bound_epoch_
 def test_build_report_data_rejects_triplet_without_verified_generation_root(
     tmp_path: Path,
 ) -> None:
-    manifest_path, source_path, crosswalk_path, _generation_root = _write_epoch_manifest_inputs(
-        tmp_path
+    manifest_path, source_path, crosswalk_path, _generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
     )
     with pytest.raises(reporter.ReportValidationError, match="generation root"):
         reporter.build_report_data(
@@ -1384,8 +1517,8 @@ def test_build_report_data_rejects_triplet_without_verified_generation_root(
 def test_build_report_data_rejects_source_identity_mutation(
     tmp_path: Path, field: str
 ) -> None:
-    manifest_path, source_path, crosswalk_path, generation_root = _write_epoch_manifest_inputs(
-        tmp_path
+    manifest_path, source_path, crosswalk_path, generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
     )
     source = json.loads(source_path.read_text(encoding="utf-8"))
     source[field] = "f" * 64
@@ -1403,7 +1536,9 @@ def test_build_report_data_rejects_source_identity_mutation(
 def test_build_report_data_rejects_manifest_without_explicit_crosswalk(
     tmp_path: Path,
 ) -> None:
-    manifest_path, source_path, _crosswalk_path, generation_root = _write_epoch_manifest_inputs(tmp_path)
+    manifest_path, source_path, _crosswalk_path, generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
+    )
     with pytest.raises(reporter.ReportValidationError, match="crosswalk"):
         reporter.build_report_data(
             REAL_BASELINE_ROOT,
@@ -1415,10 +1550,14 @@ def test_build_report_data_rejects_manifest_without_explicit_crosswalk(
 def test_build_report_data_rejects_echo_composer_crosswalk_disposition_swap(
     tmp_path: Path,
 ) -> None:
-    manifest_path, source_path, crosswalk_path, generation_root = _write_epoch_manifest_inputs(tmp_path)
+    manifest_path, source_path, crosswalk_path, generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
+    )
     crosswalk = json.loads(crosswalk_path.read_text(encoding="utf-8"))
     echo = next(
-        row for row in crosswalk["rows"] if row["strategy_id"] == "echotrade-growth-pivots"
+        row
+        for row in crosswalk["rows"]
+        if row["strategy_id"] == "echotrade-growth-pivots"
     )
     composer = next(
         row for row in crosswalk["rows"] if row["strategy_id"] == "composer-holy-grail"
@@ -1445,7 +1584,9 @@ def test_build_report_data_rejects_echo_composer_crosswalk_disposition_swap(
 def test_build_candidate_and_verify_use_successful_epoch_triplet(
     tmp_path: Path,
 ) -> None:
-    manifest_path, source_path, crosswalk_path, generation_root = _write_epoch_manifest_inputs(tmp_path)
+    manifest_path, source_path, crosswalk_path, generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
+    )
     built = reporter.build_candidate(
         REAL_BASELINE_ROOT,
         tmp_path / "report-output",
@@ -1463,20 +1604,24 @@ def test_build_candidate_and_verify_use_successful_epoch_triplet(
         candidate,
         Path(built["workbook_path"]),
         epoch_manifest_path=candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME,
-        epoch_manifest_source_path=candidate / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
+        epoch_manifest_source_path=candidate
+        / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
         epoch_crosswalk_path=candidate_crosswalk,
         epoch_manifest_generation_root=generation_root,
         baseline_generation_id=ACCEPTED_EPOCH_BASELINE_GENERATION_ID,
     )
-    assert verified["epoch_crosswalk_sha256"] == hashlib.sha256(
-        crosswalk_path.read_bytes()
-    ).hexdigest()
+    assert (
+        verified["epoch_crosswalk_sha256"]
+        == hashlib.sha256(crosswalk_path.read_bytes()).hexdigest()
+    )
 
 
 def test_build_bind_verify_publish_preserves_staged_epoch_authority(
     tmp_path: Path,
 ) -> None:
-    manifest_path, source_path, crosswalk_path, generation_root = _write_epoch_manifest_inputs(tmp_path)
+    manifest_path, source_path, crosswalk_path, generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
+    )
     built = reporter.build_candidate(
         REAL_BASELINE_ROOT,
         tmp_path / "report-output",
@@ -1501,9 +1646,24 @@ def test_build_bind_verify_publish_preserves_staged_epoch_authority(
                 "idempotency_key": job["idempotency_key"],
                 "final_state": "SUCCEEDED",
                 "steps": [
-                    {"step_index": 0, "type": "open", "status": "succeeded", "message": "opened"},
-                    {"step_index": 1, "type": "recalc", "status": "succeeded", "message": "recalculated"},
-                    {"step_index": 2, "type": "save_as", "status": "succeeded", "message": "saved"},
+                    {
+                        "step_index": 0,
+                        "type": "open",
+                        "status": "succeeded",
+                        "message": "opened",
+                    },
+                    {
+                        "step_index": 1,
+                        "type": "recalc",
+                        "status": "succeeded",
+                        "message": "recalculated",
+                    },
+                    {
+                        "step_index": 2,
+                        "type": "save_as",
+                        "status": "succeeded",
+                        "message": "saved",
+                    },
                 ],
                 "invariants": [],
                 "ok": True,
@@ -1529,46 +1689,52 @@ def test_build_bind_verify_publish_preserves_staged_epoch_authority(
         validation,
         binding_path,
         epoch_manifest_path=candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME,
-        epoch_manifest_source_path=candidate / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
+        epoch_manifest_source_path=candidate
+        / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
         epoch_crosswalk_path=candidate / reporter.EPOCH_CROSSWALK_WORKBOOK_NAME,
         baseline_root=REAL_BASELINE_ROOT,
         epoch_manifest_generation_root=generation_root,
         baseline_generation_id=ACCEPTED_EPOCH_BASELINE_GENERATION_ID,
     )
-    assert binding["epoch_crosswalk_sha256"] == hashlib.sha256(
-        crosswalk_path.read_bytes()
-    ).hexdigest()
-    assert reporter.main(
-        [
-            "bind-workbook-evidence",
-            "--candidate-dir",
-            str(candidate),
-            "--excel-workbook",
-            str(final_workbook),
-            "--xlsx-result",
-            str(xlsx_result),
-            "--validation-result",
-            str(validation),
-            "--evidence",
-            str(binding_path),
-            "--baseline-root",
-            str(REAL_BASELINE_ROOT),
-            "--epoch-manifest",
-            str(candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME),
-            "--epoch-manifest-source",
-            str(candidate / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME),
-            "--epoch-crosswalk",
-            str(candidate / reporter.EPOCH_CROSSWALK_WORKBOOK_NAME),
-            "--epoch-manifest-generation-root",
-            str(generation_root),
-        ]
-    ) == 0
+    assert (
+        binding["epoch_crosswalk_sha256"]
+        == hashlib.sha256(crosswalk_path.read_bytes()).hexdigest()
+    )
+    assert (
+        reporter.main(
+            [
+                "bind-workbook-evidence",
+                "--candidate-dir",
+                str(candidate),
+                "--excel-workbook",
+                str(final_workbook),
+                "--xlsx-result",
+                str(xlsx_result),
+                "--validation-result",
+                str(validation),
+                "--evidence",
+                str(binding_path),
+                "--baseline-root",
+                str(REAL_BASELINE_ROOT),
+                "--epoch-manifest",
+                str(candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME),
+                "--epoch-manifest-source",
+                str(candidate / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME),
+                "--epoch-crosswalk",
+                str(candidate / reporter.EPOCH_CROSSWALK_WORKBOOK_NAME),
+                "--epoch-manifest-generation-root",
+                str(generation_root),
+            ]
+        )
+        == 0
+    )
     verified = reporter.verify_candidate(
         REAL_BASELINE_ROOT,
         candidate,
         final_workbook,
         epoch_manifest_path=candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME,
-        epoch_manifest_source_path=candidate / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
+        epoch_manifest_source_path=candidate
+        / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
         epoch_crosswalk_path=candidate / reporter.EPOCH_CROSSWALK_WORKBOOK_NAME,
         epoch_manifest_generation_root=generation_root,
         baseline_generation_id=ACCEPTED_EPOCH_BASELINE_GENERATION_ID,
@@ -1584,7 +1750,8 @@ def test_build_bind_verify_publish_preserves_staged_epoch_authority(
         provider_ledger_root=REAL_BASELINE_ROOT.parent / "provider-ledger",
         workbook_evidence_binding=binding_path,
         epoch_manifest_path=candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME,
-        epoch_manifest_source_path=candidate / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
+        epoch_manifest_source_path=candidate
+        / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
         epoch_crosswalk_path=candidate / reporter.EPOCH_CROSSWALK_WORKBOOK_NAME,
         epoch_manifest_generation_root=generation_root,
     )
@@ -1594,35 +1761,38 @@ def test_build_bind_verify_publish_preserves_staged_epoch_authority(
     )
     assert delivery["epoch_crosswalk"]["sha256"] == binding["epoch_crosswalk_sha256"]
     cli_published_root = tmp_path / "cli-published"
-    assert reporter.main(
-        [
-            "publish",
-            "--baseline-root",
-            str(REAL_BASELINE_ROOT),
-            "--provider-ledger-root",
-            str(REAL_BASELINE_ROOT.parent / "provider-ledger"),
-            "--candidate-dir",
-            str(candidate),
-            "--excel-workbook",
-            str(final_workbook),
-            "--xlsx-result",
-            str(xlsx_result),
-            "--validation-result",
-            str(validation),
-            "--workbook-evidence-binding",
-            str(binding_path),
-            "--output-root",
-            str(cli_published_root),
-            "--epoch-manifest",
-            str(candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME),
-            "--epoch-manifest-source",
-            str(candidate / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME),
-            "--epoch-crosswalk",
-            str(candidate / reporter.EPOCH_CROSSWALK_WORKBOOK_NAME),
-            "--epoch-manifest-generation-root",
-            str(generation_root),
-        ]
-    ) == 0
+    assert (
+        reporter.main(
+            [
+                "publish",
+                "--baseline-root",
+                str(REAL_BASELINE_ROOT),
+                "--provider-ledger-root",
+                str(REAL_BASELINE_ROOT.parent / "provider-ledger"),
+                "--candidate-dir",
+                str(candidate),
+                "--excel-workbook",
+                str(final_workbook),
+                "--xlsx-result",
+                str(xlsx_result),
+                "--validation-result",
+                str(validation),
+                "--workbook-evidence-binding",
+                str(binding_path),
+                "--output-root",
+                str(cli_published_root),
+                "--epoch-manifest",
+                str(candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME),
+                "--epoch-manifest-source",
+                str(candidate / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME),
+                "--epoch-crosswalk",
+                str(candidate / reporter.EPOCH_CROSSWALK_WORKBOOK_NAME),
+                "--epoch-manifest-generation-root",
+                str(generation_root),
+            ]
+        )
+        == 0
+    )
     cli_delivery = next(cli_published_root.glob("deliveries/*/report-delivery.json"))
     cli_receipt = json.loads(cli_delivery.read_text(encoding="utf-8"))
     assert cli_receipt["epoch_crosswalk"]["size_bytes"] == crosswalk_path.stat().st_size
@@ -1651,7 +1821,9 @@ def test_build_bind_verify_publish_preserves_staged_epoch_authority(
 def test_current_crosswalk_labels_and_suffixes_reach_report_and_workbook(
     tmp_path: Path,
 ) -> None:
-    manifest_path, source_path, crosswalk_path, generation_root = _write_epoch_manifest_inputs(tmp_path)
+    manifest_path, source_path, crosswalk_path, generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
+    )
     crosswalk = json.loads(crosswalk_path.read_text(encoding="utf-8"))
     expected = {
         (
@@ -1684,7 +1856,10 @@ def test_current_crosswalk_labels_and_suffixes_reach_report_and_workbook(
     workbook_path = tmp_path / "report.xlsx"
     reporter._workbook(report, workbook_path)
     workbook = load_workbook(workbook_path, data_only=True)
-    for sheet_name, table_name in (("TWR MWR", "tblTwrMwr"), ("Account Summary", "tblAccounts")):
+    for sheet_name, table_name in (
+        ("TWR MWR", "tblTwrMwr"),
+        ("Account Summary", "tblAccounts"),
+    ):
         table = workbook[sheet_name].tables[table_name]
         min_col, min_row, max_col, max_row = range_boundaries(table.ref)
         headers = [
@@ -1697,18 +1872,32 @@ def test_current_crosswalk_labels_and_suffixes_reach_report_and_workbook(
         if sheet_name == "TWR MWR":
             values = {
                 (
-                    workbook[sheet_name].cell(row, headers.index("Account Id") + min_col).value,
-                    workbook[sheet_name].cell(row, headers.index("Strategy Id") + min_col).value,
-                    workbook[sheet_name].cell(row, headers.index("Effective Start") + min_col).value,
-                    workbook[sheet_name].cell(row, headers.index("Effective End") + min_col).value
+                    workbook[sheet_name]
+                    .cell(row, headers.index("Account Id") + min_col)
+                    .value,
+                    workbook[sheet_name]
+                    .cell(row, headers.index("Strategy Id") + min_col)
+                    .value,
+                    workbook[sheet_name]
+                    .cell(row, headers.index("Effective Start") + min_col)
+                    .value,
+                    workbook[sheet_name]
+                    .cell(row, headers.index("Effective End") + min_col)
+                    .value
                     or None,
                 ): (
-                    workbook[sheet_name].cell(row, headers.index("Account Label") + min_col).value,
-                    workbook[sheet_name].cell(row, headers.index("Last Four") + min_col).value
+                    workbook[sheet_name]
+                    .cell(row, headers.index("Account Label") + min_col)
+                    .value,
+                    workbook[sheet_name]
+                    .cell(row, headers.index("Last Four") + min_col)
+                    .value
                     or None,
                 )
                 for row in range(min_row + 1, max_row + 1)
-                if workbook[sheet_name].cell(row, headers.index("Strategy Id") + min_col).value
+                if workbook[sheet_name]
+                .cell(row, headers.index("Strategy Id") + min_col)
+                .value
                 in REQUIRED_STRATEGY_IDS
             }
             assert values == expected
@@ -1717,7 +1906,9 @@ def test_current_crosswalk_labels_and_suffixes_reach_report_and_workbook(
 def test_cli_build_does_not_drop_epoch_manifest_when_crosswalk_is_missing(
     tmp_path: Path,
 ) -> None:
-    manifest_path, source_path, _crosswalk_path, generation_root = _write_epoch_manifest_inputs(tmp_path)
+    manifest_path, source_path, _crosswalk_path, generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
+    )
     assert (
         reporter.main(
             [
@@ -1739,7 +1930,9 @@ def test_cli_build_does_not_drop_epoch_manifest_when_crosswalk_is_missing(
 def test_cli_verify_does_not_drop_epoch_manifest_when_crosswalk_is_missing(
     tmp_path: Path,
 ) -> None:
-    manifest_path, source_path, _crosswalk_path, generation_root = _write_epoch_manifest_inputs(tmp_path)
+    manifest_path, source_path, _crosswalk_path, generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
+    )
     assert (
         reporter.main(
             [
@@ -1780,7 +1973,9 @@ def test_cli_financial_build_and_verify_reject_all_none_epoch_triplet(
 def test_cli_financial_build_and_verify_successful_epoch_triplet(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    manifest_path, source_path, crosswalk_path, generation_root = _write_epoch_manifest_inputs(tmp_path)
+    manifest_path, source_path, crosswalk_path, generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
+    )
     output_root = tmp_path / "cli-output"
     assert (
         reporter.main(
@@ -1828,9 +2023,10 @@ def test_cli_financial_build_and_verify_successful_epoch_triplet(
     )
     verified = json.loads(capsys.readouterr().out)
     assert verified["epoch_crosswalk_size_bytes"] == crosswalk_path.stat().st_size
-    assert verified["epoch_crosswalk_sha256"] == hashlib.sha256(
-        crosswalk_path.read_bytes()
-    ).hexdigest()
+    assert (
+        verified["epoch_crosswalk_sha256"]
+        == hashlib.sha256(crosswalk_path.read_bytes()).hexdigest()
+    )
     assert (
         reporter.main(
             [
@@ -1850,7 +2046,9 @@ def test_cli_financial_build_and_verify_successful_epoch_triplet(
 def test_build_candidate_rejects_epoch_manifest_omission(
     tmp_path: Path,
 ) -> None:
-    manifest_path, source_path, _crosswalk_path, generation_root = _write_epoch_manifest_inputs(tmp_path)
+    manifest_path, source_path, _crosswalk_path, generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
+    )
     with pytest.raises(reporter.ReportValidationError, match="crosswalk"):
         reporter.build_candidate(
             REAL_BASELINE_ROOT,
@@ -1863,7 +2061,9 @@ def test_build_candidate_rejects_epoch_manifest_omission(
 def test_bind_verify_publish_reject_epoch_manifest_omission(
     tmp_path: Path,
 ) -> None:
-    manifest_path, source_path, _crosswalk_path, generation_root = _write_epoch_manifest_inputs(tmp_path)
+    manifest_path, source_path, _crosswalk_path, generation_root = (
+        _write_epoch_manifest_inputs(tmp_path)
+    )
     with pytest.raises(reporter.ReportValidationError, match="crosswalk"):
         reporter.bind_workbook_evidence(
             tmp_path / "candidate",
@@ -1947,9 +2147,7 @@ def test_product_controls_reject_unmarked_no_overlap_catalog(tmp_path: Path) -> 
     ):
         reporter._report_product_controls(
             {
-                "allocations": [
-                    {"scope": "SYSTEMATIC", "strategy_id": "unrelated"}
-                ],
+                "allocations": [{"scope": "SYSTEMATIC", "strategy_id": "unrelated"}],
                 "strategies": [{"strategy_id": "unrelated"}],
             },
             path,
@@ -1988,9 +2186,7 @@ def test_schema_invalid_portable_fixture_override_cannot_replace_owner_controls(
         "report_product_required_strategy_ids": [
             f"fixture-{index}" for index in range(1, 8)
         ],
-        "strategies": [
-            {"strategy_id": f"fixture-{index}"} for index in range(1, 10)
-        ],
+        "strategies": [{"strategy_id": f"fixture-{index}"} for index in range(1, 10)],
     }
 
     with pytest.raises(
@@ -2057,9 +2253,12 @@ def test_current_fact_surfaces_exclude_retired_strategy_and_account() -> None:
 def test_current_fact_excludes_required_strategy_on_unknown_account() -> None:
     controls = {"current": {"product_requirement": "REQUIRED"}}
 
-    assert reporter._current_product_fact_rows(
-        [{"account_id": "unknown-account", "strategy_id": "current"}],
-        controls,
-        {"current-account"},
-        "test facts",
-    ) == []
+    assert (
+        reporter._current_product_fact_rows(
+            [{"account_id": "unknown-account", "strategy_id": "current"}],
+            controls,
+            {"current-account"},
+            "test facts",
+        )
+        == []
+    )

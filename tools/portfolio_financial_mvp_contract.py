@@ -20,7 +20,6 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
-import re
 import subprocess
 from typing import Any, Final, Mapping, Sequence
 
@@ -266,7 +265,9 @@ EPOCH_CROSSWALK_ARTIFACT_PATH: Final = "authority/account-assignment-crosswalk.j
 EPOCH_CROSSWALK_ARTIFACT_SCHEMA_NAME: Final = "account-strategy-current-epoch-crosswalk"
 EPOCH_CROSSWALK_ARTIFACT_SCHEMA_VERSION: Final = "1"
 EPOCH_INDEPENDENT_REPORT_PATH: Final = "verification/independent-verification.json"
-EPOCH_INDEPENDENT_REPORT_SCHEMA_NAME: Final = "account-manifest-independent-verification"
+EPOCH_INDEPENDENT_REPORT_SCHEMA_NAME: Final = (
+    "account-manifest-independent-verification"
+)
 EPOCH_INDEPENDENT_REPORT_SCHEMA_VERSION: Final = "3"
 _V9_TRACE_CLASSES: Final = frozenset(
     {"EXTERNAL_IN", "EXTERNAL_OUT", "INTERNAL_IN", "INTERNAL_OUT"}
@@ -494,7 +495,10 @@ def _validate_v9_flow_trace(trace: object) -> None:
             )
         _v9_date(item["event_date"], "artifact v9 flow trace")
         _v9_date(item["nav_recognition_date"], "artifact v9 flow trace")
-        if type(item["amount"]) is not str or _V9_DECIMAL.fullmatch(item["amount"]) is None:
+        if (
+            type(item["amount"]) is not str
+            or _V9_DECIMAL.fullmatch(item["amount"]) is None
+        ):
             raise FinancialMvpContractError(
                 "epoch manifest source artifact v9 flow trace differs"
             )
@@ -510,19 +514,22 @@ def _validate_v9_epoch_release_controls(
     generation_as_of_date: date,
 ) -> None:
     manifest = _epoch_payload_json(manifest_payload, "artifact")
-    if type(manifest.get("schema_version")) is not int or manifest.get(
-        "schema_version"
-    ) != 9:
-        raise FinancialMvpContractError("epoch manifest source artifact schema v9 differs")
-    cutoff = _v9_date(
-        manifest.get("calculation_cutoff_date"), "artifact cutoff"
-    )
+    if (
+        type(manifest.get("schema_version")) is not int
+        or manifest.get("schema_version") != 9
+    ):
+        raise FinancialMvpContractError(
+            "epoch manifest source artifact schema v9 differs"
+        )
+    cutoff = _v9_date(manifest.get("calculation_cutoff_date"), "artifact cutoff")
     crosswalk = _epoch_payload_json(crosswalk_payload, "crosswalk")
     crosswalk_cutoff = _v9_date(
         crosswalk.get("calculation_cutoff_date"), "crosswalk cutoff"
     )
     if cutoff != crosswalk_cutoff:
-        raise FinancialMvpContractError("epoch manifest source crosswalk cutoff differs")
+        raise FinancialMvpContractError(
+            "epoch manifest source crosswalk cutoff differs"
+        )
     if cutoff > generation_as_of_date:
         raise FinancialMvpContractError("epoch manifest source artifact cutoff differs")
     rows = manifest.get("rows")
@@ -532,9 +539,13 @@ def _validate_v9_epoch_release_controls(
     blocked_rows = 0
     for row in rows:
         if type(row) is not dict:
-            raise FinancialMvpContractError("epoch manifest source artifact row differs")
+            raise FinancialMvpContractError(
+                "epoch manifest source artifact row differs"
+            )
         if "date" in row:
-            raise FinancialMvpContractError("epoch manifest source artifact has v8 trace")
+            raise FinancialMvpContractError(
+                "epoch manifest source artifact has v8 trace"
+            )
         status = row.get("status")
         if status == "OK":
             ok_rows += 1
@@ -546,26 +557,35 @@ def _validate_v9_epoch_release_controls(
         elif status == "BLOCKED_ADMISSION":
             blocked_rows += 1
         else:
-            raise FinancialMvpContractError("epoch manifest source artifact status differs")
+            raise FinancialMvpContractError(
+                "epoch manifest source artifact status differs"
+            )
 
     report = _epoch_payload_json(report_payload, "independent report")
-    if type(report.get("schema_version")) is not int or report.get(
-        "schema_version"
-    ) != 3:
+    if (
+        type(report.get("schema_version")) is not int
+        or report.get("schema_version") != 3
+    ):
         raise FinancialMvpContractError("epoch manifest source report schema differs")
     if report.get("status") != "VERIFIED":
         raise FinancialMvpContractError("epoch manifest source report status differs")
     if report_descriptor["path"] != EPOCH_INDEPENDENT_REPORT_PATH:
-        raise FinancialMvpContractError("epoch manifest source report descriptor differs")
+        raise FinancialMvpContractError(
+            "epoch manifest source report descriptor differs"
+        )
     selected = report.get("selected_source_identities")
     if type(selected) is not dict:
-        raise FinancialMvpContractError("epoch manifest source report source identities differ")
+        raise FinancialMvpContractError(
+            "epoch manifest source report source identities differ"
+        )
     reported_crosswalk = selected.get("current_epoch_crosswalk")
     if type(reported_crosswalk) is not dict or any(
         reported_crosswalk.get(key) != crosswalk_descriptor[key]
         for key in ("sha256", "size_bytes")
     ):
-        raise FinancialMvpContractError("epoch manifest source report crosswalk differs")
+        raise FinancialMvpContractError(
+            "epoch manifest source report crosswalk differs"
+        )
     subjects = report.get("subjects")
     if type(subjects) is not list:
         raise FinancialMvpContractError("epoch manifest source report subjects differ")
@@ -574,29 +594,37 @@ def _validate_v9_epoch_release_controls(
             subject
             for subject in subjects
             if type(subject) is dict
-            and all(subject.get(key) == descriptor[key] for key in ("path", "sha256", "size_bytes"))
+            and all(
+                subject.get(key) == descriptor[key]
+                for key in ("path", "sha256", "size_bytes")
+            )
         ]
         if len(matches) != 1:
-            raise FinancialMvpContractError("epoch manifest source report subjects differ")
+            raise FinancialMvpContractError(
+                "epoch manifest source report subjects differ"
+            )
     invariants = report.get("invariants")
-    if type(invariants) is not dict or set(invariants) != _V9_REPORT_INVARIANTS or any(
-        invariants[name] is not True for name in _V9_REPORT_INVARIANTS
+    if (
+        type(invariants) is not dict
+        or set(invariants) != _V9_REPORT_INVARIANTS
+        or any(invariants[name] is not True for name in _V9_REPORT_INVARIANTS)
     ):
-        raise FinancialMvpContractError("epoch manifest source report invariants differ")
+        raise FinancialMvpContractError(
+            "epoch manifest source report invariants differ"
+        )
     report_cutoff = report.get("calculation_cutoff_date")
-    if report_cutoff is not None and _v9_date(
-        report_cutoff, "report cutoff"
-    ) != cutoff:
+    if report_cutoff is not None and _v9_date(report_cutoff, "report cutoff") != cutoff:
         raise FinancialMvpContractError("epoch manifest source report cutoff differs")
     numeric = report.get("numeric_verification")
     if (
         type(numeric) is not dict
         or type(numeric.get("discrepancy_count")) is not int
         or numeric.get("discrepancy_count") != 0
-        or numeric.get("disposition")
-        != "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
+        or numeric.get("disposition") != "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
     ):
-        raise FinancialMvpContractError("epoch manifest source report numeric verification differs")
+        raise FinancialMvpContractError(
+            "epoch manifest source report numeric verification differs"
+        )
     if (
         _v9_report_count(report, "output_row_count") != len(rows)
         or _v9_report_count(report, "ok_output_row_count") != ok_rows
@@ -633,7 +661,9 @@ def epoch_manifest_source_from_bundle(bundle: GenerationBundle) -> dict[str, obj
         )
     artifact_version = artifacts[0].schema_version
     if artifact_version not in EPOCH_MANIFEST_ARTIFACT_SCHEMA_VERSIONS:
-        raise FinancialMvpContractError("epoch manifest source artifact schema version differs")
+        raise FinancialMvpContractError(
+            "epoch manifest source artifact schema version differs"
+        )
     artifact, manifest_payload = _epoch_artifact_descriptor(
         bundle,
         artifact_id=EPOCH_MANIFEST_ARTIFACT_PATH,
@@ -671,7 +701,9 @@ def epoch_manifest_source_from_bundle(bundle: GenerationBundle) -> dict[str, obj
             or receipt_report.sha256 != report["sha256"]
             or receipt_report.size_bytes != report["size_bytes"]
         ):
-            raise FinancialMvpContractError("epoch manifest source receipt report differs")
+            raise FinancialMvpContractError(
+                "epoch manifest source receipt report differs"
+            )
         _validate_v9_epoch_release_controls(
             manifest_payload,
             artifact,
@@ -696,7 +728,9 @@ def _validate_epoch_source_descriptor(
     actual: object, expected: object, name: str
 ) -> None:
     if type(actual) is not dict or type(expected) is not dict:
-        raise FinancialMvpContractError(f"epoch manifest source {name} must be an object")
+        raise FinancialMvpContractError(
+            f"epoch manifest source {name} must be an object"
+        )
     if set(actual) != _EPOCH_MANIFEST_ARTIFACT_KEYS:
         raise FinancialMvpContractError(
             f"epoch manifest source {name} keys differ from contract"
@@ -708,7 +742,9 @@ def _validate_epoch_source_descriptor(
         raise FinancialMvpContractError(
             f"epoch manifest source {name}.size_bytes must be an integer"
         )
-    _epoch_manifest_source_value(size_bytes, expected["size_bytes"], f"{name}.size_bytes")
+    _epoch_manifest_source_value(
+        size_bytes, expected["size_bytes"], f"{name}.size_bytes"
+    )
     schema = actual["schema"]
     expected_schema = expected["schema"]
     if type(schema) is not dict or type(expected_schema) is not dict:
@@ -733,10 +769,15 @@ def validate_epoch_manifest_source(source: object, *, bundle: GenerationBundle) 
         raise FinancialMvpContractError("epoch manifest source must be an object")
     artifact = source.get("artifact")
     if type(artifact) is not dict or type(artifact.get("schema")) is not dict:
-        raise FinancialMvpContractError("epoch manifest source artifact must be an object")
+        raise FinancialMvpContractError(
+            "epoch manifest source artifact must be an object"
+        )
     version = artifact["schema"].get("version")
     expected_artifact = expected["artifact"]
-    if type(expected_artifact) is not dict or type(expected_artifact.get("schema")) is not dict:
+    if (
+        type(expected_artifact) is not dict
+        or type(expected_artifact.get("schema")) is not dict
+    ):
         raise AssertionError("verified epoch source artifact shape is invalid")
     _epoch_manifest_source_value(
         version,
@@ -744,7 +785,9 @@ def validate_epoch_manifest_source(source: object, *, bundle: GenerationBundle) 
         "artifact.schema.version",
     )
     if version not in _EPOCH_MANIFEST_SOURCE_KEYS_BY_VERSION:
-        raise FinancialMvpContractError("epoch manifest source artifact schema version differs")
+        raise FinancialMvpContractError(
+            "epoch manifest source artifact schema version differs"
+        )
     if version == "9" and "crosswalk" not in source:
         raise FinancialMvpContractError("epoch manifest source crosswalk is required")
     if set(source) != _EPOCH_MANIFEST_SOURCE_KEYS_BY_VERSION[version]:
@@ -848,9 +891,7 @@ def _verify_history_receipt(
             raise FinancialMvpContractError(
                 f"history current-pointer selector differs: {role}"
             )
-        pointer_path = _evidence_file(
-            root, "CURRENT.json", f"{authority_root}/CURRENT"
-        )
+        pointer_path = _evidence_file(root, "CURRENT.json", f"{authority_root}/CURRENT")
         pointer = _load_json(pointer_path, f"{authority_root} current pointer")
         if (
             pointer.get("state") != "PUBLISHED"
@@ -1102,10 +1143,14 @@ def _verify_strategy_version_history_evidence(
                 "provider-ledger history receipt selector differs"
             )
 
-        expected_generation_key = "accepted_generation_id" if accepted_authority else (
-            "legacy_generation_id"
-            if deprecated_event_only
-            else "current_generation_id"
+        expected_generation_key = (
+            "accepted_generation_id"
+            if accepted_authority
+            else (
+                "legacy_generation_id"
+                if deprecated_event_only
+                else "current_generation_id"
+            )
         )
         expected_sha_key = accepted_sha_key if accepted_authority else current_sha_key
         legacy_sha_key = (
@@ -1131,11 +1176,11 @@ def _verify_strategy_version_history_evidence(
                 else "current_generation_id"
             )
             target_sha_key = (
-                legacy_sha_key
-                if deprecated_event_only
-                else current_sha_key
+                legacy_sha_key if deprecated_event_only else current_sha_key
             )
-            current_generation = _HISTORY_PROVIDER_LEDGER_TRANSITION[target_generation_key]
+            current_generation = _HISTORY_PROVIDER_LEDGER_TRANSITION[
+                target_generation_key
+            ]
             projected["generation_id"] = current_generation
             projected["artifact_selector"] = (
                 f"generations/{current_generation}/{suffix}"
@@ -1159,7 +1204,9 @@ def _verify_strategy_version_history_evidence(
             raise FinancialMvpContractError(
                 f"history correction has unknown strategy: {strategy_id}"
             )
-        deprecated_event_only = _is_deprecated_event_only_history(strategy, semantic_row)
+        deprecated_event_only = _is_deprecated_event_only_history(
+            strategy, semantic_row
+        )
         receipts = [
             receipt_projection(
                 receipt,
@@ -1240,9 +1287,9 @@ def _verify_strategy_version_history_evidence(
                     "provider-ledger history lineage differs from the admitted transition"
                 )
             if accepted_authority:
-                projected["source_generation_id"] = (
-                    _HISTORY_PROVIDER_LEDGER_TRANSITION["current_generation_id"]
-                )
+                projected["source_generation_id"] = _HISTORY_PROVIDER_LEDGER_TRANSITION[
+                    "current_generation_id"
+                ]
                 projected["source_generation_sha256"] = (
                     _HISTORY_PROVIDER_LEDGER_TRANSITION["current_manifest_sha256"]
                 )
@@ -1257,9 +1304,10 @@ def _verify_strategy_version_history_evidence(
             "accepted history materialized_segment_identities",
         )
     }
-    for segment_id, (accepted_sha256, corrected_sha256) in (
-        _HISTORY_SEGMENT_SHA256_OVERRIDES.items()
-    ):
+    for segment_id, (
+        accepted_sha256,
+        corrected_sha256,
+    ) in _HISTORY_SEGMENT_SHA256_OVERRIDES.items():
         accepted_segment = accepted_segments.get(segment_id)
         if accepted_segment is None or accepted_segment.get("sha256") != (
             accepted_sha256
@@ -4396,9 +4444,7 @@ def _validate_active_blocked_numeric_identities(
     )
     corrections = _objects(history.get("corrections"), "history corrections")
     for strategy in strategies:
-        strategy_id = _text(
-            strategy.get("strategy_id"), "active blocked strategy_id"
-        )
+        strategy_id = _text(strategy.get("strategy_id"), "active blocked strategy_id")
         live_identity = _object(
             strategy.get("live_implementation_identity"),
             f"active blocked live identity {strategy_id}",
@@ -4448,9 +4494,7 @@ def _validate_active_blocked_numeric_identities(
             )
         blocking_sources = []
         for source in sources:
-            subjects = _object(
-                source.get("subjects"), "active blocked source subjects"
-            )
+            subjects = _object(source.get("subjects"), "active blocked source subjects")
             if strategy_id not in subjects.get("strategy_ids", []):
                 continue
             if (
@@ -5016,11 +5060,7 @@ def _validate_robuxio_owner_funded_boundary(contract: Mapping[str, Any]) -> None
     census = _object(contract.get("current_census"), "current census")
     sleeves = _objects(census.get("account_sleeves"), "current census sleeves")
     sleeve = next(
-        (
-            row
-            for row in sleeves
-            if row.get("sleeve_alias") == "matrixport-robuxio-01"
-        ),
+        (row for row in sleeves if row.get("sleeve_alias") == "matrixport-robuxio-01"),
         None,
     )
     corrections = _objects(
@@ -5043,32 +5083,38 @@ def _validate_robuxio_owner_funded_boundary(contract: Mapping[str, Any]) -> None
     if len(assignment) != 1:
         raise FinancialMvpContractError("Robuxio owner-funded boundary differs")
     source_interval = _object(source.get("interval"), "Matrixport source interval")
-    correction_interval = _object(correction.get("interval"), "Robuxio correction interval")
+    correction_interval = _object(
+        correction.get("interval"), "Robuxio correction interval"
+    )
     funding_event = _object(correction.get("funding_event"), "Robuxio funding event")
     funded_membership = _object(
         strategy.get("funded_membership"), "Robuxio funded membership"
     )
-    if any(
-        value != _MATRIXPORT_OWNER_EPOCH["effective_start"]
-        for value in (
-            source_interval.get("effective_start"),
-            correction_interval.get("effective_start"),
-            funding_event.get("event_date"),
-            funding_event.get("account_live_start"),
-            funded_membership.get("effective_start"),
-            assignment[0].get("effective_start"),
+    if (
+        any(
+            value != _MATRIXPORT_OWNER_EPOCH["effective_start"]
+            for value in (
+                source_interval.get("effective_start"),
+                correction_interval.get("effective_start"),
+                funding_event.get("event_date"),
+                funding_event.get("account_live_start"),
+                funded_membership.get("effective_start"),
+                assignment[0].get("effective_start"),
+            )
         )
-    ) or any(
-        value != _MATRIXPORT_OWNER_EPOCH["observed_start"]
-        for value in (
-            source_interval.get("observed_start"),
-            correction_interval.get("observed_start"),
+        or any(
+            value != _MATRIXPORT_OWNER_EPOCH["observed_start"]
+            for value in (
+                source_interval.get("observed_start"),
+                correction_interval.get("observed_start"),
+            )
         )
-    ) or any(
-        value != _MATRIXPORT_OWNER_EPOCH["observed_end"]
-        for value in (
-            source_interval.get("observed_end"),
-            correction_interval.get("observed_end"),
+        or any(
+            value != _MATRIXPORT_OWNER_EPOCH["observed_end"]
+            for value in (
+                source_interval.get("observed_end"),
+                correction_interval.get("observed_end"),
+            )
         )
     ):
         raise FinancialMvpContractError("Robuxio owner-funded boundary differs")
@@ -6262,7 +6308,9 @@ def _validate_epoch_manifest_source_shape(source: object) -> None:
             "epoch_manifest_source.crosswalk",
         )
         if crosswalk["path"] != EPOCH_CROSSWALK_ARTIFACT_PATH:
-            raise FinancialMvpContractError("epoch_manifest_source.crosswalk.path differs")
+            raise FinancialMvpContractError(
+                "epoch_manifest_source.crosswalk.path differs"
+            )
         _hash(crosswalk["sha256"], "epoch_manifest_source.crosswalk.sha256")
         if type(crosswalk["size_bytes"]) is not int or crosswalk["size_bytes"] <= 0:
             raise FinancialMvpContractError(

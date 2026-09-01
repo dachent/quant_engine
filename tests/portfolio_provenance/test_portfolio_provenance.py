@@ -241,10 +241,7 @@ def _financial_mvp_binding() -> dict[str, str]:
         / "portfolio"
         / "financial-mvp-source-contract.schema.json",
     }
-    return {
-        f"{name}_path": str(path)
-        for name, path in paths.items()
-    } | {
+    return {f"{name}_path": str(path) for name, path in paths.items()} | {
         f"{name}_sha256": hashlib.sha256(path.read_bytes()).hexdigest()
         for name, path in paths.items()
     }
@@ -274,9 +271,7 @@ def _robuxio_provider_history_spec(tmp_path: Path) -> tuple[Path, dict[str, Any]
             "strategy_id": "robuxio-crypto",
         }
     )
-    spec["strategy_version_catalog"]["strategies"][0]["strategy_id"] = (
-        "robuxio-crypto"
-    )
+    spec["strategy_version_catalog"]["strategies"][0]["strategy_id"] = "robuxio-crypto"
     spec["financial_mvp"] = _financial_mvp_binding()
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
     return spec_path, spec
@@ -411,12 +406,11 @@ def test_single_current_funded_memberships_reconcile_non_provider_tracker_starts
 
     assert reconciled["p123-eu"]["effective_start"] == "2025-11-20"
     assert reconciled["volatis-strategy"]["effective_start"] == "2024-10-15"
+    assert {item["source_classification"] for item in reconciled.values()} == {
+        "financial_mvp_funded_membership_reconciled"
+    }
     assert {
-        item["source_classification"] for item in reconciled.values()
-    } == {"financial_mvp_funded_membership_reconciled"}
-    assert {
-        strategy_id: item["assignment_id"]
-        for strategy_id, item in reconciled.items()
+        strategy_id: item["assignment_id"] for strategy_id, item in reconciled.items()
     } != stale_ids
 
 
@@ -436,7 +430,9 @@ def test_funded_membership_extends_immediately_adjacent_general_predecessor(
     )
     stale_catalog, _, _ = provenance.build_catalog(spec_path)
     stale_general = next(
-        item for item in stale_catalog["assignments"] if item["observed_label"] == "General"
+        item
+        for item in stale_catalog["assignments"]
+        if item["observed_label"] == "General"
     )
     assignments_path.write_text(
         assignments_path.read_text(encoding="utf-8").replace(
@@ -482,7 +478,9 @@ def test_funded_membership_does_not_extend_non_adjacent_general_predecessor(
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
 
     catalog, _, _ = provenance.build_catalog(spec_path)
-    general = next(item for item in catalog["assignments"] if item["observed_label"] == "General")
+    general = next(
+        item for item in catalog["assignments"] if item["observed_label"] == "General"
+    )
 
     assert general["effective_end"] == "2025-11-10"
 
@@ -508,9 +506,7 @@ def test_multi_account_current_membership_does_not_rewrite_each_assignment(
         "2025-11-01",
         "2025-11-02",
     ]
-    assert {item["source_classification"] for item in assignments} == {
-        "control_file"
-    }
+    assert {item["source_classification"] for item in assignments} == {"control_file"}
 
 
 def test_stage_is_deterministic_private_and_imports_explicit_tracker_evidence(

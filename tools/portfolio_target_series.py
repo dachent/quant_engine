@@ -794,7 +794,9 @@ def _matrixport_epoch_hpr_receipt(
     daily_rows = [
         {
             "date": row["date"],
-            "return": format(_decimal(row["return"], "Matrixport return").normalize(), "f"),
+            "return": format(
+                _decimal(row["return"], "Matrixport return").normalize(), "f"
+            ),
         }
         for row in returns
     ]
@@ -802,8 +804,7 @@ def _matrixport_epoch_hpr_receipt(
     for row in daily_rows:
         daily_wealth *= Decimal(1) + Decimal(row["return"])
     epoch_links = [
-        (date.fromisoformat(row["date"]), Decimal(row["return"]))
-        for row in daily_rows
+        (date.fromisoformat(row["date"]), Decimal(row["return"])) for row in daily_rows
     ] + [
         (
             date.fromisoformat(str(span.get("span_end_date"))),
@@ -864,7 +865,9 @@ def _matrixport_daily_holding_shares(
         shares = _positive_decimal(row["share"], "Matrixport daily holding shares")
         nav_available = row["nav_available"].strip().lower()
         if nav_available not in {"true", "false"}:
-            raise TargetSeriesError("Matrixport daily holding nav availability is invalid")
+            raise TargetSeriesError(
+                "Matrixport daily holding nav availability is invalid"
+            )
         nav = (
             _positive_decimal(row["nav"], "Matrixport daily holding NAV")
             if nav_available == "true"
@@ -889,9 +892,13 @@ def _matrixport_daily_holding_shares(
         expected_nav = observations.get(observed)
         if observed in declared_missing_dates:
             if nav_available or daily_nav is not None or expected_nav is not None:
-                raise TargetSeriesError("Matrixport daily holdings missing-date status differs")
+                raise TargetSeriesError(
+                    "Matrixport daily holdings missing-date status differs"
+                )
         elif not nav_available or daily_nav != expected_nav:
-            raise TargetSeriesError("Matrixport daily holdings NAV differs from endpoint")
+            raise TargetSeriesError(
+                "Matrixport daily holdings NAV differs from endpoint"
+            )
         endpoint_shares[observed] = shares
     return endpoint_shares
 
@@ -1076,11 +1083,10 @@ def _matrixport_returns(
         source_gap_policy=source_gap_policy,
         admission_cutoff=admission_cutoff,
     )
-    if (
-        epoch_hpr_receipt["daily_cumulative_return"]
-        != format((_cumulative(returns)).normalize(), "f")
-        or epoch_hpr_receipt["epoch_cumulative_return"]
-        != format((epoch_wealth - Decimal(1)).normalize(), "f")
+    if epoch_hpr_receipt["daily_cumulative_return"] != format(
+        (_cumulative(returns)).normalize(), "f"
+    ) or epoch_hpr_receipt["epoch_cumulative_return"] != format(
+        (epoch_wealth - Decimal(1)).normalize(), "f"
     ):
         raise TargetSeriesError("Matrixport epoch HPR receipt differs from return path")
     return returns, {
@@ -1090,12 +1096,8 @@ def _matrixport_returns(
         ),
         "account_nav_observations": len(account_nav_dates),
         "boundary_return_excluded": boundary_return_excluded,
-        "daily_cumulative_return": format(
-            (_cumulative(returns)).normalize(), "f"
-        ),
-        "epoch_cumulative_return": format(
-            (epoch_wealth - Decimal(1)).normalize(), "f"
-        ),
+        "daily_cumulative_return": format((_cumulative(returns)).normalize(), "f"),
+        "epoch_cumulative_return": format((epoch_wealth - Decimal(1)).normalize(), "f"),
         "epoch_holding_period_link_observations": len(returns)
         + len(span_return_receipts),
         "epoch_hpr_receipt": epoch_hpr_receipt,
@@ -2009,9 +2011,7 @@ def _history_contract(
         )
         committed_core_sha256 = _committed_layered_history_dependency_sha256s(
             repository_sha
-        )[
-            "packages/core/src/quant_engine/core/contracts.py"
-        ]
+        )["packages/core/src/quant_engine/core/contracts.py"]
         if (
             validator_core_path is None
             or hashlib.sha256(Path(validator_core_path).read_bytes()).hexdigest()
@@ -2308,7 +2308,9 @@ def _matrixport_account_live_from_ledger(
         if observed < observed_start or observed > observed_end:
             continue
         if observed in ledger_by_date:
-            raise TargetSeriesError("Matrixport provider-ledger return date is duplicated")
+            raise TargetSeriesError(
+                "Matrixport provider-ledger return date is duplicated"
+            )
         ledger_by_date[observed] = row
 
     product_dates = set(product_by_date)
@@ -3079,10 +3081,12 @@ def build_layered_history_generation(
             inventory_profile="portfolio123",
         )
     else:
-        ledger_manifest, ledger_generation, ledger_as_of = _verified_immutable_generation(
-            manifest_path=provider_ledger_manifest_path,
-            source=sources["owner-account-live-history"],
-            name="provider ledger",
+        ledger_manifest, ledger_generation, ledger_as_of = (
+            _verified_immutable_generation(
+                manifest_path=provider_ledger_manifest_path,
+                source=sources["owner-account-live-history"],
+                name="provider ledger",
+            )
         )
         matrixport_manifest, matrixport_generation, matrixport_as_of = (
             _verified_immutable_generation(
@@ -3148,15 +3152,12 @@ def build_layered_history_generation(
         for strategy_id, series_id in product_series_by_strategy.items()
         if strategies[strategy_id].get("product_requirement") == "REQUIRED"
     }
-    if (
-        any(
-            series_by_strategy.get(strategy_id) != series_id
-            for strategy_id, series_id in required_product_series_by_strategy.items()
-        )
-        or any(
-            product_series_by_strategy.get(strategy_id) != series_id
-            for strategy_id, series_id in series_by_strategy.items()
-        )
+    if any(
+        series_by_strategy.get(strategy_id) != series_id
+        for strategy_id, series_id in required_product_series_by_strategy.items()
+    ) or any(
+        product_series_by_strategy.get(strategy_id) != series_id
+        for strategy_id, series_id in series_by_strategy.items()
     ):
         raise TargetSeriesError(
             "provider-ledger series mapping differs from product authority"
@@ -3250,15 +3251,15 @@ def build_layered_history_generation(
         or echo_catalog_receipts[0].get("sha256")
         != echo_expected_identity.get("source_receipt_sha256")
     ):
-        raise TargetSeriesError("EchoTrade rejected evidence differs from product authority")
+        raise TargetSeriesError(
+            "EchoTrade rejected evidence differs from product authority"
+        )
     if echo_candidate:
         echo_rejected_identity = _target_row_identity(echo_candidate)
         expected_echo_identity = {
             "observed_end": echo_interval.get("observed_end"),
             "observed_start": echo_interval.get("observed_start"),
-            "return_observations": echo_expected_identity.get(
-                "return_observations"
-            ),
+            "return_observations": echo_expected_identity.get("return_observations"),
             "sha256": echo_expected_identity.get("sha256"),
         }
         if echo_rejected_identity != expected_echo_identity:
@@ -5459,9 +5460,7 @@ def validate_layered_history_generation(
         else None
     )
     echo_strategy = strategies.get("echotrade-growth-pivots")
-    current_ledger_generation = inputs["provider-ledger-manifest"].get(
-        "generation_id"
-    )
+    current_ledger_generation = inputs["provider-ledger-manifest"].get("generation_id")
     echo_series_id = coverage_by_strategy.get("echotrade-growth-pivots", {}).get(
         "series_id"
     )
@@ -5542,9 +5541,7 @@ def validate_layered_history_generation(
         != {
             "observed_end": echo_interval.get("observed_end"),
             "observed_start": echo_interval.get("observed_start"),
-            "return_observations": echo_contract_identity.get(
-                "return_observations"
-            ),
+            "return_observations": echo_contract_identity.get("return_observations"),
             "sha256": echo_contract_identity.get("sha256"),
         }
         or (

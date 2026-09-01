@@ -245,9 +245,7 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
 
     contract = json.loads(
         (
-            REPOSITORY_ROOT
-            / "contracts"
-            / "portfolio-financial-mvp-source-v1.json"
+            REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
         ).read_text(encoding="utf-8")
     )
     corrections = {
@@ -930,9 +928,7 @@ def test_broker_returns_adjust_quantbase_allocation_at_nav_recognition_date() ->
         # (165 - 50) / 110 - 1: the raw 50% NAV jump is a capital allocation.
         ("2026-01-03", "0.045454545454545454545454545"),
     ]
-    assert {row["flow_timing"] for row in rows} == {
-        "PROVIDER_NAV_RECOGNITION_DATE"
-    }
+    assert {row["flow_timing"] for row in rows} == {"PROVIDER_NAV_RECOGNITION_DATE"}
 
 
 def test_broker_returns_reject_quantbase_nav_without_opening_anchor() -> None:
@@ -955,7 +951,9 @@ def test_broker_returns_reject_quantbase_nav_without_opening_anchor() -> None:
         )
 
 
-def test_broker_returns_ignore_foreign_anchors_and_reject_duplicate_quantbase_anchor() -> None:
+def test_broker_returns_ignore_foreign_anchors_and_reject_duplicate_quantbase_anchor() -> (
+    None
+):
     nav = [
         {**_nav("qb", "2026-01-01", "100", "qb-1"), "provider_id": "quantbase"},
         {**_nav("qb", "2026-01-02", "110", "qb-2"), "provider_id": "quantbase"},
@@ -992,7 +990,9 @@ def test_broker_returns_ignore_foreign_anchors_and_reject_duplicate_quantbase_an
     )
 
     assert rows[-1]["return"] == "0.045454545454545454545454545"
-    with pytest.raises(ledger.ProviderLedgerError, match="duplicate quantbase capital anchor"):
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="duplicate quantbase capital anchor"
+    ):
         ledger._broker_strategy_returns(
             nav,
             [],
@@ -1121,9 +1121,7 @@ def test_ibkr_return_uses_nav_recognition_date_not_cash_event_date() -> None:
         ("2026-01-22", "0"),
         ("2026-01-23", "0"),
     ]
-    assert {row["flow_timing"] for row in rows} == {
-        "PROVIDER_NAV_RECOGNITION_DATE"
-    }
+    assert {row["flow_timing"] for row in rows} == {"PROVIDER_NAV_RECOGNITION_DATE"}
 
 
 def test_single_account_return_preserves_direct_formula_precision() -> None:
@@ -1173,9 +1171,18 @@ def test_broker_returns_exclude_non_authoritative_provider_inputs() -> None:
 
 def test_broker_returns_omit_transition_crossing_declared_nav_gap() -> None:
     nav = [
-        {**_nav("matrix", "2026-01-01", "100", "matrix-1"), "provider_id": "matrixport"},
-        {**_nav("matrix", "2026-01-03", "121", "matrix-3"), "provider_id": "matrixport"},
-        {**_nav("matrix", "2026-01-04", "133.1", "matrix-4"), "provider_id": "matrixport"},
+        {
+            **_nav("matrix", "2026-01-01", "100", "matrix-1"),
+            "provider_id": "matrixport",
+        },
+        {
+            **_nav("matrix", "2026-01-03", "121", "matrix-3"),
+            "provider_id": "matrixport",
+        },
+        {
+            **_nav("matrix", "2026-01-04", "133.1", "matrix-4"),
+            "provider_id": "matrixport",
+        },
     ]
 
     unbounded = ledger._broker_strategy_returns(nav, [], {"matrixport"})
@@ -1224,10 +1231,13 @@ def test_retained_returns_omit_transition_crossing_declared_nav_gap() -> None:
     )
 
     assert [row["date"] for row in rows] == ["2026-01-01", "2026-01-04"]
-    assert ledger._returns_within_declared_nav_gaps(
-        retained,
-        {"matrixport": frozenset({date(2026, 1, 5)})},
-    ) == retained
+    assert (
+        ledger._returns_within_declared_nav_gaps(
+            retained,
+            {"matrixport": frozenset({date(2026, 1, 5)})},
+        )
+        == retained
+    )
 
 
 def test_account_live_returns_respect_funded_strategy_interval() -> None:
@@ -1314,7 +1324,9 @@ def test_account_rollforward_appends_only_dates_newer_than_accepted_history() ->
     assert rows[-1]["strategy_name"] == "Strategy A"
 
 
-def test_non_native_overlap_retains_source_return_and_projects_broker_rollforward() -> None:
+def test_non_native_overlap_retains_source_return_and_projects_broker_rollforward() -> (
+    None
+):
     """A retained non-native return still carries broker NAV rollforward proof."""
 
     source = [
@@ -1508,10 +1520,7 @@ def test_native_provider_account_path_replaces_stale_retained_rows() -> None:
         provider_native_strategy_ids={"strategy-native"},
     )
 
-    assert [
-        (row["strategy_id"], row["date"], row["return"])
-        for row in rows
-    ] == [
+    assert [(row["strategy_id"], row["date"], row["return"]) for row in rows] == [
         ("strategy-native", "2026-01-02", "-0.06"),
         ("strategy-native", "2026-01-03", "0.02"),
         ("strategy-owner", "2026-01-02", "0.01"),
@@ -1664,8 +1673,7 @@ def test_provider_native_overlap_reports_promoted_authority() -> None:
     )
 
     assert checks[0]["authority_effect"] == (
-        "CURRENT_PROVIDER_ACCOUNT_PATH_PROMOTED; "
-        "RETAINED_ACCOUNT_PATH_SUPERSEDED"
+        "CURRENT_PROVIDER_ACCOUNT_PATH_PROMOTED; RETAINED_ACCOUNT_PATH_SUPERSEDED"
     )
     assert checks[0]["adjudication"] == (
         "CONTRACT_SELECTED_PROVIDER_GENERATION; retained tracker path is "
@@ -1859,7 +1867,9 @@ def test_projected_provider_nav_preserves_source_proven_value_basis(
     assert projected["nav_observations"][0]["value_basis"] == value_basis
 
 
-def test_projected_ibkr_flow_retains_activity_identity_and_zero_noncapital_semantics() -> None:
+def test_projected_ibkr_flow_retains_activity_identity_and_zero_noncapital_semantics() -> (
+    None
+):
     """A zero cash row stays auditable without becoming an external capital leg."""
     catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["ibkr"]}
     catalog["flows"] = [
@@ -1972,7 +1982,9 @@ def test_projected_schwab_flow_uses_effective_date_for_nav_recognition() -> None
     assert returns[0]["flow_timing"] == "PROVIDER_NAV_RECOGNITION_DATE"
 
 
-def _schwab_journal_override_manifest(*, corrupt_4054_source: bool = False) -> GenerationManifest:
+def _schwab_journal_override_manifest(
+    *, corrupt_4054_source: bool = False
+) -> GenerationManifest:
     """The two retained WCH transaction artifacts that prove the exceptions."""
 
     source_hashes = {
@@ -2035,12 +2047,26 @@ def test_schwab_pinned_journal_flows_require_exact_record_and_retained_source() 
     catalog["transactions"] = [
         _schwab_journal_row(ira, "txn-55861c64ba8de7d6a1fa2e6d", "2025-12-29", "7000"),
         _schwab_journal_row(ira, "txn-ab66e92846c1cfb18f4222e2", "2026-01-02", "7500"),
-        _schwab_journal_row(joint, "txn-1699da38ec4afacd94bd2876", "2026-01-02", "-50000"),
+        _schwab_journal_row(
+            joint, "txn-1699da38ec4afacd94bd2876", "2026-01-02", "-50000"
+        ),
         _schwab_journal_row(ira, "nearby-journal", "2025-12-29", "7000"),
     ]
     assignments = {
-        ira: [{"effective_start": "2025-11-25", "effective_end": None, "strategy_id": "tt"}],
-        joint: [{"effective_start": "2025-11-25", "effective_end": None, "strategy_id": "tt"}],
+        ira: [
+            {
+                "effective_start": "2025-11-25",
+                "effective_end": None,
+                "strategy_id": "tt",
+            }
+        ],
+        joint: [
+            {
+                "effective_start": "2025-11-25",
+                "effective_end": None,
+                "strategy_id": "tt",
+            }
+        ],
     }
 
     projected, _ = ledger._project_account_facts(
@@ -2061,8 +2087,7 @@ def test_schwab_pinned_journal_flows_require_exact_record_and_retained_source() 
     ]
     assert {flow["mapping_basis"] for flow in flows} == {"PINNED_RETAINED_JOURNAL"}
     assert {
-        (flow["source_artifact_id"], flow["source_artifact_sha256"])
-        for flow in flows
+        (flow["source_artifact_id"], flow["source_artifact_sha256"]) for flow in flows
     } == {
         (
             "wch/transactions/account-02.json",
@@ -2081,7 +2106,9 @@ def test_schwab_pinned_journal_flow_rejects_changed_retained_source_hash() -> No
     catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
     joint = "account-702c489650e59956"
     catalog["transactions"] = [
-        _schwab_journal_row(joint, "txn-1699da38ec4afacd94bd2876", "2026-01-02", "-50000")
+        _schwab_journal_row(
+            joint, "txn-1699da38ec4afacd94bd2876", "2026-01-02", "-50000"
+        )
     ]
 
     with pytest.raises(ledger.ProviderLedgerError, match="pinned Journal source"):
@@ -2091,7 +2118,15 @@ def test_schwab_pinned_journal_flow_rejects_changed_retained_source_hash() -> No
             catalog,
             {joint},
             {"tt"},
-            {joint: [{"effective_start": "2025-11-25", "effective_end": None, "strategy_id": "tt"}]},
+            {
+                joint: [
+                    {
+                        "effective_start": "2025-11-25",
+                        "effective_end": None,
+                        "strategy_id": "tt",
+                    }
+                ]
+            },
             manifest=_schwab_journal_override_manifest(corrupt_4054_source=True),
         )
 
@@ -2112,9 +2147,7 @@ def test_schwab_pinned_journal_flow_does_not_admit_changed_fact(
     account_id = "account-38b653b91ff43a10"
     catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
     catalog["transactions"] = [
-        _schwab_journal_row(
-            account_id, "txn-55861c64ba8de7d6a1fa2e6d", day, amount
-        )
+        _schwab_journal_row(account_id, "txn-55861c64ba8de7d6a1fa2e6d", day, amount)
     ]
     projected, _ = ledger._project_account_facts(
         "schwab",
@@ -3891,7 +3924,9 @@ def test_quantbase_capital_anchors_preserve_economic_and_nav_dates(
     )
 
 
-def test_quantbase_source_coverage_keeps_last_nav_not_last_capital_recognition() -> None:
+def test_quantbase_source_coverage_keeps_last_nav_not_last_capital_recognition() -> (
+    None
+):
     """Capital recognition stops in January, while the retained Volatis NAV
     source remains authoritative through its August observation boundary."""
     coverage = ledger._provider_coverage(
@@ -3998,8 +4033,9 @@ def test_matrixport_subscription_admits_strategy_anchor_not_wallet_deposits(
     assert anchors[0]["amount"]["value"] not in {"1", "49998", "49999"}
 
 
-def test_matrixport_pre_funding_assignment_cannot_be_promoted_to_owner_account(
-    ) -> None:
+def test_matrixport_pre_funding_assignment_cannot_be_promoted_to_owner_account() -> (
+    None
+):
     """A provider-live August row is not a funded owner-account assignment."""
     provenance = {
         "accounts": [{"account_id": "account-d2e5821e608e25f1"}],
@@ -4038,11 +4074,15 @@ def test_matrixport_pre_funding_assignment_cannot_be_promoted_to_owner_account(
             "source_classification": "financial_mvp_funded_membership_reconciled",
         }
     )
-    _accounts, _strategies, assignments = ledger._assignment_index(provenance, authority)
+    _accounts, _strategies, assignments = ledger._assignment_index(
+        provenance, authority
+    )
     assert assignments["account-d2e5821e608e25f1"][0]["effective_start"] == "2025-12-06"
 
 
-def test_matrixport_opening_nav_requires_subscription_cent_match(tmp_path: Path) -> None:
+def test_matrixport_opening_nav_requires_subscription_cent_match(
+    tmp_path: Path,
+) -> None:
     run_id = "matrixport-source"
     csv_root = tmp_path / "output" / run_id / "csv"
     csv_root.mkdir(parents=True)
@@ -4421,7 +4461,9 @@ def test_broker_returns_reject_ibkr_flow_without_statement_account_scope() -> No
         ledger._broker_strategy_returns(nav, ambiguous, {"ibkr"})
 
 
-def test_broker_returns_treats_exact_zero_deposit_as_retained_noncapital_evidence() -> None:
+def test_broker_returns_treats_exact_zero_deposit_as_retained_noncapital_evidence() -> (
+    None
+):
     """A zero row is visible but cannot alter a return; a cent remains capital."""
     nav = [
         {
@@ -4460,7 +4502,9 @@ def test_broker_returns_treats_exact_zero_deposit_as_retained_noncapital_evidenc
     }
 
     assert ledger._broker_strategy_returns(nav, [zero], {"ibkr"})[0]["return"] == "0.01"
-    assert ledger._broker_strategy_returns(nav, [cent], {"ibkr"})[0]["return"] == "0.0099"
+    assert (
+        ledger._broker_strategy_returns(nav, [cent], {"ibkr"})[0]["return"] == "0.0099"
+    )
 
 
 def test_nav_move_guard_ignores_trade_notionals() -> None:

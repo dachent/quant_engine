@@ -56,7 +56,9 @@ class NoReplayTransport:
         raise AssertionError("orphan evidence must prevent network replay")
 
 
-def make_http_transport(session: FakeSession, synthetic_live_read_evidence) -> ReadOnlyTransport:
+def make_http_transport(
+    session: FakeSession, synthetic_live_read_evidence
+) -> ReadOnlyTransport:
     evidence = synthetic_live_read_evidence(
         scope=(("GET", BALANCE_PATH),), max_requests=1
     )

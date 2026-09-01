@@ -301,8 +301,8 @@ def test_v9_epoch_source_derives_crosswalk_from_verified_bundle(tmp_path: Path) 
     }
     assert source["crosswalk"] == {
         "path": "authority/account-assignment-crosswalk.json",
-            "sha256": "266f1860169925cca2c8955f5b9f8d8b56a27a5ac50dc9730f2dc6c1f7d24e3e",
-            "size_bytes": 92,
+        "sha256": "266f1860169925cca2c8955f5b9f8d8b56a27a5ac50dc9730f2dc6c1f7d24e3e",
+        "size_bytes": 92,
         "schema": {
             "name": "account-strategy-current-epoch-crosswalk",
             "version": "1",
@@ -315,9 +315,7 @@ def test_v9_epoch_source_accepts_verified_first_available_nav_basis(
 ) -> None:
     """A verified schema-9 first-NAV opening remains a valid release source."""
 
-    bundle = _synthetic_v9_epoch_bundle(
-        tmp_path, opening_basis="FIRST_AVAILABLE_NAV"
-    )
+    bundle = _synthetic_v9_epoch_bundle(tmp_path, opening_basis="FIRST_AVAILABLE_NAV")
 
     source = contract_tool.epoch_manifest_source_from_bundle(bundle)
 
@@ -498,7 +496,9 @@ def test_v9_persisted_byte_mutation_is_rejected_before_binder(
     """Detached controls must reject a copied bundle before binder semantics run."""
 
     bundle = _synthetic_v9_epoch_bundle(tmp_path / "source")
-    source_directory = tmp_path / "source" / "generations" / bundle.manifest.generation_id
+    source_directory = (
+        tmp_path / "source" / "generations" / bundle.manifest.generation_id
+    )
     copied_root = tmp_path / "copied"
     copied_directory = copied_root / "generations" / bundle.manifest.generation_id
     copied_directory.parent.mkdir(parents=True)
@@ -1117,16 +1117,16 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
                 "sha256": wanted["generation_sha256"],
                 "as_of": "2026-08-16",
             }
-            assert policy["upstream_inventory_sha256"] == wanted[
-                "upstream_inventory_sha256"
-            ]
-            assert policy["product_data_class_set_sha256"] == wanted[
-                "product_data_class_set_sha256"
-            ]
+            assert (
+                policy["upstream_inventory_sha256"]
+                == wanted["upstream_inventory_sha256"]
+            )
+            assert (
+                policy["product_data_class_set_sha256"]
+                == wanted["product_data_class_set_sha256"]
+            )
         assert policy["admitted_item_count"] == wanted["admitted_item_count"]
-        assert policy["admitted_item_set_sha256"] == wanted[
-            "admitted_item_set_sha256"
-        ]
+        assert policy["admitted_item_set_sha256"] == wanted["admitted_item_set_sha256"]
 
 
 def test_current_strategy_registry_binds_exact_applicability_plan_bytes() -> None:
@@ -1796,15 +1796,9 @@ def test_accepted_provider_ledger_history_identity_cannot_be_coherently_relabell
     """History lineage is a fixed receipt, not a replaceable generation label."""
 
     replacements = {
-        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62": (
-            "a" * 64
-        ),
-        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2": (
-            "b" * 64
-        ),
-        "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1": (
-            "c" * 64
-        ),
+        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62": ("a" * 64),
+        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2": ("b" * 64),
+        "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1": ("c" * 64),
     }
 
     def replace_lineage(value: object) -> object:
@@ -1834,21 +1828,13 @@ def test_two_vintage_history_accepts_2961_active_and_retains_07c590_echo() -> No
     active_generation = (
         "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
     )
-    active_manifest = (
-        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
-    )
-    active_catalog = (
-        "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
-    )
+    active_manifest = "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
+    active_catalog = "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
-    legacy_manifest = (
-        "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db"
-    )
-    legacy_catalog = (
-        "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
-    )
+    legacy_manifest = "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db"
+    legacy_catalog = "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
 
     contract = _contract()
     owner_source = _source(contract, "owner-account-live-history")
@@ -1892,9 +1878,7 @@ def test_two_vintage_history_accepts_2961_active_and_retains_07c590_echo() -> No
                 continue
             receipt["generation_id"] = active_generation
             suffix = receipt["artifact_selector"].split("/")[-1]
-            receipt["artifact_selector"] = (
-                f"generations/{active_generation}/{suffix}"
-            )
+            receipt["artifact_selector"] = f"generations/{active_generation}/{suffix}"
             receipt["sha256"] = (
                 active_manifest if suffix == "generation.json" else active_catalog
             )
@@ -1917,17 +1901,15 @@ def test_two_vintage_history_accepts_2961_active_and_retains_07c590_echo() -> No
     assert echo_correction["capture"]["generation_sha256"] == legacy_manifest
 
     volatis = next(
-        row for row in contract["strategies"] if row["strategy_id"] == "volatis-strategy"
+        row
+        for row in contract["strategies"]
+        if row["strategy_id"] == "volatis-strategy"
     )
-    assert volatis["live_implementation_identity"]["generation_id"].startswith(
-        "ca1970"
-    )
+    assert volatis["live_implementation_identity"]["generation_id"].startswith("ca1970")
     robuxio = next(
         row for row in contract["strategies"] if row["strategy_id"] == "robuxio-crypto"
     )
-    assert robuxio["live_implementation_identity"]["generation_id"].startswith(
-        "6a4dcb"
-    )
+    assert robuxio["live_implementation_identity"]["generation_id"].startswith("6a4dcb")
 
     _validate(contract)
     assert contract_tool._verify_strategy_version_history_evidence(contract) == 3
@@ -1936,15 +1918,9 @@ def test_two_vintage_history_accepts_2961_active_and_retains_07c590_echo() -> No
 def test_owner_account_history_rebinds_to_corrected_2961_ledger_generation() -> None:
     """The active owner-history lineage follows the corrected governed ledger."""
 
-    generation_id = (
-        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
-    )
-    manifest_sha256 = (
-        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
-    )
-    catalog_sha256 = (
-        "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
-    )
+    generation_id = "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
+    manifest_sha256 = "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
+    catalog_sha256 = "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
     contract = _contract()
     owner_source = _source(contract, "owner-account-live-history")
     assert owner_source["current_generation"] == {
@@ -1985,15 +1961,11 @@ def test_two_vintage_history_rejects_legacy_rollbacks_and_rewrites() -> None:
     active_generation = (
         "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
     )
-    active_manifest = (
-        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
-    )
+    active_manifest = "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
-    legacy_manifest = (
-        "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db"
-    )
+    legacy_manifest = "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db"
 
     active_rollback = _contract()
     p123_eu = _history_correction(active_rollback, "p123-eu-account-live")
@@ -2546,13 +2518,13 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
         _validate(missing_policy)
 
 
-def test_matrixport_owner_span_receipts_and_funded_epoch_reject_coherent_rebinds() -> None:
+def test_matrixport_owner_span_receipts_and_funded_epoch_reject_coherent_rebinds() -> (
+    None
+):
     """The source contract cannot relabel August provider history as owner TWR."""
 
     contract = _contract()
-    policy = _source(contract, "matrixport-account-generation")[
-        "declared_gap_policy"
-    ]
+    policy = _source(contract, "matrixport-account-generation")["declared_gap_policy"]
     assert [item["span_days"] for item in policy["span_return_receipts"]] == [2, 2]
 
     altered_span = copy.deepcopy(contract)
@@ -2908,10 +2880,10 @@ def test_robuxio_materialized_identity_is_daily_only_and_cannot_be_rebound() -> 
         _validate(hpr_folded)
 
 
-def test_volatis_account_live_materialized_authority_rejects_raw_contribution_series() -> None:
-    accepted_sha256 = (
-        "c2d93268f9b91eead304459ce029b8bf4b1110ca28d0bb8190361ab4df43183f"
-    )
+def test_volatis_account_live_materialized_authority_rejects_raw_contribution_series() -> (
+    None
+):
+    accepted_sha256 = "c2d93268f9b91eead304459ce029b8bf4b1110ca28d0bb8190361ab4df43183f"
     rejected_raw_contribution_sha256 = (
         "f989eed33cd7ce8e17d63acb5065032e56d511a765b4f0684e281df043d27016"
     )
@@ -2922,7 +2894,9 @@ def test_volatis_account_live_materialized_authority_rejects_raw_contribution_se
         if row["segment_id"] == "volatis-strategy:account-live"
     )
     volatis = next(
-        row for row in accepted["strategies"] if row["strategy_id"] == "volatis-strategy"
+        row
+        for row in accepted["strategies"]
+        if row["strategy_id"] == "volatis-strategy"
     )
     segment["sha256"] = accepted_sha256
     volatis["live_implementation_identity"]["version_ref"] = (
@@ -2938,7 +2912,9 @@ def test_volatis_account_live_materialized_authority_rejects_raw_contribution_se
         if row["segment_id"] == "volatis-strategy:account-live"
     )
     rejected_volatis = next(
-        row for row in rejected["strategies"] if row["strategy_id"] == "volatis-strategy"
+        row
+        for row in rejected["strategies"]
+        if row["strategy_id"] == "volatis-strategy"
     )
     rejected_segment["sha256"] = rejected_raw_contribution_sha256
     rejected_volatis["live_implementation_identity"]["version_ref"] = (
@@ -3241,17 +3217,20 @@ def test_history_receipts_resolve_to_governed_bytes_and_reject_coherent_rewrite(
     # manifest/artifact evidence, while the explicitly-current receipt must fail.
     pointer_path.unlink()
     retained_generation = copy.deepcopy(minimal)
-    retained_generation["history_corrections"]["corrections"][0][
-        "source_receipts"
-    ] = receipts[1:]
-    assert contract_tool.verify_history_evidence(
-        retained_generation, {"MATRIXPORT": authority}
-    )["verified_receipts"] == 2
+    retained_generation["history_corrections"]["corrections"][0]["source_receipts"] = (
+        receipts[1:]
+    )
+    assert (
+        contract_tool.verify_history_evidence(
+            retained_generation, {"MATRIXPORT": authority}
+        )["verified_receipts"]
+        == 2
+    )
 
     current_pointer_only = copy.deepcopy(minimal)
-    current_pointer_only["history_corrections"]["corrections"][0][
-        "source_receipts"
-    ] = receipts[:1]
+    current_pointer_only["history_corrections"]["corrections"][0]["source_receipts"] = (
+        receipts[:1]
+    )
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match="history evidence file is missing",
@@ -3895,10 +3874,10 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
                 sort_keys=True,
             ).encode("utf-8")
             + b"\n"
-            )
-            ).hexdigest() == (
-                "033565fb529ec062f23cfcd973ee5b7186a1b754ceb4fb2ba8b009e5b11c99b7"
-            )
+        )
+    ).hexdigest() == (
+        "033565fb529ec062f23cfcd973ee5b7186a1b754ceb4fb2ba8b009e5b11c99b7"
+    )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
     )

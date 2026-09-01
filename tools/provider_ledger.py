@@ -690,7 +690,9 @@ def _matrixport_capital_anchors(
         manifest, nav_artifact_id, "matrixport daily portfolio totals"
     )
     nav_rows = _verified_csv_rows(
-        _exact_file(run_root, Path(nav_artifact_id), "matrixport daily portfolio totals"),
+        _exact_file(
+            run_root, Path(nav_artifact_id), "matrixport daily portfolio totals"
+        ),
         nav_artifact.sha256,
         {
             "portfolio_value_usd_observed",
@@ -703,18 +705,22 @@ def _matrixport_capital_anchors(
 
     def timestamp_day(value: object, name: str) -> date:
         try:
-            return datetime.fromisoformat(_text(value, name).replace("Z", "+00:00")).date()
+            return datetime.fromisoformat(
+                _text(value, name).replace("Z", "+00:00")
+            ).date()
         except ValueError as exc:
             raise ProviderLedgerError(f"{name} is not an ISO timestamp") from exc
 
     nav_rows_by_day: dict[date, list[dict[str, str]]] = defaultdict(list)
     for row in nav_rows:
-        nav_rows_by_day[_day(row.get("utc_date"), "matrixport portfolio utc_date")].append(
-            row
-        )
+        nav_rows_by_day[
+            _day(row.get("utc_date"), "matrixport portfolio utc_date")
+        ].append(row)
 
     anchors: list[dict[str, Any]] = []
-    for row in sorted(rows, key=lambda item: (item["subscription_time_utc"], item["order_id"])):
+    for row in sorted(
+        rows, key=lambda item: (item["subscription_time_utc"], item["order_id"])
+    ):
         amount = _observed_decimal(
             row.get("subscription_amount"), "matrixport subscription amount"
         )
@@ -722,7 +728,12 @@ def _matrixport_capital_anchors(
             row.get("actual_subscription_amount"),
             "matrixport actual subscription amount",
         )
-        if amount is None or amount <= 0 or actual_amount is None or actual_amount != amount:
+        if (
+            amount is None
+            or amount <= 0
+            or actual_amount is None
+            or actual_amount != amount
+        ):
             raise ProviderLedgerError(
                 "matrixport subscription amount is absent, non-positive, or inconsistent"
             )
@@ -742,38 +753,38 @@ def _matrixport_capital_anchors(
         strategy_id, mapping_status = _mapped_strategy_for_account(
             account_id, recognition_day, accounts, strategies, assignments
         )
-        source_record_id = _text(row.get("order_id"), "matrixport subscription order_id")
+        source_record_id = _text(
+            row.get("order_id"), "matrixport subscription order_id"
+        )
         opening = not anchors
         anchor: dict[str, Any] = {
-                "account_id": account_id,
-                "amount": {
-                    "currency": _text(
-                        row.get("subscription_currency"),
-                        "matrixport subscription currency",
-                    ),
-                    "status": "AVAILABLE",
-                    "value": format(amount.normalize(), "f"),
-                },
-                "capital_type": (
-                    "OPENING_CAPITAL_ANCHOR"
-                    if opening
-                    else "STRATEGY_CAPITAL_ALLOCATION"
+            "account_id": account_id,
+            "amount": {
+                "currency": _text(
+                    row.get("subscription_currency"),
+                    "matrixport subscription currency",
                 ),
-                "event_date": event_day.isoformat(),
-                "evidence_layer": "ACCOUNT_LIVE",
-                "generation_id": generation_id,
-                "mapping_basis": "EXACT_STRATEGY_SUBSCRIPTION",
-                "mapping_status": mapping_status,
-                "nav_recognition_date": recognition_day.isoformat(),
-                "provider_id": "matrixport",
-                "record_id": f"matrixport-capital-anchor:{source_record_id}",
-                "source_artifact_id": artifact_id,
-                "source_product_id": _text(
-                    row.get("product_id"), "matrixport subscription product_id"
-                ),
-                "source_record_id": source_record_id,
-                "strategy_id": strategy_id,
-            }
+                "status": "AVAILABLE",
+                "value": format(amount.normalize(), "f"),
+            },
+            "capital_type": (
+                "OPENING_CAPITAL_ANCHOR" if opening else "STRATEGY_CAPITAL_ALLOCATION"
+            ),
+            "event_date": event_day.isoformat(),
+            "evidence_layer": "ACCOUNT_LIVE",
+            "generation_id": generation_id,
+            "mapping_basis": "EXACT_STRATEGY_SUBSCRIPTION",
+            "mapping_status": mapping_status,
+            "nav_recognition_date": recognition_day.isoformat(),
+            "provider_id": "matrixport",
+            "record_id": f"matrixport-capital-anchor:{source_record_id}",
+            "source_artifact_id": artifact_id,
+            "source_product_id": _text(
+                row.get("product_id"), "matrixport subscription product_id"
+            ),
+            "source_record_id": source_record_id,
+            "strategy_id": strategy_id,
+        }
         if opening:
             matched_nav_rows = nav_rows_by_day.get(recognition_day, [])
             if len(matched_nav_rows) != 1:
@@ -1554,7 +1565,10 @@ def _project_account_facts(
             ):
                 if field in row:
                     record[field] = row[field]
-            if source_fact == "flows" and record.get("flow_type") == "DEPOSIT_OR_WITHDRAWAL":
+            if (
+                source_fact == "flows"
+                and record.get("flow_type") == "DEPOSIT_OR_WITHDRAWAL"
+            ):
                 amount = _observed_decimal(record.get("amount"), "flow amount")
                 record["capital_disposition"] = (
                     "NON_CAPITAL" if amount == 0 else "EXTERNAL_CAPITAL"
@@ -2139,17 +2153,14 @@ def _broker_strategy_returns(
         if record_id in seen_quantbase_anchor_ids:
             raise ProviderLedgerError("duplicate quantbase capital anchor record_id")
         seen_quantbase_anchor_ids.add(record_id)
-        account_id = _text(
-            row.get("account_id"), "quantbase capital anchor account_id"
-        )
+        account_id = _text(row.get("account_id"), "quantbase capital anchor account_id")
         strategy_id = _text(
             row.get("strategy_id"), "quantbase capital anchor strategy_id"
         )
         if (
             row.get("mapping_status") != "MAPPED"
             or row.get("evidence_layer") != "ACCOUNT_LIVE"
-            or row.get("mapping_basis")
-            != "RECONCILED_PROVIDER_STRATEGY_CAPITAL"
+            or row.get("mapping_basis") != "RECONCILED_PROVIDER_STRATEGY_CAPITAL"
         ):
             raise ProviderLedgerError("quantbase capital anchor mapping is unavailable")
         event_day = _day(row.get("event_date"), "quantbase capital anchor event_date")
@@ -2178,7 +2189,9 @@ def _broker_strategy_returns(
             raise ProviderLedgerError("quantbase capital anchor type is invalid")
         account_strategy = ("quantbase", account_id, strategy_id)
         anchor_key = ("quantbase", account_id, recognition_day.isoformat())
-        previous_strategy = quantbase_anchor_strategies.setdefault(anchor_key, strategy_id)
+        previous_strategy = quantbase_anchor_strategies.setdefault(
+            anchor_key, strategy_id
+        )
         if previous_strategy != strategy_id:
             raise ProviderLedgerError(
                 "quantbase capital anchors conflict at NAV recognition date"
@@ -2191,18 +2204,18 @@ def _broker_strategy_returns(
         else:
             quantbase_allocation_accounts.add(account_strategy)
             quantbase_anchor_adjustments[anchor_key] += amount_value
-            flow_timing_by_provider["quantbase"].add(
-                "PROVIDER_NAV_RECOGNITION_DATE"
-            )
+            flow_timing_by_provider["quantbase"].add("PROVIDER_NAV_RECOGNITION_DATE")
 
     for account_strategy in quantbase_allocation_accounts:
         if account_strategy not in quantbase_opening_accounts:
             raise ProviderLedgerError(
                 "quantbase capital allocation lacks an opening capital anchor"
             )
-    for (provider_id, account_id, recognition_day), strategy_id in (
-        quantbase_anchor_strategies.items()
-    ):
+    for (
+        provider_id,
+        account_id,
+        recognition_day,
+    ), strategy_id in quantbase_anchor_strategies.items():
         if not any(
             str(row.get("as_of_date")) == recognition_day
             and row.get("mapping_status") == "MAPPED"
@@ -2281,18 +2294,14 @@ def _broker_strategy_returns(
         composite = (
             items[0][1]
             if len(items) == 1
-            else sum(
-                (capital * value for capital, value, _, _, _ in items), Decimal(0)
-            )
+            else sum((capital * value for capital, value, _, _, _ in items), Decimal(0))
             / denominator
         )
         providers = sorted({item[2] for item in items})
         timing_modes = {
             mode
             for provider in providers
-            for mode in flow_timing_by_provider.get(
-                provider, {"DATE_ONLY_END_OF_DAY"}
-            )
+            for mode in flow_timing_by_provider.get(provider, {"DATE_ONLY_END_OF_DAY"})
         }
         account_ids = sorted({item[3] for item in items})
         source_record_ids = sorted(item[4] for item in items)
@@ -2412,7 +2421,9 @@ def _funded_account_live_boundaries(
 
     required = {
         _text(row.get("strategy_id"), "required financial MVP strategy_id")
-        for row in _objects(financial_contract.get("strategies"), "financial MVP strategies")
+        for row in _objects(
+            financial_contract.get("strategies"), "financial MVP strategies"
+        )
         if row.get("product_requirement") == "REQUIRED"
     }
     if set(boundaries) != required:
@@ -2556,9 +2567,7 @@ def _complete_broker_rollforward(row: Mapping[str, Any]) -> bool:
         and bool(flow_timing.strip())
         and isinstance(source_record_ids, list)
         and bool(source_record_ids)
-        and all(
-            isinstance(value, str) and value.strip() for value in source_record_ids
-        )
+        and all(isinstance(value, str) and value.strip() for value in source_record_ids)
     )
 
 
@@ -2593,13 +2602,10 @@ def _merge_account_returns(
             )
     for broker_row in broker_rows:
         strategy_id = str(broker_row["strategy_id"])
-        if (
-            strategy_id not in provider_native_strategy_ids
-            and str(broker_row["date"]) <= last_source.get(strategy_id, "")
-        ):
-            retained = retained_account_rows.get(
-                (strategy_id, str(broker_row["date"]))
-            )
+        if strategy_id not in provider_native_strategy_ids and str(
+            broker_row["date"]
+        ) <= last_source.get(strategy_id, ""):
+            retained = retained_account_rows.get((strategy_id, str(broker_row["date"])))
             if retained is not None and _complete_broker_rollforward(broker_row):
                 retained.update(
                     {field: broker_row[field] for field in _ROLLFORWARD_FIELDS}
@@ -2673,8 +2679,7 @@ def _strategy_return_overlap_checks(
                     "CURRENT_PROVIDER_ACCOUNT_PATH_PROMOTED; "
                     "RETAINED_ACCOUNT_PATH_SUPERSEDED"
                     if strategy_id in provider_native_strategy_ids
-                    else "INHERITED_ACCOUNT_PATH_RETAINED; "
-                    "BROKER_OVERLAP_NOT_PROMOTED"
+                    else "INHERITED_ACCOUNT_PATH_RETAINED; BROKER_OVERLAP_NOT_PROMOTED"
                 ),
                 "blocking": False,
                 "check_id": f"strategy-return-overlap-{strategy_id}",
@@ -4180,9 +4185,7 @@ def build_catalog(
                 "check_id": "broker-nav-rollforward",
                 "promoted_provider_return_count": promoted_provider_return_count,
                 "status": "PASS",
-                "superseded_retained_return_count": (
-                    superseded_retained_return_count
-                ),
+                "superseded_retained_return_count": (superseded_retained_return_count),
             },
             *overlap_checks,
         ],

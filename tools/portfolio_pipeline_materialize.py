@@ -598,10 +598,10 @@ def _generation_expectation(value: object, role: str) -> dict[str, Any]:
             and isinstance(relative_path, str)
             and (
                 relative_path.lower().endswith(".xlsx")
-            or any(
-                segment.lower() == "deliveries"
-                for segment in relative_path.replace("\\", "/").split("/")
-            )
+                or any(
+                    segment.lower() == "deliveries"
+                    for segment in relative_path.replace("\\", "/").split("/")
+                )
             )
         ):
             raise MaterializationError(

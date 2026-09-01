@@ -120,9 +120,7 @@ def _current_payload(
     }
 
 
-def _provider_ledger_identity(
-    root: Path, generation_id: str
-) -> dict[str, object]:
+def _provider_ledger_identity(root: Path, generation_id: str) -> dict[str, object]:
     accepted_root = root.resolve()
     try:
         pointer = read_current(accepted_root)
@@ -192,10 +190,14 @@ def _validate_freshness(
         },
     )
     catalog = _strict_object(
-        provider_ledger.get("catalog"), "selected provider ledger catalog", {"path", "sha256", "size_bytes"}
+        provider_ledger.get("catalog"),
+        "selected provider ledger catalog",
+        {"path", "sha256", "size_bytes"},
     )
     manifest = _strict_object(
-        provider_ledger.get("manifest"), "selected provider ledger manifest", {"path", "sha256", "size_bytes"}
+        provider_ledger.get("manifest"),
+        "selected provider ledger manifest",
+        {"path", "sha256", "size_bytes"},
     )
     if (
         ledger.get("as_of_date") != provider_ledger.get("as_of_date")
@@ -299,7 +301,12 @@ def _panel_payload(
         raise ControlRecomputeError("candidate artifact_sha256 is unavailable")
     normalized_hashes: dict[str, str] = {}
     for relative, declared_hash in artifact_hashes.items():
-        if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+        ):
             raise ControlRecomputeError("candidate artifact path differs")
         normalized_hashes[relative] = _hash_text(
             declared_hash, f"candidate artifact {relative} sha256"
@@ -320,12 +327,14 @@ def _panel_payload(
     freshness_path = accepted / "data" / "freshness-health.json"
     candidate_freshness = _file_identity(freshness_path)
     declared_freshness = normalized_hashes.get("data/freshness-health.json")
-    if declared_freshness is None or declared_freshness != candidate_freshness["sha256"]:
-        raise ControlRecomputeError("candidate freshness hash differs")
     if (
-        candidate_freshness["sha256"] != selected_freshness.get("sha256")
-        or candidate_freshness["size_bytes"] != selected_freshness.get("size_bytes")
+        declared_freshness is None
+        or declared_freshness != candidate_freshness["sha256"]
     ):
+        raise ControlRecomputeError("candidate freshness hash differs")
+    if candidate_freshness["sha256"] != selected_freshness.get(
+        "sha256"
+    ) or candidate_freshness["size_bytes"] != selected_freshness.get("size_bytes"):
         raise ControlRecomputeError("panel freshness identity differs")
     panel_id = _text(manifest.get("panel_id"), "panel_id")
     if panel_id != expected_panel_id:
@@ -425,7 +434,8 @@ def build_receipt(
         == correlation_identity["generation_id"],
         "panel_freshness_matches_selected": (
             panel_meta.get("freshness_evaluated_on") == evaluation_date.isoformat()
-            and panel_identity["freshness"] == {
+            and panel_identity["freshness"]
+            == {
                 "path": panel_identity["freshness"]["path"],
                 "sha256": freshness_identity["sha256"],
                 "size_bytes": freshness_identity["size_bytes"],

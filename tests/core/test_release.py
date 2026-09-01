@@ -49,9 +49,7 @@ COMMIT = "b" * 40
 
 
 @pytest.fixture(autouse=True)
-def _skip_posix_release_behavior_on_windows(
-    request: pytest.FixtureRequest
-) -> None:
+def _skip_posix_release_behavior_on_windows(request: pytest.FixtureRequest) -> None:
     if (
         os.name == "nt"
         and not request.node.name.startswith("test_windows_")
@@ -256,15 +254,21 @@ def test_release_manifest_schema_has_disjoint_legacy_and_current_versions(
         gates=_gate(),
     )
     schema = json.loads(
-        (Path(__file__).parents[2] / "schemas" / "core" / "release-manifest.schema.json").read_text(
-            encoding="utf-8"
-        )
+        (
+            Path(__file__).parents[2]
+            / "schemas"
+            / "core"
+            / "release-manifest.schema.json"
+        ).read_text(encoding="utf-8")
     )
     Draft202012Validator.check_schema(schema)
     authority_schema = json.loads(
-        (Path(__file__).parents[2] / "schemas" / "core" / "release-authority.schema.json").read_text(
-            encoding="utf-8"
-        )
+        (
+            Path(__file__).parents[2]
+            / "schemas"
+            / "core"
+            / "release-authority.schema.json"
+        ).read_text(encoding="utf-8")
     )
     validator = Draft202012Validator(
         schema,

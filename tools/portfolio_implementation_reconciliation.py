@@ -39,9 +39,7 @@ TRADE_SIDES: Final = frozenset({"BUY", "SELL"})
 INSUFFICIENT_EXACT_COMMON_DATA: Final = (
     "accepted as_of leaves insufficient exact-common data"
 )
-UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT: Final = (
-    "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT"
-)
+UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT: Final = "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT"
 _TICKER_ENTRY = re.compile(r"(?:^|\s)([^\s|]+):USA\|")
 
 
@@ -193,8 +191,7 @@ def _grizzly_manual_histories(
     differing = [
         item
         for item in live
-        if item["observed"] in by_timestamp
-        and by_timestamp[item["observed"]] != item
+        if item["observed"] in by_timestamp and by_timestamp[item["observed"]] != item
     ]
     if (
         differing
@@ -207,9 +204,7 @@ def _grizzly_manual_histories(
             "Grizzly bounded all-history and live-only files are inconsistent"
         )
     sell_rows = [item for item in blended if item["action"] == "SELL"]
-    if len(sell_rows) < 50 or any(
-        item["pnl_fraction"] is None for item in sell_rows
-    ):
+    if len(sell_rows) < 50 or any(item["pnl_fraction"] is None for item in sell_rows):
         raise _insufficient_exact_common_data()
     validation = {
         "all_history_observations": len(blended),
@@ -320,9 +315,7 @@ def relative_metrics(
     accepted_as_of: date,
 ) -> dict[str, Any]:
     common = sorted(
-        observed
-        for observed in set(model) & set(actual)
-        if observed <= accepted_as_of
+        observed for observed in set(model) & set(actual) if observed <= accepted_as_of
     )
     if len(common) < 2:
         raise _insufficient_exact_common_data()
@@ -1240,9 +1233,7 @@ def _tt_reconciliation(
     model_events, _ = _tt_allocation_events(
         workbook, components, accepted_as_of=accepted_as_of
     )
-    actual_events = _tt_actual_events(
-        ledger, schwab, accepted_as_of=accepted_as_of
-    )
+    actual_events = _tt_actual_events(ledger, schwab, accepted_as_of=accepted_as_of)
     common_dates = sorted(set(model_returns) & set(account_returns))
     if len(common_dates) < 2 or not model_events or not actual_events:
         raise _insufficient_exact_common_data()
@@ -1275,9 +1266,7 @@ def _tt_reconciliation(
     component_count_changed = len(component_counts) > 1
     coverage = event_coverage(comparable_model, comparable_actual)
 
-    def segment(
-        first: date, last: date, *, accepted_as_of: date
-    ) -> dict[str, object]:
+    def segment(first: date, last: date, *, accepted_as_of: date) -> dict[str, object]:
         observed = [
             item
             for item in common_dates
@@ -1437,9 +1426,7 @@ def _market_prices(path: Path, *, accepted_as_of: date) -> dict[date, float]:
 def _next_trading_day(
     observed: date, calendar: Sequence[date], *, accepted_as_of: date
 ) -> date:
-    matches = [
-        item for item in calendar if observed <= item <= accepted_as_of
-    ]
+    matches = [item for item in calendar if observed <= item <= accepted_as_of]
     if not matches:
         raise _insufficient_exact_common_data()
     return matches[0]
@@ -1500,9 +1487,7 @@ def _grizzly_model_states(
         )
         if raw_day > calendar[-1]:
             continue
-        trade_day = _next_trading_day(
-            raw_day, calendar, accepted_as_of=accepted_as_of
-        )
+        trade_day = _next_trading_day(raw_day, calendar, accepted_as_of=accepted_as_of)
         effective.setdefault(trade_day, []).append((observed, action))
     states: dict[date, bool] = {}
     events: list[TradeEvent] = []
@@ -1631,9 +1616,7 @@ def _grizzly_reconciliation(
     model_states, model_events = _grizzly_model_states(
         signals, calendar, accepted_as_of=accepted_as_of
     )
-    _, actual_events = _grizzly_actual(
-        ledger, schwab, accepted_as_of=accepted_as_of
-    )
+    _, actual_events = _grizzly_actual(ledger, schwab, accepted_as_of=accepted_as_of)
     actual_states = _expand_actual_states(
         actual_events, calendar, accepted_as_of=accepted_as_of
     )
@@ -1655,9 +1638,7 @@ def _grizzly_reconciliation(
         for observed in comparable_calendar
         if model_states[observed] != actual_states[observed]
     ]
-    model_proxy = _state_returns(
-        prices, model_states, accepted_as_of=accepted_as_of
-    )
+    model_proxy = _state_returns(prices, model_states, accepted_as_of=accepted_as_of)
     actual_state_proxy = _state_returns(
         prices, actual_states, accepted_as_of=accepted_as_of
     )
@@ -1943,9 +1924,7 @@ def build_reconciliation(
             accepted_as_of=accepted_as_of,
         ),
         grizzly,
-        _tt_reconciliation(
-            tt_workbook, ledger, schwab, accepted_as_of=accepted_as_of
-        ),
+        _tt_reconciliation(tt_workbook, ledger, schwab, accepted_as_of=accepted_as_of),
     ]
     payload: dict[str, object] = {
         "as_of_date": accepted_as_of.isoformat(),

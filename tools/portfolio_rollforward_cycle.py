@@ -101,7 +101,11 @@ def _validate_file_identity(value: object, label: str) -> dict[str, object]:
     observed_hash, observed_size = hash_file(path)
     if (observed_hash, observed_size) != (expected_hash, expected_size):
         raise RollforwardCycleError(f"{label} input identity differs")
-    return {"path": str(path.resolve()), "sha256": observed_hash, "size_bytes": observed_size}
+    return {
+        "path": str(path.resolve()),
+        "sha256": observed_hash,
+        "size_bytes": observed_size,
+    }
 
 
 def _validate_generation_identity(value: object, label: str) -> None:
@@ -137,7 +141,9 @@ def _validate_panel_identity(
     if candidate_dir.is_symlink() or not candidate_dir.is_dir():
         raise RollforwardCycleError("panel candidate directory is missing or linked")
     panel_id = _hash_text(panel.get("panel_id"), "panel.panel_id")
-    candidate_record = _validate_file_identity(panel.get("candidate_record"), "panel candidate record")
+    candidate_record = _validate_file_identity(
+        panel.get("candidate_record"), "panel candidate record"
+    )
     dashboard = _validate_file_identity(panel.get("dashboard"), "panel dashboard")
     freshness = _validate_file_identity(panel.get("freshness"), "panel freshness")
     declared_freshness = _hash_text(
@@ -145,8 +151,10 @@ def _validate_panel_identity(
     )
     if (
         Path(candidate_record["path"]) != candidate_dir.resolve() / "candidate.json"
-        or Path(dashboard["path"]) != candidate_dir.resolve() / "data" / "dashboard_data.json"
-        or Path(freshness["path"]) != candidate_dir.resolve() / "data" / "freshness-health.json"
+        or Path(dashboard["path"])
+        != candidate_dir.resolve() / "data" / "dashboard_data.json"
+        or Path(freshness["path"])
+        != candidate_dir.resolve() / "data" / "freshness-health.json"
     ):
         raise RollforwardCycleError("panel identity paths differ")
     record = _load(Path(candidate_record["path"]), "panel candidate record")
@@ -155,7 +163,12 @@ def _validate_panel_identity(
         raise RollforwardCycleError("panel candidate artifact hashes differ")
     normalized: dict[str, str] = {}
     for relative, raw_hash in artifact_hashes.items():
-        if not isinstance(relative, str) or not relative or Path(relative).is_absolute() or ".." in Path(relative).parts:
+        if (
+            not isinstance(relative, str)
+            or not relative
+            or Path(relative).is_absolute()
+            or ".." in Path(relative).parts
+        ):
             raise RollforwardCycleError("panel candidate artifact path differs")
         normalized[relative] = _hash_text(raw_hash, f"panel artifact {relative}")
         observed = _identity(candidate_dir / relative)
@@ -191,11 +204,17 @@ def _validate_provider_ledger_identity(
     )
     _hash_text(identity.get("generation_id"), "provider ledger generation_id")
     try:
-        date.fromisoformat(_text(identity.get("as_of_date"), "provider ledger as_of_date"))
+        date.fromisoformat(
+            _text(identity.get("as_of_date"), "provider ledger as_of_date")
+        )
     except ValueError as exc:
         raise RollforwardCycleError("provider ledger as_of_date differs") from exc
-    catalog = _validate_file_identity(identity.get("catalog"), "provider ledger catalog")
-    manifest = _validate_file_identity(identity.get("manifest"), "provider ledger manifest")
+    catalog = _validate_file_identity(
+        identity.get("catalog"), "provider ledger catalog"
+    )
+    manifest = _validate_file_identity(
+        identity.get("manifest"), "provider ledger manifest"
+    )
     observed = {
         "as_of_date": identity["as_of_date"],
         "catalog": catalog,
@@ -203,7 +222,9 @@ def _validate_provider_ledger_identity(
         "manifest": manifest,
     }
     if observed != selected:
-        raise RollforwardCycleError("control recomputation provider ledger identity differs")
+        raise RollforwardCycleError(
+            "control recomputation provider ledger identity differs"
+        )
 
 
 def _validate_recomputation(
@@ -312,7 +333,9 @@ def _validate_recomputation(
         raise RollforwardCycleError("control recomputation freshness date differs")
     if {**freshness, "as_of_date": evaluation_date.isoformat()} != selected_freshness:
         raise RollforwardCycleError("control recomputation freshness identity differs")
-    _validate_provider_ledger_identity(inputs["provider_ledger"], selected_provider_ledger)
+    _validate_provider_ledger_identity(
+        inputs["provider_ledger"], selected_provider_ledger
+    )
     _validate_panel_identity(inputs["panel"], selected_freshness)
     _validate_generation_identity(inputs["report"], "report")
 
@@ -406,7 +429,8 @@ def build_receipt(
         or freshness_ledger.get("catalog_sha256") != catalog_identity["sha256"]
         or freshness_ledger.get("catalog_size_bytes") != catalog_identity["size_bytes"]
         or freshness_ledger.get("manifest_sha256") != manifest_identity["sha256"]
-        or freshness_ledger.get("manifest_size_bytes") != manifest_identity["size_bytes"]
+        or freshness_ledger.get("manifest_size_bytes")
+        != manifest_identity["size_bytes"]
     ):
         raise RollforwardCycleError("freshness provider ledger identity differs")
     policies: dict[str, FreshnessPolicy] = {}
@@ -475,9 +499,7 @@ def build_receipt(
                 try:
                     date.fromisoformat(_text(value, f"freshness {field}"))
                 except ValueError as exc:
-                    raise RollforwardCycleError(
-                        f"freshness {field} differs"
-                    ) from exc
+                    raise RollforwardCycleError(f"freshness {field} differs") from exc
         if row.get("acquired_at") is not None and not isinstance(
             row.get("acquired_at"), str
         ):

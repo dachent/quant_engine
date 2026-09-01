@@ -47,9 +47,7 @@ _HARNESS_IDENTITY = {
 
 
 @pytest.fixture(autouse=True)
-def _skip_posix_rehearsal_behavior_on_windows(
-    request: pytest.FixtureRequest
-) -> None:
+def _skip_posix_rehearsal_behavior_on_windows(request: pytest.FixtureRequest) -> None:
     if os.name == "nt" and "windows" not in request.node.name:
         pytest.skip("POSIX coordinated rehearsal behavior is verified on POSIX")
 
@@ -74,7 +72,8 @@ def test_windows_rehearsal_entry_points_return_unavailable_without_output_mutati
     )
 
     assert all(
-        result == {
+        result
+        == {
             "reason": "WINDOWS_NAMESPACE_UNTRUSTED",
             "status": "PUBLICATION_UNAVAILABLE",
         }

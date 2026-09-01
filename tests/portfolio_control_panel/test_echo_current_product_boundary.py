@@ -43,9 +43,9 @@ def _current_manifest_rows() -> list[dict[str, object]]:
     """Project the explicit seven-strategy account authority into 13 epochs."""
 
     manifest = json.loads(
-        (ROOT.parent / "dataPortfolio" / "manifests" / "strategy-manifest.json").read_text(
-            encoding="utf-8"
-        )
+        (
+            ROOT.parent / "dataPortfolio" / "manifests" / "strategy-manifest.json"
+        ).read_text(encoding="utf-8")
     )
     rows: list[dict[str, object]] = []
     for strategy in manifest["strategies"]:
@@ -89,9 +89,7 @@ def _schema9_epoch_fixture() -> tuple[
         if source["strategy_id"] == "volatis-strategy":
             # The admitted manifest calculation is cut off on August 13 while
             # the report retains later source observations through August 16.
-            manifest_row.update(
-                {"start": "2024-10-15", "end": "2026-08-13"}
-            )
+            manifest_row.update({"start": "2024-10-15", "end": "2026-08-13"})
             performance_row["observed_start"] = "2024-10-15"
         manifest_rows.append(manifest_row)
         performance_rows.append(performance_row)
@@ -179,12 +177,12 @@ def test_panel_rejects_owner_control_snapshot_that_reactivates_echo() -> None:
         panel.ControlPanelValidationError,
         match="deprecated EchoTrade owner authority differs",
     ):
-        panel._financial_mvp_product_controls(
-            json.dumps(contract).encode("utf-8")
-        )
+        panel._financial_mvp_product_controls(json.dumps(contract).encode("utf-8"))
 
 
-def test_panel_rejects_arbitrary_strategy_id_substitution_even_when_counts_match() -> None:
+def test_panel_rejects_arbitrary_strategy_id_substitution_even_when_counts_match() -> (
+    None
+):
     """Seven-count arithmetic must not replace the owner strategy identities."""
 
     contract = json.loads(
@@ -221,15 +219,15 @@ def test_panel_requires_exact_thirteen_current_manifest_performance_rows(
         )
 
 
-def test_panel_accepts_the_authoritative_thirteen_row_manifest_performance_set() -> None:
+def test_panel_accepts_the_authoritative_thirteen_row_manifest_performance_set() -> (
+    None
+):
     controls = panel._financial_mvp_product_controls()
     manifest_rows = _current_manifest_rows()
 
     assert panel._validate_current_product_epoch_surface(
         {"rows": manifest_rows}, manifest_rows, controls, as_of_date="2026-08-13"
-    ) == {
-        (row["account_id"], row["strategy_id"]) for row in manifest_rows
-    }
+    ) == {(row["account_id"], row["strategy_id"]) for row in manifest_rows}
 
 
 def test_panel_rejects_a_future_synthetic_performance_row() -> None:
@@ -280,9 +278,7 @@ def test_panel_rejects_epoch_surface_missing_each_required_strategy(
 
     controls = panel._financial_mvp_product_controls()
     source_rows = _current_manifest_rows()
-    rows = [
-        row for row in source_rows if row["strategy_id"] != missing_strategy_id
-    ]
+    rows = [row for row in source_rows if row["strategy_id"] != missing_strategy_id]
     replacement_strategy_id = next(
         strategy_id
         for strategy_id in sorted(REQUIRED_STRATEGY_IDS)
@@ -421,9 +417,7 @@ def test_performance_lineage_schema_is_closed_and_accepts_emitted_identity() -> 
             encoding="utf-8"
         )
     )
-    lineage_schema = schema["properties"]["meta"]["properties"][
-        "performance_lineage"
-    ]
+    lineage_schema = schema["properties"]["meta"]["properties"]["performance_lineage"]
     accepted = next(
         branch
         for branch in lineage_schema["oneOf"]
@@ -472,12 +466,8 @@ def test_missing_baseline_provider_ledger_has_a_strict_unavailable_shape() -> No
             encoding="utf-8"
         )
     )
-    lineage_schema = schema["properties"]["meta"]["properties"][
-        "performance_lineage"
-    ]
-    assert Draft202012Validator(schema).evolve(schema=lineage_schema).is_valid(
-        lineage
-    )
+    lineage_schema = schema["properties"]["meta"]["properties"]["performance_lineage"]
+    assert Draft202012Validator(schema).evolve(schema=lineage_schema).is_valid(lineage)
 
 
 def test_ambiguous_baseline_provider_ledger_has_a_strict_unavailable_shape() -> None:
@@ -494,9 +484,7 @@ def test_ambiguous_baseline_provider_ledger_has_a_strict_unavailable_shape() -> 
             encoding="utf-8"
         )
     )
-    lineage_schema = schema["properties"]["meta"]["properties"][
-        "performance_lineage"
-    ]
+    lineage_schema = schema["properties"]["meta"]["properties"]["performance_lineage"]
     assert lineage["baseline_provider_ledger"] == {
         "status": "UNAVAILABLE_BASELINE_PROVIDER_LEDGER_IDENTITY"
     }
@@ -506,9 +494,7 @@ def test_ambiguous_baseline_provider_ledger_has_a_strict_unavailable_shape() -> 
         "sha256": "1" * 64,
     }
     assert lineage["status"] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
-    assert Draft202012Validator(schema).evolve(schema=lineage_schema).is_valid(
-        lineage
-    )
+    assert Draft202012Validator(schema).evolve(schema=lineage_schema).is_valid(lineage)
 
 
 @pytest.mark.parametrize(
@@ -769,9 +755,7 @@ def test_mismatched_ledger_lineage_suppresses_strategy_eligibility_inputs() -> N
     }
     assert {row["strategy_id"] for row in suppressed} == REQUIRED_STRATEGY_IDS
     assert len(suppressed) == 7
-    assert all(
-        row[field] is None for row in suppressed for field in unavailable_fields
-    )
+    assert all(row[field] is None for row in suppressed for field in unavailable_fields)
     assert all(
         row["account_live_cagr_status"] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         for row in suppressed
@@ -781,8 +765,7 @@ def test_mismatched_ledger_lineage_suppresses_strategy_eligibility_inputs() -> N
         for row in suppressed
     )
     assert all(
-        row["nav_status"] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
-        for row in suppressed
+        row["nav_status"] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" for row in suppressed
     )
     assert all(
         row["provider_comparison_status"] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
@@ -849,9 +832,7 @@ def test_panel_rejects_non_authoritative_current_manifest_performance_identity(
         ("return_path_observed_end", "2026-08-14"),
     ),
 )
-def test_panel_rejects_noncanonical_current_epoch_dates(
-    field: str, value: str
-) -> None:
+def test_panel_rejects_noncanonical_current_epoch_dates(field: str, value: str) -> None:
     """Current return dates must use the canonical crosswalk date encoding."""
 
     manifest, performance_rows, crosswalk = _schema9_epoch_fixture()
@@ -898,9 +879,7 @@ def test_panel_rejects_excluded_available_canonical_return_authority() -> None:
                 "twr_status": "AVAILABLE_WITH_INFERRED_FLOW_TIMING",
             }
         ],
-        "allocation_history": [
-            {"scope": "SYSTEMATIC", "strategy_id": "retired"}
-        ],
+        "allocation_history": [{"scope": "SYSTEMATIC", "strategy_id": "retired"}],
     }
 
     with pytest.raises(
@@ -950,9 +929,7 @@ def test_panel_current_row_filter_excludes_history_only_strategy() -> None:
         controls,
     )
 
-    assert current_rows == [
-        {"strategy_id": "current", "twr_status": "AVAILABLE"}
-    ]
+    assert current_rows == [{"strategy_id": "current", "twr_status": "AVAILABLE"}]
 
 
 def test_panel_current_row_filter_fails_closed_for_missing_strategy_controls() -> None:
@@ -1091,11 +1068,7 @@ def test_panel_rejects_noncurrent_account_manifest_identity(
         )
 
     panel._validate_current_product_account_manifest(
-        {
-            "rows": [
-                {"account_id": "current-account", "strategy_id": "qsi"}
-            ]
-        },
+        {"rows": [{"account_id": "current-account", "strategy_id": "qsi"}]},
         controls,
         {"current-account"},
     )
@@ -1138,9 +1111,7 @@ def test_panel_selector_excludes_deprecated_account_without_strategy_id() -> Non
 
     # The pre-fix consumer used the forged report list directly, so the
     # missing strategy_id left the deprecated ALPACA account selectable.
-    assert "retired-account" in {
-        row["account_id"] for row in forged_report_selector
-    }
+    assert "retired-account" in {row["account_id"] for row in forged_report_selector}
     selector_rows = panel._current_product_account_summary_rows(
         forged_report_selector, baseline, controls
     )
@@ -1264,8 +1235,13 @@ def test_weekly_current_surface_accepts_nine_plan_bound_strategy_series() -> Non
     }
 
     current_ids = (
-        "p123-ai-factor", "p123-eu", "qsi", "tt-portfolio",
-        "volatis-strategy", "grizzlybears-vtma", "robuxio-crypto",
+        "p123-ai-factor",
+        "p123-eu",
+        "qsi",
+        "tt-portfolio",
+        "volatis-strategy",
+        "grizzlybears-vtma",
+        "robuxio-crypto",
     )
     strategy_names = {
         strategy_id: f"Strategy {index}"

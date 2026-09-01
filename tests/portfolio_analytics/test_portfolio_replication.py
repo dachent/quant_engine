@@ -257,7 +257,13 @@ def _producer_fixture(
                 [
                     "synthetic-strategy",
                     observed.isoformat(),
-                    format(0.00015 + beta_one * factor_one + beta_two * factor_two + risk_free, ".17g"),
+                    format(
+                        0.00015
+                        + beta_one * factor_one
+                        + beta_two * factor_two
+                        + risk_free,
+                        ".17g",
+                    ),
                     "ACCOUNT_LIVE",
                     "NET",
                     "TOTAL",
@@ -273,7 +279,10 @@ def _producer_fixture(
                 ]
             )
     target_hash, target_size = _source(target)["sha256"], _source(target)["size_bytes"]
-    factor_hash, factor_size = _source(factors)["sha256"], _source(factors)["size_bytes"]
+    factor_hash, factor_size = (
+        _source(factors)["sha256"],
+        _source(factors)["size_bytes"],
+    )
     specification: dict[str, object] = {
         "as_of_date": days[-1].isoformat(),
         "factor_source": {
@@ -305,7 +314,14 @@ def _producer_fixture(
                 "periods_per_year": 252,
                 "ridge_candidates": ["0.0000000001"],
                 "series_id": "synthetic-strategy",
-                "smoothness_candidates": ["0.00000001", "0.0000001", "0.000001", "0.00001", "0.0001", "0.001"],
+                "smoothness_candidates": [
+                    "0.00000001",
+                    "0.0000001",
+                    "0.000001",
+                    "0.00001",
+                    "0.0001",
+                    "0.001",
+                ],
                 "test_start": days[105].isoformat(),
                 "train_end": days[104].isoformat(),
             }

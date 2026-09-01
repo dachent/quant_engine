@@ -349,7 +349,9 @@ def _replace_receipt(source: Path, destination: Path) -> None:
     movefile_replace_existing = 0x1
     movefile_write_through = 0x8
     if not move_file_ex(
-        str(source), str(destination), movefile_replace_existing | movefile_write_through
+        str(source),
+        str(destination),
+        movefile_replace_existing | movefile_write_through,
     ):
         raise OSError(ctypes.get_last_error(), "MoveFileExW failed")
 
@@ -372,11 +374,15 @@ def _commit_receipt_directory_entry(receipt_path: Path) -> None:
     try:
         descriptor = os.open(receipt_path.parent, flags)
     except OSError:
-        raise GovernanceError("receipt directory could not be opened for durability") from None
+        raise GovernanceError(
+            "receipt directory could not be opened for durability"
+        ) from None
     try:
         os.fsync(descriptor)
     except OSError:
-        raise GovernanceError("receipt directory durability could not be established") from None
+        raise GovernanceError(
+            "receipt directory durability could not be established"
+        ) from None
     finally:
         os.close(descriptor)
 
@@ -440,16 +446,22 @@ def _canonical_state_root() -> Path:
             raw_base = os.environ.get("XDG_STATE_HOME")
             base = Path(raw_base) if raw_base else Path.home() / ".local" / "state"
     except (OSError, RuntimeError):
-        raise GovernanceError("live-read receipt state base cannot be resolved") from None
+        raise GovernanceError(
+            "live-read receipt state base cannot be resolved"
+        ) from None
     if not base.is_absolute() or not base.is_dir():
         raise GovernanceError("live-read receipt state base is not a valid directory")
     _reject_reparse_ancestors(base)
     try:
         resolved_base = base.resolve(strict=True)
         if not base.samefile(resolved_base):
-            raise GovernanceError("live-read receipt state base cannot use a reparse path")
+            raise GovernanceError(
+                "live-read receipt state base cannot use a reparse path"
+            )
     except OSError:
-        raise GovernanceError("live-read receipt state base cannot be resolved") from None
+        raise GovernanceError(
+            "live-read receipt state base cannot be resolved"
+        ) from None
     return (
         resolved_base
         / "quant_engine"
@@ -466,7 +478,9 @@ def _prepare_canonical_state_root(state_root: Path) -> Path:
     try:
         root.mkdir(parents=True, exist_ok=True)
     except OSError:
-        raise GovernanceError("live-read receipt state root cannot be created") from None
+        raise GovernanceError(
+            "live-read receipt state root cannot be created"
+        ) from None
     _reject_reparse_ancestors(root)
     return root
 

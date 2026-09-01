@@ -633,9 +633,7 @@ def build_replication(
     if decomposition_artifact.schema_name != "portfolio-factor-decomposition":
         raise ReplicationError("decomposition manifest artifact schema_name differs")
     if decomposition_artifact.schema_version != str(analytics_schema_version):
-        raise ReplicationError(
-            "decomposition manifest artifact schema_version differs"
-        )
+        raise ReplicationError("decomposition manifest artifact schema_version differs")
     if decomposition.get("method_label") != ALLOWED_SOURCE_METHOD_LABEL:
         raise ReplicationError("decomposition method label is not accepted")
     if decomposition.get("as_of_date") != as_of.isoformat():

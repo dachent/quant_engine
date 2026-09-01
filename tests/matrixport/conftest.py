@@ -15,9 +15,7 @@ from quant_engine.matrixport.util import canonical_json
 
 
 @pytest.fixture(autouse=True)
-def canonical_governance_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> Path:
+def canonical_governance_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     root = tmp_path / "canonical-governance"
     monkeypatch.setattr(governance_module, "_canonical_state_root", lambda: root)
     return root

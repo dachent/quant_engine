@@ -26,7 +26,10 @@ CURRENT_FIXTURE = (
 
 
 def _matrix_rows(matrix: dict[str, object]) -> list[list[str]]:
-    return [list(row) if isinstance(row, list) else str(row).split(" ") for row in matrix["values"]]
+    return [
+        list(row) if isinstance(row, list) else str(row).split(" ")
+        for row in matrix["values"]
+    ]
 
 
 def _quadratic_loss(matrix: dict[str, object], inputs: list[Decimal]) -> Decimal:
@@ -51,7 +54,10 @@ def _browser_runtime() -> tuple[str, str, str] | None:
         / "chrome.exe"
     )
     module = (
-        Path(runtime_node).resolve().parent / "node_modules" / "playwright" / "index.mjs"
+        Path(runtime_node).resolve().parent
+        / "node_modules"
+        / "playwright"
+        / "index.mjs"
         if runtime_node
         else None
     )
@@ -62,7 +68,9 @@ def _browser_runtime() -> tuple[str, str, str] | None:
 
 def _write_dashboard(candidate: Path, data: dict[str, object]) -> None:
     serialized = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
-    (candidate / "data" / "dashboard_data.json").write_text(serialized + "\n", encoding="utf-8")
+    (candidate / "data" / "dashboard_data.json").write_text(
+        serialized + "\n", encoding="utf-8"
+    )
     (candidate / "data" / "dashboard_data.js").write_text(
         "window.PORTFOLIO_DATA = " + serialized + ";\n", encoding="utf-8"
     )
@@ -89,6 +97,7 @@ def _project_current_strategy_fixture(data: dict[str, object]) -> None:
         if row["strategy_name"] == name
     }
     assert len(legacy_to_current) == len(current_ids)
+
     def rewrite_current(row: dict[str, object]) -> dict[str, object]:
         return {**row, "strategy_id": legacy_to_current[str(row["strategy_id"])]}
 
@@ -101,7 +110,11 @@ def _project_current_strategy_fixture(data: dict[str, object]) -> None:
     data["strategies"] = strategies
     data["performance"] = [
         {
-            **(rewrite_current(row) if row.get("strategy_id") in legacy_to_current else row),
+            **(
+                rewrite_current(row)
+                if row.get("strategy_id") in legacy_to_current
+                else row
+            ),
             "mwr_status": "AVAILABLE",
             "mwr_xirr": "0.03125",
         }
@@ -150,23 +163,45 @@ def _project_current_strategy_fixture(data: dict[str, object]) -> None:
         if row["primary_group"] == "STRATEGY" and row["display_name"] in current_names
     ]
     assert len(strategy_series) == len(current_ids) == 7
-    weeks = [f"2026-{month:02d}-{day:02d}" for month, day in (
-        (5, 4), (5, 11), (5, 18), (5, 25), (6, 1), (6, 8), (6, 15),
-        (6, 22), (6, 29), (7, 6), (7, 13), (7, 20), (7, 27), (8, 3),
-    )]
+    weeks = [
+        f"2026-{month:02d}-{day:02d}"
+        for month, day in (
+            (5, 4),
+            (5, 11),
+            (5, 18),
+            (5, 25),
+            (6, 1),
+            (6, 8),
+            (6, 15),
+            (6, 22),
+            (6, 29),
+            (7, 6),
+            (7, 13),
+            (7, 20),
+            (7, 27),
+            (8, 3),
+        )
+    ]
     for index, row in enumerate(strategy_series):
         values = {week: f"0.0{index + 1}" for week in weeks}
-        metadata = {
-            week: [5, week, week, "COMPLETE", []]
-            for week in weeks[:-1]
-        }
-        metadata[weeks[-1]] = [2, weeks[-1], weeks[-1], "PARTIAL_BOUNDARY", ["CURRENT_AS_OF"]]
+        metadata = {week: [5, week, week, "COMPLETE", []] for week in weeks[:-1]}
+        metadata[weeks[-1]] = [
+            2,
+            weeks[-1],
+            weeks[-1],
+            "PARTIAL_BOUNDARY",
+            ["CURRENT_AS_OF"],
+        ]
         row["values_by_mode"] = {"LIVE_ONLY": values}
         row["observation_meta_by_mode"] = {"LIVE_ONLY": metadata}
-        row["mode_coverage"] = {"LIVE_ONLY": {"status": "AVAILABLE", "weekly_observations": len(weeks)}}
+        row["mode_coverage"] = {
+            "LIVE_ONLY": {"status": "AVAILABLE", "weekly_observations": len(weeks)}
+        }
         row["calendar_basis_by_mode"] = {"LIVE_ONLY": "WEEKDAY"}
     data["weekly_returns"]["series"] = strategy_series + [
-        row for row in data["weekly_returns"]["series"] if row["primary_group"] != "STRATEGY"
+        row
+        for row in data["weekly_returns"]["series"]
+        if row["primary_group"] != "STRATEGY"
     ]
     data["weekly_returns"]["weeks"] = weeks
     data["weekly_returns"]["current_week"] = {
@@ -181,11 +216,15 @@ def _project_current_strategy_fixture(data: dict[str, object]) -> None:
 
     def project_dependence(dependence: dict[str, object]) -> dict[str, Decimal]:
         source_ids = list(dependence["series_ids"])
-        retained_indices = [index for index, name in enumerate(source_ids) if name in current_names]
+        retained_indices = [
+            index for index, name in enumerate(source_ids) if name in current_names
+        ]
         retained_names = [source_ids[index] for index in retained_indices]
         assert retained_indices == [0, 1, 2, 3, 4, 5, 7]
 
-        def slice_matrix(matrix: dict[str, object], *, seed_robuxio: bool = False) -> None:
+        def slice_matrix(
+            matrix: dict[str, object], *, seed_robuxio: bool = False
+        ) -> None:
             source_rows = _matrix_rows(matrix)
             assert len(source_rows) == len(source_ids) == 9
             assert all(len(row) == len(source_ids) for row in source_rows)
@@ -205,7 +244,8 @@ def _project_current_strategy_fixture(data: dict[str, object]) -> None:
             slice_matrix(matrix)
         dependence["series_ids"] = retained_names
         dependence["cells"] = [
-            row for row in dependence["cells"]
+            row
+            for row in dependence["cells"]
             if row["left"] in current_names and row["right"] in current_names
         ]
         assert len(dependence["cells"]) == 21
@@ -219,21 +259,40 @@ def _project_current_strategy_fixture(data: dict[str, object]) -> None:
         with localcontext() as context:
             context.prec = 40
             weights = [
-                Decimal("0.16"), Decimal("0.14"), Decimal("0.14"), Decimal("0.14"),
-                Decimal("0.14"), Decimal("0.14"), Decimal("0.14"),
+                Decimal("0.16"),
+                Decimal("0.14"),
+                Decimal("0.14"),
+                Decimal("0.14"),
+                Decimal("0.14"),
+                Decimal("0.14"),
+                Decimal("0.14"),
             ]
             conservative_losses = [
-                Decimal("0.22"), Decimal("0.23"), Decimal("0.24"), Decimal("0.25"),
-                Decimal("0.26"), Decimal("0.27"), Decimal("0.31"),
+                Decimal("0.22"),
+                Decimal("0.23"),
+                Decimal("0.24"),
+                Decimal("0.25"),
+                Decimal("0.26"),
+                Decimal("0.27"),
+                Decimal("0.31"),
             ]
-            correlation_loss = sum(weight * loss for weight, loss in zip(weights, conservative_losses))
+            correlation_loss = sum(
+                weight * loss for weight, loss in zip(weights, conservative_losses)
+            )
             central_inputs = [
-                Decimal("0"), Decimal("0"), Decimal("0"), Decimal("0"),
-                Decimal("0"), Decimal("0"), Decimal("0.12"),
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0"),
+                Decimal("0.12"),
             ]
             posterior_rows = _matrix_rows(dependence["matrices"]["posterior"])
             central_loss = sum(
-                central_inputs[left] * Decimal(posterior_rows[left][right]) * central_inputs[right]
+                central_inputs[left]
+                * Decimal(posterior_rows[left][right])
+                * central_inputs[right]
                 for left in range(len(retained_names))
                 for right in range(len(retained_names))
             ).sqrt()
@@ -246,43 +305,58 @@ def _project_current_strategy_fixture(data: dict[str, object]) -> None:
             }
             for name, weight, loss in zip(retained_names, weights, conservative_losses)
         ]
-        dependence["correlation_one"].update({
-            "components": correlation_components,
-            "declared_loss": fixed_decimal(correlation_loss),
-            "loss": fixed_decimal(correlation_loss),
-            "reconciliation_difference": "0",
-        })
-        dependence["central_case"].update({
-            "components": [
-                {"series_id": name, "status": "MEASURED", "loss_input": fixed_decimal(loss_input)}
-                for name, loss_input in zip(retained_names, central_inputs)
-            ],
-            "loss": fixed_decimal(central_loss),
-            "measured_component_count": len(retained_names),
-            "measured_pair_count": measured_pairs,
-            "prior_component_count": 0,
-            "prior_pair_count": 21 - measured_pairs,
-        })
+        dependence["correlation_one"].update(
+            {
+                "components": correlation_components,
+                "declared_loss": fixed_decimal(correlation_loss),
+                "loss": fixed_decimal(correlation_loss),
+                "reconciliation_difference": "0",
+            }
+        )
+        dependence["central_case"].update(
+            {
+                "components": [
+                    {
+                        "series_id": name,
+                        "status": "MEASURED",
+                        "loss_input": fixed_decimal(loss_input),
+                    }
+                    for name, loss_input in zip(retained_names, central_inputs)
+                ],
+                "loss": fixed_decimal(central_loss),
+                "measured_component_count": len(retained_names),
+                "measured_pair_count": measured_pairs,
+                "prior_component_count": 0,
+                "prior_pair_count": 21 - measured_pairs,
+            }
+        )
         cluster = dependence["economic_driver_cluster_budget"]["clusters"][0]
         cluster["members"] = retained_names
         cluster["pair_evidence"] = [
-            row for row in cluster["pair_evidence"]
+            row
+            for row in cluster["pair_evidence"]
             if row["left"] in current_names and row["right"] in current_names
         ]
         cluster["loss_contribution"] = fixed_decimal(correlation_loss)
-        dependence["economic_driver_cluster_budget"].update({
-            "central_case_loss": fixed_decimal(central_loss),
-            "correlation_one_loss": fixed_decimal(correlation_loss),
-            "limit_breach": fixed_decimal(correlation_loss - Decimal("0.15")),
-        })
-        dependence["economic_driver_cluster_budget"]["historical_audit_reference"]["full_systematic_loss"] = fixed_decimal(correlation_loss)
+        dependence["economic_driver_cluster_budget"].update(
+            {
+                "central_case_loss": fixed_decimal(central_loss),
+                "correlation_one_loss": fixed_decimal(correlation_loss),
+                "limit_breach": fixed_decimal(correlation_loss - Decimal("0.15")),
+            }
+        )
+        dependence["economic_driver_cluster_budget"]["historical_audit_reference"][
+            "full_systematic_loss"
+        ] = fixed_decimal(correlation_loss)
         return {"central_loss": central_loss, "correlation_loss": correlation_loss}
 
     projected_dependence = project_dependence(data["dependence_analysis"])
     for dependence in data["dependence_modes"].values():
         mode_dependence = project_dependence(dependence)
         assert mode_dependence == projected_dependence
-    data["advisory"]["correlation_one_stress"] = fixed_decimal(projected_dependence["correlation_loss"])
+    data["advisory"]["correlation_one_stress"] = fixed_decimal(
+        projected_dependence["correlation_loss"]
+    )
     component_by_name = {
         row["series_id"]: row
         for row in data["dependence_analysis"]["correlation_one"]["components"]
@@ -291,15 +365,32 @@ def _project_current_strategy_fixture(data: dict[str, object]) -> None:
         for row in collection:
             component = component_by_name[row["strategy_name"]]
             portfolio_fit = row.get("portfolio_fit", row)
-            portfolio_fit["strategy_correlation_one_loss_contribution"] = component["loss_contribution"]
+            portfolio_fit["strategy_correlation_one_loss_contribution"] = component[
+                "loss_contribution"
+            ]
             portfolio_fit["strategy_share_of_correlation_one_loss"] = fixed_decimal(
-                Decimal(component["loss_contribution"]) / projected_dependence["correlation_loss"]
+                Decimal(component["loss_contribution"])
+                / projected_dependence["correlation_loss"]
             )
-            portfolio_fit["cluster_loss_contribution"] = fixed_decimal(projected_dependence["correlation_loss"])
+            portfolio_fit["cluster_loss_contribution"] = fixed_decimal(
+                projected_dependence["correlation_loss"]
+            )
 
     excluded_identity = re.compile(r"echo|composer", re.IGNORECASE)
-    identity_keys = {"strategy_id", "strategy_name", "series_id", "display_name", "left", "right"}
-    identity_lists = {"members", "series_ids", "uncovered_strategies", "excluded_strategies"}
+    identity_keys = {
+        "strategy_id",
+        "strategy_name",
+        "series_id",
+        "display_name",
+        "left",
+        "right",
+    }
+    identity_lists = {
+        "members",
+        "series_ids",
+        "uncovered_strategies",
+        "excluded_strategies",
+    }
     drop = object()
 
     def project_value(value: object, parent_key: str | None = None) -> object:
@@ -323,7 +414,11 @@ def _project_current_strategy_fixture(data: dict[str, object]) -> None:
                 if (projected := project_value(item, parent_key)) is not drop
             ]
         if isinstance(value, str) and excluded_identity.search(value):
-            return drop if parent_key in identity_lists else "Non-current strategy identities withheld from the current fixture."
+            return (
+                drop
+                if parent_key in identity_lists
+                else "Non-current strategy identities withheld from the current fixture."
+            )
         return value
 
     projected = project_value(data)
@@ -332,9 +427,11 @@ def _project_current_strategy_fixture(data: dict[str, object]) -> None:
     data.update(projected)
 
 
-def _rendered_evidence(candidate: Path, runtime: tuple[str, str, str]) -> dict[str, object]:
+def _rendered_evidence(
+    candidate: Path, runtime: tuple[str, str, str]
+) -> dict[str, object]:
     node, module, executable = runtime
-    probe = r'''
+    probe = r"""
 import { pathToFileURL } from "node:url";
 const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
 const browser = await chromium.launch({ headless: true, executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH });
@@ -395,7 +492,7 @@ try {
 } finally {
   await browser.close();
 }
-'''
+"""
     env = dict(
         os.environ,
         PLAYWRIGHT_MODULE=module,
@@ -418,7 +515,9 @@ def _interaction_evidence(
     candidate: Path, runtime: tuple[str, str, str], output: Path, *, epoch_only: bool
 ) -> dict[str, object]:
     node, module, executable = runtime
-    env = dict(os.environ, PLAYWRIGHT_MODULE=module, PLAYWRIGHT_EXECUTABLE_PATH=executable)
+    env = dict(
+        os.environ, PLAYWRIGHT_MODULE=module, PLAYWRIGHT_EXECUTABLE_PATH=executable
+    )
     result = subprocess.run(
         [
             node,
@@ -431,7 +530,7 @@ def _interaction_evidence(
             "true",
             "--expected-calculation-cutoff",
             "2026-08-13",
-            *( ["--epoch-only", "true"] if epoch_only else [] ),
+            *(["--epoch-only", "true"] if epoch_only else []),
         ],
         capture_output=True,
         encoding="utf-8",
@@ -455,15 +554,29 @@ def test_browser_withholds_adversarial_report_performance_on_lineage_mismatch(
     candidate = tmp_path / "current-dashboard"
     shutil.copytree(CURRENT_FIXTURE, candidate)
     shutil.copy2(PANEL_ROOT / "app.js", candidate / "app.js")
-    data = json.loads((candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8"))
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
     _project_current_strategy_fixture(data)
     _write_dashboard(candidate, data)
     manifest_rows = data["account_manifest"]["rows"]
     assert len(manifest_rows) == 13
     assert len({row["strategy_id"] for row in manifest_rows}) == 7
-    assert not any("echo" in row["strategy_id"].lower() or "composer" in row["strategy_id"].lower() for row in manifest_rows)
+    assert not any(
+        "echo" in row["strategy_id"].lower() or "composer" in row["strategy_id"].lower()
+        for row in manifest_rows
+    )
     assert len(data["strategies"]) == 7
-    assert len([row for row in data["weekly_returns"]["series"] if row["primary_group"] == "STRATEGY"]) == 7
+    assert (
+        len(
+            [
+                row
+                for row in data["weekly_returns"]["series"]
+                if row["primary_group"] == "STRATEGY"
+            ]
+        )
+        == 7
+    )
     assert len(data["weekly_returns"]["series"]) == 21
     assert len(data["dependence_analysis"]["series_ids"]) == 7
     assert len(data["dependence_analysis"]["cells"]) == 21
@@ -471,10 +584,21 @@ def test_browser_withholds_adversarial_report_performance_on_lineage_mismatch(
     assert len(data["dependence_modes"]["LIVE_ONLY"]["cells"]) == 21
     assert len(data["factor_analysis"]["series"]) == 7
     assert len(data["replication_analysis"]["series"]) == 7
-    assert all(len(lens["series"]) == 7 for lens in data["decomposition_lenses"]["lenses"])
-    assert all(len(lens["series"]) == 7 for lens in data["decomposition_lenses"]["modes"]["LIVE_ONLY"])
-    assert all(len(mode["series_ids"]) == 7 and len(mode["cells"]) == 21 for mode in data["dependence_modes"].values())
-    assert all(all(len(lens["series"]) == 7 for lens in lenses) for lenses in data["decomposition_lenses"]["modes"].values())
+    assert all(
+        len(lens["series"]) == 7 for lens in data["decomposition_lenses"]["lenses"]
+    )
+    assert all(
+        len(lens["series"]) == 7
+        for lens in data["decomposition_lenses"]["modes"]["LIVE_ONLY"]
+    )
+    assert all(
+        len(mode["series_ids"]) == 7 and len(mode["cells"]) == 21
+        for mode in data["dependence_modes"].values()
+    )
+    assert all(
+        all(len(lens["series"]) == 7 for lens in lenses)
+        for lenses in data["decomposition_lenses"]["modes"].values()
+    )
     for dependence in [data["dependence_analysis"], *data["dependence_modes"].values()]:
         for matrix in [
             *dependence["matrices"].values(),
@@ -491,20 +615,38 @@ def test_browser_withholds_adversarial_report_performance_on_lineage_mismatch(
         assert len(correlation_one["components"]) == 7
         with localcontext() as context:
             context.prec = 40
-            contributions = sum(Decimal(row["loss_contribution"]) for row in correlation_one["components"])
-            weights = sum(Decimal(row["allocation_weight"]) for row in correlation_one["components"])
+            contributions = sum(
+                Decimal(row["loss_contribution"])
+                for row in correlation_one["components"]
+            )
+            weights = sum(
+                Decimal(row["allocation_weight"])
+                for row in correlation_one["components"]
+            )
         assert contributions == Decimal(correlation_one["declared_loss"])
         assert weights == Decimal("1")
-        central_inputs = [Decimal(row["loss_input"]) for row in dependence["central_case"]["components"]]
+        central_inputs = [
+            Decimal(row["loss_input"])
+            for row in dependence["central_case"]["components"]
+        ]
         assert len(central_inputs) == 7
-        assert _quadratic_loss(dependence["matrices"]["posterior"], central_inputs) == Decimal(dependence["central_case"]["loss"])
+        assert _quadratic_loss(
+            dependence["matrices"]["posterior"], central_inputs
+        ) == Decimal(dependence["central_case"]["loss"])
         cluster = dependence["economic_driver_cluster_budget"]["clusters"][0]
         assert dependence["pair_count"] == 21
-        assert dependence["available_pair_count"] == dependence["central_case"]["measured_pair_count"]
+        assert (
+            dependence["available_pair_count"]
+            == dependence["central_case"]["measured_pair_count"]
+        )
         assert len(cluster["members"]) == 7
         assert len(cluster["pair_evidence"]) == 21
-        assert Decimal(cluster["loss_contribution"]) == Decimal(correlation_one["declared_loss"])
-        assert Decimal(dependence["economic_driver_cluster_budget"]["central_case_loss"]) == Decimal(dependence["central_case"]["loss"])
+        assert Decimal(cluster["loss_contribution"]) == Decimal(
+            correlation_one["declared_loss"]
+        )
+        assert Decimal(
+            dependence["economic_driver_cluster_budget"]["central_case_loss"]
+        ) == Decimal(dependence["central_case"]["loss"])
     current_fixture_surfaces = {
         "strategies": data["strategies"],
         "performance": data["performance"],
@@ -518,16 +660,32 @@ def test_browser_withholds_adversarial_report_performance_on_lineage_mismatch(
     assert "composer" not in json.dumps(current_fixture_surfaces).lower()
     assert "echo" not in json.dumps(data).lower()
     assert "composer" not in json.dumps(data).lower()
-    assert any(row.get("twr") is not None and row.get("twr_status") == "AVAILABLE_WITH_INFERRED_FLOW_TIMING" for row in data["performance"])
-    assert any(row.get("mwr_xirr") is not None and row.get("mwr_status") == "AVAILABLE" for row in data["performance"])
+    assert any(
+        row.get("twr") is not None
+        and row.get("twr_status") == "AVAILABLE_WITH_INFERRED_FLOW_TIMING"
+        for row in data["performance"]
+    )
+    assert any(
+        row.get("mwr_xirr") is not None and row.get("mwr_status") == "AVAILABLE"
+        for row in data["performance"]
+    )
     assert any(row.get("nav_status") == "AVAILABLE" for row in data["strategies"])
 
     matching = _rendered_evidence(candidate, runtime)
     assert any(row[4]["primary"] != "—" for row in matching["performanceRows"])
-    assert any(row[6]["primary"] != "—" and "Available" in row[7]["text"] for row in matching["performanceRows"])
-    matching_strategy_return = next(item for item in matching["comparison"] if item["label"] == "13-week strategy return")
+    assert any(
+        row[6]["primary"] != "—" and "Available" in row[7]["text"]
+        for row in matching["performanceRows"]
+    )
+    matching_strategy_return = next(
+        item
+        for item in matching["comparison"]
+        if item["label"] == "13-week strategy return"
+    )
     assert matching_strategy_return["value"] != "—"
-    assert matching["weekly"]["rows"] and any(cell != "—" for row in matching["weekly"]["rows"] for cell in row["cells"])
+    assert matching["weekly"]["rows"] and any(
+        cell != "—" for row in matching["weekly"]["rows"] for cell in row["cells"]
+    )
     assert matching["dependence"]["matrixCells"] == 49
     assert matching["dependence"]["robuxioCell"].strip() == "0.77"
     matching_interaction = _interaction_evidence(
@@ -543,7 +701,10 @@ def test_browser_withholds_adversarial_report_performance_on_lineage_mismatch(
     mismatch = _rendered_evidence(candidate, runtime)
 
     assert mismatch["performanceRows"]
-    assert not any(re.search(r"\b(?:Accepted|Available)\b", header, flags=re.IGNORECASE) for header in mismatch["performanceHeaders"])
+    assert not any(
+        re.search(r"\b(?:Accepted|Available)\b", header, flags=re.IGNORECASE)
+        for header in mismatch["performanceHeaders"]
+    )
     assert all(
         row[4]["primary"] == "—"
         and row[6]["primary"] == "—"
@@ -563,35 +724,60 @@ def test_browser_withholds_adversarial_report_performance_on_lineage_mismatch(
         and "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" in row[1]["text"]
         for row in mismatch["implementationRows"]
     )
-    withheld_regions = f'{mismatch["performanceText"]} {mismatch["hwmText"]} {mismatch["strategyText"]}'
+    withheld_regions = f"{mismatch['performanceText']} {mismatch['hwmText']} {mismatch['strategyText']}"
     assert "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" in withheld_regions
     assert not re.search(
         r"\b(?:Accepted|canonical account-live returns|Available for HWM|HWM-qualified|AVAILABLE)\b",
         withheld_regions,
         flags=re.IGNORECASE,
     )
-    strategy_return = next(item for item in mismatch["comparison"] if item["label"] == "13-week strategy return")
+    strategy_return = next(
+        item
+        for item in mismatch["comparison"]
+        if item["label"] == "13-week strategy return"
+    )
     assert strategy_return["value"] == "—"
     assert "withheld" in strategy_return["note"].lower()
     assert "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" in mismatch["strategyCoverageText"]
-    assert not re.search(r"\b(?:AVAILABLE|coverage-qualified|TWR segments)\b", mismatch["strategyCoverageText"], re.IGNORECASE)
+    assert not re.search(
+        r"\b(?:AVAILABLE|coverage-qualified|TWR segments)\b",
+        mismatch["strategyCoverageText"],
+        re.IGNORECASE,
+    )
     command_restricted_text = " ".join(mismatch["command"].values())
     assert "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" in command_restricted_text
-    assert not re.search(r"\b(?:HWM|accepted|canonical|echo|composer)\b", command_restricted_text, re.IGNORECASE)
+    assert not re.search(
+        r"\b(?:HWM|accepted|canonical|echo|composer)\b",
+        command_restricted_text,
+        re.IGNORECASE,
+    )
     assert mismatch["weekly"]["rows"]
-    assert all(cell == "—" for row in mismatch["weekly"]["rows"] for cell in row["cells"])
+    assert all(
+        cell == "—" for row in mismatch["weekly"]["rows"] for cell in row["cells"]
+    )
     assert "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" in mismatch["weekly"]["detail"]
-    assert not re.search(r"\b(?:Accepted observations|Compounded from accepted daily returns|AVAILABLE)\b", f'{mismatch["weekly"]["text"]} {mismatch["weekly"]["detail"]}', re.IGNORECASE)
+    assert not re.search(
+        r"\b(?:Accepted observations|Compounded from accepted daily returns|AVAILABLE)\b",
+        f"{mismatch['weekly']['text']} {mismatch['weekly']['detail']}",
+        re.IGNORECASE,
+    )
     assert len(mismatch["epochRows"]) == 13
     assert len({row["strategy"] for row in mismatch["epochRows"]}) == 7
-    assert not any("echo" in row["strategy"].lower() or "composer" in row["strategy"].lower() for row in mismatch["epochRows"])
+    assert not any(
+        "echo" in row["strategy"].lower() or "composer" in row["strategy"].lower()
+        for row in mismatch["epochRows"]
+    )
 
     interaction = _interaction_evidence(
-        candidate, runtime, tmp_path / "lineage-mismatch-interaction.json", epoch_only=True
+        candidate,
+        runtime,
+        tmp_path / "lineage-mismatch-interaction.json",
+        epoch_only=True,
     )
     lineage_check = next(
         item
         for item in interaction["checks"]
-        if item["check"] == "Lineage mismatch withholds retained report performance in the DOM"
+        if item["check"]
+        == "Lineage mismatch withholds retained report performance in the DOM"
     )
     assert lineage_check["status"] == "PASS"

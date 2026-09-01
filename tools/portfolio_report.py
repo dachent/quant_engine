@@ -187,9 +187,9 @@ PUBLISHED_EPOCH_CROSSWALK_RELATIVE_PATH: Final = (
 WORKBOOK_TOTAL_FORMULA: Final = (
     "=IF(ABS(SUM(tblStrategies[Current Value Usd])+"
     'SUMIFS(tblAllocations[Current Value Usd],tblAllocations[Scope],"RESERVE")'
-    '+SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],'
+    "+SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],"
     '"Retained excluded systematic balance")'
-    '-SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],'
+    "-SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],"
     '"Total liquid"))<0.02,"PASS","FAIL")'
 )
 WORKBOOK_TABLE_SPECS: Final = (
@@ -375,7 +375,9 @@ def _baseline(
                 break
             except OSError as exc:
                 if attempt == len(_CURRENT_READ_RETRY_DELAYS):
-                    raise ReportValidationError("baseline pointer is not accepted") from exc
+                    raise ReportValidationError(
+                        "baseline pointer is not accepted"
+                    ) from exc
                 time_module.sleep(_CURRENT_READ_RETRY_DELAYS[attempt])
             except (ValueError, RuntimeError) as exc:
                 raise ReportValidationError("baseline pointer is not accepted") from exc
@@ -396,9 +398,7 @@ def _baseline(
         != manifest.to_json_bytes()
     ):
         raise ReportValidationError("baseline generation contract differs")
-    catalog_path = (
-        root / "generations" / generation_id / "portfolio-baseline.json"
-    )
+    catalog_path = root / "generations" / generation_id / "portfolio-baseline.json"
     if catalog_path.is_symlink() or not catalog_path.is_file():
         raise ReportValidationError("baseline catalog is missing or linked")
     catalog = _load_json(catalog_path, "baseline catalog")
@@ -479,9 +479,11 @@ def _dependence_report(
             inferred_root = generation_dir.parent.parent
             if generation_dir.parent.name != "generations":
                 raise ValueError("explicit dependence generation layout differs")
-            if root is not None and generation_dir.resolve() != (
-                root / "generations" / generation_id
-            ).resolve():
+            if (
+                root is not None
+                and generation_dir.resolve()
+                != (root / "generations" / generation_id).resolve()
+            ):
                 raise ValueError("explicit dependence generation root differs")
             root = inferred_root if root is None else root
             generation_root = generation_dir
@@ -497,9 +499,10 @@ def _dependence_report(
         raise ReportValidationError("dependence generation contract differs")
     correlation_path = generation_root / "correlation.json"
     manifest_path = generation_root / "generation.json"
-    if _regular_file_bytes(
-        manifest_path, "dependence generation manifest"
-    ) != manifest.to_json_bytes():
+    if (
+        _regular_file_bytes(manifest_path, "dependence generation manifest")
+        != manifest.to_json_bytes()
+    ):
         raise ReportValidationError("dependence generation manifest differs")
     if correlation_path.is_symlink() or not correlation_path.is_file():
         raise ReportValidationError("dependence artifact is missing or linked")
@@ -888,9 +891,8 @@ def _account_strategy_performance(
     catalog: Mapping[str, Any],
     strategy_product_controls: Mapping[str, Mapping[str, str]] | None = None,
     current_epoch_tuples: set[tuple[str, str, str, str | None]] | None = None,
-    current_epoch_details: Mapping[
-        tuple[str, str, str, str | None], Mapping[str, Any]
-    ] | None = None,
+    current_epoch_details: Mapping[tuple[str, str, str, str | None], Mapping[str, Any]]
+    | None = None,
     *,
     calculation_cutoff_date: str | None = None,
 ) -> list[dict[str, Any]]:
@@ -993,7 +995,10 @@ def _account_strategy_performance(
         catalog.get("strategy_provider_evidence", []),
         "strategy_provider_evidence",
     ):
-        if admission_governed and evidence.get("strategy_id") not in admitted_strategy_ids:
+        if (
+            admission_governed
+            and evidence.get("strategy_id") not in admitted_strategy_ids
+        ):
             continue
         if evidence.get("evidence_layer") != "ACCOUNT_LIVE":
             continue
@@ -1259,9 +1264,7 @@ def _portfolio_summary(
     retained_excluded_systematic_balance: str | None = None
     if strategy_product_controls is not None:
         replay_total_liquid = _decimal(total_liquid, "replay.total_liquid_usd")
-        replay_systematic = _decimal(
-            systematic_total, "replay.systematic_total_usd"
-        )
+        replay_systematic = _decimal(systematic_total, "replay.systematic_total_usd")
         replay_reserve = _decimal(reserve_total, "replay.reserve_total_usd")
         if replay_total_liquid != replay_systematic + replay_reserve:
             raise ReportValidationError("replay total liquid does not reconcile")
@@ -1325,9 +1328,13 @@ def _portfolio_summary(
                 "retained excluded systematic allocations differ"
             )
         if reserve != replay_reserve:
-            raise ReportValidationError("current reserve allocation differs from replay")
+            raise ReportValidationError(
+                "current reserve allocation differs from replay"
+            )
         if systematic + retained_excluded + replay_reserve != replay_total_liquid:
-            raise ReportValidationError("portfolio summary total liquid does not reconcile")
+            raise ReportValidationError(
+                "portfolio summary total liquid does not reconcile"
+            )
         systematic_total = decimal_text(systematic)
         retained_excluded_systematic_balance = decimal_text(retained_excluded)
         reserve_total = decimal_text(replay_reserve)
@@ -1338,7 +1345,10 @@ def _portfolio_summary(
     nav_coverage = hwm_summary.get("nav_coverage") if hwm_summary is not None else None
     coverage_status = hwm_summary.get("status") if hwm_summary is not None else None
     correlation_one_stress = replay.get("correlation_one_stress")
-    if dependence_analysis is not None and dependence_analysis.get("status") == "AVAILABLE":
+    if (
+        dependence_analysis is not None
+        and dependence_analysis.get("status") == "AVAILABLE"
+    ):
         mode_summaries = _object(
             dependence_analysis.get("mode_summaries"),
             "dependence_analysis.mode_summaries",
@@ -1491,7 +1501,9 @@ def _validate_report_account_manifest(
         )
     rows = _objects(account_manifest.get("rows"), "account_manifest.rows")
     if len(rows) != CURRENT_PRODUCT_EPOCH_COUNT:
-        raise ReportValidationError("report account manifest must contain exactly 13 rows")
+        raise ReportValidationError(
+            "report account manifest must contain exactly 13 rows"
+        )
 
     crosswalk_rows = (
         _objects(crosswalk.get("rows"), "account crosswalk.rows")
@@ -1508,12 +1520,17 @@ def _validate_report_account_manifest(
             "account crosswalk must contain exactly 13 admitted rows"
         )
 
-    def epoch_tuple(row: Mapping[str, Any], field_name: str) -> tuple[str, str, str, str | None]:
+    def epoch_tuple(
+        row: Mapping[str, Any], field_name: str
+    ) -> tuple[str, str, str, str | None]:
         account_id = row.get("account_id")
         strategy_id = row.get("strategy_id")
         if not isinstance(account_id, str) or not account_id:
             raise ReportValidationError(f"{field_name} account_id must be text")
-        if not isinstance(strategy_id, str) or strategy_id not in CURRENT_REQUIRED_STRATEGY_IDS:
+        if (
+            not isinstance(strategy_id, str)
+            or strategy_id not in CURRENT_REQUIRED_STRATEGY_IDS
+        ):
             raise ReportValidationError(f"{field_name} strategy is excluded or invalid")
         if "effective_start" not in row or "effective_end" not in row:
             raise ReportValidationError(f"{field_name} epoch tuple is incomplete")
@@ -1533,7 +1550,9 @@ def _validate_report_account_manifest(
             try:
                 end = date.fromisoformat(effective_end)
             except ValueError as exc:
-                raise ReportValidationError(f"{field_name} epoch tuple is invalid") from exc
+                raise ReportValidationError(
+                    f"{field_name} epoch tuple is invalid"
+                ) from exc
             if end.isoformat() != effective_end or end < start:
                 raise ReportValidationError(f"{field_name} epoch tuple is invalid")
         return account_id, strategy_id, effective_start, effective_end
@@ -1564,10 +1583,14 @@ def _validate_report_account_manifest(
         if current_account_ids is not None and account_id not in current_account_ids:
             raise ReportValidationError("report account manifest account is unknown")
         if key in actual:
-            raise ReportValidationError("report account manifest identities are duplicated")
+            raise ReportValidationError(
+                "report account manifest identities are duplicated"
+            )
         actual.add(key)
     if actual != expected:
-        raise ReportValidationError("report account manifest differs from admitted crosswalk")
+        raise ReportValidationError(
+            "report account manifest differs from admitted crosswalk"
+        )
     return actual
 
 
@@ -1597,17 +1620,14 @@ def _accounts(
     for account in _objects(catalog.get("accounts"), "accounts"):
         account_id = _text(account.get("account_id"), "account.account_id")
         role = _text(account.get("role"), "account.role")
-        if (
-            role != "RESERVE"
-            and (
-                (
-                    current_epoch_account_details is not None
-                    and account_id not in current_epoch_account_details
-                )
-                or (
-                    current_account_ids is not None
-                    and account_id not in current_account_ids
-                )
+        if role != "RESERVE" and (
+            (
+                current_epoch_account_details is not None
+                and account_id not in current_epoch_account_details
+            )
+            or (
+                current_account_ids is not None
+                and account_id not in current_account_ids
             )
         ):
             continue
@@ -1621,14 +1641,14 @@ def _accounts(
         else:
             as_of, value, status = None, None, "UNAVAILABLE_NO_NAV"
         account_row = {
-                "account_id": account_id,
-                "as_of_date": as_of,
-                "base_currency": account.get("base_currency"),
-                "latest_value_usd": value,
-                "provider": account.get("provider"),
-                "role": role,
-                "status": status,
-            }
+            "account_id": account_id,
+            "as_of_date": as_of,
+            "base_currency": account.get("base_currency"),
+            "latest_value_usd": value,
+            "provider": account.get("provider"),
+            "role": role,
+            "status": status,
+        }
         if current_epoch_account_details is not None:
             detail = current_epoch_account_details.get(account_id)
             account_row["account_label"] = detail["account_label"] if detail else None
@@ -1732,7 +1752,9 @@ def _epoch_hpr_receipts(
             receipt.get("daily_return_series_schema") != "ordered-date-return/1"
             or not isinstance(receipt.get("daily_return_observations"), int)
             or receipt["daily_return_observations"] < 1
-            or not isinstance(receipt.get("epoch_holding_period_link_observations"), int)
+            or not isinstance(
+                receipt.get("epoch_holding_period_link_observations"), int
+            )
             or receipt["epoch_holding_period_link_observations"]
             < receipt["daily_return_observations"]
         ):
@@ -1894,7 +1916,9 @@ def _account_live_return_series(
                 if path_dependent_metrics_available
                 else None
             )
-            if epoch_receipt is not None and decimal_text(cumulative_return) != decimal_text(
+            if epoch_receipt is not None and decimal_text(
+                cumulative_return
+            ) != decimal_text(
                 _decimal(epoch_receipt["epoch_cumulative_return"], "epoch HPR return")
             ):
                 raise ReportValidationError("epoch HPR return differs")
@@ -1905,14 +1929,11 @@ def _account_live_return_series(
             else decimal_text(cumulative_return),
             "cumulative_return_label": (
                 "EPOCH_CUMULATIVE_TWR_WITH_HASH_BOUND_HPR_GAPS"
-                if epoch_receipt is not None
-                and epoch_receipt["span_return_receipts"]
+                if epoch_receipt is not None and epoch_receipt["span_return_receipts"]
                 else "DAILY_GEOMETRIC_TWR"
             ),
             "current_drawdown": (
-                decimal_text(current_drawdown)
-                if current_drawdown is not None
-                else None
+                decimal_text(current_drawdown) if current_drawdown is not None else None
             ),
             "maximum_drawdown": (
                 decimal_text(maximum_drawdown)
@@ -2014,7 +2035,11 @@ def _report_product_controls(
                 "financial MVP funded_membership.effective_end",
             )
         )
-        if funded_start is not None and funded_end is not None and funded_end < funded_start:
+        if (
+            funded_start is not None
+            and funded_end is not None
+            and funded_end < funded_start
+        ):
             raise ReportValidationError(
                 "financial MVP funded_membership interval is reversed"
             )
@@ -2024,16 +2049,23 @@ def _report_product_controls(
                     "required financial MVP strategy lifecycle differs"
                 )
         elif requirement == "EXCLUDED":
-            if lifecycle not in {
-                "DEPRECATED_HISTORY_ONLY",
-                "IMMATERIAL_EXCLUDED",
-            } or funded != "EXCLUDED":
+            if (
+                lifecycle
+                not in {
+                    "DEPRECATED_HISTORY_ONLY",
+                    "IMMATERIAL_EXCLUDED",
+                }
+                or funded != "EXCLUDED"
+            ):
                 raise ReportValidationError(
                     "excluded financial MVP strategy lifecycle differs"
                 )
         else:
             raise ReportValidationError("financial MVP strategy requirement differs")
-        if item.get("effective_product_interval") is None and strategy_id in CURRENT_STRATEGY_CONTROL_IDS:
+        if (
+            item.get("effective_product_interval") is None
+            and strategy_id in CURRENT_STRATEGY_CONTROL_IDS
+        ):
             raise ReportValidationError(
                 "financial MVP effective_product_interval must be an object"
             )
@@ -2061,7 +2093,11 @@ def _report_product_controls(
                 "financial MVP effective_product_interval.effective_end",
             )
         )
-        if product_start is not None and product_end is not None and product_end < product_start:
+        if (
+            product_start is not None
+            and product_end is not None
+            and product_end < product_start
+        ):
             raise ReportValidationError(
                 "financial MVP effective_product_interval is reversed"
             )
@@ -2090,7 +2126,8 @@ def _report_product_controls(
                 or product_start.isoformat() != "2025-09-27"
                 or product_end is None
                 or product_end.isoformat() != "2025-11-24"
-                or set(outcomes) != {
+                or set(outcomes)
+                != {
                     "AS_HELD_COMPOSITE_HWM",
                     "INVESTED_CAPITAL",
                     "DECOMPOSITION",
@@ -2140,8 +2177,7 @@ def _report_product_controls(
             "financial MVP strategy perimeter has no approved product overlap"
         )
     synthetic_ids = all(
-        re.fullmatch(r"strategy-[0-9]+", strategy_id)
-        for strategy_id in controls
+        re.fullmatch(r"strategy-[0-9]+", strategy_id) for strategy_id in controls
     )
     if set(controls) != CURRENT_STRATEGY_CONTROL_IDS and not synthetic_ids:
         raise ReportValidationError(
@@ -2187,18 +2223,14 @@ def _current_product_baseline_projection(
         for row in _objects(value, field_name):
             strategy_id = row.get("strategy_id")
             if not isinstance(strategy_id, str):
-                raise ReportValidationError(
-                    f"{field_name} strategy_id must be text"
-                )
+                raise ReportValidationError(f"{field_name} strategy_id must be text")
             control = strategy_product_controls.get(strategy_id)
             if control is None:
                 raise ReportValidationError(
                     f"{field_name} references an unknown product strategy"
                 )
             if strategy_id in required_ids:
-                observation_date = _date(
-                    row.get("date"), f"{field_name}.date"
-                )
+                observation_date = _date(row.get("date"), f"{field_name}.date")
                 funded_start = (
                     None
                     if control.get("funded_membership_effective_start") is None
@@ -2957,8 +2989,7 @@ def _strategies(
         )
         historical_only = bool(
             product_control
-            and product_control.get("lifecycle_status")
-            == "DEPRECATED_HISTORY_ONLY"
+            and product_control.get("lifecycle_status") == "DEPRECATED_HISTORY_ONLY"
         )
         live_row = live.get(strategy_id)
         metrics = _object(live_row.get("metrics"), "live.metrics") if live_row else {}
@@ -3523,9 +3554,7 @@ def _allocations(
                 raise ReportValidationError(
                     "systematic allocation must reference a known product strategy"
                 )
-            if not _is_current_product_strategy(
-                strategy_id, strategy_product_controls
-            ):
+            if not _is_current_product_strategy(strategy_id, strategy_product_controls):
                 continue
         rows.append(
             {
@@ -3555,12 +3584,11 @@ def _allocations(
         for strategy_id, control in strategy_product_controls.items()
         if control.get("product_requirement") == "REQUIRED"
     }
-    if len(systematic_rows) != len(required_ids) or {
-        row.get("strategy_id") for row in systematic_rows
-    } != required_ids:
-        raise ReportValidationError(
-            "current systematic allocation perimeter differs"
-        )
+    if (
+        len(systematic_rows) != len(required_ids)
+        or {row.get("strategy_id") for row in systematic_rows} != required_ids
+    ):
+        raise ReportValidationError("current systematic allocation perimeter differs")
     systematic_total = sum(
         (
             _decimal(row["current_value_usd"], "allocation.current_value_usd")
@@ -3577,16 +3605,12 @@ def _allocations(
         assigned = Decimal("0")
         for row in systematic_rows[:-1]:
             weight = (
-                _decimal(
-                    row["current_value_usd"], "allocation.current_value_usd"
-                )
+                _decimal(row["current_value_usd"], "allocation.current_value_usd")
                 / systematic_total
             )
             row["systematic_weight"] = decimal_text(weight)
             assigned += weight
-        systematic_rows[-1]["systematic_weight"] = decimal_text(
-            Decimal("1") - assigned
-        )
+        systematic_rows[-1]["systematic_weight"] = decimal_text(Decimal("1") - assigned)
     return rows
 
 
@@ -4524,9 +4548,10 @@ def _calculation_catalog_through(
         for assignment in assignments:
             for field_name in ("effective_start", "effective_end"):
                 value = assignment.get(field_name)
-                if value is not None and _date(
-                    value, f"assignment.{field_name}"
-                ) > cutoff:
+                if (
+                    value is not None
+                    and _date(value, f"assignment.{field_name}") > cutoff
+                ):
                     raise ReportValidationError(
                         f"assignment {field_name} exceeds cutoff"
                     )
@@ -4546,9 +4571,7 @@ def _calculation_catalog_through(
         projected[field_name] = [
             dict(row)
             for row in _objects(catalog.get(field_name), field_name)
-            if (
-                field_name == "calendar_coverage" and row.get(date_field) is None
-            )
+            if (field_name == "calendar_coverage" and row.get(date_field) is None)
             or _date(row.get(date_field), f"{field_name}.{date_field}") <= cutoff
         ]
     raw_hwm_inputs = catalog.get("hwm_inputs")
@@ -4627,8 +4650,8 @@ def build_report_data(
     catalog, baseline_ref, baseline_catalog_path = _baseline(
         baseline_root, baseline_generation_id
     )
-    strategy_product_controls, product_contract_provenance = (
-        _report_product_controls(catalog)
+    strategy_product_controls, product_contract_provenance = _report_product_controls(
+        catalog
     )
     current_product_catalog = _current_product_baseline_projection(
         catalog, strategy_product_controls
@@ -4641,19 +4664,20 @@ def build_report_data(
         catalog, strategy_product_controls
     )
     current_epoch_tuples: set[tuple[str, str, str, str | None]] | None = None
-    current_epoch_details: dict[
-        tuple[str, str, str, str | None], dict[str, Any]
-    ] | None = None
+    current_epoch_details: (
+        dict[tuple[str, str, str, str | None], dict[str, Any]] | None
+    ) = None
     current_epoch_account_details: dict[str, dict[str, Any]] | None = None
     calculation_cutoff_date: str | None = None
     epoch_provenance: list[dict[str, Any]] = []
     epoch_supplied = _require_epoch_manifest_triplet(
         epoch_manifest_path, epoch_manifest_source_path, epoch_crosswalk_path
     )
-    _require_epoch_generation_root(
-        epoch_supplied, epoch_manifest_generation_root
-    )
-    if _is_governed_financial_mvp2_path(catalog, strategy_product_controls) and not epoch_supplied:
+    _require_epoch_generation_root(epoch_supplied, epoch_manifest_generation_root)
+    if (
+        _is_governed_financial_mvp2_path(catalog, strategy_product_controls)
+        and not epoch_supplied
+    ):
         raise ReportValidationError(
             "financial MVP-2 report requires manifest, source receipt, and current epoch crosswalk"
         )
@@ -4665,8 +4689,7 @@ def build_report_data(
             _source_bytes,
             _crosswalk_bytes,
             verified_epoch_details,
-        ) = (
-            _validate_epoch_manifest_input(
+        ) = _validate_epoch_manifest_input(
             epoch_manifest_path,
             epoch_manifest_source_path,
             strategy_product_controls,
@@ -4676,7 +4699,6 @@ def build_report_data(
             baseline_ref=baseline_ref,
             baseline_catalog_path=baseline_catalog_path,
             epoch_manifest_generation_root=epoch_manifest_generation_root,
-            )
         )
         source_receipt_sha256 = hashlib.sha256(_source_bytes).hexdigest()
         epoch_provenance = [
@@ -4786,9 +4808,7 @@ def build_report_data(
             calculation_cutoff_date is not None
             and history_contract_ref.get("as_of_date") != calculation_cutoff_date
         ):
-            raise ReportValidationError(
-                "strategy history calculation cutoff differs"
-            )
+            raise ReportValidationError("strategy history calculation cutoff differs")
         epoch_hpr_receipts = history_contract_ref.pop("epoch_hpr_receipts", [])
         if epoch_hpr_receipts:
             catalog = {**catalog, "epoch_hpr_receipts": epoch_hpr_receipts}
@@ -4954,7 +4974,9 @@ def build_report_data(
         None,
         "strategy_summary",
     )
-    hwm_coverage_inputs: tuple[list[dict[str, Any]], dict[str, Any], date, str] | None = None
+    hwm_coverage_inputs: (
+        tuple[list[dict[str, Any]], dict[str, Any], date, str] | None
+    ) = None
     if freshness_health_path is not None:
         portfolio_as_of = _date(catalog.get("as_of_date"), "portfolio as_of_date")
         freshness, evaluation_date, freshness_sha256 = _freshness_assessments(
@@ -4969,9 +4991,7 @@ def build_report_data(
             for row in current_strategy_summary
         }
         policy_excluded_strategy_ids = set(hwm_policy["excluded_strategy_ids"])
-        required_policy_exclusions = (
-            policy_excluded_strategy_ids & current_strategy_ids
-        )
+        required_policy_exclusions = policy_excluded_strategy_ids & current_strategy_ids
         if required_policy_exclusions:
             raise ReportValidationError(
                 "HWM policy excludes a required current-product strategy"
@@ -5650,7 +5670,9 @@ def _replace_disposable(path: Path, content: bytes) -> None:
 
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists() and path.is_symlink():
-        raise GenerationConflictError(f"disposable workbook input is linked: {path.name}")
+        raise GenerationConflictError(
+            f"disposable workbook input is linked: {path.name}"
+        )
     descriptor, temporary_name = tempfile.mkstemp(
         prefix=".excel-input-", suffix=".xlsx", dir=path.parent
     )
@@ -6425,9 +6447,7 @@ def _epoch_manifest_payloads(
         )
     if epoch_manifest_path is None or epoch_manifest_source_path is None:
         raise ReportValidationError("epoch manifest evidence is required")
-    manifest_bytes = _regular_file_bytes(
-        epoch_manifest_path, "epoch manifest evidence"
-    )
+    manifest_bytes = _regular_file_bytes(epoch_manifest_path, "epoch manifest evidence")
     source_bytes = _regular_file_bytes(
         epoch_manifest_source_path, "epoch manifest source evidence"
     )
@@ -6482,8 +6502,7 @@ def _epoch_manifest_payloads(
     crosswalk_artifact = source.get("crosswalk")
     if (
         not isinstance(crosswalk_artifact, dict)
-        or set(crosswalk_artifact)
-        != {"path", "sha256", "size_bytes", "schema"}
+        or set(crosswalk_artifact) != {"path", "sha256", "size_bytes", "schema"}
         or crosswalk_artifact.get("path")
         != "authority/account-assignment-crosswalk.json"
         or not isinstance(crosswalk_artifact.get("sha256"), str)
@@ -6553,10 +6572,9 @@ def _validate_epoch_manifest_input(
         crosswalk=crosswalk,
     )
     source_crosswalk = source["crosswalk"]
-    if (
-        source_crosswalk["sha256"] != hashlib.sha256(crosswalk_bytes).hexdigest()
-        or source_crosswalk["size_bytes"] != len(crosswalk_bytes)
-    ):
+    if source_crosswalk["sha256"] != hashlib.sha256(
+        crosswalk_bytes
+    ).hexdigest() or source_crosswalk["size_bytes"] != len(crosswalk_bytes):
         raise ReportValidationError("current epoch crosswalk source receipt differs")
     epoch_details = _validate_epoch_generation_authority(
         epoch_manifest_generation_root,
@@ -6584,9 +6602,9 @@ def _verified_epoch_authority_details(
 
     try:
         manifest_schema = json.loads(EPOCH_MANIFEST_SCHEMA.read_text(encoding="utf-8"))
-        Draft202012Validator(
-            manifest_schema, format_checker=FormatChecker()
-        ).validate(manifest)
+        Draft202012Validator(manifest_schema, format_checker=FormatChecker()).validate(
+            manifest
+        )
     except (
         OSError,
         UnicodeDecodeError,
@@ -6601,14 +6619,25 @@ def _verified_epoch_authority_details(
         manifest.get("schema_version") != 9
         or cutoff != CURRENT_EPOCH_CROSSWALK_CUTOFF_DATE
     ):
-        raise ReportValidationError("epoch generation requires schema-9 cutoff authority")
+        raise ReportValidationError(
+            "epoch generation requires schema-9 cutoff authority"
+        )
     try:
-        verification_schema = json.loads(EPOCH_VERIFICATION_SCHEMA.read_text(encoding="utf-8"))
+        verification_schema = json.loads(
+            EPOCH_VERIFICATION_SCHEMA.read_text(encoding="utf-8")
+        )
         Draft202012Validator(
             verification_schema, format_checker=FormatChecker()
         ).validate(verification)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, JsonSchemaValidationError) as exc:
-        raise ReportValidationError("epoch verification schema-3 authority differs") from exc
+    except (
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        JsonSchemaValidationError,
+    ) as exc:
+        raise ReportValidationError(
+            "epoch verification schema-3 authority differs"
+        ) from exc
     required_verification_keys = {
         "schema_version",
         "artifact_id",
@@ -6676,7 +6705,9 @@ def _verified_epoch_authority_details(
         canonical_json_bytes({"subjects": observed_subjects})
     ).hexdigest()
     if verification.get("subjects_semantic_sha256") != expected_subject_digest:
-        raise ReportValidationError("epoch verification subjects semantic digest differs")
+        raise ReportValidationError(
+            "epoch verification subjects semantic digest differs"
+        )
 
     def subject_object(path: str) -> dict[str, Any]:
         payload = subject_payloads.get(path)
@@ -6685,16 +6716,18 @@ def _verified_epoch_authority_details(
         try:
             decoded = json.loads(payload)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ReportValidationError("epoch verification subject payload differs") from exc
+            raise ReportValidationError(
+                "epoch verification subject payload differs"
+            ) from exc
         if not isinstance(decoded, dict) or canonical_json_bytes(decoded) != payload:
             raise ReportValidationError("epoch verification subject payload differs")
         return decoded
 
-    selected_identities = subject_object(
-        "authority/selected-input-identities.json"
-    )
+    selected_identities = subject_object("authority/selected-input-identities.json")
     if verification.get("selected_source_identities") != selected_identities:
-        raise ReportValidationError("epoch verification selected source identity differs")
+        raise ReportValidationError(
+            "epoch verification selected source identity differs"
+        )
     selected_verifier = selected_identities.get("code_sources", {}).get(
         "independent_verifier"
     )
@@ -6725,7 +6758,9 @@ def _verified_epoch_authority_details(
         "sha256": crosswalk_subject["sha256"],
         "size_bytes": crosswalk_subject["size_bytes"],
     }:
-        raise ReportValidationError("epoch verification selected source identity differs")
+        raise ReportValidationError(
+            "epoch verification selected source identity differs"
+        )
 
     def subject_identity(path: str) -> dict[str, Any]:
         payload = subject_payloads.get(path)
@@ -6792,7 +6827,9 @@ def _verified_epoch_authority_details(
             or len(selected_by_id) != len(selected_receipts)
             or len({receipt_id.casefold() for receipt_id in selected_by_id})
             != len(selected_by_id)
-            or any(not receipt_id.startswith("receipt/") for receipt_id in selected_by_id)
+            or any(
+                not receipt_id.startswith("receipt/") for receipt_id in selected_by_id
+            )
             or authority_ids != sorted(authority_ids, key=str.casefold)
             or len({receipt_id.casefold() for receipt_id in authority_ids})
             != len(authority_ids)
@@ -6810,18 +6847,13 @@ def _verified_epoch_authority_details(
             receipt_id = entry["artifact_id"]
             selected_identity = selected_by_id[receipt_id]
             expected_identity = subject_identity(receipt_id)
-            if (
-                {
-                    "sha256": entry.get("sha256"),
-                    "size_bytes": entry.get("size_bytes"),
-                }
-                != expected_identity
-                or {
-                    "sha256": selected_identity.get("sha256"),
-                    "size_bytes": selected_identity.get("size_bytes"),
-                }
-                != expected_identity
-            ):
+            if {
+                "sha256": entry.get("sha256"),
+                "size_bytes": entry.get("size_bytes"),
+            } != expected_identity or {
+                "sha256": selected_identity.get("sha256"),
+                "size_bytes": selected_identity.get("size_bytes"),
+            } != expected_identity:
                 raise ReportValidationError(failure)
             receipt = subject_object(receipt_id)
             try:
@@ -6847,8 +6879,7 @@ def _verified_epoch_authority_details(
                     matching_crosswalk = [
                         row
                         for row in crosswalk["rows"]
-                        if row["product_epoch_disposition"]
-                        == "INCLUDED_PRODUCT_EPOCH"
+                        if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
                         and (
                             row["account_id"],
                             row["strategy_id"],
@@ -6877,16 +6908,17 @@ def _verified_epoch_authority_details(
                             matching_crosswalk[0]["effective_end"],
                         )
                     ]
-                    expected_end = (
-                        matching_crosswalk[0]["effective_end"] or cutoff
-                    )
+                    expected_end = matching_crosswalk[0]["effective_end"] or cutoff
                     issuer = receipt["issuer"]
+
                     def observed_facts(field: str) -> dict[str, Any]:
                         facts = matching_calculation[0][field]
                         dates = sorted(
                             item.get(
                                 "as_of_date",
-                                item.get("nav_recognition_date", item.get("event_date")),
+                                item.get(
+                                    "nav_recognition_date", item.get("event_date")
+                                ),
                             )
                             for item in facts
                         )
@@ -6895,6 +6927,7 @@ def _verified_epoch_authority_details(
                             "first_date": dates[0] if dates else None,
                             "last_date": dates[-1] if dates else None,
                         }
+
                     expected_staged_inputs = {
                         "provider_ledger_generation_id": selected_identities[
                             "provider_ledger"
@@ -6958,9 +6991,7 @@ def _verified_epoch_authority_details(
                     "source_account_identity_sha256"
                 ],
                 "provider_generation": receipt["provider_generation"],
-                "provider_generation_manifest": receipt[
-                    "provider_generation_manifest"
-                ],
+                "provider_generation_manifest": receipt["provider_generation_manifest"],
                 "raw_evidence_artifacts": raw_artifacts,
                 "required_categories": required_categories,
                 "pagination": receipt["pagination"],
@@ -7060,13 +7091,11 @@ def _verified_epoch_authority_details(
                 "event_dispositions": flow_policy["event_dispositions"],
             }
             and admission_source["policy_id"] == admission_policy["policy_id"]
-            and admission_source["policy_version"]
-            == admission_policy["policy_version"]
+            and admission_source["policy_version"] == admission_policy["policy_version"]
             and admission_source["assignment"] == manifest_sources["assignment"]
             and coverage_source["classified_flows_artifact"]
             == classified_source["artifact"]
-            and selected_identities["receipt_authority"]
-            == expected_receipt_authority
+            and selected_identities["receipt_authority"] == expected_receipt_authority
             and selected_receipt_ids == receipt_subject_ids
             and selected_identities["manifest_schema"]
             == {
@@ -7167,11 +7196,9 @@ def _verified_epoch_authority_details(
             )
         )
         or counts["coverage_row_count"]
-        != counts["complete_coverage_row_count"]
-        + counts["blocked_coverage_row_count"]
+        != counts["complete_coverage_row_count"] + counts["blocked_coverage_row_count"]
         or counts["admission_row_count"]
-        != counts["funded_admission_row_count"]
-        + counts["blocked_admission_row_count"]
+        != counts["funded_admission_row_count"] + counts["blocked_admission_row_count"]
         or counts["output_row_count"]
         != counts["ok_output_row_count"] + counts["blocked_output_row_count"]
         or counts["assignment_count"]
@@ -7182,8 +7209,7 @@ def _verified_epoch_authority_details(
         != counts["classified_event_classified_count"]
         + counts["classified_event_blocked_count"]
         or counts["unmatched_fact_count"]
-        != counts["unmatched_nav_fact_count"]
-        + counts["unmatched_raw_flow_fact_count"]
+        != counts["unmatched_nav_fact_count"] + counts["unmatched_raw_flow_fact_count"]
     ):
         raise ReportValidationError("epoch verification semantic counts differ")
     numeric = verification.get("numeric_verification")
@@ -7192,8 +7218,7 @@ def _verified_epoch_authority_details(
         or numeric.get("candidate_count") != counts["ok_output_row_count"]
         or numeric.get("comparison_count") != counts["ok_output_row_count"]
         or numeric.get("discrepancy_count") != 0
-        or numeric.get("disposition")
-        != "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
+        or numeric.get("disposition") != "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
     ):
         raise ReportValidationError("epoch verification numeric partition differs")
     calculation_rows = _objects(
@@ -7215,9 +7240,7 @@ def _verified_epoch_authority_details(
         calculation_ledger.get("nav_observations"),
         "epoch calculation ledger nav observations",
     )
-    _objects(
-        calculation_ledger.get("flows"), "epoch calculation ledger flows"
-    )
+    _objects(calculation_ledger.get("flows"), "epoch calculation ledger flows")
     classified_payload = subject_object("authority/classified-flows.json")
     classified_events = _objects(
         classified_payload.get("events"), "epoch classified events"
@@ -7235,9 +7258,7 @@ def _verified_epoch_authority_details(
         "funded_admission_row_count": sum(
             row.get("status") == "FUNDED" for row in admission_rows
         ),
-        "ok_output_row_count": sum(
-            row.get("status") == "OK" for row in manifest_rows
-        ),
+        "ok_output_row_count": sum(row.get("status") == "OK" for row in manifest_rows),
         "blocked_coverage_row_count": sum(
             row.get("status") == "BLOCKED" for row in coverage_rows
         ),
@@ -7252,8 +7273,7 @@ def _verified_epoch_authority_details(
         raise ReportValidationError("epoch verification semantic counts differ")
     if (
         calculation_inputs.get("schema_version") != 4
-        or calculation_inputs.get("artifact_id")
-        != "authority/calculation-inputs.json"
+        or calculation_inputs.get("artifact_id") != "authority/calculation-inputs.json"
         or not isinstance(calculation_ledger, dict)
         or calculation_ledger.get("calculation_cutoff_date") != cutoff
     ):
@@ -7304,9 +7324,7 @@ def _verified_epoch_authority_details(
             if assignment_field is None:
                 if not set(tuple_fields).issubset(authority_row):
                     raise ReportValidationError(f"epoch {label} tuple differs")
-                assignment = {
-                    field: authority_row[field] for field in tuple_fields
-                }
+                assignment = {field: authority_row[field] for field in tuple_fields}
             else:
                 assignment = authority_row.get(assignment_field)
             if not isinstance(assignment, dict) or set(assignment) != set(tuple_fields):
@@ -7322,12 +7340,8 @@ def _verified_epoch_authority_details(
     calculation_by_key = index_authority_rows(
         calculation_rows, "epoch", "calculation input"
     )
-    coverage_by_key = index_authority_rows(
-        coverage_rows, "assignment", "coverage"
-    )
-    admission_by_key = index_authority_rows(
-        admission_rows, None, "admission"
-    )
+    coverage_by_key = index_authority_rows(coverage_rows, "assignment", "coverage")
+    admission_by_key = index_authority_rows(admission_rows, None, "admission")
     assert calculation_by_key
     details: dict[tuple[str, str, str, str | None], dict[str, Any]] = {}
     numeric_candidate_count = 0
@@ -7374,10 +7388,10 @@ def _verified_epoch_authority_details(
         ):
             raise ReportValidationError("epoch blocker chain semantic equality differs")
         if chain.get("numeric_candidate") is True:
-            if (
-                admission != {"status": "FUNDED", "blocker_code": None}
-                or output != {"status": "OK", "blocking_reason": None}
-            ):
+            if admission != {"status": "FUNDED", "blocker_code": None} or output != {
+                "status": "OK",
+                "blocking_reason": None,
+            }:
                 raise ReportValidationError("epoch funded semantic chain differs")
             numeric_candidate_count += 1
         elif chain.get("numeric_candidate") is False:
@@ -7448,10 +7462,18 @@ def _validate_epoch_generation_authority(
             "1",
         ),
     }
-    for artifact_id, (expected_bytes, schema_name, schema_version) in artifact_specs.items():
+    for artifact_id, (
+        expected_bytes,
+        schema_name,
+        schema_version,
+    ) in artifact_specs.items():
         payload = bundle.payloads.get(artifact_id)
         artifact = next(
-            (item for item in bundle.manifest.artifacts if item.artifact_id == artifact_id),
+            (
+                item
+                for item in bundle.manifest.artifacts
+                if item.artifact_id == artifact_id
+            ),
             None,
         )
         if (
@@ -7499,8 +7521,7 @@ def _validate_epoch_generation_authority(
         or verification_artifact.sha256
         != hashlib.sha256(verification_bytes).hexdigest()
         or verification_artifact.size_bytes != len(verification_bytes)
-        or calculation_artifact.sha256
-        != hashlib.sha256(calculation_bytes).hexdigest()
+        or calculation_artifact.sha256 != hashlib.sha256(calculation_bytes).hexdigest()
         or calculation_artifact.size_bytes != len(calculation_bytes)
     ):
         raise ReportValidationError("epoch generation verification authority differs")
@@ -7581,15 +7602,19 @@ def _validate_current_epoch_crosswalk(
         "schema_version",
         "selected_baseline",
     }
-    if set(crosswalk) != expected_root or crosswalk.get("artifact_id") != (
-        "account-strategy-current-epoch-crosswalk"
-    ) or crosswalk.get("schema_version") != 1:
+    if (
+        set(crosswalk) != expected_root
+        or crosswalk.get("artifact_id") != ("account-strategy-current-epoch-crosswalk")
+        or crosswalk.get("schema_version") != 1
+    ):
         raise ReportValidationError("current epoch crosswalk schema differs")
     if crosswalk.get("as_of_date") != CURRENT_EPOCH_CROSSWALK_AS_OF_DATE:
         raise ReportValidationError("current epoch crosswalk as_of_date differs")
     _date(crosswalk.get("as_of_date"), "current epoch crosswalk.as_of_date")
     if crosswalk.get("calculation_cutoff_date") != CURRENT_EPOCH_CROSSWALK_CUTOFF_DATE:
-        raise ReportValidationError("current epoch crosswalk calculation cutoff differs")
+        raise ReportValidationError(
+            "current epoch crosswalk calculation cutoff differs"
+        )
     _date(
         crosswalk.get("calculation_cutoff_date"),
         "current epoch crosswalk.calculation_cutoff_date",
@@ -7623,17 +7648,33 @@ def _validate_current_epoch_crosswalk(
             raise ReportValidationError(
                 f"current epoch crosswalk row {index} schema differs"
             )
-        for key in ("assignment_id", "account_id", "provider", "strategy_id", "account_label"):
+        for key in (
+            "assignment_id",
+            "account_id",
+            "provider",
+            "strategy_id",
+            "account_label",
+        ):
             if not isinstance(row.get(key), str) or not row[key]:
-                raise ReportValidationError(f"current epoch crosswalk row {index} is invalid")
+                raise ReportValidationError(
+                    f"current epoch crosswalk row {index} is invalid"
+                )
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", row["assignment_id"]):
-            raise ReportValidationError("current epoch crosswalk assignment identity differs")
+            raise ReportValidationError(
+                "current epoch crosswalk assignment identity differs"
+            )
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", row["account_id"]):
-            raise ReportValidationError("current epoch crosswalk account identity differs")
+            raise ReportValidationError(
+                "current epoch crosswalk account identity differs"
+            )
         if not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", row["strategy_id"]):
-            raise ReportValidationError("current epoch crosswalk strategy identity differs")
+            raise ReportValidationError(
+                "current epoch crosswalk strategy identity differs"
+            )
         if row["assignment_id"] in assignment_ids:
-            raise ReportValidationError("current epoch crosswalk assignments are duplicated")
+            raise ReportValidationError(
+                "current epoch crosswalk assignments are duplicated"
+            )
         assignment_ids.add(row["assignment_id"])
         identity = (
             row["account_id"],
@@ -7644,10 +7685,18 @@ def _validate_current_epoch_crosswalk(
         if identity in row_identities:
             raise ReportValidationError("current epoch crosswalk rows are duplicated")
         row_identities.add(identity)
-        _date(row["effective_start"], f"current epoch crosswalk row {index}.effective_start")
+        _date(
+            row["effective_start"],
+            f"current epoch crosswalk row {index}.effective_start",
+        )
         if row["effective_end"] is not None:
-            _date(row["effective_end"], f"current epoch crosswalk row {index}.effective_end")
-        if row["last_four"] is not None and not re.fullmatch(r"[0-9]{4}", row["last_four"]):
+            _date(
+                row["effective_end"],
+                f"current epoch crosswalk row {index}.effective_end",
+            )
+        if row["last_four"] is not None and not re.fullmatch(
+            r"[0-9]{4}", row["last_four"]
+        ):
             raise ReportValidationError("current epoch crosswalk last_four differs")
         disposition = row["product_epoch_disposition"]
         if disposition not in {
@@ -7664,11 +7713,15 @@ def _validate_current_epoch_crosswalk(
             "EXCLUDED_IMMATERIAL": "COMPOSER_OWNER_EXCLUDED_IMMATERIAL",
         }[disposition]
         if row["owner_reason"] != expected_owner_reason:
-            raise ReportValidationError("current epoch crosswalk owner authority differs")
+            raise ReportValidationError(
+                "current epoch crosswalk owner authority differs"
+            )
         if strategy_product_controls is not None:
             control = strategy_product_controls.get(row["strategy_id"])
             if control is None:
-                raise ReportValidationError("current epoch crosswalk strategy authority differs")
+                raise ReportValidationError(
+                    "current epoch crosswalk strategy authority differs"
+                )
             expected_disposition = (
                 "INCLUDED_PRODUCT_EPOCH"
                 if control["product_requirement"] == "REQUIRED"
@@ -7679,7 +7732,9 @@ def _validate_current_epoch_crosswalk(
                 )
             )
             if disposition != expected_disposition:
-                raise ReportValidationError("current epoch crosswalk disposition authority differs")
+                raise ReportValidationError(
+                    "current epoch crosswalk disposition authority differs"
+                )
     observed_counts = {
         disposition: sum(
             1 for row in rows if row["product_epoch_disposition"] == disposition
@@ -7687,10 +7742,18 @@ def _validate_current_epoch_crosswalk(
         for disposition in counts
     }
     if observed_counts != counts:
-        raise ReportValidationError("current epoch crosswalk row disposition counts differ")
+        raise ReportValidationError(
+            "current epoch crosswalk row disposition counts differ"
+        )
     selected = crosswalk.get("selected_baseline")
     if not isinstance(selected, dict) or set(selected) != {
-        "artifact_id", "as_of_date", "generation_id", "schema_name", "schema_version", "sha256", "size_bytes"
+        "artifact_id",
+        "as_of_date",
+        "generation_id",
+        "schema_name",
+        "schema_version",
+        "sha256",
+        "size_bytes",
     }:
         raise ReportValidationError("current epoch crosswalk selected baseline differs")
     if (
@@ -7706,12 +7769,22 @@ def _validate_current_epoch_crosswalk(
         or not isinstance(selected["size_bytes"], int)
         or selected["size_bytes"] <= 0
     ):
-        raise ReportValidationError("current epoch crosswalk selected baseline fields differ")
-    _date(selected["as_of_date"], "current epoch crosswalk selected_baseline.as_of_date")
-    if baseline_catalog is not None and baseline_ref is not None and baseline_catalog_path is not None:
+        raise ReportValidationError(
+            "current epoch crosswalk selected baseline fields differ"
+        )
+    _date(
+        selected["as_of_date"], "current epoch crosswalk selected_baseline.as_of_date"
+    )
+    if (
+        baseline_catalog is not None
+        and baseline_ref is not None
+        and baseline_catalog_path is not None
+    ):
         expected_selected = {
             "artifact_id": "normalized/portfolio-baseline.json",
-            "as_of_date": _text(baseline_catalog.get("as_of_date"), "baseline as_of_date"),
+            "as_of_date": _text(
+                baseline_catalog.get("as_of_date"), "baseline as_of_date"
+            ),
             "generation_id": baseline_ref["generation_id"],
             "schema_name": "portfolio-baseline-catalog",
             "schema_version": "1",
@@ -7719,10 +7792,14 @@ def _validate_current_epoch_crosswalk(
             "size_bytes": baseline_catalog_path.stat().st_size,
         }
         if selected != expected_selected:
-            raise ReportValidationError("current epoch crosswalk selected baseline binding differs")
+            raise ReportValidationError(
+                "current epoch crosswalk selected baseline binding differs"
+            )
         assignments = {
             row.get("assignment_id"): row
-            for row in _objects(baseline_catalog.get("assignments"), "baseline.assignments")
+            for row in _objects(
+                baseline_catalog.get("assignments"), "baseline.assignments"
+            )
         }
         accounts = {
             row.get("account_id"): row
@@ -7731,11 +7808,23 @@ def _validate_current_epoch_crosswalk(
         for row in rows:
             assignment = assignments.get(row["assignment_id"])
             account = accounts.get(row["account_id"])
-            if assignment is None or account is None or any(
-                assignment.get(key) != row[key]
-                for key in ("account_id", "strategy_id", "effective_start", "effective_end")
-            ) or account.get("provider") != row["provider"]:
-                raise ReportValidationError("current epoch crosswalk is not bound to baseline authority")
+            if (
+                assignment is None
+                or account is None
+                or any(
+                    assignment.get(key) != row[key]
+                    for key in (
+                        "account_id",
+                        "strategy_id",
+                        "effective_start",
+                        "effective_end",
+                    )
+                )
+                or account.get("provider") != row["provider"]
+            ):
+                raise ReportValidationError(
+                    "current epoch crosswalk is not bound to baseline authority"
+                )
 
 
 def _repo_bound_workbook_parity_receipt(
@@ -7771,9 +7860,7 @@ def bind_workbook_evidence(
     epoch_supplied = _require_epoch_manifest_triplet(
         epoch_manifest_path, epoch_manifest_source_path, epoch_crosswalk_path
     )
-    _require_epoch_generation_root(
-        epoch_supplied, epoch_manifest_generation_root
-    )
+    _require_epoch_generation_root(epoch_supplied, epoch_manifest_generation_root)
     catalog: Mapping[str, Any] | None = None
     baseline_ref: Mapping[str, Any] | None = None
     baseline_catalog_path: Path | None = None
@@ -7864,11 +7951,7 @@ def _is_governed_report_data(report: Mapping[str, Any]) -> bool:
     return (
         isinstance(rows, list)
         and len(rows) == len(CURRENT_REQUIRED_STRATEGY_IDS)
-        and {
-            row.get("strategy_id")
-            for row in rows
-            if isinstance(row, Mapping)
-        }
+        and {row.get("strategy_id") for row in rows if isinstance(row, Mapping)}
         == CURRENT_REQUIRED_STRATEGY_IDS
         and isinstance(report.get("baseline"), Mapping)
     )
@@ -8067,7 +8150,9 @@ def verify_candidate(
         epoch_manifest_source_path,
         epoch_crosswalk_path,
     )
-    _require_epoch_generation_root(bool(epoch_snapshots), epoch_manifest_generation_root)
+    _require_epoch_generation_root(
+        bool(epoch_snapshots), epoch_manifest_generation_root
+    )
     # Once supplied epoch evidence is bound into the candidate, rebuild from
     # those exact candidate bytes. External paths are inputs to the binding
     # check, not an alternate source of report identity.
@@ -8133,7 +8218,9 @@ def verify_candidate(
                 "epoch_crosswalk_sha256": hashlib.sha256(
                     epoch_snapshots["epoch_crosswalk"][1]
                 ).hexdigest(),
-                "epoch_crosswalk_size_bytes": len(epoch_snapshots["epoch_crosswalk"][1]),
+                "epoch_crosswalk_size_bytes": len(
+                    epoch_snapshots["epoch_crosswalk"][1]
+                ),
             }
         )
     return verification
@@ -8495,7 +8582,9 @@ def _snapshot_selected_generation_root(
     try:
         read_generation(destination, generation_id)
     except (OSError, ValueError, RuntimeError) as exc:
-        raise ReportValidationError("snapshotted selected generation is not accepted") from exc
+        raise ReportValidationError(
+            "snapshotted selected generation is not accepted"
+        ) from exc
     return destination, destination_generation
 
 
@@ -8549,7 +8638,8 @@ def _epoch_history_snapshot_evidence(
     if (
         type(crosswalk_payload) is not bytes
         or crosswalk_payload != expected_crosswalk_bytes
-        or hashlib.sha256(crosswalk_payload).hexdigest() != crosswalk_artifact.get("sha256")
+        or hashlib.sha256(crosswalk_payload).hexdigest()
+        != crosswalk_artifact.get("sha256")
         or len(crosswalk_payload) != crosswalk_artifact.get("size_bytes")
     ):
         raise ReportValidationError("epoch history crosswalk authority differs")
@@ -8568,7 +8658,8 @@ def _epoch_history_snapshot_evidence(
     if (
         crosswalk_manifest_artifact is None
         or crosswalk_manifest_artifact.sha256 != crosswalk_artifact.get("sha256")
-        or crosswalk_manifest_artifact.size_bytes != crosswalk_artifact.get("size_bytes")
+        or crosswalk_manifest_artifact.size_bytes
+        != crosswalk_artifact.get("size_bytes")
         or crosswalk_manifest_artifact.schema_name
         != "account-strategy-current-epoch-crosswalk"
         or crosswalk_manifest_artifact.schema_version != "1"
@@ -8578,8 +8669,12 @@ def _epoch_history_snapshot_evidence(
         manifest_subject = json.loads(expected_manifest_bytes)
         crosswalk_subject = json.loads(expected_crosswalk_bytes)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ReportValidationError("epoch history subject authority is invalid") from exc
-    if not isinstance(manifest_subject, dict) or not isinstance(crosswalk_subject, dict):
+        raise ReportValidationError(
+            "epoch history subject authority is invalid"
+        ) from exc
+    if not isinstance(manifest_subject, dict) or not isinstance(
+        crosswalk_subject, dict
+    ):
         raise ReportValidationError("epoch history subject authority differs")
     if set(crosswalk_subject) != {
         "artifact_id",
@@ -8659,14 +8754,11 @@ def _epoch_history_snapshot_evidence(
         ),
         None,
     )
-    calculation_payload_bytes = bundle.payloads.get(
-        "authority/calculation-inputs.json"
-    )
+    calculation_payload_bytes = bundle.payloads.get("authority/calculation-inputs.json")
     if (
         calculation_artifact is None
         or type(calculation_payload_bytes) is not bytes
-        or calculation_artifact.schema_name
-        != "account-manifest-calculation-inputs"
+        or calculation_artifact.schema_name != "account-manifest-calculation-inputs"
         or calculation_artifact.schema_version != "4"
         or calculation_artifact.sha256
         != hashlib.sha256(calculation_payload_bytes).hexdigest()
@@ -8894,7 +8986,9 @@ def publish_report(
             evidence_snapshots["epoch_manifest"][1],
             evidence_snapshots["epoch_crosswalk"][1],
         )
-        epoch_verification_snapshot = snapshot_root / "epoch-independent-verification.json"
+        epoch_verification_snapshot = (
+            snapshot_root / "epoch-independent-verification.json"
+        )
         _write_exact(epoch_verification_snapshot, epoch_history_verification[1])
         epoch_history_verification = (
             epoch_verification_snapshot,

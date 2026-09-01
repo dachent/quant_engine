@@ -927,9 +927,7 @@ def ai_attribution(
     exact_gap_pp = (exact_account - exact_model) * 100.0
     raw_mixed_model_return = model_mix["model_mix_return"]
     mixed_model_return = (
-        float(raw_mixed_model_return)
-        if raw_mixed_model_return is not None
-        else None
+        float(raw_mixed_model_return) if raw_mixed_model_return is not None else None
     )
     role_contributions = {
         str(role): float(value)
@@ -960,9 +958,7 @@ def ai_attribution(
         else None
     )
     primary_implementation_pp = (
-        primary_actual_pp - primary_target_pp
-        if primary_target_pp is not None
-        else None
+        primary_actual_pp - primary_target_pp if primary_target_pp is not None else None
     )
     other_implementation_pp = (
         other_actual_pp - other_target_pp if other_target_pp is not None else None
@@ -1114,8 +1110,7 @@ def _grizzly_account(
             for row in schwab.get("transactions", [])
             if isinstance(row, dict)
             and str(row.get("account_id")) == account
-            and date.fromisoformat(str(row.get("event_date") or ""))
-            <= accepted_as_of
+            and date.fromisoformat(str(row.get("event_date") or "")) <= accepted_as_of
         ],
         key=lambda row: (str(row.get("event_date")), str(row.get("record_id"))),
     )
@@ -1678,13 +1673,9 @@ def tt_attribution(
         workbook, components, accepted_as_of=accepted_as_of
     )
     prices = _market_rows_many(market_data, accepted_as_of=accepted_as_of)
-    model_events = _tt_weighted_events(
-        snapshots, accepted_as_of=accepted_as_of
-    )
+    model_events = _tt_weighted_events(snapshots, accepted_as_of=accepted_as_of)
     actual_events = _canonical_events(
-        reconciliation._tt_actual_events(
-            ledger, schwab, accepted_as_of=accepted_as_of
-        )
+        reconciliation._tt_actual_events(ledger, schwab, accepted_as_of=accepted_as_of)
     )
     target_boundary = min(snapshots)
     inherited_account_returns = reconciliation._returns(
@@ -1697,15 +1688,13 @@ def tt_attribution(
         row
         for row in ledger.get("nav_observations", [])
         if isinstance(row, dict)
-        and date.fromisoformat(str(row.get("as_of_date") or ""))
-        <= accepted_as_of
+        and date.fromisoformat(str(row.get("as_of_date") or "")) <= accepted_as_of
     ]
     bounded_flows = [
         row
         for row in ledger.get("flows", [])
         if isinstance(row, dict)
-        and date.fromisoformat(str(row.get("event_date") or ""))
-        <= accepted_as_of
+        and date.fromisoformat(str(row.get("event_date") or "")) <= accepted_as_of
     ]
     broker_rows = [
         row

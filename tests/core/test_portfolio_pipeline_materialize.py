@@ -1936,9 +1936,15 @@ def test_core_pipeline_rejects_legacy_provider_admission_adapter_v4(
     }
     authority_hashes = {
         "contract_raw_sha256": hashlib.sha256(contract_path.read_bytes()).hexdigest(),
-        "provider_catalog_sha256": hashlib.sha256(catalog_path.read_bytes()).hexdigest(),
-        "provider_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-        "provider_receipt_sha256": hashlib.sha256(receipt_path.read_bytes()).hexdigest(),
+        "provider_catalog_sha256": hashlib.sha256(
+            catalog_path.read_bytes()
+        ).hexdigest(),
+        "provider_manifest_sha256": hashlib.sha256(
+            manifest_path.read_bytes()
+        ).hexdigest(),
+        "provider_receipt_sha256": hashlib.sha256(
+            receipt_path.read_bytes()
+        ).hexdigest(),
         "source_matrix_sha256": hashlib.sha256(matrix_path.read_bytes()).hexdigest(),
     }
     product_path = tmp_path / "product.json"

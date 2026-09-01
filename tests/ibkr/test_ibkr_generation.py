@@ -67,8 +67,7 @@ def _xml(
                     'amount="1.25" currency="USD" conid="100" />'
                 )
             )
-            +
-            "</CashTransactions>"
+            + "</CashTransactions>"
         ),
         "ChangeInNAV": (
             f'<ChangeInNAV accountId="{account}" endingValue="{change_nav or nav}" />'
@@ -449,9 +448,9 @@ def test_summary_cash_observations_are_excluded_without_dropping_detail_flows(
         "30000",
         "5000",
     ]
-    assert sum(Decimal(flow["amount"]["value"]) for flow in catalog["flows"]) == Decimal(
-        "35000"
-    )
+    assert sum(
+        Decimal(flow["amount"]["value"]) for flow in catalog["flows"]
+    ) == Decimal("35000")
 
 
 def test_cross_report_summary_aggregate_is_not_an_additional_cash_flow(
@@ -503,9 +502,9 @@ def test_cross_report_summary_aggregate_is_not_an_additional_cash_flow(
         "-3572.46",
         "5250",
     ]
-    assert sum(Decimal(flow["amount"]["value"]) for flow in catalog["flows"]) == Decimal(
-        "1677.54"
-    )
+    assert sum(
+        Decimal(flow["amount"]["value"]) for flow in catalog["flows"]
+    ) == Decimal("1677.54")
 
 
 def _position_transfer_statement(
@@ -734,9 +733,7 @@ def test_corrected_p123_eu_position_base_legs_are_eight_safe_internal_pairs(
         assert {flow["provider_account_scope"] for flow in flows} == {
             "STATEMENT_ACCOUNT"
         }
-        assert {flow["value_basis"] for flow in flows} == {
-            "POSITION_AMOUNT_IN_BASE"
-        }
+        assert {flow["value_basis"] for flow in flows} == {"POSITION_AMOUNT_IN_BASE"}
         assert sum(Decimal(flow["amount"]["value"]) for flow in flows) == Decimal("0")
         inbound_total += Decimal(inbound_value)
 
@@ -825,7 +822,10 @@ def test_retained_p123_eu_position_transfers_project_exact_source_base_values() 
                 }
             ],
         },
-        {"U21991024": "account-source-counterpart", "U22509054": "account-source-p123-eu"},
+        {
+            "U21991024": "account-source-counterpart",
+            "U22509054": "account-source-p123-eu",
+        },
         [],
         frozenset(),
         0,
@@ -857,9 +857,9 @@ def test_retained_p123_eu_position_transfers_project_exact_source_base_values() 
         for activity, amount in expected_inbound.items()
     }
     assert sum(inbound_by_activity.values()) == Decimal("6821.754075")
-    assert sum(Decimal(flow["amount"]["value"]) for flow in counterpart_flows) == Decimal(
-        "-6821.754075"
-    )
+    assert sum(
+        Decimal(flow["amount"]["value"]) for flow in counterpart_flows
+    ) == Decimal("-6821.754075")
 
 
 @pytest.mark.parametrize(
@@ -889,13 +889,23 @@ def test_position_transfer_base_valuation_requires_an_exact_cross_account_pair(
 
 
 @pytest.mark.parametrize(
-    ("incoming_type", "outgoing_type", "incoming_value", "outgoing_value", "outgoing_base_currency"),
+    (
+        "incoming_type",
+        "outgoing_type",
+        "incoming_value",
+        "outgoing_value",
+        "outgoing_base_currency",
+    ),
     [
         ("EXTERNAL", "EXTERNAL", "125.50", "-125.50", "USD"),
         ("INTERNAL", "INTERNAL", "125.50", "-125.50", "EUR"),
         ("INTERNAL", "INTERNAL", "-125.50", "125.50", "USD"),
     ],
-    ids=("external_transfer", "mismatched_statement_base_currency", "reversed_direction_signs"),
+    ids=(
+        "external_transfer",
+        "mismatched_statement_base_currency",
+        "reversed_direction_signs",
+    ),
 )
 def test_position_transfer_base_valuation_rejects_noninternal_cross_currency_or_reversed_sign_pairs(
     tmp_path: Path,

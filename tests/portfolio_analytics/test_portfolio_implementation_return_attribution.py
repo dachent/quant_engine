@@ -188,7 +188,7 @@ def test_build_attribution_threads_cutoff_to_each_strategy_and_is_invariant(
     for path, content in (
         (schwab_path, "{}"),
         (ibkr_root / "ibkr-catalog.json", "{}"),
-        (current_xml, "<FlexQueryResponse/>") ,
+        (current_xml, "<FlexQueryResponse/>"),
         (p123_root / "generation.json", "{}"),
         (signals, "timestamp,state\n"),
         (grizzly_market, "{}"),
@@ -221,7 +221,9 @@ def test_build_attribution_threads_cutoff_to_each_strategy_and_is_invariant(
 
         return adapter
 
-    monkeypatch.setattr(attribution, "ai_attribution", strategy_adapter("p123-ai-factor"))
+    monkeypatch.setattr(
+        attribution, "ai_attribution", strategy_adapter("p123-ai-factor")
+    )
     monkeypatch.setattr(
         attribution, "grizzly_attribution", strategy_adapter("grizzlybears-vtma")
     )
@@ -417,9 +419,7 @@ def test_grizzly_account_uses_only_bounded_mapped_ledger_evidence() -> None:
                 },
             ],
         }
-        return attribution._grizzly_account(
-            ledger, schwab, accepted_as_of=cutoff
-        )
+        return attribution._grizzly_account(ledger, schwab, accepted_as_of=cutoff)
 
     before_cutoff = select("999", "CURRENT_A")
 
@@ -486,9 +486,7 @@ def test_tt_dated_sources_are_post_cutoff_invariant(
             encoding="utf-8",
         )
         return (
-            attribution._tt_target_snapshots(
-                workbook, ["A"], accepted_as_of=cutoff
-            ),
+            attribution._tt_target_snapshots(workbook, ["A"], accepted_as_of=cutoff),
             attribution._market_rows_many([market], accepted_as_of=cutoff),
         )
 

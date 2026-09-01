@@ -307,9 +307,7 @@ def test_matrixport_target_retains_declared_gap_span_for_epoch_twr_only(
         observed += timedelta(days=1)
     rows.append(f"P1,2026-08-14T00:00:00Z,{terminal_nav * Decimal(2)}\n")
     _write(nav, "".join(rows))
-    _rebind_matrixport_nav(
-        manifest, nav, declared_dates=("2026-01-27", "2026-07-03")
-    )
+    _rebind_matrixport_nav(manifest, nav, declared_dates=("2026-01-27", "2026-07-03"))
     daily_holdings = _rebind_matrixport_daily_holdings(
         manifest, nav, declared_dates=("2026-01-27", "2026-07-03")
     )
@@ -342,14 +340,17 @@ def test_matrixport_target_retains_declared_gap_span_for_epoch_twr_only(
     assert receipt["daily_return_observations"] == 246
     assert receipt["epoch_holding_period_link_observations"] == 248
     assert receipt["admission_cutoff"] == "2026-08-13"
-    assert receipt["epoch_cumulative_return"] == (
-        "-0.0123875290080184841010757599"
-    )
+    assert receipt["epoch_cumulative_return"] == ("-0.0123875290080184841010757599")
     assert receipt["daily_cumulative_return"] == coverage["daily_cumulative_return"]
     assert receipt["epoch_cumulative_return"] != receipt["daily_cumulative_return"]
     assert len(receipt["daily_return_series_sha256"]) == 64
     assert [
-        (row["missing_source_date"], row["span_start_date"], row["span_end_date"], row["span_days"])
+        (
+            row["missing_source_date"],
+            row["span_start_date"],
+            row["span_end_date"],
+            row["span_days"],
+        )
         for row in coverage["span_return_receipts"]
     ] == [
         ("2026-01-27", "2026-01-26", "2026-01-28", 2),

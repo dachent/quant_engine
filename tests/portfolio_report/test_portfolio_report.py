@@ -339,7 +339,9 @@ def _published_report_delivery(
 ) -> tuple[Path, str, Path]:
     baseline_root = _published_baseline(tmp_path / "baseline")
     candidate = Path(
-        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")[
+            "candidate_dir"
+        ]
     )
     workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
         candidate,
@@ -824,9 +826,7 @@ def test_epoch_admission_blocks_twelve_rows_before_any_numeric_candidate(
     funded = [row for row in rows if row["epoch_admission_status"] == "FUNDED"]
     assert len(blocked) == 12
     assert len(funded) == 1
-    assert {
-        row["strategy_id"] for row in funded
-    } == {"volatis-strategy"}
+    assert {row["strategy_id"] for row in funded} == {"volatis-strategy"}
     assert all(
         row[status_field] == "BLOCKED_ADMISSION"
         for row in blocked
@@ -1286,18 +1286,12 @@ def _published_dependence(
             "performance": (
                 {}
                 if cutoff is None
-                else {
-                    series_id: {"observed_end": cutoff}
-                    for series_id in series_ids
-                }
+                else {series_id: {"observed_end": cutoff} for series_id in series_ids}
             ),
             "series_composition": (
                 {}
                 if cutoff is None
-                else {
-                    series_id: {"observed_end": cutoff}
-                    for series_id in series_ids
-                }
+                else {series_id: {"observed_end": cutoff} for series_id in series_ids}
             ),
         }
 
@@ -1327,16 +1321,18 @@ def _published_dependence(
         if target == "complete_through":
             correlation[target] = replacement
         else:
-            correlation["dependence_modes"]["LIVE_ONLY"][target][
-                "Current Strategy 1"
-            ]["observed_end"] = replacement
+            correlation["dependence_modes"]["LIVE_ONLY"][target]["Current Strategy 1"][
+                "observed_end"
+            ] = replacement
             correlation["dependence"] = correlation["dependence_modes"]["LIVE_ONLY"]
     content = canonical_json_bytes(correlation)
     artifact = SourceArtifact(
         artifact_id="normalized/correlation.json",
         sha256=hashlib.sha256(content).hexdigest(),
         size_bytes=len(content),
-        as_of_date=(date.fromisoformat(cutoff) if cutoff is not None else date(2026, 1, 3)),
+        as_of_date=(
+            date.fromisoformat(cutoff) if cutoff is not None else date(2026, 1, 3)
+        ),
         schema_name="portfolio-correlation-analysis",
         schema_version="2",
     )
@@ -1580,7 +1576,9 @@ def test_report_uses_only_verified_epoch_hpr_projection_for_endpoint_wealth(
     strategy = next(
         row for row in report["strategy_summary"] if row["strategy_id"] == "strategy-1"
     )
-    assert strategy["account_live_cumulative_return"] == "-0.0123875290080184841010757599"
+    assert (
+        strategy["account_live_cumulative_return"] == "-0.0123875290080184841010757599"
+    )
     assert strategy["account_live_return_observations"] == 2
     assert strategy["account_live_max_drawdown"] is None
     assert strategy["hwm_current_drawdown"] is None
@@ -1679,7 +1677,10 @@ def test_bind_workbook_evidence_rejects_half_baseline_selector(
         )
 
 
-@pytest.mark.parametrize("selector_args", (("--baseline-root", "missing"), ("--baseline-generation-id", "a" * 64)))
+@pytest.mark.parametrize(
+    "selector_args",
+    (("--baseline-root", "missing"), ("--baseline-generation-id", "a" * 64)),
+)
 def test_bind_workbook_evidence_cli_rejects_half_baseline_selector(
     selector_args: tuple[str, str], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1869,10 +1870,7 @@ def test_staged_selectors_flow_through_build_verify_bind_publish_and_inspect(
     assert inspected["workbook_status"] == "EXACT_NON_AUTHORITY"
     published_report = json.loads(
         (
-            published_root
-            / "generations"
-            / generation_id
-            / reporter.REPORT_DATA_NAME
+            published_root / "generations" / generation_id / reporter.REPORT_DATA_NAME
         ).read_text(encoding="utf-8")
     )
     assert published_report["baseline"]["generation_id"] == baseline_generation_id
@@ -2059,7 +2057,9 @@ def test_calculation_cutoff_retains_current_allocation_snapshot() -> None:
     assert projected["provider_strategy_returns"] == []
 
 
-def test_calculation_cutoff_retains_null_calendar_sentinel_and_clips_dated_rows() -> None:
+def test_calculation_cutoff_retains_null_calendar_sentinel_and_clips_dated_rows() -> (
+    None
+):
     sentinel = {
         "account_id": "account-no-nav",
         "date": None,
@@ -2230,7 +2230,7 @@ def test_calculation_cutoff_rejects_future_assignment_before_nav_flow_traps(
                 "account_id": "future-account",
                 "as_of_date": "2026-08-13",
                 "value": "NAV_TRAP_MUST_NOT_BE_PARSED",
-            }
+            },
         ],
         "flows": [
             {
@@ -2884,9 +2884,7 @@ def test_any_bound_workbook_evidence_byte_change_blocks_publication(
     target.write_bytes(target.read_bytes() + b"drift")
 
     published_root = tmp_path / "published"
-    with pytest.raises(
-        reporter.ReportValidationError, match=f"^{error_category}$"
-    ):
+    with pytest.raises(reporter.ReportValidationError, match=f"^{error_category}$"):
         reporter.publish_report(
             baseline_root,
             candidate,
@@ -2941,7 +2939,9 @@ def test_accepted_delivery_evidence_publishes_without_authority_upgrade(
 
     baseline_root = _published_baseline(tmp_path / "baseline")
     candidate = Path(
-        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")[
+            "candidate_dir"
+        ]
     )
     workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
         candidate,
@@ -2986,7 +2986,9 @@ def test_failed_or_incomplete_workbook_evidence_cannot_create_delivery_binding(
 
     baseline_root = _published_baseline(tmp_path / "baseline")
     candidate = Path(
-        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")[
+            "candidate_dir"
+        ]
     )
     workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
         candidate,
@@ -3023,7 +3025,9 @@ def test_noncanonical_delivery_binding_cannot_advance_authority(
 
     baseline_root = _published_baseline(tmp_path / "baseline")
     candidate = Path(
-        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")[
+            "candidate_dir"
+        ]
     )
     workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
         candidate,
@@ -3087,7 +3091,9 @@ def test_delivery_evidence_binding_mutation_cannot_advance_authority(
 
     baseline_root = _published_baseline(tmp_path / "baseline")
     candidate = Path(
-        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")[
+            "candidate_dir"
+        ]
     )
     workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
         candidate,
@@ -3173,7 +3179,9 @@ def test_publish_keeps_authority_json_immutable_when_delivery_workbook_drifts(
 
     baseline_root = _published_baseline(tmp_path / "baseline")
     candidate = Path(
-        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")[
+            "candidate_dir"
+        ]
     )
     workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
         candidate,
@@ -3263,10 +3271,7 @@ def test_publish_keeps_authority_json_immutable_when_delivery_workbook_drifts(
 
     delivery_schema = json.loads(
         (
-            REPOSITORY_ROOT
-            / "schemas"
-            / "portfolio"
-            / "report-delivery.schema.json"
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "report-delivery.schema.json"
         ).read_text(encoding="utf-8")
     )
     Draft202012Validator.check_schema(delivery_schema)
@@ -3293,9 +3298,10 @@ def test_publish_keeps_authority_json_immutable_when_delivery_workbook_drifts(
     )
     assert delivery_status["workbook_status"] == "DRIFTED_NON_AUTHORITY"
     assert delivery_status["expected_workbook_sha256"] == receipt["workbook"]["sha256"]
-    assert delivery_status["actual_workbook_sha256"] == hashlib.sha256(
-        workbook_path.read_bytes()
-    ).hexdigest()
+    assert (
+        delivery_status["actual_workbook_sha256"]
+        == hashlib.sha256(workbook_path.read_bytes()).hexdigest()
+    )
     assert read_current(published_root) == pointer
 
     with pytest.raises(reporter.GenerationConflictError):
@@ -3317,7 +3323,9 @@ def test_delivery_inspection_requires_closed_receipt_and_exact_authority_binding
 
     baseline_root = _published_baseline(tmp_path / "baseline")
     candidate = Path(
-        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")[
+            "candidate_dir"
+        ]
     )
     workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
         candidate,
@@ -3350,9 +3358,10 @@ def test_delivery_inspection_requires_closed_receipt_and_exact_authority_binding
 
     exact = reporter.inspect_report_delivery(published_root, generation_id, delivery)
     assert exact["workbook_status"] == "EXACT_NON_AUTHORITY"
-    assert exact["generation_manifest_sha256"] == hashlib.sha256(
-        manifest_bytes
-    ).hexdigest()
+    assert (
+        exact["generation_manifest_sha256"]
+        == hashlib.sha256(manifest_bytes).hexdigest()
+    )
     assert exact["report_data_sha256"] == hashlib.sha256(report_bytes).hexdigest()
 
     size_only = json.loads(original_receipt)
@@ -3456,7 +3465,9 @@ def test_delivery_preflight_does_not_create_other_target_on_conflict(
 
     baseline_root = _published_baseline(tmp_path / "baseline")
     candidate = Path(
-        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")[
+            "candidate_dir"
+        ]
     )
     workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
         candidate,
@@ -3523,7 +3534,9 @@ def test_delivery_preflight_recovers_exact_partial_delivery(
 
     baseline_root = _published_baseline(tmp_path / "baseline")
     candidate = Path(
-        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")[
+            "candidate_dir"
+        ]
     )
     workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
         candidate,
@@ -3574,9 +3587,13 @@ def test_publish_requires_exact_bound_workbook_evidence_for_every_caller_input(
 ) -> None:
     baseline_root = _published_baseline(tmp_path / "baseline")
     candidate = Path(
-        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")[
+            "candidate_dir"
+        ]
     )
-    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(candidate)
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate
+    )
     reporter.bind_workbook_evidence(
         candidate, workbook, run_result, validation, binding_path
     )
@@ -3616,9 +3633,9 @@ def test_publish_requires_exact_bound_workbook_evidence_for_every_caller_input(
                         "path": str(published_root / reporter.WORKBOOK_NAME),
                         "sha256": hashlib.sha256(workbook.read_bytes()).hexdigest(),
                     },
-                    "run_id": json.loads(
-                        run_result.read_text(encoding="utf-8")
-                    )["run_id"],
+                    "run_id": json.loads(run_result.read_text(encoding="utf-8"))[
+                        "run_id"
+                    ],
                     "schema_version": "xlsx-win-native-receipt/1",
                     "staged_workbook": {
                         "path": str(workbook),
@@ -3651,9 +3668,13 @@ def test_publish_cli_accepts_exact_bound_workbook_evidence(
 ) -> None:
     baseline_root = _published_baseline(tmp_path / "baseline")
     candidate = Path(
-        reporter.build_candidate(baseline_root, tmp_path / "candidates")["candidate_dir"]
+        reporter.build_candidate(baseline_root, tmp_path / "candidates")[
+            "candidate_dir"
+        ]
     )
-    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(candidate)
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate
+    )
     reporter.bind_workbook_evidence(
         candidate, workbook, run_result, validation, binding_path
     )
@@ -3693,7 +3714,9 @@ def test_delivery_evidence_stages_without_current_or_release_pointer(
     baseline_root = _published_baseline(tmp_path / "baseline")
     built = reporter.build_candidate(baseline_root, tmp_path / "staging")
     candidate = Path(built["candidate_dir"])
-    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(candidate)
+    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
+        candidate
+    )
 
     binding = reporter.bind_workbook_evidence(
         candidate, workbook, run_result, validation, binding_path
@@ -3764,9 +3787,10 @@ def test_report_schema_is_closed_and_keeps_mwr_unavailable() -> None:
     assert schema["properties"]["strategy_summary"]["minItems"] == 7
     assert schema["properties"]["strategy_summary"]["maxItems"] == 7
     assert schema["$defs"]["performance"]["properties"]["mwr_xirr"]["type"] == "null"
-    assert schema["$defs"]["performance"]["properties"]["mwr_status"][
-        "enum"
-    ] == ["UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE", "BLOCKED_ADMISSION"]
+    assert schema["$defs"]["performance"]["properties"]["mwr_status"]["enum"] == [
+        "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
+        "BLOCKED_ADMISSION",
+    ]
     performance_schema = schema["$defs"]["performance"]
     assert performance_schema["additionalProperties"] is False
     governed_required = {
@@ -3900,10 +3924,7 @@ def test_report_schema_is_closed_and_keeps_mwr_unavailable() -> None:
     }
     baseline_schema = json.loads(
         (
-            REPOSITORY_ROOT
-            / "schemas"
-            / "portfolio"
-            / "baseline-catalog.schema.json"
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "baseline-catalog.schema.json"
         ).read_text(encoding="utf-8")
     )
     component_accounts = baseline_schema["properties"]["hwm_inputs"]["properties"][
@@ -4028,9 +4049,6 @@ def test_governed_report_schema_rejects_root_and_stripped_row_loopholes(
 
 def test_product_report_output_obeys_current_allocation_schema(tmp_path: Path) -> None:
     """Validate the real current-product projection, not the schema text."""
-
-    from jsonschema import Draft202012Validator, ValidationError
-    from referencing import Registry, Resource
 
     strategy_ids = (
         "p123-ai-factor",
@@ -4373,7 +4391,9 @@ def test_account_live_summary_uses_one_hash_bound_canonical_return_path() -> Non
     assert row["account_live_source_sha256"] is None
 
 
-def test_account_live_epoch_hpr_receipt_qualifies_wealth_and_blocks_path_metrics() -> None:
+def test_account_live_epoch_hpr_receipt_qualifies_wealth_and_blocks_path_metrics() -> (
+    None
+):
     """A gap receipt restores endpoint wealth without inventing an intra-gap peak."""
 
     daily_rows = [
@@ -4446,9 +4466,10 @@ def test_account_live_epoch_hpr_receipt_qualifies_wealth_and_blocks_path_metrics
     )
     assert canonical["robuxio-crypto"]["return_observations"] == 2
     assert canonical["robuxio-crypto"]["epoch_holding_period_link_observations"] == 3
-    assert canonical["robuxio-crypto"]["return_series_sha256"] == hashlib.sha256(
-        canonical_json_bytes(daily_rows)
-    ).hexdigest()
+    assert (
+        canonical["robuxio-crypto"]["return_series_sha256"]
+        == hashlib.sha256(canonical_json_bytes(daily_rows)).hexdigest()
+    )
 
 
 def test_epoch_hpr_span_makes_governed_portfolio_hwm_unavailable() -> None:
@@ -4730,9 +4751,7 @@ def test_deprecated_strategy_retains_history_without_current_series_requirement(
         first_funded_status="EXCLUDED",
     )
     monkeypatch.setattr(reporter, "_PORTABLE_HWM_PRODUCT_CONTRACT", contract_path)
-    baseline_root = _published_baseline(
-        tmp_path, _historical_only_provider_catalog()
-    )
+    baseline_root = _published_baseline(tmp_path, _historical_only_provider_catalog())
 
     report, _content, _baseline_path = reporter.build_report_data(baseline_root)
 
@@ -4769,9 +4788,7 @@ def test_active_strategy_still_requires_current_canonical_return_series(
         first_funded_status="EVIDENCED",
     )
     monkeypatch.setattr(reporter, "_PORTABLE_HWM_PRODUCT_CONTRACT", contract_path)
-    baseline_root = _published_baseline(
-        tmp_path, _historical_only_provider_catalog()
-    )
+    baseline_root = _published_baseline(tmp_path, _historical_only_provider_catalog())
 
     with pytest.raises(
         reporter.ReportValidationError,
@@ -4896,13 +4913,13 @@ def test_excluded_product_history_cannot_enter_current_returns_or_allocations() 
     without_retired_returns = {
         **catalog,
         "strategy_returns": [
-            row for row in catalog["strategy_returns"] if row["strategy_id"] != "strategy-1"
+            row
+            for row in catalog["strategy_returns"]
+            if row["strategy_id"] != "strategy-1"
         ],
     }
     allocation_rows = reporter._allocations(catalog, controls)
-    summary = reporter._portfolio_summary(
-        catalog, strategy_product_controls=controls
-    )
+    summary = reporter._portfolio_summary(catalog, strategy_product_controls=controls)
 
     assert canonical == {
         "strategy-2": {
@@ -4932,22 +4949,30 @@ def test_excluded_product_history_cannot_enter_current_returns_or_allocations() 
     assert current["strategy_id"] == "strategy-2"
     assert current["twr"] == "0.1"
     assert current["return_path_status"] == "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH"
-    assert reporter._account_strategy_performance(
-        without_retired_returns, controls
-    ) == performance
+    assert (
+        reporter._account_strategy_performance(without_retired_returns, controls)
+        == performance
+    )
     assert {row["strategy_id"] for row in allocation_rows} == {
         *{f"strategy-{index}" for index in range(2, 10)},
         None,
     }
-    assert next(row for row in summary if row["metric"] == "Total liquid")["value"] == "90.19"
-    assert next(row for row in summary if row["metric"] == "Systematic capital")[
-        "value"
-    ] == "80"
-    assert next(
-        row
-        for row in summary
-        if row["metric"] == "Retained excluded systematic balance"
-    )["value"] == "0.19"
+    assert (
+        next(row for row in summary if row["metric"] == "Total liquid")["value"]
+        == "90.19"
+    )
+    assert (
+        next(row for row in summary if row["metric"] == "Systematic capital")["value"]
+        == "80"
+    )
+    assert (
+        next(
+            row
+            for row in summary
+            if row["metric"] == "Retained excluded systematic balance"
+        )["value"]
+        == "0.19"
+    )
 
 
 def test_legacy_account_metrics_remain_one_explicit_audit_vintage() -> None:
@@ -5431,9 +5456,9 @@ def test_hwm_numerical_composite_matches_hand_computation(tmp_path: Path) -> Non
     assert {row["strategy_id"] for row in report["strategy_summary"]} == {
         f"strategy-{index}" for index in range(1, 8)
     }
-    assert {
-        row["strategy_id"] for row in report["strategy_summary"]
-    }.isdisjoint({"strategy-8", "strategy-9"})
+    assert {row["strategy_id"] for row in report["strategy_summary"]}.isdisjoint(
+        {"strategy-8", "strategy-9"}
+    )
     # Hand-computed expectation (Decimal, 34-digit precision, half-even):
     #   day 2026-01-02: (100*0.10 + 300*(-0.05) + 5*100*0) / 900
     #   day 2026-01-03: (110*0.02 + 285*0.04 + 5*100*0) / 895
@@ -5476,9 +5501,7 @@ def test_hwm_uncovered_weight_uses_final_current_allocation_weight(
     freshness_path = _hwm_freshness_file(tmp_path)
     freshness = json.loads(freshness_path.read_text(encoding="utf-8"))
     stale = next(
-        row
-        for row in freshness["assessments"]
-        if row["subject_id"] == "strategy-7"
+        row for row in freshness["assessments"] if row["subject_id"] == "strategy-7"
     )
     stale["state"] = "STALE"
     stale["reason"] = "synthetic stale HWM lane"

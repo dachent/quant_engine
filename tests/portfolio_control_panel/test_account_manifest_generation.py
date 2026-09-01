@@ -22,7 +22,11 @@ from types import MappingProxyType
 from typing import Any
 
 import pytest
-from quant_engine.core import GenerationConflictError, InputSnapshot, read_generation_bundle
+from quant_engine.core import (
+    GenerationConflictError,
+    InputSnapshot,
+    read_generation_bundle,
+)
 from quant_engine.core.contracts import (
     AdapterIdentity,
     CoverageClaim,
@@ -155,11 +159,13 @@ def test_current_epoch_crosswalk_uses_rows_as_sole_disposition_authority(
     crosswalk_payload = selected.current_epoch_crosswalk.json_object()
     for row in crosswalk_payload["rows"]:
         row["assignment_id"] = assignment_ids[row["assignment_id"]]
-    crosswalk_payload["selected_baseline"].update({
-        "generation_id": json.loads(baseline_manifest.contents)["generation_id"],
-        "sha256": baseline.sha256,
-        "size_bytes": baseline.size_bytes,
-    })
+    crosswalk_payload["selected_baseline"].update(
+        {
+            "generation_id": json.loads(baseline_manifest.contents)["generation_id"],
+            "sha256": baseline.sha256,
+            "size_bytes": baseline.size_bytes,
+        }
+    )
     crosswalk = InputSnapshot.from_bytes(
         "schema-valid synthetic current epoch crosswalk",
         canonical_json_bytes(crosswalk_payload),
@@ -183,8 +189,7 @@ def test_current_epoch_crosswalk_uses_rows_as_sole_disposition_authority(
     excluded = next(
         row
         for row in forged["rows"]
-        if row["product_epoch_disposition"]
-        == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
+        if row["product_epoch_disposition"] == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
     )
     excluded["product_epoch_disposition"] = "INCLUDED_PRODUCT_EPOCH"
     excluded["owner_reason"] = "MUTATED_CURRENT_PRODUCT_EPOCH"
@@ -206,11 +211,15 @@ def test_current_epoch_crosswalk_uses_rows_as_sole_disposition_authority(
 
     swapped = json.loads(crosswalk.contents)
     excluded = [
-        row for row in swapped["rows"]
+        row
+        for row in swapped["rows"]
         if row["product_epoch_disposition"] != "INCLUDED_PRODUCT_EPOCH"
     ]
     assert len(excluded) == 2
-    excluded[0]["product_epoch_disposition"], excluded[1]["product_epoch_disposition"] = (
+    (
+        excluded[0]["product_epoch_disposition"],
+        excluded[1]["product_epoch_disposition"],
+    ) = (
         excluded[1]["product_epoch_disposition"],
         excluded[0]["product_epoch_disposition"],
     )
@@ -242,8 +251,12 @@ def test_crosswalk_selected_input_caps_current_subject_to_cutoff(
 
     mapped, _ = perimeter_module._c3_mapped_assignments(selected)
     assert len(mapped) == 13
-    assert perimeter_module._current_epoch_calculation_cutoff(selected) == date(2026, 2, 1)
-    selected_identity = json.loads(perimeter_module.build_selected_input_identities(selected))
+    assert perimeter_module._current_epoch_calculation_cutoff(selected) == date(
+        2026, 2, 1
+    )
+    selected_identity = json.loads(
+        perimeter_module.build_selected_input_identities(selected)
+    )
     assert selected_identity["current_epoch_crosswalk"]["sha256"] == (
         selected.current_epoch_crosswalk.sha256
     )
@@ -259,14 +272,16 @@ def test_verifier_preserves_validated_crosswalk_order_and_matches_each_tuple(
     baseline_payload = base_selected.baseline.json_object()
     renamed: dict[str, str] = {}
     for assignment in baseline_payload["assignments"]:
-        if assignment["account_id"] == "synthetic-account-01" and assignment[
-            "strategy_mapping_disposition"
-        ] == "STRATEGY_MAPPED":
+        if (
+            assignment["account_id"] == "synthetic-account-01"
+            and assignment["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+        ):
             renamed[assignment["assignment_id"]] = "assignment-z"
             assignment["assignment_id"] = "assignment-z"
-        elif assignment["account_id"] == "synthetic-account-02" and assignment[
-            "strategy_mapping_disposition"
-        ] == "STRATEGY_MAPPED":
+        elif (
+            assignment["account_id"] == "synthetic-account-02"
+            and assignment["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+        ):
             renamed[assignment["assignment_id"]] = "assignment-a"
             assignment["assignment_id"] = "assignment-a"
     baseline = InputSnapshot.from_bytes(
@@ -308,7 +323,9 @@ def test_verifier_preserves_validated_crosswalk_order_and_matches_each_tuple(
     )
     fields = ("account_id", "strategy_id", "effective_start", "effective_end")
     expected_keys = [tuple(row[field] for field in fields) for row in expected]
-    assert expected_keys != sorted(expected_keys, key=lambda key: tuple(str(item) for item in key))
+    assert expected_keys != sorted(
+        expected_keys, key=lambda key: tuple(str(item) for item in key)
+    )
 
     # Model all 15 producer perimeter mappings arriving in account-sorted form;
     # the crosswalk explicitly excludes two while retaining assignment-id order.
@@ -373,14 +390,16 @@ def test_mixed_verify_canonicalizes_report_chains_after_interleaved_crosswalk(
     baseline_payload = selected_base.baseline.json_object()
     renamed: dict[str, str] = {}
     for assignment in baseline_payload["assignments"]:
-        if assignment["account_id"] == "synthetic-account-01" and assignment[
-            "strategy_mapping_disposition"
-        ] == "STRATEGY_MAPPED":
+        if (
+            assignment["account_id"] == "synthetic-account-01"
+            and assignment["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+        ):
             renamed[assignment["assignment_id"]] = "assignment-z"
             assignment["assignment_id"] = "assignment-z"
-        elif assignment["account_id"] == "synthetic-account-02" and assignment[
-            "strategy_mapping_disposition"
-        ] == "STRATEGY_MAPPED":
+        elif (
+            assignment["account_id"] == "synthetic-account-02"
+            and assignment["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+        ):
             renamed[assignment["assignment_id"]] = "assignment-a"
             assignment["assignment_id"] = "assignment-a"
     baseline = InputSnapshot.from_bytes(
@@ -418,8 +437,10 @@ def test_mixed_verify_canonicalizes_report_chains_after_interleaved_crosswalk(
     canonical = sorted(
         included,
         key=lambda row: (
-            row["account_id"], row["strategy_id"],
-            row["effective_start"], row["effective_end"] or "",
+            row["account_id"],
+            row["strategy_id"],
+            row["effective_start"],
+            row["effective_end"] or "",
         ),
     )
     interleaved = canonical[::2] + canonical[1::2]
@@ -445,8 +466,10 @@ def test_mixed_verify_canonicalizes_report_chains_after_interleaved_crosswalk(
 
     def key(row: Mapping[str, object]) -> tuple[str, str, str, str]:
         return (
-            str(row["account_id"]), str(row["strategy_id"]),
-            str(row["effective_start"]), str(row["effective_end"] or ""),
+            str(row["account_id"]),
+            str(row["strategy_id"]),
+            str(row["effective_start"]),
+            str(row["effective_end"] or ""),
         )
 
     baseline_mapped = {
@@ -475,9 +498,13 @@ def test_mixed_verify_canonicalizes_report_chains_after_interleaved_crosswalk(
         for row in source_admission_rows
         if key(row.get("assignment", row)) in set(producer_keys)
     ]
-    assert [key(row.get("assignment", row)) for row in admission_rows] == source_admission_keys
+    assert [
+        key(row.get("assignment", row)) for row in admission_rows
+    ] == source_admission_keys
     assert json.loads(payloads["authority/selected-input-identities.json"]) == (
-        verifier_module._selected_identity(_mixed_verifier_inputs(verifier_module, selected))
+        verifier_module._selected_identity(
+            _mixed_verifier_inputs(verifier_module, selected)
+        )
     )
     assert payloads["authority/account-assignment-crosswalk.json"] == (
         selected.current_epoch_crosswalk.contents
@@ -502,10 +529,15 @@ def test_crosswalk_display_fields_are_joined_only_by_epoch_key(
         "current epoch crosswalk", CURRENT_EPOCH_CROSSWALK_PATH.read_bytes()
     )
     producer_display = perimeter_module._crosswalk_display_by_epoch(crosswalk)
-    verifier_display = verifier_module._independent_crosswalk_display_by_epoch(crosswalk)
+    verifier_display = verifier_module._independent_crosswalk_display_by_epoch(
+        crosswalk
+    )
     assert producer_display == verifier_display
     assert len(producer_display) == 15
-    assert all(set(value) == {"account_label", "last_four"} for value in producer_display.values())
+    assert all(
+        set(value) == {"account_label", "last_four"}
+        for value in producer_display.values()
+    )
 
 
 def _generation_manifest_snapshot(
@@ -702,16 +734,18 @@ def _with_later_baseline_date(module: Any, selected: object) -> object:
         catalog_schema_version="1",
         as_of_date="2026-02-03",
     )
-    values.update({
-        "baseline": baseline_snapshot,
-        "baseline_manifest": baseline_manifest,
-        "current_epoch_crosswalk": _rebound_current_epoch_crosswalk(
-            selected,
-            baseline=baseline_snapshot,
-            baseline_manifest=baseline_manifest,
-            label="later baseline crosswalk",
-        ),
-    })
+    values.update(
+        {
+            "baseline": baseline_snapshot,
+            "baseline_manifest": baseline_manifest,
+            "current_epoch_crosswalk": _rebound_current_epoch_crosswalk(
+                selected,
+                baseline=baseline_snapshot,
+                baseline_manifest=baseline_manifest,
+                label="later baseline crosswalk",
+            ),
+        }
+    )
     if selected.receipt_authority is not None:
         values.update(
             {
@@ -748,15 +782,19 @@ def _rebound_current_epoch_crosswalk(
     for row in rows:
         row["provider"] = providers[row["account_id"]]
     payload["as_of_date"] = baseline_payload["as_of_date"]
-    payload["selected_baseline"].update({
-        "generation_id": json.loads(baseline_manifest.contents)["generation_id"],
-        "sha256": baseline.sha256,
-        "size_bytes": baseline.size_bytes,
-        "as_of_date": baseline_payload["as_of_date"],
-        "schema_version": str(baseline_payload["baseline_schema_version"]),
-    })
+    payload["selected_baseline"].update(
+        {
+            "generation_id": json.loads(baseline_manifest.contents)["generation_id"],
+            "sha256": baseline.sha256,
+            "size_bytes": baseline.size_bytes,
+            "as_of_date": baseline_payload["as_of_date"],
+            "schema_version": str(baseline_payload["baseline_schema_version"]),
+        }
+    )
     payload["disposition_counts"] = {
-        disposition: sum(row["product_epoch_disposition"] == disposition for row in rows)
+        disposition: sum(
+            row["product_epoch_disposition"] == disposition for row in rows
+        )
         for disposition in (
             "INCLUDED_PRODUCT_EPOCH",
             "EXCLUDED_DEPRECATED_HISTORY_ONLY",
@@ -1340,10 +1378,7 @@ def test_c3_retains_internal_leg_blocked_when_physical_counterpart_is_external(
     external = indexed["c3-flow-02"]
     assert internal["classification_status"] == "BLOCKED"
     assert internal["disposition"] is None
-    assert (
-        internal["blocker_code"]
-        == "INTERNAL_COUNTERPARTY_CLASSIFICATION_BLOCKED"
-    )
+    assert internal["blocker_code"] == "INTERNAL_COUNTERPARTY_CLASSIFICATION_BLOCKED"
     assert "counterparty_source_record_id" not in internal
     assert external["classification_status"] == "CLASSIFIED"
     assert external["disposition"] == "EXTERNAL"
@@ -2194,7 +2229,9 @@ def test_selected_input_public_seams_exclude_forbidden_time_and_filesystem_depen
             if node.module == "datetime":
                 assert [name.name for name in node.names] == ["date"]
             else:
-                forbidden_bound_names.update(name.asname or name.name for name in node.names)
+                forbidden_bound_names.update(
+                    name.asname or name.name for name in node.names
+                )
 
     forbidden_call_names = {"__import__", "eval", "exec", "import_module"}
     forbidden_attributes = {
@@ -2234,7 +2271,11 @@ def test_selected_input_public_seams_exclude_forbidden_time_and_filesystem_depen
         and node.module == "tools.account_strategy_manifest"
         for alias in node.names
     }
-    assert {"ManifestCandidateSnapshots", "build_manifest_candidate_from_snapshots", "validate_manifest_schema"} <= imported_names
+    assert {
+        "ManifestCandidateSnapshots",
+        "build_manifest_candidate_from_snapshots",
+        "validate_manifest_schema",
+    } <= imported_names
 
     class GuardedDate:
         @staticmethod
@@ -2419,8 +2460,7 @@ def test_captured_snapshots_ignore_post_capture_filesystem_changes(
         rebuilt_identity = json.loads(rebuilt_identities)
         assert rebuilt_identity["as_of_date"] == "2026-02-01"
         assert (
-            rebuilt_identity["provider_ledger"]["artifact"]
-            == expected_ledger_artifact
+            rebuilt_identity["provider_ledger"]["artifact"] == expected_ledger_artifact
         )
         assert (
             rebuilt_identity["provider_ledger"]["artifact"]["sha256"]
@@ -2441,8 +2481,7 @@ def test_captured_snapshots_ignore_post_capture_filesystem_changes(
     wrong_size_mutant["provider_ledger"]["artifact"]["size_bytes"] = 54
     with pytest.raises(AssertionError):
         assert (
-            wrong_size_mutant["provider_ledger"]["artifact"]
-            == expected_ledger_artifact
+            wrong_size_mutant["provider_ledger"]["artifact"] == expected_ledger_artifact
         )
     assert rebuilt_identity["provider_ledger"]["artifact"] == expected_ledger_artifact
 
@@ -2564,7 +2603,12 @@ def test_builder_counts_facts_in_unbounded_non_strategy_interval_and_schema_keep
     assert reserve["effective_start"] is None
     assert reserve["effective_end"] is None
     assert reserve["calculation_eligible"] is False
-    assert reserve["available_nav"] == reserve["raw_flows"] == reserve["classified_flows"] == 1
+    assert (
+        reserve["available_nav"]
+        == reserve["raw_flows"]
+        == reserve["classified_flows"]
+        == 1
+    )
     assert not list(_schema_validator().iter_errors(payload))
 
     reserve["strategy_mapping_disposition"] = "STRATEGY_MAPPED"
@@ -2883,10 +2927,10 @@ def test_rejects_each_required_fact_identity_collision(
         _build(perimeter_module, inputs)
 
 
-@pytest.mark.parametrize("field", ["nav_facts", "raw_flow_facts", "classified_flow_facts"])
-def test_rejects_malformed_fact_account_ids(
-    perimeter_module: Any, field: str
-) -> None:
+@pytest.mark.parametrize(
+    "field", ["nav_facts", "raw_flow_facts", "classified_flow_facts"]
+)
+def test_rejects_malformed_fact_account_ids(perimeter_module: Any, field: str) -> None:
     inputs = _fixture_inputs()
     fact = deepcopy(inputs[field][0])
     fact["account_id"] = ""
@@ -3396,17 +3440,19 @@ def test_mvp_audit_001_independent_report_emits_exact_v2_population_partition(
         "unmatched_fact_count": 2,
         "unmatched_projection_count": 3,
     }
-    assert counts["classified_event_count"] == (
-        counts["classified_event_classified_count"]
-        + counts["classified_event_blocked_count"]
-    ) == counts["observed_raw_flow_count"]
+    assert (
+        counts["classified_event_count"]
+        == (
+            counts["classified_event_classified_count"]
+            + counts["classified_event_blocked_count"]
+        )
+        == counts["observed_raw_flow_count"]
+    )
     assert counts["unmatched_fact_count"] == (
-        counts["unmatched_nav_fact_count"]
-        + counts["unmatched_raw_flow_fact_count"]
+        counts["unmatched_nav_fact_count"] + counts["unmatched_raw_flow_fact_count"]
     )
     assert counts["unmatched_projection_count"] == (
-        counts["unmatched_nav_fact_count"]
-        + 2 * counts["unmatched_raw_flow_fact_count"]
+        counts["unmatched_nav_fact_count"] + 2 * counts["unmatched_raw_flow_fact_count"]
     )
 
 
@@ -12755,7 +12801,14 @@ _C4C4B2B2A_LITERAL_ORACLE: dict[str, dict[str, object]] = {
             ),
             "flows": (("2026-02-07", "EXTERNAL_IN", "USD", Decimal("78.80")),),
         },
-        "predecessor": ("acct-a", "2026-02-06", "2026-02-06", "USD", Decimal("120.00"), True),
+        "predecessor": (
+            "acct-a",
+            "2026-02-06",
+            "2026-02-06",
+            "USD",
+            Decimal("120.00"),
+            True,
+        ),
         "projection": {
             "start": "2026-02-07",
             "end": "2026-02-09",
@@ -12801,7 +12854,14 @@ _C4C4B2B2A_LITERAL_ORACLE: dict[str, dict[str, object]] = {
             ),
             "flows": (("2026-02-06", "EXTERNAL_IN", "USD", Decimal("78.80")),),
         },
-        "predecessor": ("acct-a", "2026-02-04", "2026-02-04", "USD", Decimal("120.00"), True),
+        "predecessor": (
+            "acct-a",
+            "2026-02-04",
+            "2026-02-04",
+            "USD",
+            Decimal("120.00"),
+            True,
+        ),
         "phase": "adjacency",
     },
     "c4c4b2b::REJECTED::predecessor-one-day-overlap": {
@@ -12822,7 +12882,14 @@ _C4C4B2B2A_LITERAL_ORACLE: dict[str, dict[str, object]] = {
             ),
             "flows": (("2026-02-06", "EXTERNAL_IN", "USD", Decimal("78.80")),),
         },
-        "predecessor": ("acct-a", "2026-02-06", "2026-02-06", "USD", Decimal("120.00"), True),
+        "predecessor": (
+            "acct-a",
+            "2026-02-06",
+            "2026-02-06",
+            "USD",
+            Decimal("120.00"),
+            True,
+        ),
         "phase": "adjacency",
     },
     "c4c4b2b::DISCREPANCY::predecessor-flow-at-predecessor-close": {
@@ -12906,7 +12973,12 @@ def _c4c4b2b2a_facts_shape(facts: object) -> dict[str, object]:
             (nav.as_of_date.isoformat(), nav.currency, nav.value) for nav in facts.navs
         ),
         "flows": tuple(
-            (flow.event_date.isoformat(), flow.classification, flow.currency, flow.amount)
+            (
+                flow.event_date.isoformat(),
+                flow.classification,
+                flow.currency,
+                flow.amount,
+            )
             for flow in facts.flows
         ),
     }
@@ -12926,27 +12998,37 @@ def _c4c4b2b2a_projection_shape(row: dict[str, object]) -> dict[str, object]:
     }
 
 
-assert {str(case.values[0]) for case in _C4C4B2B2A_CASES} == _C4C4B2B2A_LITERAL_EXPECTED_IDS
+assert {
+    str(case.values[0]) for case in _C4C4B2B2A_CASES
+} == _C4C4B2B2A_LITERAL_EXPECTED_IDS
 assert len(_C4C4B2B2A_CASES) == len(_C4C4B2B2A_LITERAL_EXPECTED_IDS) == 8
 assert set(_C4C4B2B2A_LITERAL_ORACLE) == _C4C4B2B2A_LITERAL_EXPECTED_IDS
-assert sum("::DISCREPANCY::" in case_id for case_id in _C4C4B2B2A_LITERAL_EXPECTED_IDS) == 5
-assert sum("::REJECTED::" in case_id for case_id in _C4C4B2B2A_LITERAL_EXPECTED_IDS) == 3
-assert len(
-    {
-        _c4c4b2b_source_fingerprint(
-            {
-                "navs": navs,
-                "flows": flows,
-                "context": context,
-                "predecessor": predecessor,
-            }
-        )
-        for case in _C4C4B2B2A_CASES
-        for navs, flows, context, predecessor, _candidate in (
-            _c4c4b2b_source(str(case.values[0])),
-        )
-    }
-) == 8
+assert (
+    sum("::DISCREPANCY::" in case_id for case_id in _C4C4B2B2A_LITERAL_EXPECTED_IDS)
+    == 5
+)
+assert (
+    sum("::REJECTED::" in case_id for case_id in _C4C4B2B2A_LITERAL_EXPECTED_IDS) == 3
+)
+assert (
+    len(
+        {
+            _c4c4b2b_source_fingerprint(
+                {
+                    "navs": navs,
+                    "flows": flows,
+                    "context": context,
+                    "predecessor": predecessor,
+                }
+            )
+            for case in _C4C4B2B2A_CASES
+            for navs, flows, context, predecessor, _candidate in (
+                _c4c4b2b_source(str(case.values[0])),
+            )
+        }
+    )
+    == 8
+)
 
 
 def test_c4c4b2b2a_unmutated_first_baseline_is_exact_non_discrepancy(
@@ -12977,7 +13059,11 @@ def test_c4c4b2b2a_unmutated_first_baseline_is_exact_non_discrepancy(
     result = verifier_module._compare_test_local_numeric_epoch(facts, candidate)
     assert type(result) is verifier_module._NumericComparison
     assert result == verifier_module._NumericComparison(1, 1, 0)
-    assert source == before and candidate == candidate_before and facts == facts_before_derive
+    assert (
+        source == before
+        and candidate == candidate_before
+        and facts == facts_before_derive
+    )
 
 
 @pytest.mark.parametrize("case_id", _C4C4B2B2A_CASES)
@@ -12987,7 +13073,9 @@ def test_c4c4b2b2a_relation_parser_and_filter_contracts(
     case_id: str,
 ) -> None:
     oracle = _C4C4B2B2A_LITERAL_ORACLE[case_id]
-    base_navs, base_flows, base_context, base_predecessor = _c4c4b2b_base_source(case_id)
+    base_navs, base_flows, base_context, base_predecessor = _c4c4b2b_base_source(
+        case_id
+    )
     navs, flows, context, predecessor_raw, candidate = _c4c4b2b_source(case_id)
     before_source = {
         "navs": deepcopy(base_navs),
@@ -13001,8 +13089,14 @@ def test_c4c4b2b2a_relation_parser_and_filter_contracts(
         "context": context,
         "predecessor": predecessor_raw,
     }
-    assert navs is not base_navs and flows is not base_flows and context is not base_context
-    assert _c4c4b2b_source_fingerprint(source) != _c4c4b2b_source_fingerprint(before_source)
+    assert (
+        navs is not base_navs
+        and flows is not base_flows
+        and context is not base_context
+    )
+    assert _c4c4b2b_source_fingerprint(source) != _c4c4b2b_source_fingerprint(
+        before_source
+    )
     assert _c4c4b2b_changed_paths(before_source, source) == oracle["paths"]
     source_before_calls = deepcopy(source)
     base_before_calls = deepcopy(before_source)
@@ -13021,8 +13115,12 @@ def test_c4c4b2b2a_relation_parser_and_filter_contracts(
             comparator_calls.append((args, kwargs))
             raise AssertionError("inverted bounds must not reach comparison")
 
-        monkeypatch.setattr(verifier_module, "_parse_source_cents", forbidden_parser_deeper_work)
-        monkeypatch.setattr(verifier_module, "_compare_test_local_numeric_epoch", forbidden_comparator)
+        monkeypatch.setattr(
+            verifier_module, "_parse_source_cents", forbidden_parser_deeper_work
+        )
+        monkeypatch.setattr(
+            verifier_module, "_compare_test_local_numeric_epoch", forbidden_comparator
+        )
         with pytest.raises(verifier_module.IndependentVerificationError):
             verifier_module._parse_epoch_facts(navs, flows, **context)
         assert parser_deeper_calls == [] and comparator_calls == []
@@ -13046,7 +13144,10 @@ def test_c4c4b2b2a_relation_parser_and_filter_contracts(
     assert len(facts.navs) >= 3
     assert len({nav.as_of_date for nav in facts.navs}) == len(facts.navs)
     assert all(nav.value > 0 and nav.currency == "USD" for nav in facts.navs)
-    assert facts.navs[0].as_of_date == facts.start and facts.navs[-1].as_of_date == facts.end
+    assert (
+        facts.navs[0].as_of_date == facts.start
+        and facts.navs[-1].as_of_date == facts.end
+    )
     assert all(facts.start <= flow.event_date <= facts.end for flow in facts.flows)
 
     predecessor = (
@@ -13063,7 +13164,10 @@ def test_c4c4b2b2a_relation_parser_and_filter_contracts(
             predecessor.closing_nav_currency,
             predecessor.closing_nav_value,
             predecessor.continuity_to_successor,
-        ) == oracle.get("predecessor", ("acct-a", "2026-02-05", "2026-02-05", "USD", Decimal("120.00"), True))
+        ) == oracle.get(
+            "predecessor",
+            ("acct-a", "2026-02-05", "2026-02-05", "USD", Decimal("120.00"), True),
+        )
 
     if oracle["phase"] == "adjacency":
         assert predecessor is not None
@@ -13074,7 +13178,9 @@ def test_c4c4b2b2a_relation_parser_and_filter_contracts(
 
         def forbidden_downstream_derivation(*args: object, **kwargs: object) -> object:
             downstream_calls.append((args, kwargs))
-            raise AssertionError("adjacency rejection must precede successor derivation")
+            raise AssertionError(
+                "adjacency rejection must precede successor derivation"
+            )
 
         monkeypatch.setattr(
             verifier_module,
@@ -13082,7 +13188,9 @@ def test_c4c4b2b2a_relation_parser_and_filter_contracts(
             forbidden_downstream_derivation,
         )
         with pytest.raises(verifier_module.IndependentVerificationError):
-            verifier_module._compare_test_local_numeric_epoch((predecessor, facts), candidate)
+            verifier_module._compare_test_local_numeric_epoch(
+                (predecessor, facts), candidate
+            )
         assert downstream_calls == []
         assert facts == facts_before and predecessor == predecessor_before
         assert source == source_before_calls and before_source == base_before_calls
@@ -13114,7 +13222,9 @@ def test_c4c4b2b2a_relation_parser_and_filter_contracts(
         assert facts == facts_before and predecessor == predecessor_before
 
     source_for_comparison = facts if predecessor is None else (predecessor, facts)
-    result = verifier_module._compare_test_local_numeric_epoch(source_for_comparison, candidate)
+    result = verifier_module._compare_test_local_numeric_epoch(
+        source_for_comparison, candidate
+    )
     assert type(result) is verifier_module._NumericComparison
     assert result == verifier_module._NumericComparison(*oracle["result"])
     assert facts == facts_before and predecessor == predecessor_before
@@ -13258,9 +13368,16 @@ def _c4c4b2b2b_fact_tuple(facts: object) -> tuple[object, ...]:
         facts.account_id,
         facts.start.isoformat(),
         facts.end.isoformat(),
-        tuple((nav.as_of_date.isoformat(), nav.currency, nav.value) for nav in facts.navs),
         tuple(
-            (flow.event_date.isoformat(), flow.classification, flow.currency, flow.amount)
+            (nav.as_of_date.isoformat(), nav.currency, nav.value) for nav in facts.navs
+        ),
+        tuple(
+            (
+                flow.event_date.isoformat(),
+                flow.classification,
+                flow.currency,
+                flow.amount,
+            )
             for flow in facts.flows
         ),
     )
@@ -13278,48 +13395,163 @@ def _c4c4b2b2b_literal_base_flows(case_id: str) -> list[dict[str, str]]:
         # Case 10's base is independently authored: it is not copied from the
         # mutation and is intentionally a two-row 4.00/6.00 split.
         return [
-            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "4.00"},
-            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "6.00"},
-            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_OUT", "currency": "USD", "amount": "10.00"},
-            {"account_id": "acct-a", "event_date": "2026-01-05", "classification": "INTERNAL_IN", "currency": "USD", "amount": "50.00"},
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "4.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "6.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_OUT",
+                "currency": "USD",
+                "amount": "10.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-05",
+                "classification": "INTERNAL_IN",
+                "currency": "USD",
+                "amount": "50.00",
+            },
         ]
     return [
-        {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "10.00"},
-        {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_OUT", "currency": "USD", "amount": "10.00"},
-        {"account_id": "acct-a", "event_date": "2026-01-05", "classification": "INTERNAL_IN", "currency": "USD", "amount": "50.00"},
+        {
+            "account_id": "acct-a",
+            "event_date": "2026-01-03",
+            "classification": "EXTERNAL_IN",
+            "currency": "USD",
+            "amount": "10.00",
+        },
+        {
+            "account_id": "acct-a",
+            "event_date": "2026-01-03",
+            "classification": "EXTERNAL_OUT",
+            "currency": "USD",
+            "amount": "10.00",
+        },
+        {
+            "account_id": "acct-a",
+            "event_date": "2026-01-05",
+            "classification": "INTERNAL_IN",
+            "currency": "USD",
+            "amount": "50.00",
+        },
     ]
 
 
 def _c4c4b2b2b_literal_changed_flows(case_id: str) -> list[dict[str, str]]:
     if case_id.endswith("split-same-class-aggregate"):
         return [
-            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "4.00"},
-            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "6.00"},
-            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_OUT", "currency": "USD", "amount": "10.00"},
-            {"account_id": "acct-a", "event_date": "2026-01-05", "classification": "INTERNAL_IN", "currency": "USD", "amount": "50.00"},
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "4.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "6.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_OUT",
+                "currency": "USD",
+                "amount": "10.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-05",
+                "classification": "INTERNAL_IN",
+                "currency": "USD",
+                "amount": "50.00",
+            },
         ]
     if case_id.endswith("reallocate-split-aggregate"):
         # Case 10's mutation is separately literal from its 4.00/6.00 base.
         return [
-            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "3.00"},
-            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "7.00"},
-            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_OUT", "currency": "USD", "amount": "10.00"},
-            {"account_id": "acct-a", "event_date": "2026-01-05", "classification": "INTERNAL_IN", "currency": "USD", "amount": "50.00"},
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "3.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "7.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_OUT",
+                "currency": "USD",
+                "amount": "10.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-05",
+                "classification": "INTERNAL_IN",
+                "currency": "USD",
+                "amount": "50.00",
+            },
         ]
     if case_id.endswith("swap-equal-external-classes"):
         return [
-            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_OUT", "currency": "USD", "amount": "10.00"},
-            {"account_id": "acct-a", "event_date": "2026-01-03", "classification": "EXTERNAL_IN", "currency": "USD", "amount": "10.00"},
-            {"account_id": "acct-a", "event_date": "2026-01-05", "classification": "INTERNAL_IN", "currency": "USD", "amount": "50.00"},
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_OUT",
+                "currency": "USD",
+                "amount": "10.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-03",
+                "classification": "EXTERNAL_IN",
+                "currency": "USD",
+                "amount": "10.00",
+            },
+            {
+                "account_id": "acct-a",
+                "event_date": "2026-01-05",
+                "classification": "INTERNAL_IN",
+                "currency": "USD",
+                "amount": "50.00",
+            },
         ]
     raise AssertionError(case_id)
 
 
 def _c4c4b2b2b_literal_source(
     case_id: str,
-) -> tuple[list[dict[str, str]], list[dict[str, str]], dict[str, object], dict[str, object]]:
+) -> tuple[
+    list[dict[str, str]], list[dict[str, str]], dict[str, object], dict[str, object]
+]:
     navs, _ignored_flows, context = _c4c4b2a_raw_first_fixture()
-    return navs, _c4c4b2b2b_literal_changed_flows(case_id), context, _c4c4a_first_candidate()
+    return (
+        navs,
+        _c4c4b2b2b_literal_changed_flows(case_id),
+        context,
+        _c4c4a_first_candidate(),
+    )
 
 
 def _c4c4b2b2b_literal_base_source(
@@ -13329,7 +13561,9 @@ def _c4c4b2b2b_literal_base_source(
     return navs, _c4c4b2b2b_literal_base_flows(case_id), context
 
 
-assert {str(case.values[0]) for case in _C4C4B2B2B_CASES} == _C4C4B2B2B_LITERAL_EXPECTED_IDS
+assert {
+    str(case.values[0]) for case in _C4C4B2B2B_CASES
+} == _C4C4B2B2B_LITERAL_EXPECTED_IDS
 assert set(_C4C4B2B2B_LITERAL_ORACLE) == _C4C4B2B2B_LITERAL_EXPECTED_IDS
 assert len(_C4C4B2B2B_CASES) == len(_C4C4B2B2B_LITERAL_EXPECTED_IDS) == 3
 
@@ -13343,13 +13577,25 @@ def test_c4c4b2b2b_accepted_semantic_aggregate_contracts(
     oracle = _C4C4B2B2B_LITERAL_ORACLE[case_id]
     base_navs, base_flows, base_context = _c4c4b2b2b_literal_base_source(case_id)
     navs, flows, context, candidate = _c4c4b2b2b_literal_source(case_id)
-    base_source = {"navs": base_navs, "flows": base_flows, "context": base_context, "predecessor": None}
-    changed_source = {"navs": navs, "flows": flows, "context": context, "predecessor": None}
+    base_source = {
+        "navs": base_navs,
+        "flows": base_flows,
+        "context": base_context,
+        "predecessor": None,
+    }
+    changed_source = {
+        "navs": navs,
+        "flows": flows,
+        "context": context,
+        "predecessor": None,
+    }
 
     base_fingerprint = _c4c4b2b_source_fingerprint(base_source)
     changed_fingerprint = _c4c4b2b_source_fingerprint(changed_source)
     assert base_fingerprint != changed_fingerprint, case_id
-    assert _c4c4b2b_changed_paths(base_source, changed_source) == oracle["paths"], case_id
+    assert _c4c4b2b_changed_paths(base_source, changed_source) == oracle["paths"], (
+        case_id
+    )
     assert base_source != changed_source, (
         "C4.c3c raw-fact bijection must reject this changed raw source; the private numeric aggregate owns no source authority."
     )
@@ -13360,8 +13606,12 @@ def test_c4c4b2b2b_accepted_semantic_aggregate_contracts(
         assert (len(base_flows), len(flows)) == (4, 4)
         assert tuple(flow["amount"] for flow in base_flows[:2]) == ("4.00", "6.00")
         assert tuple(flow["amount"] for flow in flows[:2]) == ("3.00", "7.00")
-        assert sum((Decimal(flow["amount"]) for flow in base_flows[:2]), Decimal("0")) == Decimal("10.00")
-        assert sum((Decimal(flow["amount"]) for flow in flows[:2]), Decimal("0")) == Decimal("10.00")
+        assert sum(
+            (Decimal(flow["amount"]) for flow in base_flows[:2]), Decimal("0")
+        ) == Decimal("10.00")
+        assert sum(
+            (Decimal(flow["amount"]) for flow in flows[:2]), Decimal("0")
+        ) == Decimal("10.00")
     else:
         assert len(base_flows) == len(flows) == 3
         assert (flows[0]["classification"], flows[1]["classification"]) == (
@@ -13372,7 +13622,9 @@ def test_c4c4b2b2b_accepted_semantic_aggregate_contracts(
     base_before_calls = deepcopy(base_source)
     changed_before_calls = deepcopy(changed_source)
     candidate_before_calls = deepcopy(candidate)
-    base_facts = verifier_module._parse_epoch_facts(base_navs, base_flows, **base_context)
+    base_facts = verifier_module._parse_epoch_facts(
+        base_navs, base_flows, **base_context
+    )
     facts = verifier_module._parse_epoch_facts(navs, flows, **context)
     base_facts_before_compare = deepcopy(base_facts)
     facts_before_compare = deepcopy(facts)
@@ -13583,19 +13835,36 @@ def _c4c4b2b2c_expected_mutated_facts(
 
 
 def _c4c4b2b2c_raw_source(
-    facts: tuple[tuple[tuple[date, Decimal], ...], tuple[tuple[date, str, Decimal], ...]],
+    facts: tuple[
+        tuple[tuple[date, Decimal], ...], tuple[tuple[date, str, Decimal], ...]
+    ],
 ) -> dict[str, object]:
     navs, flows = facts
     return {
         "navs": [
-            {"account_id": "acct-a", "as_of_date": when.isoformat(), "currency": "USD", "value": f"{value:.2f}"}
+            {
+                "account_id": "acct-a",
+                "as_of_date": when.isoformat(),
+                "currency": "USD",
+                "value": f"{value:.2f}",
+            }
             for when, value in navs
         ],
         "flows": [
-            {"account_id": "acct-a", "event_date": when.isoformat(), "classification": flow_class, "currency": "USD", "amount": f"{amount:.2f}"}
+            {
+                "account_id": "acct-a",
+                "event_date": when.isoformat(),
+                "classification": flow_class,
+                "currency": "USD",
+                "amount": f"{amount:.2f}",
+            }
             for when, flow_class, amount in flows
         ],
-        "context": {"account_id": "acct-a", "start": date(2026, 1, 2), "end": date(2027, 1, 2)},
+        "context": {
+            "account_id": "acct-a",
+            "start": date(2026, 1, 2),
+            "end": date(2027, 1, 2),
+        },
         "predecessor": None,
     }
 
@@ -13608,15 +13877,24 @@ def _c4c4b2b2c_changed_leaves(
     if isinstance(before, dict):
         assert set(before) == set(after)
         return set().union(
-            *(_c4c4b2b2c_changed_leaves(before[key], after[key], (*path, key)) for key in before)
+            *(
+                _c4c4b2b2c_changed_leaves(before[key], after[key], (*path, key))
+                for key in before
+            )
         )
     if isinstance(before, list):
-        common = set().union(
-            *(
-                _c4c4b2b2c_changed_leaves(before[index], after[index], (*path, index))
-                for index in range(min(len(before), len(after)))
+        common = (
+            set().union(
+                *(
+                    _c4c4b2b2c_changed_leaves(
+                        before[index], after[index], (*path, index)
+                    )
+                    for index in range(min(len(before), len(after)))
+                )
             )
-        ) if before and after else set()
+            if before and after
+            else set()
+        )
         return common | {
             ((*path, index), _c4c4b2b2c_literal_value(after[index]))
             for index in range(len(before), len(after))
@@ -13638,12 +13916,19 @@ def _c4c4b2b2c_literal_value(value: object) -> object:
 
 def _c4c4b2b2c_fingerprint(source: object) -> str:
     return hashlib.sha256(
-        json.dumps(source, default=lambda value: value.isoformat(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(
+            source,
+            default=lambda value: value.isoformat(),
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
     ).hexdigest()
 
 
 def _c4c4b2b2c_expected_row(
-    facts: tuple[tuple[tuple[date, Decimal], ...], tuple[tuple[date, str, Decimal], ...]],
+    facts: tuple[
+        tuple[tuple[date, Decimal], ...], tuple[tuple[date, str, Decimal], ...]
+    ],
 ) -> dict[str, object]:
     """Independent Decimal/date derivation for the B2.2c literal facts only."""
     navs, flows = facts
@@ -13653,7 +13938,10 @@ def _c4c4b2b2c_expected_row(
     start, opening = navs[0]
     end, current = navs[-1]
     totals = {
-        flow_class: sum((amount for _when, kind, amount in flows if kind == flow_class), Decimal("0"))
+        flow_class: sum(
+            (amount for _when, kind, amount in flows if kind == flow_class),
+            Decimal("0"),
+        )
         for flow_class in ("EXTERNAL_IN", "EXTERNAL_OUT", "INTERNAL_IN", "INTERNAL_OUT")
     }
     invested = opening + totals["EXTERNAL_IN"] + totals["INTERNAL_IN"]
@@ -13668,7 +13956,14 @@ def _c4c4b2b2c_expected_row(
     maximum_drawdown = Decimal("0")
     links: list[dict[str, object]] = []
     for (link_start, base_nav), (link_end, ending_nav) in zip(navs, navs[1:]):
-        net_flow = sum((amount for when, amount in flow_by_date.items() if link_start < when <= link_end), Decimal("0"))
+        net_flow = sum(
+            (
+                amount
+                for when, amount in flow_by_date.items()
+                if link_start < when <= link_end
+            ),
+            Decimal("0"),
+        )
         factor = exact_context.add(
             Decimal("1"),
             exact_context.divide(ending_nav - base_nav - net_flow, base_nav),
@@ -13679,24 +13974,43 @@ def _c4c4b2b2c_expected_row(
             Decimal("1"), exact_context.divide(cumulative, running_hwm)
         )
         maximum_drawdown = max(maximum_drawdown, drawdown)
-        links.append({
-            "start_date": link_start.isoformat(), "end_date": link_end.isoformat(), "base_nav": base_nav,
-            "ending_nav": ending_nav, "net_flow": net_flow, "factor": factor,
-            "cumulative_index": cumulative, "running_hwm_index": running_hwm, "drawdown": drawdown,
-        })
+        links.append(
+            {
+                "start_date": link_start.isoformat(),
+                "end_date": link_end.isoformat(),
+                "base_nav": base_nav,
+                "ending_nav": ending_nav,
+                "net_flow": net_flow,
+                "factor": factor,
+                "cumulative_index": cumulative,
+                "running_hwm_index": running_hwm,
+                "drawdown": drawdown,
+            }
+        )
     gain = current - net_capital
     return {
-        "start": start.isoformat(), "end": end.isoformat(), "opening_capital": opening,
-        "deposits": totals["EXTERNAL_IN"], "internal_in": totals["INTERNAL_IN"], "invested": invested,
-        "external_withdrawals": totals["EXTERNAL_OUT"], "internal_out": totals["INTERNAL_OUT"],
-        "withdrawn": withdrawn, "net_capital": net_capital, "current_value": current, "gain": gain,
-        "return_on_net_capital": gain / net_capital, "annualized_return_on_net_capital": Decimal("0"),
+        "start": start.isoformat(),
+        "end": end.isoformat(),
+        "opening_capital": opening,
+        "deposits": totals["EXTERNAL_IN"],
+        "internal_in": totals["INTERNAL_IN"],
+        "invested": invested,
+        "external_withdrawals": totals["EXTERNAL_OUT"],
+        "internal_out": totals["INTERNAL_OUT"],
+        "withdrawn": withdrawn,
+        "net_capital": net_capital,
+        "current_value": current,
+        "gain": gain,
+        "return_on_net_capital": gain / net_capital,
+        "annualized_return_on_net_capital": Decimal("0"),
         "xirr_diagnostic": Decimal("0"),
         "observation_linked_return": exact_context.subtract(
             exact_context.divide(cumulative, Decimal("100")), Decimal("1")
         ),
-        "observed_hwm_index": running_hwm, "observed_max_drawdown": maximum_drawdown,
-        "opening_basis": "FIRST_AVAILABLE_NAV", "nav_observations": len(navs),
+        "observed_hwm_index": running_hwm,
+        "observed_max_drawdown": maximum_drawdown,
+        "opening_basis": "FIRST_AVAILABLE_NAV",
+        "nav_observations": len(navs),
         "observation_trace": {"links": links},
         "capital_flow_trace": [
             {"class": flow_class, "date": when.isoformat(), "amount": amount}
@@ -13720,9 +14034,17 @@ def test_c4c4b2b2c_gross_net_timing_sensitivity_exact_projection(
     base_source = _c4c4b2b2c_raw_source(base_local_facts)
     source = _c4c4b2b2c_raw_source(mutated_local_facts)
     candidate = _c4c4a_first_candidate()
-    assert base_source["navs"] is not source["navs"] and base_source["flows"] is not source["flows"]
-    assert _c4c4b2b2c_changed_leaves(base_source, source) == raw_oracle["paths"], case_id
-    assert (_c4c4b2b2c_fingerprint(base_source), _c4c4b2b2c_fingerprint(source)) == raw_oracle["fingerprints"], case_id
+    assert (
+        base_source["navs"] is not source["navs"]
+        and base_source["flows"] is not source["flows"]
+    )
+    assert _c4c4b2b2c_changed_leaves(base_source, source) == raw_oracle["paths"], (
+        case_id
+    )
+    assert (
+        _c4c4b2b2c_fingerprint(base_source),
+        _c4c4b2b2c_fingerprint(source),
+    ) == raw_oracle["fingerprints"], case_id
     source_before_calls = deepcopy(source)
     base_source_before_calls = deepcopy(base_source)
     candidate_before_calls = deepcopy(candidate)
@@ -13736,7 +14058,9 @@ def test_c4c4b2b2c_gross_net_timing_sensitivity_exact_projection(
     base_facts = verifier_module._parse_epoch_facts(
         base_source["navs"], base_source["flows"], **base_source["context"]
     )
-    facts = verifier_module._parse_epoch_facts(source["navs"], source["flows"], **source["context"])
+    facts = verifier_module._parse_epoch_facts(
+        source["navs"], source["flows"], **source["context"]
+    )
     base_facts_before_compare = deepcopy(base_facts)
     facts_before_compare = deepcopy(facts)
     base_row = verifier_module._derive_first_available_nav_epoch(base_facts)
@@ -13746,20 +14070,38 @@ def test_c4c4b2b2c_gross_net_timing_sensitivity_exact_projection(
     assert row == expected_mutated, case_id
     assert row["observation_trace"] == expected_mutated["observation_trace"], case_id
     assert row["capital_flow_trace"] == expected_mutated["capital_flow_trace"], case_id
-    assert _c4c4b2b2c_changed_leaves(base_row, row) == raw_oracle["projection_leaves"], case_id
+    assert (
+        _c4c4b2b2c_changed_leaves(base_row, row) == raw_oracle["projection_leaves"]
+    ), case_id
 
     if case_id.endswith("balanced-pair-date-shift"):
         aggregate_fields = (
-            "opening_capital", "deposits", "internal_in", "invested", "external_withdrawals",
-            "internal_out", "withdrawn", "net_capital", "current_value", "gain",
+            "opening_capital",
+            "deposits",
+            "internal_in",
+            "invested",
+            "external_withdrawals",
+            "internal_out",
+            "withdrawn",
+            "net_capital",
+            "current_value",
+            "gain",
         )
         assert all(row[field] == base_row[field] for field in aggregate_fields), case_id
         assert row["observation_trace"] == base_row["observation_trace"], case_id
         first_link = row["observation_trace"]["links"][0]
-        assert (first_link["start_date"], first_link["end_date"]) == ("2026-01-02", "2026-01-05")
-        assert all(first_link["start_date"] < flow["date"] < first_link["end_date"] for flow in row["capital_flow_trace"][:2])
+        assert (first_link["start_date"], first_link["end_date"]) == (
+            "2026-01-02",
+            "2026-01-05",
+        )
+        assert all(
+            first_link["start_date"] < flow["date"] < first_link["end_date"]
+            for flow in row["capital_flow_trace"][:2]
+        )
     else:
-        assert row["net_capital"] == base_row["net_capital"] == Decimal("150.00"), case_id
+        assert row["net_capital"] == base_row["net_capital"] == Decimal("150.00"), (
+            case_id
+        )
 
     result = verifier_module._compare_test_local_numeric_epoch(facts, candidate)
     assert type(result) is verifier_module._NumericComparison, case_id
@@ -13797,10 +14139,10 @@ def test_c4d1a_ast_semantic_dependency_allowlist_is_exact() -> None:
                     ("ROUND_HALF_EVEN", None),
                     ("localcontext", None),
                 ),
-                ),
-                ("types", 0, (("MappingProxyType", None),)),
-                ("pathlib", 0, (("Path", None),)),
-                ("typing", 0, (("Final", None), ("NoReturn", None))),
+            ),
+            ("types", 0, (("MappingProxyType", None),)),
+            ("pathlib", 0, (("Path", None),)),
+            ("typing", 0, (("Final", None), ("NoReturn", None))),
             ("quant_engine.core", 0, (("InputSnapshot", None),)),
             (
                 "quant_engine.core.contracts",
@@ -13839,9 +14181,7 @@ def test_c4d1a_ast_semantic_dependency_allowlist_is_exact() -> None:
     tree = ast.parse(source, filename=str(VERIFIER_MODULE_PATH))
 
     imports = [node for node in ast.walk(tree) if isinstance(node, ast.Import)]
-    from_imports = [
-        node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)
-    ]
+    from_imports = [node for node in ast.walk(tree) if isinstance(node, ast.ImportFrom)]
     actual_imports = [
         (alias.name, alias.asname) for node in imports for alias in node.names
     ]
@@ -13857,7 +14197,10 @@ def test_c4d1a_ast_semantic_dependency_allowlist_is_exact() -> None:
     ]
     assert len(actual_from_imports) == len(expected_from_imports)
     assert set(actual_from_imports) == expected_from_imports
-    assert all(node.level == 0 and all(alias.name != "*" for alias in node.names) for node in from_imports)
+    assert all(
+        node.level == 0 and all(alias.name != "*" for alias in node.names)
+        for node in from_imports
+    )
 
     subject_paths_assignment = next(
         node
@@ -13950,11 +14293,7 @@ def test_c4d1a_ast_semantic_dependency_allowlist_is_exact() -> None:
         alias.asname or alias.name.split(".", 1)[0]
         for node in imports
         for alias in node.names
-    } | {
-        alias.asname or alias.name
-        for node in from_imports
-        for alias in node.names
-    }
+    } | {alias.asname or alias.name for node in from_imports for alias in node.names}
     cli_functions = {
         node.name: node
         for node in tree.body
@@ -14068,6 +14407,7 @@ def test_c4d1a_ast_semantic_dependency_allowlist_is_exact() -> None:
         for node in verifier_class.body
         if isinstance(node, ast.FunctionDef) and node.name == "verify"
     )
+
     def reachable_functions(start: ast.FunctionDef) -> set[str]:
         reachable: set[str] = set()
         pending = [
@@ -14156,10 +14496,16 @@ def test_c4d1a_core_contract_objects_are_identical_and_pinned(
     assert verifier_module.strict_json_loads is strict_json_module.strict_json_loads
     assert verifier_module.strict_json_loads is core_module.strict_json_loads
     assert verifier_module.InputSnapshot.__module__ == "quant_engine.core.snapshots"
-    assert verifier_module.GenerationManifest.__module__ == "quant_engine.core.contracts"
+    assert (
+        verifier_module.GenerationManifest.__module__ == "quant_engine.core.contracts"
+    )
     assert verifier_module.SourceArtifact.__module__ == "quant_engine.core.contracts"
-    assert verifier_module.canonical_json_bytes.__module__ == "quant_engine.core.contracts"
-    assert verifier_module.strict_json_loads.__module__ == "quant_engine.core.strict_json"
+    assert (
+        verifier_module.canonical_json_bytes.__module__ == "quant_engine.core.contracts"
+    )
+    assert (
+        verifier_module.strict_json_loads.__module__ == "quant_engine.core.strict_json"
+    )
     assert verifier_module.canonical_json_bytes({"z": 2, "a": 1}) == b'{"a":1,"z":2}\n'
 
     for module_name, (relative_path, expected_sha256) in expected_core_pins.items():
@@ -14168,7 +14514,9 @@ def test_c4d1a_core_contract_objects_are_identical_and_pinned(
         assert Path(module.__file__).resolve() == expected_origin
         assert module.__spec__ is not None
         assert Path(module.__spec__.origin).resolve() == expected_origin
-        assert hashlib.sha256(expected_origin.read_bytes()).hexdigest() == expected_sha256
+        assert (
+            hashlib.sha256(expected_origin.read_bytes()).hexdigest() == expected_sha256
+        )
 
 
 def test_c4d1a_retained_blocked_public_path_does_not_export_or_call_comparator(
@@ -14193,7 +14541,8 @@ def test_c4d1a_retained_blocked_public_path_does_not_export_or_call_comparator(
         inspect.signature(verifier_module.decode_verification_request),
     )
     assert all(
-        comparator_name not in str(signature) and numeric_type_name not in str(signature)
+        comparator_name not in str(signature)
+        and numeric_type_name not in str(signature)
         for signature in public_signatures
     )
 
@@ -14270,7 +14619,7 @@ def test_c4d1a_retained_blocked_public_path_does_not_export_or_call_comparator(
     )
 
 
-_C4D1B_CHILD = r'''
+_C4D1B_CHILD = r"""
 import base64
 import binascii
 import builtins
@@ -14477,7 +14826,7 @@ try:
 except Exception:
     sys.stderr.write("D1B_CHILD_FAILURE\n")
     raise SystemExit(1)
-'''
+"""
 
 
 def _c4d1b_fake_tree(root: Path, sentinel: str) -> None:
@@ -14692,7 +15041,9 @@ def _c4d2a_19_fact_bundle(
     verifier_inputs = verifier_module.IndependentVerifierInputs(
         **_selected_input_kwargs(selected)
     )
-    return verifier_inputs, perimeter_module.build_blocked_account_manifest_payloads(selected)
+    return verifier_inputs, perimeter_module.build_blocked_account_manifest_payloads(
+        selected
+    )
 
 
 def _c4d2a_forged_comparison(
@@ -14731,7 +15082,9 @@ def test_c4d2a_public_path_normalizes_once_then_composes_private_candidate(
         assert type(normalized) is dict
         return original_semantics(selected, normalized)
 
-    def gate_spy(comparison: object, disposition: object, state: Mapping[str, object]) -> None:
+    def gate_spy(
+        comparison: object, disposition: object, state: Mapping[str, object]
+    ) -> None:
         events.append("gate")
         original_gate(comparison, disposition, state)
 
@@ -14813,22 +15166,31 @@ def test_c4d2a_private_candidate_has_exact_blocked_state_and_no_vacuous_claim(
     chains = candidate["blocker_chains"]
     assert isinstance(chains, tuple) and len(chains) == 15
     keys = [
-        tuple(chain["assignment"][field] for field in (
-            "account_id", "strategy_id", "effective_start", "effective_end"
-        ))
+        tuple(
+            chain["assignment"][field]
+            for field in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        )
         for chain in chains
     ]
     assert keys == sorted(keys)
     assert all(
-        chain["coverage"] == {
+        chain["coverage"]
+        == {
             "status": "BLOCKED",
             "blocker_code": "NO_ADMISSIBLE_V2_RECEIPT",
         }
-        and chain["admission"] == {
+        and chain["admission"]
+        == {
             "status": "BLOCKED",
             "blocker_code": "FLOW_COMPLETENESS_NOT_PROVEN",
         }
-        and chain["output"] == {
+        and chain["output"]
+        == {
             "status": "BLOCKED_ADMISSION",
             "blocking_reason": "FLOW_COMPLETENESS_NOT_PROVEN",
         }
@@ -14946,7 +15308,10 @@ def test_c4d2a_candidate_is_deeply_immutable_and_nonaliased(
     state = _c4d2a_state(perimeter_module, verifier_module)
     candidate = verifier_module._build_retained_report_candidate(state)
     assert tuple(candidate) == (
-        "counts", "blocker_chains", "numeric_verification", "invariants"
+        "counts",
+        "blocker_chains",
+        "numeric_verification",
+        "invariants",
     )
     assert tuple(candidate["invariants"]) == (
         "exact_subject_set",
@@ -15023,9 +15388,12 @@ def test_c4d2a_dynamic_counts_succeed_and_invalid_mutations_fail_before_factory(
     count_mutated_inputs, count_mutated_payloads = _c4d2a_19_fact_bundle(
         perimeter_module, verifier_module
     )
-    assert verifier_module._verify_retained_semantics(
-        count_mutated_inputs, count_mutated_payloads
-    )["counts"]["observed_nav_fact_count"] == 19
+    assert (
+        verifier_module._verify_retained_semantics(
+            count_mutated_inputs, count_mutated_payloads
+        )["counts"]["observed_nav_fact_count"]
+        == 19
+    )
     changed_count_report = json.loads(
         verifier_module.IndependentAccountManifestVerifier().verify(
             count_mutated_inputs, count_mutated_payloads
@@ -15059,13 +15427,17 @@ def test_c4d2a_dynamic_counts_succeed_and_invalid_mutations_fail_before_factory(
         altered = deepcopy(output)
         mutate(altered["rows"][0])
         subjects = dict(payloads)
-        subjects["outputs/account-strategy-manifest.json"] = canonical_json_bytes(altered)
+        subjects["outputs/account-strategy-manifest.json"] = canonical_json_bytes(
+            altered
+        )
         subject_mutations.append(subjects)
     for inputs, subjects in (
         (verifier_inputs, subjects) for subjects in subject_mutations
     ):
         with pytest.raises(verifier_module.IndependentVerificationError) as raised:
-            verifier_module.IndependentAccountManifestVerifier().verify(inputs, subjects)
+            verifier_module.IndependentAccountManifestVerifier().verify(
+                inputs, subjects
+            )
         assert "synthetic-account" not in str(raised.value)
         assert factory_calls == []
 
@@ -15106,9 +15478,12 @@ def test_c4d2b_positive_gate_is_private_and_accepts_only_exact_context(
         verifier_module._validate_reportable_comparison(
             comparison, _context=verifier_module._D2A_REPORTABILITY_CONTEXT
         )
-    assert verifier_module._validate_reportable_comparison(
-        comparison, _context=verifier_module._D2B_TEST_LOCAL_CONTEXT
-    ) is None
+    assert (
+        verifier_module._validate_reportable_comparison(
+            comparison, _context=verifier_module._D2B_TEST_LOCAL_CONTEXT
+        )
+        is None
+    )
     assert "_D2B_TEST_LOCAL_CONTEXT" not in verifier_module.__all__
 
 
@@ -15128,9 +15503,7 @@ def _c4d2b_comparator_then_gate_then_continue(
     observed: list[object],
     continuation: Any,
 ) -> object:
-    comparison = verifier_module._compare_test_local_numeric_epoch(
-        fact_form, candidate
-    )
+    comparison = verifier_module._compare_test_local_numeric_epoch(fact_form, candidate)
     observed.append(comparison)
     _c4d2b_continue_after_gate(verifier_module, comparison, continuation)
     return comparison
@@ -15264,12 +15637,13 @@ def test_c4d2b_predecessor_comparator_result_reaches_private_gate(
         ("negative", lambda module: _c4d2a_forged_comparison(module, -1, 0, 0)),
         ("bool", lambda module: _c4d2a_forged_comparison(module, True, 0, 0)),
         ("float", lambda module: _c4d2a_forged_comparison(module, 1.0, 1, 0)),
-        ("decimal", lambda module: _c4d2a_forged_comparison(module, Decimal("1"), 1, 0)),
+        (
+            "decimal",
+            lambda module: _c4d2a_forged_comparison(module, Decimal("1"), 1, 0),
+        ),
         (
             "integer-subclass",
-            lambda module: _c4d2a_forged_comparison(
-                module, _C4D2BInteger(1), 1, 0
-            ),
+            lambda module: _c4d2a_forged_comparison(module, _C4D2BInteger(1), 1, 0),
         ),
         ("missing-field", lambda module: object.__new__(module._NumericComparison)),
     ],
@@ -15415,7 +15789,9 @@ def test_c4d2b_positive_context_has_no_production_call_site(
         containing = parents[id(containing)]
     assert containing.name == "_validate_reportable_comparison"
     assert tuple(
-        inspect.signature(verifier_module.IndependentAccountManifestVerifier.verify).parameters
+        inspect.signature(
+            verifier_module.IndependentAccountManifestVerifier.verify
+        ).parameters
     ) == ("self", "selected_snapshots", "subject_payloads")
     assert "_D2B_TEST_LOCAL_CONTEXT" not in verifier_module.__all__
     assert "_compare_test_local_numeric_epoch" not in verifier_module.__all__
@@ -15678,31 +16054,36 @@ def test_c4d3a_report_subject_entries_and_digest_are_exact_and_fresh(
     assert tuple(item["path"] for item in entries) == C4D3A_LITERAL_SUBJECT_PATHS
     assert all(set(item) == {"path", "sha256", "size_bytes"} for item in entries)
     assert entries == expected
-    assert verifier_module._report_subjects_semantic_sha256(entries) == hashlib.sha256(
-        canonical_json_bytes({"subjects": expected})
-    ).hexdigest()
+    assert (
+        verifier_module._report_subjects_semantic_sha256(entries)
+        == hashlib.sha256(canonical_json_bytes({"subjects": expected})).hexdigest()
+    )
 
     reversed_normalized = dict(reversed(tuple(normalized.items())))
     assert verifier_module._report_subject_entries(reversed_normalized) == expected
-    assert verifier_module._report_subjects_semantic_sha256(
-        verifier_module._report_subject_entries(reversed_normalized)
-    ) == hashlib.sha256(canonical_json_bytes({"subjects": expected})).hexdigest()
+    assert (
+        verifier_module._report_subjects_semantic_sha256(
+            verifier_module._report_subject_entries(reversed_normalized)
+        )
+        == hashlib.sha256(canonical_json_bytes({"subjects": expected})).hexdigest()
+    )
 
     entries[0]["sha256"] = "0" * 64
     assert verifier_module._report_subject_entries(normalized) == expected
 
     accepted_entries = verifier_module._report_subject_entries(normalized)
-    accepted_digest = verifier_module._report_subjects_semantic_sha256(
-        accepted_entries
-    )
+    accepted_digest = verifier_module._report_subjects_semantic_sha256(accepted_entries)
     entries_before = deepcopy(accepted_entries)
     normalized[C4D3A_LITERAL_SUBJECT_PATHS[0]] = canonical_json_bytes(
         {"replacement": True}
     )
     assert accepted_entries == entries_before
-    assert accepted_digest == hashlib.sha256(
-        canonical_json_bytes({"subjects": entries_before})
-    ).hexdigest()
+    assert (
+        accepted_digest
+        == hashlib.sha256(
+            canonical_json_bytes({"subjects": entries_before})
+        ).hexdigest()
+    )
 
 
 def test_c4d3a_private_subject_helpers_never_normalize_again(
@@ -15720,9 +16101,14 @@ def test_c4d3a_private_subject_helpers_never_normalize_again(
         verifier_module, "_normalize_subject_payloads", unexpected_normalization
     )
     entries = verifier_module._report_subject_entries(normalized)
-    assert verifier_module._report_subjects_semantic_sha256(entries) == hashlib.sha256(
-        canonical_json_bytes({"subjects": _c4d3a_expected_subject_entries(normalized)})
-    ).hexdigest()
+    assert (
+        verifier_module._report_subjects_semantic_sha256(entries)
+        == hashlib.sha256(
+            canonical_json_bytes(
+                {"subjects": _c4d3a_expected_subject_entries(normalized)}
+            )
+        ).hexdigest()
+    )
 
 
 def test_c4d3a_legacy_subject_helpers_normalize_once_and_delegate(
@@ -15750,9 +16136,7 @@ def test_c4d3a_legacy_subject_helpers_normalize_once_and_delegate(
 
     monkeypatch.setattr(verifier_module, "_normalize_subject_payloads", normalize_spy)
     monkeypatch.setattr(verifier_module, "_report_subject_entries", entries_spy)
-    monkeypatch.setattr(
-        verifier_module, "_report_subjects_semantic_sha256", digest_spy
-    )
+    monkeypatch.setattr(verifier_module, "_report_subjects_semantic_sha256", digest_spy)
 
     entries = verifier_module.canonical_subject_entries(payloads)
     assert type(entries) is tuple
@@ -15763,11 +16147,18 @@ def test_c4d3a_legacy_subject_helpers_normalize_once_and_delegate(
 
     calls.clear()
     digest = verifier_module.subjects_semantic_sha256(payloads)
-    assert digest == hashlib.sha256(
-        canonical_json_bytes(
-            {"subjects": _c4d3a_expected_subject_entries(original_normalize(payloads))}
-        )
-    ).hexdigest()
+    assert (
+        digest
+        == hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "subjects": _c4d3a_expected_subject_entries(
+                        original_normalize(payloads)
+                    )
+                }
+            )
+        ).hexdigest()
+    )
     assert calls == ["normalize", "entries", "digest"]
 
 
@@ -15854,9 +16245,7 @@ def _c4d3a_selected_identity_oracle(
             },
             "independent_verifier": {
                 "artifact_id": "tools/verify_account_manifest_generation.py",
-                **_c4d3a_snapshot_identity_oracle(
-                    selected.independent_verifier_source
-                ),
+                **_c4d3a_snapshot_identity_oracle(selected.independent_verifier_source),
             },
         },
     }
@@ -15935,9 +16324,10 @@ def test_c4d3a_report_metadata_is_fresh_deterministic_and_rejects_bad_binding(
     }
     assert changed_identity == _c4d3a_selected_identity_oracle(verifier_changed)
     assert changed_artifact != second_artifact
-    assert changed_identity["code_sources"]["independent_verifier"] != second_identity[
-        "code_sources"
-    ]["independent_verifier"]
+    assert (
+        changed_identity["code_sources"]["independent_verifier"]
+        != second_identity["code_sources"]["independent_verifier"]
+    )
 
     values = _selected_input_kwargs(selected)
     values["provider_ledger"] = InputSnapshot.from_bytes(
@@ -15969,12 +16359,14 @@ def test_c4d3a_report_metadata_receipt_order_is_deterministic(
     first = verifier_module.IndependentVerifierInputs(**first_values)
     second = verifier_module.IndependentVerifierInputs(**second_values)
 
-    assert verifier_module._report_source_metadata(first) == verifier_module._report_source_metadata(
-        second
-    )
+    assert verifier_module._report_source_metadata(
+        first
+    ) == verifier_module._report_source_metadata(second)
     assert [
         item["receipt_id"]
-        for item in verifier_module._report_source_metadata(first)[1]["retrieval_receipts"]
+        for item in verifier_module._report_source_metadata(first)[1][
+            "retrieval_receipts"
+        ]
     ] == ["receipt/a", "receipt/b"]
 
 
@@ -16015,9 +16407,10 @@ def test_c4d3a_report_metadata_accepts_only_valid_rebound_provider_lineage(
         selected_identity["flow_classification_policy"]
         == original_identity["flow_classification_policy"]
     )
-    assert selected_identity["retrieval_receipts"] == original_identity[
-        "retrieval_receipts"
-    ]
+    assert (
+        selected_identity["retrieval_receipts"]
+        == original_identity["retrieval_receipts"]
+    )
     assert selected_identity["code_sources"] == original_identity["code_sources"]
     serialized = canonical_json_bytes(
         {"verifier": verifier_artifact, "selected_source_identities": selected_identity}
@@ -16090,7 +16483,9 @@ def test_c4d3a_assemble_report_is_exact_closed_and_nonaliased(
         return original_thaw(value)
 
     monkeypatch.setattr(verifier_module, "_thaw_retained_report_candidate", thaw_spy)
-    report = verifier_module._assemble_independent_report(selected, normalized, candidate)
+    report = verifier_module._assemble_independent_report(
+        selected, normalized, candidate
+    )
     expected_entries = _c4d3a_expected_subject_entries(normalized)
     expected_artifact = {
         "artifact_id": "tools/verify_account_manifest_generation.py",
@@ -16123,9 +16518,12 @@ def test_c4d3a_assemble_report_is_exact_closed_and_nonaliased(
         selected
     )
     assert report["subjects"] == expected_entries
-    assert report["subjects_semantic_sha256"] == hashlib.sha256(
-        canonical_json_bytes({"subjects": expected_entries})
-    ).hexdigest()
+    assert (
+        report["subjects_semantic_sha256"]
+        == hashlib.sha256(
+            canonical_json_bytes({"subjects": expected_entries})
+        ).hexdigest()
+    )
     assert report["counts"] == {
         "selected_baseline_account_count": 18,
         "account_count": 18,
@@ -16167,12 +16565,21 @@ def test_c4d3a_assemble_report_is_exact_closed_and_nonaliased(
         ("synthetic-account-14", "synthetic-strategy-14", "2025-01-01", "2025-12-31"),
         ("synthetic-account-15", "synthetic-strategy-15", "2025-01-01", "2025-12-31"),
     )
-    assert tuple(
-        tuple(chain["assignment"][field] for field in (
-            "account_id", "strategy_id", "effective_start", "effective_end"
-        ))
-        for chain in report["blocker_chains"]
-    ) == expected_blocker_keys
+    assert (
+        tuple(
+            tuple(
+                chain["assignment"][field]
+                for field in (
+                    "account_id",
+                    "strategy_id",
+                    "effective_start",
+                    "effective_end",
+                )
+            )
+            for chain in report["blocker_chains"]
+        )
+        == expected_blocker_keys
+    )
     assert all(
         chain["coverage"]
         == {"status": "BLOCKED", "blocker_code": "NO_ADMISSIBLE_V2_RECEIPT"}
@@ -16192,9 +16599,7 @@ def test_c4d3a_assemble_report_is_exact_closed_and_nonaliased(
         "discrepancy_count": 0,
         "disposition": "NOT_APPLICABLE_NO_CANDIDATES",
     }
-    assert report["invariants"] == {
-        key: True for key in C4E1_LITERAL_INVARIANT_KEYS
-    }
+    assert report["invariants"] == {key: True for key in C4E1_LITERAL_INVARIANT_KEYS}
     _c4d3a_assert_ordinary_report_tree(report)
     subjects_before = deepcopy(report["subjects"])
     normalized[C4D3A_LITERAL_SUBJECT_PATHS[0]] = canonical_json_bytes(
@@ -16206,9 +16611,12 @@ def test_c4d3a_assemble_report_is_exact_closed_and_nonaliased(
     assert selected.provider_ledger.contents not in serialized
     assert all(contents not in serialized for contents in normalized.values())
     report["counts"]["account_count"] = 0
-    assert verifier_module._thaw_retained_report_candidate(candidate)["counts"][
-        "account_count"
-    ] == 18
+    assert (
+        verifier_module._thaw_retained_report_candidate(candidate)["counts"][
+            "account_count"
+        ]
+        == 18
+    )
 
 
 @pytest.mark.parametrize(
@@ -16257,8 +16665,12 @@ def test_c4d3a_thaw_rejects_cycles_and_repeated_frozen_containers(
         lambda candidate: candidate["blocker_chains"][0]["coverage"].update(
             {"status": "OK"}
         ),
-        lambda candidate: candidate["numeric_verification"].update({"discrepancy_count": 1}),
-        lambda candidate: candidate["invariants"].update({"privacy_safe_projection": False}),
+        lambda candidate: candidate["numeric_verification"].update(
+            {"discrepancy_count": 1}
+        ),
+        lambda candidate: candidate["invariants"].update(
+            {"privacy_safe_projection": False}
+        ),
     ],
 )
 def test_c4d3a_assembler_rejects_malformed_frozen_d2_candidate(
@@ -16298,7 +16710,9 @@ def test_c4d3a_assembler_rejects_wrong_selected_or_normalized_input(
         def generation_as_of_date(self) -> date:
             return selected.generation_as_of_date
 
-    def metadata_sentinel(_value: object) -> tuple[dict[str, object], dict[str, object]]:
+    def metadata_sentinel(
+        _value: object,
+    ) -> tuple[dict[str, object], dict[str, object]]:
         metadata_calls.append(None)
         raise AssertionError("assembler reached downstream metadata")
 
@@ -16359,7 +16773,9 @@ def test_c4d3a_assembler_validates_thawed_candidate_without_public_gate_adapter(
         verifier_module, "_validate_numeric_decision", public_gate_sentinel
     )
 
-    report = verifier_module._assemble_independent_report(selected, normalized, candidate)
+    report = verifier_module._assemble_independent_report(
+        selected, normalized, candidate
+    )
     assert report["numeric_verification"] == {
         "candidate_count": 0,
         "comparison_count": 0,
@@ -16396,9 +16812,14 @@ def test_c4d3a_canonical_report_bytes_are_schema_valid_and_private(
     assert report_bytes == canonical_json_bytes(parsed)
     assert report_bytes.endswith(b"\n")
     assert parsed == report
-    assert parsed["subjects_semantic_sha256"] == hashlib.sha256(
-        canonical_json_bytes({"subjects": _c4d3a_expected_subject_entries(normalized)})
-    ).hexdigest()
+    assert (
+        parsed["subjects_semantic_sha256"]
+        == hashlib.sha256(
+            canonical_json_bytes(
+                {"subjects": _c4d3a_expected_subject_entries(normalized)}
+            )
+        ).hexdigest()
+    )
     assert selected.provider_ledger.contents not in report_bytes
 
 
@@ -16445,7 +16866,10 @@ def test_c4d3a_canonical_bytes_are_order_invariant_and_subject_bound(
     )
     baseline_bytes = verifier_module._canonical_independent_report_bytes(report)
     reversed_report = dict(reversed(tuple(report.items())))
-    assert verifier_module._canonical_independent_report_bytes(reversed_report) == baseline_bytes
+    assert (
+        verifier_module._canonical_independent_report_bytes(reversed_report)
+        == baseline_bytes
+    )
 
     reversed_normalized = dict(reversed(tuple(normalized.items())))
     reversed_subject_report = verifier_module._assemble_independent_report(
@@ -16464,10 +16888,13 @@ def test_c4d3a_canonical_bytes_are_order_invariant_and_subject_bound(
         selected, changed_subjects, candidate
     )
     assert changed_report["subjects"][0] != report["subjects"][0]
-    assert changed_report["subjects_semantic_sha256"] != report[
-        "subjects_semantic_sha256"
-    ]
-    assert verifier_module._canonical_independent_report_bytes(changed_report) != baseline_bytes
+    assert (
+        changed_report["subjects_semantic_sha256"] != report["subjects_semantic_sha256"]
+    )
+    assert (
+        verifier_module._canonical_independent_report_bytes(changed_report)
+        != baseline_bytes
+    )
     assert "verification/independent-verification.json" not in {
         item["path"] for item in changed_report["subjects"]
     }
@@ -16584,7 +17011,11 @@ def test_c4d3a_schema_mutations_and_digest_mismatch_stay_test_only(
         lambda value: value["numeric_verification"].update({"disposition": "WRONG"}),
         lambda value: value["numeric_verification"].update({"extra": 1}),
         lambda value: value["subjects"].append(
-            {"path": "verification/independent-verification.json", "sha256": "0" * 64, "size_bytes": 0}
+            {
+                "path": "verification/independent-verification.json",
+                "sha256": "0" * 64,
+                "size_bytes": 0,
+            }
         ),
         lambda value: value["verifier"].update({"artifact_id": "wrong.py"}),
         lambda value: value["verifier"].update({"as_of_date": "not-an-iso-date"}),
@@ -16607,9 +17038,7 @@ def test_c4d3a_schema_mutations_and_digest_mismatch_stay_test_only(
     digest_mismatch["subjects_semantic_sha256"] = "0" * 64
     assert validator.is_valid(digest_mismatch)
     literal_digest = hashlib.sha256(
-        canonical_json_bytes(
-            {"subjects": _c4d3a_expected_subject_entries(normalized)}
-        )
+        canonical_json_bytes({"subjects": _c4d3a_expected_subject_entries(normalized)})
     ).hexdigest()
     assert report["subjects_semantic_sha256"] == literal_digest
     assert digest_mismatch["subjects_semantic_sha256"] != literal_digest
@@ -16618,8 +17047,10 @@ def test_c4d3a_schema_mutations_and_digest_mismatch_stay_test_only(
 def test_c4d3a_verifier_ast_has_no_jsonschema_runtime_import() -> None:
     tree = ast.parse(VERIFIER_MODULE_PATH.read_text(encoding="utf-8"))
     assert not any(
-        isinstance(node, ast.Import) and any(alias.name == "jsonschema" for alias in node.names)
-        or isinstance(node, ast.ImportFrom) and node.module == "jsonschema"
+        isinstance(node, ast.Import)
+        and any(alias.name == "jsonschema" for alias in node.names)
+        or isinstance(node, ast.ImportFrom)
+        and node.module == "jsonschema"
         for node in ast.walk(tree)
     )
 
@@ -16851,11 +17282,15 @@ def test_c4d3b2_finalized_report_has_no_caller_or_override_authority(
     )
     decoy = hostile_tree.body[0]
     assert isinstance(decoy, ast.FunctionDef)
-    assert next(
-        node
-        for node in ast.walk(hostile_tree)
-        if isinstance(node, ast.FunctionDef) and node.name == "verify_finalized_report"
-    ) is decoy
+    assert (
+        next(
+            node
+            for node in ast.walk(hostile_tree)
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "verify_finalized_report"
+        )
+        is decoy
+    )
     hostile_method = select_finalized_method(hostile_tree)
     assert hostile_method is not decoy
     assert hostile_method.lineno > decoy.lineno
@@ -16940,10 +17375,16 @@ def test_c4d3b2_finalized_report_rejects_representative_caller_bytes_without_lea
     digest_mutation["subjects_semantic_sha256"] = "0" * 64
     assert validator.is_valid(date_mutation)
     assert validator.is_valid(digest_mutation)
-    assert date_mutation["verifier"]["as_of_date"] != selected.generation_as_of_date.isoformat()
-    assert digest_mutation["subjects_semantic_sha256"] != hashlib.sha256(
-        canonical_json_bytes({"subjects": parsed["subjects"]})
-    ).hexdigest()
+    assert (
+        date_mutation["verifier"]["as_of_date"]
+        != selected.generation_as_of_date.isoformat()
+    )
+    assert (
+        digest_mutation["subjects_semantic_sha256"]
+        != hashlib.sha256(
+            canonical_json_bytes({"subjects": parsed["subjects"]})
+        ).hexdigest()
+    )
     reordered_whitespace = (
         json.dumps(
             dict(reversed(tuple(parsed.items()))), ensure_ascii=True, indent=2
@@ -17104,7 +17545,9 @@ def test_c4d3c1_cli_prepare_rejects_leaf_symlink_before_source_resolution_or_rea
         if path == request_path:
             events.append("request.read_bytes")
             return original_read_bytes(path)
-        pytest.fail(f"source bytes must not be read after a leaf-symlink result: {path}")
+        pytest.fail(
+            f"source bytes must not be read after a leaf-symlink result: {path}"
+        )
 
     def true_leaf_symlink(path: Path) -> bool:
         assert path == source_path
@@ -17135,7 +17578,7 @@ def test_c4d3c1_cli_helpers_remain_private_and_export_no_cli_symbol(
     assert "_cli_dispatch" not in verifier_module.__all__
     assert "_cli_main" not in verifier_module.__all__
     source = VERIFIER_MODULE_PATH.read_text(encoding="utf-8")
-    assert "if __name__ == \"__main__\"" in source
+    assert 'if __name__ == "__main__"' in source
 
 
 def test_c4d3c1_ast_pins_the_exact_private_cli_island() -> None:
@@ -17219,9 +17662,7 @@ def _cli_main() -> int:
 '''
     )
     expected_island = tuple(
-        node
-        for node in expected_island_tree.body
-        if isinstance(node, ast.FunctionDef)
+        node for node in expected_island_tree.body if isinstance(node, ast.FunctionDef)
     )
     expected_guard = ast.parse(
         'if __name__ == "__main__":\n    raise SystemExit(_cli_main())\n'
@@ -17244,9 +17685,7 @@ def _cli_main() -> int:
         assert len({node.name for node in top_level_cli}) == len(expected_names)
         assert tuple(
             ast.dump(node, include_attributes=False) for node in top_level_cli
-        ) == tuple(
-            ast.dump(node, include_attributes=False) for node in expected_island
-        )
+        ) == tuple(ast.dump(node, include_attributes=False) for node in expected_island)
         assert not any(
             isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
             and node.name.startswith("_cli_")
@@ -17265,9 +17704,7 @@ def _cli_main() -> int:
             (node.module, tuple((alias.name, alias.asname) for alias in node.names))
             for node in prepare_imports
         ] == [("pathlib", (("Path", None),))]
-        assert not any(
-            isinstance(node, ast.Import) for node in ast.walk(prepare)
-        )
+        assert not any(isinstance(node, ast.Import) for node in ast.walk(prepare))
         assert not any(
             isinstance(node, (ast.Import, ast.ImportFrom))
             for node in ast.walk(dispatch)
@@ -17279,9 +17716,7 @@ def _cli_main() -> int:
         assert not any(isinstance(node, ast.ImportFrom) for node in ast.walk(main))
 
         local_functions = {
-            node.name
-            for node in source_tree.body
-            if isinstance(node, ast.FunctionDef)
+            node.name for node in source_tree.body if isinstance(node, ast.FunctionDef)
         }
 
         def local_edges(function: ast.FunctionDef) -> set[str]:
@@ -17353,7 +17788,9 @@ def _cli_main() -> int:
             and not node.keywords
             and isinstance(node.args[0], ast.Name)
         ) == ["__file__", "finalized_name", "request_name"]
-        assert all(len(node.args) == 1 and not node.keywords for node in path_constructors)
+        assert all(
+            len(node.args) == 1 and not node.keywords for node in path_constructors
+        )
         read_calls = [
             node
             for node in ast.walk(prepare)
@@ -17636,7 +18073,9 @@ def test_c4d3c2a_dispatch_returns_the_one_fresh_verifier_bytes_object(
             return returned
 
     monkeypatch.setattr(verifier_module, "_cli_prepare", prepare_spy)
-    monkeypatch.setattr(verifier_module, "IndependentAccountManifestVerifier", FreshVerifier)
+    monkeypatch.setattr(
+        verifier_module, "IndependentAccountManifestVerifier", FreshVerifier
+    )
     actual = verifier_module._cli_dispatch(argv)
     assert actual is returned
     assert prepare_calls == [argv]
@@ -17687,9 +18126,7 @@ def test_c4d3c2a_dispatch_blocks_finalized_form_before_verifier_or_report_read(
         verifier_module, "IndependentAccountManifestVerifier", ForbiddenVerifier
     )
     with pytest.raises(verifier_module.IndependentVerificationError) as raised:
-        verifier_module._cli_dispatch(
-            argv + ("--finalized-report", str(report_path))
-        )
+        verifier_module._cli_dispatch(argv + ("--finalized-report", str(report_path)))
     assert str(raised.value) == "independent verification input is invalid"
     assert prepare_calls == [argv + ("--finalized-report", str(report_path))]
     assert calls == []
@@ -17975,22 +18412,36 @@ def _c4d3c2b1_bound_request(
     )
     bound_selected = perimeter_module.AccountManifestSelectedInputs(**selected_values)
     assert bound_selected.independent_verifier_source.contents == captured_source
-    assert bound_selected.independent_verifier_source.sha256 == captured_identity["sha256"]
-    assert bound_selected.independent_verifier_source.size_bytes == captured_identity["size_bytes"]
+    assert (
+        bound_selected.independent_verifier_source.sha256 == captured_identity["sha256"]
+    )
+    assert (
+        bound_selected.independent_verifier_source.size_bytes
+        == captured_identity["size_bytes"]
+    )
 
     payloads = perimeter_module.build_blocked_account_manifest_payloads(bound_selected)
     selected_identity = json.loads(payloads["authority/selected-input-identities.json"])
     code_identity = json.loads(payloads["authority/code-identities.json"])
-    assert selected_identity["code_sources"]["independent_verifier"] == captured_identity
+    assert (
+        selected_identity["code_sources"]["independent_verifier"] == captured_identity
+    )
     assert code_identity["code_sources"]["independent_verifier"] == captured_identity
     verifier_inputs = verifier_module.IndependentVerifierInputs(
         **_selected_input_kwargs(bound_selected)
     )
     request = verifier_module.encode_verification_request(verifier_inputs, payloads)
-    decoded_inputs, decoded_subjects = verifier_module.decode_verification_request(request)
+    decoded_inputs, decoded_subjects = verifier_module.decode_verification_request(
+        request
+    )
     assert decoded_inputs.independent_verifier_source.contents == captured_source
-    assert decoded_inputs.independent_verifier_source.sha256 == captured_identity["sha256"]
-    assert decoded_inputs.independent_verifier_source.size_bytes == captured_identity["size_bytes"]
+    assert (
+        decoded_inputs.independent_verifier_source.sha256 == captured_identity["sha256"]
+    )
+    assert (
+        decoded_inputs.independent_verifier_source.size_bytes
+        == captured_identity["size_bytes"]
+    )
     assert decoded_subjects == payloads
     expected_report = verifier_module.IndependentAccountManifestVerifier().verify(
         verifier_inputs, payloads
@@ -18003,7 +18454,9 @@ def _c4d3c2b1_bound_request(
     Draft202012Validator(
         json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
     ).validate(expected_object)
-    assert expected_object["artifact_id"] == "verification/independent-verification.json"
+    assert (
+        expected_object["artifact_id"] == "verification/independent-verification.json"
+    )
     assert expected_object["status"] == "VERIFIED"
     assert expected_object["counts"]["account_count"] == 18
     assert expected_object["counts"]["assignment_count"] == 26
@@ -18235,9 +18688,9 @@ def test_c4d3c2b2_rejects_noncanonical_and_source_mismatch_requests_without_leak
     mismatch_wire = deepcopy(original_wire)
     assert isinstance(original_wire["selected_snapshots"], dict)
     assert isinstance(mismatch_wire["selected_snapshots"], dict)
-    mismatch_wire["selected_snapshots"][
-        "independent_verifier_source_base64"
-    ] = mismatch_base64
+    mismatch_wire["selected_snapshots"]["independent_verifier_source_base64"] = (
+        mismatch_base64
+    )
     assert mismatch_wire["schema_version"] == original_wire["schema_version"]
     assert mismatch_wire["retrieval_receipts"] == original_wire["retrieval_receipts"]
     assert mismatch_wire["subjects"] == original_wire["subjects"]
@@ -18560,7 +19013,10 @@ def test_c4d3a_private_call_graph_and_runtime_path_exclude_forbidden_facilities(
         verifier_module, "account_strategy_manifest", RuntimeTrap(), raising=False
     )
     monkeypatch.setattr(
-        verifier_module, "build_account_manifest_generation", RuntimeTrap(), raising=False
+        verifier_module,
+        "build_account_manifest_generation",
+        RuntimeTrap(),
+        raising=False,
     )
 
     for name, source, expected_trap in (
@@ -18644,7 +19100,9 @@ def test_c4d3a_report_and_canonical_bytes_exclude_private_lineage_projection(
     normalized = verifier_module._normalize_subject_payloads(payloads)
     state = verifier_module._verify_retained_semantics_normalized(selected, normalized)
     candidate = verifier_module._build_retained_report_candidate(state)
-    report = verifier_module._assemble_independent_report(selected, normalized, candidate)
+    report = verifier_module._assemble_independent_report(
+        selected, normalized, candidate
+    )
     report_bytes = verifier_module._canonical_independent_report_bytes(report)
 
     assert sentinel.encode("ascii") in provider_ledger.contents
@@ -18755,7 +19213,9 @@ def test_assignment_perimeter_omits_baseline_account_without_assignment_or_facts
         "synthetic-assigned-a",
         "synthetic-assigned-b",
     }
-    assert payload["selected_baseline_identity"]["artifact"]["sha256"] == baseline.sha256
+    assert (
+        payload["selected_baseline_identity"]["artifact"]["sha256"] == baseline.sha256
+    )
 
 
 def test_assignment_perimeter_retains_nav_for_unassigned_baseline_account(
@@ -19085,8 +19545,12 @@ def test_assignment_perimeter_gives_shared_day_facts_to_mapped_successor(
 
     historical, mapped = payload["rows"]
     assert payload["account_count"] == 1
-    assert [historical[key] for key in ("available_nav", "raw_flows", "classified_flows")] == [0, 0, 0]
-    assert [mapped[key] for key in ("available_nav", "raw_flows", "classified_flows")] == [1, 1, 1]
+    assert [
+        historical[key] for key in ("available_nav", "raw_flows", "classified_flows")
+    ] == [0, 0, 0]
+    assert [
+        mapped[key] for key in ("available_nav", "raw_flows", "classified_flows")
+    ] == [1, 1, 1]
 
 
 def test_blocked_builder_retains_outside_interval_facts_before_classification(
@@ -19101,9 +19565,7 @@ def test_blocked_builder_retains_outside_interval_facts_before_classification(
         if row["account_id"] == "synthetic-pinned-09"
     )
     flow = next(
-        row
-        for row in ledger["flows"]
-        if row["account_id"] == "synthetic-pinned-09"
+        row for row in ledger["flows"] if row["account_id"] == "synthetic-pinned-09"
     )
     nav["as_of_date"] = "2024-12-31"
     flow["event_date"] = "2024-12-31"
@@ -19127,11 +19589,14 @@ def test_blocked_builder_retains_outside_interval_facts_before_classification(
     classified = json.loads(payloads["authority/classified-flows.json"])
     assert perimeter["unassigned_fact_count"] == 2
     assert perimeter["unassigned_projection_count"] == 3
-    assert next(
-        event
-        for event in classified["events"]
-        if event["source_record_id"] == flow["record_id"]
-    )["blocker_code"] == "FLOW_TYPE_UNRESOLVED"
+    assert (
+        next(
+            event
+            for event in classified["events"]
+            if event["source_record_id"] == flow["record_id"]
+        )["blocker_code"]
+        == "FLOW_TYPE_UNRESOLVED"
+    )
 
 
 def test_independent_verifier_accepts_pinned_assignment_semantics(
@@ -19235,7 +19700,9 @@ def test_independent_verifier_rejects_invalid_governed_assignment_envelope(
 
     with pytest.raises(verifier_module.IndependentVerificationError):
         verifier_module.IndependentAccountManifestVerifier().verify(
-            verifier_module.IndependentVerifierInputs(**_selected_input_kwargs(selected)),
+            verifier_module.IndependentVerifierInputs(
+                **_selected_input_kwargs(selected)
+            ),
             payloads,
         )
 
@@ -19290,7 +19757,9 @@ def test_independent_verifier_rejects_assignment_perimeter_reassignment(
         historical, mapped = transition_rows
         for key in ("available_nav", "raw_flows", "classified_flows"):
             historical[key], mapped[key] = mapped[key], historical[key]
-    payloads["authority/account-assignment-perimeter.json"] = canonical_json_bytes(perimeter)
+    payloads["authority/account-assignment-perimeter.json"] = canonical_json_bytes(
+        perimeter
+    )
     verifier_inputs = verifier_module.IndependentVerifierInputs(
         **_selected_input_kwargs(selected)
     )
@@ -19344,9 +19813,7 @@ def test_unassigned_and_unresolved_facts_are_retained_blocked_and_verified(
     selected = _selected_with_unassigned_unresolved_facts(perimeter_module)
 
     payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
-    perimeter = json.loads(
-        payloads["authority/account-assignment-perimeter.json"]
-    )
+    perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
     classified = json.loads(payloads["authority/classified-flows.json"])
     calculation = json.loads(payloads["authority/calculation-inputs.json"])
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
@@ -19499,13 +19966,22 @@ def test_mvp_audit_001_report_schema_branches_and_semantic_finalization(
     legacy["schema_version"] = 1
     counts = legacy["counts"]
     legacy["counts"] = {
-        **{key: value for key, value in counts.items() if key not in {
-            "observed_nav_fact_count", "observed_raw_flow_count",
-            "classified_event_count", "classified_event_classified_count",
-            "classified_event_blocked_count", "unmatched_nav_fact_count",
-            "unmatched_raw_flow_fact_count", "unmatched_fact_count",
-            "unmatched_projection_count",
-        }},
+        **{
+            key: value
+            for key, value in counts.items()
+            if key
+            not in {
+                "observed_nav_fact_count",
+                "observed_raw_flow_count",
+                "classified_event_count",
+                "classified_event_classified_count",
+                "classified_event_blocked_count",
+                "unmatched_nav_fact_count",
+                "unmatched_raw_flow_fact_count",
+                "unmatched_fact_count",
+                "unmatched_projection_count",
+            }
+        },
         "nav_fact_count": counts["observed_nav_fact_count"],
         "raw_flow_count": counts["observed_raw_flow_count"],
         "classified_flow_count": counts["classified_event_count"],
@@ -19528,7 +20004,10 @@ def test_mvp_audit_001_report_schema_branches_and_semantic_finalization(
     inconsistent["counts"]["unmatched_projection_count"] = 1
     assert schema.is_valid(inconsistent)
     with pytest.raises(verifier_module.IndependentVerificationError):
-        verifier.verify_finalized_report(selected, payloads, canonical_json_bytes(inconsistent))
+        verifier.verify_finalized_report(
+            selected, payloads, canonical_json_bytes(inconsistent)
+        )
+
 
 def test_unassigned_perimeter_schema_rejects_contradictory_status_and_counts(
     perimeter_module: Any,
@@ -19595,9 +20074,7 @@ def test_mapped_unresolved_flow_stays_blocked_and_non_numeric(
     )
     assert unresolved in mapped_row["classified_flows"]
     output_row = next(
-        row
-        for row in output["rows"]
-        if row["account_id"] == "synthetic-pinned-09"
+        row for row in output["rows"] if row["account_id"] == "synthetic-pinned-09"
     )
     assert output_row["status"] == "BLOCKED_ADMISSION"
     assert "numeric_candidate" not in output_row
@@ -19773,7 +20250,9 @@ def test_independent_verifier_rejects_internal_counterparty_evidence_mutations(
     payloads = dict(perimeter_module.build_blocked_account_manifest_payloads(selected))
     classified = json.loads(payloads["authority/classified-flows.json"])
     indexed = {event["source_record_id"]: event for event in classified["events"]}
-    target = indexed["c3-flow-07"] if mutation == "counterparty" else indexed["c3-flow-01"]
+    target = (
+        indexed["c3-flow-07"] if mutation == "counterparty" else indexed["c3-flow-01"]
+    )
     target[field] = value
     payloads["authority/classified-flows.json"] = canonical_json_bytes(classified)
     verifier_inputs = verifier_module.IndependentVerifierInputs(
@@ -19812,9 +20291,7 @@ def _selected_with_policy_sign_mismatches(module: Any) -> object:
             "flow_type": "SYNTHETIC_INTERNAL_POSITIVE",
             "disposition": "INTERNAL",
             "amount_sign": "POSITIVE",
-            "counterparty_rule": (
-                "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
-            ),
+            "counterparty_rule": ("SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"),
         }
     )
     return _c3_with_mutated_ledger_or_policy(module, ledger, policy)
@@ -19839,10 +20316,7 @@ def test_policy_sign_mismatches_are_retained_blocked_and_verified(
     internal = indexed["c3-flow-01"]
     assert internal["classification_status"] == "BLOCKED"
     assert internal["disposition"] is None
-    assert (
-        internal["blocker_code"]
-        == "INTERNAL_COUNTERPARTY_CLASSIFICATION_BLOCKED"
-    )
+    assert internal["blocker_code"] == "INTERNAL_COUNTERPARTY_CLASSIFICATION_BLOCKED"
     assert "counterparty_source_record_id" not in internal
     unavailable = indexed["c3-flow-16"]
     assert unavailable["classification_status"] == "BLOCKED"
@@ -19855,7 +20329,10 @@ def test_policy_sign_mismatches_are_retained_blocked_and_verified(
         for row in calculation["rows"]
         for event in row["classified_flows"]
     }
-    assert all(record_id in mapped_events for record_id in ("c3-flow-01", "c3-flow-02", "c3-flow-03"))
+    assert all(
+        record_id in mapped_events
+        for record_id in ("c3-flow-01", "c3-flow-02", "c3-flow-03")
+    )
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
     assert all(
         row["status"] == "BLOCKED_ADMISSION" and "numeric_candidate" not in row
@@ -20031,7 +20508,9 @@ def test_independent_verifier_rejects_absent_baseline_flow_mutations(
             if event["source_record_id"] == "synthetic-absent-flow"
         )
         calculation["rows"][0]["classified_flows"].append(absent_event)
-        payloads["authority/calculation-inputs.json"] = canonical_json_bytes(calculation)
+        payloads["authority/calculation-inputs.json"] = canonical_json_bytes(
+            calculation
+        )
     payloads["authority/account-assignment-perimeter.json"] = canonical_json_bytes(
         perimeter
     )
@@ -20065,7 +20544,9 @@ def test_mvp_audit_001_section_2f_canonical_zero_reaches_policy_sign_blocker(
     payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
     classified = json.loads(payloads["authority/classified-flows.json"])
     zero_event = next(
-        event for event in classified["events"] if event["source_record_id"] == "c3-flow-01"
+        event
+        for event in classified["events"]
+        if event["source_record_id"] == "c3-flow-01"
     )
     assert zero_event["amount"]["value"] == "0"
     assert zero_event["classification_status"] == "BLOCKED"
@@ -20224,6 +20705,7 @@ def test_mvp_audit_001_section_2f_public_verifier_rejects_malformed_retained_sou
     source_value: str,
 ) -> None:
     """Public verification reaches retained-source validation for each fact kind."""
+
     def mutate(ledger: dict[str, object]) -> None:
         if source_kind == "NAV":
             ledger["nav_observations"][0]["nav"]["value"] = source_value
@@ -20263,6 +20745,7 @@ def test_mvp_audit_001_section_2f_public_verifier_rejects_flow_nav_currency_disa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A synthetic available flow cannot disagree with NAV-derived USD currency."""
+
     def mutate(ledger: dict[str, object]) -> None:
         ledger["flows"][0]["amount"]["currency"] = "EUR"
 
@@ -20291,8 +20774,6 @@ def test_mvp_audit_001_section_2f_public_verifier_rejects_flow_nav_currency_disa
         verifier_module.IndependentAccountManifestVerifier().verify(
             verifier_inputs, payloads
         )
-
-
 
 
 def _mvp_audit_001_selected_with_unmatched_facts(
@@ -20353,7 +20834,9 @@ def test_mvp_audit_001_public_report_derives_unmatched_projection_weights(
     payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
     report = json.loads(
         verifier_module.IndependentAccountManifestVerifier().verify(
-            verifier_module.IndependentVerifierInputs(**_selected_input_kwargs(selected)),
+            verifier_module.IndependentVerifierInputs(
+                **_selected_input_kwargs(selected)
+            ),
             payloads,
         )
     )
@@ -20380,7 +20863,9 @@ def test_mvp_audit_001_public_report_keeps_unresolved_flow_in_blocked_partition(
     payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
     report = json.loads(
         verifier_module.IndependentAccountManifestVerifier().verify(
-            verifier_module.IndependentVerifierInputs(**_selected_input_kwargs(selected)),
+            verifier_module.IndependentVerifierInputs(
+                **_selected_input_kwargs(selected)
+            ),
             payloads,
         )
     )
@@ -20392,7 +20877,12 @@ def test_mvp_audit_001_public_report_keeps_unresolved_flow_in_blocked_partition(
 
 @pytest.mark.parametrize(
     "mutation",
-    ["classification_status", "source_kind", "unassigned_fact_count", "unassigned_projection_count"],
+    [
+        "classification_status",
+        "source_kind",
+        "unassigned_fact_count",
+        "unassigned_projection_count",
+    ],
 )
 def test_mvp_audit_001_public_verifier_rejects_population_derivation_mutations(
     perimeter_module: Any, verifier_module: Any, mutation: str
@@ -20417,7 +20907,9 @@ def test_mvp_audit_001_public_verifier_rejects_population_derivation_mutations(
         )
     with pytest.raises(verifier_module.IndependentVerificationError):
         verifier_module.IndependentAccountManifestVerifier().verify(
-            verifier_module.IndependentVerifierInputs(**_selected_input_kwargs(selected)),
+            verifier_module.IndependentVerifierInputs(
+                **_selected_input_kwargs(selected)
+            ),
             payloads,
         )
 
@@ -20428,13 +20920,22 @@ def _mvp_audit_001_v1_report_from_v2(report: dict[str, object]) -> dict[str, obj
     counts = legacy["counts"]
     assert isinstance(counts, dict)
     legacy["counts"] = {
-        **{key: value for key, value in counts.items() if key not in {
-            "observed_nav_fact_count", "observed_raw_flow_count",
-            "classified_event_count", "classified_event_classified_count",
-            "classified_event_blocked_count", "unmatched_nav_fact_count",
-            "unmatched_raw_flow_fact_count", "unmatched_fact_count",
-            "unmatched_projection_count",
-        }},
+        **{
+            key: value
+            for key, value in counts.items()
+            if key
+            not in {
+                "observed_nav_fact_count",
+                "observed_raw_flow_count",
+                "classified_event_count",
+                "classified_event_classified_count",
+                "classified_event_blocked_count",
+                "unmatched_nav_fact_count",
+                "unmatched_raw_flow_fact_count",
+                "unmatched_fact_count",
+                "unmatched_projection_count",
+            }
+        },
         "nav_fact_count": counts["observed_nav_fact_count"],
         "raw_flow_count": counts["observed_raw_flow_count"],
         "classified_flow_count": counts["classified_event_count"],
@@ -20448,10 +20949,15 @@ def _mvp_audit_001_v1_report_from_v2(report: dict[str, object]) -> dict[str, obj
 @pytest.mark.parametrize(
     "count_name",
     [
-        "observed_nav_fact_count", "observed_raw_flow_count", "classified_event_count",
-        "classified_event_classified_count", "classified_event_blocked_count",
-        "unmatched_nav_fact_count", "unmatched_raw_flow_fact_count",
-        "unmatched_fact_count", "unmatched_projection_count",
+        "observed_nav_fact_count",
+        "observed_raw_flow_count",
+        "classified_event_count",
+        "classified_event_classified_count",
+        "classified_event_blocked_count",
+        "unmatched_nav_fact_count",
+        "unmatched_raw_flow_fact_count",
+        "unmatched_fact_count",
+        "unmatched_projection_count",
     ],
 )
 def test_mvp_audit_001_schema_closes_every_v2_population_count(
@@ -20543,13 +21049,17 @@ def test_mvp_audit_001_small_synthetic_population_verifies_without_retained_coun
     )
     values["provider_ledger"] = ledger_snapshot
     values["baseline_manifest"] = _generation_manifest_snapshot(
-        catalog=baseline_snapshot, catalog_artifact_id="normalized/portfolio-baseline.json",
-        catalog_schema_name="portfolio-baseline-catalog", catalog_schema_version="1",
+        catalog=baseline_snapshot,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
         as_of_date="2026-02-01",
     )
     values["provider_ledger_manifest"] = _generation_manifest_snapshot(
-        catalog=ledger_snapshot, catalog_artifact_id="normalized/provider-ledger.json",
-        catalog_schema_name="provider-ledger-catalog", catalog_schema_version="1",
+        catalog=ledger_snapshot,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
         as_of_date="2026-02-01",
     )
     small = perimeter_module.AccountManifestSelectedInputs(**values)
@@ -20573,15 +21083,42 @@ def test_mixed_composer_preserves_the_hard_coded_legacy_nine_subject_vector(
     """A no-triplet dispatcher must not silently alter the legacy blocked release."""
     selected = _c3_selected_inputs(perimeter_module)
     expected = {
-        "authority/selected-input-identities.json": ("c765ab9f5b28c88afc29db61c8f33e3ab23a050060feb9f6d0c76f06ca154977", 2083),
-        "authority/account-assignment-perimeter.json": ("e96ba78a8502c8fdb9edd88a007f1dc39e2681816b44a597b62e00537a4d0ae8", 11228),
-        "authority/calculation-inputs.json": ("310e73999b51bd4468e8951cb0e644c3f6dbc25fc53fc2db7b53e65d0a7be437", 9342),
-        "authority/flow-classification-policy.json": ("be860caffa13c6e121f73d13ce56b06cb940333ebeeb940c3d544ae5269c4de3", 350),
-        "authority/classified-flows.json": ("3fe88f8e1361189eabec3991bf83dbf4f78910007fe599ad39806936b6659b7e", 6249),
-        "authority/account-flow-coverage.json": ("7aa1304179b0307414ef7e75d7d6a2260f941c290eb022b01f89179ce15938a0", 6469),
-        "authority/mapped-epoch-admission.json": ("f16da4a4afa53c55ef6b3dcef85c9af1a34a737079ef49f03d27170b84b473f0", 5219),
-        "authority/code-identities.json": ("9a0f81804ee3317498ebe2de12ce7b4ec09c70d67b4956125afdb73664615749", 621),
-        "outputs/account-strategy-manifest.json": ("9417bee071778513ff2fec03a038eef900eeb507e38363d03a81c0f1e841b563", 11768),
+        "authority/selected-input-identities.json": (
+            "c765ab9f5b28c88afc29db61c8f33e3ab23a050060feb9f6d0c76f06ca154977",
+            2083,
+        ),
+        "authority/account-assignment-perimeter.json": (
+            "e96ba78a8502c8fdb9edd88a007f1dc39e2681816b44a597b62e00537a4d0ae8",
+            11228,
+        ),
+        "authority/calculation-inputs.json": (
+            "310e73999b51bd4468e8951cb0e644c3f6dbc25fc53fc2db7b53e65d0a7be437",
+            9342,
+        ),
+        "authority/flow-classification-policy.json": (
+            "be860caffa13c6e121f73d13ce56b06cb940333ebeeb940c3d544ae5269c4de3",
+            350,
+        ),
+        "authority/classified-flows.json": (
+            "3fe88f8e1361189eabec3991bf83dbf4f78910007fe599ad39806936b6659b7e",
+            6249,
+        ),
+        "authority/account-flow-coverage.json": (
+            "7aa1304179b0307414ef7e75d7d6a2260f941c290eb022b01f89179ce15938a0",
+            6469,
+        ),
+        "authority/mapped-epoch-admission.json": (
+            "f16da4a4afa53c55ef6b3dcef85c9af1a34a737079ef49f03d27170b84b473f0",
+            5219,
+        ),
+        "authority/code-identities.json": (
+            "9a0f81804ee3317498ebe2de12ce7b4ec09c70d67b4956125afdb73664615749",
+            621,
+        ),
+        "outputs/account-strategy-manifest.json": (
+            "9417bee071778513ff2fec03a038eef900eeb507e38363d03a81c0f1e841b563",
+            11768,
+        ),
     }
     blocked = perimeter_module.build_blocked_account_manifest_payloads(selected)
     dispatched = perimeter_module.build_account_manifest_payloads(selected)
@@ -20600,7 +21137,9 @@ def test_mixed_composer_requires_the_optional_snapshot_triplet(
     selected = _c3_selected_inputs(perimeter_module)
     values = _selected_input_kwargs(selected)
     values["receipt_authority"] = InputSnapshot.from_bytes("authority", b"{}")
-    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError, match="selected together"):
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError, match="selected together"
+    ):
         perimeter_module.AccountManifestSelectedInputs(**values)
 
 
@@ -20622,54 +21161,207 @@ def _mixed_base_selected_inputs(perimeter_module: Any) -> object:
     ledger = selected.provider_ledger.json_object()
     account_id = "synthetic-account-01"
     ledger["nav_observations"] = [
-        {"record_id": "mixed-nav-1", "account_id": account_id, "as_of_date": "2026-01-30", "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"}},
-        {"record_id": "mixed-nav-2", "account_id": account_id, "as_of_date": "2026-01-31", "nav": {"currency": "USD", "status": "AVAILABLE", "value": "60"}},
-        {"record_id": "mixed-nav-3", "account_id": account_id, "as_of_date": "2026-02-01", "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"}},
+        {
+            "record_id": "mixed-nav-1",
+            "account_id": account_id,
+            "as_of_date": "2026-01-30",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
+        },
+        {
+            "record_id": "mixed-nav-2",
+            "account_id": account_id,
+            "as_of_date": "2026-01-31",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "60"},
+        },
+        {
+            "record_id": "mixed-nav-3",
+            "account_id": account_id,
+            "as_of_date": "2026-02-01",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
+        },
     ]
-    ledger["flows"] = [{"record_id": "mixed-flow-1", "account_id": account_id, "event_date": "2026-01-31", "nav_recognition_date": "2026-01-31", "flow_type": "CONTRIBUTION", "amount": {"currency": "USD", "status": "AVAILABLE", "value": "10"}}]
+    ledger["flows"] = [
+        {
+            "record_id": "mixed-flow-1",
+            "account_id": account_id,
+            "event_date": "2026-01-31",
+            "nav_recognition_date": "2026-01-31",
+            "flow_type": "CONTRIBUTION",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "10"},
+        }
+    ]
     baseline = selected.baseline.json_object()
     funded_assignment = next(
-        row for row in baseline["assignments"]
+        row
+        for row in baseline["assignments"]
         if row["account_id"] == account_id
         and row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
     )
-    ledger["capital_anchors"] = [{
-        "record_id": "mixed-opening-anchor-1",
-        "account_id": account_id,
-        "provider_id": "synthetic",
-        "generation_id": "c" * 64,
-        "strategy_id": funded_assignment["strategy_id"],
-        "mapping_status": "MAPPED",
-        "evidence_layer": "ACCOUNT_LIVE",
-        "event_date": "2024-12-31",
-        "nav_recognition_date": "2026-01-30",
-        "capital_type": "OPENING_CAPITAL_ANCHOR",
-        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
-        "opening_nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
-        "source_artifact_id": "raw/synthetic.json",
-        "nav_source_artifact_id": "raw/synthetic.json",
-        "source_record_id": "synthetic-opening-1",
-        "mapping_basis": "EXACT_SYNTHETIC_OPENING",
-    }]
-    ledger["provider_generations"] = [{"provider_id": "synthetic", "generation_id": "c" * 64, "manifest_sha256": "a" * 64, "generation_as_of_date": "2026-02-01"}]
-    ledger_snapshot = InputSnapshot.from_bytes("mixed ledger", canonical_json_bytes(ledger))
-    raw_artifact = {"artifact_id": "raw/synthetic.json", "as_of_date": "2026-02-01", "schema": {"name": "synthetic", "version": "1"}, "sha256": "a" * 64, "size_bytes": 1}
+    ledger["capital_anchors"] = [
+        {
+            "record_id": "mixed-opening-anchor-1",
+            "account_id": account_id,
+            "provider_id": "synthetic",
+            "generation_id": "c" * 64,
+            "strategy_id": funded_assignment["strategy_id"],
+            "mapping_status": "MAPPED",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "event_date": "2024-12-31",
+            "nav_recognition_date": "2026-01-30",
+            "capital_type": "OPENING_CAPITAL_ANCHOR",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
+            "opening_nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
+            "source_artifact_id": "raw/synthetic.json",
+            "nav_source_artifact_id": "raw/synthetic.json",
+            "source_record_id": "synthetic-opening-1",
+            "mapping_basis": "EXACT_SYNTHETIC_OPENING",
+        }
+    ]
+    ledger["provider_generations"] = [
+        {
+            "provider_id": "synthetic",
+            "generation_id": "c" * 64,
+            "manifest_sha256": "a" * 64,
+            "generation_as_of_date": "2026-02-01",
+        }
+    ]
+    ledger_snapshot = InputSnapshot.from_bytes(
+        "mixed ledger", canonical_json_bytes(ledger)
+    )
+    raw_artifact = {
+        "artifact_id": "raw/synthetic.json",
+        "as_of_date": "2026-02-01",
+        "schema": {"name": "synthetic", "version": "1"},
+        "sha256": "a" * 64,
+        "size_bytes": 1,
+    }
     receipt_id = "receipt/mixed-account-01.json"
-    receipt = {"schema_version": 2, "artifact_id": receipt_id, "issuer": {"adapter_name": "SYNTHETIC", "adapter_version": "1", "code_sha256": "b" * 64}, "provider": "SYNTHETIC", "provider_generation": "c" * 64, "provider_generation_manifest": raw_artifact, "raw_evidence_artifacts": [raw_artifact], "account_id": account_id, "source_account_identity_sha256": "d" * 64, "requested_start": "2025-01-01", "requested_end": "2026-02-01", "covered_start": "2025-01-01", "covered_end": "2026-02-01", "required_categories": ["CASH"], "completed_categories": ["CASH"], "unavailable_categories": [], "pagination": {"mode": "SYNTHETIC", "page_count": 1, "request_response_chain_sha256": "e" * 64, "terminal_response_sha256": "f" * 64, "terminal": True}, "completeness": "EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES", "truncated": False}
-    receipt_snapshot = InputSnapshot.from_bytes("mixed receipt", canonical_json_bytes(receipt))
-    authority = {"schema_version": 1, "artifact_id": "authority/account-interval-retrieval-receipt-authority.json", "as_of_date": "2026-02-01", "receipts": [{"artifact_id": receipt_id, "sha256": receipt_snapshot.sha256, "size_bytes": receipt_snapshot.size_bytes, "contract": {"adapter_name": "SYNTHETIC", "adapter_version": "1", "code_sha256": "b" * 64, "provider": "SYNTHETIC", "account_id": account_id, "source_account_identity_sha256": "d" * 64, "provider_generation": "c" * 64, "provider_generation_manifest": raw_artifact, "raw_evidence_artifacts": [raw_artifact], "required_categories": ["CASH"], "pagination": receipt["pagination"]}}]}
+    receipt = {
+        "schema_version": 2,
+        "artifact_id": receipt_id,
+        "issuer": {
+            "adapter_name": "SYNTHETIC",
+            "adapter_version": "1",
+            "code_sha256": "b" * 64,
+        },
+        "provider": "SYNTHETIC",
+        "provider_generation": "c" * 64,
+        "provider_generation_manifest": raw_artifact,
+        "raw_evidence_artifacts": [raw_artifact],
+        "account_id": account_id,
+        "source_account_identity_sha256": "d" * 64,
+        "requested_start": "2025-01-01",
+        "requested_end": "2026-02-01",
+        "covered_start": "2025-01-01",
+        "covered_end": "2026-02-01",
+        "required_categories": ["CASH"],
+        "completed_categories": ["CASH"],
+        "unavailable_categories": [],
+        "pagination": {
+            "mode": "SYNTHETIC",
+            "page_count": 1,
+            "request_response_chain_sha256": "e" * 64,
+            "terminal_response_sha256": "f" * 64,
+            "terminal": True,
+        },
+        "completeness": "EXACT_ACCOUNT_INTERVAL_ALL_APPLICABLE_CATEGORIES",
+        "truncated": False,
+    }
+    receipt_snapshot = InputSnapshot.from_bytes(
+        "mixed receipt", canonical_json_bytes(receipt)
+    )
+    authority = {
+        "schema_version": 1,
+        "artifact_id": "authority/account-interval-retrieval-receipt-authority.json",
+        "as_of_date": "2026-02-01",
+        "receipts": [
+            {
+                "artifact_id": receipt_id,
+                "sha256": receipt_snapshot.sha256,
+                "size_bytes": receipt_snapshot.size_bytes,
+                "contract": {
+                    "adapter_name": "SYNTHETIC",
+                    "adapter_version": "1",
+                    "code_sha256": "b" * 64,
+                    "provider": "SYNTHETIC",
+                    "account_id": account_id,
+                    "source_account_identity_sha256": "d" * 64,
+                    "provider_generation": "c" * 64,
+                    "provider_generation_manifest": raw_artifact,
+                    "raw_evidence_artifacts": [raw_artifact],
+                    "required_categories": ["CASH"],
+                    "pagination": receipt["pagination"],
+                },
+            }
+        ],
+    }
     mapped, _ = perimeter_module._c3_mapped_assignments(selected)
     assignments = [perimeter_module._c3_assignment_record(item) for item in mapped]
-    assignment_hash = hashlib.sha256(json.dumps(sorted(assignments, key=lambda item: (item["account_id"], item["strategy_id"], item["effective_start"], str(item["effective_end"]))), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()).hexdigest()
+    assignment_hash = hashlib.sha256(
+        json.dumps(
+            sorted(
+                assignments,
+                key=lambda item: (
+                    item["account_id"],
+                    item["strategy_id"],
+                    item["effective_start"],
+                    str(item["effective_end"]),
+                ),
+            ),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode()
+    ).hexdigest()
     admissions = []
     for assignment in assignments:
         funded = assignment["account_id"] == account_id
-        row = {**assignment, "status": "FUNDED" if funded else "BLOCKED", "continuity_to_successor": False}
-        row.update({"authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1", "funded_nav_record_ids": ["mixed-nav-1"]} if funded else {"reason": "SYNTHETIC_BLOCKED"})
+        row = {
+            **assignment,
+            "status": "FUNDED" if funded else "BLOCKED",
+            "continuity_to_successor": False,
+        }
+        row.update(
+            {
+                "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                "funded_nav_record_ids": ["mixed-nav-1"],
+            }
+            if funded
+            else {"reason": "SYNTHETIC_BLOCKED"}
+        )
         admissions.append(row)
-    policy = {"schema_version": 2, "policy_id": "MAPPED_EPOCH_ADMISSION_V2", "policy_version": "2", "artifact_id": "authority/mapped-epoch-admission.json", "as_of_date": "2026-02-01", "assignment_sha256": assignment_hash, "admissions": admissions}
+    policy = {
+        "schema_version": 2,
+        "policy_id": "MAPPED_EPOCH_ADMISSION_V2",
+        "policy_version": "2",
+        "artifact_id": "authority/mapped-epoch-admission.json",
+        "as_of_date": "2026-02-01",
+        "assignment_sha256": assignment_hash,
+        "admissions": admissions,
+    }
     values = _selected_input_kwargs(selected)
-    values.update({"provider_ledger": ledger_snapshot, "provider_ledger_manifest": _generation_manifest_snapshot(catalog=ledger_snapshot, catalog_artifact_id="normalized/provider-ledger.json", catalog_schema_name="provider-ledger-catalog", catalog_schema_version="1", as_of_date="2026-02-01"), "retrieval_receipts": {receipt_id: receipt_snapshot}, "receipt_authority": InputSnapshot.from_bytes("mixed authority", canonical_json_bytes(authority)), "admission_policy": InputSnapshot.from_bytes("mixed admission", canonical_json_bytes(policy)), "manifest_schema": InputSnapshot.from_bytes("mixed schema", ACCOUNT_STRATEGY_SCHEMA_PATH.read_bytes())})
+    values.update(
+        {
+            "provider_ledger": ledger_snapshot,
+            "provider_ledger_manifest": _generation_manifest_snapshot(
+                catalog=ledger_snapshot,
+                catalog_artifact_id="normalized/provider-ledger.json",
+                catalog_schema_name="provider-ledger-catalog",
+                catalog_schema_version="1",
+                as_of_date="2026-02-01",
+            ),
+            "retrieval_receipts": {receipt_id: receipt_snapshot},
+            "receipt_authority": InputSnapshot.from_bytes(
+                "mixed authority", canonical_json_bytes(authority)
+            ),
+            "admission_policy": InputSnapshot.from_bytes(
+                "mixed admission", canonical_json_bytes(policy)
+            ),
+            "manifest_schema": InputSnapshot.from_bytes(
+                "mixed schema", ACCOUNT_STRATEGY_SCHEMA_PATH.read_bytes()
+            ),
+        }
+    )
     return perimeter_module.AccountManifestSelectedInputs(**values)
 
 
@@ -20680,12 +21372,15 @@ def _mixed_crosswalk_selected_inputs(perimeter_module: Any) -> object:
     baseline = selected.baseline.json_object()
     providers = {row["account_id"]: row["provider"] for row in baseline["accounts"]}
     mapped = [
-        row for row in baseline["assignments"]
+        row
+        for row in baseline["assignments"]
         if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
     ]
     assert len(mapped) == 15
     rows = []
-    for index, row in enumerate(sorted(mapped, key=lambda item: item["assignment_id"]), 1):
+    for index, row in enumerate(
+        sorted(mapped, key=lambda item: item["assignment_id"]), 1
+    ):
         disposition = (
             "INCLUDED_PRODUCT_EPOCH"
             if index <= 13
@@ -20766,7 +21461,10 @@ def test_gate1_synthetic_crosswalk_mixed_transport_v3_has_thirteen_display_rows(
     )
     assert json.loads(request)["schema_version"] == 3
     decoded, decoded_payloads = verifier_module.decode_verification_request(request)
-    assert decoded.current_epoch_crosswalk.contents == selected.current_epoch_crosswalk.contents
+    assert (
+        decoded.current_epoch_crosswalk.contents
+        == selected.current_epoch_crosswalk.contents
+    )
     assert decoded_payloads == payloads
 
 
@@ -20783,7 +21481,9 @@ def test_current_v9_propagates_dual_dates_and_capital_anchor_lineage(
     ledger = selected.provider_ledger.json_object()
     ledger["flows"][0].pop("nav_recognition_date")
     ledger["capital_anchors"][0]["amount"] = {
-        "currency": "USDT", "status": "AVAILABLE", "value": "499"
+        "currency": "USDT",
+        "status": "AVAILABLE",
+        "value": "499",
     }
     selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
 
@@ -20796,18 +21496,22 @@ def test_current_v9_propagates_dual_dates_and_capital_anchor_lineage(
     assert calculation["schema_version"] == 4
     assert calculation["calculation_classified_flows"]["schema_version"] == 4
     assert output["schema_version"] == 9
-    assert classified["events"][0]["nav_recognition_date"] == (
-        classified["events"][0]["event_date"]
+    assert (
+        classified["events"][0]["nav_recognition_date"]
+        == (classified["events"][0]["event_date"])
     )
-    assert calculation["calculation_ledger"]["capital_anchors"] == (
-        classified["capital_anchors"]
+    assert (
+        calculation["calculation_ledger"]["capital_anchors"]
+        == (classified["capital_anchors"])
     )
     anchor_row = next(row for row in calculation["rows"] if row["capital_anchors"])
-    assert anchor_row["capital_anchors"][0]["event_date"] < (
-        anchor_row["epoch"]["effective_start"]
+    assert (
+        anchor_row["capital_anchors"][0]["event_date"]
+        < (anchor_row["epoch"]["effective_start"])
     )
-    assert calculation["calculation_classified_flows"]["capital_anchors"] == (
-        classified["capital_anchors"]
+    assert (
+        calculation["calculation_classified_flows"]["capital_anchors"]
+        == (classified["capital_anchors"])
     )
     ok_row = next(row for row in output["rows"] if row["status"] == "OK")
     assert ok_row["opening_basis"] == "PROVIDER_CAPITAL_ANCHOR"
@@ -20844,13 +21548,17 @@ def test_first_available_nav_absorbs_preopening_flow_and_counts_later_recognitio
     selected = _mixed_composer_selected_inputs(perimeter_module)
     ledger = selected.provider_ledger.json_object()
     ledger["capital_anchors"] = []
-    ledger["flows"][0].update({
-        "event_date": "2026-01-30",
-        "nav_recognition_date": "2026-01-30",
-    })
+    ledger["flows"][0].update(
+        {
+            "event_date": "2026-01-30",
+            "nav_recognition_date": "2026-01-30",
+        }
+    )
     opening_selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
 
-    opening_payloads = perimeter_module.build_account_manifest_payloads(opening_selected)
+    opening_payloads = perimeter_module.build_account_manifest_payloads(
+        opening_selected
+    )
     opening_output = json.loads(
         opening_payloads["outputs/account-strategy-manifest.json"]
     )
@@ -20869,17 +21577,17 @@ def test_first_available_nav_absorbs_preopening_flow_and_counts_later_recognitio
         perimeter_module, opening_selected, later_ledger
     )
     later_payloads = perimeter_module.build_account_manifest_payloads(later_selected)
-    later_output = json.loads(
-        later_payloads["outputs/account-strategy-manifest.json"]
-    )
+    later_output = json.loads(later_payloads["outputs/account-strategy-manifest.json"])
     later_row = next(row for row in later_output["rows"] if row["status"] == "OK")
     assert later_row["deposits"] == "10"
-    assert later_row["capital_flow_trace"] == [{
-        "class": "EXTERNAL_IN",
-        "event_date": "2026-01-30",
-        "nav_recognition_date": "2026-01-31",
-        "amount": "10",
-    }]
+    assert later_row["capital_flow_trace"] == [
+        {
+            "class": "EXTERNAL_IN",
+            "event_date": "2026-01-30",
+            "nav_recognition_date": "2026-01-31",
+            "amount": "10",
+        }
+    ]
     assert later_row["gain"] != opening_row["gain"]
     verifier_module.IndependentAccountManifestVerifier().verify(
         _mixed_verifier_inputs(verifier_module, later_selected), later_payloads
@@ -20934,7 +21642,10 @@ def test_zero_nav_liquidation_run_bridges_only_exact_bounded_reconciliation(
         ),
         (
             verifier_module._IndependentFlowFact(
-                date(2026, 1, 2), "EXTERNAL_OUT", "USD", Decimal("32.15"),
+                date(2026, 1, 2),
+                "EXTERNAL_OUT",
+                "USD",
+                Decimal("32.15"),
                 date(2026, 1, 2),
             ),
         ),
@@ -20945,19 +21656,27 @@ def test_zero_nav_liquidation_run_bridges_only_exact_bounded_reconciliation(
     assert verifier_row["nav_observations"] == 3
     assert verifier_row["withdrawn"] == Decimal("32.15")
     assert verifier_row["observation_trace"]["links"][0]["end_date"] == "2026-01-04"
-    assert verifier_row["observation_trace"]["links"][0]["net_flow"] == Decimal("-32.15")
+    assert verifier_row["observation_trace"]["links"][0]["net_flow"] == Decimal(
+        "-32.15"
+    )
 
     invalid_cases = (
         ({("2026-01-02", "2026-01-02"): Decimal("32.14")}, navs),
-        ({("2026-01-02", "2026-01-02"): Decimal("32.15")}, {
-            "2026-01-01": Decimal("32.15"),
-            "2026-01-02": Decimal("0"),
-            "2026-01-03": Decimal("0"),
-        }),
-        ({
-            ("2026-01-02", "2026-01-02"): Decimal("32.15"),
-            ("2026-01-03", "2026-01-03"): Decimal("1"),
-        }, navs),
+        (
+            {("2026-01-02", "2026-01-02"): Decimal("32.15")},
+            {
+                "2026-01-01": Decimal("32.15"),
+                "2026-01-02": Decimal("0"),
+                "2026-01-03": Decimal("0"),
+            },
+        ),
+        (
+            {
+                ("2026-01-02", "2026-01-02"): Decimal("32.15"),
+                ("2026-01-03", "2026-01-03"): Decimal("1"),
+            },
+            navs,
+        ),
     )
     for invalid_withdrawals, invalid_navs in invalid_cases:
         blocked = producer_module.analyze_epoch(
@@ -20979,27 +21698,31 @@ def test_current_cutoff_excludes_future_economic_flow_despite_earlier_recognitio
         ]
     )
     ledger = selected.provider_ledger.json_object()
-    ledger["flows"].append({
-        "record_id": "future-economic-flow",
-        "account_id": "synthetic-account-01",
-        "event_date": "2026-02-02",
-        "nav_recognition_date": "2026-01-31",
-        "flow_type": "CONTRIBUTION",
-        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "999"},
-    })
+    ledger["flows"].append(
+        {
+            "record_id": "future-economic-flow",
+            "account_id": "synthetic-account-01",
+            "event_date": "2026-02-02",
+            "nav_recognition_date": "2026-01-31",
+            "flow_type": "CONTRIBUTION",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "999"},
+        }
+    )
     ledger["as_of_date"] = "2026-02-02"
     selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
     crosswalk = selected.current_epoch_crosswalk.json_object()
     crosswalk["calculation_cutoff_date"] = "2026-02-01"
     values = _selected_input_kwargs(selected)
-    values.update({
-        "receipt_authority": selected.receipt_authority,
-        "admission_policy": selected.admission_policy,
-        "manifest_schema": selected.manifest_schema,
-        "current_epoch_crosswalk": InputSnapshot.from_bytes(
-            "earlier current cutoff", canonical_json_bytes(crosswalk)
-        ),
-    })
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": selected.admission_policy,
+            "manifest_schema": selected.manifest_schema,
+            "current_epoch_crosswalk": InputSnapshot.from_bytes(
+                "earlier current cutoff", canonical_json_bytes(crosswalk)
+            ),
+        }
+    )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
 
     payloads = perimeter_module.build_account_manifest_payloads(selected)
@@ -21067,9 +21790,9 @@ def test_post_cutoff_allocation_is_source_lineage_not_calculation_input(
 
     assert allocation in source_classified["capital_anchors"]
     assert allocation not in calculation["calculation_ledger"]["capital_anchors"]
-    assert allocation not in calculation["calculation_classified_flows"][
-        "capital_anchors"
-    ]
+    assert (
+        allocation not in calculation["calculation_classified_flows"]["capital_anchors"]
+    )
     assert output["calculation_cutoff_date"] == "2026-02-01"
     assert output["rows"] == baseline_output["rows"]
     verifier_module.IndependentAccountManifestVerifier().verify(
@@ -21084,23 +21807,25 @@ def test_pre_epoch_strategy_allocation_is_not_admitted_by_recognition_date(
     selected = _mixed_composer_selected_inputs(perimeter_module)
     ledger = selected.provider_ledger.json_object()
     opening = ledger["capital_anchors"][0]
-    ledger["capital_anchors"].append({
-        "record_id": "mixed-strategy-allocation-1",
-        "account_id": opening["account_id"],
-        "provider_id": opening["provider_id"],
-        "generation_id": opening["generation_id"],
-        "strategy_id": opening["strategy_id"],
-        "mapping_status": "MAPPED",
-        "evidence_layer": "ACCOUNT_LIVE",
-        "event_date": "2024-12-31",
-        "nav_recognition_date": "2026-01-31",
-        "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
-        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
-        "source_artifact_id": "raw/synthetic.json",
-        "nav_source_artifact_id": "raw/synthetic.json",
-        "source_record_id": "synthetic-allocation-1",
-        "mapping_basis": "EXACT_STRATEGY_ALLOCATION",
-    })
+    ledger["capital_anchors"].append(
+        {
+            "record_id": "mixed-strategy-allocation-1",
+            "account_id": opening["account_id"],
+            "provider_id": opening["provider_id"],
+            "generation_id": opening["generation_id"],
+            "strategy_id": opening["strategy_id"],
+            "mapping_status": "MAPPED",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "event_date": "2024-12-31",
+            "nav_recognition_date": "2026-01-31",
+            "capital_type": "STRATEGY_CAPITAL_ALLOCATION",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "20"},
+            "source_artifact_id": "raw/synthetic.json",
+            "nav_source_artifact_id": "raw/synthetic.json",
+            "source_record_id": "synthetic-allocation-1",
+            "mapping_basis": "EXACT_STRATEGY_ALLOCATION",
+        }
+    )
     selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
 
     payloads = perimeter_module.build_account_manifest_payloads(selected)
@@ -21113,12 +21838,14 @@ def test_pre_epoch_strategy_allocation_is_not_admitted_by_recognition_date(
         anchor["record_id"] != "mixed-strategy-allocation-1"
         for anchor in calculation["calculation_ledger"]["capital_anchors"]
     )
-    assert row["capital_flow_trace"] == [{
-        "class": "EXTERNAL_IN",
-        "event_date": "2026-01-31",
-        "nav_recognition_date": "2026-01-31",
-        "amount": "10",
-    }]
+    assert row["capital_flow_trace"] == [
+        {
+            "class": "EXTERNAL_IN",
+            "event_date": "2026-01-31",
+            "nav_recognition_date": "2026-01-31",
+            "amount": "10",
+        }
+    ]
     verifier_module.IndependentAccountManifestVerifier().verify(
         _mixed_verifier_inputs(verifier_module, selected), payloads
     )
@@ -21146,15 +21873,22 @@ def test_opening_anchor_requires_both_dates_at_or_before_cutoff(
     payloads = perimeter_module.build_account_manifest_payloads(selected)
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
     row = next(
-        item for item in output["rows"]
-        if item["account_id"] == "synthetic-account-01"
+        item for item in output["rows"] if item["account_id"] == "synthetic-account-01"
     )
     assert row["status"] == "BLOCKED_RETURN_LINKAGE"
     assert row["blocking_reason"] == "OPENING_ANCHOR_RECOGNITION_AFTER_CUTOFF"
     assert not {
-        "opening_capital", "deposits", "invested", "net_capital",
-        "current_value", "gain", "observation_linked_return", "observed_return",
-        "observed_hwm_index", "observed_max_drawdown", "observation_trace",
+        "opening_capital",
+        "deposits",
+        "invested",
+        "net_capital",
+        "current_value",
+        "gain",
+        "observation_linked_return",
+        "observed_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "observation_trace",
         "capital_flow_trace",
     } & set(row)
 
@@ -21173,8 +21907,7 @@ def test_unattachable_recognition_emits_no_return_or_risk_numbers(
     payloads = perimeter_module.build_account_manifest_payloads(selected)
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
     row = next(
-        item for item in output["rows"]
-        if item["account_id"] == "synthetic-account-01"
+        item for item in output["rows"] if item["account_id"] == "synthetic-account-01"
     )
 
     assert row["status"] == "BLOCKED_RETURN_LINKAGE"
@@ -21226,8 +21959,7 @@ def test_in_epoch_strategy_allocation_is_retained_and_blocks_unlinked_recognitio
     calculation = json.loads(payloads["authority/calculation-inputs.json"])
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
     row = next(
-        item for item in output["rows"]
-        if item["account_id"] == "synthetic-account-01"
+        item for item in output["rows"] if item["account_id"] == "synthetic-account-01"
     )
 
     assert output["calculation_cutoff_date"] == "2026-02-01"
@@ -21264,12 +21996,10 @@ def test_independent_verifier_rejects_coordinated_recognition_date_rewrite(
     selected = _mixed_composer_selected_inputs(perimeter_module)
     payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
     calculation = json.loads(payloads["authority/calculation-inputs.json"])
-    calculation["calculation_ledger"]["flows"][0][
-        "nav_recognition_date"
-    ] = "2026-02-01"
-    calculation["calculation_classified_flows"]["events"][0][
-        "nav_recognition_date"
-    ] = "2026-02-01"
+    calculation["calculation_ledger"]["flows"][0]["nav_recognition_date"] = "2026-02-01"
+    calculation["calculation_classified_flows"]["events"][0]["nav_recognition_date"] = (
+        "2026-02-01"
+    )
     funded_row = next(row for row in calculation["rows"] if row["classified_flows"])
     funded_row["classified_flows"][0]["nav_recognition_date"] = "2026-02-01"
     payloads["authority/calculation-inputs.json"] = canonical_json_bytes(calculation)
@@ -21277,18 +22007,22 @@ def test_independent_verifier_rejects_coordinated_recognition_date_rewrite(
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
     row = next(item for item in output["rows"] if item["status"] == "OK")
     row["capital_flow_trace"][0]["nav_recognition_date"] = "2026-02-01"
-    row["observation_trace"]["links"][1].update({
-        "net_flow": "0",
-        "factor": "1.2",
-        "cumulative_index": "120",
-        "running_hwm_index": "120",
-    })
-    row["observation_trace"]["links"][2].update({
-        "net_flow": "10",
-        "factor": "1",
-        "cumulative_index": "120",
-        "running_hwm_index": "120",
-    })
+    row["observation_trace"]["links"][1].update(
+        {
+            "net_flow": "0",
+            "factor": "1.2",
+            "cumulative_index": "120",
+            "running_hwm_index": "120",
+        }
+    )
+    row["observation_trace"]["links"][2].update(
+        {
+            "net_flow": "10",
+            "factor": "1",
+            "cumulative_index": "120",
+            "running_hwm_index": "120",
+        }
+    )
     row["observation_linked_return"] = "0.2"
     row["observed_hwm_index"] = "120"
     payloads["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
@@ -21439,7 +22173,8 @@ def test_gate1_crosswalk_semantic_epoch_mutations_reject_in_both_paths(
     selected = _mixed_crosswalk_selected_inputs(perimeter_module)
     baseline = selected.baseline.json_object()
     mapped = [
-        row for row in baseline["assignments"]
+        row
+        for row in baseline["assignments"]
         if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
     ]
     if mutation == "duplicate_composite":
@@ -21450,8 +22185,8 @@ def test_gate1_crosswalk_semantic_epoch_mutations_reject_in_both_paths(
     else:
         included = mapped[1]
         included["account_id"] = mapped[0]["account_id"]
-    mutated_baseline, mutated_crosswalk = _crosswalk_bound_to_mutated_synthetic_baseline(
-        selected, baseline
+    mutated_baseline, mutated_crosswalk = (
+        _crosswalk_bound_to_mutated_synthetic_baseline(selected, baseline)
     )
     with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
         perimeter_module._validate_current_epoch_crosswalk(
@@ -21481,7 +22216,8 @@ def test_gate1_crosswalk_row_bijection_mutations_reject_in_both_paths(
         rows.append(forged)
     else:
         included = next(
-            row for row in rows
+            row
+            for row in rows
             if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
         )
         rows.append(deepcopy(included))
@@ -21504,14 +22240,15 @@ def test_gate1_count_preserving_disposition_swap_controls_exact_epoch_set(
     original_payloads = perimeter_module.build_account_manifest_payloads(selected)
     crosswalk = selected.current_epoch_crosswalk.json_object()
     included = next(
-        row for row in crosswalk["rows"]
+        row
+        for row in crosswalk["rows"]
         if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
         and row["account_id"] != "synthetic-account-01"
     )
     excluded = next(
-        row for row in crosswalk["rows"]
-        if row["product_epoch_disposition"]
-        == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
+        row
+        for row in crosswalk["rows"]
+        if row["product_epoch_disposition"] == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
     )
     removed_key = tuple(
         included[field]
@@ -21533,8 +22270,7 @@ def test_gate1_count_preserving_disposition_swap_controls_exact_epoch_set(
     assert crosswalk["disposition_counts"] == expected_counts
     assert {
         disposition: sum(
-            row["product_epoch_disposition"] == disposition
-            for row in crosswalk["rows"]
+            row["product_epoch_disposition"] == disposition for row in crosswalk["rows"]
         )
         for disposition in expected_counts
     } == expected_counts
@@ -21590,7 +22326,8 @@ def test_gate1_crosswalk_repeated_account_display_mismatch_rejects_in_both_paths
     selected = _mixed_crosswalk_selected_inputs(perimeter_module)
     baseline = selected.baseline.json_object()
     mapped = [
-        row for row in baseline["assignments"]
+        row
+        for row in baseline["assignments"]
         if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
     ]
     first, second, replacement_open = mapped[0], mapped[1], mapped[11]
@@ -21620,7 +22357,9 @@ def test_gate1_crosswalk_repeated_account_display_mismatch_rejects_in_both_paths
     rows = crosswalk["rows"]
     assert isinstance(rows, list)
     repeated_rows = [
-        row for row in rows if row["assignment_id"] in by_assignment
+        row
+        for row in rows
+        if row["assignment_id"] in by_assignment
         and row["assignment_id"] in {first["assignment_id"], second["assignment_id"]}
     ]
     assert len(repeated_rows) == 2
@@ -21636,8 +22375,7 @@ def test_gate1_crosswalk_repeated_account_display_mismatch_rejects_in_both_paths
             }
         )
     next(
-        row for row in rows
-        if row["assignment_id"] == replacement_open["assignment_id"]
+        row for row in rows if row["assignment_id"] == replacement_open["assignment_id"]
     )["effective_end"] = None
     values = _selected_input_kwargs(selected)
     values["baseline"] = baseline_snapshot
@@ -21652,11 +22390,14 @@ def test_gate1_crosswalk_repeated_account_display_mismatch_rejects_in_both_paths
     crosswalk["selected_baseline"]["generation_id"] = repeated.baseline_generation_id
     valid_crosswalk = _with_gate1_crosswalk(perimeter_module, repeated, crosswalk)
     assert len(perimeter_module._c3_mapped_assignments(valid_crosswalk)[0]) == 13
-    assert len(
-        verifier_module._independently_validate_current_epoch_crosswalk(
-            valid_crosswalk.baseline, valid_crosswalk.current_epoch_crosswalk
+    assert (
+        len(
+            verifier_module._independently_validate_current_epoch_crosswalk(
+                valid_crosswalk.baseline, valid_crosswalk.current_epoch_crosswalk
+            )
         )
-    ) == 13
+        == 13
+    )
     repeated_rows[1]["account_label"] = "Mismatched synthetic account"
     mutated = _with_gate1_crosswalk(perimeter_module, repeated, crosswalk)
     with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
@@ -21674,7 +22415,9 @@ def test_gate1_independent_verifier_rejects_staged_crosswalk_byte_mutation(
     payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
     forged = json.loads(payloads["authority/account-assignment-crosswalk.json"])
     forged["rows"][0]["account_label"] = "forged staged display"
-    payloads["authority/account-assignment-crosswalk.json"] = canonical_json_bytes(forged)
+    payloads["authority/account-assignment-crosswalk.json"] = canonical_json_bytes(
+        forged
+    )
     with pytest.raises(verifier_module.IndependentVerificationError):
         verifier_module.IndependentAccountManifestVerifier().verify(
             _mixed_verifier_inputs(verifier_module, selected), payloads
@@ -21691,28 +22434,43 @@ def test_gate1_selected_assignment_key_mutations_cannot_emit_a_candidate(
 
     selected = _mixed_crosswalk_selected_inputs(perimeter_module)
     selected_rows, _ = perimeter_module._c3_mapped_assignments(selected)
-    keys = [tuple(perimeter_module._c3_assignment_record(row).values()) for row in selected_rows]
+    keys = [
+        tuple(perimeter_module._c3_assignment_record(row).values())
+        for row in selected_rows
+    ]
     if mutation == "unknown":
-        forged_keys = [*keys, ("unknown-account", "unknown-strategy", "2026-01-01", None)]
+        forged_keys = [
+            *keys,
+            ("unknown-account", "unknown-strategy", "2026-01-01", None),
+        ]
     elif mutation == "missing":
         forged_keys = keys[:-1]
     else:
         baseline = selected.baseline.json_object()
         additional = next(
-            row for row in baseline["assignments"]
+            row
+            for row in baseline["assignments"]
             if row["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
             and tuple(perimeter_module._c3_assignment_record(row).values()) not in keys
         )
-        forged_keys = [*keys, tuple(perimeter_module._c3_assignment_record(additional).values())]
+        forged_keys = [
+            *keys,
+            tuple(perimeter_module._c3_assignment_record(additional).values()),
+        ]
     original = perimeter_module.ManifestCandidateSnapshots
 
     def forged_candidate(*args: object, **kwargs: object) -> object:
         kwargs["selected_assignment_keys"] = tuple(forged_keys)
         return original(*args, **kwargs)
 
-    monkeypatch.setattr(perimeter_module, "ManifestCandidateSnapshots", forged_candidate)
+    monkeypatch.setattr(
+        perimeter_module, "ManifestCandidateSnapshots", forged_candidate
+    )
     with pytest.raises(
-        (account_strategy_manifest.ManifestError, perimeter_module.AccountAssignmentPerimeterError)
+        (
+            account_strategy_manifest.ManifestError,
+            perimeter_module.AccountAssignmentPerimeterError,
+        )
     ):
         perimeter_module.build_account_manifest_payloads(selected)
 
@@ -21725,7 +22483,9 @@ def test_gate1_independent_verifier_rejects_producer_selection_monkeypatch(
     selected = _mixed_crosswalk_selected_inputs(perimeter_module)
     original = perimeter_module._c3_mapped_assignments
 
-    def forged_selection(inputs: object) -> tuple[list[dict[str, object]], dict[str, str]]:
+    def forged_selection(
+        inputs: object,
+    ) -> tuple[list[dict[str, object]], dict[str, str]]:
         mapped, providers = original(inputs)
         return mapped[:-1], providers
 
@@ -21881,9 +22641,7 @@ def _mixed_two_receipt_selected_inputs(perimeter_module: Any) -> object:
                     "source_account_identity_sha256"
                 ],
                 "provider_generation": receipt["provider_generation"],
-                "provider_generation_manifest": receipt[
-                    "provider_generation_manifest"
-                ],
+                "provider_generation_manifest": receipt["provider_generation_manifest"],
                 "raw_evidence_artifacts": receipt["raw_evidence_artifacts"],
                 "required_categories": receipt["required_categories"],
                 "pagination": receipt["pagination"],
@@ -21892,9 +22650,7 @@ def _mixed_two_receipt_selected_inputs(perimeter_module: Any) -> object:
 
     authority = {
         "schema_version": 1,
-        "artifact_id": (
-            "authority/account-interval-retrieval-receipt-authority.json"
-        ),
+        "artifact_id": ("authority/account-interval-retrieval-receipt-authority.json"),
         "as_of_date": "2026-02-01",
         "receipts": [
             authority_entry(second_id, second_snapshot, second),
@@ -21968,7 +22724,9 @@ def test_mixed_two_receipts_produce_two_literal_independent_numeric_rows(
     selected = _mixed_two_receipt_selected_inputs(perimeter_module)
     payloads = perimeter_module.build_account_manifest_payloads(selected)
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
-    ok_rows = {row["account_id"]: row for row in output["rows"] if row["status"] == "OK"}
+    ok_rows = {
+        row["account_id"]: row for row in output["rows"] if row["status"] == "OK"
+    }
     assert {
         account_id: {
             key: row[key]
@@ -22087,13 +22845,9 @@ def _mixed_authority_entry_for_payload(
             "code_sha256": issuer["code_sha256"],
             "provider": receipt["provider"],
             "account_id": receipt["account_id"],
-            "source_account_identity_sha256": receipt[
-                "source_account_identity_sha256"
-            ],
+            "source_account_identity_sha256": receipt["source_account_identity_sha256"],
             "provider_generation": receipt["provider_generation"],
-            "provider_generation_manifest": receipt[
-                "provider_generation_manifest"
-            ],
+            "provider_generation_manifest": receipt["provider_generation_manifest"],
             "raw_evidence_artifacts": receipt["raw_evidence_artifacts"],
             "required_categories": receipt["required_categories"],
             "pagination": receipt["pagination"],
@@ -22181,9 +22935,7 @@ def test_mixed_open_receipt_cutoff_bounds_calculation_projection(
         }
     )
     next(
-        nav
-        for nav in ledger["nav_observations"]
-        if nav["record_id"] == "mixed-nav-3"
+        nav for nav in ledger["nav_observations"] if nav["record_id"] == "mixed-nav-3"
     )["nav"]["value"] = "777"
     ledger["flows"].append(
         {
@@ -22206,11 +22958,14 @@ def test_mixed_open_receipt_cutoff_bounds_calculation_projection(
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
 
     assert coverage["as_of_date"] == "2026-02-01"
-    assert next(
-        row
-        for row in coverage["rows"]
-        if row["assignment"]["account_id"] == "synthetic-account-01"
-    )["requested_end"] == "2026-01-31"
+    assert (
+        next(
+            row
+            for row in coverage["rows"]
+            if row["assignment"]["account_id"] == "synthetic-account-01"
+        )["requested_end"]
+        == "2026-01-31"
+    )
     assert {
         nav["record_id"]
         for nav in calculation["calculation_ledger"]["nav_observations"]
@@ -22219,13 +22974,12 @@ def test_mixed_open_receipt_cutoff_bounds_calculation_projection(
         flow["record_id"] for flow in calculation["calculation_ledger"]["flows"]
     } == {"mixed-flow-1"}
     assert "mixed-nav-3" not in payloads["authority/calculation-inputs.json"].decode()
-    assert "post-receipt-flow-333" not in payloads[
-        "authority/calculation-inputs.json"
-    ].decode()
+    assert (
+        "post-receipt-flow-333"
+        not in payloads["authority/calculation-inputs.json"].decode()
+    )
     row = next(
-        item
-        for item in output["rows"]
-        if item["account_id"] == "synthetic-account-01"
+        item for item in output["rows"] if item["account_id"] == "synthetic-account-01"
     )
     assert {key: row[key] for key in ("end", "current_value", "deposits")} == {
         "end": "2026-01-31",
@@ -22311,9 +23065,7 @@ def _mixed_same_account_continuity_selected_inputs(perimeter_module: Any) -> obj
         ]
     )
     ledger["flows"] = [
-        flow
-        for flow in ledger["flows"]
-        if flow["account_id"] != "synthetic-account-01"
+        flow for flow in ledger["flows"] if flow["account_id"] != "synthetic-account-01"
     ]
     ledger["flows"].extend(
         [
@@ -22371,16 +23123,12 @@ def _mixed_same_account_continuity_selected_inputs(perimeter_module: Any) -> obj
         )
         receipts[receipt_id] = receipt
     snapshots = {
-        receipt_id: InputSnapshot.from_bytes(
-            receipt_id, canonical_json_bytes(receipt)
-        )
+        receipt_id: InputSnapshot.from_bytes(receipt_id, canonical_json_bytes(receipt))
         for receipt_id, receipt in receipts.items()
     }
     authority = {
         "schema_version": 1,
-        "artifact_id": (
-            "authority/account-interval-retrieval-receipt-authority.json"
-        ),
+        "artifact_id": ("authority/account-interval-retrieval-receipt-authority.json"),
         "as_of_date": "2026-01-28",
         "receipts": [
             _mixed_authority_entry_for_payload(
@@ -22411,16 +23159,21 @@ def _mixed_same_account_continuity_selected_inputs(perimeter_module: Any) -> obj
             next(item for item in assignments if item["strategy_id"] == strategy_id)
             for strategy_id in ("synthetic-strategy-01a", "synthetic-strategy-01b")
         ):
-            rows.append({
-                **original,
-                **{
-                    key: assignment[key]
-                    for key in (
-                        "assignment_id", "account_id", "strategy_id",
-                        "effective_start", "effective_end",
-                    )
-                },
-            })
+            rows.append(
+                {
+                    **original,
+                    **{
+                        key: assignment[key]
+                        for key in (
+                            "assignment_id",
+                            "account_id",
+                            "strategy_id",
+                            "effective_start",
+                            "effective_end",
+                        )
+                    },
+                }
+            )
 
     provisional = _selected_input_kwargs(selected)
     provisional.update(
@@ -22478,11 +23231,7 @@ def _mixed_same_account_continuity_selected_inputs(perimeter_module: Any) -> obj
                     "continuity_to_successor": predecessor,
                     "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
                     "funded_nav_record_ids": [
-                        (
-                            "continuity-nav-p3"
-                            if predecessor
-                            else "continuity-nav-s1"
-                        )
+                        ("continuity-nav-p3" if predecessor else "continuity-nav-s1")
                     ],
                 }
             )
@@ -22533,11 +23282,7 @@ def test_mixed_same_account_sequential_receipts_preserve_continuity_once(
     } == {"2026-01-28", "2026-02-01"}
     payloads = perimeter_module.build_account_manifest_payloads(selected)
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
-    rows = {
-        row["strategy_id"]: row
-        for row in output["rows"]
-        if row["status"] == "OK"
-    }
+    rows = {row["strategy_id"]: row for row in output["rows"] if row["status"] == "OK"}
     assert {
         strategy_id: {
             key: row[key]
@@ -22687,13 +23432,18 @@ def test_mixed_two_receipts_keep_coverage_and_admission_independent(
     payloads = perimeter_module.build_account_manifest_payloads(selected)
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
     row = next(
-        item for item in output["rows"]
-        if item["account_id"] == "synthetic-account-02"
+        item for item in output["rows"] if item["account_id"] == "synthetic-account-02"
     )
     assert row["status"] == expected_status
     forbidden = {
-        "opening_capital", "deposits", "invested", "net_capital",
-        "current_value", "gain", "observation_trace", "capital_flow_trace",
+        "opening_capital",
+        "deposits",
+        "invested",
+        "net_capital",
+        "current_value",
+        "gain",
+        "observation_trace",
+        "capital_flow_trace",
     }
     assert forbidden.isdisjoint(row)
     report = json.loads(
@@ -22748,7 +23498,8 @@ def test_mixed_two_receipt_verifier_rejects_blocked_numeric_injection(
     }
     admission = selected.admission_policy.json_object()
     row = next(
-        item for item in admission["admissions"]
+        item
+        for item in admission["admissions"]
         if item["account_id"] == "synthetic-account-02"
     )
     row.clear()
@@ -22772,8 +23523,7 @@ def test_mixed_two_receipt_verifier_rejects_blocked_numeric_injection(
     verifier.verify(verifier_inputs, payloads)
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
     blocked = next(
-        item for item in output["rows"]
-        if item["account_id"] == "synthetic-account-02"
+        item for item in output["rows"] if item["account_id"] == "synthetic-account-02"
     )
     blocked["gain"] = "0"
     payloads["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
@@ -22896,18 +23646,14 @@ def test_mixed_finalized_report_path_is_reserved_across_public_boundaries(
     if reserved_id == "verification/independent-verification.json":
         from jsonschema import Draft202012Validator
 
-        report_schema = json.loads(
-            VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8")
-        )
+        report_schema = json.loads(VERIFIER_SCHEMA_PATH.read_text(encoding="utf-8"))
         mutated_report = deepcopy(report)
         mutated_report["subjects"][10] = {
             "path": reserved_id,
             "sha256": "7" * 64,
             "size_bytes": 7,
         }
-        assert list(
-            Draft202012Validator(report_schema).iter_errors(mutated_report)
-        )
+        assert list(Draft202012Validator(report_schema).iter_errors(mutated_report))
 
     receipts = {
         receipt_id: snapshot.json_object()
@@ -22959,9 +23705,7 @@ def test_mixed_finalized_report_path_is_reserved_across_public_boundaries(
         "outputs/account-strategy-manifest.json",
         "authority/account-interval-retrieval-receipt-authority.json",
     ]
-    dynamic_paths = sorted(
-        ("receipt/Z-account-01.json", reserved_id), key=str.casefold
-    )
+    dynamic_paths = sorted(("receipt/Z-account-01.json", reserved_id), key=str.casefold)
     parsed["subjects"] = [
         subject_entries[path] for path in (*fixed_paths, *dynamic_paths)
     ]
@@ -22977,9 +23721,7 @@ def test_mixed_receipt_cardinality_is_closed_at_fifteen(
     """The static mixed boundary admits 15 portable IDs and rejects the 16th."""
 
     snapshot = InputSnapshot.from_bytes("receipt boundary", b"{}")
-    fifteen = {
-        f"receipt/boundary-{index:02d}.json": snapshot for index in range(15)
-    }
+    fifteen = {f"receipt/boundary-{index:02d}.json": snapshot for index in range(15)}
     perimeter_module._validate_mixed_receipt_cardinality(fifteen)
     with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
         perimeter_module._validate_mixed_receipt_cardinality(
@@ -23085,9 +23827,7 @@ def test_mixed_two_receipt_verifier_and_request_reject_subject_set_or_order_drif
     )
     mutations.append(extra_subject)
     unsorted_subjects = deepcopy(parsed)
-    unsorted_subjects["subjects"][-2:] = reversed(
-        unsorted_subjects["subjects"][-2:]
-    )
+    unsorted_subjects["subjects"][-2:] = reversed(unsorted_subjects["subjects"][-2:])
     mutations.append(unsorted_subjects)
     unsorted_receipts = deepcopy(parsed)
     unsorted_receipts["retrieval_receipts"][-2:] = reversed(
@@ -23107,17 +23847,28 @@ def test_mixed_composer_routes_one_receipt_to_one_literal_numeric_row(
         _mixed_composer_selected_inputs(perimeter_module)
     )
     assert set(payloads) == {
-        "authority/selected-input-identities.json", "authority/account-assignment-perimeter.json",
+        "authority/selected-input-identities.json",
+        "authority/account-assignment-perimeter.json",
         "authority/account-assignment-crosswalk.json",
-        "authority/calculation-inputs.json", "authority/flow-classification-policy.json",
-        "authority/classified-flows.json", "authority/account-flow-coverage.json",
-        "authority/mapped-epoch-admission.json", "authority/code-identities.json",
+        "authority/calculation-inputs.json",
+        "authority/flow-classification-policy.json",
+        "authority/classified-flows.json",
+        "authority/account-flow-coverage.json",
+        "authority/mapped-epoch-admission.json",
+        "authority/code-identities.json",
         "authority/account-interval-retrieval-receipt-authority.json",
-        "receipt/mixed-account-01.json", "outputs/account-strategy-manifest.json",
+        "receipt/mixed-account-01.json",
+        "outputs/account-strategy-manifest.json",
     }
     selected = _mixed_composer_selected_inputs(perimeter_module)
-    assert payloads["authority/account-interval-retrieval-receipt-authority.json"] == selected.receipt_authority.contents
-    assert payloads["receipt/mixed-account-01.json"] == selected.retrieval_receipts["receipt/mixed-account-01.json"].contents
+    assert (
+        payloads["authority/account-interval-retrieval-receipt-authority.json"]
+        == selected.receipt_authority.contents
+    )
+    assert (
+        payloads["receipt/mixed-account-01.json"]
+        == selected.retrieval_receipts["receipt/mixed-account-01.json"].contents
+    )
     coverage = json.loads(payloads["authority/account-flow-coverage.json"])
     assert [row["status"] for row in coverage["rows"]].count("COMPLETE") == 1
     assert [row["status"] for row in coverage["rows"]].count("BLOCKED") == 12
@@ -23127,10 +23878,56 @@ def test_mixed_composer_routes_one_receipt_to_one_literal_numeric_row(
     output = json.loads(payloads["outputs/account-strategy-manifest.json"])
     ok_rows = [row for row in output["rows"] if row["status"] == "OK"]
     assert len(ok_rows) == 1
-    assert {key: ok_rows[0][key] for key in ("opening_capital", "deposits", "internal_in", "invested", "withdrawn", "net_capital", "current_value", "gain")} == {"opening_capital": "50", "deposits": "10", "internal_in": "0", "invested": "60", "withdrawn": "0", "net_capital": "60", "current_value": "70", "gain": "10"}
+    assert {
+        key: ok_rows[0][key]
+        for key in (
+            "opening_capital",
+            "deposits",
+            "internal_in",
+            "invested",
+            "withdrawn",
+            "net_capital",
+            "current_value",
+            "gain",
+        )
+    } == {
+        "opening_capital": "50",
+        "deposits": "10",
+        "internal_in": "0",
+        "invested": "60",
+        "withdrawn": "0",
+        "net_capital": "60",
+        "current_value": "70",
+        "gain": "10",
+    }
     blocked = [row for row in output["rows"] if row["status"] == "BLOCKED_ADMISSION"]
     assert len(blocked) == 12
-    forbidden = {"start", "end", "opening_capital", "deposits", "internal_in", "invested", "external_withdrawals", "internal_out", "withdrawn", "net_capital", "current_value", "gain", "return_on_net_capital", "annualized_return_on_net_capital", "xirr_diagnostic", "observation_linked_return", "observed_return", "observed_hwm_index", "observed_max_drawdown", "opening_basis", "observation_trace", "capital_flow_trace", "nav_observation_trace", "nav_observations"}
+    forbidden = {
+        "start",
+        "end",
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "invested",
+        "external_withdrawals",
+        "internal_out",
+        "withdrawn",
+        "net_capital",
+        "current_value",
+        "gain",
+        "return_on_net_capital",
+        "annualized_return_on_net_capital",
+        "xirr_diagnostic",
+        "observation_linked_return",
+        "observed_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "opening_basis",
+        "observation_trace",
+        "capital_flow_trace",
+        "nav_observation_trace",
+        "nav_observations",
+    }
     assert all(forbidden.isdisjoint(row) for row in blocked)
 
 
@@ -23149,7 +23946,9 @@ def test_mixed_schema_scopes_current_receipt_outputs_only(
         captured["candidate"] = deepcopy(candidate)
         return candidate
 
-    monkeypatch.setattr(perimeter_module, "build_manifest_candidate_from_snapshots", capture)
+    monkeypatch.setattr(
+        perimeter_module, "build_manifest_candidate_from_snapshots", capture
+    )
     mixed = json.loads(
         perimeter_module.build_account_manifest_payloads(selected)[
             "outputs/account-strategy-manifest.json"
@@ -23162,11 +23961,19 @@ def test_mixed_schema_scopes_current_receipt_outputs_only(
     )
     assert generic["schema_version"] == 9
     assert "receipt_authority" in generic["source_identities"]["flow_coverage"]
-    assert generic["source_identities"]["admission_policy"]["artifact"]["schema"]["version"] == "2"
+    assert (
+        generic["source_identities"]["admission_policy"]["artifact"]["schema"][
+            "version"
+        ]
+        == "2"
+    )
     assert validator.is_valid(generic)
     assert mixed["schema_version"] == 9
     assert mixed["source_identities"]["calculation_inputs"]["schema"]["version"] == "4"
-    assert mixed["source_identities"]["admission_policy"]["artifact"]["schema"]["version"] == "2"
+    assert (
+        mixed["source_identities"]["admission_policy"]["artifact"]["schema"]["version"]
+        == "2"
+    )
     assert validator.is_valid(mixed)
     legacy = json.loads(
         perimeter_module.build_blocked_account_manifest_payloads(
@@ -23174,7 +23981,10 @@ def test_mixed_schema_scopes_current_receipt_outputs_only(
         )["outputs/account-strategy-manifest.json"]
     )
     assert legacy["source_identities"]["calculation_inputs"]["schema"]["version"] == "1"
-    assert legacy["source_identities"]["admission_policy"]["artifact"]["schema"]["version"] == "1"
+    assert (
+        legacy["source_identities"]["admission_policy"]["artifact"]["schema"]["version"]
+        == "1"
+    )
     assert validator.is_valid(legacy)
 
 
@@ -23201,7 +24011,10 @@ def test_mixed_composer_retains_the_producer_validated_earlier_authority_date(
             "outputs/account-strategy-manifest.json"
         ]
     )
-    assert output["source_identities"]["flow_coverage"]["receipt_authority"]["as_of_date"] == "2026-01-31"
+    assert (
+        output["source_identities"]["flow_coverage"]["receipt_authority"]["as_of_date"]
+        == "2026-01-31"
+    )
 
 
 def test_mixed_composer_rejects_a_generic_candidate_identity_substitution(
@@ -23212,10 +24025,14 @@ def test_mixed_composer_rejects_a_generic_candidate_identity_substitution(
 
     def substituted(inputs: object) -> object:
         candidate = deepcopy(original(inputs))
-        candidate["source_identities"]["classified_flows"]["artifact"]["sha256"] = "0" * 64
+        candidate["source_identities"]["classified_flows"]["artifact"]["sha256"] = (
+            "0" * 64
+        )
         return candidate
 
-    monkeypatch.setattr(perimeter_module, "build_manifest_candidate_from_snapshots", substituted)
+    monkeypatch.setattr(
+        perimeter_module, "build_manifest_candidate_from_snapshots", substituted
+    )
     with pytest.raises(
         perimeter_module.AccountAssignmentPerimeterError,
         match="calculation identities differ",
@@ -23225,7 +24042,9 @@ def test_mixed_composer_rejects_a_generic_candidate_identity_substitution(
         )
 
 
-@pytest.mark.parametrize("identity_path", ["baseline", "flow_coverage", "calculation_code"])
+@pytest.mark.parametrize(
+    "identity_path", ["baseline", "flow_coverage", "calculation_code"]
+)
 def test_mixed_composer_rejects_other_generic_identity_substitutions(
     perimeter_module: Any, monkeypatch: pytest.MonkeyPatch, identity_path: str
 ) -> None:
@@ -23237,12 +24056,16 @@ def test_mixed_composer_rejects_other_generic_identity_substitutions(
         if identity_path == "baseline":
             candidate["source_identities"]["baseline"]["generation_id"] = "0" * 64
         elif identity_path == "flow_coverage":
-            candidate["source_identities"]["flow_coverage"]["artifact"]["sha256"] = "0" * 64
+            candidate["source_identities"]["flow_coverage"]["artifact"]["sha256"] = (
+                "0" * 64
+            )
         else:
             candidate["source_identities"]["calculation_code"]["sha256"] = "0" * 64
         return candidate
 
-    monkeypatch.setattr(perimeter_module, "build_manifest_candidate_from_snapshots", substituted)
+    monkeypatch.setattr(
+        perimeter_module, "build_manifest_candidate_from_snapshots", substituted
+    )
     with pytest.raises(
         perimeter_module.AccountAssignmentPerimeterError,
         match="calculation identities differ",
@@ -23268,7 +24091,9 @@ def test_mixed_composer_rejects_receipt_provider_generation_mismatch(
     selected = _mixed_composer_selected_inputs(perimeter_module)
     ledger = selected.provider_ledger.json_object()
     ledger["provider_generations"][0][field] = value
-    ledger_snapshot = InputSnapshot.from_bytes("mutated mixed ledger", canonical_json_bytes(ledger))
+    ledger_snapshot = InputSnapshot.from_bytes(
+        "mutated mixed ledger", canonical_json_bytes(ledger)
+    )
     values = _selected_input_kwargs(selected)
     values.update(
         {
@@ -23301,7 +24126,9 @@ def test_mixed_composer_rejects_a_lowercase_baseline_provider_alias(
     selected = _mixed_composer_selected_inputs(perimeter_module)
     baseline = selected.baseline.json_object()
     baseline["accounts"][0]["provider"] = "synthetic"
-    baseline_snapshot = InputSnapshot.from_bytes("aliased baseline", canonical_json_bytes(baseline))
+    baseline_snapshot = InputSnapshot.from_bytes(
+        "aliased baseline", canonical_json_bytes(baseline)
+    )
     baseline_manifest = _generation_manifest_snapshot(
         catalog=baseline_snapshot,
         catalog_artifact_id="normalized/portfolio-baseline.json",
@@ -23346,7 +24173,9 @@ def test_mixed_composer_rejects_a_self_consistent_receipt_authority_evidence_mut
     receipt_id = "receipt/mixed-account-01.json"
     receipt = selected.retrieval_receipts[receipt_id].json_object()
     receipt["provider_generation_manifest"][field] = value
-    receipt_snapshot = InputSnapshot.from_bytes("mutated receipt", canonical_json_bytes(receipt))
+    receipt_snapshot = InputSnapshot.from_bytes(
+        "mutated receipt", canonical_json_bytes(receipt)
+    )
     authority = selected.receipt_authority.json_object()
     authority_entry = authority["receipts"][0]
     authority_entry["sha256"] = receipt_snapshot.sha256
@@ -23356,7 +24185,9 @@ def test_mixed_composer_rejects_a_self_consistent_receipt_authority_evidence_mut
     values.update(
         {
             "retrieval_receipts": {receipt_id: receipt_snapshot},
-            "receipt_authority": InputSnapshot.from_bytes("mutated authority", canonical_json_bytes(authority)),
+            "receipt_authority": InputSnapshot.from_bytes(
+                "mutated authority", canonical_json_bytes(authority)
+            ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
         }
@@ -23378,7 +24209,9 @@ def test_mixed_composer_rejects_receipt_path_collision_before_payload_mapping(
     collision = "authority/code-identities.json"
     receipt = selected.retrieval_receipts["receipt/mixed-account-01.json"].json_object()
     receipt["artifact_id"] = collision
-    receipt_snapshot = InputSnapshot.from_bytes("colliding receipt", canonical_json_bytes(receipt))
+    receipt_snapshot = InputSnapshot.from_bytes(
+        "colliding receipt", canonical_json_bytes(receipt)
+    )
     authority = selected.receipt_authority.json_object()
     authority["receipts"][0]["artifact_id"] = collision
     authority["receipts"][0]["sha256"] = receipt_snapshot.sha256
@@ -23387,7 +24220,9 @@ def test_mixed_composer_rejects_receipt_path_collision_before_payload_mapping(
     values.update(
         {
             "retrieval_receipts": {collision: receipt_snapshot},
-            "receipt_authority": InputSnapshot.from_bytes("colliding authority", canonical_json_bytes(authority)),
+            "receipt_authority": InputSnapshot.from_bytes(
+                "colliding authority", canonical_json_bytes(authority)
+            ),
             "admission_policy": selected.admission_policy,
             "manifest_schema": selected.manifest_schema,
         }
@@ -23401,9 +24236,7 @@ def test_mixed_composer_rejects_receipt_path_collision_before_payload_mapping(
         )
 
 
-def _mixed_verifier_inputs(
-    verifier_module: Any, selected: object
-) -> object:
+def _mixed_verifier_inputs(verifier_module: Any, selected: object) -> object:
     values = _selected_input_kwargs(selected)
     values.update(
         {
@@ -23584,9 +24417,7 @@ def test_mixed_admitted_projection_excludes_unrelated_blocked_facts(
     selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
     payloads = perimeter_module.build_account_manifest_payloads(selected)
 
-    outer_events = json.loads(
-        payloads["authority/classified-flows.json"]
-    )["events"]
+    outer_events = json.loads(payloads["authority/classified-flows.json"])["events"]
     blocked = next(
         event
         for event in outer_events
@@ -23676,8 +24507,7 @@ def test_mixed_admitted_projection_ignores_foreign_currency_blocked_evidence(
         for nav in calculation["calculation_ledger"]["nav_observations"]
     } == {"mixed-nav-1", "mixed-nav-2", "mixed-nav-3"}
     assert {
-        flow["record_id"]
-        for flow in calculation["calculation_ledger"]["flows"]
+        flow["record_id"] for flow in calculation["calculation_ledger"]["flows"]
     } == {"mixed-flow-1"}
     classified = json.loads(payloads["authority/classified-flows.json"])["events"]
     blocked_flow = next(
@@ -23734,14 +24564,10 @@ def _mixed_internal_selected(
             "flow_type": "INTERNAL_TRANSFER",
             "disposition": "INTERNAL",
             "amount_sign": "NONZERO",
-            "counterparty_rule": (
-                "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
-            ),
+            "counterparty_rule": ("SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"),
         }
     )
-    return _mixed_selected_with_ledger(
-        perimeter_module, selected, ledger, policy
-    )
+    return _mixed_selected_with_ledger(perimeter_module, selected, ledger, policy)
 
 
 @pytest.mark.parametrize("selected_edge", ("unresolved", "unavailable"))
@@ -23828,9 +24654,7 @@ def test_mixed_admitted_projection_includes_exact_internal_counterpart(
         "gain": "10",
     }
     counterpart = next(
-        row
-        for row in output["rows"]
-        if row["account_id"] == "synthetic-account-02"
+        row for row in output["rows"] if row["account_id"] == "synthetic-account-02"
     )
     assert counterpart["status"] == "BLOCKED_ADMISSION"
     assert {
@@ -23951,9 +24775,7 @@ def _refresh_mixed_calculation_projection_lineage(
     calculation["calculation_classified_flows"]["ledger_identity"] = deepcopy(
         ledger_identity
     )
-    classified_bytes = canonical_json_bytes(
-        calculation["calculation_classified_flows"]
-    )
+    classified_bytes = canonical_json_bytes(calculation["calculation_classified_flows"])
     classified_artifact = calculation["calculation_flow_coverage"][
         "classified_flows_artifact"
     ]
@@ -24007,9 +24829,7 @@ def test_mixed_admitted_projection_mutation_is_independently_rejected(
     calculation_source["sha256"] = hashlib.sha256(
         mutated["authority/calculation-inputs.json"]
     ).hexdigest()
-    calculation_source["size_bytes"] = len(
-        mutated["authority/calculation-inputs.json"]
-    )
+    calculation_source["size_bytes"] = len(mutated["authority/calculation-inputs.json"])
     mutated["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
 
     with pytest.raises(verifier_module.IndependentVerificationError):
@@ -24250,9 +25070,22 @@ def test_mixed_independent_verifier_rejects_partial_selection_and_layout_drift(
     verifier = verifier_module.IndependentAccountManifestVerifier()
     for mutated in (
         {**payloads, "unexpected.json": canonical_json_bytes({"unexpected": True})},
-        {key: value for key, value in payloads.items() if key != "authority/account-interval-retrieval-receipt-authority.json"},
-        {key: value for key, value in payloads.items() if key != "receipt/mixed-account-01.json"},
-        {**payloads, "verification/independent-verification.json": canonical_json_bytes({"status": "VERIFIED"})},
+        {
+            key: value
+            for key, value in payloads.items()
+            if key != "authority/account-interval-retrieval-receipt-authority.json"
+        },
+        {
+            key: value
+            for key, value in payloads.items()
+            if key != "receipt/mixed-account-01.json"
+        },
+        {
+            **payloads,
+            "verification/independent-verification.json": canonical_json_bytes(
+                {"status": "VERIFIED"}
+            ),
+        },
     ):
         with pytest.raises(verifier_module.IndependentVerificationError):
             verifier.verify(mixed_inputs, mutated)
@@ -24320,7 +25153,8 @@ def test_mixed_independent_verifier_v3_report_schema_is_closed(
 
     duplicate_ok = deepcopy(report)
     blocked = next(
-        chain for chain in duplicate_ok["blocker_chains"]
+        chain
+        for chain in duplicate_ok["blocker_chains"]
         if chain["numeric_candidate"] is False
     )
     blocked["coverage"] = {"status": "COMPLETE", "blocker_code": None}
@@ -24374,9 +25208,7 @@ def _rebound_mixed_verifier_inputs(
                 else admission_policy
             ),
             "manifest_schema": (
-                selected.manifest_schema
-                if manifest_schema is None
-                else manifest_schema
+                selected.manifest_schema if manifest_schema is None else manifest_schema
             ),
         }
     )
@@ -24392,9 +25224,7 @@ def _refresh_mixed_selected_identity_subject(
     manifest_schema_snapshot: InputSnapshot | None = None,
 ) -> dict[str, bytes]:
     mutated = dict(payloads)
-    selected_identity = json.loads(
-        mutated["authority/selected-input-identities.json"]
-    )
+    selected_identity = json.loads(mutated["authority/selected-input-identities.json"])
     if receipt_snapshot is not None:
         selected_identity["retrieval_receipts"] = [
             {
@@ -24409,17 +25239,15 @@ def _refresh_mixed_selected_identity_subject(
             "sha256": authority_snapshot.sha256,
             "size_bytes": authority_snapshot.size_bytes,
         }
-        mutated[
-            "authority/account-interval-retrieval-receipt-authority.json"
-        ] = authority_snapshot.contents
+        mutated["authority/account-interval-retrieval-receipt-authority.json"] = (
+            authority_snapshot.contents
+        )
     if admission_snapshot is not None:
         selected_identity["admission_policy"] = {
             "sha256": admission_snapshot.sha256,
             "size_bytes": admission_snapshot.size_bytes,
         }
-        mutated["authority/mapped-epoch-admission.json"] = (
-            admission_snapshot.contents
-        )
+        mutated["authority/mapped-epoch-admission.json"] = admission_snapshot.contents
     if manifest_schema_snapshot is not None:
         selected_identity["manifest_schema"] = {
             "sha256": manifest_schema_snapshot.sha256,
@@ -24454,9 +25282,7 @@ def _refresh_mixed_receipt_lineage(
     mutated["authority/account-flow-coverage.json"] = canonical_json_bytes(coverage)
 
     calculation = json.loads(mutated["authority/calculation-inputs.json"])
-    calculation["calculation_flow_coverage"]["receipt_artifacts"] = [
-        receipt_artifact
-    ]
+    calculation["calculation_flow_coverage"]["receipt_artifacts"] = [receipt_artifact]
     mutated["authority/calculation-inputs.json"] = canonical_json_bytes(calculation)
 
     output = json.loads(mutated["outputs/account-strategy-manifest.json"])
@@ -24570,9 +25396,10 @@ def test_verifier_manifest_schema_pin_matches_repository_bytes(
     verifier_module: Any,
 ) -> None:
     schema_bytes = ACCOUNT_STRATEGY_SCHEMA_PATH.read_bytes()
-    assert verifier_module.APPROVED_MANIFEST_SCHEMA_SHA256 == hashlib.sha256(
-        schema_bytes
-    ).hexdigest()
+    assert (
+        verifier_module.APPROVED_MANIFEST_SCHEMA_SHA256
+        == hashlib.sha256(schema_bytes).hexdigest()
+    )
     assert verifier_module.APPROVED_MANIFEST_SCHEMA_SIZE_BYTES == len(schema_bytes)
 
 
@@ -24605,9 +25432,9 @@ def test_mixed_independent_verifier_rejects_receipt_contract_parity_gaps(
             receipt["raw_evidence_artifacts"].append(
                 deepcopy(receipt["raw_evidence_artifacts"][0])
             )
-            authority["receipts"][0]["contract"][
-                "raw_evidence_artifacts"
-            ] = deepcopy(receipt["raw_evidence_artifacts"])
+            authority["receipts"][0]["contract"]["raw_evidence_artifacts"] = deepcopy(
+                receipt["raw_evidence_artifacts"]
+            )
         receipt_snapshot = InputSnapshot.from_bytes(
             f"{contract_edge} receipt", canonical_json_bytes(receipt)
         )
@@ -24661,12 +25488,12 @@ def test_mixed_independent_verifier_accepts_older_anchored_provider_generation(
     authority_entry = authority["receipts"][0]
     authority_entry["sha256"] = receipt_snapshot.sha256
     authority_entry["size_bytes"] = receipt_snapshot.size_bytes
-    authority_entry["contract"]["provider_generation_manifest"][
-        "as_of_date"
-    ] = "2026-01-31"
-    authority_entry["contract"]["raw_evidence_artifacts"][0][
-        "as_of_date"
-    ] = "2026-01-31"
+    authority_entry["contract"]["provider_generation_manifest"]["as_of_date"] = (
+        "2026-01-31"
+    )
+    authority_entry["contract"]["raw_evidence_artifacts"][0]["as_of_date"] = (
+        "2026-01-31"
+    )
     authority_snapshot = InputSnapshot.from_bytes(
         "older-generation authority", canonical_json_bytes(authority)
     )
@@ -24871,7 +25698,11 @@ def test_mixed_builder_uses_provider_ledger_date_for_open_ended_receipt_route(
     """Mixed receipt routing accepts an open assignment capped at ledger as_of_date."""
     from tools import account_strategy_manifest
 
-    monkeypatch.setattr(account_strategy_manifest, "validate_manifest_schema", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        account_strategy_manifest,
+        "validate_manifest_schema",
+        lambda *args, **kwargs: None,
+    )
     selected = _with_later_baseline_date(
         perimeter_module, _mixed_composer_selected_inputs(perimeter_module)
     )
@@ -24891,7 +25722,11 @@ def test_independent_verifier_accepts_later_baseline_receipt_capped_at_ledger_da
     """Independent verification accepts the mixed candidate at the provider boundary."""
     from tools import account_strategy_manifest
 
-    monkeypatch.setattr(account_strategy_manifest, "validate_manifest_schema", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        account_strategy_manifest,
+        "validate_manifest_schema",
+        lambda *args, **kwargs: None,
+    )
     selected = _with_later_baseline_date(
         perimeter_module, _mixed_composer_selected_inputs(perimeter_module)
     )
@@ -25199,13 +26034,14 @@ def test_mixed_opening_anchor_uses_amount_as_basis_not_opening_nav(
 
     producer_ledger = deepcopy(ledger_payload)
     producer_ledger["accounting_currency"] = "USD"
-    producer_anchors = account_strategy_manifest.parse_capital_anchors(
-        producer_ledger
-    )
+    producer_anchors = account_strategy_manifest.parse_capital_anchors(producer_ledger)
     producer_row = account_strategy_manifest.analyze_epoch(
-        {date: Decimal(value) for date, value in zip(
-            ("2026-01-30", "2026-01-31", "2026-02-01"), nav_values, strict=True
-        )},
+        {
+            date: Decimal(value)
+            for date, value in zip(
+                ("2026-01-30", "2026-01-31", "2026-02-01"), nav_values, strict=True
+            )
+        },
         {"2026-01-31": Decimal("10")},
         {},
         {},
@@ -25245,11 +26081,23 @@ def test_mixed_opening_anchor_uses_amount_as_basis_not_opening_nav(
         "first_ending_nav": Decimal("985.44"),
     }
     assert producer_row["opening_capital"] == expected["opening_capital"]
-    assert producer_row["observation_trace"]["links"][0]["base_nav"] == expected["first_base_nav"]
-    assert producer_row["observation_trace"]["links"][0]["ending_nav"] == expected["first_ending_nav"]
+    assert (
+        producer_row["observation_trace"]["links"][0]["base_nav"]
+        == expected["first_base_nav"]
+    )
+    assert (
+        producer_row["observation_trace"]["links"][0]["ending_nav"]
+        == expected["first_ending_nav"]
+    )
     assert verifier_row["opening_capital"] == expected["opening_capital"]
-    assert verifier_row["observation_trace"]["links"][0]["base_nav"] == expected["first_base_nav"]
-    assert verifier_row["observation_trace"]["links"][0]["ending_nav"] == expected["first_ending_nav"]
+    assert (
+        verifier_row["observation_trace"]["links"][0]["base_nav"]
+        == expected["first_base_nav"]
+    )
+    assert (
+        verifier_row["observation_trace"]["links"][0]["ending_nav"]
+        == expected["first_ending_nav"]
+    )
 
     # Exercise the complete retained mixed producer -> independent verifier path.
     payloads = perimeter_module.build_account_manifest_payloads(selected)
@@ -25460,9 +26308,7 @@ def test_generation_composer_stages_one_verified_two_receipt_bundle(
                 verifier_calls.append("verify")
                 return super().verify(*args, **kwargs)
 
-            def verify_finalized_report(
-                self, *args: object, **kwargs: object
-            ) -> None:
+            def verify_finalized_report(self, *args: object, **kwargs: object) -> None:
                 verifier_calls.append("verify_finalized_report")
                 return super().verify_finalized_report(*args, **kwargs)
 
@@ -25547,9 +26393,7 @@ def test_generation_composer_stages_one_verified_two_receipt_bundle(
     } == expected_schema_map
     assert set(bundle.payloads) == set(expected_schema_map)
 
-    report = json.loads(
-        bundle.payloads["verification/independent-verification.json"]
-    )
+    report = json.loads(bundle.payloads["verification/independent-verification.json"])
     assert report["schema_version"] == 3
     assert report["status"] == "VERIFIED"
     assert report["numeric_verification"] == {
@@ -25620,9 +26464,7 @@ def test_generation_composer_stages_legacy_report_v2_in_fixed_artifact_order(
     bundle = perimeter_module.stage_account_manifest_generation(
         selected, tmp_path.parent / "composer-legacy"
     )
-    report = json.loads(
-        bundle.payloads["verification/independent-verification.json"]
-    )
+    report = json.loads(bundle.payloads["verification/independent-verification.json"])
     assert report["schema_version"] == 2
     assert report["numeric_verification"] == {
         "candidate_count": 0,
@@ -25694,9 +26536,7 @@ def test_generation_composer_rejects_executing_source_mismatch_before_writes(
         perimeter_module.AccountAssignmentPerimeterError,
         match="differs from executing bytes",
     ):
-        perimeter_module.stage_account_manifest_generation(
-            mismatched, generation_root
-        )
+        perimeter_module.stage_account_manifest_generation(mismatched, generation_root)
     assert not generation_root.exists()
 
 
@@ -25790,8 +26630,7 @@ def test_generation_composer_is_byte_deterministic_and_readback_rejects_tamperin
     assert first.receipt_bytes == second.receipt_bytes
     assert first.inventory_bytes == second.inventory_bytes
     assert (
-        first.full_directory_inventory_sha256
-        == second.full_directory_inventory_sha256
+        first.full_directory_inventory_sha256 == second.full_directory_inventory_sha256
     )
 
     def directory_bytes(root: Path, generation_id: str) -> dict[str, bytes]:
@@ -25801,9 +26640,9 @@ def test_generation_composer_is_byte_deterministic_and_readback_rejects_tamperin
             for path in sorted(item for item in generation.rglob("*") if item.is_file())
         }
 
-    assert directory_bytes(
-        first_root, first.manifest.generation_id
-    ) == directory_bytes(second_root, second.manifest.generation_id)
+    assert directory_bytes(first_root, first.manifest.generation_id) == directory_bytes(
+        second_root, second.manifest.generation_id
+    )
 
     for root, artifact_id in (
         (first_root, "outputs/account-strategy-manifest.json"),
@@ -25917,13 +26756,9 @@ def test_owner_correction_retains_closed_echo_baseline_without_assignment_overla
     ]
 
     payloads = perimeter_module.build_blocked_account_manifest_payloads(selected)
-    selected_identity = json.loads(
-        payloads["authority/selected-input-identities.json"]
-    )
+    selected_identity = json.loads(payloads["authority/selected-input-identities.json"])
     assert "assignment_authority" not in selected_identity
-    perimeter = json.loads(
-        payloads["authority/account-assignment-perimeter.json"]
-    )
+    perimeter = json.loads(payloads["authority/account-assignment-perimeter.json"])
     assert (
         perimeter["selected_baseline_account_count"],
         perimeter["account_count"],
@@ -25943,9 +26778,7 @@ def test_owner_correction_retains_closed_echo_baseline_without_assignment_overla
         row for row in perimeter["unassigned_facts"] if row["source_kind"] == "NAV"
     ]
     unmatched_raw_flow = [
-        row
-        for row in perimeter["unassigned_facts"]
-        if row["source_kind"] == "RAW_FLOW"
+        row for row in perimeter["unassigned_facts"] if row["source_kind"] == "RAW_FLOW"
     ]
     assert len(unmatched_nav) == 62
     assert len(unmatched_raw_flow) == 46

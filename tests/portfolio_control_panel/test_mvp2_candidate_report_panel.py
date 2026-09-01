@@ -174,9 +174,7 @@ def test_panel_hwm_returns_span_gap_reason_before_envelope_validation() -> None:
             "epoch_hpr_receipts": [
                 {
                     "receipt": {
-                        "span_return_receipts": [
-                            {"missing_source_date": "2026-08-12"}
-                        ]
+                        "span_return_receipts": [{"missing_source_date": "2026-08-12"}]
                     }
                 }
             ]
@@ -231,7 +229,9 @@ def test_strategy_history_contract_binds_report_identity_and_hpr_receipts(
     monkeypatch.setattr(
         panel,
         "import_module",
-        lambda name: fake_dependence if name == "tools.portfolio_current_dependence" else None,
+        lambda name: (
+            fake_dependence if name == "tools.portfolio_current_dependence" else None
+        ),
     )
 
     verified, binding = panel._verified_strategy_history_contract(

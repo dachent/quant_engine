@@ -20,7 +20,9 @@ CROSSWALK_PATH = ROOT / "contracts" / "account-strategy-current-epoch-crosswalk-
 
 
 def _load_runner() -> Any:
-    spec = importlib.util.spec_from_file_location("rebind_current_epoch_crosswalk", RUNNER_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "rebind_current_epoch_crosswalk", RUNNER_PATH
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -110,9 +112,9 @@ def _write_generation(tmp_path: Path, baseline: dict[str, object]) -> Path:
     generation_id = "a" * 64
     generation = tmp_path / "generations" / generation_id
     generation.mkdir(parents=True)
-    baseline_bytes = json.dumps(
-        baseline, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    baseline_bytes = json.dumps(baseline, sort_keys=True, separators=(",", ":")).encode(
+        "utf-8"
+    )
     (generation / "portfolio-baseline.json").write_bytes(baseline_bytes)
     manifest = {
         "generation_id": generation_id,
@@ -174,7 +176,10 @@ def test_rebinds_only_baseline_derived_fields_from_exact_staged_generation(
         "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
         "owner_reason": "OWNER_CHOICE_00",
     }
-    assert rebound["rows"][13]["product_epoch_disposition"] == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
+    assert (
+        rebound["rows"][13]["product_epoch_disposition"]
+        == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
+    )
     assert rebound["rows"][14]["owner_reason"] == "OWNER_CHOICE_14"
 
 
@@ -199,7 +204,9 @@ def test_rebind_writes_the_core_canonical_json_encoding(tmp_path: Path) -> None:
     assert actual.endswith(b"\n")
 
 
-def test_tracked_current_epoch_crosswalk_uses_the_core_canonical_json_encoding() -> None:
+def test_tracked_current_epoch_crosswalk_uses_the_core_canonical_json_encoding() -> (
+    None
+):
     """Would fail if the governed tracked crosswalk drifts from canonical bytes."""
 
     actual = CROSSWALK_PATH.read_bytes()
@@ -222,7 +229,9 @@ def test_rejects_a_coherently_rehashed_baseline_that_changes_an_explicit_mapping
     assignments[4]["strategy_id"] = "different-strategy"
     generation = _write_generation(tmp_path, baseline)
 
-    with pytest.raises(runner.CurrentEpochCrosswalkRebindError, match="mapping differs"):
+    with pytest.raises(
+        runner.CurrentEpochCrosswalkRebindError, match="mapping differs"
+    ):
         runner.rebind_current_epoch_crosswalk(
             template_path=template_path,
             baseline_generation_dir=generation,

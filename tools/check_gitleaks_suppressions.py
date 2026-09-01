@@ -14,7 +14,7 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from typing import Any, Never
+from typing import Never
 
 
 ACCEPTED_REVIEW_COMMIT = "8ca2b94eef2cdd7cd0172295d1eae15e8b137376"
@@ -91,7 +91,9 @@ def _read_lf(path: Path, label: str) -> bytes:
 
 def _require_safe_git_environment() -> None:
     git_environment = {
-        key: value for key, value in os.environ.items() if key.upper().startswith("GIT_")
+        key: value
+        for key, value in os.environ.items()
+        if key.upper().startswith("GIT_")
     }
     allowed: set[str] = set()
     if git_environment.get("GIT_PAGER") == "cat":
@@ -101,10 +103,9 @@ def _require_safe_git_environment() -> None:
         for index in range(int(count)):
             key_name = f"GIT_CONFIG_KEY_{index}"
             value_name = f"GIT_CONFIG_VALUE_{index}"
-            if (
-                git_environment.get(key_name, "").casefold() == "safe.directory"
-                and git_environment.get(value_name)
-            ):
+            if git_environment.get(
+                key_name, ""
+            ).casefold() == "safe.directory" and git_environment.get(value_name):
                 allowed.update({key_name, value_name})
             else:
                 break
@@ -212,7 +213,9 @@ def _validate_metadata(raw_metadata: bytes) -> tuple[list[str], list[re.Match[st
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SuppressionMetadataError("suppression evidence is unreadable") from exc
     metadata = _object(payload, "suppression metadata")
-    _exact_keys(metadata, {"review", "schema_version", "suppressions"}, "suppression metadata")
+    _exact_keys(
+        metadata, {"review", "schema_version", "suppressions"}, "suppression metadata"
+    )
     if type(metadata["schema_version"]) is not int or metadata["schema_version"] != 1:
         _fail("suppression metadata schema differs")
 
@@ -245,7 +248,9 @@ def _validate_metadata(raw_metadata: bytes) -> tuple[list[str], list[re.Match[st
     parsed: list[re.Match[str]] = []
     for raw_row in rows:
         row = _object(raw_row, "suppression row")
-        _exact_keys(row, {"classification", "fingerprint", "rationale"}, "suppression row")
+        _exact_keys(
+            row, {"classification", "fingerprint", "rationale"}, "suppression row"
+        )
         classification = _string(row["classification"], "suppression classification")
         fingerprint = _string(row["fingerprint"], "suppression fingerprint")
         rationale = _string(row["rationale"], "suppression rationale")
@@ -282,12 +287,15 @@ def verify_suppressions(
         _fail("metadata and ignore fingerprints differ")
 
     if verify_git_objects:
-        if _git(
-            resolved_root,
-            "cat-file",
-            "-t",
-            ACCEPTED_REVIEW_COMMIT,
-        ).stdout != b"commit\n":
+        if (
+            _git(
+                resolved_root,
+                "cat-file",
+                "-t",
+                ACCEPTED_REVIEW_COMMIT,
+            ).stdout
+            != b"commit\n"
+        ):
             _fail("accepted review commit is unavailable")
         ancestor = _git(
             resolved_root,

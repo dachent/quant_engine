@@ -20,7 +20,11 @@ from types import MappingProxyType
 from typing import Final, NoReturn
 
 from quant_engine.core import InputSnapshot
-from quant_engine.core.contracts import GenerationManifest, SourceArtifact, canonical_json_bytes
+from quant_engine.core.contracts import (
+    GenerationManifest,
+    SourceArtifact,
+    canonical_json_bytes,
+)
 from quant_engine.core.strict_json import strict_json_loads
 
 
@@ -72,28 +76,44 @@ APPROVED_MANIFEST_SCHEMA_SHA256: Final[str] = (
 APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 24975
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _INTERNAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
-_CROSSWALK_DISPOSITIONS: Final[frozenset[str]] = frozenset({
-    "INCLUDED_PRODUCT_EPOCH",
-    "EXCLUDED_DEPRECATED_HISTORY_ONLY",
-    "EXCLUDED_IMMATERIAL",
-})
+_CROSSWALK_DISPOSITIONS: Final[frozenset[str]] = frozenset(
+    {
+        "INCLUDED_PRODUCT_EPOCH",
+        "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+        "EXCLUDED_IMMATERIAL",
+    }
+)
 _CANONICAL_CENT = re.compile(r"^-?(0|[1-9][0-9]*)(?:\.[0-9]{1,2})?$")
 _CANONICAL_NUMERIC = re.compile(r"^-?(0|[1-9][0-9]*)(?:\.[0-9]+)?$")
 _COUNTERPARTY_RULE = "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
 _OUTPUT_FORBIDDEN_NUMERIC_FIELDS: Final[frozenset[str]] = frozenset(
     {
-        "start", "end", "opening_capital", "deposits", "internal_in", "invested",
-        "external_withdrawals", "internal_out", "withdrawn", "net_capital",
-        "current_value", "gain", "return_on_net_capital",
-        "annualized_return_on_net_capital", "xirr_diagnostic",
-        "observation_linked_return", "observed_hwm_index", "observed_max_drawdown",
-        "nav_observations", "opening_basis", "observation_trace",
-        "capital_flow_trace", "nav_observation_trace",
+        "start",
+        "end",
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "invested",
+        "external_withdrawals",
+        "internal_out",
+        "withdrawn",
+        "net_capital",
+        "current_value",
+        "gain",
+        "return_on_net_capital",
+        "annualized_return_on_net_capital",
+        "xirr_diagnostic",
+        "observation_linked_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "nav_observations",
+        "opening_basis",
+        "observation_trace",
+        "capital_flow_trace",
+        "nav_observation_trace",
     }
 )
-_PORTABLE_COMPONENT = re.compile(
-    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$"
-)
+_PORTABLE_COMPONENT = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 
 
 def _fail() -> NoReturn:
@@ -122,14 +142,26 @@ def _independently_validate_current_epoch_crosswalk(
         payload = _strict_object(crosswalk.contents)
     except Exception:
         _fail()
-    if set(payload) != {
-        "schema_version", "artifact_id", "as_of_date", "calculation_cutoff_date",
-        "disposition_counts", "selected_baseline", "rows",
-    } or payload.get("schema_version") != 1 or payload.get("artifact_id") != "account-strategy-current-epoch-crosswalk":
+    if (
+        set(payload)
+        != {
+            "schema_version",
+            "artifact_id",
+            "as_of_date",
+            "calculation_cutoff_date",
+            "disposition_counts",
+            "selected_baseline",
+            "rows",
+        }
+        or payload.get("schema_version") != 1
+        or payload.get("artifact_id") != "account-strategy-current-epoch-crosswalk"
+    ):
         _fail()
     binding = payload.get("selected_baseline")
     expected_binding = {
-        "generation_id": baseline_generation_id if baseline_generation_id is not None else (binding or {}).get("generation_id"),
+        "generation_id": baseline_generation_id
+        if baseline_generation_id is not None
+        else (binding or {}).get("generation_id"),
         "artifact_id": "normalized/portfolio-baseline.json",
         "sha256": baseline.sha256,
         "size_bytes": baseline.size_bytes,
@@ -142,23 +174,34 @@ def _independently_validate_current_epoch_crosswalk(
     if payload.get("as_of_date") != baseline_payload.get("as_of_date"):
         _fail()
     try:
-        if date.fromisoformat(str(payload["calculation_cutoff_date"])) > date.fromisoformat(str(payload["as_of_date"])):
+        if date.fromisoformat(
+            str(payload["calculation_cutoff_date"])
+        ) > date.fromisoformat(str(payload["as_of_date"])):
             _fail()
     except ValueError:
         _fail()
     accounts = baseline_payload.get("accounts")
     assignments = baseline_payload.get("assignments")
     rows = payload.get("rows")
-    if not isinstance(accounts, list) or not isinstance(assignments, list) or not isinstance(rows, list):
+    if (
+        not isinstance(accounts, list)
+        or not isinstance(assignments, list)
+        or not isinstance(rows, list)
+    ):
         _fail()
     providers: dict[str, object] = {}
     for account in accounts:
-        if not isinstance(account, dict) or not isinstance(account.get("account_id"), str):
+        if not isinstance(account, dict) or not isinstance(
+            account.get("account_id"), str
+        ):
             _fail()
         providers[account["account_id"]] = account.get("provider")
     mapped: dict[str, dict[str, object]] = {}
     for assignment in assignments:
-        if not isinstance(assignment, dict) or assignment.get("strategy_mapping_disposition") != "STRATEGY_MAPPED":
+        if (
+            not isinstance(assignment, dict)
+            or assignment.get("strategy_mapping_disposition") != "STRATEGY_MAPPED"
+        ):
             continue
         assignment_id = assignment.get("assignment_id")
         if not isinstance(assignment_id, str) or assignment_id in mapped:
@@ -174,15 +217,36 @@ def _independently_validate_current_epoch_crosswalk(
     actual_counts = {disposition: 0 for disposition in _CROSSWALK_DISPOSITIONS}
     for row in rows:
         if not isinstance(row, dict) or set(row) != {
-            "assignment_id", "account_id", "provider", "strategy_id", "effective_start", "effective_end",
-            "account_label", "last_four", "product_epoch_disposition", "owner_reason",
+            "assignment_id",
+            "account_id",
+            "provider",
+            "strategy_id",
+            "effective_start",
+            "effective_end",
+            "account_label",
+            "last_four",
+            "product_epoch_disposition",
+            "owner_reason",
         }:
             _fail()
         assignment_id = row.get("assignment_id")
-        if not isinstance(assignment_id, str) or assignment_id in seen or assignment_id not in mapped:
+        if (
+            not isinstance(assignment_id, str)
+            or assignment_id in seen
+            or assignment_id not in mapped
+        ):
             _fail()
         baseline_row = mapped[assignment_id]
-        if any(row.get(key) != baseline_row.get(key) for key in ("assignment_id", "account_id", "strategy_id", "effective_start", "effective_end")) or row.get("provider") != providers.get(row.get("account_id")):
+        if any(
+            row.get(key) != baseline_row.get(key)
+            for key in (
+                "assignment_id",
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        ) or row.get("provider") != providers.get(row.get("account_id")):
             _fail()
         composite_key = tuple(
             row.get(key)
@@ -191,10 +255,17 @@ def _independently_validate_current_epoch_crosswalk(
         if composite_key in composite_keys:
             _fail()
         composite_keys.add(composite_key)
-        if row.get("product_epoch_disposition") not in _CROSSWALK_DISPOSITIONS or not isinstance(row.get("account_label"), str) or not row["account_label"]:
+        if (
+            row.get("product_epoch_disposition") not in _CROSSWALK_DISPOSITIONS
+            or not isinstance(row.get("account_label"), str)
+            or not row["account_label"]
+        ):
             _fail()
         last_four = row.get("last_four")
-        if last_four is not None and (not isinstance(last_four, str) or re.fullmatch(r"[0-9]{4}", last_four) is None):
+        if last_four is not None and (
+            not isinstance(last_four, str)
+            or re.fullmatch(r"[0-9]{4}", last_four) is None
+        ):
             _fail()
         account_id = row.get("account_id")
         if not isinstance(account_id, str):
@@ -208,7 +279,11 @@ def _independently_validate_current_epoch_crosswalk(
         actual_counts[disposition] += 1
         try:
             start = _date_value(row["effective_start"])
-            end = None if row["effective_end"] is None else _date_value(row["effective_end"])
+            end = (
+                None
+                if row["effective_end"] is None
+                else _date_value(row["effective_end"])
+            )
         except Exception:
             _fail()
         if end is not None and end < start:
@@ -249,9 +324,15 @@ def _independent_crosswalk_display_by_epoch(
     for row in rows:
         if not isinstance(row, dict):
             _fail()
-        key = tuple(row.get(field) for field in (
-            "account_id", "strategy_id", "effective_start", "effective_end"
-        ))
+        key = tuple(
+            row.get(field)
+            for field in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        )
         if key in result:
             _fail()
         result[key] = {
@@ -301,7 +382,9 @@ def _portable_identifier(value: object) -> str:
     return value
 
 
-def _validate_receipt_ids(receipts: Mapping[object, object]) -> dict[str, InputSnapshot]:
+def _validate_receipt_ids(
+    receipts: Mapping[object, object],
+) -> dict[str, InputSnapshot]:
     if not isinstance(receipts, Mapping):
         _fail()
     normalized: dict[str, InputSnapshot] = {}
@@ -372,12 +455,9 @@ class IndependentVerifierInputs:
         if optional[0] is not None:
             if self.current_epoch_crosswalk is None:
                 _fail()
-            if (
-                not 1 <= len(normalized) <= 15
-                or any(
-                    receipt_id.casefold() == _REPORT_PATH.casefold()
-                    for receipt_id in normalized
-                )
+            if not 1 <= len(normalized) <= 15 or any(
+                receipt_id.casefold() == _REPORT_PATH.casefold()
+                for receipt_id in normalized
             ):
                 _fail()
             for snapshot in optional:
@@ -483,8 +563,7 @@ def _mixed_subject_paths(selected: IndependentVerifierInputs) -> tuple[str, ...]
     if type(entries) is not list or not entries:
         _fail()
     authority_ids = [
-        entry.get("artifact_id") if type(entry) is dict else None
-        for entry in entries
+        entry.get("artifact_id") if type(entry) is dict else None for entry in entries
     ]
     if authority_ids != receipt_ids:
         _fail()
@@ -567,7 +646,11 @@ def _selected_report_subjects_semantic_sha256(
     selected: IndependentVerifierInputs,
     entries: list[dict[str, object]],
 ) -> str:
-    paths = EXACT_SUBJECT_PATHS if not selected._is_mixed else _mixed_subject_paths(selected)
+    paths = (
+        EXACT_SUBJECT_PATHS
+        if not selected._is_mixed
+        else _mixed_subject_paths(selected)
+    )
     if type(entries) is not list or len(entries) != len(paths):
         _fail()
     for path, entry in zip(paths, entries, strict=True):
@@ -700,9 +783,7 @@ def _validate_provider_ledger_date_authority(
         if not isinstance(generation, dict):
             _fail()
         generation_date = _date_value(generation.get("generation_as_of_date"))
-        _reject_provider_fact_after_ledger_date(
-            generation_date, ledger_as_of_date
-        )
+        _reject_provider_fact_after_ledger_date(generation_date, ledger_as_of_date)
     return ledger_as_of_date
 
 
@@ -803,9 +884,7 @@ def _xirr(cashflows: list[tuple[date, Decimal]]) -> Decimal | None:
             if amount
         ]
         signs = [amount > 0 for _, amount in ordered]
-        sign_changes = sum(
-            left != right for left, right in zip(signs, signs[1:])
-        )
+        sign_changes = sum(left != right for left, right in zip(signs, signs[1:]))
         if len(ordered) < 2 or sign_changes != 1:
             return None
         start_date = ordered[0][0]
@@ -872,18 +951,12 @@ def _annualize_return_on_net_capital(
     """Independently apply the governed piecewise annualization policy."""
 
     if span_days < 365:
-        return (
-            return_on_net_capital
-            * Decimal(365)
-            / Decimal(max(span_days, 1))
-        )
+        return return_on_net_capital * Decimal(365) / Decimal(max(span_days, 1))
     if return_on_net_capital <= Decimal(-1):
         _fail()
-    return (
-        (Decimal(1) + return_on_net_capital)
-        ** (Decimal(365) / Decimal(span_days))
-        - Decimal(1)
-    )
+    return (Decimal(1) + return_on_net_capital) ** (
+        Decimal(365) / Decimal(span_days)
+    ) - Decimal(1)
 
 
 @dataclass(frozen=True)
@@ -987,11 +1060,7 @@ def _parse_epoch_facts(
                 expected_currency = currency
             elif currency != expected_currency:
                 _fail()
-            navs.append(
-                _IndependentNavFact(
-                    observation_date, currency, value
-                )
-            )
+            navs.append(_IndependentNavFact(observation_date, currency, value))
     navs.sort(key=lambda item: item.as_of_date)
     if not navs or len({item.as_of_date for item in navs}) != len(navs):
         _fail()
@@ -1005,7 +1074,11 @@ def _parse_epoch_facts(
         if not isinstance(raw, Mapping):
             _fail()
         expected_flow_fields = {
-            "account_id", "event_date", "classification", "currency", "amount"
+            "account_id",
+            "event_date",
+            "classification",
+            "currency",
+            "amount",
         }
         if _dual_date_trace:
             expected_flow_fields.add("nav_recognition_date")
@@ -1104,9 +1177,7 @@ def _derive_first_available_nav_epoch(
                 if (flow.nav_recognition_date or flow.event_date) > first.as_of_date
             )
 
-        def signed_flow(
-            start_exclusive: date, end_inclusive: date
-        ) -> Decimal:
+        def signed_flow(start_exclusive: date, end_inclusive: date) -> Decimal:
             return sum(
                 (
                     flow.amount
@@ -1139,8 +1210,7 @@ def _derive_first_available_nav_epoch(
             first_zero = nav
             zero_end = nav_index
             while (
-                zero_end + 1 < len(funded_navs)
-                and funded_navs[zero_end + 1].value == 0
+                zero_end + 1 < len(funded_navs) and funded_navs[zero_end + 1].value == 0
             ):
                 zero_end += 1
             if (
@@ -1172,11 +1242,7 @@ def _derive_first_available_nav_epoch(
 
         by_class: dict[str, Decimal] = {
             flow_class: sum(
-                (
-                    flow.amount
-                    for flow in flows
-                    if flow.classification == flow_class
-                ),
+                (flow.amount for flow in flows if flow.classification == flow_class),
                 Decimal(0),
             )
             for flow_class in (
@@ -1241,9 +1307,7 @@ def _derive_first_available_nav_epoch(
         links: list[dict[str, object]] = []
         prior = first
         if opening_anchor is not None:
-            initial_flow = interval_flow(
-                opening_anchor.event_date, first.as_of_date
-            )
+            initial_flow = interval_flow(opening_anchor.event_date, first.as_of_date)
             factor = Decimal(1) + (first.value - opening - initial_flow) / opening
             if factor <= 0:
                 _fail()
@@ -1266,9 +1330,9 @@ def _derive_first_available_nav_epoch(
             )
         for current_nav in days[1:]:
             net_flow = interval_flow(prior.as_of_date, current_nav.as_of_date)
-            factor = Decimal(1) + (
-                current_nav.value - prior.value - net_flow
-            ) / prior.value
+            factor = (
+                Decimal(1) + (current_nav.value - prior.value - net_flow) / prior.value
+            )
             if factor <= 0:
                 _fail()
             cumulative_index *= factor
@@ -1320,9 +1384,7 @@ def _derive_first_available_nav_epoch(
         ]
         xirr_rate = _xirr(cashflows)
         opening_date = (
-            first.as_of_date
-            if opening_anchor is None
-            else opening_anchor.event_date
+            first.as_of_date if opening_anchor is None else opening_anchor.event_date
         )
         span_days = (closing.as_of_date - opening_date).days
         return_on_net_capital = gain / net_capital if net_capital > 0 else None
@@ -1482,7 +1544,8 @@ def _recognition_legs_attach_to_observed_intervals(
         )
     return all(
         any(
-            interval_start < (flow.nav_recognition_date or flow.event_date)
+            interval_start
+            < (flow.nav_recognition_date or flow.event_date)
             <= interval_end
             for interval_start, interval_end in intervals
         )
@@ -1552,40 +1615,78 @@ def _validate_reportable_comparison(
 
 _NUMERIC_PROJECTION_FIELDS: Final[frozenset[str]] = frozenset(
     {
-        "start", "end", "opening_capital", "deposits", "internal_in", "invested",
-        "external_withdrawals", "internal_out", "withdrawn", "net_capital",
-        "current_value", "gain", "return_on_net_capital",
-        "annualized_return_on_net_capital", "xirr_diagnostic",
-        "observation_linked_return", "observed_hwm_index", "observed_max_drawdown",
-        "opening_basis", "nav_observations", "observation_trace", "capital_flow_trace",
+        "start",
+        "end",
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "invested",
+        "external_withdrawals",
+        "internal_out",
+        "withdrawn",
+        "net_capital",
+        "current_value",
+        "gain",
+        "return_on_net_capital",
+        "annualized_return_on_net_capital",
+        "xirr_diagnostic",
+        "observation_linked_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "opening_basis",
+        "nav_observations",
+        "observation_trace",
+        "capital_flow_trace",
     }
 )
 _NUMERIC_MONEY_FIELDS: Final[tuple[str, ...]] = (
-    "opening_capital", "deposits", "internal_in", "invested", "external_withdrawals",
-    "internal_out", "withdrawn", "net_capital", "current_value", "gain",
+    "opening_capital",
+    "deposits",
+    "internal_in",
+    "invested",
+    "external_withdrawals",
+    "internal_out",
+    "withdrawn",
+    "net_capital",
+    "current_value",
+    "gain",
 )
 _NUMERIC_RATE_FIELDS: Final[tuple[str, ...]] = (
-    "return_on_net_capital", "annualized_return_on_net_capital", "xirr_diagnostic",
+    "return_on_net_capital",
+    "annualized_return_on_net_capital",
+    "xirr_diagnostic",
 )
 _NUMERIC_OBSERVATION_FIELDS: Final[tuple[str, ...]] = (
-    "observation_linked_return", "observed_hwm_index", "observed_max_drawdown",
+    "observation_linked_return",
+    "observed_hwm_index",
+    "observed_max_drawdown",
 )
 _NUMERIC_TRACE_FIELDS: Final[frozenset[str]] = frozenset(
     {
-        "start_date", "end_date", "base_nav", "ending_nav", "net_flow", "factor",
-        "cumulative_index", "running_hwm_index", "drawdown",
+        "start_date",
+        "end_date",
+        "base_nav",
+        "ending_nav",
+        "net_flow",
+        "factor",
+        "cumulative_index",
+        "running_hwm_index",
+        "drawdown",
     }
 )
 _NUMERIC_TRACE_VALUE_FIELDS: Final[tuple[str, ...]] = (
-    "base_nav", "ending_nav", "net_flow", "factor", "cumulative_index",
-    "running_hwm_index", "drawdown",
+    "base_nav",
+    "ending_nav",
+    "net_flow",
+    "factor",
+    "cumulative_index",
+    "running_hwm_index",
+    "drawdown",
 )
 _NUMERIC_TRACE_MONEY_FIELDS: Final[frozenset[str]] = frozenset(
     {"base_nav", "ending_nav", "net_flow"}
 )
-_NUMERIC_FLOW_FIELDS: Final[frozenset[str]] = frozenset(
-    {"class", "date", "amount"}
-)
+_NUMERIC_FLOW_FIELDS: Final[frozenset[str]] = frozenset({"class", "date", "amount"})
 _NUMERIC_FLOW_FIELDS_V9: Final[frozenset[str]] = frozenset(
     {"class", "event_date", "nav_recognition_date", "amount"}
 )
@@ -1609,9 +1710,7 @@ def _projection_decimal(
         return value
     if money:
         parse_money = (
-            _parse_retained_source_decimal
-            if _retained_money
-            else _parse_source_cents
+            _parse_retained_source_decimal if _retained_money else _parse_source_cents
         )
         parsed = parse_money(value)
     else:
@@ -1663,7 +1762,9 @@ def _parse_numeric_projection(
     )
     basis = row["opening_basis"]
     if type(basis) is not str or basis not in {
-        "FIRST_AVAILABLE_NAV", "PREDECESSOR_CLOSING_NAV", "PROVIDER_CAPITAL_ANCHOR"
+        "FIRST_AVAILABLE_NAV",
+        "PREDECESSOR_CLOSING_NAV",
+        "PROVIDER_CAPITAL_ANCHOR",
     }:
         _fail()
     nav_observations = row["nav_observations"]
@@ -1700,8 +1801,10 @@ def _parse_numeric_projection(
     if type(flow_trace) is not list:
         _fail()
     parsed_flows: list[tuple[object, ...]] = []
-    dual_date_trace = bool(flow_trace) and isinstance(flow_trace[0], Mapping) and (
-        "event_date" in flow_trace[0]
+    dual_date_trace = (
+        bool(flow_trace)
+        and isinstance(flow_trace[0], Mapping)
+        and ("event_date" in flow_trace[0])
     )
     for flow in flow_trace:
         expected_fields = (
@@ -1712,26 +1815,36 @@ def _parse_numeric_projection(
         flow_class = flow["class"]
         if type(flow_class) is not str or flow_class not in _NUMERIC_CLASSES:
             _fail()
-        parsed_flows.append((
-            flow_class,
-            *(
-                (
-                    _parse_canonical_date(flow["event_date"]),
-                    _parse_canonical_date(flow["nav_recognition_date"]),
-                )
-                if dual_date_trace
-                else (_parse_canonical_date(flow["date"]),)
-            ),
-            _projection_decimal(
-                flow["amount"],
-                money=True,
-                expected=expected,
-                _retained_money=_retained_money,
-            ),
-        ))
+        parsed_flows.append(
+            (
+                flow_class,
+                *(
+                    (
+                        _parse_canonical_date(flow["event_date"]),
+                        _parse_canonical_date(flow["nav_recognition_date"]),
+                    )
+                    if dual_date_trace
+                    else (_parse_canonical_date(flow["date"]),)
+                ),
+                _projection_decimal(
+                    flow["amount"],
+                    money=True,
+                    expected=expected,
+                    _retained_money=_retained_money,
+                ),
+            )
+        )
 
-    return (*dates, *money, *rates, *observations, basis, nav_observations,
-            tuple(parsed_links), tuple(parsed_flows))
+    return (
+        *dates,
+        *money,
+        *rates,
+        *observations,
+        basis,
+        nav_observations,
+        tuple(parsed_links),
+        tuple(parsed_flows),
+    )
 
 
 def _compare_test_local_numeric_epoch(
@@ -1745,9 +1858,7 @@ def _compare_test_local_numeric_epoch(
         and type(fact_form[0]) is _IndependentPredecessorFact
         and type(fact_form[1]) is _IndependentEpochFacts
     ):
-        expected_row = _derive_predecessor_closing_nav_epoch(
-            fact_form[0], fact_form[1]
-        )
+        expected_row = _derive_predecessor_closing_nav_epoch(fact_form[0], fact_form[1])
     else:
         _fail()
     expected_projection = _parse_numeric_projection(expected_row, expected=True)
@@ -1772,9 +1883,7 @@ def _compare_mixed_retained_numeric_epoch(
         and type(fact_form[0]) is _IndependentPredecessorFact
         and type(fact_form[1]) is _IndependentEpochFacts
     ):
-        expected_row = _derive_predecessor_closing_nav_epoch(
-            fact_form[0], fact_form[1]
-        )
+        expected_row = _derive_predecessor_closing_nav_epoch(fact_form[0], fact_form[1])
     else:
         _fail()
     expected_projection = _parse_numeric_projection(
@@ -1788,8 +1897,6 @@ def _compare_mixed_retained_numeric_epoch(
         comparison_count=1,
         discrepancy_count=int(candidate_projection != expected_projection),
     )
-
-
 
 
 def _internal_id(value: object, *, nullable: bool = False) -> str | None:
@@ -1837,10 +1944,16 @@ def _bound_catalog(
     catalog_object = _strict_object(catalog.contents)
     catalog_date = _date_value(catalog_object.get("as_of_date"))
     schema_version_key = (
-        "catalog_schema_version" if role == "provider_ledger" else "baseline_schema_version"
+        "catalog_schema_version"
+        if role == "provider_ledger"
+        else "baseline_schema_version"
     )
     schema_version = catalog_object.get(schema_version_key)
-    if isinstance(schema_version, bool) or not isinstance(schema_version, int) or schema_version < 0:
+    if (
+        isinstance(schema_version, bool)
+        or not isinstance(schema_version, int)
+        or schema_version < 0
+    ):
         _fail()
     manifest = _manifest(manifest_snapshot)
     if manifest.as_of_date != catalog_date or manifest.verification.value != "VERIFIED":
@@ -1851,9 +1964,13 @@ def _bound_catalog(
         else "normalized/portfolio-baseline.json"
     )
     expected_schema_name = (
-        "provider-ledger-catalog" if role == "provider_ledger" else "portfolio-baseline-catalog"
+        "provider-ledger-catalog"
+        if role == "provider_ledger"
+        else "portfolio-baseline-catalog"
     )
-    matching = [item for item in manifest.artifacts if item.artifact_id == expected_artifact_id]
+    matching = [
+        item for item in manifest.artifacts if item.artifact_id == expected_artifact_id
+    ]
     if len(matching) != 1:
         _fail()
     artifact = matching[0]
@@ -1904,7 +2021,9 @@ def _selected_identity(
         "as_of_date": selected.generation_as_of_date.isoformat(),
         "provider_ledger": provider,
         "baseline": baseline,
-        "flow_classification_policy": _snapshot_identity(selected.flow_classification_policy),
+        "flow_classification_policy": _snapshot_identity(
+            selected.flow_classification_policy
+        ),
         "retrieval_receipts": [
             {"receipt_id": receipt_id, **_snapshot_identity(snapshot)}
             for receipt_id, snapshot in selected.retrieval_receipts.items()
@@ -1924,7 +2043,10 @@ def _selected_identity(
             },
         },
     }
-    if provider_generation_id != provider["generation_id"] or baseline_generation_id != baseline["generation_id"]:
+    if (
+        provider_generation_id != provider["generation_id"]
+        or baseline_generation_id != baseline["generation_id"]
+    ):
         _fail()
     if selected._is_mixed:
         result["receipt_authority"] = _snapshot_identity(
@@ -1937,7 +2059,9 @@ def _selected_identity(
             _require_snapshot(selected.manifest_schema)
         )
     if selected.current_epoch_crosswalk is not None:
-        result["current_epoch_crosswalk"] = _snapshot_identity(selected.current_epoch_crosswalk)
+        result["current_epoch_crosswalk"] = _snapshot_identity(
+            selected.current_epoch_crosswalk
+        )
     return result
 
 
@@ -1966,9 +2090,7 @@ def _report_source_metadata(
 def _fact_assignment(
     account_id: object,
     raw_date: object,
-    intervals: Mapping[
-        str, tuple[tuple[date | None, date | None, int, str], ...]
-    ],
+    intervals: Mapping[str, tuple[tuple[date | None, date | None, int, str], ...]],
 ) -> int | None:
     account = _internal_id(account_id)
     fact_date = _date_value(raw_date)
@@ -1977,8 +2099,7 @@ def _fact_assignment(
     matches = [
         index
         for index, (start, end, _, _) in enumerate(intervals[account])
-        if (start is None or start <= fact_date)
-        and (end is None or fact_date <= end)
+        if (start is None or start <= fact_date) and (end is None or fact_date <= end)
     ]
     if len(matches) == 2:
         predecessor = intervals[account][matches[0]]
@@ -2091,7 +2212,8 @@ def _sorted_mapped_assignment_rows(rows: object) -> list[dict[str, object]]:
     if not isinstance(rows, list):
         _fail()
     mapped = [
-        row for row in rows
+        row
+        for row in rows
         if isinstance(row, dict)
         and row.get("strategy_mapping_disposition") == "STRATEGY_MAPPED"
     ]
@@ -2137,7 +2259,9 @@ def _selected_current_epoch_rows(
     return result
 
 
-def _current_epoch_calculation_cutoff(selected: IndependentVerifierInputs) -> date | None:
+def _current_epoch_calculation_cutoff(
+    selected: IndependentVerifierInputs,
+) -> date | None:
     if selected.current_epoch_crosswalk is None:
         return None
     _independently_validate_current_epoch_crosswalk(
@@ -2184,9 +2308,7 @@ def _perimeter_identity(
         _fail()
     account_by_id = _baseline_account_providers(accounts)
     rows: list[dict[str, object]] = []
-    intervals: dict[
-        str, list[tuple[date | None, date | None, int, str]]
-    ] = {}
+    intervals: dict[str, list[tuple[date | None, date | None, int, str]]] = {}
     ownership_fields = {
         "account_id",
         "strategy_id",
@@ -2218,11 +2340,19 @@ def _perimeter_identity(
         if account_id not in account_by_id:
             _fail()
         disposition = assignment.get("strategy_mapping_disposition")
-        if disposition not in {"STRATEGY_MAPPED", "HISTORICAL_POOL_ONLY", "RESERVE_NOT_APPLICABLE"}:
+        if disposition not in {
+            "STRATEGY_MAPPED",
+            "HISTORICAL_POOL_ONLY",
+            "RESERVE_NOT_APPLICABLE",
+        }:
             _fail()
         if "assignment_id" in assignment:
             assignment_id = assignment["assignment_id"]
-            if not isinstance(assignment_id, str) or not assignment_id or assignment_id in assignment_ids:
+            if (
+                not isinstance(assignment_id, str)
+                or not assignment_id
+                or assignment_id in assignment_ids
+            ):
                 _fail()
             assignment_ids.add(assignment_id)
         if provenance_fields <= set(assignment):
@@ -2234,8 +2364,7 @@ def _perimeter_identity(
                 "source_id",
             )
             if any(
-                not isinstance(assignment.get(field), str)
-                or not assignment[field]
+                not isinstance(assignment.get(field), str) or not assignment[field]
                 for field in text_fields
             ):
                 _fail()
@@ -2263,13 +2392,15 @@ def _perimeter_identity(
             _fail()
         interval_list = intervals.setdefault(account_id, [])
         interval_list.append((start, end, index, disposition))
-        rows.append({
-            "account_id": account_id,
-            "strategy_id": strategy,
-            "strategy_mapping_disposition": disposition,
-            "effective_start": None if start is None else start.isoformat(),
-            "effective_end": None if end is None else end.isoformat(),
-        })
+        rows.append(
+            {
+                "account_id": account_id,
+                "strategy_id": strategy,
+                "strategy_mapping_disposition": disposition,
+                "effective_start": None if start is None else start.isoformat(),
+                "effective_end": None if end is None else end.isoformat(),
+            }
+        )
     if not intervals or not set(intervals) <= set(account_by_id):
         _fail()
     _validate_interval_rows(assignments)
@@ -2289,12 +2420,18 @@ def _perimeter_identity(
             values, key=lambda value: (value[0] is not None, value[0] or date.min)
         )
         ordered_intervals[account] = tuple(ordered)
-    nav_facts = _strict_object(selected.provider_ledger.contents).get("nav_observations")
+    nav_facts = _strict_object(selected.provider_ledger.contents).get(
+        "nav_observations"
+    )
     raw_flows = _strict_object(selected.provider_ledger.contents).get("flows")
     ledger = _strict_object(selected.provider_ledger.contents)
     ledger_as_of_date = _validate_provider_ledger_date_authority(selected, ledger)
     events = classified.get("events")
-    if not isinstance(nav_facts, list) or not isinstance(raw_flows, list) or not isinstance(events, list):
+    if (
+        not isinstance(nav_facts, list)
+        or not isinstance(raw_flows, list)
+        or not isinstance(events, list)
+    ):
         _fail()
     nav_ids: set[str] = set()
     nav_account_dates: set[tuple[str, str]] = set()
@@ -2323,11 +2460,12 @@ def _perimeter_identity(
             _fail()
         nav_account_dates.add(nav_key)
         amount = nav.get("nav")
-        if not isinstance(amount, dict) or amount.get("status") not in {"AVAILABLE", "UNAVAILABLE"}:
+        if not isinstance(amount, dict) or amount.get("status") not in {
+            "AVAILABLE",
+            "UNAVAILABLE",
+        }:
             _fail()
-        index = _fact_assignment(
-            nav_account, nav_date.isoformat(), ordered_intervals
-        )
+        index = _fact_assignment(nav_account, nav_date.isoformat(), ordered_intervals)
         if index is None:
             unassigned_facts.append(
                 {
@@ -2391,11 +2529,7 @@ def _perimeter_identity(
         )
         index = _fact_assignment(event_account, event_date, ordered_intervals)
         raw_account, raw_date, raw_index = raw_by_id[source_id]
-        if (
-            event_account != raw_account
-            or event_date != raw_date
-            or index != raw_index
-        ):
+        if event_account != raw_account or event_date != raw_date or index != raw_index:
             _fail()
         if index is None:
             unassigned_facts.append(
@@ -2432,7 +2566,9 @@ def _perimeter_identity(
     )
     for row in rows:
         assignment_key = (
-            row["account_id"], row["effective_start"], row["effective_end"]
+            row["account_id"],
+            row["effective_start"],
+            row["effective_end"],
         )
         assignment_index = next(
             index
@@ -2445,7 +2581,8 @@ def _perimeter_identity(
         row.update(
             {
                 "provider": account_by_id[row["account_id"]],
-                "calculation_eligible": row["strategy_mapping_disposition"] == "STRATEGY_MAPPED",
+                "calculation_eligible": row["strategy_mapping_disposition"]
+                == "STRATEGY_MAPPED",
                 "available_nav": row_counts[0],
                 "unavailable_nav": row_counts[1],
                 "raw_flows": row_counts[2],
@@ -2453,9 +2590,18 @@ def _perimeter_identity(
             }
         )
         row["assignment_identity"] = {
-            "sha256": _semantic_digest({key: row[key] for key in (
-                "account_id", "strategy_id", "strategy_mapping_disposition", "effective_start", "effective_end"
-            )})
+            "sha256": _semantic_digest(
+                {
+                    key: row[key]
+                    for key in (
+                        "account_id",
+                        "strategy_id",
+                        "strategy_mapping_disposition",
+                        "effective_start",
+                        "effective_end",
+                    )
+                }
+            )
         }
     expected = {
         "schema_version": 1,
@@ -2467,29 +2613,41 @@ def _perimeter_identity(
         },
         "full_perimeter_identity": {
             "count": len(rows),
-            "sha256": _semantic_digest([
-                {key: row[key] for key in (
-                    "account_id", "strategy_id", "strategy_mapping_disposition", "effective_start", "effective_end"
-                )}
-                for row in rows
-            ]),
+            "sha256": _semantic_digest(
+                [
+                    {
+                        key: row[key]
+                        for key in (
+                            "account_id",
+                            "strategy_id",
+                            "strategy_mapping_disposition",
+                            "effective_start",
+                            "effective_end",
+                        )
+                    }
+                    for row in rows
+                ]
+            ),
         },
         "selected_baseline_account_count": len(account_by_id),
         "account_count": len(intervals),
         "assignment_count": len(rows),
         "partition_counts": {
-            disposition: sum(row["strategy_mapping_disposition"] == disposition for row in rows)
-            for disposition in ("STRATEGY_MAPPED", "HISTORICAL_POOL_ONLY", "RESERVE_NOT_APPLICABLE")
+            disposition: sum(
+                row["strategy_mapping_disposition"] == disposition for row in rows
+            )
+            for disposition in (
+                "STRATEGY_MAPPED",
+                "HISTORICAL_POOL_ONLY",
+                "RESERVE_NOT_APPLICABLE",
+            )
         },
         "fact_bijection_status": (
-            "BLOCKED_UNASSIGNED_FACTS"
-            if unassigned_facts
-            else "ONE_TO_ONE_VERIFIED"
+            "BLOCKED_UNASSIGNED_FACTS" if unassigned_facts else "ONE_TO_ONE_VERIFIED"
         ),
         "unassigned_fact_count": len(unassigned_facts),
         "unassigned_projection_count": sum(
-            2 if fact["source_kind"] == "RAW_FLOW" else 1
-            for fact in unassigned_facts
+            2 if fact["source_kind"] == "RAW_FLOW" else 1 for fact in unassigned_facts
         ),
         "unassigned_facts": unassigned_facts,
         "rows": rows,
@@ -2518,7 +2676,10 @@ def _verify_c4b1_contract_normalized(
     if selected_identity != expected_identity:
         _fail()
     if selected_snapshots.current_epoch_crosswalk is not None:
-        if normalized.get(_CROSSWALK_SUBJECT_PATH) != selected_snapshots.current_epoch_crosswalk.contents:
+        if (
+            normalized.get(_CROSSWALK_SUBJECT_PATH)
+            != selected_snapshots.current_epoch_crosswalk.contents
+        ):
             _fail()
         _independently_validate_current_epoch_crosswalk(
             selected_snapshots.baseline,
@@ -2531,7 +2692,10 @@ def _verify_c4b1_contract_normalized(
     classified = _strict_object(normalized["authority/classified-flows.json"])
     if classified.get("artifact_id") != "authority/classified-flows.json":
         _fail()
-    if perimeter.get("as_of_date") != selected_snapshots.generation_as_of_date.isoformat():
+    if (
+        perimeter.get("as_of_date")
+        != selected_snapshots.generation_as_of_date.isoformat()
+    ):
         _fail()
     _perimeter_identity(selected_snapshots, perimeter, classified)
     selected_rows = _selected_current_epoch_rows(
@@ -2548,10 +2712,19 @@ def _classification_rules(
     selected_policy: InputSnapshot,
 ) -> tuple[dict[str, dict[str, str]], list[dict[str, str]], dict[str, object]]:
     policy = _strict_object(selected_policy.contents)
-    if set(policy) != {
-        "schema_version", "artifact_id", "as_of_date", "policy_id",
-        "policy_version", "event_dispositions",
-    } or isinstance(policy.get("schema_version"), bool) or policy.get("schema_version") != 1:
+    if (
+        set(policy)
+        != {
+            "schema_version",
+            "artifact_id",
+            "as_of_date",
+            "policy_id",
+            "policy_version",
+            "event_dispositions",
+        }
+        or isinstance(policy.get("schema_version"), bool)
+        or policy.get("schema_version") != 1
+    ):
         _fail()
     _date_value(policy.get("as_of_date"))
     if not isinstance(policy.get("artifact_id"), str) or not policy["artifact_id"]:
@@ -2572,7 +2745,13 @@ def _classification_rules(
         if not isinstance(row, dict) or set(row) not in (
             {"flow_type", "disposition", "amount_sign"},
             {"flow_type", "disposition", "amount_sign", "counterparty_rule"},
-            {"flow_type", "disposition", "amount_sign", "counterparty_rule", "unpaired_disposition"},
+            {
+                "flow_type",
+                "disposition",
+                "amount_sign",
+                "counterparty_rule",
+                "unpaired_disposition",
+            },
         ):
             _fail()
         flow_type = row.get("flow_type")
@@ -2581,13 +2760,18 @@ def _classification_rules(
         disposition = row.get("disposition")
         sign = row.get("amount_sign")
         if disposition not in {"EXTERNAL", "INTERNAL"} or sign not in {
-            "POSITIVE", "NEGATIVE", "NONZERO"
+            "POSITIVE",
+            "NEGATIVE",
+            "NONZERO",
         }:
             _fail()
         if disposition == "INTERNAL":
             if row.get("counterparty_rule") != _COUNTERPARTY_RULE:
                 _fail()
-            if "unpaired_disposition" in row and row["unpaired_disposition"] != "EXTERNAL":
+            if (
+                "unpaired_disposition" in row
+                and row["unpaired_disposition"] != "EXTERNAL"
+            ):
                 _fail()
         elif "counterparty_rule" in row:
             _fail()
@@ -2597,7 +2781,13 @@ def _classification_rules(
         if not isinstance(row, dict) or set(row) not in (
             {"flow_type_prefix", "disposition", "amount_sign"},
             {"flow_type_prefix", "disposition", "amount_sign", "counterparty_rule"},
-            {"flow_type_prefix", "disposition", "amount_sign", "counterparty_rule", "unpaired_disposition"},
+            {
+                "flow_type_prefix",
+                "disposition",
+                "amount_sign",
+                "counterparty_rule",
+                "unpaired_disposition",
+            },
         ):
             _fail()
         prefix = row.get("flow_type_prefix")
@@ -2606,13 +2796,18 @@ def _classification_rules(
         disposition = row.get("disposition")
         sign = row.get("amount_sign")
         if disposition not in {"EXTERNAL", "INTERNAL"} or sign not in {
-            "POSITIVE", "NEGATIVE", "NONZERO"
+            "POSITIVE",
+            "NEGATIVE",
+            "NONZERO",
         }:
             _fail()
         if disposition == "INTERNAL":
             if row.get("counterparty_rule") != _COUNTERPARTY_RULE:
                 _fail()
-            if "unpaired_disposition" in row and row["unpaired_disposition"] != "EXTERNAL":
+            if (
+                "unpaired_disposition" in row
+                and row["unpaired_disposition"] != "EXTERNAL"
+            ):
                 _fail()
         elif "counterparty_rule" in row:
             _fail()
@@ -2627,9 +2822,7 @@ def _classification_rules(
         ):
             _fail()
     if any(
-        flow_type.startswith(prefix)
-        for flow_type in exact
-        for prefix in seen_prefixes
+        flow_type.startswith(prefix) for flow_type in exact for prefix in seen_prefixes
     ):
         _fail()
     return exact, prefixes, policy
@@ -2685,7 +2878,12 @@ def _normalize_provider_navs(
         return {"currency": currency, "status": status, "value": amount}
 
     for row in navs:
-        if not isinstance(row, dict) or not {"record_id", "account_id", "as_of_date", "nav"} <= set(row):
+        if not isinstance(row, dict) or not {
+            "record_id",
+            "account_id",
+            "as_of_date",
+            "nav",
+        } <= set(row):
             _fail()
         record_id = row.get("record_id")
         if not isinstance(record_id, str) or not record_id or record_id in seen_ids:
@@ -2738,7 +2936,9 @@ def _verify_c4b3_calculation_inputs(
     b1_state: Mapping[str, object],
 ) -> None:
     navs, accounting_currency = _normalize_provider_navs(selected)
-    perimeter = _strict_object(subject_payloads["authority/account-assignment-perimeter.json"])
+    perimeter = _strict_object(
+        subject_payloads["authority/account-assignment-perimeter.json"]
+    )
     classified = _strict_object(subject_payloads["authority/classified-flows.json"])
     baseline = _strict_object(selected.baseline.contents)
     accounts = baseline.get("accounts")
@@ -2753,11 +2953,11 @@ def _verify_c4b3_calculation_inputs(
     cutoff = _current_epoch_calculation_cutoff(selected)
     if cutoff is not None:
         events = [
-            event for event in events
+            event
+            for event in events
             if isinstance(event, dict)
-            and _date_value(
-                event.get("nav_recognition_date", event.get("event_date"))
-            ) <= cutoff
+            and _date_value(event.get("nav_recognition_date", event.get("event_date")))
+            <= cutoff
         ]
 
     def in_interval(value: str, row: Mapping[str, object]) -> bool:
@@ -2775,16 +2975,23 @@ def _verify_c4b3_calculation_inputs(
             {
                 "epoch": {
                     key: row[key]
-                    for key in ("account_id", "strategy_id", "effective_start", "effective_end")
+                    for key in (
+                        "account_id",
+                        "strategy_id",
+                        "effective_start",
+                        "effective_end",
+                    )
                 },
                 "provider": providers[row["account_id"]],
                 "nav_observations": [
-                    nav for nav in navs
+                    nav
+                    for nav in navs
                     if nav["account_id"] == row["account_id"]
                     and in_interval(nav["as_of_date"], row)
                 ],
                 "classified_flows": [
-                    event for event in events
+                    event
+                    for event in events
                     if isinstance(event, dict)
                     and event.get("account_id") == row["account_id"]
                     and in_interval(
@@ -2813,7 +3020,10 @@ def _verify_c4b3_calculation_inputs(
         "mapped_assignments_identity": b1_state["mapped_assignments_identity"],
         "rows": expected_rows,
     }
-    if _strict_object(subject_payloads["authority/calculation-inputs.json"]) != expected:
+    if (
+        _strict_object(subject_payloads["authority/calculation-inputs.json"])
+        != expected
+    ):
         _fail()
 
 
@@ -2861,7 +3071,9 @@ def _verify_c4b3_2a_coverage_admission(
         "generation_id": selected_identity["provider_ledger"]["generation_id"],
         "artifact": selected_identity["provider_ledger"]["artifact"],
     }
-    perimeter = _strict_object(subject_payloads["authority/account-assignment-perimeter.json"])
+    perimeter = _strict_object(
+        subject_payloads["authority/account-assignment-perimeter.json"]
+    )
     perimeter_rows = perimeter.get("rows")
     if not isinstance(perimeter_rows, list):
         _fail()
@@ -2890,7 +3102,12 @@ def _verify_c4b3_2a_coverage_admission(
             {
                 "assignment": {
                     key: row[key]
-                    for key in ("account_id", "strategy_id", "effective_start", "effective_end")
+                    for key in (
+                        "account_id",
+                        "strategy_id",
+                        "effective_start",
+                        "effective_end",
+                    )
                 },
                 "requested_start": start.isoformat(),
                 "requested_end": end.isoformat(),
@@ -2932,7 +3149,12 @@ def _verify_c4b3_2a_coverage_admission(
             {
                 "assignment": {
                     key: row[key]
-                    for key in ("account_id", "strategy_id", "effective_start", "effective_end")
+                    for key in (
+                        "account_id",
+                        "strategy_id",
+                        "effective_start",
+                        "effective_end",
+                    )
                 },
                 "status": "BLOCKED",
                 "authority_kind": "NONE",
@@ -2943,7 +3165,10 @@ def _verify_c4b3_2a_coverage_admission(
             for row in mapped
         ],
     }
-    if _strict_object(subject_payloads["authority/mapped-epoch-admission.json"]) != admission_expected:
+    if (
+        _strict_object(subject_payloads["authority/mapped-epoch-admission.json"])
+        != admission_expected
+    ):
         _fail()
 
 
@@ -2966,7 +3191,10 @@ def _verify_c4b3_2b1_output(
     generated_date = selected.generation_as_of_date.isoformat()
     classified_artifact = _subject_artifact(
         subject_payloads["authority/classified-flows.json"],
-        "authority/classified-flows.json", "classified-flows", "4", generated_date,
+        "authority/classified-flows.json",
+        "classified-flows",
+        "4",
+        generated_date,
     )
     policy_payload = _strict_object(selected.flow_classification_policy.contents)
     policy_bytes = canonical_json_bytes(policy_payload)
@@ -2992,27 +3220,44 @@ def _verify_c4b3_2b1_output(
     )
     admission_artifact = _subject_artifact(
         subject_payloads["authority/mapped-epoch-admission.json"],
-        "authority/mapped-epoch-admission.json", "mapped-epoch-admission", "1", generated_date,
+        "authority/mapped-epoch-admission.json",
+        "mapped-epoch-admission",
+        "1",
+        generated_date,
     )
     selected_artifact = _subject_artifact(
         subject_payloads["authority/selected-input-identities.json"],
-        "authority/selected-input-identities.json", "selected-input-identities", "1", generated_date,
+        "authority/selected-input-identities.json",
+        "selected-input-identities",
+        "1",
+        generated_date,
     )
     perimeter_artifact = _subject_artifact(
         subject_payloads["authority/account-assignment-perimeter.json"],
-        "authority/account-assignment-perimeter.json", "account-assignment-perimeter", "1", generated_date,
+        "authority/account-assignment-perimeter.json",
+        "account-assignment-perimeter",
+        "1",
+        generated_date,
     )
     calculation_artifact = _subject_artifact(
         subject_payloads["authority/calculation-inputs.json"],
-        "authority/calculation-inputs.json", "account-manifest-calculation-inputs", "1", generated_date,
+        "authority/calculation-inputs.json",
+        "account-manifest-calculation-inputs",
+        "1",
+        generated_date,
     )
     code_artifact = _subject_artifact(
         subject_payloads["authority/code-identities.json"],
-        "authority/code-identities.json", "account-manifest-code-identities", "1", generated_date,
+        "authority/code-identities.json",
+        "account-manifest-code-identities",
+        "1",
+        generated_date,
     )
     baseline = _strict_object(selected.baseline.contents)
     accounts = baseline.get("accounts")
-    perimeter = _strict_object(subject_payloads["authority/account-assignment-perimeter.json"])
+    perimeter = _strict_object(
+        subject_payloads["authority/account-assignment-perimeter.json"]
+    )
     rows = perimeter.get("rows")
     if not isinstance(accounts, list) or not isinstance(rows, list):
         _fail()
@@ -3044,9 +3289,15 @@ def _verify_c4b3_2b1_output(
         if display_by_epoch is not None:
             output_row.update(
                 display_by_epoch[
-                    tuple(row[field] for field in (
-                        "account_id", "strategy_id", "effective_start", "effective_end"
-                    ))
+                    tuple(
+                        row[field]
+                        for field in (
+                            "account_id",
+                            "strategy_id",
+                            "effective_start",
+                            "effective_end",
+                        )
+                    )
                 ]
             )
         if _OUTPUT_FORBIDDEN_NUMERIC_FIELDS.intersection(output_row):
@@ -3105,7 +3356,10 @@ def _verify_c4b3_2b1_output(
         },
         "rows": output_rows,
     }
-    if _strict_object(subject_payloads["outputs/account-strategy-manifest.json"]) != expected:
+    if (
+        _strict_object(subject_payloads["outputs/account-strategy-manifest.json"])
+        != expected
+    ):
         _fail()
 
 
@@ -3194,7 +3448,9 @@ def _derive_c4b3_2b2_fragments(
             for row in assignments
         )
         for disposition in (
-            "STRATEGY_MAPPED", "HISTORICAL_POOL_ONLY", "RESERVE_NOT_APPLICABLE"
+            "STRATEGY_MAPPED",
+            "HISTORICAL_POOL_ONLY",
+            "RESERVE_NOT_APPLICABLE",
         )
     }
     baseline_account_ids = {
@@ -3207,26 +3463,33 @@ def _derive_c4b3_2b2_fragments(
         for assignment in assignments
         if isinstance(assignment, dict)
     }
-    if (
-        not assignment_account_ids <= baseline_account_ids
-        or len(assignments) != sum(disposition_counts.values())
+    if not assignment_account_ids <= baseline_account_ids or len(assignments) != sum(
+        disposition_counts.values()
     ):
         _fail()
     calc = _strict_object(subject_payloads["authority/calculation-inputs.json"])
     coverage = _strict_object(subject_payloads["authority/account-flow-coverage.json"])
-    admission = _strict_object(subject_payloads["authority/mapped-epoch-admission.json"])
+    admission = _strict_object(
+        subject_payloads["authority/mapped-epoch-admission.json"]
+    )
     output = _strict_object(subject_payloads["outputs/account-strategy-manifest.json"])
     calc_rows = calc.get("rows")
     coverage_rows = coverage.get("rows")
     admission_rows = admission.get("rows")
     output_rows = output.get("rows")
-    if not all(isinstance(rows, list) for rows in (calc_rows, coverage_rows, admission_rows, output_rows)):
+    if not all(
+        isinstance(rows, list)
+        for rows in (calc_rows, coverage_rows, admission_rows, output_rows)
+    ):
         _fail()
     perimeter = _strict_object(
         subject_payloads["authority/account-assignment-perimeter.json"]
     )
     mapped = _selected_current_epoch_rows(selected, perimeter["rows"])
-    if not all(len(rows) == len(mapped) for rows in (calc_rows, coverage_rows, admission_rows, output_rows)):
+    if not all(
+        len(rows) == len(mapped)
+        for rows in (calc_rows, coverage_rows, admission_rows, output_rows)
+    ):
         _fail()
 
     def assignment_key(row: object) -> tuple[object, ...]:
@@ -3234,17 +3497,22 @@ def _derive_c4b3_2b2_fragments(
             _fail()
         assignment = row.get("assignment", row.get("epoch", row))
         if not isinstance(assignment, dict) or not {
-            "account_id", "strategy_id", "effective_start", "effective_end"
+            "account_id",
+            "strategy_id",
+            "effective_start",
+            "effective_end",
         } <= set(assignment):
             _fail()
-        return tuple(assignment[key] for key in (
-            "account_id", "strategy_id", "effective_start", "effective_end"
-        ))
+        return tuple(
+            assignment[key]
+            for key in ("account_id", "strategy_id", "effective_start", "effective_end")
+        )
 
     mapped_keys = {
-        tuple(row[key] for key in (
-            "account_id", "strategy_id", "effective_start", "effective_end"
-        ))
+        tuple(
+            row[key]
+            for key in ("account_id", "strategy_id", "effective_start", "effective_end")
+        )
         for row in mapped
     }
     calc_keys = {assignment_key(row) for row in calc_rows}
@@ -3264,9 +3532,15 @@ def _derive_c4b3_2b2_fragments(
         _fail()
     blocker_chains: list[dict[str, object]] = []
     for row in mapped:
-        key = tuple(row[field] for field in (
-            "account_id", "strategy_id", "effective_start", "effective_end"
-        ))
+        key = tuple(
+            row[field]
+            for field in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        )
         coverage_row = coverage_by_key[key]
         admission_row = admission_by_key[key]
         output_row = output_by_key[key]
@@ -3284,7 +3558,12 @@ def _derive_c4b3_2b2_fragments(
             {
                 "assignment": {
                     field: row[field]
-                    for field in ("account_id", "strategy_id", "effective_start", "effective_end")
+                    for field in (
+                        "account_id",
+                        "strategy_id",
+                        "effective_start",
+                        "effective_end",
+                    )
                 },
                 "coverage": {
                     "status": "BLOCKED",
@@ -3313,9 +3592,15 @@ def _derive_c4b3_2b2_fragments(
         "coverage_row_count": len(coverage_rows),
         "admission_row_count": len(admission_rows),
         "output_row_count": len(output_rows),
-        "blocked_coverage_row_count": sum(row.get("status") == "BLOCKED" for row in coverage_rows),
-        "blocked_admission_row_count": sum(row.get("status") == "BLOCKED" for row in admission_rows),
-        "blocked_output_row_count": sum(row.get("status") == "BLOCKED_ADMISSION" for row in output_rows),
+        "blocked_coverage_row_count": sum(
+            row.get("status") == "BLOCKED" for row in coverage_rows
+        ),
+        "blocked_admission_row_count": sum(
+            row.get("status") == "BLOCKED" for row in admission_rows
+        ),
+        "blocked_output_row_count": sum(
+            row.get("status") == "BLOCKED_ADMISSION" for row in output_rows
+        ),
     }
     return {
         "counts": counts,
@@ -3364,9 +3649,7 @@ def _sorted_mixed_output_assignments(
         ):
             _fail()
         ordered.append(row)
-    ordered.sort(
-        key=lambda row: (str(row["account_id"]), str(row["effective_start"]))
-    )
+    ordered.sort(key=lambda row: (str(row["account_id"]), str(row["effective_start"])))
     return ordered
 
 
@@ -3386,9 +3669,7 @@ def _mixed_coverage_payload(
     }
     rows: list[dict[str, object]] = []
     for assignment in mapped:
-        route = route_by_assignment.get(
-            tuple(_assignment_record(assignment).values())
-        )
+        route = route_by_assignment.get(tuple(_assignment_record(assignment).values()))
         complete = route is not None
         rows.append(
             {
@@ -3406,8 +3687,12 @@ def _mixed_coverage_payload(
                 "status": "COMPLETE" if complete else "BLOCKED",
                 "authority_kind": (
                     "STATIC_SNAPSHOT_COVERAGE_V1"
-                    if complete and route["receipt"].get("coverage_mode") == "STATIC_SNAPSHOT_COVERAGE_V1"
-                    else "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2" if complete else "NONE"
+                    if complete
+                    and route["receipt"].get("coverage_mode")
+                    == "STATIC_SNAPSHOT_COVERAGE_V1"
+                    else "ACCOUNT_INTERVAL_RETRIEVAL_RECEIPT_V2"
+                    if complete
+                    else "NONE"
                 ),
                 "receipt_artifact_id": route["receipt_id"] if complete else None,
                 "blocker_code": None if complete else "NO_ADMISSIBLE_V2_RECEIPT",
@@ -3437,7 +3722,11 @@ def _mixed_coverage_payload(
 
 def _validate_source_artifact_object(value: object) -> dict[str, object]:
     if not isinstance(value, dict) or set(value) != {
-        "artifact_id", "as_of_date", "schema", "sha256", "size_bytes"
+        "artifact_id",
+        "as_of_date",
+        "schema",
+        "sha256",
+        "size_bytes",
     }:
         _fail()
     _portable_identifier(value.get("artifact_id"))
@@ -3523,12 +3812,25 @@ def _verify_mixed_authority_and_coverage_many(
     routed_keys: set[tuple[object, ...]] = set()
     expected_entries: list[dict[str, object]] = []
     receipt_fields = {
-        "schema_version", "artifact_id", "issuer", "provider",
-        "provider_generation", "provider_generation_manifest",
-        "raw_evidence_artifacts", "account_id", "source_account_identity_sha256",
-        "requested_start", "requested_end", "covered_start", "covered_end",
-        "required_categories", "completed_categories", "unavailable_categories",
-        "pagination", "completeness", "truncated",
+        "schema_version",
+        "artifact_id",
+        "issuer",
+        "provider",
+        "provider_generation",
+        "provider_generation_manifest",
+        "raw_evidence_artifacts",
+        "account_id",
+        "source_account_identity_sha256",
+        "requested_start",
+        "requested_end",
+        "covered_start",
+        "covered_end",
+        "required_categories",
+        "completed_categories",
+        "unavailable_categories",
+        "pagination",
+        "completeness",
+        "truncated",
     }
     for receipt_id in receipt_ids:
         receipt_snapshot = selected.retrieval_receipts[receipt_id]
@@ -3536,8 +3838,32 @@ def _verify_mixed_authority_and_coverage_many(
             _fail()
         receipt = _strict_object(receipt_snapshot.contents)
         if receipt.get("coverage_mode") == "STATIC_SNAPSHOT_COVERAGE_V1":
-            static_fields = {"schema_version", "artifact_id", "coverage_mode", "issuer", "provider", "account_id", "strategy_id", "requested_start", "requested_end", "calculation_cutoff_date", "date_convention", "provider_generation", "staged_inputs", "observed_facts", "missing_intervals", "coverage_as_of_date", "completeness"}
-            if set(receipt) != static_fields or receipt.get("schema_version") != 3 or receipt.get("artifact_id") != receipt_id or receipt.get("date_convention") != "EOD_PROVIDER_NAV_RECOGNITION_DATE" or receipt.get("completeness") != "RETAINED_STATIC_SNAPSHOT_ONLY":
+            static_fields = {
+                "schema_version",
+                "artifact_id",
+                "coverage_mode",
+                "issuer",
+                "provider",
+                "account_id",
+                "strategy_id",
+                "requested_start",
+                "requested_end",
+                "calculation_cutoff_date",
+                "date_convention",
+                "provider_generation",
+                "staged_inputs",
+                "observed_facts",
+                "missing_intervals",
+                "coverage_as_of_date",
+                "completeness",
+            }
+            if (
+                set(receipt) != static_fields
+                or receipt.get("schema_version") != 3
+                or receipt.get("artifact_id") != receipt_id
+                or receipt.get("date_convention") != "EOD_PROVIDER_NAV_RECOGNITION_DATE"
+                or receipt.get("completeness") != "RETAINED_STATIC_SNAPSHOT_ONLY"
+            ):
                 _fail()
             account_id = _internal_id(receipt.get("account_id"))
             strategy_id = _fact_text(receipt.get("strategy_id"))
@@ -3546,66 +3872,169 @@ def _verify_mixed_authority_and_coverage_many(
             generation = receipt.get("provider_generation")
             staged = receipt.get("staged_inputs")
             facts = receipt.get("observed_facts")
-            if not isinstance(generation, dict) or not isinstance(staged, dict) or not isinstance(facts, dict) or set(facts) != {"nav", "flows", "capital_anchors"}:
+            if (
+                not isinstance(generation, dict)
+                or not isinstance(staged, dict)
+                or not isinstance(facts, dict)
+                or set(facts) != {"nav", "flows", "capital_anchors"}
+            ):
                 _fail()
             provider = _fact_text(receipt.get("provider"))
             matching_generations = [
-                row for row in generations if isinstance(row, dict)
+                row
+                for row in generations
+                if isinstance(row, dict)
                 and row.get("provider_id") == provider.casefold()
                 and providers.get(account_id) == provider
-                and generation == {"generation_id": row.get("generation_id"), "catalog_sha256": row.get("catalog_sha256"), "manifest_sha256": row.get("manifest_sha256"), "generation_as_of_date": row.get("generation_as_of_date")}
+                and generation
+                == {
+                    "generation_id": row.get("generation_id"),
+                    "catalog_sha256": row.get("catalog_sha256"),
+                    "manifest_sha256": row.get("manifest_sha256"),
+                    "generation_as_of_date": row.get("generation_as_of_date"),
+                }
             ]
-            if len(matching_generations) != 1 or selected.current_epoch_crosswalk is None:
+            if (
+                len(matching_generations) != 1
+                or selected.current_epoch_crosswalk is None
+            ):
                 _fail()
             selected_identity = _selected_identity(selected)
             expected_staged = {
-                "provider_ledger_generation_id": selected_identity["provider_ledger"]["generation_id"],
-                "provider_ledger_artifact": selected_identity["provider_ledger"]["artifact"],
-                "baseline_sha256": selected.baseline.sha256, "baseline_size_bytes": selected.baseline.size_bytes,
-                "crosswalk_sha256": selected.current_epoch_crosswalk.sha256, "crosswalk_size_bytes": selected.current_epoch_crosswalk.size_bytes,
+                "provider_ledger_generation_id": selected_identity["provider_ledger"][
+                    "generation_id"
+                ],
+                "provider_ledger_artifact": selected_identity["provider_ledger"][
+                    "artifact"
+                ],
+                "baseline_sha256": selected.baseline.sha256,
+                "baseline_size_bytes": selected.baseline.size_bytes,
+                "crosswalk_sha256": selected.current_epoch_crosswalk.sha256,
+                "crosswalk_size_bytes": selected.current_epoch_crosswalk.size_bytes,
             }
             cutoff = _current_epoch_calculation_cutoff(selected)
-            if staged != expected_staged or cutoff is None or receipt.get("calculation_cutoff_date") != cutoff.isoformat():
+            if (
+                staged != expected_staged
+                or cutoff is None
+                or receipt.get("calculation_cutoff_date") != cutoff.isoformat()
+            ):
                 _fail()
+
             def static_fact_date(row: Mapping[str, object], kind: str) -> str:
                 return str(
                     row.get("as_of_date")
                     if kind == "nav"
                     else row.get("nav_recognition_date", row.get("event_date"))
                 )
-            for kind, field in (("nav", "nav_observations"), ("flows", "flows"), ("capital_anchors", "capital_anchors")):
+
+            for kind, field in (
+                ("nav", "nav_observations"),
+                ("flows", "flows"),
+                ("capital_anchors", "capital_anchors"),
+            ):
                 source_rows = ledger.get(field)
                 if not isinstance(source_rows, list):
                     _fail()
-                rows = [row for row in source_rows if isinstance(row, Mapping) and row.get("account_id") == account_id and (kind != "capital_anchors" or row.get("strategy_id") == strategy_id) and requested_start.isoformat() <= static_fact_date(row, kind) <= requested_end.isoformat()]
+                rows = [
+                    row
+                    for row in source_rows
+                    if isinstance(row, Mapping)
+                    and row.get("account_id") == account_id
+                    and (
+                        kind != "capital_anchors"
+                        or row.get("strategy_id") == strategy_id
+                    )
+                    and requested_start.isoformat()
+                    <= static_fact_date(row, kind)
+                    <= requested_end.isoformat()
+                ]
                 dates = sorted(static_fact_date(row, kind) for row in rows)
-                if facts.get(kind) != {"row_count": len(rows), "first_date": dates[0] if dates else None, "last_date": dates[-1] if dates else None}:
+                if facts.get(kind) != {
+                    "row_count": len(rows),
+                    "first_date": dates[0] if dates else None,
+                    "last_date": dates[-1] if dates else None,
+                }:
                     _fail()
             expected_missing: list[dict[str, str]] = []
             coverage_rows = ledger.get("provider_coverage")
             if isinstance(coverage_rows, list):
                 for coverage_row in coverage_rows:
-                    coverage = coverage_row.get("coverage") if isinstance(coverage_row, Mapping) else None
-                    if not isinstance(coverage, Mapping) or str(coverage_row.get("provider_id", "")).upper() != provider:
+                    coverage = (
+                        coverage_row.get("coverage")
+                        if isinstance(coverage_row, Mapping)
+                        else None
+                    )
+                    if (
+                        not isinstance(coverage, Mapping)
+                        or str(coverage_row.get("provider_id", "")).upper() != provider
+                    ):
                         continue
                     for item in coverage.get("declared_exclusions", []):
-                        exclusion_item = item.get("item") if isinstance(item, Mapping) else None
-                        if isinstance(exclusion_item, str) and exclusion_item.startswith("nav_missing_date:"):
+                        exclusion_item = (
+                            item.get("item") if isinstance(item, Mapping) else None
+                        )
+                        if isinstance(
+                            exclusion_item, str
+                        ) and exclusion_item.startswith("nav_missing_date:"):
                             missing = exclusion_item.removeprefix("nav_missing_date:")
-                            if requested_start.isoformat() <= missing <= requested_end.isoformat():
-                                expected_missing.append({"start": missing, "end": missing, "reason": "PROVIDER_DECLARED_NAV_MISSING"})
-            if receipt.get("missing_intervals") != sorted(expected_missing, key=lambda item: item["start"]):
+                            if (
+                                requested_start.isoformat()
+                                <= missing
+                                <= requested_end.isoformat()
+                            ):
+                                expected_missing.append(
+                                    {
+                                        "start": missing,
+                                        "end": missing,
+                                        "reason": "PROVIDER_DECLARED_NAV_MISSING",
+                                    }
+                                )
+            if receipt.get("missing_intervals") != sorted(
+                expected_missing, key=lambda item: item["start"]
+            ):
                 _fail()
-            contract = {"coverage_mode": "STATIC_SNAPSHOT_COVERAGE_V1", "account_id": account_id, "strategy_id": strategy_id, "requested_start": requested_start.isoformat(), "requested_end": requested_end.isoformat(), "provider_generation": generation, "staged_inputs": staged}
-            expected_entries.append({"artifact_id": receipt_id, "sha256": receipt_snapshot.sha256, "size_bytes": receipt_snapshot.size_bytes, "contract": contract})
-            routed = [assignment for assignment in mapped if assignment["account_id"] == account_id and assignment["strategy_id"] == strategy_id and assignment["effective_start"] == requested_start.isoformat() and (assignment["effective_end"] is None or assignment["effective_end"] == requested_end.isoformat())]
+            contract = {
+                "coverage_mode": "STATIC_SNAPSHOT_COVERAGE_V1",
+                "account_id": account_id,
+                "strategy_id": strategy_id,
+                "requested_start": requested_start.isoformat(),
+                "requested_end": requested_end.isoformat(),
+                "provider_generation": generation,
+                "staged_inputs": staged,
+            }
+            expected_entries.append(
+                {
+                    "artifact_id": receipt_id,
+                    "sha256": receipt_snapshot.sha256,
+                    "size_bytes": receipt_snapshot.size_bytes,
+                    "contract": contract,
+                }
+            )
+            routed = [
+                assignment
+                for assignment in mapped
+                if assignment["account_id"] == account_id
+                and assignment["strategy_id"] == strategy_id
+                and assignment["effective_start"] == requested_start.isoformat()
+                and (
+                    assignment["effective_end"] is None
+                    or assignment["effective_end"] == requested_end.isoformat()
+                )
+            ]
             if len(routed) != 1:
                 _fail()
             route_key = tuple(_assignment_record(routed[0]).values())
             if route_key in routed_keys:
                 _fail()
             routed_keys.add(route_key)
-            routes.append({"receipt_id": receipt_id, "receipt_snapshot": receipt_snapshot, "receipt": receipt, "selected_assignment": routed[0]})
+            routes.append(
+                {
+                    "receipt_id": receipt_id,
+                    "receipt_snapshot": receipt_snapshot,
+                    "receipt": receipt,
+                    "selected_assignment": routed[0],
+                }
+            )
             continue
         if (
             set(receipt) != receipt_fields
@@ -3625,9 +4054,13 @@ def _verify_mixed_authority_and_coverage_many(
             or type(issuer.get("code_sha256")) is not str
             or _SHA256.fullmatch(issuer["code_sha256"]) is None
             or not isinstance(pagination, dict)
-            or set(pagination) != {
-                "mode", "page_count", "request_response_chain_sha256",
-                "terminal_response_sha256", "terminal",
+            or set(pagination)
+            != {
+                "mode",
+                "page_count",
+                "request_response_chain_sha256",
+                "terminal_response_sha256",
+                "terminal",
             }
             or not isinstance(pagination.get("mode"), str)
             or not pagination["mode"]
@@ -3678,8 +4111,7 @@ def _verify_mixed_authority_and_coverage_many(
         provider = receipt.get("provider")
         if (
             not categories["required_categories"]
-            or categories["required_categories"]
-            != categories["completed_categories"]
+            or categories["required_categories"] != categories["completed_categories"]
             or categories["unavailable_categories"]
             or not isinstance(provider, str)
             or not provider
@@ -3706,9 +4138,7 @@ def _verify_mixed_authority_and_coverage_many(
             "code_sha256": issuer["code_sha256"],
             "provider": provider,
             "account_id": account_id,
-            "source_account_identity_sha256": receipt[
-                "source_account_identity_sha256"
-            ],
+            "source_account_identity_sha256": receipt["source_account_identity_sha256"],
             "provider_generation": receipt["provider_generation"],
             "provider_generation_manifest": manifest,
             "raw_evidence_artifacts": normalized_raw,
@@ -3818,7 +4248,11 @@ def _mixed_normalized_facts(
     seen: set[str] = set()
     for raw in raw_flows:
         if not isinstance(raw, dict) or not {
-            "record_id", "account_id", "event_date", "flow_type", "amount"
+            "record_id",
+            "account_id",
+            "event_date",
+            "flow_type",
+            "amount",
         } <= set(raw):
             _fail()
         record_id = raw.get("record_id")
@@ -3859,9 +4293,19 @@ def _mixed_normalized_facts(
     anchors: list[dict[str, object]] = []
     anchor_ids: set[str] = set()
     common_anchor_fields = {
-        "record_id", "account_id", "provider_id", "generation_id", "strategy_id",
-        "mapping_status", "evidence_layer", "event_date", "nav_recognition_date",
-        "capital_type", "amount", "source_artifact_id", "source_record_id",
+        "record_id",
+        "account_id",
+        "provider_id",
+        "generation_id",
+        "strategy_id",
+        "mapping_status",
+        "evidence_layer",
+        "event_date",
+        "nav_recognition_date",
+        "capital_type",
+        "amount",
+        "source_artifact_id",
+        "source_record_id",
         "mapping_basis",
     }
     for raw in raw_anchors:
@@ -3872,11 +4316,12 @@ def _mixed_normalized_facts(
             _fail()
         anchor_ids.add(record_id)
         capital_type = _fact_text(raw.get("capital_type"))
-        if capital_type not in {
-            "OPENING_CAPITAL_ANCHOR", "STRATEGY_CAPITAL_ALLOCATION"
-        } or raw.get("mapping_status") != "MAPPED" or raw.get(
-            "evidence_layer"
-        ) != "ACCOUNT_LIVE":
+        if (
+            capital_type
+            not in {"OPENING_CAPITAL_ANCHOR", "STRATEGY_CAPITAL_ALLOCATION"}
+            or raw.get("mapping_status") != "MAPPED"
+            or raw.get("evidence_layer") != "ACCOUNT_LIVE"
+        ):
             _fail()
         amount = raw.get("amount")
         if (
@@ -3889,22 +4334,24 @@ def _mixed_normalized_facts(
         ):
             _fail()
         normalized = dict(raw)
-        normalized.update({
-            "record_id": record_id,
-            "account_id": _internal_id(raw.get("account_id")),
-            "provider_id": _fact_text(raw.get("provider_id")),
-            "generation_id": _fact_text(raw.get("generation_id")),
-            "strategy_id": _fact_text(raw.get("strategy_id")),
-            "event_date": _date_value(raw.get("event_date")).isoformat(),
-            "nav_recognition_date": _date_value(
-                raw.get("nav_recognition_date")
-            ).isoformat(),
-            "capital_type": capital_type,
-            "amount": dict(amount),
-            "source_artifact_id": _fact_text(raw.get("source_artifact_id")),
-            "source_record_id": _fact_text(raw.get("source_record_id")),
-            "mapping_basis": _fact_text(raw.get("mapping_basis")),
-        })
+        normalized.update(
+            {
+                "record_id": record_id,
+                "account_id": _internal_id(raw.get("account_id")),
+                "provider_id": _fact_text(raw.get("provider_id")),
+                "generation_id": _fact_text(raw.get("generation_id")),
+                "strategy_id": _fact_text(raw.get("strategy_id")),
+                "event_date": _date_value(raw.get("event_date")).isoformat(),
+                "nav_recognition_date": _date_value(
+                    raw.get("nav_recognition_date")
+                ).isoformat(),
+                "capital_type": capital_type,
+                "amount": dict(amount),
+                "source_artifact_id": _fact_text(raw.get("source_artifact_id")),
+                "source_record_id": _fact_text(raw.get("source_record_id")),
+                "mapping_basis": _fact_text(raw.get("mapping_basis")),
+            }
+        )
         if _date_value(normalized["nav_recognition_date"]) < _date_value(
             normalized["event_date"]
         ):
@@ -4017,8 +4464,7 @@ def _mixed_admitted_fact_projection(
     root_events = [
         event
         for event in events
-        if isinstance(event, dict)
-        and in_funded_epoch(event, "nav_recognition_date")
+        if isinstance(event, dict) and in_funded_epoch(event, "nav_recognition_date")
     ]
     if any(event.get("classification_status") != "CLASSIFIED" for event in root_events):
         _fail()
@@ -4061,14 +4507,14 @@ def _mixed_admitted_fact_projection(
         != projected_source_ids
         or {str(flow.get("record_id")) for flow in projected_flows}
         != projected_source_ids
-        or any(event.get("classification_status") != "CLASSIFIED" for event in projected_events)
+        or any(
+            event.get("classification_status") != "CLASSIFIED"
+            for event in projected_events
+        )
     ):
         _fail()
-    projected_navs = [
-        nav
-        for nav in navs
-        if in_funded_epoch(nav, "as_of_date")
-    ]
+    projected_navs = [nav for nav in navs if in_funded_epoch(nav, "as_of_date")]
+
     def anchor_membership_date(anchor: Mapping[str, object]) -> object:
         if anchor.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION":
             return anchor.get("event_date")
@@ -4079,8 +4525,7 @@ def _mixed_admitted_fact_projection(
         for anchor in capital_anchors
         if any(
             anchor.get("account_id") == route["selected_assignment"]["account_id"]
-            and anchor.get("strategy_id")
-            == route["selected_assignment"]["strategy_id"]
+            and anchor.get("strategy_id") == route["selected_assignment"]["strategy_id"]
             and in_interval(anchor_membership_date(anchor), route)
             for route in funded_routes
         )
@@ -4088,8 +4533,7 @@ def _mixed_admitted_fact_projection(
     descriptor = {
         "selector": "ALL_FUNDED_EPOCHS_V1",
         "funded_epochs": [
-            _assignment_record(route["selected_assignment"])
-            for route in funded_routes
+            _assignment_record(route["selected_assignment"]) for route in funded_routes
         ],
         "supporting_internal_counterparty_source_record_ids": sorted(supporting_ids),
     }
@@ -4126,9 +4570,10 @@ def _mixed_projection_accounting_currency(
         amount = flow.get("amount")
         if not isinstance(amount, dict):
             _fail()
-        if amount.get("status") == "AVAILABLE" and amount.get(
-            "currency"
-        ) != accounting_currency:
+        if (
+            amount.get("status") == "AVAILABLE"
+            and amount.get("currency") != accounting_currency
+        ):
             _fail()
     for anchor in capital_anchors:
         money = (
@@ -4173,15 +4618,13 @@ def _verify_mixed_calculation_bridge(
         projected_events,
         projected_anchors,
         projection,
-    ) = (
-        _mixed_admitted_fact_projection(
-            funded_assignments=admission["funded_assignments"],
-            routes=authority_state["routes"],
-            navs=navs,
-            flows=flows,
-            events=events,
-            capital_anchors=calculation_capital_anchors,
-        )
+    ) = _mixed_admitted_fact_projection(
+        funded_assignments=admission["funded_assignments"],
+        routes=authority_state["routes"],
+        navs=navs,
+        flows=flows,
+        events=events,
+        capital_anchors=calculation_capital_anchors,
     )
     currency = _mixed_projection_accounting_currency(
         projected_navs, projected_flows, projected_anchors
@@ -4198,8 +4641,10 @@ def _verify_mixed_calculation_bridge(
     }
     ledger_bytes = canonical_json_bytes(calculation_ledger)
     ledger_artifact = _subject_artifact(
-        ledger_bytes, "authority/calculation-ledger.json",
-        "account-manifest-calculation-ledger", "1",
+        ledger_bytes,
+        "authority/calculation-ledger.json",
+        "account-manifest-calculation-ledger",
+        "1",
         selected.generation_as_of_date.isoformat(),
     )
     ledger_pair = {
@@ -4257,7 +4702,9 @@ def _verify_mixed_calculation_bridge(
     calculation_classified_artifact = _subject_artifact(
         calculation_classified_bytes,
         "authority/calculation-classified-flows.json",
-        "classified-flows", "4", selected.generation_as_of_date.isoformat(),
+        "classified-flows",
+        "4",
+        selected.generation_as_of_date.isoformat(),
     )
     calculation_coverage = _mixed_coverage_payload(
         selected=selected,
@@ -4280,12 +4727,14 @@ def _verify_mixed_calculation_bridge(
             "epoch": _assignment_record(assignment),
             "provider": providers[str(assignment["account_id"])],
             "nav_observations": [
-                nav for nav in projected_navs
+                nav
+                for nav in projected_navs
                 if nav["account_id"] == assignment["account_id"]
                 and in_interval(nav["as_of_date"], assignment)
             ],
             "classified_flows": [
-                event for event in projected_events
+                event
+                for event in projected_events
                 if isinstance(event, dict)
                 and event.get("account_id") == assignment["account_id"]
                 and in_interval(
@@ -4294,7 +4743,8 @@ def _verify_mixed_calculation_bridge(
                 )
             ],
             "capital_anchors": [
-                anchor for anchor in projected_anchors
+                anchor
+                for anchor in projected_anchors
                 if anchor.get("account_id") == assignment["account_id"]
                 and anchor.get("strategy_id") == assignment["strategy_id"]
                 and in_interval(
@@ -4318,9 +4768,7 @@ def _verify_mixed_calculation_bridge(
         "as_of_date": selected.generation_as_of_date.isoformat(),
         "accounting_currency": currency,
         "source_ledger_identity": ledger_source,
-        "source_classified_flows_artifact": authority_state[
-            "classified_artifact"
-        ],
+        "source_classified_flows_artifact": authority_state["classified_artifact"],
         "mapped_assignments_identity": dict(mapped_identity),
         "projection": projection,
         "rows": rows,
@@ -4363,7 +4811,10 @@ def _selected_mixed_admission_bytes(
         and tuple(
             row.get(field)
             for field in (
-                "account_id", "strategy_id", "effective_start", "effective_end"
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
             )
         )
         in selected_keys
@@ -4394,12 +4845,21 @@ def _verify_mixed_admission(
     expected_bytes, policy = _selected_mixed_admission_bytes(selected, mapped)
     if normalized["authority/mapped-epoch-admission.json"] != expected_bytes:
         _fail()
-    if set(policy) != {
-        "schema_version", "policy_id", "policy_version", "artifact_id",
-        "as_of_date", "assignment_sha256", "admissions",
-    } or policy.get("schema_version") != 2 or policy.get("artifact_id") != (
-        "authority/mapped-epoch-admission.json"
-    ) or policy.get("assignment_sha256") != mapped_identity.get("sha256"):
+    if (
+        set(policy)
+        != {
+            "schema_version",
+            "policy_id",
+            "policy_version",
+            "artifact_id",
+            "as_of_date",
+            "assignment_sha256",
+            "admissions",
+        }
+        or policy.get("schema_version") != 2
+        or policy.get("artifact_id") != ("authority/mapped-epoch-admission.json")
+        or policy.get("assignment_sha256") != mapped_identity.get("sha256")
+    ):
         _fail()
     if (
         policy.get("policy_id") != "MAPPED_EPOCH_ADMISSION_V2"
@@ -4411,23 +4871,23 @@ def _verify_mixed_admission(
     admissions = policy.get("admissions")
     if not isinstance(admissions, list) or len(admissions) != len(mapped):
         _fail()
-    mapped_by_key = {
-        tuple(_assignment_record(row).values()): row for row in mapped
-    }
+    mapped_by_key = {tuple(_assignment_record(row).values()): row for row in mapped}
     admission_by_key: dict[tuple[object, ...], dict[str, object]] = {}
     funded: list[dict[str, object]] = []
     navs, _flows, _anchors = _mixed_normalized_facts(selected)
-    nav_by_id = {
-        nav.get("record_id"): nav
-        for nav in navs
-        if isinstance(nav, dict)
-    }
+    nav_by_id = {nav.get("record_id"): nav for nav in navs if isinstance(nav, dict)}
     for raw in admissions:
         if not isinstance(raw, dict):
             _fail()
-        key = tuple(raw.get(name) for name in (
-            "account_id", "strategy_id", "effective_start", "effective_end"
-        ))
+        key = tuple(
+            raw.get(name)
+            for name in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        )
         if key not in mapped_by_key or key in admission_by_key:
             _fail()
         status = raw.get("status")
@@ -4435,11 +4895,20 @@ def _verify_mixed_admission(
         if type(continuity) is not bool:
             _fail()
         if status == "FUNDED":
-            if set(raw) != {
-                "account_id", "strategy_id", "effective_start", "effective_end",
-                "status", "continuity_to_successor", "authority_kind",
-                "funded_nav_record_ids",
-            } or raw.get("authority_kind") != "LEDGER_AVAILABLE_POSITIVE_NAV_V1":
+            if (
+                set(raw)
+                != {
+                    "account_id",
+                    "strategy_id",
+                    "effective_start",
+                    "effective_end",
+                    "status",
+                    "continuity_to_successor",
+                    "authority_kind",
+                    "funded_nav_record_ids",
+                }
+                or raw.get("authority_kind") != "LEDGER_AVAILABLE_POSITIVE_NAV_V1"
+            ):
                 _fail()
             ids = raw.get("funded_nav_record_ids")
             if (
@@ -4458,7 +4927,10 @@ def _verify_mixed_admission(
             )
             for record_id in ids:
                 nav = nav_by_id.get(record_id)
-                if not isinstance(nav, dict) or nav.get("account_id") != assignment["account_id"]:
+                if (
+                    not isinstance(nav, dict)
+                    or nav.get("account_id") != assignment["account_id"]
+                ):
                     _fail()
                 nav_date = _date_value(nav.get("as_of_date"))
                 amount = nav.get("nav")
@@ -4471,10 +4943,21 @@ def _verify_mixed_admission(
                     _fail()
             funded.append(raw)
         elif status == "BLOCKED":
-            if set(raw) != {
-                "account_id", "strategy_id", "effective_start", "effective_end",
-                "status", "continuity_to_successor", "reason",
-            } or continuity or not isinstance(raw.get("reason"), str) or not raw["reason"]:
+            if (
+                set(raw)
+                != {
+                    "account_id",
+                    "strategy_id",
+                    "effective_start",
+                    "effective_end",
+                    "status",
+                    "continuity_to_successor",
+                    "reason",
+                }
+                or continuity
+                or not isinstance(raw.get("reason"), str)
+                or not raw["reason"]
+            ):
                 _fail()
         else:
             _fail()
@@ -4522,18 +5005,31 @@ def _verify_mixed_admission(
             (
                 index
                 for index, row in enumerate(chain)
-                if tuple(row.get(name) for name in (
-                    "account_id", "strategy_id", "effective_start", "effective_end"
-                )) == key
+                if tuple(
+                    row.get(name)
+                    for name in (
+                        "account_id",
+                        "strategy_id",
+                        "effective_start",
+                        "effective_end",
+                    )
+                )
+                == key
             ),
             None,
         )
         if full_index is None or full_index + 1 >= len(chain):
             _fail()
         successor = chain[full_index + 1]
-        successor_key = tuple(successor.get(name) for name in (
-            "account_id", "strategy_id", "effective_start", "effective_end"
-        ))
+        successor_key = tuple(
+            successor.get(name)
+            for name in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        )
         successor_policy = admission_by_key.get(successor_key)
         if (
             successor.get("strategy_mapping_disposition") != "STRATEGY_MAPPED"
@@ -4545,13 +5041,10 @@ def _verify_mixed_admission(
         ):
             _fail()
         cited_ids = policy_row.get("funded_nav_record_ids")
-        if (
-            not isinstance(cited_ids, list)
-            or not any(
-                isinstance(nav_by_id.get(record_id), dict)
-                and nav_by_id[record_id].get("as_of_date") == end_value
-                for record_id in cited_ids
-            )
+        if not isinstance(cited_ids, list) or not any(
+            isinstance(nav_by_id.get(record_id), dict)
+            and nav_by_id[record_id].get("as_of_date") == end_value
+            for record_id in cited_ids
         ):
             _fail()
         predecessor_by_key[successor_key] = assignment
@@ -4559,7 +5052,10 @@ def _verify_mixed_admission(
         tuple(
             row[name]
             for name in (
-                "account_id", "strategy_id", "effective_start", "effective_end"
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
             )
         )
         for row in funded
@@ -4616,7 +5112,10 @@ def _mixed_numeric_facts(
         )
     flow_facts: list[dict[str, object]] = []
     for event in events:
-        if not isinstance(event, dict) or event.get("account_id") != assignment["account_id"]:
+        if (
+            not isinstance(event, dict)
+            or event.get("account_id") != assignment["account_id"]
+        ):
             continue
         amount = _parse_retained_source_decimal(event.get("amount"))
         disposition = event.get("disposition")
@@ -4633,13 +5132,15 @@ def _mixed_numeric_facts(
             }
         )
     epoch_anchors = [
-        anchor for anchor in capital_anchors
+        anchor
+        for anchor in capital_anchors
         if isinstance(anchor, dict)
         and anchor.get("account_id") == assignment["account_id"]
         and anchor.get("strategy_id") == assignment["strategy_id"]
     ]
     opening_rows = [
-        anchor for anchor in epoch_anchors
+        anchor
+        for anchor in epoch_anchors
         if anchor.get("capital_type") == "OPENING_CAPITAL_ANCHOR"
     ]
     if len(opening_rows) > 1:
@@ -4678,18 +5179,18 @@ def _mixed_numeric_facts(
         ):
             _fail()
         allocation_event = _date_value(allocation.get("event_date"))
-        allocation_recognition = _date_value(
-            allocation.get("nav_recognition_date")
-        )
+        allocation_recognition = _date_value(allocation.get("nav_recognition_date"))
         if allocation_recognition < allocation_event:
             _fail()
-        allocation_facts.append(_IndependentFlowFact(
-            allocation_event,
-            "INTERNAL_IN",
-            currency,
-            _parse_retained_source_decimal(amount.get("value")),
-            allocation_recognition,
-        ))
+        allocation_facts.append(
+            _IndependentFlowFact(
+                allocation_event,
+                "INTERNAL_IN",
+                currency,
+                _parse_retained_source_decimal(amount.get("value")),
+                allocation_recognition,
+            )
+        )
     cutoff = _current_epoch_calculation_cutoff(selected)
     if cutoff is None:
         _fail()
@@ -4761,9 +5262,15 @@ def _verify_mixed_output_and_state(
     for row in candidate_rows:
         if not isinstance(row, dict):
             _fail()
-        key = tuple(row.get(name) for name in (
-            "account_id", "strategy_id", "effective_start", "effective_end"
-        ))
+        key = tuple(
+            row.get(name)
+            for name in (
+                "account_id",
+                "strategy_id",
+                "effective_start",
+                "effective_end",
+            )
+        )
         if key in candidate_by_key:
             _fail()
         candidate_by_key[key] = row
@@ -4773,15 +5280,11 @@ def _verify_mixed_output_and_state(
     display_by_key = (
         {}
         if selected.current_epoch_crosswalk is None
-        else _independent_crosswalk_display_by_epoch(
-            selected.current_epoch_crosswalk
-        )
+        else _independent_crosswalk_display_by_epoch(selected.current_epoch_crosswalk)
     )
     admission_by_key = admission["by_key"]
     coverage_rows = authority_state["coverage"]["rows"]
-    coverage_by_key = {
-        tuple(row["assignment"].values()): row for row in coverage_rows
-    }
+    coverage_by_key = {tuple(row["assignment"].values()): row for row in coverage_rows}
     _, source_flows, source_capital_anchors = _mixed_normalized_facts(selected)
     cutoff_excluded_opening_anchor_keys = {
         tuple(_assignment_record(assignment).values())
@@ -4792,7 +5295,8 @@ def _verify_mixed_output_and_state(
             and anchor.get("strategy_id") == assignment["strategy_id"]
             and (
                 _date_value(anchor["event_date"]) > calculation_cutoff
-                or _date_value(anchor.get("nav_recognition_date", anchor["event_date"])) > calculation_cutoff
+                or _date_value(anchor.get("nav_recognition_date", anchor["event_date"]))
+                > calculation_cutoff
             )
             for anchor in source_capital_anchors
         )
@@ -4809,9 +5313,11 @@ def _verify_mixed_output_and_state(
             <= calculation_cutoff
             and (
                 assignment["effective_end"] is None
-                or _date_value(anchor["event_date"]) <= _date_value(assignment["effective_end"])
+                or _date_value(anchor["event_date"])
+                <= _date_value(assignment["effective_end"])
             )
-            and _date_value(anchor.get("nav_recognition_date", anchor["event_date"])) > calculation_cutoff
+            and _date_value(anchor.get("nav_recognition_date", anchor["event_date"]))
+            > calculation_cutoff
             for anchor in source_capital_anchors
         )
     }
@@ -4825,9 +5331,11 @@ def _verify_mixed_output_and_state(
             <= calculation_cutoff
             and (
                 assignment["effective_end"] is None
-                or _date_value(flow["event_date"]) <= _date_value(assignment["effective_end"])
+                or _date_value(flow["event_date"])
+                <= _date_value(assignment["effective_end"])
             )
-            and _date_value(flow.get("nav_recognition_date", flow["event_date"])) > calculation_cutoff
+            and _date_value(flow.get("nav_recognition_date", flow["event_date"]))
+            > calculation_cutoff
             for flow in source_flows
         )
     }
@@ -4846,8 +5354,14 @@ def _verify_mixed_output_and_state(
             **display_by_key.get(key, {}),
         }
         if selected.current_epoch_crosswalk is not None and set(base) != {
-            "account_id", "strategy_id", "effective_start", "effective_end",
-            "provider", "continuity_to_successor", "account_label", "last_four",
+            "account_id",
+            "strategy_id",
+            "effective_start",
+            "effective_end",
+            "provider",
+            "continuity_to_successor",
+            "account_label",
+            "last_four",
         }:
             _fail()
         coverage_complete = coverage_row["status"] == "COMPLETE"
@@ -4872,7 +5386,9 @@ def _verify_mixed_output_and_state(
                     "status": "BLOCKED_RETURN_LINKAGE",
                     "blocking_reason": blocking_reason,
                 }
-                if candidate != expected or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(candidate):
+                if candidate != expected or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(
+                    candidate
+                ):
                     _fail()
                 expected_rows.append(expected)
                 blocker_chains.append(
@@ -4927,9 +5443,8 @@ def _verify_mixed_output_and_state(
                         "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL"
                     ),
                 }
-                if (
-                    candidate != expected
-                    or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(candidate)
+                if candidate != expected or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(
+                    candidate
                 ):
                     _fail()
                 expected_rows.append(expected)
@@ -4958,7 +5473,9 @@ def _verify_mixed_output_and_state(
             }
             if set(candidate) != set(expected_base) | _NUMERIC_PROJECTION_FIELDS:
                 _fail()
-            projection = {field: candidate[field] for field in _NUMERIC_PROJECTION_FIELDS}
+            projection = {
+                field: candidate[field] for field in _NUMERIC_PROJECTION_FIELDS
+            }
             row_comparison = _compare_mixed_retained_numeric_epoch(
                 fact_form, projection
             )
@@ -4989,7 +5506,9 @@ def _verify_mixed_output_and_state(
                 "status": "BLOCKED_ADMISSION",
                 "blocking_reason": policy_row["reason"],
             }
-            if candidate != expected or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(candidate):
+            if candidate != expected or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(
+                candidate
+            ):
                 _fail()
             expected_rows.append(expected)
             blocker_chains.append(
@@ -5020,7 +5539,9 @@ def _verify_mixed_output_and_state(
                 "status": "BLOCKED_UNPROVABLE_OPENING_FLOWS",
                 "blocking_reason": "FLOW_COMPLETENESS_NOT_PROVEN",
             }
-            if candidate != expected or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(candidate):
+            if candidate != expected or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(
+                candidate
+            ):
                 _fail()
             expected_rows.append(expected)
             blocker_chains.append(
@@ -5044,13 +5565,17 @@ def _verify_mixed_output_and_state(
     policy_bytes = canonical_json_bytes(policy)
     authority = authority_state["authority"]
     authority_artifact = _subject_artifact(
-        normalized[_MIXED_AUTHORITY_PATH], _MIXED_AUTHORITY_PATH,
-        "account-interval-retrieval-receipt-authority", "1",
+        normalized[_MIXED_AUTHORITY_PATH],
+        _MIXED_AUTHORITY_PATH,
+        "account-interval-retrieval-receipt-authority",
+        "1",
         str(authority["as_of_date"]),
     )
     coverage_artifact = _subject_artifact(
         normalized["authority/account-flow-coverage.json"],
-        "authority/account-flow-coverage.json", "account-flow-coverage", "2",
+        "authority/account-flow-coverage.json",
+        "account-flow-coverage",
+        "2",
         _selected_date(selected.provider_ledger).isoformat(),
     )
     admission_policy = admission["policy"]
@@ -5086,16 +5611,17 @@ def _verify_mixed_output_and_state(
                 "policy_version": policy.get("policy_version"),
                 "event_dispositions": policy.get("event_dispositions"),
                 "artifact": _subject_artifact(
-                    policy_bytes, "authority/flow-classification-policy.json",
-                    "flow-classification-policy", "1", str(policy.get("as_of_date")),
+                    policy_bytes,
+                    "authority/flow-classification-policy.json",
+                    "flow-classification-policy",
+                    "1",
+                    str(policy.get("as_of_date")),
                 ),
             },
             "flow_coverage": {
                 "artifact": coverage_artifact,
                 "ledger_identity": bridge["ledger_source"],
-                "classified_flows_artifact": authority_state[
-                    "classified_artifact"
-                ],
+                "classified_flows_artifact": authority_state["classified_artifact"],
                 "receipt_authority": authority_artifact,
             },
             "admission_policy": {
@@ -5104,7 +5630,8 @@ def _verify_mixed_output_and_state(
                 "artifact": _subject_artifact(
                     normalized["authority/mapped-epoch-admission.json"],
                     "authority/mapped-epoch-admission.json",
-                    "account-strategy-manifest-admission-policy", "2",
+                    "account-strategy-manifest-admission-policy",
+                    "2",
                     str(admission_policy["as_of_date"]),
                 ),
                 "assignment": dict(mapped_identity),
@@ -5113,23 +5640,31 @@ def _verify_mixed_output_and_state(
             "calculation_code": selected_identity["code_sources"]["epoch_producer"],
             "selected_inputs": _subject_artifact(
                 normalized["authority/selected-input-identities.json"],
-                "authority/selected-input-identities.json", "selected-input-identities",
-                "1", generated_date,
+                "authority/selected-input-identities.json",
+                "selected-input-identities",
+                "1",
+                generated_date,
             ),
             "account_assignment_perimeter": _subject_artifact(
                 normalized["authority/account-assignment-perimeter.json"],
                 "authority/account-assignment-perimeter.json",
-                "account-assignment-perimeter", "1", generated_date,
+                "account-assignment-perimeter",
+                "1",
+                generated_date,
             ),
             "calculation_inputs": _subject_artifact(
                 normalized["authority/calculation-inputs.json"],
                 "authority/calculation-inputs.json",
-                "account-manifest-calculation-inputs", "4", generated_date,
+                "account-manifest-calculation-inputs",
+                "4",
+                generated_date,
             ),
             "code_identities": _subject_artifact(
                 normalized["authority/code-identities.json"],
-                "authority/code-identities.json", "account-manifest-code-identities",
-                "1", generated_date,
+                "authority/code-identities.json",
+                "account-manifest-code-identities",
+                "1",
+                generated_date,
             ),
         },
         "epoch_continuity": {
@@ -5161,7 +5696,9 @@ def _verify_mixed_output_and_state(
             for row in assignments
         )
         for disposition in (
-            "STRATEGY_MAPPED", "HISTORICAL_POOL_ONLY", "RESERVE_NOT_APPLICABLE"
+            "STRATEGY_MAPPED",
+            "HISTORICAL_POOL_ONLY",
+            "RESERVE_NOT_APPLICABLE",
         )
     }
     admissions = admission_policy["admissions"]
@@ -5178,11 +5715,19 @@ def _verify_mixed_output_and_state(
         "coverage_row_count": len(coverage_rows),
         "admission_row_count": len(admissions),
         "output_row_count": len(expected_rows),
-        "complete_coverage_row_count": sum(row["status"] == "COMPLETE" for row in coverage_rows),
-        "funded_admission_row_count": sum(row["status"] == "FUNDED" for row in admissions),
+        "complete_coverage_row_count": sum(
+            row["status"] == "COMPLETE" for row in coverage_rows
+        ),
+        "funded_admission_row_count": sum(
+            row["status"] == "FUNDED" for row in admissions
+        ),
         "ok_output_row_count": sum(row["status"] == "OK" for row in expected_rows),
-        "blocked_coverage_row_count": sum(row["status"] == "BLOCKED" for row in coverage_rows),
-        "blocked_admission_row_count": sum(row["status"] == "BLOCKED" for row in admissions),
+        "blocked_coverage_row_count": sum(
+            row["status"] == "BLOCKED" for row in coverage_rows
+        ),
+        "blocked_admission_row_count": sum(
+            row["status"] == "BLOCKED" for row in admissions
+        ),
         "blocked_output_row_count": sum(row["status"] != "OK" for row in expected_rows),
     }
     # Report state has its own canonical chain order.  Coverage, calculation,
@@ -5222,7 +5767,9 @@ def _verify_mixed_semantics_normalized(
         selected, normalized, enforce_global_accounting_currency=False
     )
     _verify_c4b3_code_identities(selected, normalized)
-    perimeter = _strict_object(normalized["authority/account-assignment-perimeter.json"])
+    perimeter = _strict_object(
+        normalized["authority/account-assignment-perimeter.json"]
+    )
     mapped = _selected_current_epoch_rows(selected, perimeter.get("rows"))
     baseline = _strict_object(selected.baseline.contents)
     providers = _baseline_account_providers(baseline.get("accounts"))
@@ -5230,9 +5777,7 @@ def _verify_mixed_semantics_normalized(
     authority_state = _verify_mixed_authority_and_coverage_many(
         selected, normalized, mapped, providers, mapped_identity
     )
-    admission = _verify_mixed_admission(
-        selected, normalized, mapped, mapped_identity
-    )
+    admission = _verify_mixed_admission(selected, normalized, mapped, mapped_identity)
     bridge = _verify_mixed_calculation_bridge(
         selected,
         normalized,
@@ -5243,8 +5788,14 @@ def _verify_mixed_semantics_normalized(
         admission,
     )
     return _verify_mixed_output_and_state(
-        selected, normalized, mapped, providers, mapped_identity,
-        authority_state, bridge, admission,
+        selected,
+        normalized,
+        mapped,
+        providers,
+        mapped_identity,
+        authority_state,
+        bridge,
+        admission,
     )
 
 
@@ -5427,7 +5978,10 @@ def _validate_retained_candidate_state(
             _fail()
         prior_key = key
     if type(numeric) is not dict or set(numeric) != {
-        "candidate_count", "comparison_count", "discrepancy_count", "disposition"
+        "candidate_count",
+        "comparison_count",
+        "discrepancy_count",
+        "disposition",
     }:
         _fail()
     counts = (
@@ -5447,9 +6001,11 @@ def _validate_retained_candidate_state(
     if (
         type(disposition) is not str
         or disposition != "NOT_APPLICABLE_NO_CANDIDATES"
-        or tuple(numeric[key] for key in (
-            "candidate_count", "comparison_count", "discrepancy_count"
-        )) != counts
+        or tuple(
+            numeric[key]
+            for key in ("candidate_count", "comparison_count", "discrepancy_count")
+        )
+        != counts
         or numeric["disposition"] != disposition
     ):
         _fail()
@@ -5469,7 +6025,9 @@ def _freeze_report_candidate(value: object) -> object:
     """Copy the internal candidate into recursively immutable containers."""
 
     if type(value) is dict:
-        return MappingProxyType({key: _freeze_report_candidate(item) for key, item in value.items()})
+        return MappingProxyType(
+            {key: _freeze_report_candidate(item) for key, item in value.items()}
+        )
     if type(value) is list or type(value) is tuple:
         return tuple(_freeze_report_candidate(item) for item in value)
     if type(value) is set or type(value) is frozenset:
@@ -5485,7 +6043,10 @@ def _build_retained_report_candidate(
     """Return the pre-D3 candidate from derived retained semantics only."""
 
     if type(state) is not dict or set(state) != {
-        "counts", "blocker_chains", "numeric_verification", "invariants"
+        "counts",
+        "blocker_chains",
+        "numeric_verification",
+        "invariants",
     }:
         _fail()
     frozen = _freeze_report_candidate(
@@ -5585,7 +6146,10 @@ _MIXED_COUNT_KEYS: Final[frozenset[str]] = _RETAINED_D2A_COUNT_KEYS | {
 
 def _validate_mixed_candidate_state(state: Mapping[str, object]) -> None:
     if type(state) is not dict or set(state) != {
-        "counts", "blocker_chains", "numeric_verification", "invariants"
+        "counts",
+        "blocker_chains",
+        "numeric_verification",
+        "invariants",
     }:
         _fail()
     counts = state.get("counts")
@@ -5599,8 +6163,11 @@ def _validate_mixed_candidate_state(state: Mapping[str, object]) -> None:
         or type(chains) is not list
         or len(chains) != counts["current_product_epoch_count"]
         or type(numeric) is not dict
-        or set(numeric) != {
-            "candidate_count", "comparison_count", "discrepancy_count",
+        or set(numeric)
+        != {
+            "candidate_count",
+            "comparison_count",
+            "discrepancy_count",
             "disposition",
         }
     ):
@@ -5629,24 +6196,23 @@ def _validate_mixed_candidate_state(state: Mapping[str, object]) -> None:
         + counts["classified_event_blocked_count"]
         or counts["classified_event_count"] != counts["observed_raw_flow_count"]
         or counts["unmatched_fact_count"]
-        != counts["unmatched_nav_fact_count"]
-        + counts["unmatched_raw_flow_fact_count"]
+        != counts["unmatched_nav_fact_count"] + counts["unmatched_raw_flow_fact_count"]
         or counts["unmatched_projection_count"]
         != counts["unmatched_nav_fact_count"]
         + 2 * counts["unmatched_raw_flow_fact_count"]
         or any(
             counts[key] != counts["current_product_epoch_count"]
             for key in (
-                "calculation_input_row_count", "coverage_row_count",
-                "admission_row_count", "output_row_count",
+                "calculation_input_row_count",
+                "coverage_row_count",
+                "admission_row_count",
+                "output_row_count",
             )
         )
         or counts["coverage_row_count"]
-        != counts["complete_coverage_row_count"]
-        + counts["blocked_coverage_row_count"]
+        != counts["complete_coverage_row_count"] + counts["blocked_coverage_row_count"]
         or counts["admission_row_count"]
-        != counts["funded_admission_row_count"]
-        + counts["blocked_admission_row_count"]
+        != counts["funded_admission_row_count"] + counts["blocked_admission_row_count"]
         or counts["output_row_count"]
         != counts["ok_output_row_count"] + counts["blocked_output_row_count"]
         or counts["ok_output_row_count"] != candidate_count
@@ -5661,17 +6227,26 @@ def _validate_mixed_candidate_state(state: Mapping[str, object]) -> None:
     prior: tuple[str, str, str, str] | None = None
     for chain in chains:
         if type(chain) is not dict or set(chain) != {
-            "assignment", "coverage", "admission", "output", "numeric_candidate"
+            "assignment",
+            "coverage",
+            "admission",
+            "output",
+            "numeric_candidate",
         }:
             _fail()
         assignment = chain.get("assignment")
         if not isinstance(assignment, dict) or set(assignment) != {
-            "account_id", "strategy_id", "effective_start", "effective_end"
+            "account_id",
+            "strategy_id",
+            "effective_start",
+            "effective_end",
         }:
             _fail()
         key = (
-            str(assignment["account_id"]), str(assignment["strategy_id"]),
-            str(assignment["effective_start"]), str(assignment["effective_end"] or ""),
+            str(assignment["account_id"]),
+            str(assignment["strategy_id"]),
+            str(assignment["effective_start"]),
+            str(assignment["effective_end"] or ""),
         )
         if prior is not None and key <= prior:
             _fail()
@@ -5848,10 +6423,7 @@ def _verify_c4b2_policy_and_flows(
         if status == "AVAILABLE":
             value = amount.get("value")
             decimal_value = _parse_retained_source_decimal(value)
-            if (
-                enforce_global_accounting_currency
-                and currency != accounting_currency
-            ):
+            if enforce_global_accounting_currency and currency != accounting_currency:
                 _fail()
         elif status == "UNAVAILABLE":
             if amount.get("value") is not None:
@@ -5868,13 +6440,13 @@ def _verify_c4b2_policy_and_flows(
             "amount": dict(amount),
             "decimal_value": decimal_value,
         }
+
     def select_rule(flow_type: str) -> dict[str, str] | None:
         rule = exact.get(flow_type)
         if rule is not None:
             return rule
         matches = [
-            rule for rule in prefixes
-            if flow_type.startswith(rule["flow_type_prefix"])
+            rule for rule in prefixes if flow_type.startswith(rule["flow_type_prefix"])
         ]
         if not matches:
             return None
@@ -5995,8 +6567,7 @@ def _verify_c4b2_policy_and_flows(
                     counterpart["classification_status"] == "CLASSIFIED"
                     and counterpart["disposition"] == "INTERNAL"
                     and counterpart_rule is not None
-                    and counterpart_rule.get("counterparty_rule")
-                    == _COUNTERPARTY_RULE
+                    and counterpart_rule.get("counterparty_rule") == _COUNTERPARTY_RULE
                     and physical_candidates[counterparty_id] == [record_id]
                 ):
                     blocker_code = "INTERNAL_COUNTERPARTY_CLASSIFICATION_BLOCKED"
@@ -6106,7 +6677,10 @@ def encode_verification_request(
         )
     )
     receipts = [
-        {"receipt_id": receipt_id, "contents_base64": _canonical_base64(snapshot.contents)}
+        {
+            "receipt_id": receipt_id,
+            "contents_base64": _canonical_base64(snapshot.contents),
+        }
         for receipt_id, snapshot in receipt_items
     ]
     subject_paths = (
@@ -6120,7 +6694,9 @@ def encode_verification_request(
     ]
     return canonical_json_bytes(
         {
-            "schema_version": _REQUEST_VERSION if layout == "legacy" else _CROSSWALK_REQUEST_VERSION,
+            "schema_version": _REQUEST_VERSION
+            if layout == "legacy"
+            else _CROSSWALK_REQUEST_VERSION,
             "selected_snapshots": selected,
             "retrieval_receipts": receipts,
             "subjects": subjects,
@@ -6142,21 +6718,25 @@ def decode_verification_request(
     if canonical_json_bytes(parsed) != request_bytes:  # type: ignore[arg-type]
         _fail()
     root = _transport_object(parsed)
-    if set(root) != {"schema_version", "selected_snapshots", "retrieval_receipts", "subjects"}:
+    if set(root) != {
+        "schema_version",
+        "selected_snapshots",
+        "retrieval_receipts",
+        "subjects",
+    }:
         _fail()
     request_version = root["schema_version"]
     if isinstance(request_version, bool) or request_version not in {
         _REQUEST_VERSION,
-        2, _CROSSWALK_REQUEST_VERSION,
+        2,
+        _CROSSWALK_REQUEST_VERSION,
     }:
         _fail()
 
     selected = _transport_object(root["selected_snapshots"])
     expected_selected_keys = {f"{role}_base64" for role in _SNAPSHOT_ROLES}
     if request_version in {2, _CROSSWALK_REQUEST_VERSION}:
-        expected_selected_keys |= {
-            f"{role}_base64" for role in _MIXED_SNAPSHOT_ROLES
-        }
+        expected_selected_keys |= {f"{role}_base64" for role in _MIXED_SNAPSHOT_ROLES}
     if request_version == _CROSSWALK_REQUEST_VERSION:
         expected_selected_keys.add("current_epoch_crosswalk_base64")
     if set(selected) != expected_selected_keys:
@@ -6237,11 +6817,16 @@ def decode_verification_request(
         if request_version == 1:
             if prior_path is not None and path <= prior_path:
                 _fail()
-        elif index >= len(expected_subject_paths) or path != expected_subject_paths[index]:
+        elif (
+            index >= len(expected_subject_paths)
+            or path != expected_subject_paths[index]
+        ):
             _fail()
         prior_path = path
         subjects[path] = _decode_base64(entry["contents_base64"])
-    if request_version in {2, _CROSSWALK_REQUEST_VERSION} and len(raw_subjects) != len(expected_subject_paths):
+    if request_version in {2, _CROSSWALK_REQUEST_VERSION} and len(raw_subjects) != len(
+        expected_subject_paths
+    ):
         _fail()
     subjects = (
         _normalize_subject_payloads(subjects)

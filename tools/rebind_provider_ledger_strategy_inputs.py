@@ -201,7 +201,9 @@ def _candidate_payload(
         )
     returns_path_value = strategy_inputs.get("returns_path")
     returns_hash_value = strategy_inputs.get("returns_sha256")
-    if not isinstance(returns_path_value, str) or not isinstance(returns_hash_value, str):
+    if not isinstance(returns_path_value, str) or not isinstance(
+        returns_hash_value, str
+    ):
         raise ProviderLedgerStrategyInputsRebindError(
             "provider-ledger strategy_inputs is invalid"
         )
@@ -213,9 +215,7 @@ def _candidate_payload(
     return candidate
 
 
-def _reject_output_alias(
-    output_path: Path, inputs: Sequence[Path]
-) -> None:
+def _reject_output_alias(output_path: Path, inputs: Sequence[Path]) -> None:
     try:
         resolved_output = output_path.resolve(strict=False)
     except OSError as exc:
@@ -228,7 +228,9 @@ def _reject_output_alias(
             ):
                 raise ProviderLedgerStrategyInputsRebindError("output aliases an input")
         except OSError as exc:
-            raise ProviderLedgerStrategyInputsRebindError("input path is invalid") from exc
+            raise ProviderLedgerStrategyInputsRebindError(
+                "input path is invalid"
+            ) from exc
 
 
 def _write_new(path: Path, payload: Mapping[str, Any]) -> None:

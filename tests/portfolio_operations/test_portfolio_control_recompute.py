@@ -27,7 +27,9 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_control_recompute.py"
-SCHEMA_PATH = REPOSITORY_ROOT / "schemas" / "portfolio" / "control-recomputation.schema.json"
+SCHEMA_PATH = (
+    REPOSITORY_ROOT / "schemas" / "portfolio" / "control-recomputation.schema.json"
+)
 SPEC = importlib.util.spec_from_file_location(
     "portfolio_control_recompute", MODULE_PATH
 )
@@ -271,9 +273,14 @@ def _recompute(
 def test_independently_recomputes_panel_freshness_and_selected_ledger(
     tmp_path: Path,
 ) -> None:
-    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
-        tmp_path
-    )
+    (
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+    ) = _inputs(tmp_path)
 
     receipt = _recompute(
         correlation_root,
@@ -290,16 +297,22 @@ def test_independently_recomputes_panel_freshness_and_selected_ledger(
     assert set(receipt["differences"].values()) == {"0"}
     assert all(receipt["generation_checks"].values())
     assert receipt["receipt_schema_version"] == 2
-    assert receipt["inputs"]["panel"]["freshness"]["sha256"] == receipt["inputs"][
-        "freshness"
-    ]["sha256"]
+    assert (
+        receipt["inputs"]["panel"]["freshness"]["sha256"]
+        == receipt["inputs"]["freshness"]["sha256"]
+    )
     assert receipt["inputs"]["provider_ledger"]["generation_id"] == ledger_generation
 
 
 def test_same_date_cross_pair_is_rejected(tmp_path: Path) -> None:
-    correlation_root, report_root, candidate, _freshness_one, _ledger_one, _generation_one = _inputs(
-        tmp_path
-    )
+    (
+        correlation_root,
+        report_root,
+        candidate,
+        _freshness_one,
+        _ledger_one,
+        _generation_one,
+    ) = _inputs(tmp_path)
     ledger_two = tmp_path / "provider-ledger-two"
     generation_two, identity_two = _ledger(ledger_two, "two")
     selected_freshness = tmp_path / "selected-freshness-two.json"
@@ -319,9 +332,14 @@ def test_same_date_cross_pair_is_rejected(tmp_path: Path) -> None:
 
 
 def test_same_date_freshness_byte_mutation_is_rejected(tmp_path: Path) -> None:
-    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
-        tmp_path
-    )
+    (
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+    ) = _inputs(tmp_path)
     selected_freshness = tmp_path / "freshness-byte-mutation.json"
     payload = json.loads(freshness.read_text(encoding="utf-8"))
     payload["assessments"][0]["reason"] = "same date, different bytes"
@@ -343,9 +361,14 @@ def test_same_date_freshness_byte_mutation_is_rejected(tmp_path: Path) -> None:
 def test_candidate_record_declared_freshness_hash_mutation_is_rejected(
     tmp_path: Path,
 ) -> None:
-    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
-        tmp_path
-    )
+    (
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+    ) = _inputs(tmp_path)
     record_path = candidate / "candidate.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))
     record["artifact_sha256"]["data/freshness-health.json"] = "b" * 64
@@ -369,9 +392,14 @@ def test_candidate_record_declared_freshness_hash_mutation_is_rejected(
 
 
 def test_candidate_directory_panel_id_mismatch_is_rejected(tmp_path: Path) -> None:
-    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
-        tmp_path
-    )
+    (
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+    ) = _inputs(tmp_path)
     moved = candidate.parent / ("c" * 64)
     shutil.move(str(candidate), str(moved))
 
@@ -389,9 +417,14 @@ def test_candidate_directory_panel_id_mismatch_is_rejected(tmp_path: Path) -> No
 def test_provider_ledger_generation_identity_mutation_is_rejected(
     tmp_path: Path,
 ) -> None:
-    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
-        tmp_path
-    )
+    (
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+    ) = _inputs(tmp_path)
     payload = json.loads(freshness.read_text(encoding="utf-8"))
     payload["provider_ledger"]["generation_id"] = "b" * 64
     freshness.write_bytes(canonical_json_bytes(payload))
@@ -406,7 +439,9 @@ def test_provider_ledger_generation_identity_mutation_is_rejected(
     shutil.move(str(candidate), str(moved))
     (moved / "candidate.json").write_bytes(canonical_json_bytes(record))
 
-    with pytest.raises(recompute.ControlRecomputeError, match="provider ledger identity differs"):
+    with pytest.raises(
+        recompute.ControlRecomputeError, match="provider ledger identity differs"
+    ):
         _recompute(
             correlation_root,
             report_root,
@@ -418,9 +453,14 @@ def test_provider_ledger_generation_identity_mutation_is_rejected(
 
 
 def test_provider_ledger_catalog_byte_mutation_is_rejected(tmp_path: Path) -> None:
-    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
-        tmp_path
-    )
+    (
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+    ) = _inputs(tmp_path)
     catalog_path = (
         ledger_root / "generations" / ledger_generation / "provider-ledger.json"
     )
@@ -430,7 +470,9 @@ def test_provider_ledger_catalog_byte_mutation_is_rejected(tmp_path: Path) -> No
     expected_mutated_hash = hashlib.sha256(mutated_catalog).hexdigest()
     expected_mutated_size = len(mutated_catalog)
     catalog_path.write_bytes(mutated_catalog)
-    assert hashlib.sha256(catalog_path.read_bytes()).hexdigest() == expected_mutated_hash
+    assert (
+        hashlib.sha256(catalog_path.read_bytes()).hexdigest() == expected_mutated_hash
+    )
     assert catalog_path.stat().st_size == expected_mutated_size
 
     with pytest.raises(
@@ -449,9 +491,14 @@ def test_provider_ledger_catalog_byte_mutation_is_rejected(tmp_path: Path) -> No
 def test_receipt_schema_requires_exact_v2_freshness_lineage_classes(
     tmp_path: Path,
 ) -> None:
-    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
-        tmp_path
-    )
+    (
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+    ) = _inputs(tmp_path)
     receipt = _recompute(
         correlation_root,
         report_root,
@@ -475,9 +522,14 @@ def test_receipt_schema_requires_exact_v2_freshness_lineage_classes(
 
 
 def test_mismatched_panel_headline_fails_closed(tmp_path: Path) -> None:
-    correlation_root, report_root, candidate, freshness, ledger_root, ledger_generation = _inputs(
-        tmp_path
-    )
+    (
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+    ) = _inputs(tmp_path)
     dashboard_path = candidate / "data" / "dashboard_data.json"
     dashboard = json.loads(dashboard_path.read_text(encoding="utf-8"))
     dashboard["advisory"]["correlation_one_stress"] = "0.2"
