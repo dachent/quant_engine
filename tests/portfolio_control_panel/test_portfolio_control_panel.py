@@ -3608,7 +3608,9 @@ def test_current_analytics_walks_a_long_finalized_generation(
         physical_root, "decomposition.json", _decomposition(), "long-lens"
     )
     pointer = read_current(physical_root)
-    root = physical_root / ("long-root-" + "x" * 100) / ".."
+    long_component = physical_root / ("long-root-" + "x" * 100)
+    long_component.mkdir()
+    root = long_component / ".."
     artifact_path = root / "generations" / pointer.generation_id / "decomposition.json"
     assert len(str(artifact_path.absolute())) > 270
 
@@ -10347,7 +10349,16 @@ def test_filesystem_path_normalizes_dot_segments_before_windows_extended_prefix(
     second = "second-" + ("y" * 110)
     readable = tmp_path / "readable.txt"
     readable.write_text("stable", encoding="utf-8")
-    candidate = tmp_path / first / second / ".." / ".." / readable.name
+    first_directory = tmp_path / first
+    second_directory = first_directory / second
+    for directory in (first_directory, second_directory):
+        storage_directory = (
+            Path(f"\\\\?\\{directory.absolute()}")
+            if sys.platform == "win32"
+            else directory
+        )
+        storage_directory.mkdir()
+    candidate = second_directory / ".." / ".." / readable.name
 
     assert len(str(candidate.absolute())) >= 248
     resolved = panel._filesystem_path(candidate)
