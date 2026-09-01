@@ -618,6 +618,10 @@ def _proven_position_transfer_pairs(
             continue
         incoming = left if left.direction.upper() == "IN" else right
         outgoing = right if incoming is left else left
+        left_position_amount = left.position_amount_in_base
+        right_position_amount = right.position_amount_in_base
+        incoming_position_amount = incoming.position_amount_in_base
+        outgoing_position_amount = outgoing.position_amount_in_base
         if (
             left_raw_account == right_raw_account
             or crosswalk[left_raw_account] == crosswalk[right_raw_account]
@@ -629,9 +633,13 @@ def _proven_position_transfer_pairs(
             or left.event_date != right.event_date
             or left.conid is None
             or left.conid != right.conid
-            or left.position_amount_in_base != -right.position_amount_in_base
-            or incoming.position_amount_in_base <= 0
-            or outgoing.position_amount_in_base >= 0
+            or left_position_amount is None
+            or right_position_amount is None
+            or incoming_position_amount is None
+            or outgoing_position_amount is None
+            or left_position_amount != -right_position_amount
+            or incoming_position_amount <= 0
+            or outgoing_position_amount >= 0
         ):
             continue
         proven.update((raw_account, transfer) for raw_account, _, transfer in legs)

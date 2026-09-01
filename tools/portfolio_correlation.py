@@ -1684,6 +1684,8 @@ def build_correlation(
         },
     }
     if dependence_modes is not None:
+        if complete_through is None:
+            raise CorrelationError("schema v2 complete_through is unavailable")
         payload["complete_through"] = complete_through.isoformat()
         payload["default_evidence_mode"] = "LIVE_ONLY"
         payload["dependence_modes"] = dependence_modes

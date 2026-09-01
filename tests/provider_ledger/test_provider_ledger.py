@@ -176,20 +176,20 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
         "p123-eu-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "cde06a404effc35c4c6ecdb96042abd7153638c6dabe758c60c65d77fbd64f53",
-                "cd106e04d11980097c77d2b6fe855837a498765b96f3a523f1b8a8c2b6216331",
+                "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62",
+                "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2",
             ),
             (
                 "provider-ledger-catalog",
-                "cde06a404effc35c4c6ecdb96042abd7153638c6dabe758c60c65d77fbd64f53",
-                "7f85049dc3111bf29dd8f7009fc3593c00743bc4f764871155c071a684514afa",
+                "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62",
+                "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1",
             ),
         },
         "volatis-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "cde06a404effc35c4c6ecdb96042abd7153638c6dabe758c60c65d77fbd64f53",
-                "cd106e04d11980097c77d2b6fe855837a498765b96f3a523f1b8a8c2b6216331",
+                "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62",
+                "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2",
             ),
         },
         "echotrade-event-only-account-live-rejected": {
@@ -280,7 +280,7 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
     }
     assert expected_history_generations == {
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
-        "cde06a404effc35c4c6ecdb96042abd7153638c6dabe758c60c65d77fbd64f53",
+        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62",
     }
     accepted_history_generations = {
         receipt["generation_id"]

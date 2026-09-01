@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import json
 import importlib.util
+import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,297 +15,180 @@ SPEC.loader.exec_module(readiness)
 
 
 def _run(
-    name: str, conclusion: str = "success", *, app_id: int = 15368
+    name: str,
+    conclusion: str = "success",
+    *,
+    status: str = "completed",
+    app_id: int = 15368,
 ) -> dict[str, object]:
     return {
         "name": name,
-        "status": "completed",
+        "status": status,
         "conclusion": conclusion,
         "app": {"id": app_id},
     }
 
 
 def _status(
-    context: str,
-    state: str = "success",
-    **fields: object,
+    context: str, state: str = "success", **fields: object
 ) -> dict[str, object]:
     return {"context": context, "state": state, **fields}
 
 
-def test_check_census_paginates_and_requires_every_protected_context(
+def test_census_paginates_without_protected_branch_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
     first_page = [_run("quality")] + [_run(f"optional-{index}") for index in range(99)]
-    second_page = [_run("security")]
 
     def fake_gh(*args: str) -> str:
         endpoint = args[-1]
         calls.append(endpoint)
-        if endpoint.endswith("required_status_checks"):
-            return json.dumps({"contexts": ["quality", "security"]})
-        if endpoint.endswith("&page=1"):
+        if "/check-runs?" in endpoint and endpoint.endswith("&page=1"):
             return json.dumps({"check_runs": first_page})
-        if endpoint.endswith("&page=2"):
-            return json.dumps({"check_runs": second_page})
+        if "/check-runs?" in endpoint and endpoint.endswith("&page=2"):
+            return json.dumps({"check_runs": [_run("security")]})
+        if "/statuses?" in endpoint:
+            return json.dumps([])
         raise AssertionError(endpoint)
 
     monkeypatch.setattr(readiness, "_gh", fake_gh)
 
-    failing, pending, missing = readiness._check_states("a" * 40)
-
-    assert (failing, pending, missing) == ([], [], [])
-    assert any(call.endswith("&page=2") for call in calls)
-
-
-def test_check_census_deduplicates_required_context_across_pages(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
-    older_quality = _run("quality", "failure")
-    older_quality.update({"created_at": "2026-08-24T12:00:00Z", "id": 100})
-    first_page = [older_quality] + [_run(f"optional-{index}") for index in range(99)]
-    newer_quality = _run("quality")
-    newer_quality.update({"created_at": "2026-08-25T12:00:00Z", "id": 101})
-    second_page = [newer_quality, _run("security")]
-
-    def fake_gh(*args: str) -> str:
-        endpoint = args[-1]
-        calls.append(endpoint)
-        if endpoint.endswith("required_status_checks"):
-            return json.dumps({"contexts": ["quality", "security"]})
-        if endpoint.endswith("&page=1"):
-            return json.dumps({"check_runs": first_page})
-        if endpoint.endswith("&page=2"):
-            return json.dumps({"check_runs": second_page})
-        raise AssertionError(endpoint)
-
-    monkeypatch.setattr(readiness, "_gh", fake_gh)
-
-    failing, pending, missing = readiness._check_states("a" * 40)
-
-    assert (failing, pending, missing) == ([], [], [])
-    assert any(call.endswith("&page=2") for call in calls)
+    assert readiness._check_states("a" * 40) == ([], [])
+    assert any("/check-runs?" in call and call.endswith("&page=2") for call in calls)
+    assert any("/statuses?" in call for call in calls)
+    assert not any("protection" in call for call in calls)
 
 
 def test_newest_check_run_controls_duplicate_context_across_pages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    older_quality = _run("quality", "failure")
-    older_quality.update(
-        {
-            "completed_at": "2026-08-24T12:00:00Z",
-            "created_at": "2026-08-24T11:00:00Z",
-            "id": 200,
-        }
-    )
-    newer_quality = _run("quality")
-    newer_quality.update(
-        {
-            "completed_at": "2026-08-25T12:00:00Z",
-            "created_at": "2026-08-25T11:00:00Z",
-            "id": 100,
-        }
-    )
+    older = _run("quality", "failure")
+    older.update({"completed_at": "2026-08-24T12:00:00Z", "id": 200})
+    newer = _run("quality")
+    newer.update({"completed_at": "2026-08-25T12:00:00Z", "id": 100})
 
     def fake_gh(*args: str) -> str:
         endpoint = args[-1]
-        if endpoint.endswith("required_status_checks"):
-            return json.dumps({"contexts": ["quality"]})
-        if endpoint.endswith("&page=1"):
-            return json.dumps({"check_runs": [older_quality] * 100})
-        if endpoint.endswith("&page=2"):
-            return json.dumps({"check_runs": [newer_quality]})
+        if "/check-runs?" in endpoint and endpoint.endswith("&page=1"):
+            return json.dumps({"check_runs": [older] * 100})
+        if "/check-runs?" in endpoint and endpoint.endswith("&page=2"):
+            return json.dumps({"check_runs": [newer]})
+        if "/statuses?" in endpoint:
+            return json.dumps([])
         raise AssertionError(endpoint)
 
     monkeypatch.setattr(readiness, "_gh", fake_gh)
 
-    assert readiness._check_states("b" * 40) == ([], [], [])
+    assert readiness._check_states("b" * 40) == ([], [])
 
 
-def test_newest_legacy_status_controls_duplicate_context_across_pages(
+def test_newest_commit_status_is_censused_and_can_fail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    older_success = _status(
-        "legacy",
-        updated_at="2026-08-24T12:00:00Z",
-        id=200,
-    )
-    newer_failure = _status(
-        "legacy",
-        "failure",
-        updated_at="2026-08-25T12:00:00Z",
-        id=100,
-    )
-    first_page = [older_success] + [_status(f"filler-{index}") for index in range(99)]
+    older = _status("legacy", updated_at="2026-08-24T12:00:00Z", id=200)
+    newer = _status("legacy", "failure", updated_at="2026-08-25T12:00:00Z", id=100)
+    first_page = [older] + [_status(f"filler-{index}") for index in range(99)]
 
     def fake_gh(*args: str) -> str:
         endpoint = args[-1]
-        if endpoint.endswith("required_status_checks"):
-            return json.dumps({"contexts": ["legacy"]})
         if "/check-runs?" in endpoint:
             return json.dumps({"check_runs": []})
-        if endpoint.endswith("&page=1"):
+        if "/statuses?" in endpoint and endpoint.endswith("&page=1"):
             return json.dumps(first_page)
-        if endpoint.endswith("&page=2"):
-            return json.dumps([newer_failure])
+        if "/statuses?" in endpoint and endpoint.endswith("&page=2"):
+            return json.dumps([newer])
         raise AssertionError(endpoint)
 
     monkeypatch.setattr(readiness, "_gh", fake_gh)
 
-    assert readiness._check_states("s" * 40) == (["legacy"], [], [])
+    assert readiness._check_states("c" * 40) == (["legacy"], [])
 
 
-@pytest.mark.parametrize(
-    ("first", "second"),
-    (
-        (
-            _status("legacy", updated_at="not-a-timestamp", id=100),
-            _status(
-                "legacy",
-                "failure",
-                updated_at="2026-08-25T12:00:00Z",
-                id=1,
-            ),
-        ),
-        (
-            _status("legacy", updated_at="2026-08-25T12:00:00Z", id=100),
-            _status(
-                "legacy",
-                "failure",
-                updated_at="2026-08-25T12:00:00Z",
-                id=101,
-            ),
-        ),
-        (
-            _status(
-                "legacy",
-                updated_at="2026-08-25T12:00:00Z",
-                created_at="2026-08-24T12:00:00Z",
-                id=999,
-            ),
-            _status(
-                "legacy",
-                "failure",
-                updated_at="2026-08-25T12:00:00Z",
-                created_at="2026-08-25T12:00:00Z",
-                id=1,
-            ),
-        ),
-        (
-            _status("legacy", id=100),
-            _status("legacy", "failure", id=101),
-        ),
-    ),
-)
-def test_legacy_status_timestamp_ties_are_not_page_ordered(
-    monkeypatch: pytest.MonkeyPatch,
-    first: dict[str, object],
-    second: dict[str, object],
-) -> None:
-    first_page = [first] + [_status(f"filler-{index}") for index in range(99)]
-
-    def fake_gh(*args: str) -> str:
-        endpoint = args[-1]
-        if endpoint.endswith("required_status_checks"):
-            return json.dumps({"contexts": ["legacy"]})
-        if "/check-runs?" in endpoint:
-            return json.dumps({"check_runs": []})
-        if endpoint.endswith("&page=1"):
-            return json.dumps(first_page)
-        if endpoint.endswith("&page=2"):
-            return json.dumps([second])
-        raise AssertionError(endpoint)
-
-    monkeypatch.setattr(readiness, "_gh", fake_gh)
-
-    assert readiness._check_states("t" * 40) == (["legacy"], [], [])
-
-
-@pytest.mark.parametrize("conclusion", ("skipped", "neutral", "cancelled"))
-def test_non_success_required_conclusion_never_satisfies_readiness(
+@pytest.mark.parametrize("conclusion", ("skipped", "neutral"))
+def test_optional_nonfailing_conclusions_do_not_block(
     monkeypatch: pytest.MonkeyPatch, conclusion: str
 ) -> None:
     def fake_gh(*args: str) -> str:
         endpoint = args[-1]
-        if endpoint.endswith("required_status_checks"):
-            return json.dumps({"contexts": ["quality"]})
-        return json.dumps({"check_runs": [_run("quality", conclusion)]})
-
-    monkeypatch.setattr(readiness, "_gh", fake_gh)
-
-    failing, pending, missing = readiness._check_states("b" * 40)
-
-    assert failing == ["quality"]
-    assert pending == []
-    assert missing == []
-
-
-def test_missing_protected_context_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_gh(*args: str) -> str:
-        endpoint = args[-1]
-        if endpoint.endswith("required_status_checks"):
-            return json.dumps({"contexts": ["quality", "issue-guard"]})
+        if "/check-runs?" in endpoint:
+            return json.dumps({"check_runs": [_run("optional", conclusion)]})
         if "/statuses?" in endpoint:
             return json.dumps([])
-        return json.dumps({"check_runs": [_run("quality")]})
-
-    monkeypatch.setattr(readiness, "_gh", fake_gh)
-
-    assert readiness._check_states("c" * 40) == ([], [], ["issue-guard"])
-
-
-def test_latest_check_run_controls_duplicate_context(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_gh(*args: str) -> str:
-        endpoint = args[-1]
-        if endpoint.endswith("required_status_checks"):
-            return json.dumps({"contexts": ["quality"]})
-        return json.dumps({"check_runs": [_run("quality"), _run("quality", "failure")]})
-
-    monkeypatch.setattr(readiness, "_gh", fake_gh)
-
-    assert readiness._check_states("d" * 40) == ([], [], [])
-
-
-def test_required_check_is_bound_to_protected_app_identity(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_gh(*args: str) -> str:
-        endpoint = args[-1]
-        if endpoint.endswith("required_status_checks"):
-            return json.dumps(
-                {
-                    "contexts": ["quality"],
-                    "checks": [{"context": "quality", "app_id": 15368}],
-                }
-            )
-        return json.dumps({"check_runs": [_run("quality", app_id=999)]})
-
-    monkeypatch.setattr(readiness, "_gh", fake_gh)
-
-    assert readiness._check_states("e" * 40) == (
-        [],
-        [],
-        ["quality@app:15368"],
-    )
-
-
-def test_legacy_required_context_accepts_successful_commit_status(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_gh(*args: str) -> str:
-        endpoint = args[-1]
-        if endpoint.endswith("required_status_checks"):
-            return json.dumps({"contexts": ["legacy"]})
-        if "/check-runs?" in endpoint:
-            return json.dumps({"check_runs": []})
-        if "/statuses?" in endpoint:
-            return json.dumps([{"context": "legacy", "state": "success"}])
         raise AssertionError(endpoint)
 
     monkeypatch.setattr(readiness, "_gh", fake_gh)
 
-    assert readiness._check_states("f" * 40) == ([], [], [])
+    assert readiness._check_states("d" * 40) == ([], [])
+
+
+@pytest.mark.parametrize(
+    "conclusion", ("action_required", "cancelled", "failure", "stale", "timed_out")
+)
+def test_completed_failure_conclusions_block(
+    monkeypatch: pytest.MonkeyPatch, conclusion: str
+) -> None:
+    def fake_gh(*args: str) -> str:
+        endpoint = args[-1]
+        if "/check-runs?" in endpoint:
+            return json.dumps({"check_runs": [_run("quality", conclusion)]})
+        if "/statuses?" in endpoint:
+            return json.dumps([])
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(readiness, "_gh", fake_gh)
+
+    assert readiness._check_states("e" * 40) == (["quality"], [])
+
+
+@pytest.mark.parametrize("status", ("queued", "in_progress"))
+def test_nonterminal_check_runs_are_pending(
+    monkeypatch: pytest.MonkeyPatch, status: str
+) -> None:
+    def fake_gh(*args: str) -> str:
+        endpoint = args[-1]
+        if "/check-runs?" in endpoint:
+            return json.dumps({"check_runs": [_run("quality", status=status)]})
+        if "/statuses?" in endpoint:
+            return json.dumps([])
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(readiness, "_gh", fake_gh)
+
+    assert readiness._check_states("f" * 40) == ([], ["quality"])
+
+
+def test_self_check_is_excluded_from_its_own_pending_census(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_gh(*args: str) -> str:
+        endpoint = args[-1]
+        if "/check-runs?" in endpoint:
+            return json.dumps(
+                {"check_runs": [_run(readiness.SELF_CHECK_NAME, status="in_progress")]}
+            )
+        if "/statuses?" in endpoint:
+            return json.dumps([_status(readiness.SELF_CHECK_NAME, "pending")])
+        raise AssertionError(endpoint)
+
+    monkeypatch.setattr(readiness, "_gh", fake_gh)
+
+    assert readiness._check_states("g" * 40) == ([], [])
+
+
+def test_merge_state_still_blocks_when_ci_census_is_clean(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        readiness,
+        "_gh",
+        lambda *args: json.dumps(
+            {"state": "OPEN", "headRefOid": "h" * 40, "mergeStateStatus": "BLOCKED"}
+        ),
+    )
+    monkeypatch.setattr(readiness, "_unresolved_thread_count", lambda number: 0)
+    monkeypatch.setattr(readiness, "_check_states", lambda head: ([], []))
+    monkeypatch.setattr(sys, "argv", ["merge_readiness.py", "383"])
+
+    assert readiness.main() == 1
+    assert "mergeStateStatus=BLOCKED" in capsys.readouterr().out

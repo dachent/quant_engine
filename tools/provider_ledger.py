@@ -1648,6 +1648,8 @@ def _schwab_pinned_journal_external_flow(
         amount = _observed_decimal(row.get("amount"), "Schwab Journal amount")
     except ProviderLedgerError:
         return None
+    if amount is None:
+        return None
     key = (
         str(row.get("account_id") or ""),
         str(row.get("record_id") or ""),
@@ -2172,13 +2174,15 @@ def _broker_strategy_returns(
             raise ProviderLedgerError(
                 "quantbase capital anchor recognition precedes economic event"
             )
-        amount = _object(row.get("amount"), "quantbase capital anchor amount")
+        anchor_amount = _object(row.get("amount"), "quantbase capital anchor amount")
         if (
-            set(amount) != {"currency", "status", "value"}
-            or amount.get("currency") != "USD"
+            set(anchor_amount) != {"currency", "status", "value"}
+            or anchor_amount.get("currency") != "USD"
         ):
             raise ProviderLedgerError("quantbase capital anchor amount is invalid")
-        amount_value = _observed_decimal(amount, "quantbase capital anchor amount")
+        amount_value = _observed_decimal(
+            anchor_amount, "quantbase capital anchor amount"
+        )
         if amount_value is None or amount_value <= 0:
             raise ProviderLedgerError("quantbase capital anchor amount is invalid")
         capital_type = row.get("capital_type")
@@ -2991,25 +2995,27 @@ def _portfolio123_provider_returns(
         cash_added = _decimal(row.get("Cash Added") or "0", "Portfolio123 cash added")
         if equity_value <= 0:
             raise ProviderLedgerError("Portfolio123 equity must be positive")
-        value = (equity_value, cash_added)
-        prior = equity_observations[entity_id].get(observed)
-        if prior is not None and prior != value:
+        equity_observation = (equity_value, cash_added)
+        prior_observation = equity_observations[entity_id].get(observed)
+        if prior_observation is not None and prior_observation != equity_observation:
             raise ProviderLedgerError(
                 "Portfolio123 equity curve has conflicting duplicate dates"
             )
-        equity_observations[entity_id][observed] = value
+        equity_observations[entity_id][observed] = equity_observation
     for row in performance_table.to_pylist():
         entity_id = str(row.get("_entity_id") or "")
         if entity_id not in selected:
             continue
         field = _text(row.get("field"), "Portfolio123 managed performance field")
-        value = _text(row.get("value"), "Portfolio123 managed performance value")
-        prior = selected[entity_id].get(field)
-        if prior is not None and prior != value:
+        selected_value = _text(
+            row.get("value"), "Portfolio123 managed performance value"
+        )
+        prior_selected_value = selected[entity_id].get(field)
+        if prior_selected_value is not None and prior_selected_value != selected_value:
             raise ProviderLedgerError(
                 "Portfolio123 managed performance has conflicting captures"
             )
-        selected[entity_id][field] = value
+        selected[entity_id][field] = selected_value
 
     result: list[dict[str, Any]] = []
     required_fields = {"data", "date", "dateLast", "panels"}
@@ -3982,12 +3988,13 @@ def build_catalog(
 
     _validate_current_census_provider_generations(authority, identities, manifests)
 
-    source_strategy_returns, evidence_rows, strategy_artifacts = _strategy_inputs(
+    strategy_return_rows, evidence_rows, strategy_artifacts = _strategy_inputs(
         spec["strategy_inputs"],
         provenance,
         as_of,
         _object(spec["strategy_provider_map"], "strategy_provider_map"),
     )
+    source_strategy_returns: Sequence[Mapping[str, Any]] = strategy_return_rows
     declared_nav_gaps = _declared_nav_gap_dates_by_provider(manifests)
     source_strategy_returns = _returns_within_declared_nav_gaps(
         source_strategy_returns,
@@ -4046,7 +4053,7 @@ def build_catalog(
         capital_anchors=combined.get("capital_anchors", []),
         declared_nav_gap_dates_by_provider=declared_nav_gaps,
     )
-    strategy_returns = _merge_account_returns(
+    strategy_returns: Sequence[Mapping[str, Any]] = _merge_account_returns(
         source_strategy_returns,
         broker_returns,
         strategy_names,

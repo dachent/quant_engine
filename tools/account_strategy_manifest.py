@@ -53,7 +53,7 @@ from decimal import Context, Decimal, getcontext, localcontext
 from functools import wraps
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 from quant_engine.core import InputSnapshot
 from quant_engine.core.contracts import (
@@ -726,10 +726,10 @@ def _validate_flow_coverage_payload(
                 raise ManifestError(
                     f"flow coverage row {index} COMPLETE blockers are invalid"
                 )
-            snapshot = receipt_snapshots.get(receipt_id)
-            if snapshot is None:
+            receipt_snapshot = receipt_snapshots.get(receipt_id)
+            if receipt_snapshot is None:
                 raise ManifestError(f"flow coverage row {index} receipt is missing")
-            receipt = snapshot.json_object(f"retrieval receipt {receipt_id}")
+            receipt = receipt_snapshot.json_object(f"retrieval receipt {receipt_id}")
             if (
                 authority_kind == "STATIC_SNAPSHOT_COVERAGE_V1"
                 and receipt.get("coverage_mode") != "STATIC_SNAPSHOT_COVERAGE_V1"
@@ -800,10 +800,12 @@ def _make_coverage_loader(receipt_predicate: Any) -> Any:
 
     class _CoverageIndex:
         __slots__ = ("_rows", "_receipt_authority")
+        _rows: tuple[Mapping[str, object], ...]
+        _receipt_authority: dict[str, object] | None
 
         def __init__(
             self,
-            rows: list[dict[str, object]],
+            rows: list[Mapping[str, object]],
             receipt_authority: dict[str, object] | None,
             *,
             _capability: object,
@@ -943,7 +945,11 @@ def _make_coverage_loader(receipt_predicate: Any) -> Any:
             validate_selected_receipt,
         )
         return (
-            _CoverageIndex(list(rows), receipt_authority, _capability=capability),
+            _CoverageIndex(
+                [dict(row) for row in rows],
+                receipt_authority,
+                _capability=capability,
+            ),
             artifact,
         )
 
@@ -1136,12 +1142,13 @@ def _validate_static_snapshot_contract(contract: Mapping[str, object]) -> None:
         ("baseline_sha256", "baseline_size_bytes"),
         ("crosswalk_sha256", "crosswalk_size_bytes"),
     ):
+        size = staged.get(size_field)
         if (
             not isinstance(staged.get(hash_field), str)
             or _SHA256.fullmatch(str(staged.get(hash_field))) is None
-            or isinstance(staged.get(size_field), bool)
-            or not isinstance(staged.get(size_field), int)
-            or int(staged.get(size_field)) < 0
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 0
         ):
             raise ManifestError("static receipt authority staged inputs are invalid")
 
@@ -1222,15 +1229,16 @@ def _validate_static_snapshot_receipt(
     }:
         raise ManifestError("static snapshot receipt observed facts are invalid")
     for summary in facts.values():
+        row_count = summary.get("row_count") if isinstance(summary, Mapping) else None
         if (
             not isinstance(summary, Mapping)
             or set(summary) != {"row_count", "first_date", "last_date"}
-            or isinstance(summary.get("row_count"), bool)
-            or not isinstance(summary.get("row_count"), int)
-            or int(summary.get("row_count")) < 0
+            or isinstance(row_count, bool)
+            or not isinstance(row_count, int)
+            or row_count < 0
         ):
             raise ManifestError("static snapshot receipt observed facts are invalid")
-        count = int(summary["row_count"])
+        count = row_count
         if count == 0 and (
             summary.get("first_date") is not None
             or summary.get("last_date") is not None
@@ -2085,16 +2093,16 @@ def flow_buckets_from_classes(
     events: list[dict[str, Any]],
 ) -> dict[str, dict[str, dict[tuple[str, str], Decimal]]]:
     """Build buckets only after exact event-level reconciliation."""
-    external_in: dict[str, dict[str, Decimal]] = defaultdict(
+    external_in: dict[str, dict[tuple[str, str], Decimal]] = defaultdict(
         lambda: defaultdict(Decimal)
     )
-    external_out: dict[str, dict[str, Decimal]] = defaultdict(
+    external_out: dict[str, dict[tuple[str, str], Decimal]] = defaultdict(
         lambda: defaultdict(Decimal)
     )
-    internal_in: dict[str, dict[str, Decimal]] = defaultdict(
+    internal_in: dict[str, dict[tuple[str, str], Decimal]] = defaultdict(
         lambda: defaultdict(Decimal)
     )
-    internal_out: dict[str, dict[str, Decimal]] = defaultdict(
+    internal_out: dict[str, dict[tuple[str, str], Decimal]] = defaultdict(
         lambda: defaultdict(Decimal)
     )
     for event in events:
@@ -2871,9 +2879,9 @@ def analyze_epoch(
             legs[leg] = legs.get(leg, Decimal(0)) + amount
         return legs
 
-    external_in_by_day = normalize_legs(external_in_by_day)
-    external_out_by_day = normalize_legs(external_out_by_day)
-    int_in_by_day = normalize_legs(int_in_by_day)
+    external_in_legs = normalize_legs(external_in_by_day)
+    external_out_legs = normalize_legs(external_out_by_day)
+    int_in_legs = normalize_legs(int_in_by_day)
     admitted_allocations: dict[tuple[str, str], Decimal] = {}
     for raw_key, amount in (capital_allocation_legs or {}).items():
         if not isinstance(raw_key, tuple) or len(raw_key) != 2:
@@ -2891,13 +2899,13 @@ def analyze_epoch(
         leg = (event_day, recognition_day)
         admitted_allocations[leg] = admitted_allocations.get(leg, Decimal(0)) + amount
     for leg, amount in admitted_allocations.items():
-        int_in_by_day[leg] = int_in_by_day.get(leg, Decimal(0)) + amount
-    int_out_by_day = normalize_legs(int_out_by_day)
+        int_in_legs[leg] = int_in_legs.get(leg, Decimal(0)) + amount
+    int_out_legs = normalize_legs(int_out_by_day)
     for flow_class, source in (
-        ("EXTERNAL_IN", external_in_by_day),
-        ("EXTERNAL_OUT", external_out_by_day),
-        ("INTERNAL_IN", int_in_by_day),
-        ("INTERNAL_OUT", int_out_by_day),
+        ("EXTERNAL_IN", external_in_legs),
+        ("EXTERNAL_OUT", external_out_legs),
+        ("INTERNAL_IN", int_in_legs),
+        ("INTERNAL_OUT", int_out_legs),
     ):
         for (event_date, nav_recognition_date), amount in source.items():
             if amount <= 0:
@@ -2925,16 +2933,16 @@ def analyze_epoch(
                 leg: amount for leg, amount in source.items() if leg[1] > first_funded
             }
 
-        external_in_by_day = post_opening_legs(external_in_by_day)
-        external_out_by_day = post_opening_legs(external_out_by_day)
-        int_in_by_day = post_opening_legs(int_in_by_day)
-        int_out_by_day = post_opening_legs(int_out_by_day)
+        external_in_legs = post_opening_legs(external_in_legs)
+        external_out_legs = post_opening_legs(external_out_legs)
+        int_in_legs = post_opening_legs(int_in_legs)
+        int_out_legs = post_opening_legs(int_out_legs)
     capital_flow_trace: list[dict[str, Any]] = []
     for flow_class, source in (
-        ("EXTERNAL_IN", external_in_by_day),
-        ("EXTERNAL_OUT", external_out_by_day),
-        ("INTERNAL_IN", int_in_by_day),
-        ("INTERNAL_OUT", int_out_by_day),
+        ("EXTERNAL_IN", external_in_legs),
+        ("EXTERNAL_OUT", external_out_legs),
+        ("INTERNAL_IN", int_in_legs),
+        ("INTERNAL_OUT", int_out_legs),
     ):
         for (event_date, nav_recognition_date), amount in source.items():
             capital_flow_trace.append(
@@ -2954,10 +2962,10 @@ def analyze_epoch(
     )
     net_flow_by_leg: dict[tuple[str, str], Decimal] = {}
     for source, sign in (
-        (external_in_by_day, 1),
-        (external_out_by_day, -1),
-        (int_in_by_day, 1),
-        (int_out_by_day, -1),
+        (external_in_legs, 1),
+        (external_out_legs, -1),
+        (int_in_legs, 1),
+        (int_out_legs, -1),
     ):
         for leg, value in source.items():
             net_flow_by_leg[leg] = net_flow_by_leg.get(leg, Decimal(0)) + sign * value
@@ -3026,10 +3034,10 @@ def analyze_epoch(
     if any(
         event_date > closing_nav_date
         for source_days in (
-            external_in_by_day,
-            external_out_by_day,
-            int_in_by_day,
-            int_out_by_day,
+            external_in_legs,
+            external_out_legs,
+            int_in_legs,
+            int_out_legs,
         )
         for event_date, _recognition_date in source_days
     ):
@@ -3080,7 +3088,7 @@ def analyze_epoch(
     dep = sum(
         (
             v
-            for (_event_day, recognition_day), v in external_in_by_day.items()
+            for (_event_day, recognition_day), v in external_in_legs.items()
             if include_first_day_flow or recognition_day > first_funded
         ),
         Decimal(0),
@@ -3088,7 +3096,7 @@ def analyze_epoch(
     wd = sum(
         (
             v
-            for (_event_day, recognition_day), v in external_out_by_day.items()
+            for (_event_day, recognition_day), v in external_out_legs.items()
             if include_first_day_flow or recognition_day > first_funded
         ),
         Decimal(0),
@@ -3096,7 +3104,7 @@ def analyze_epoch(
     int_in = sum(
         (
             v
-            for (_event_day, recognition_day), v in int_in_by_day.items()
+            for (_event_day, recognition_day), v in int_in_legs.items()
             if include_first_day_flow or recognition_day > first_funded
         ),
         Decimal(0),
@@ -3104,7 +3112,7 @@ def analyze_epoch(
     int_out = sum(
         (
             v
-            for (_event_day, recognition_day), v in int_out_by_day.items()
+            for (_event_day, recognition_day), v in int_out_legs.items()
             if include_first_day_flow or recognition_day > first_funded
         ),
         Decimal(0),
@@ -3257,10 +3265,10 @@ def analyze_epoch(
         (date.fromisoformat(opening_cashflow_date), -opening)
     ]
     for source, sign in (
-        (external_in_by_day, -1),
-        (external_out_by_day, 1),
-        (int_in_by_day, -1),
-        (int_out_by_day, 1),
+        (external_in_legs, -1),
+        (external_out_legs, 1),
+        (int_in_legs, -1),
+        (int_out_legs, 1),
     ):
         for (event_day, recognition_day), v in source.items():
             if (
@@ -4358,7 +4366,12 @@ def _build_manifest_candidate_from_snapshots_impl(
                 "flow coverage.as_of_date",
             ),
         )
-        for row in flow_coverage_snapshot.json_object("flow coverage").get("rows", []):
+        flow_coverage_rows = flow_coverage_snapshot.json_object("flow coverage").get(
+            "rows", []
+        )
+        if not isinstance(flow_coverage_rows, list):
+            raise ManifestError("flow coverage rows are invalid")
+        for row in flow_coverage_rows:
             if (
                 not isinstance(row, Mapping)
                 or row.get("authority_kind") != "STATIC_SNAPSHOT_COVERAGE_V1"
@@ -4471,7 +4484,10 @@ def _build_manifest_candidate_from_snapshots_impl(
         full_chains=perimeter.full_chains,
         schema_snapshot=inputs.manifest_schema,
     )
-    return json_ready(manifest)  # type: ignore[return-value]
+    manifest_json = json_ready(manifest)
+    if not isinstance(manifest_json, dict):
+        raise ManifestError("manifest JSON encoding is invalid")
+    return manifest_json
 
 
 def _capture_manifest_candidate_inputs(
@@ -4503,45 +4519,48 @@ def _capture_manifest_candidate_inputs(
     except (OSError, ValueError) as exc:
         raise ManifestError("baseline artifact escapes baseline root") from exc
     try:
-        return build_manifest_candidate_from_snapshots(
-            ManifestCandidateSnapshots(
-                ledger=InputSnapshot.capture(ledger_path, "ledger"),
-                ledger_identity=InputSnapshot.capture(
-                    ledger_identity_path, "ledger identity"
+        return cast(
+            dict[str, Any],
+            build_manifest_candidate_from_snapshots(
+                ManifestCandidateSnapshots(
+                    ledger=InputSnapshot.capture(ledger_path, "ledger"),
+                    ledger_identity=InputSnapshot.capture(
+                        ledger_identity_path, "ledger identity"
+                    ),
+                    baseline=InputSnapshot.capture(baseline_path, "baseline"),
+                    classified_flows=InputSnapshot.capture(
+                        classified_flows_path, "classified flows"
+                    ),
+                    classification_policy=InputSnapshot.capture(
+                        classification_policy_path, "flow classification policy"
+                    ),
+                    admission_policy=InputSnapshot.capture(
+                        admission_policy_path, "admission policy"
+                    ),
+                    flow_coverage=InputSnapshot.capture(
+                        flow_coverage_path, "flow coverage"
+                    ),
+                    retrieval_receipts={
+                        artifact_id: InputSnapshot.capture(
+                            path, f"retrieval receipt {artifact_id}"
+                        )
+                        for artifact_id, path in (retrieval_receipt_paths or {}).items()
+                    },
+                    receipt_authority=(
+                        None
+                        if receipt_authority_path is None
+                        else InputSnapshot.capture(
+                            receipt_authority_path, "receipt authority"
+                        )
+                    ),
+                    calculation_code=InputSnapshot.capture(
+                        Path(__file__), "calculation code"
+                    ),
+                    manifest_schema=InputSnapshot.capture(
+                        _MANIFEST_SCHEMA_PATH, "account strategy manifest schema"
+                    ),
+                    baseline_generation_id=selected_baseline_generation_id,
                 ),
-                baseline=InputSnapshot.capture(baseline_path, "baseline"),
-                classified_flows=InputSnapshot.capture(
-                    classified_flows_path, "classified flows"
-                ),
-                classification_policy=InputSnapshot.capture(
-                    classification_policy_path, "flow classification policy"
-                ),
-                admission_policy=InputSnapshot.capture(
-                    admission_policy_path, "admission policy"
-                ),
-                flow_coverage=InputSnapshot.capture(
-                    flow_coverage_path, "flow coverage"
-                ),
-                retrieval_receipts={
-                    artifact_id: InputSnapshot.capture(
-                        path, f"retrieval receipt {artifact_id}"
-                    )
-                    for artifact_id, path in (retrieval_receipt_paths or {}).items()
-                },
-                receipt_authority=(
-                    None
-                    if receipt_authority_path is None
-                    else InputSnapshot.capture(
-                        receipt_authority_path, "receipt authority"
-                    )
-                ),
-                calculation_code=InputSnapshot.capture(
-                    Path(__file__), "calculation code"
-                ),
-                manifest_schema=InputSnapshot.capture(
-                    _MANIFEST_SCHEMA_PATH, "account strategy manifest schema"
-                ),
-                baseline_generation_id=selected_baseline_generation_id,
             ),
         )
     except OSError as exc:

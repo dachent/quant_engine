@@ -307,7 +307,7 @@ class GenerationReceipt:
         if isinstance(schema_version, bool) or not isinstance(schema_version, int):
             raise ManifestValidationError("receipt schema version must be an integer")
         try:
-            report = SourceArtifact.from_dict(decoded["independent_report"])  # type: ignore[arg-type]
+            report = SourceArtifact.from_dict(decoded["independent_report"])
         except (KeyError, TypeError, ManifestValidationError) as exc:
             raise ManifestValidationError(
                 "receipt independent_report is invalid"
@@ -606,7 +606,7 @@ def _stat_is_link_like(value: os.stat_result) -> bool:
 
 
 def _stat_identity(value: os.stat_result) -> tuple[int, ...]:
-    identity = (
+    identity: tuple[int, ...] = (
         value.st_dev,
         value.st_ino,
         value.st_mode,
@@ -677,8 +677,9 @@ def _capture_posix_directory(
     files: dict[str, bytes],
     directories: set[str],
 ) -> None:
-    nofollow = os.O_NOFOLLOW
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | nofollow
+    nofollow: int = getattr(os, "O_NOFOLLOW")
+    directory: int = getattr(os, "O_DIRECTORY")
+    directory_flags = os.O_RDONLY | directory | nofollow
     file_flags = os.O_RDONLY | nofollow
     for name in sorted(os.listdir(descriptor)):
         relative = f"{prefix}/{name}" if prefix else name
@@ -881,7 +882,9 @@ def _capture_generation_directory(
                 os.close(generations_descriptor)
             os.close(root_descriptor)
     else:
-        directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        directory: int = getattr(os, "O_DIRECTORY")
+        nofollow: int = getattr(os, "O_NOFOLLOW")
+        directory_flags = os.O_RDONLY | directory | nofollow
         root_stat = root.lstat()
         _require_directory_stat(root_stat)
         root_descriptor = os.open(root, directory_flags)

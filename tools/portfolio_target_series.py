@@ -27,7 +27,7 @@ from pathlib import Path
 import statistics
 import subprocess
 import sys
-from typing import Any, Callable, Collection, Final, Mapping, Sequence
+from typing import Any, Callable, Collection, Final, Mapping, Sequence, cast
 
 from quant_engine.core.contracts import (
     GenerationManifest,
@@ -826,7 +826,15 @@ def _matrixport_epoch_hpr_receipt(
         "daily_return_observations": len(daily_rows),
         "daily_return_series_schema": "ordered-date-return/1",
         "daily_return_series_sha256": hashlib.sha256(
-            canonical_json_bytes(daily_rows)
+            (
+                json.dumps(
+                    daily_rows,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+                + "\n"
+            ).encode("utf-8")
         ).hexdigest(),
         "epoch_cumulative_return": format((epoch_wealth - Decimal(1)).normalize(), "f"),
         "epoch_holding_period_link_observations": len(daily_rows)
@@ -863,20 +871,20 @@ def _matrixport_daily_holding_shares(
         except ValueError as exc:
             raise TargetSeriesError("Matrixport daily holding date is invalid") from exc
         shares = _positive_decimal(row["share"], "Matrixport daily holding shares")
-        nav_available = row["nav_available"].strip().lower()
-        if nav_available not in {"true", "false"}:
+        nav_availability = row["nav_available"].strip().lower()
+        if nav_availability not in {"true", "false"}:
             raise TargetSeriesError(
                 "Matrixport daily holding nav availability is invalid"
             )
         nav = (
             _positive_decimal(row["nav"], "Matrixport daily holding NAV")
-            if nav_available == "true"
+            if nav_availability == "true"
             else None
         )
-        candidate = (shares, nav, nav_available == "true")
-        if observed in daily and daily[observed] != candidate:
+        daily_observation = (shares, nav, nav_availability == "true")
+        if observed in daily and daily[observed] != daily_observation:
             raise TargetSeriesError("Matrixport daily holdings have conflicting dates")
-        daily[observed] = candidate
+        daily[observed] = daily_observation
 
     required_dates = {account_live_start}
     for missing in declared_missing_dates:
@@ -885,10 +893,10 @@ def _matrixport_daily_holding_shares(
         )
     endpoint_shares: dict[date, Decimal] = {}
     for observed in required_dates:
-        candidate = daily.get(observed)
-        if candidate is None:
+        required_daily_observation = daily.get(observed)
+        if required_daily_observation is None:
             raise TargetSeriesError("Matrixport daily holdings lack required span date")
-        shares, daily_nav, nav_available = candidate
+        shares, daily_nav, nav_available = required_daily_observation
         expected_nav = observations.get(observed)
         if observed in declared_missing_dates:
             if nav_available or daily_nav is not None or expected_nav is not None:
@@ -2124,8 +2132,14 @@ def _verified_core_generation_envelope(
         or not isinstance(expected_schema["version"], str)
     ):
         raise TargetSeriesError(error)
+    expected_schema_name = expected_schema.get("name")
+    expected_schema_version = expected_schema.get("version")
+    if not isinstance(expected_schema_name, str) or not isinstance(
+        expected_schema_version, str
+    ):
+        raise TargetSeriesError(error)
     expected_adapter = CORE_GENERATION_ADAPTER_BY_SOURCE_SCHEMA.get(
-        (expected_schema.get("name"), expected_schema.get("version"))
+        (expected_schema_name, expected_schema_version)
     )
     if expected_adapter is None:
         raise TargetSeriesError(error)
@@ -3049,7 +3063,7 @@ def build_layered_history_generation(
 
     if source_selection_mode == "CURRENT_POINTERS":
         ledger_manifest, ledger_generation, ledger_as_of = _verified_current_generation(
-            pointer_path=provider_ledger_pointer_path,
+            pointer_path=cast(Path, provider_ledger_pointer_path),
             manifest_path=provider_ledger_manifest_path,
             source=sources["owner-account-live-history"],
             name="provider ledger",
@@ -3057,7 +3071,7 @@ def build_layered_history_generation(
         )
         matrixport_manifest, matrixport_generation, matrixport_as_of = (
             _verified_current_generation(
-                pointer_path=matrixport_pointer_path,
+                pointer_path=cast(Path, matrixport_pointer_path),
                 manifest_path=matrixport_manifest_path,
                 source=sources["matrixport-account-generation"],
                 name="Matrixport",
@@ -3066,7 +3080,7 @@ def build_layered_history_generation(
         )
         quantbase_manifest, quantbase_generation, quantbase_as_of = (
             _verified_current_generation(
-                pointer_path=quantbase_pointer_path,
+                pointer_path=cast(Path, quantbase_pointer_path),
                 manifest_path=quantbase_manifest_path,
                 source=sources["quantbase-account-generation"],
                 name="Quantbase",
@@ -3074,7 +3088,7 @@ def build_layered_history_generation(
             )
         )
         p123_manifest, p123_generation, p123_as_of = _verified_current_generation(
-            pointer_path=portfolio123_pointer_path,
+            pointer_path=cast(Path, portfolio123_pointer_path),
             manifest_path=portfolio123_manifest_path,
             source=sources["portfolio123-model-generation"],
             name="Portfolio123",
@@ -4083,28 +4097,28 @@ def build_layered_history_generation(
                 _artifact_identity(
                     input_id="provider-ledger-current",
                     artifact_role="CURRENT_POINTER",
-                    path=provider_ledger_pointer_path,
+                    path=cast(Path, provider_ledger_pointer_path),
                     generation_id=ledger_generation,
                     as_of_date=ledger_as_of,
                 ),
                 _artifact_identity(
                     input_id="matrixport-current",
                     artifact_role="CURRENT_POINTER",
-                    path=matrixport_pointer_path,
+                    path=cast(Path, matrixport_pointer_path),
                     generation_id=matrixport_generation,
                     as_of_date=matrixport_as_of,
                 ),
                 _artifact_identity(
                     input_id="quantbase-current",
                     artifact_role="CURRENT_POINTER",
-                    path=quantbase_pointer_path,
+                    path=cast(Path, quantbase_pointer_path),
                     generation_id=quantbase_generation,
                     as_of_date=quantbase_as_of,
                 ),
                 _artifact_identity(
                     input_id="portfolio123-current",
                     artifact_role="CURRENT_POINTER",
-                    path=portfolio123_pointer_path,
+                    path=cast(Path, portfolio123_pointer_path),
                     generation_id=p123_generation,
                     as_of_date=p123_as_of,
                 ),
@@ -4197,10 +4211,16 @@ def build_layered_history_generation(
     }
     if source_selection_mode == "CURRENT_POINTERS":
         manifest_without_id["source_pointers"] = {
-            "matrixport": matrixport_pointer_path.read_text(encoding="utf-8"),
-            "portfolio123": portfolio123_pointer_path.read_text(encoding="utf-8"),
-            "provider-ledger": provider_ledger_pointer_path.read_text(encoding="utf-8"),
-            "quantbase": quantbase_pointer_path.read_text(encoding="utf-8"),
+            "matrixport": cast(Path, matrixport_pointer_path).read_text(
+                encoding="utf-8"
+            ),
+            "portfolio123": cast(Path, portfolio123_pointer_path).read_text(
+                encoding="utf-8"
+            ),
+            "provider-ledger": cast(Path, provider_ledger_pointer_path).read_text(
+                encoding="utf-8"
+            ),
+            "quantbase": cast(Path, quantbase_pointer_path).read_text(encoding="utf-8"),
         }
 
     generation_id = hashlib.sha256(

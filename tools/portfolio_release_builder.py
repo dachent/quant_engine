@@ -1015,16 +1015,17 @@ def _inspect_report_delivery(
         raise VerticalBuildError("report delivery receipt is unreadable") from exc
     if not isinstance(receipt, dict) or canonical_json_bytes(receipt) != receipt_bytes:
         raise VerticalBuildError("report delivery receipt differs")
+    expected_payload = {
+        "relative_path": "portfolio-report-data.json",
+        "sha256": hashlib.sha256(report_data).hexdigest(),
+        "size_bytes": len(report_data),
+    }
     expected_authority = {
         "generation_id": generation_id,
         "generation_inventory_sha256": inventory_sha256,
         "generation_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "generation_manifest_size_bytes": len(manifest_bytes),
-        "payload": {
-            "relative_path": "portfolio-report-data.json",
-            "sha256": hashlib.sha256(report_data).hexdigest(),
-            "size_bytes": len(report_data),
-        },
+        "payload": expected_payload,
     }
     workbook = receipt.get("workbook")
     if (
@@ -1051,7 +1052,7 @@ def _inspect_report_delivery(
         "delivery_classification": "NON_AUTHORITY_HUMAN_DELIVERY",
         "generation_id": generation_id,
         "generation_manifest_sha256": expected_authority["generation_manifest_sha256"],
-        "report_data_sha256": expected_authority["payload"]["sha256"],
+        "report_data_sha256": expected_payload["sha256"],
         "workbook_status": (
             "EXACT_NON_AUTHORITY"
             if actual_sha256 == workbook["sha256"]

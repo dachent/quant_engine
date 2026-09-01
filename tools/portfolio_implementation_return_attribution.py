@@ -971,17 +971,15 @@ def ai_attribution(
             other_implementation_pp,
         )
     )
+    bridge_values = (
+        benchmark_definition_pp,
+        primary_implementation_pp,
+        other_implementation_pp,
+        unexplained_pp,
+        cash_and_reconciliation_pp,
+    )
     if bridge_available:
-        bridge_total = sum(
-            float(value)
-            for value in (
-                benchmark_definition_pp,
-                primary_implementation_pp,
-                other_implementation_pp,
-                unexplained_pp,
-                cash_and_reconciliation_pp,
-            )
-        )
+        bridge_total = sum(value for value in bridge_values if value is not None)
         if not math.isclose(bridge_total, exact_gap_pp, abs_tol=1e-8):
             raise ReturnAttributionError("AI operational bridge does not close")
     primary_subcause_residual_pp = (

@@ -6254,7 +6254,9 @@ def _validate_epoch_manifest_source_shape(source: object) -> None:
     source_object = _object(source, "epoch_manifest_source")
     artifact = _object(source_object.get("artifact"), "epoch_manifest_source.artifact")
     schema = _object(artifact.get("schema"), "epoch_manifest_source.artifact.schema")
-    version = schema.get("version")
+    version = _text(
+        schema.get("version"), "epoch_manifest_source.artifact.schema.version"
+    )
     expected_source_keys = _EPOCH_MANIFEST_SOURCE_KEYS_BY_VERSION.get(version)
     if expected_source_keys is None:
         raise FinancialMvpContractError(
@@ -6262,7 +6264,7 @@ def _validate_epoch_manifest_source_shape(source: object) -> None:
         )
     _strict_keys(
         source_object,
-        expected_source_keys,
+        set(expected_source_keys),
         "epoch_manifest_source",
     )
     for name in (

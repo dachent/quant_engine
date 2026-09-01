@@ -9,6 +9,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 import hashlib
 from html.parser import HTMLParser
+from importlib import import_module
 import json
 import math
 import os
@@ -17,7 +18,7 @@ import re
 import stat
 import sys
 import tempfile
-from typing import TYPE_CHECKING, Any, Final, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Final, Mapping, Sequence, cast
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -62,8 +63,6 @@ if TYPE_CHECKING:
         validate_manifest_schema,
     )
 else:
-    from importlib import import_module
-
     try:
         _manifest_module = import_module("tools.account_strategy_manifest")
     except ModuleNotFoundError as exc:  # direct `python tools/...` execution
@@ -2188,14 +2187,14 @@ def _validate_current_product_boundary(
             "excluded strategy appears on a current panel surface"
         )
     for row in _objects(report.get("twr_mwr"), "twr_mwr"):
-        strategy_id = row.get("strategy_id")
-        if not isinstance(strategy_id, str):
+        twr_strategy_id = row.get("strategy_id")
+        if not isinstance(twr_strategy_id, str):
             raise ControlPanelValidationError("twr_mwr strategy_id must be text")
-        if strategy_id not in strategy_product_controls:
+        if twr_strategy_id not in strategy_product_controls:
             raise ControlPanelValidationError(
                 "twr_mwr references an unknown product strategy"
             )
-        if strategy_id not in excluded_ids:
+        if twr_strategy_id not in excluded_ids:
             continue
         authority = row.get("return_path_authority")
         if (
@@ -2212,10 +2211,15 @@ def _validate_current_product_boundary(
     for row in _objects(report.get("allocation_history"), "allocation_history"):
         if row.get("scope") != "SYSTEMATIC":
             continue
-        strategy_id = row.get("strategy_id")
+        allocation_strategy_id = row.get("strategy_id")
+        if not isinstance(allocation_strategy_id, str):
+            raise ControlPanelValidationError(
+                "current systematic allocation strategy is not REQUIRED"
+            )
         if (
-            not isinstance(strategy_id, str)
-            or strategy_product_controls.get(strategy_id, {}).get("product_requirement")
+            strategy_product_controls.get(allocation_strategy_id, {}).get(
+                "product_requirement"
+            )
             != "REQUIRED"
         ):
             raise ControlPanelValidationError(
@@ -2325,6 +2329,8 @@ def _validate_current_product_account_manifest(
             raise ControlPanelValidationError(
                 "current account manifest row is outside the product boundary"
             )
+        account_id = cast(str, account_id)
+        strategy_id = cast(str, strategy_id)
         if not enforce_owner_perimeter:
             continue
         if (
@@ -2516,14 +2522,11 @@ def _current_epoch_crosswalk_included_tuples(
                 ) from exc
             if parsed.isoformat() != value:
                 raise ControlPanelValidationError("current crosswalk dates are invalid")
-        epoch_tuple = tuple(
-            row.get(field)
-            for field in (
-                "account_id",
-                "strategy_id",
-                "effective_start",
-                "effective_end",
-            )
+        epoch_tuple = (
+            row.get("account_id"),
+            row.get("strategy_id"),
+            row.get("effective_start"),
+            row.get("effective_end"),
         )
         if epoch_tuple in tuples:
             raise ControlPanelValidationError(
@@ -2544,14 +2547,11 @@ def _current_epoch_crosswalk_included_tuples(
             "current crosswalk disposition counts are invalid"
         )
     return {
-        tuple(
-            row.get(field)
-            for field in (
-                "account_id",
-                "strategy_id",
-                "effective_start",
-                "effective_end",
-            )
+        (
+            row.get("account_id"),
+            row.get("strategy_id"),
+            row.get("effective_start"),
+            row.get("effective_end"),
         )
         for row in rows
         if row.get("product_epoch_disposition") == "INCLUDED_PRODUCT_EPOCH"
@@ -2728,14 +2728,11 @@ def _validate_current_product_epoch_surface(
             (account_id, strategy_id, *(row.get(field) for field in date_fields))
         )
         expected_epoch_tuples.add(
-            tuple(
-                row.get(field)
-                for field in (
-                    "account_id",
-                    "strategy_id",
-                    "effective_start",
-                    "effective_end",
-                )
+            (
+                row.get("account_id"),
+                row.get("strategy_id"),
+                row.get("effective_start"),
+                row.get("effective_end"),
             )
         )
     if crosswalk_tuples is not None and expected_epoch_tuples != crosswalk_tuples:
@@ -5395,11 +5392,14 @@ def _project_current_product_dependence(
         for component in central_components
     ]
     quadratic_loss = sum(
-        loss_vector[row]
-        * Decimal(str(central_values[row][column]))
-        * loss_vector[column]
-        for row in range(len(loss_vector))
-        for column in range(len(loss_vector))
+        (
+            loss_vector[row]
+            * Decimal(str(central_values[row][column]))
+            * loss_vector[column]
+            for row in range(len(loss_vector))
+            for column in range(len(loss_vector))
+        ),
+        Decimal("0"),
     )
     if quadratic_loss < 0:
         raise ControlPanelValidationError(
@@ -6662,6 +6662,7 @@ def _strategy_underwriting(
         or policy.get("policy_id") != "PORT-UNDERWRITE-1"
     ):
         raise ControlPanelValidationError("underwriting policy identity is unsupported")
+    rows: list[dict[str, Any]]
     if not performance_lineage_available:
         unavailable = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         rows = [
@@ -6738,7 +6739,7 @@ def _strategy_underwriting(
     total_stress = _finite_float(correlation_one.get("loss"), "correlation_one loss")
     modes = _object(decomposition_lenses.get("modes"), "decomposition modes")
 
-    rows: list[dict[str, Any]] = []
+    rows = []
     for strategy in strategies:
         strategy_id = _text(strategy.get("strategy_id"), "underwriting strategy_id")
         strategy_name = _text(
@@ -8632,10 +8633,11 @@ def _epoch_manifest_report_attestation(
         )
 
     actual_subject_paths = set(bundle.payloads) - {_EPOCH_MANIFEST_REPORT_PATH}
+    expected_subject_paths: tuple[str, ...]
     if expected_version == 2:
         expected_subject_paths = _EPOCH_MANIFEST_LEGACY_SUBJECT_PATHS
     else:
-        fixed_paths = (
+        fixed_paths: tuple[str, ...] = (
             *_EPOCH_MANIFEST_LEGACY_SUBJECT_PATHS,
             _EPOCH_MANIFEST_RECEIPT_AUTHORITY_PATH,
         )
@@ -8761,14 +8763,11 @@ def _epoch_manifest_report_attestation(
     rows = _objects(manifest.get("rows"), "account manifest rows")
     row_by_assignment: dict[tuple[object, object, object, object], dict[str, Any]] = {}
     for row in rows:
-        key = tuple(
-            row.get(field)
-            for field in (
-                "account_id",
-                "strategy_id",
-                "effective_start",
-                "effective_end",
-            )
+        key = (
+            row.get("account_id"),
+            row.get("strategy_id"),
+            row.get("effective_start"),
+            row.get("effective_end"),
         )
         if key in row_by_assignment:
             raise ControlPanelValidationError(
@@ -8779,27 +8778,24 @@ def _epoch_manifest_report_attestation(
     seen_assignments: set[tuple[object, object, object, object]] = set()
     for chain in chains:
         assignment = _object(chain.get("assignment"), "report blocker assignment")
-        key = tuple(
-            assignment.get(field)
-            for field in (
-                "account_id",
-                "strategy_id",
-                "effective_start",
-                "effective_end",
-            )
+        key = (
+            assignment.get("account_id"),
+            assignment.get("strategy_id"),
+            assignment.get("effective_start"),
+            assignment.get("effective_end"),
         )
-        row = row_by_assignment.get(key)
-        if row is None or key in seen_assignments:
+        manifest_row = row_by_assignment.get(key)
+        if manifest_row is None or key in seen_assignments:
             raise ControlPanelValidationError(
                 "independent verification report blocker assignment differs"
             )
         seen_assignments.add(key)
         output = _object(chain.get("output"), "report blocker output")
-        is_numeric = row.get("status") == "OK"
+        is_numeric = manifest_row.get("status") == "OK"
         if (
             chain.get("numeric_candidate") is not is_numeric
-            or output.get("status") != row.get("status")
-            or output.get("blocking_reason") != row.get("blocking_reason")
+            or output.get("status") != manifest_row.get("status")
+            or output.get("blocking_reason") != manifest_row.get("blocking_reason")
         ):
             raise ControlPanelValidationError(
                 "independent verification report row disposition differs"
@@ -9147,7 +9143,7 @@ def _validate_panel_data_schema(
 ) -> None:
     """Enforce the published panel contract, including manifest/profile binding."""
     try:
-        from jsonschema import (  # type: ignore[import-untyped]
+        from jsonschema import (
             Draft202012Validator,
             FormatChecker,
         )
@@ -9244,6 +9240,7 @@ def _rendered_files(
         raise ControlPanelValidationError(
             "supply exactly one of report root or report candidate"
         )
+    report_identity: Mapping[str, str | None]
     if report_candidate is None:
         assert report_root is not None
         report, report_identity, report_path = _current_report(report_root)
@@ -9264,6 +9261,12 @@ def _rendered_files(
                 ),
             )
         )
+    report_identity_values = {
+        "generation_id": _text(
+            report_identity.get("generation_id"), "report generation_id"
+        ),
+        "sha256": _text(report_identity.get("sha256"), "report sha256"),
+    }
     portfolio_as_of = _text(report.get("as_of_date"), "report.as_of_date")
     if freshness_health_path is None:
         raise ControlPanelValidationError("freshness health is mandatory")
@@ -9501,7 +9504,7 @@ def _rendered_files(
         )
     data = _panel_data(
         report,
-        report_identity,
+        report_identity_values,
         decomposition,
         decomposition_identity,
         correlation,
@@ -9569,7 +9572,7 @@ def _rendered_files(
     if candidate_driver_map_content is not None:
         files["data/candidate-driver-map.json"] = candidate_driver_map_content
     bound_inputs: dict[str, tuple[Path, str]] = {
-        "report": (report_path, report_identity["sha256"]),
+        "report": (report_path, report_identity_values["sha256"]),
         "decomposition": (decomposition_path, decomposition_identity["sha256"]),
         "correlation": (correlation_path, correlation_identity["sha256"]),
         "legacy": (legacy_data_path, legacy_data_sha256),

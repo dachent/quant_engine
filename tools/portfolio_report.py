@@ -18,7 +18,7 @@ import shutil
 import sys
 import tempfile
 import time as time_module
-from typing import Any, Final, Mapping, Sequence
+from typing import Any, Final, Mapping, Sequence, cast
 from xml.etree import ElementTree as ET
 import zipfile
 
@@ -1095,11 +1095,14 @@ def _account_strategy_performance(
             "twr": None,
             "twr_status": "UNAVAILABLE",
         }
-        epoch_key = (
-            account_id,
-            assignment.get("strategy_id"),
-            assignment.get("effective_start"),
-            assignment.get("effective_end"),
+        epoch_key = cast(
+            tuple[str, str, str, str | None],
+            (
+                account_id,
+                assignment.get("strategy_id"),
+                assignment.get("effective_start"),
+                assignment.get("effective_end"),
+            ),
         )
         if current_epoch_details is not None:
             detail = current_epoch_details.get(epoch_key)
@@ -6791,6 +6794,8 @@ def _verified_epoch_authority_details(
                 "authority/account-interval-retrieval-receipt-authority.json"
             )
             entries = authority.get("receipts")
+            if not isinstance(entries, list):
+                raise TypeError("epoch receipt authority receipts must be a list")
             selected_receipts = selected_identities["retrieval_receipts"]
             selected_by_id = {
                 receipt["receipt_id"]: receipt for receipt in selected_receipts
@@ -6996,11 +7001,15 @@ def _verified_epoch_authority_details(
                 "required_categories": required_categories,
                 "pagination": receipt["pagination"],
             }
+            requested_start = receipt.get("requested_start")
+            requested_end = receipt.get("requested_end")
             if (
-                receipt.get("artifact_id") != receipt_id
+                not isinstance(requested_start, str)
+                or not isinstance(requested_end, str)
+                or receipt.get("artifact_id") != receipt_id
                 or receipt.get("covered_start") != receipt.get("requested_start")
                 or receipt.get("covered_end") != receipt.get("requested_end")
-                or receipt.get("requested_start") > receipt.get("requested_end")
+                or requested_start > requested_end
                 or required_categories != sorted(set(required_categories))
                 or receipt.get("completed_categories") != required_categories
                 or receipt.get("unavailable_categories") != []
@@ -7305,15 +7314,16 @@ def _verified_epoch_authority_details(
     tuple_fields = ("account_id", "strategy_id", "effective_start", "effective_end")
     by_key: dict[tuple[str, str, str, str | None], Mapping[str, Any]] = {}
     for row in manifest_rows:
-        key = tuple(row.get(field) for field in tuple_fields)
+        raw_key = tuple(row.get(field) for field in tuple_fields)
         if (
-            not isinstance(key[0], str)
-            or not isinstance(key[1], str)
-            or not isinstance(key[2], str)
-            or (key[3] is not None and not isinstance(key[3], str))
-            or key in by_key
+            not isinstance(raw_key[0], str)
+            or not isinstance(raw_key[1], str)
+            or not isinstance(raw_key[2], str)
+            or (raw_key[3] is not None and not isinstance(raw_key[3], str))
+            or raw_key in by_key
         ):
             raise ReportValidationError("epoch manifest tuple authority differs")
+        key = cast(tuple[str, str, str, str | None], raw_key)
         by_key[key] = row
 
     def index_authority_rows(
@@ -7321,15 +7331,23 @@ def _verified_epoch_authority_details(
     ) -> dict[tuple[str, str, str, str | None], Mapping[str, Any]]:
         indexed: dict[tuple[str, str, str, str | None], Mapping[str, Any]] = {}
         for authority_row in rows:
+            assignment_value: object
             if assignment_field is None:
                 if not set(tuple_fields).issubset(authority_row):
                     raise ReportValidationError(f"epoch {label} tuple differs")
-                assignment = {field: authority_row[field] for field in tuple_fields}
+                assignment_value = {
+                    field: authority_row[field] for field in tuple_fields
+                }
             else:
-                assignment = authority_row.get(assignment_field)
-            if not isinstance(assignment, dict) or set(assignment) != set(tuple_fields):
+                assignment_value = authority_row.get(assignment_field)
+            if not isinstance(assignment_value, dict) or set(assignment_value) != set(
+                tuple_fields
+            ):
                 raise ReportValidationError(f"epoch {label} tuple differs")
-            key = tuple(assignment[field] for field in tuple_fields)
+            key = cast(
+                tuple[str, str, str, str | None],
+                tuple(assignment_value[field] for field in tuple_fields),
+            )
             if key in indexed:
                 raise ReportValidationError(f"epoch {label} tuple differs")
             indexed[key] = authority_row
@@ -7358,15 +7376,18 @@ def _verified_epoch_authority_details(
         assignment = chain.get("assignment")
         if not isinstance(assignment, dict) or set(assignment) != set(tuple_fields):
             raise ReportValidationError("epoch blocker chain tuple differs")
-        key = tuple(assignment[field] for field in tuple_fields)
-        row = by_key.get(key)
+        key = cast(
+            tuple[str, str, str, str | None],
+            tuple(assignment[field] for field in tuple_fields),
+        )
+        manifest_row = by_key.get(key)
         admission = chain.get("admission")
         output = chain.get("output")
         coverage = chain.get("coverage")
         coverage_authority = coverage_by_key.get(key)
         admission_authority = admission_by_key.get(key)
         if (
-            row is None
+            manifest_row is None
             or not isinstance(coverage, dict)
             or not isinstance(admission, dict)
             or not isinstance(output, dict)
@@ -7382,9 +7403,9 @@ def _verified_epoch_authority_details(
                 "status": admission_authority.get("status"),
                 "blocker_code": admission_authority.get("reason"),
             }
-            or admission.get("status") != row.get("admission_status")
-            or output.get("status") != row.get("status")
-            or output.get("blocking_reason") != row.get("blocking_reason")
+            or admission.get("status") != manifest_row.get("admission_status")
+            or output.get("status") != manifest_row.get("status")
+            or output.get("blocking_reason") != manifest_row.get("blocking_reason")
         ):
             raise ReportValidationError("epoch blocker chain semantic equality differs")
         if chain.get("numeric_candidate") is True:
@@ -7409,8 +7430,8 @@ def _verified_epoch_authority_details(
         else:
             raise ReportValidationError("epoch numeric candidate authority differs")
         details[key] = {
-            "account_label": row.get("account_label"),
-            "last_four": row.get("last_four"),
+            "account_label": manifest_row.get("account_label"),
+            "last_four": manifest_row.get("last_four"),
             "epoch_admission_status": admission["status"],
             "epoch_output_status": output["status"],
             "epoch_blocking_reason": output["blocking_reason"],
@@ -7433,6 +7454,8 @@ def _validate_epoch_generation_authority(
     """Require the triplet to be an exact payload of an immutable generation."""
 
     generation_id = source.get("generation_id")
+    if not isinstance(generation_id, str):
+        raise ReportValidationError("epoch generation root is not verified")
     try:
         bundle = read_generation_bundle(generation_root, generation_id)
     except (OSError, RuntimeError, TypeError, ValueError) as exc:
@@ -8342,6 +8365,11 @@ def inspect_report_delivery(
         authority_root / "generations" / generation_id / REPORT_DATA_NAME,
         "report authority payload",
     )
+    expected_payload = {
+        "relative_path": REPORT_DATA_NAME,
+        "sha256": hashlib.sha256(report_data_bytes).hexdigest(),
+        "size_bytes": len(report_data_bytes),
+    }
     expected_authority = {
         "generation_id": generation_id,
         "generation_inventory_sha256": generation_inventory_sha256(
@@ -8349,11 +8377,7 @@ def inspect_report_delivery(
         ),
         "generation_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
         "generation_manifest_size_bytes": len(manifest_bytes),
-        "payload": {
-            "relative_path": REPORT_DATA_NAME,
-            "sha256": hashlib.sha256(report_data_bytes).hexdigest(),
-            "size_bytes": len(report_data_bytes),
-        },
+        "payload": expected_payload,
     }
     if authority != expected_authority:
         raise ReportValidationError("report delivery receipt authority binding differs")
@@ -8406,8 +8430,8 @@ def inspect_report_delivery(
             "generation_manifest_size_bytes"
         ],
         "generation_id": generation_id,
-        "report_data_sha256": expected_authority["payload"]["sha256"],
-        "report_data_size_bytes": expected_authority["payload"]["size_bytes"],
+        "report_data_sha256": expected_payload["sha256"],
+        "report_data_size_bytes": expected_payload["size_bytes"],
         "workbook_status": (
             "EXACT_NON_AUTHORITY"
             if (
