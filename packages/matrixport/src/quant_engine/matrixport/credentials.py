@@ -49,7 +49,18 @@ def _decode_blob(blob: Any) -> str:
 
 
 def load_credentials() -> ApiCredentials:
-    """Read the exact ``BIT.com-API`` generic credential from Windows."""
+    """Read the exact ``BIT.com-API`` generic credential from Windows.
+
+    Precedence: process environment first (run-time injection for
+    vault-fetched values - Azure Key Vault is the system of record; nothing
+    is written to disk or the OS credential store), then Credential Manager.
+    """
+    import os
+
+    env_identifier = os.environ.get("BITCOM_API_KEY_IDENTIFIER", "").strip()
+    env_material = os.environ.get("BITCOM_API_SIGNING_MATERIAL", "").strip()
+    if env_identifier and env_material:
+        return ApiCredentials(env_identifier, env_material)
 
     try:
         import win32cred  # type: ignore
