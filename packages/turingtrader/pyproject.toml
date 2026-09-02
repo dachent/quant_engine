@@ -1,0 +1,16 @@
+[project]
+name = "quant-engine-turingtrader"
+version = "0.1.0"
+description = "Governed, fail-closed TuringTrader public-token JSON endpoint capture."
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "jsonschema>=4.25,<4.26",
+]
+classifiers = ["Private :: Do Not Upload"]
+
+[build-system]
+requires = ["uv_build==0.11.28"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "quant_engine.turingtrader"

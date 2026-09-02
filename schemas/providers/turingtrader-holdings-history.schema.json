@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/providers/turingtrader-holdings-history.schema.json",
+  "title": "TuringTrader holdings-history.json payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["rows"],
+  "properties": {
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [
+          {
+            "type": "string",
+            "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}$"
+          },
+          {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_.-]+=[0-9]+(\\.[0-9]+)?%(, [A-Za-z0-9_.-]+=[0-9]+(\\.[0-9]+)?%)*$"
+          }
+        ],
+        "minItems": 2,
+        "maxItems": 2
+      }
+    }
+  }
+}

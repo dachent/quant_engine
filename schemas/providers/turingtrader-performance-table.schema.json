@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/providers/turingtrader-performance-table.schema.json",
+  "title": "TuringTrader performance-table.json payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["cagr", "stdev", "maxdd", "sharpe", "beta", "ulcer", "martin"],
+  "properties": {
+    "cagr": {"type": "number"},
+    "stdev": {"type": "number"},
+    "maxdd": {"type": "number"},
+    "sharpe": {"type": "number"},
+    "beta": {"type": "number"},
+    "ulcer": {"type": "number"},
+    "martin": {"type": "number"}
+  }
+}

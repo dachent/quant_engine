@@ -50,6 +50,7 @@ def test_virtual_root_has_only_accepted_workspace_members() -> None:
             "packages/portfolio-ledger",
             "packages/portfolio123",
             "packages/schwab",
+            "packages/turingtrader",
             "packages/web-contracts",
         ]
     }
@@ -226,6 +227,28 @@ def test_matrixport_package_is_private_and_semantically_read_only() -> None:
     assert "packages/matrixport/src" in quality
     assert "tests/matrixport" in quality
     assert "tools/matrixport_generation.py" in quality
+
+
+def test_turingtrader_package_is_private_and_capture_only() -> None:
+    member_root = REPOSITORY_ROOT / "packages" / "turingtrader"
+    member = _toml(member_root / "pyproject.toml")
+    project = member["project"]
+    assert isinstance(project, dict)
+    assert project["requires-python"] == ">=3.11,<3.14"
+    assert project["dependencies"] == ["jsonschema>=4.25,<4.26"]
+    assert project["classifiers"] == ["Private :: Do Not Upload"]
+    assert member["tool"]["uv"]["build-backend"]["module-name"] == (  # type: ignore[index]
+        "quant_engine.turingtrader"
+    )
+    assert not (member_root / "src" / "quant_engine" / "__init__.py").exists()
+    assert (
+        member_root / "src" / "quant_engine" / "turingtrader" / "py.typed"
+    ).is_file()
+    quality = (REPOSITORY_ROOT / ".github" / "workflows" / "quality.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "packages/turingtrader/src" in quality
+    assert "tests/turingtrader" in quality
 
 
 def test_web_contract_package_is_private_and_read_side_only() -> None:

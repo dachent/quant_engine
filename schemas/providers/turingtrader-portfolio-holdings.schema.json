@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/providers/turingtrader-portfolio-holdings.schema.json",
+  "title": "TuringTrader portfolio-holdings.json payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["holdings"],
+  "properties": {
+    "holdings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["symbol", "allocation", "price"],
+        "properties": {
+          "symbol": {"type": "string", "minLength": 1},
+          "allocation": {
+            "oneOf": [
+              {"type": "number"},
+              {"enum": ["", "---"]}
+            ]
+          },
+          "price": {
+            "oneOf": [
+              {"type": "number"},
+              {"enum": ["", "---"]}
+            ]
+          }
+        }
+      }
+    }
+  }
+}

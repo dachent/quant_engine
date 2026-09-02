@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/providers/turingtrader-portfolio-comp.schema.json",
+  "title": "TuringTrader portfolio-comp.json payload",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["strategies"],
+  "properties": {
+    "strategies": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/strategy"}
+    }
+  },
+  "$defs": {
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "slug",
+        "name",
+        "cagr",
+        "sharpe",
+        "max-drawdown",
+        "cagr-5th",
+        "cagr-95th"
+      ],
+      "properties": {
+        "slug": {"type": "string", "minLength": 1},
+        "name": {"type": "string", "minLength": 1},
+        "cagr": {"type": "number"},
+        "sharpe": {"type": "number"},
+        "max-drawdown": {"type": "number"},
+        "cagr-5th": {
+          "type": "string",
+          "description": "JSON array of numbers serialized as a string by the provider"
+        },
+        "cagr-95th": {
+          "type": "string",
+          "description": "JSON array of numbers serialized as a string by the provider"
+        }
+      }
+    }
+  }
+}
