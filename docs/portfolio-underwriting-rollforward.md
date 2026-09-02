@@ -135,6 +135,12 @@ published Portfolio123 generation:
 The newest QSI archive is the authority for every overlapping weekly row; the
 older archive is retained only before the newer archive begins. Rows after the
 declared panel as-of date remain provenance and are not admitted to returns.
+Each QSI paid-subscription ZIP is bound by role: `BACKTEST_SPAN` (the embedded
+`Stratum_vs_SPY_Weekly_Returns 2013 to 2024.xlsx` weekly-return workbook) and
+`WEEKLY_DROPS` (`Weekly_File_Drops/stratum_data_combined.xlsx`). A ZIP may
+carry one or both roles; a ZIP carrying neither, or carrying duplicate members
+for one role, is rejected, and the bound roles are recorded per archive in the
+history manifest (`archive_roles`, schema `qsi-archive-role-binding-v1`).
 Record overlap revisions and exact excluded-row counts in the history manifest.
 For GrizzlyBears, validate the live-only file as a subset of the combined file.
 The original design is the futures implementation recorded in

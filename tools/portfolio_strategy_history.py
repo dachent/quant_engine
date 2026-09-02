@@ -36,7 +36,7 @@ RETURN_FIELDS: Final = (
     "strategy_version",
 )
 SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.4.0"
+BUILDER_VERSION: Final = "1.5.0"
 _SHEET_NS: Final = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS: Final = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PKG_REL_NS: Final = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -1314,79 +1314,171 @@ def _tt(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
     )
 
 
-def _qsi_archive_weeks(
-    path: Path,
-) -> tuple[list[dict[str, Any]], dict[str, object], dict[str, object]]:
-    archive_source = _source_identity(path, "qsi-paid-subscription-archive")
-    try:
-        with ZipFile(path) as archive:
-            matches = [
-                name
-                for name in archive.namelist()
-                if name.endswith("Stratum_vs_SPY_Weekly_Returns 2013 to 2024.xlsx")
-            ]
-            if len(matches) != 1:
-                raise StrategyHistoryError(
-                    "QSI subscription archive must contain one weekly-return workbook"
-                )
-            member_name = matches[0]
-            content = archive.read(member_name)
-    except (OSError, BadZipFile, KeyError) as exc:
-        raise StrategyHistoryError("QSI subscription archive is invalid") from exc
-    member_source = _content_identity(
-        content,
-        "qsi-2013-2024-exact-weekly-model-path",
-        member_name,
-    )
-    rows = _xlsx_rows_content(content, "Sheet 1")
+# Assumed producer column mapping for the QSI paid-subscription archive, by
+# role. BACKTEST_SPAN is the 2013-2024 exact weekly backtest workbook;
+# WEEKLY_DROPS is the combined weekly model-data workbook carried by the
+# current subscription ZIPs. Both parse into the same normalized week shape.
+QSI_ARCHIVE_ROLE_SCHEMA: Final[dict[str, Any]] = {
+    "schema_version": "qsi-archive-role-binding-v1",
+    "roles": {
+        "BACKTEST_SPAN": {
+            "columns": {
+                "allocations": "Weight Allocations",
+                "exact_return": "Stratum Returns (With Slippage)",
+                "labels": "Stratum Label",
+                "validation_return": "Stratum Returns (No Slippage)",
+                "week_end": "Week End Date",
+                "week_start": "Week Start Date",
+            },
+            "member_source_id": "qsi-2013-2024-exact-weekly-model-path",
+            "member_suffix": "Stratum_vs_SPY_Weekly_Returns 2013 to 2024.xlsx",
+            "minimum_weeks": 500,
+            "sheet": "Sheet 1",
+        },
+        "WEEKLY_DROPS": {
+            "columns": {
+                "allocations": "allocation_reference",
+                "exact_return": "Stratum 3x Returns (with slippage)",
+                "labels": "Stratum 3x Label",
+                "validation_return": "Stratum 3x Returns",
+                "week_end": "Week Ending Date",
+            },
+            "member_source_id": "qsi-current-exact-weekly-model-path",
+            "member_suffix": "Weekly_File_Drops/stratum_data_combined.xlsx",
+            "minimum_weeks": 26,
+            "sheet": "Stratum Data Combined",
+        },
+    },
+}
+
+
+def _qsi_archive_role_members(archive: ZipFile) -> dict[str, str]:
+    """Bind one paid-subscription ZIP to the archive roles its members carry.
+
+    A ZIP may carry zero, one, or both known roles. More than one member for
+    a single role is ambiguous and rejects the archive, as does a ZIP that
+    carries no known member at all.
+    """
+
+    names = archive.namelist()
+    binding: dict[str, str] = {}
+    for role, spec in QSI_ARCHIVE_ROLE_SCHEMA["roles"].items():
+        matches = [name for name in names if name.endswith(spec["member_suffix"])]
+        if len(matches) > 1:
+            raise StrategyHistoryError(
+                f"QSI subscription archive carries ambiguous {role} members"
+            )
+        if matches:
+            binding[role] = matches[0]
+    if not binding:
+        raise StrategyHistoryError(
+            "QSI subscription archive carries no known weekly model member"
+        )
+    return binding
+
+
+def _qsi_archive_role_weeks(role: str, content: bytes) -> list[dict[str, Any]]:
+    """Parse one bound member into normalized (start, end, return, weights) weeks."""
+
+    spec = QSI_ARCHIVE_ROLE_SCHEMA["roles"][role]
+    columns: dict[str, str] = spec["columns"]
+    rows = _xlsx_rows_content(content, spec["sheet"])
     if not rows:
-        raise StrategyHistoryError("QSI embedded weekly-return workbook is empty")
+        raise StrategyHistoryError(f"QSI {role} weekly workbook is empty")
     headers = {str(value or "").strip(): index for index, value in enumerate(rows[0])}
-    required = {
-        "Week Start Date",
-        "Week End Date",
-        "Stratum Returns (With Slippage)",
-        "Stratum Returns (No Slippage)",
-        "Stratum Label",
-        "Weight Allocations",
-    }
-    if not required <= set(headers):
-        raise StrategyHistoryError("QSI embedded weekly-return headers differ")
+    if not set(columns.values()) <= set(headers):
+        raise StrategyHistoryError(f"QSI {role} weekly workbook headers differ")
     weeks: list[dict[str, Any]] = []
     for row in rows[1:]:
-        raw_start = _cell(row, headers["Week Start Date"])
-        raw_end = _cell(row, headers["Week End Date"])
-        raw_target = _cell(row, headers["Stratum Returns (With Slippage)"])
-        raw_validation = _cell(row, headers["Stratum Returns (No Slippage)"])
-        if None in {raw_start, raw_end, raw_target, raw_validation}:
+        raw_end = _cell(row, headers[columns["week_end"]])
+        raw_start = (
+            _cell(row, headers[columns["week_start"]])
+            if "week_start" in columns
+            else None
+        )
+        raw_exact = _cell(row, headers[columns["exact_return"]])
+        raw_validation = _cell(row, headers[columns["validation_return"]])
+        required_cells = [raw_end, raw_exact, raw_validation]
+        if "week_start" in columns:
+            required_cells.append(raw_start)
+        if any(value is None for value in required_cells):
             continue
         labels = (
-            str(_cell(row, headers["Stratum Label"]) or "").replace("/", " ").split()
+            str(_cell(row, headers[columns["labels"]]) or "").replace("/", " ").split()
         )
         allocations = [
-            _decimal(item.strip(), "QSI model allocation")
-            for item in str(_cell(row, headers["Weight Allocations"]) or "").split("/")
+            _decimal(item.strip(), f"QSI {role} model allocation")
+            for item in str(_cell(row, headers[columns["allocations"]]) or "").split(
+                "/"
+            )
             if item.strip()
         ]
         if not labels or len(labels) != len(allocations):
-            raise StrategyHistoryError("QSI model labels and allocations differ")
+            raise StrategyHistoryError(
+                f"QSI {role} model labels and allocations differ"
+            )
         weights: dict[str, Decimal] = {}
         for ticker, allocation in zip(labels, allocations, strict=True):
             weights[ticker] = weights.get(ticker, Decimal(0)) + allocation
+        end = _excel_date(raw_end, f"QSI {role} week end")
+        start = (
+            _excel_date(raw_start, f"QSI {role} week start")
+            if "week_start" in columns
+            else end - timedelta(days=4)
+        )
         weeks.append(
             {
-                "end": _excel_date(raw_end, "QSI backtest week end"),
-                "exact_return": _decimal(raw_target, "QSI with-slippage return"),
+                "end": end,
+                "exact_return": _decimal(raw_exact, f"QSI {role} slippage return"),
                 "price_validation_return": _decimal(
-                    raw_validation, "QSI no-slippage return"
+                    raw_validation, f"QSI {role} no-slippage return"
                 ),
-                "start": _excel_date(raw_start, "QSI backtest week start"),
+                "start": start,
                 "weights": weights,
             }
         )
-    if len(weeks) < 500:
-        raise StrategyHistoryError("QSI embedded weekly-return history is too short")
-    return weeks, archive_source, member_source
+    if len(weeks) < spec["minimum_weeks"]:
+        raise StrategyHistoryError(f"QSI {role} weekly history is insufficient")
+    ends = [item["end"] for item in weeks]
+    if len(set(ends)) != len(ends):
+        raise StrategyHistoryError(f"QSI {role} weekly history overlaps itself")
+    if role == "WEEKLY_DROPS" and ends != sorted(ends):
+        raise StrategyHistoryError(f"QSI {role} weekly history is not monotone")
+    return weeks
+
+
+def _qsi_archive_weeks(
+    path: Path,
+) -> tuple[
+    dict[str, list[dict[str, Any]]],
+    dict[str, object],
+    dict[str, dict[str, object]],
+]:
+    """Load the governed paid-subscription archive, binding each role it carries."""
+
+    archive_source = _source_identity(path, "qsi-paid-subscription-archive")
+    try:
+        with ZipFile(path) as archive:
+            binding = _qsi_archive_role_members(archive)
+            contents = {role: archive.read(member) for role, member in binding.items()}
+    except (OSError, BadZipFile, KeyError) as exc:
+        raise StrategyHistoryError("QSI subscription archive is invalid") from exc
+    archive_source["archive_roles"] = sorted(binding)
+    archive_source["archive_role_schema_version"] = QSI_ARCHIVE_ROLE_SCHEMA[
+        "schema_version"
+    ]
+    weeks: dict[str, list[dict[str, Any]]] = {}
+    member_sources: dict[str, dict[str, object]] = {}
+    for role, member in binding.items():
+        member_source = _content_identity(
+            contents[role],
+            QSI_ARCHIVE_ROLE_SCHEMA["roles"][role]["member_source_id"],
+            member,
+        )
+        member_source["archive_role"] = role
+        member_sources[role] = member_source
+        weeks[role] = _qsi_archive_role_weeks(role, contents[role])
+    return weeks, archive_source, member_sources
 
 
 def _qsi_current_archive_weeks(
@@ -1395,80 +1487,31 @@ def _qsi_current_archive_weeks(
     archive_source = _source_identity(path, "qsi-current-paid-subscription-archive")
     try:
         with ZipFile(path) as archive:
-            matches = [
-                name
-                for name in archive.namelist()
-                if name.endswith("Weekly_File_Drops/stratum_data_combined.xlsx")
-            ]
-            if len(matches) != 1:
-                raise StrategyHistoryError(
-                    "QSI current archive must contain one combined weekly-data workbook"
-                )
-            member_name = matches[0]
-            content = archive.read(member_name)
+            binding = _qsi_archive_role_members(archive)
+            content = (
+                archive.read(binding["WEEKLY_DROPS"])
+                if "WEEKLY_DROPS" in binding
+                else None
+            )
     except (OSError, BadZipFile, KeyError) as exc:
         raise StrategyHistoryError(
             "QSI current subscription archive is invalid"
         ) from exc
+    if content is None:
+        raise StrategyHistoryError(
+            "QSI current archive must contain one combined weekly-data workbook"
+        )
     member_source = _content_identity(
         content,
         "qsi-current-exact-weekly-model-path",
-        member_name,
+        binding["WEEKLY_DROPS"],
     )
-    rows = _xlsx_rows_content(content, "Stratum Data Combined")
-    if not rows:
-        raise StrategyHistoryError("QSI current combined weekly-data workbook is empty")
-    headers = {str(value or "").strip(): index for index, value in enumerate(rows[0])}
-    required = {
-        "Week Ending Date",
-        "Stratum 3x Returns",
-        "Stratum 3x Returns (with slippage)",
-        "Stratum 3x Label",
-        "allocation_reference",
-    }
-    if not required <= set(headers):
-        raise StrategyHistoryError("QSI current weekly-data headers differ")
-    weeks: list[dict[str, Any]] = []
-    for row in rows[1:]:
-        raw_end = _cell(row, headers["Week Ending Date"])
-        raw_exact = _cell(row, headers["Stratum 3x Returns (with slippage)"])
-        raw_validation = _cell(row, headers["Stratum 3x Returns"])
-        if None in {raw_end, raw_exact, raw_validation}:
-            continue
-        labels = (
-            str(_cell(row, headers["Stratum 3x Label"]) or "").replace("/", " ").split()
-        )
-        allocations = [
-            _decimal(item.strip(), "QSI current model allocation")
-            for item in str(_cell(row, headers["allocation_reference"]) or "").split(
-                "/"
-            )
-            if item.strip()
-        ]
-        if not labels or len(labels) != len(allocations):
-            raise StrategyHistoryError(
-                "QSI current model labels and allocations differ"
-            )
-        weights: dict[str, Decimal] = {}
-        for ticker, allocation in zip(labels, allocations, strict=True):
-            weights[ticker] = weights.get(ticker, Decimal(0)) + allocation
-        end = _excel_date(raw_end, "QSI current week end")
-        weeks.append(
-            {
-                "end": end,
-                "exact_return": _decimal(raw_exact, "QSI current slippage return"),
-                "price_validation_return": _decimal(
-                    raw_validation, "QSI current no-slippage return"
-                ),
-                "start": end - timedelta(days=4),
-                "weights": weights,
-            }
-        )
-    if len(weeks) < 26:
-        raise StrategyHistoryError("QSI current exact weekly history is insufficient")
-    ends = [item["end"] for item in weeks]
-    if len(set(ends)) != len(ends):
-        raise StrategyHistoryError("QSI current weekly history overlaps itself")
+    member_source["archive_role"] = "WEEKLY_DROPS"
+    archive_source["archive_roles"] = sorted(binding)
+    archive_source["archive_role_schema_version"] = QSI_ARCHIVE_ROLE_SCHEMA[
+        "schema_version"
+    ]
+    weeks = _qsi_archive_role_weeks("WEEKLY_DROPS", content)
     return weeks, archive_source, member_source
 
 
@@ -1742,26 +1785,32 @@ def _qsi(
     price_extension_json: Path | None = None,
     as_of_date: date | None = None,
 ) -> tuple[list[dict[str, str]], dict[str, object]]:
-    historical, archive_source, embedded_source = _qsi_archive_weeks(
+    role_weeks, archive_source, member_sources = _qsi_archive_weeks(
         subscription_archive
     )
+    historical = role_weeks.get("BACKTEST_SPAN", [])
     current, appendix_source = _qsi_appendix_weeks(appendix_workbook)
     revision_validation: dict[str, object] | None = None
     current_archive_sources: list[dict[str, object]] = []
     source_observed_end: date | None = None
     excluded_after_as_of = 0
+    latest: list[dict[str, Any]] | None = None
     if current_subscription_archive is not None:
         latest, latest_archive_source, latest_member_source = (
             _qsi_current_archive_weeks(current_subscription_archive)
         )
-        revision_validation = {
-            "historical_archive_overlap": _qsi_revision_validation(
-                historical, latest, "historical archive"
-            ),
-            "prior_appendix_overlap": _qsi_revision_validation(
-                current, latest, "prior appendix"
-            ),
-        }
+        current_archive_sources = [latest_archive_source, latest_member_source]
+    elif "WEEKLY_DROPS" in role_weeks:
+        latest = role_weeks["WEEKLY_DROPS"]
+    if latest is not None:
+        revision_validation = {}
+        if historical:
+            revision_validation["historical_archive_overlap"] = (
+                _qsi_revision_validation(historical, latest, "historical archive")
+            )
+        revision_validation["prior_appendix_overlap"] = _qsi_revision_validation(
+            current, latest, "prior appendix"
+        )
         source_observed_end = max(item["end"] for item in latest)
         accepted_as_of = as_of_date or source_observed_end
         excluded_after_as_of = sum(item["end"] > accepted_as_of for item in latest)
@@ -1770,7 +1819,6 @@ def _qsi(
             *[item for item in historical if item["end"] < first_latest],
             *[item for item in latest if item["end"] <= accepted_as_of],
         ]
-        current_archive_sources = [latest_archive_source, latest_member_source]
     else:
         weeks = [*historical, *current]
     ends = [week["end"] for week in weeks]
@@ -1785,7 +1833,11 @@ def _qsi(
     daily, validation = _qsi_daily_path(weeks, prices)
     sources = [
         archive_source,
-        embedded_source,
+        *(
+            member_sources[role]
+            for role in QSI_ARCHIVE_ROLE_SCHEMA["roles"]
+            if role in member_sources
+        ),
         appendix_source,
         *current_archive_sources,
         *price_sources,
@@ -1797,7 +1849,7 @@ def _qsi(
             "source_sha256": [source["sha256"] for source in sources],
             "strategy_definition": (
                 "CURRENT_STRATUM_3X_MODULES_AND_WEIGHTS_FROM_202608_ARCHIVE"
-                if current_subscription_archive is not None
+                if latest is not None
                 else "CURRENT_STRATUM_3X_MODULES_AND_WEIGHTS"
             ),
         },
@@ -1810,7 +1862,7 @@ def _qsi(
         history_status="ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
         compatibility_basis=(
             "EXACT_2013_2019_RETAINED_MODEL_PATH_PLUS_REVISED_CURRENT_2020_2026_3X_PATH"
-            if current_subscription_archive is not None
+            if latest is not None
             else "EXACT_2013_2024_MODEL_RETURN_TRADELOG_PLUS_CURRENT_2025_3X_ALLOCATION_AND_RETURN_PATH"
         ),
         frequency="DAILY_EXACT_WEEKLY_ENDPOINT_ANCHORED",
@@ -1819,7 +1871,7 @@ def _qsi(
         source=archive_source,
         coverage_disposition=(
             "COMPLETE_THROUGH_DECLARED_AS_OF_WITH_LATER_SOURCE_ROWS_EXCLUDED"
-            if current_subscription_archive is not None and excluded_after_as_of
+            if latest is not None and excluded_after_as_of
             else "COMPLETE_WITHIN_RETAINED_2013_2025_MODEL_BOUNDARY"
         ),
     )

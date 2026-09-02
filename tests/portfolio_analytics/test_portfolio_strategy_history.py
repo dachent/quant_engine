@@ -102,11 +102,10 @@ def _tt(path: Path) -> None:
     workbook.close()
 
 
-def _qsi_appendix(path: Path) -> None:
+def _qsi_appendix(path: Path, start: datetime = datetime(2025, 1, 3)) -> None:
     workbook = xlsxwriter.Workbook(path)
     sheet = workbook.add_worksheet("Stratum 3x")
     sheet.write_row(0, 0, ["Fund Ticker", "Fund Name", "Fund Role", "Alternatives"])
-    start = datetime(2025, 1, 3)
     for index in range(30):
         sheet.write(
             index * 0 + 0,
@@ -121,7 +120,16 @@ def _qsi_appendix(path: Path) -> None:
     workbook.close()
 
 
-def _qsi_subscription_archive(path: Path) -> None:
+_QSI_BACKTEST_MEMBER = (
+    "Quanta 72 Paid Sub Files/Backtest Folder/Backtest Tradelog/"
+    "Stratum_vs_SPY_Weekly_Returns 2013 to 2024.xlsx"
+)
+_QSI_WEEKLY_MEMBER = (
+    "Quanta 72 Paid Sub Files/Weekly_File_Drops/stratum_data_combined.xlsx"
+)
+
+
+def _qsi_backtest_span_payload() -> bytes:
     embedded = io.BytesIO()
     workbook = xlsxwriter.Workbook(embedded, {"in_memory": True})
     sheet = workbook.add_worksheet("Sheet 1")
@@ -166,15 +174,24 @@ def _qsi_subscription_archive(path: Path) -> None:
                     text[:start_index] + '<dimension ref="A1"/>' + text[end_index:]
                 ).encode("utf-8")
             rewritten.writestr(name, content)
-    member = (
-        "Quanta 72 Paid Sub Files/Backtest Folder/Backtest Tradelog/"
-        "Stratum_vs_SPY_Weekly_Returns 2013 to 2024.xlsx"
+    return repaired.getvalue()
+
+
+def _qsi_weekly_drops_payload(
+    *,
+    start: datetime = datetime(2025, 1, 3),
+    count: int = 30,
+    dates: list[datetime] | None = None,
+    label: str = "SPXL / BIL",
+    allocation: str = "0.75 / 0.25",
+    exact: float = 0.01,
+    validation: float = 0.011,
+) -> bytes:
+    observed = (
+        dates
+        if dates is not None
+        else [start + timedelta(days=7 * index) for index in range(count)]
     )
-    with ZipFile(path, "w", ZIP_DEFLATED) as archive:
-        archive.writestr(member, repaired.getvalue())
-
-
-def _qsi_current_archive(path: Path) -> None:
     embedded = io.BytesIO()
     workbook = xlsxwriter.Workbook(embedded, {"in_memory": True})
     sheet = workbook.add_worksheet("Stratum Data Combined")
@@ -189,19 +206,24 @@ def _qsi_current_archive(path: Path) -> None:
             "allocation_reference",
         ],
     )
-    start = datetime(2025, 1, 3)
-    for index in range(30):
-        sheet.write_datetime(index + 1, 0, start + timedelta(days=7 * index))
-        sheet.write_number(index + 1, 1, 0.011)
-        sheet.write_number(index + 1, 2, 0.01)
-        sheet.write(index + 1, 3, "SPXL / BIL")
-        sheet.write(index + 1, 4, "0.75 / 0.25")
+    for index, week_end in enumerate(observed):
+        sheet.write_datetime(index + 1, 0, week_end)
+        sheet.write_number(index + 1, 1, validation)
+        sheet.write_number(index + 1, 2, exact)
+        sheet.write(index + 1, 3, label)
+        sheet.write(index + 1, 4, allocation)
     workbook.close()
+    return embedded.getvalue()
+
+
+def _qsi_subscription_archive(path: Path) -> None:
     with ZipFile(path, "w", ZIP_DEFLATED) as archive:
-        archive.writestr(
-            "Quanta 72 Paid Sub Files/Weekly_File_Drops/stratum_data_combined.xlsx",
-            embedded.getvalue(),
-        )
+        archive.writestr(_QSI_BACKTEST_MEMBER, _qsi_backtest_span_payload())
+
+
+def _qsi_current_archive(path: Path) -> None:
+    with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+        archive.writestr(_QSI_WEEKLY_MEMBER, _qsi_weekly_drops_payload())
 
 
 def _qsi_prices(path: Path) -> None:
@@ -399,7 +421,7 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
 
     assert manifest["verification"] == "VERIFIED"
     assert manifest["builder"] == "portfolio-strategy-history"
-    assert manifest["builder_version"] == "1.4.0"
+    assert manifest["builder_version"] == "1.5.0"
     assert {item["series_id"] for item in manifest["series"]} == {
         "GrizzlyBears VTMA",
         "QSI",
@@ -564,6 +586,218 @@ def test_qsi_current_archive_is_newer_overlap_authority(tmp_path: Path) -> None:
     assert revision["accepted_authority"] == "NEWER_CURRENT_ARCHIVE"
     assert revision["overlap_observations"] == 30
     assert revision["max_abs_return_revision"] == pytest.approx(0.001)
+
+
+def test_qsi_archive_binds_backtest_span_role(tmp_path: Path) -> None:
+    path = tmp_path / "qsi.zip"
+    _qsi_subscription_archive(path)
+
+    weeks_by_role, archive_source, member_sources = history._qsi_archive_weeks(path)
+
+    assert archive_source["source_id"] == "qsi-paid-subscription-archive"
+    assert archive_source["archive_roles"] == ["BACKTEST_SPAN"]
+    assert (
+        archive_source["archive_role_schema_version"] == "qsi-archive-role-binding-v1"
+    )
+    assert set(weeks_by_role) == {"BACKTEST_SPAN"}
+    weeks = weeks_by_role["BACKTEST_SPAN"]
+    assert len(weeks) == 500
+    assert set(weeks[0]) == {
+        "end",
+        "exact_return",
+        "price_validation_return",
+        "start",
+        "weights",
+    }
+    member = member_sources["BACKTEST_SPAN"]
+    assert member["source_id"] == "qsi-2013-2024-exact-weekly-model-path"
+    assert member["archive_role"] == "BACKTEST_SPAN"
+
+
+def test_qsi_archive_binds_weekly_drops_role(tmp_path: Path) -> None:
+    path = tmp_path / "qsi-2026.zip"
+    _qsi_current_archive(path)
+
+    weeks_by_role, archive_source, member_sources = history._qsi_archive_weeks(path)
+
+    assert archive_source["archive_roles"] == ["WEEKLY_DROPS"]
+    assert set(weeks_by_role) == {"WEEKLY_DROPS"}
+    weeks = weeks_by_role["WEEKLY_DROPS"]
+    assert len(weeks) == 30
+    assert weeks[0]["weights"] == {
+        "SPXL": history.Decimal("0.75"),
+        "BIL": history.Decimal("0.25"),
+    }
+    assert weeks[0]["start"] == weeks[0]["end"] - timedelta(days=4)
+    member = member_sources["WEEKLY_DROPS"]
+    assert member["source_id"] == "qsi-current-exact-weekly-model-path"
+    assert member["archive_role"] == "WEEKLY_DROPS"
+
+
+def test_qsi_archive_binds_both_roles(tmp_path: Path) -> None:
+    path = tmp_path / "qsi-both.zip"
+    with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+        archive.writestr(_QSI_BACKTEST_MEMBER, _qsi_backtest_span_payload())
+        archive.writestr(_QSI_WEEKLY_MEMBER, _qsi_weekly_drops_payload())
+
+    weeks_by_role, archive_source, member_sources = history._qsi_archive_weeks(path)
+
+    assert archive_source["archive_roles"] == ["BACKTEST_SPAN", "WEEKLY_DROPS"]
+    assert set(member_sources) == {"BACKTEST_SPAN", "WEEKLY_DROPS"}
+    assert len(weeks_by_role["BACKTEST_SPAN"]) == 500
+    assert len(weeks_by_role["WEEKLY_DROPS"]) == 30
+
+
+def test_qsi_archive_without_known_member_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "qsi-unknown.zip"
+    with ZipFile(path, "w", ZIP_DEFLATED) as archive:
+        archive.writestr("Quanta 72 Paid Sub Files/readme.txt", b"unrelated")
+
+    with pytest.raises(
+        history.StrategyHistoryError, match="no known weekly model member"
+    ):
+        history._qsi_archive_weeks(path)
+
+
+def test_qsi_archive_ambiguous_members_fail_closed(tmp_path: Path) -> None:
+    backtest = tmp_path / "qsi-ambiguous-backtest.zip"
+    with ZipFile(backtest, "w", ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "A/Stratum_vs_SPY_Weekly_Returns 2013 to 2024.xlsx",
+            _qsi_backtest_span_payload(),
+        )
+        archive.writestr(
+            "B/Stratum_vs_SPY_Weekly_Returns 2013 to 2024.xlsx",
+            _qsi_backtest_span_payload(),
+        )
+    with pytest.raises(
+        history.StrategyHistoryError, match="ambiguous BACKTEST_SPAN members"
+    ):
+        history._qsi_archive_weeks(backtest)
+
+    weekly = tmp_path / "qsi-ambiguous-weekly.zip"
+    with ZipFile(weekly, "w", ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "A/Weekly_File_Drops/stratum_data_combined.xlsx",
+            _qsi_weekly_drops_payload(),
+        )
+        archive.writestr(
+            "B/Weekly_File_Drops/stratum_data_combined.xlsx",
+            _qsi_weekly_drops_payload(),
+        )
+    with pytest.raises(
+        history.StrategyHistoryError, match="ambiguous WEEKLY_DROPS members"
+    ):
+        history._qsi_archive_weeks(weekly)
+
+
+def test_qsi_weekly_drops_output_shape_matches_producer_shape(tmp_path: Path) -> None:
+    path = tmp_path / "qsi-current.zip"
+    _qsi_current_archive(path)
+    legacy = tmp_path / "qsi.zip"
+    _qsi_subscription_archive(legacy)
+
+    via_loader = history._qsi_archive_weeks(path)[0]["WEEKLY_DROPS"]
+    via_current, _, _ = history._qsi_current_archive_weeks(path)
+    via_backtest = history._qsi_archive_weeks(legacy)[0]["BACKTEST_SPAN"]
+
+    assert via_loader == via_current
+    assert set(via_loader[0]) == set(via_backtest[0])
+    for week in via_loader:
+        assert isinstance(week["end"], history.date)
+        assert isinstance(week["start"], history.date)
+        assert isinstance(week["exact_return"], history.Decimal)
+        assert isinstance(week["price_validation_return"], history.Decimal)
+        assert isinstance(week["weights"], dict)
+
+
+def test_qsi_weekly_drops_non_monotone_or_duplicate_dates_fail_closed(
+    tmp_path: Path,
+) -> None:
+    start = datetime(2025, 1, 3)
+    ordered = [start + timedelta(days=7 * index) for index in range(30)]
+    unordered = tmp_path / "qsi-unordered.zip"
+    shuffled = [ordered[1], ordered[0], *ordered[2:]]
+    with ZipFile(unordered, "w", ZIP_DEFLATED) as archive:
+        archive.writestr(_QSI_WEEKLY_MEMBER, _qsi_weekly_drops_payload(dates=shuffled))
+    with pytest.raises(history.StrategyHistoryError, match="not monotone"):
+        history._qsi_archive_weeks(unordered)
+
+    duplicated = tmp_path / "qsi-duplicated.zip"
+    repeated = [ordered[0], ordered[0], *ordered[2:]]
+    with ZipFile(duplicated, "w", ZIP_DEFLATED) as archive:
+        archive.writestr(_QSI_WEEKLY_MEMBER, _qsi_weekly_drops_payload(dates=repeated))
+    with pytest.raises(history.StrategyHistoryError, match="overlaps itself"):
+        history._qsi_archive_weeks(duplicated)
+
+
+def _qsi_weekly_drops_end_to_end(tmp_path: Path) -> tuple[Path, Path, Path]:
+    archive = tmp_path / "qsi-2026.zip"
+    with ZipFile(archive, "w", ZIP_DEFLATED) as bundle:
+        bundle.writestr(
+            _QSI_WEEKLY_MEMBER,
+            _qsi_weekly_drops_payload(
+                start=datetime(2023, 1, 6),
+                label="SPXL",
+                allocation="1",
+                exact=0.01,
+                validation=0.01,
+            ),
+        )
+    appendix = tmp_path / "qsi-appendix.xlsx"
+    _qsi_appendix(appendix, start=datetime(2023, 3, 3))
+    prices = tmp_path / "qsi-prices"
+    _qsi_prices(prices)
+    return archive, appendix, prices
+
+
+def test_qsi_weekly_drops_only_archive_bring_lane_current(tmp_path: Path) -> None:
+    archive, appendix, prices = _qsi_weekly_drops_end_to_end(tmp_path)
+
+    accepted, definition = history._qsi(
+        archive, appendix, prices, as_of_date=history.date(2026, 8, 3)
+    )
+
+    assert accepted
+    assert definition["exact_weekly_observations"] == 30
+    assert definition["exact_weekly_observed_end"] == "2023-07-28"
+    revision = definition["history_revision_validation"]
+    assert "historical_archive_overlap" not in revision
+    assert revision["prior_appendix_overlap"]["status"] == (
+        "OVERLAP_VALIDATED_NEWER_AUTHORITY_ACCEPTED"
+    )
+    artifacts = {item["source_id"]: item for item in definition["source_artifacts"]}
+    assert artifacts["qsi-paid-subscription-archive"]["archive_roles"] == [
+        "WEEKLY_DROPS"
+    ]
+
+
+def test_qsi_combined_archive_binds_both_roles_end_to_end(tmp_path: Path) -> None:
+    archive, appendix, prices = _qsi_weekly_drops_end_to_end(tmp_path)
+    with ZipFile(archive, "a", ZIP_DEFLATED) as bundle:
+        bundle.writestr(_QSI_BACKTEST_MEMBER, _qsi_backtest_span_payload())
+
+    accepted, definition = history._qsi(
+        archive, appendix, prices, as_of_date=history.date(2026, 8, 3)
+    )
+
+    assert accepted
+    revision = definition["history_revision_validation"]
+    historical_overlap = revision["historical_archive_overlap"]
+    assert historical_overlap["status"] == "OVERLAP_VALIDATED_NEWER_AUTHORITY_ACCEPTED"
+    assert historical_overlap["overlap_observations"] > 0
+    assert historical_overlap["max_abs_return_revision"] == 0
+    expected_historical = sum(
+        (datetime(2013, 10, 25) + timedelta(days=7 * index)).date()
+        < history.date(2023, 1, 6)
+        for index in range(500)
+    )
+    assert definition["exact_weekly_observations"] == expected_historical + 30
+    artifacts = {item["source_id"]: item for item in definition["source_artifacts"]}
+    assert artifacts["qsi-paid-subscription-archive"]["archive_roles"] == [
+        "BACKTEST_SPAN",
+        "WEEKLY_DROPS",
+    ]
 
 
 def test_grizzly_manual_live_file_is_validated_as_combined_subset(
