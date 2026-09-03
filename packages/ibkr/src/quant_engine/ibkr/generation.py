@@ -64,6 +64,11 @@ _SOURCE_ROLES = {
 _ACTIVITY_FLEX_SCHEMA_NAME = "activity-flex"
 _ACTIVITY_FLEX_ROLES = frozenset({"PRIMARY_FLEX_ACTIVITY", "REFRESH_FLEX_ACTIVITY"})
 _EXTERNAL_FLOW_TYPES = {"Deposits/Withdrawals"}
+# The provider emits daily statements on trading days, so the longest normal
+# calendar break is a 3-day weekend (Fri -> Mon, e.g. Good Friday). One extra
+# day of headroom keeps the bound fail-closed: any gap of 4+ calendar days is
+# a real coverage hole in the chained statement set.
+MAX_STATEMENT_GAP_DAYS = 4
 
 
 class IbkrGenerationError(ValueError):
@@ -320,13 +325,13 @@ def _sources(
                 "legacy spec cannot include current provider evidence"
             )
     elif (
-        len(refresh) != 1
-        or refresh[0][2].suffix.lower() != ".xml"
+        not refresh
+        or any(path.suffix.lower() != ".xml" for _, _, path in refresh)
         or len(snapshots) != 1
         or snapshots[0][2].suffix.lower() != ".json"
     ):
         raise IbkrGenerationError(
-            "refreshed spec requires one Flex refresh and one TWS snapshot"
+            "refreshed spec requires at least one Flex refresh and one TWS snapshot"
         )
     return resolved, tuple(artifacts)
 
@@ -376,6 +381,29 @@ def _statements_equal(left: FlexDailyStatement, right: FlexDailyStatement) -> bo
     )
 
 
+def _verify_statement_continuity(
+    statements: Mapping[tuple[str, date], FlexDailyStatement],
+) -> None:
+    """Fail closed on any calendar hole in the chained statement set.
+
+    Applies to the whole accepted set (primary + all refresh statements) per
+    raw account, so holes inside one document or between chained sources are
+    caught identically.
+    """
+
+    dates_by_account: dict[str, set[date]] = {}
+    for raw_account_id, report_date in statements:
+        dates_by_account.setdefault(raw_account_id, set()).add(report_date)
+    for raw_account_id in sorted(dates_by_account):
+        observed = sorted(dates_by_account[raw_account_id])
+        for previous, current in zip(observed, observed[1:]):
+            if (current - previous).days > MAX_STATEMENT_GAP_DAYS:
+                raise IbkrGenerationError(
+                    f"Flex statement continuity gap for {raw_account_id}: "
+                    f"{previous.isoformat()} to {current.isoformat()}"
+                )
+
+
 def _statements(
     sources: Sequence[tuple[str, str, Path]],
 ) -> tuple[list[FlexDailyStatement], frozenset[str], int]:
@@ -409,6 +437,7 @@ def _statements(
                     refresh_accounts.add(statement.raw_account_id)
     if not statements:
         raise IbkrGenerationError("no primary Flex statements were parsed")
+    _verify_statement_continuity(statements)
     return (
         [statements[key] for key in sorted(statements)],
         frozenset(refresh_accounts),

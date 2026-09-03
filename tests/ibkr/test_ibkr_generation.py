@@ -1101,6 +1101,147 @@ def test_conflicting_flex_refresh_fails_closed(tmp_path: Path) -> None:
         build_generation(spec_path)
 
 
+def _multi_day_xml(account: str, days: list[tuple[date, str]]) -> str:
+    """One Flex document carrying several daily statement slices."""
+    slices = []
+    for day, nav in days:
+        single = _xml(account, day, nav)
+        slices.append(
+            single[single.index("<FlexStatement ") : single.index("</FlexStatements>")]
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<FlexQueryResponse type="AF" queryName="SYNTHETIC">'
+        f'<FlexStatements count="{len(slices)}">'
+        + "".join(slices)
+        + "</FlexStatements></FlexQueryResponse>"
+    )
+
+
+def _chained_refresh_spec(
+    tmp_path: Path, second_refresh_days: list[tuple[date, str]]
+) -> Path:
+    """Refreshed spec carrying a SECOND REFRESH_FLEX_ACTIVITY source."""
+    spec_path = _refreshed_spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    source_root = Path(spec["roots"]["legacy"])
+    path = source_root / "flex-refresh-second.xml"
+    path.write_text(_multi_day_xml("SYNTH-RAW", second_refresh_days), encoding="utf-8")
+    payload = path.read_bytes()
+    last_day = max(day for day, _ in second_refresh_days)
+    spec["sources"].append(
+        {
+            "artifact_id": "private/flex-refresh-second.xml",
+            "as_of_date": last_day.isoformat(),
+            "expected_sha256": hashlib.sha256(payload).hexdigest(),
+            "expected_size_bytes": len(payload),
+            "relative_path": path.name,
+            "role": "REFRESH_FLEX_ACTIVITY",
+            "root_id": "legacy",
+            "schema_name": "activity-flex",
+            "schema_version": "3",
+        }
+    )
+    spec["as_of_date"] = max(spec["as_of_date"], last_day.isoformat())
+    spec_path.write_bytes(canonical_json_bytes(spec))
+    return spec_path
+
+
+def test_chained_refresh_statements_with_overlap_build(tmp_path: Path) -> None:
+    """Two refresh statements whose windows overlap build when equal."""
+    spec_path = _chained_refresh_spec(
+        tmp_path,
+        [(date(2026, 1, 8), "107"), (date(2026, 1, 9), "108")],
+    )
+    catalog, manifest, catalog_bytes = build_generation(spec_path)
+    refresh = next(
+        item
+        for item in catalog["reconciliation_checks"]
+        if item["check_id"] == "flex-refresh-overlap"
+    )
+    # Primary 01-08 vs refresh one, refresh one vs refresh two on 01-08.
+    assert refresh == {
+        "check_id": "flex-refresh-overlap",
+        "record_count": 2,
+        "status": "PASS",
+    }
+    assert max(
+        date.fromisoformat(row["as_of_date"]) for row in catalog["nav_observations"]
+    ) == date(2026, 1, 9)
+    rebuilt, rebuilt_manifest, rebuilt_bytes = build_generation(spec_path)
+    assert rebuilt_bytes == catalog_bytes
+    assert rebuilt_manifest.generation_id == manifest.generation_id
+    assert rebuilt == catalog
+
+
+def test_conflicting_second_refresh_still_fails_closed(tmp_path: Path) -> None:
+    """The overlap-equal path still fires on a conflicting chained value."""
+    spec_path = _chained_refresh_spec(
+        tmp_path,
+        [(date(2026, 1, 8), "999"), (date(2026, 1, 9), "108")],
+    )
+    with pytest.raises(IbkrGenerationError, match="refresh conflicts"):
+        build_generation(spec_path)
+
+
+def test_refresh_chain_calendar_hole_fails_closed(tmp_path: Path) -> None:
+    """A > 4-day hole between two refresh statements is rejected."""
+    spec_path = _chained_refresh_spec(tmp_path, [(date(2026, 1, 14), "114")])
+    with pytest.raises(IbkrGenerationError, match="continuity gap") as error:
+        build_generation(spec_path)
+    assert "SYNTH-RAW" in str(error.value)
+    assert "2026-01-08" in str(error.value)
+    assert "2026-01-14" in str(error.value)
+
+
+def test_single_refresh_still_builds(tmp_path: Path) -> None:
+    """The accepted one-refresh 20260814 shape is unchanged."""
+    spec_path = _refreshed_spec(tmp_path)
+    catalog, _, _ = build_generation(spec_path)
+    assert max(
+        date.fromisoformat(row["as_of_date"]) for row in catalog["nav_observations"]
+    ) == date(2026, 1, 8)
+
+
+def test_abutting_refresh_windows_build(tmp_path: Path) -> None:
+    """First refresh ends Thursday, the second starts Friday: no hole."""
+    assert date(2026, 1, 8).weekday() == 3
+    assert date(2026, 1, 9).weekday() == 4
+    spec_path = _chained_refresh_spec(tmp_path, [(date(2026, 1, 9), "108")])
+    catalog, _, _ = build_generation(spec_path)
+    assert max(
+        date.fromisoformat(row["as_of_date"]) for row in catalog["nav_observations"]
+    ) == date(2026, 1, 9)
+
+
+def test_continuity_gap_inside_one_document_fails_closed(tmp_path: Path) -> None:
+    """A 10-day hole inside a single statement file's own coverage is caught."""
+    spec_path = _refreshed_spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    source_root = Path(spec["roots"]["legacy"])
+    refresh = next(
+        item for item in spec["sources"] if item["role"] == "REFRESH_FLEX_ACTIVITY"
+    )
+    path = source_root / refresh["relative_path"]
+    path.write_text(
+        _multi_day_xml(
+            "SYNTH-RAW",
+            [(date(2026, 1, 8), "107"), (date(2026, 1, 18), "118")],
+        ),
+        encoding="utf-8",
+    )
+    payload = path.read_bytes()
+    refresh["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    refresh["expected_size_bytes"] = len(payload)
+    refresh["as_of_date"] = "2026-01-18"
+    spec["as_of_date"] = "2026-01-18"
+    spec_path.write_bytes(canonical_json_bytes(spec))
+    with pytest.raises(IbkrGenerationError, match="continuity gap") as error:
+        build_generation(spec_path)
+    assert "2026-01-08" in str(error.value)
+    assert "2026-01-18" in str(error.value)
+
+
 def test_crosswalk_ambiguity_fails_closed(tmp_path: Path) -> None:
     spec_path = _spec(tmp_path)
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
