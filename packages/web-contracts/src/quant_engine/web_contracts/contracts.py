@@ -21,6 +21,7 @@ class SemanticEffect(StrEnum):
 
 
 RequestValidator = Callable[[Mapping[str, Any]], None]
+ResponseValidator = Callable[[Any], None]
 
 
 @dataclass(frozen=True)
@@ -33,6 +34,7 @@ class EndpointContract:
     path: str
     semantic_effect: SemanticEffect
     validate_request: RequestValidator | None = None
+    validate_response: ResponseValidator | None = None
     path_pattern: str | None = None
     query_keys: frozenset[str] = frozenset()
     validate_query: RequestValidator | None = None

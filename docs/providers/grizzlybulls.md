@@ -51,3 +51,18 @@ reviewing terms would require a separately approved provider issue.
 Recovery is non-destructive: leave the rejected branch and private source
 artifacts unchanged and do not advance any provider, strategy, portfolio, or
 publication pointer.
+
+## Successor work
+
+Issue #240 (WCH-GB-002) is the open successor. It builds a refreshed,
+fail-closed GrizzlyBulls HAR/web capture contract
+(`packages/web-contracts/src/quant_engine/web_contracts/grizzlybulls.py`) that
+fixes the blocking findings above: session-bearing and mutation-like routes are
+rejected fail-closed at the contract level, non-success and empty responses
+fail closed, every captured response is schema-validated, and the strategy
+mapping to `grizzlybears-vtma` is an explicit authoritative table. The two
+histories (all-history vs live-only) are separately identified series, and
+replay re-derives identical output hashes from persisted raw bytes without
+network. This document and `source-rejection.v1.json` remain the governing
+record of the #195 rejection until the live capture passes under #240's
+issue-recorded PROCEED and supersession goes through review.

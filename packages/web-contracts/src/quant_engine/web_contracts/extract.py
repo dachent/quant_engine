@@ -53,6 +53,36 @@ class ExtractedResponse:
             "status": self.status,
         }
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> ExtractedResponse:
+        """Rebuild one record from its sole serialized representation."""
+
+        capability = value.get("capability")
+        captured_at = value.get("captured_at")
+        request_sha256 = value.get("request_sha256")
+        status = value.get("status")
+        if not isinstance(capability, str) or not isinstance(request_sha256, str):
+            raise WebContractError("serialized record identity must be text")
+        if not isinstance(captured_at, str):
+            raise WebContractError("serialized capture time must be text")
+        if isinstance(status, bool) or not isinstance(status, int):
+            raise WebContractError("serialized status must be an integer")
+        try:
+            observed = datetime.fromisoformat(captured_at)
+        except ValueError as exc:
+            raise WebContractError("serialized capture time is invalid") from exc
+        if observed.tzinfo is None:
+            raise WebContractError("serialized capture time must be timezone-aware")
+        if "response" not in value:
+            raise WebContractError("serialized record response is missing")
+        return cls(
+            capability=capability,
+            captured_at=observed,
+            request_sha256=request_sha256,
+            response=value["response"],
+            status=status,
+        )
+
 
 def _object(value: object, name: str) -> dict[str, Any]:
     if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
@@ -126,6 +156,12 @@ def _response_json(response: Mapping[str, Any]) -> object:
         raise WebContractError("response content is not valid JSON") from exc
 
 
+def sanitize_response(payload: object, provider: ProviderContract) -> object:
+    """Redact provider-declared sensitive fields from one response payload."""
+
+    return _sanitize(payload, provider.sensitive_fields)
+
+
 def extract_har(
     document: Mapping[str, Any],
     *,
@@ -172,6 +208,9 @@ def extract_har(
             raise WebContractError("request body has no reviewed validator")
         if status < 200 or status >= 300:
             raise WebContractError("allowlisted request did not succeed")
+        payload = _response_json(response)
+        if endpoint.validate_response is not None:
+            endpoint.validate_response(payload)
         request_identity = {
             "capability": endpoint.capability,
             "body": request_body if endpoint.validate_request is not None else None,
@@ -188,7 +227,7 @@ def extract_har(
                 capability=endpoint.capability,
                 captured_at=session.captured_at,
                 request_sha256=request_sha256,
-                response=_sanitize(_response_json(response), provider.sensitive_fields),
+                response=_sanitize(payload, provider.sensitive_fields),
                 status=status,
             )
         )
@@ -200,3 +239,21 @@ def canonical_extraction(value: Sequence[ExtractedResponse]) -> bytes:
     """Return the sole deterministic serialized representation."""
 
     return canonical_json_bytes({"records": [item.to_dict() for item in value]})
+
+
+def parse_extraction(raw: bytes) -> tuple[ExtractedResponse, ...]:
+    """Rebuild records from persisted canonical bytes, fail-closed."""
+
+    try:
+        document = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WebContractError("persisted extraction is not canonical JSON") from exc
+    records = _object(document, "extraction").get("records")
+    if not isinstance(records, list):
+        raise WebContractError("persisted extraction records must be an array")
+    parsed = tuple(
+        ExtractedResponse.from_dict(_object(item, "records[]")) for item in records
+    )
+    if canonical_extraction(parsed) != raw:
+        raise WebContractError("persisted extraction is not in canonical form")
+    return parsed
