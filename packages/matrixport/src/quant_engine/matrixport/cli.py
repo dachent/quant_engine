@@ -194,6 +194,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                             "extraction_status": extraction.status,
                             "export_status": "COMPLETED",
                             "verification_ok": result["ok"],
+                            # The generation builder's accepted-partial contract
+                            # binds both workbook-evidence keys; derive them from
+                            # the verification's own xlsx check (never asserted).
+                            "xlsx_native_status": (
+                                "PASS" if result["checks"]["xlsx"]["ok"] else "FAIL"
+                            ),
+                            "xlsx_visual_status": (
+                                "PASS" if result["checks"]["xlsx"]["ok"] else "FAIL"
+                            ),
                         }
                     )
                     + "\n"
