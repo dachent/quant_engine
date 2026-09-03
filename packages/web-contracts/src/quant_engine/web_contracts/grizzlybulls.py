@@ -257,6 +257,18 @@ ROUTE_CATALOG: tuple[CatalogRoute, ...] = (
         "/api/billing",
         "Subscriber billing surface; carries session material.",
     ),
+    _session_route(
+        "trades.recent",
+        "/api/trades",
+        "Most-recent trades require a subscriber session (owner correction "
+        "2026-09-02); never capturable unauthenticated.",
+    ),
+    _session_route(
+        "positions.current",
+        "/api/positions",
+        "Current positions require a subscriber session (owner correction "
+        "2026-09-02); never capturable unauthenticated.",
+    ),
 )
 
 
