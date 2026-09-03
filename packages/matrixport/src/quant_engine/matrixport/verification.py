@@ -47,6 +47,24 @@ SOURCE_LIMITED_WALLET_HISTORY_PATHS = {
     "/mapi/v1/wallet/withdrawals",
 }
 
+# Terminal atoms the wallet history walk may emit that verification accepts as
+# source-limited coverage.  "enumerated_currency_failures" is the partial
+# shape (accepted only when every failed currency carries strict rejection
+# evidence; anything else fails closed) and
+# "structured_parameter_rejections_dispositioned" is the complete shape where
+# every provider-structured rejection was dispositioned.  These must stay a
+# subset of the pipeline's WALLET_HISTORY_TERMINAL_REASONS.
+TERMINAL_ENUMERATED_CURRENCY_FAILURES = "enumerated_currency_failures"
+TERMINAL_STRUCTURED_REJECTIONS_DISPOSITIONED = (
+    "structured_parameter_rejections_dispositioned"
+)
+WALLET_SOURCE_LIMITED_TERMINAL_REASONS = frozenset(
+    {
+        TERMINAL_ENUMERATED_CURRENCY_FAILURES,
+        TERMINAL_STRUCTURED_REJECTIONS_DISPOSITIONED,
+    }
+)
+
 _WALLET_PATH_ATOM_PREFIX: dict[str, str] = {
     "/mapi/v1/wallet/deposits": "wallet_deposit_currency",
     "/mapi/v1/wallet/withdrawals": "wallet_withdrawal_currency",
@@ -483,14 +501,23 @@ def verify_coverage(run_dir: Path) -> dict[str, Any]:
                 failures.append(f"{key}:{field} is not an object")
             else:
                 parsed_fields[field] = parsed
-        if (
-            endpoint.path in REQUIRED_CORE_PATHS
-            and status != "complete_to_observed_boundary"
+        # Wallet history lanes whose provider rejected parameters for whole
+        # currencies need source-limit validation even when the walk completed:
+        # "complete_to_observed_boundary" with dispositioned rejections still
+        # names the rejected currencies as known gaps.
+        dispositioned_complete = (
+            endpoint.path in SOURCE_LIMITED_WALLET_HISTORY_PATHS
+            and status == "complete_to_observed_boundary"
+            and terminal == TERMINAL_STRUCTURED_REJECTIONS_DISPOSITIONED
+        )
+        if endpoint.path in REQUIRED_CORE_PATHS and (
+            status != "complete_to_observed_boundary" or dispositioned_complete
         ):
             details = parsed_fields.get("details_json", {})
             failed_currencies = details.get("failed_currencies")
             currency_count = details.get("currency_count")
             failure_count = details.get("failed_currency_count")
+            dispositions = details.get("dispositions")
             endpoint_requests = [
                 request
                 for request in request_rows
@@ -530,23 +557,50 @@ def verify_coverage(run_dir: Path) -> dict[str, Any]:
                     rejection_evidence_ok = False
                     continue
                 rejected_currencies.add(currency)
-            valid_source_limit = (
-                endpoint.path in SOURCE_LIMITED_WALLET_HISTORY_PATHS
-                and status == "partial"
-                and terminal == "enumerated_currency_parameter_rejections"
-                and isinstance(failed_currencies, list)
-                and bool(failed_currencies)
-                and all(
-                    isinstance(currency, str) and currency
-                    for currency in failed_currencies
+            if dispositioned_complete:
+                disposition_items = (
+                    dispositions if isinstance(dispositions, list) else []
                 )
-                and len(set(failed_currencies)) == len(failed_currencies)
-                and failure_count == len(failed_currencies)
-                and isinstance(currency_count, int)
-                and currency_count == len(request_currencies)
-                and rejected_currencies == set(failed_currencies)
-                and rejection_evidence_ok
-            )
+                disposition_currencies = [
+                    item.get("currency")
+                    for item in disposition_items
+                    if isinstance(item, dict)
+                ]
+                valid_source_limit = (
+                    bool(disposition_items)
+                    and len(disposition_currencies) == len(disposition_items)
+                    and all(
+                        isinstance(currency, str) and currency
+                        for currency in disposition_currencies
+                    )
+                    and len(set(disposition_currencies)) == len(disposition_currencies)
+                    and failed_currencies == []
+                    and failure_count == 0
+                    and details.get("rejected_currency_count")
+                    == len(disposition_currencies)
+                    and isinstance(currency_count, int)
+                    and currency_count == len(request_currencies)
+                    and rejected_currencies == set(disposition_currencies)
+                    and rejection_evidence_ok
+                )
+            else:
+                valid_source_limit = (
+                    endpoint.path in SOURCE_LIMITED_WALLET_HISTORY_PATHS
+                    and status == "partial"
+                    and terminal == TERMINAL_ENUMERATED_CURRENCY_FAILURES
+                    and isinstance(failed_currencies, list)
+                    and bool(failed_currencies)
+                    and all(
+                        isinstance(currency, str) and currency
+                        for currency in failed_currencies
+                    )
+                    and len(set(failed_currencies)) == len(failed_currencies)
+                    and failure_count == len(failed_currencies)
+                    and isinstance(currency_count, int)
+                    and currency_count == len(request_currencies)
+                    and rejected_currencies == set(failed_currencies)
+                    and rejection_evidence_ok
+                )
             if valid_source_limit:
                 prefix = _WALLET_PATH_ATOM_PREFIX.get(
                     endpoint.path,

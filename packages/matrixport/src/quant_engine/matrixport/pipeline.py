@@ -45,16 +45,44 @@ RFQ_CAP = 100
 FULL_START_MS = 0
 RUN_ID_RE = re.compile(r"^\d{8}T\d{6}\.\d{3}Z$")
 
+# Terminal reasons the per-currency wallet history walk can emit.  The
+# verification lane accepts exactly the source-limited subset of these atoms;
+# keep the two modules consistent (see WALLET_SOURCE_LIMITED_TERMINAL_REASONS
+# in verification.py).
+WALLET_TERMINAL_ALL_ENUMERATED = "all_enumerated_currencies"
+WALLET_TERMINAL_CURRENCY_FAILURES = "enumerated_currency_failures"
+WALLET_TERMINAL_REJECTIONS_DISPOSITIONED = (
+    "structured_parameter_rejections_dispositioned"
+)
+WALLET_HISTORY_TERMINAL_REASONS = frozenset(
+    {
+        WALLET_TERMINAL_ALL_ENUMERATED,
+        WALLET_TERMINAL_CURRENCY_FAILURES,
+        WALLET_TERMINAL_REJECTIONS_DISPOSITIONED,
+    }
+)
+
 
 class ExtractionError(RuntimeError):
     """A sanitized pipeline error that contains no authentication material."""
 
 
 class ApiResponseError(ExtractionError):
-    def __init__(self, endpoint: str, code: str) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        code: str,
+        *,
+        status_code: int | None = None,
+        content: bytes | None = None,
+        request_id: str | None = None,
+    ) -> None:
         super().__init__(f"Matrixport API error at {endpoint} (code={code})")
         self.endpoint = endpoint
         self.code = code
+        self.status_code = status_code
+        self.content = bytes(content) if content is not None else None
+        self.request_id = request_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,16 +135,38 @@ def _data(payload: Any) -> Any:
 def _structured_rejection_details(error: BaseException) -> dict[str, Any] | None:
     """Evidence for a provider-structured parameter rejection, or ``None``.
 
-    A rejection is provider-structured iff the transport raised
-    ``TransportHTTPError`` with status 400 and the response body is a JSON
-    object carrying an integer error code and a message (the observed shape is
-    ``{"code": 18100410, "message": "Invalid params"}``).  Anything else must
-    keep the fail-closed treatment.
+    A rejection is provider-structured iff the response body is a JSON object
+    carrying an integer error code and a message (the observed shape is
+    ``{"code": 18100410, "message": "Invalid params"}``) and it arrived on one
+    of the two observed transport shapes: ``TransportHTTPError`` with status
+    400, or an HTTP-200 response whose body code is non-zero, surfaced as
+    ``ApiResponseError`` carrying the raw bytes (status 200 live, or the
+    stored status on a resumed request).  Anything else must keep the
+    fail-closed treatment.
     """
-    if not isinstance(error, TransportHTTPError) or error.status_code != 400:
+    status_code: int
+    content: bytes
+    request_id: str
+    if isinstance(error, TransportHTTPError):
+        if error.status_code != 400:
+            return None
+        status_code = error.status_code
+        content = error.content
+        request_id = error.request_id
+    elif isinstance(error, ApiResponseError):
+        if (
+            error.status_code not in {200, 400}
+            or error.content is None
+            or error.request_id is None
+        ):
+            return None
+        status_code = error.status_code
+        content = error.content
+        request_id = error.request_id
+    else:
         return None
     try:
-        payload = json.loads(error.content.decode("utf-8"))
+        payload = json.loads(content.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
     if not isinstance(payload, Mapping):
@@ -128,11 +178,11 @@ def _structured_rejection_details(error: BaseException) -> dict[str, Any] | None
     if not isinstance(message, str) or not message:
         return None
     return {
-        "status_code": error.status_code,
+        "status_code": status_code,
         "api_error_code": code,
         "api_message": message,
-        "response_sha256": sha256_bytes(error.content),
-        "request_id": error.request_id,
+        "response_sha256": sha256_bytes(content),
+        "request_id": request_id,
     }
 
 
@@ -600,10 +650,22 @@ class MatrixportExtractor:
         }
         stored = self.raw.lookup(path, safe_params)
         if stored is not None:
-            payload = _json_loads(stored.response_path.read_bytes())
+            content = stored.response_path.read_bytes()
+            payload = _json_loads(content)
             code = _api_code(payload)
             if code is not None:
-                raise ApiResponseError(path, code)
+                envelope = self.raw._read_envelope(stored.envelope_path)
+                stored_status = envelope.get("status_code")
+                raise ApiResponseError(
+                    path,
+                    code,
+                    status_code=stored_status
+                    if isinstance(stored_status, int)
+                    and not isinstance(stored_status, bool)
+                    else None,
+                    content=content,
+                    request_id=stored.request_id,
+                )
             return ApiCall(endpoint, payload, stored.request_id, True)
 
         try:
@@ -665,7 +727,13 @@ class MatrixportExtractor:
         )
         code = _api_code(payload)
         if code is not None:
-            raise ApiResponseError(path, code)
+            raise ApiResponseError(
+                path,
+                code,
+                status_code=response.status_code,
+                content=response.content,
+                request_id=response.request_id,
+            )
         return ApiCall(endpoint, payload, stored.request_id, stored.resumed)
 
     def _safe_call(
@@ -1622,11 +1690,11 @@ class MatrixportExtractor:
                 )
             all_complete = not failed_currencies
             if not all_complete:
-                terminal_reason = "enumerated_currency_failures"
+                terminal_reason = WALLET_TERMINAL_CURRENCY_FAILURES
             elif dispositions:
-                terminal_reason = "structured_parameter_rejections_dispositioned"
+                terminal_reason = WALLET_TERMINAL_REJECTIONS_DISPOSITIONED
             else:
-                terminal_reason = "all_enumerated_currencies"
+                terminal_reason = WALLET_TERMINAL_ALL_ENUMERATED
             self._coverage(
                 path,
                 "complete_to_observed_boundary" if all_complete else "partial",

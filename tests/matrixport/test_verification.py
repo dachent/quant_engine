@@ -66,7 +66,7 @@ def test_coverage_accepts_strictly_evidenced_wallet_source_limit(
                 run_id,
                 f"GET https://{endpoint.host}{path}",
                 "partial",
-                terminal_reason="enumerated_currency_parameter_rejections",
+                terminal_reason="enumerated_currency_failures",
                 details={
                     "currency_count": 1,
                     "raw_rows": 0,
