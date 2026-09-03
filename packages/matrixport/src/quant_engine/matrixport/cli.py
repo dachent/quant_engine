@@ -116,6 +116,14 @@ def _verify(run_id: str) -> tuple[int, dict[str, Any]]:
         {
             "status": result["status"] if result["ok"] else "FAILED",
             "verification_ok": result["ok"],
+            # Same accepted-partial contract as the run path: derive the
+            # workbook-evidence keys from the verification's xlsx check.
+            "xlsx_native_status": (
+                "PASS" if result["checks"]["xlsx"]["ok"] else "FAIL"
+            ),
+            "xlsx_visual_status": (
+                "PASS" if result["checks"]["xlsx"]["ok"] else "FAIL"
+            ),
         }
     )
     atomic_write(
