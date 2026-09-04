@@ -1659,3 +1659,176 @@ def test_expected_record_count_negative_fails(tmp_path: Path) -> None:
     spec.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(SchwabGenerationError, match="strictly positive"):
         build_generation(spec)
+
+
+# -- Developer-API snapshot NAV anchor tests (manual NAV role optional) ---------
+
+
+def _spec_api_anchored(tmp_path: Path) -> Path:
+    """A v2 spec with a DEVELOPER_API (schema_version 1) current snapshot and
+    no manual NAV role: the API snapshot anchors the NAV reconciliation."""
+    path = _spec_with_current(tmp_path)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["sources"] = [
+        source
+        for source in document["sources"]
+        if source["role"] not in ("MANUAL_NAV_CSV", "MANUAL_NAV_CSV_ALL")
+    ]
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def test_api_snapshot_anchors_nav_without_manual_role(tmp_path: Path) -> None:
+    """DEVELOPER_API snapshot + no manual NAV role builds via the API anchor."""
+    spec = _spec_api_anchored(tmp_path)
+    catalog, manifest, _ = build_generation(spec)
+    assert manifest.coverage.status.value == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    assert len(catalog["nav_observations"]) == 16
+    assert {item["value_basis"] for item in catalog["nav_observations"]} == {
+        "ACCOUNT_VALUE"
+    }
+    nav_recon = [
+        item for item in catalog["reconciliation"] if item.get("fact_type") == "NAV"
+    ]
+    assert len(nav_recon) == 1
+    entry = nav_recon[0]
+    assert entry["account_id"] is None
+    assert entry["status"] == "PASS_WITH_LATER_API_SNAPSHOT"
+    assert entry["snapshot_observed_at"] == "2026-07-31T20:00:00+00:00"
+    assert entry["wch_nav_max_date"] == "2026-07-30"
+    assert not any(
+        "later manual date" in gap for gap in catalog["coverage"]["known_gaps"]
+    )
+
+
+def test_api_snapshot_stale_boundary_fails(tmp_path: Path) -> None:
+    """A snapshot observed on or before the WCH NAV series end fails closed."""
+    spec = _spec_api_anchored(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    nav_source = next(
+        item for item in document["sources"] if item["role"] == "WCH_NAV_CSV"
+    )
+    nav_path = Path(document["roots"]["source"]) / nav_source["relative_path"]
+    with nav_path.open("a", encoding="utf-8", newline="") as handle:
+        # The series now ends on the snapshot date 2026-07-31 — not strictly
+        # earlier than the snapshot, so the boundary check must fail.
+        handle.write("SYNTHETIC-001,SYNTHETIC,07/31/2026,102\r\n")
+    payload = nav_path.read_bytes()
+    nav_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    nav_source["expected_size_bytes"] = len(payload)
+    document["baseline"]["nav_count"] = 17
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="stale current snapshot"):
+        build_generation(spec)
+
+
+def test_api_snapshot_nav_coverage_fails_closed(tmp_path: Path) -> None:
+    """Snapshot/NAV account coverage must be an exact bijection, fail-closed."""
+    # A snapshot missing one account is rejected at snapshot validation.
+    spec = _spec_api_anchored(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    snapshot_path = (
+        Path(document["roots"]["source"])
+        / document["current_snapshot"]["relative_path"]
+    )
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["accounts"].pop()
+    snapshot_path.write_bytes(canonical_json_bytes(snapshot))
+    payload = snapshot_path.read_bytes()
+    document["current_snapshot"]["expected_sha256"] = hashlib.sha256(
+        payload
+    ).hexdigest()
+    document["current_snapshot"]["expected_size_bytes"] = len(payload)
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="scope differs from crosswalk"):
+        build_generation(spec)
+
+    # A WCH NAV account outside the snapshot coverage trips the anchor's
+    # bijection even when every account-scoped role is internally consistent.
+    shifted = tmp_path / "shifted"
+    shifted.mkdir()
+    spec = _spec_api_anchored(shifted)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    removed = f"account-{7:016x}"
+    replacement = "account-ffffffffffffffff"
+    for source in document["sources"]:
+        if source["account_id"] == removed:
+            source["account_id"] = replacement
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(SchwabGenerationError, match="account coverage differs"):
+        build_generation(spec)
+
+
+def test_web_contract_snapshot_still_requires_manual_nav(tmp_path: Path) -> None:
+    """A WEB_CONTRACT (v2) snapshot without manual NAV fails exactly as before:
+    web-contract snapshots carry no developer-API balances evidence."""
+    spec = _spec_api_anchored(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    snapshot_path = (
+        Path(document["roots"]["source"])
+        / document["current_snapshot"]["relative_path"]
+    )
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["schema_version"] = 2
+    snapshot["transport"] = "WEB_CONTRACT"
+    for position in snapshot["positions"]:
+        position["evidence_class"] = "WCH_CURRENT"
+    snapshot_path.write_bytes(canonical_json_bytes(snapshot))
+    payload = snapshot_path.read_bytes()
+    document["current_snapshot"]["expected_sha256"] = hashlib.sha256(
+        payload
+    ).hexdigest()
+    document["current_snapshot"]["expected_size_bytes"] = len(payload)
+    document["current_snapshot"]["schema_version"] = "2"
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(
+        SchwabGenerationError,
+        match="a manual NAV role \\(per-account or aggregate\\) is required",
+    ):
+        build_generation(spec)
+
+
+def test_manual_nav_role_keeps_manual_reconciliation_with_api_snapshot(
+    tmp_path: Path,
+) -> None:
+    """A manual NAV role alongside a DEVELOPER_API snapshot keeps the existing
+    manual-anchored reconciliation path unchanged."""
+    spec = _spec_with_current(tmp_path)
+    catalog, manifest, _ = build_generation(spec)
+    assert manifest.coverage.status.value == "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    nav_recon = [
+        item for item in catalog["reconciliation"] if item.get("fact_type") == "NAV"
+    ]
+    assert len(nav_recon) == 8
+    assert all(item["account_id"] is not None for item in nav_recon)
+    assert {item["status"] for item in nav_recon} == {"PASS_WITH_LATER_MANUAL_DATE"}
+    assert any("later manual date" in gap for gap in catalog["coverage"]["known_gaps"])
+
+
+def test_both_manual_nav_variants_still_error(tmp_path: Path) -> None:
+    """Both manual NAV variants together remain an error, even when the
+    developer-API snapshot would otherwise make the manual role optional."""
+    spec = _spec_with_current(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    source_root = Path(document["roots"]["source"])
+    nav_all = source_root / "manual-nav-all.csv"
+    nav_all.write_text(
+        "Balances for All-Accounts as of 07/31/2026 04:00 PM ET\n",
+        encoding="utf-8",
+    )
+    document["sources"].append(
+        _source(
+            nav_all,
+            root=source_root,
+            artifact_id="manual/nav-all.csv",
+            role="MANUAL_NAV_CSV_ALL",
+            account_id=None,
+            schema_name="synthetic-manual-nav-all",
+        )
+    )
+    spec.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(
+        SchwabGenerationError,
+        match="cannot use both per-account and aggregate manual NAV roles",
+    ):
+        build_generation(spec)

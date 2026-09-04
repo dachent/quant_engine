@@ -248,7 +248,11 @@ def _crosswalk(value: object) -> tuple[dict[str, str], tuple[str, ...]]:
 
 
 def _sources(
-    value: object, roots: Mapping[str, Path], generation_as_of: date
+    value: object,
+    roots: Mapping[str, Path],
+    generation_as_of: date,
+    *,
+    snapshot_schema_version: str | None = None,
 ) -> tuple[dict[str, list[tuple[str | None, Path]]], tuple[SourceArtifact, ...]]:
     grouped: dict[str, list[tuple[str | None, Path]]] = {role: [] for role in _ROLES}
     artifacts: list[SourceArtifact] = []
@@ -362,14 +366,18 @@ def _sources(
             "a manual transaction role (per-account or aggregate) is required"
         )
 
-    # Exactly one manual NAV role
+    # Exactly one manual NAV role — or none when the current snapshot is
+    # developer-API sourced (source record schema_version "1"): the API
+    # snapshot then anchors the NAV reconciliation in place of the manual
+    # balances export. A web-contract snapshot carries no developer-API
+    # balances evidence, so the manual role stays mandatory there.
     has_nav_per = "MANUAL_NAV_CSV" in actual_counts
     has_nav_all = "MANUAL_NAV_CSV_ALL" in actual_counts
     if has_nav_per and has_nav_all:
         raise SchwabGenerationError(
             "cannot use both per-account and aggregate manual NAV roles"
         )
-    if not has_nav_per and not has_nav_all:
+    if not has_nav_per and not has_nav_all and snapshot_schema_version != "1":
         raise SchwabGenerationError(
             "a manual NAV role (per-account or aggregate) is required"
         )
@@ -378,15 +386,16 @@ def _sources(
     chosen_txn_role = (
         "MANUAL_TRANSACTION_JSON_ALL" if has_txn_all else "MANUAL_TRANSACTION_JSON"
     )
-    chosen_nav_role = "MANUAL_NAV_CSV_ALL" if has_nav_all else "MANUAL_NAV_CSV"
-    for role in (
+    counted_roles = [
         chosen_txn_role,
-        chosen_nav_role,
         "MANUAL_POSITION_CSV",
         "WORKBOOK_REFERENCE",
         "WCH_NAV_CSV",
         "WCH_TRANSACTION_JSON",
-    ):
+    ]
+    if has_nav_per or has_nav_all:
+        counted_roles.append("MANUAL_NAV_CSV_ALL" if has_nav_all else "MANUAL_NAV_CSV")
+    for role in counted_roles:
         if actual_counts.get(role) != expected[role]:
             raise SchwabGenerationError(f"role {role} has wrong count")
     account_scoped_roles = {
@@ -1270,6 +1279,80 @@ def _nav_all(
     return normalized, per_account_findings
 
 
+def _nav_api(
+    wch: Sequence[tuple[str | None, Path]],
+    *,
+    snapshot_account_ids: set[str],
+    snapshot_observed_at: datetime,
+    source_artifact_ids: Mapping[str, str],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Anchor the WCH NAV series against a developer-API current snapshot.
+
+    With the developer-API lane provisioned, the hash-pinned current snapshot
+    is the contract-governed second channel and the manual balances export is
+    no longer required. The reconciliation is an account-coverage bijection
+    plus a strict date boundary: the snapshot must be observed strictly after
+    the WCH series end. Values are never compared across dates — the series
+    ends before the snapshot date by construction, so a cross-date value
+    comparison would be a category error.
+    """
+    wch_by_account: dict[str, dict[date, Decimal]] = {}
+    for account_id, path in wch:
+        assert account_id is not None
+        wch_by_account[account_id] = _nav_rows(path, manual=False)
+    wch_accounts = set(wch_by_account)
+    if wch_accounts != snapshot_account_ids:
+        raise SchwabGenerationError(
+            "current snapshot account coverage differs from the WCH NAV series: "
+            f"missing_from_snapshot={sorted(wch_accounts - snapshot_account_ids)}, "
+            f"missing_from_wch={sorted(snapshot_account_ids - wch_accounts)}"
+        )
+    series_max = max(
+        (day for rows in wch_by_account.values() for day in rows), default=None
+    )
+    if series_max is None:
+        raise SchwabGenerationError("WCH NAV series is empty")
+    snapshot_date = snapshot_observed_at.date()
+    if snapshot_date <= series_max:
+        raise SchwabGenerationError(
+            f"stale current snapshot: observed date {snapshot_date.isoformat()} is "
+            f"not later than the WCH NAV series end {series_max.isoformat()}"
+        )
+
+    normalized: list[dict[str, object]] = []
+    for account_id, rows in wch_by_account.items():
+        for observed_date, amount in sorted(rows.items()):
+            identity = {
+                "account_id": account_id,
+                "as_of_date": observed_date.isoformat(),
+                "value_basis": "ACCOUNT_VALUE",
+            }
+            payload = NavObservation(
+                record_id=_record_id("nav", identity),
+                account_id=account_id,
+                as_of_date=observed_date,
+                nav=ObservedAmount.available(amount, "USD"),
+            ).to_dict()
+            payload["evidence_class"] = "WCH_HISTORICAL"
+            payload["source_artifact_id"] = _text(
+                source_artifact_ids.get(account_id), "WCH_NAV_CSV.artifact_id"
+            )
+            payload["value_basis"] = "ACCOUNT_VALUE"
+            normalized.append(payload)
+
+    reconciliation: list[dict[str, object]] = [
+        {
+            "account_id": None,
+            "fact_type": "NAV",
+            "snapshot_observed_at": snapshot_observed_at.isoformat(),
+            "status": "PASS_WITH_LATER_API_SNAPSHOT",
+            "wch_nav_max_date": series_max.isoformat(),
+        }
+    ]
+    normalized.sort(key=lambda item: (str(item["account_id"]), str(item["as_of_date"])))
+    return normalized, reconciliation
+
+
 def _positions(
     path: Path, suffix_to_internal: Mapping[str, str]
 ) -> tuple[list[dict[str, object]], str, int]:
@@ -1408,10 +1491,48 @@ def build_generation(
     }
     if tuple(sorted(suffix_to_internal)) != suffixes:
         raise SchwabGenerationError("crosswalk suffix derivation differs")
-    sources, artifacts = _sources(spec["sources"], roots, generation_as_of)
+    snapshot_schema_version: str | None = None
+    if spec["schema_version"] == SPEC_SCHEMA_VERSION:
+        snapshot_schema_version = _text(
+            _object(spec["current_snapshot"], "current_snapshot").get("schema_version"),
+            "current_snapshot.schema_version",
+        )
+    sources, artifacts = _sources(
+        spec["sources"],
+        roots,
+        generation_as_of,
+        snapshot_schema_version=snapshot_schema_version,
+    )
     nav_source_artifact_ids = _account_source_artifact_ids(
         spec["sources"], "WCH_NAV_CSV"
     )
+    current_accounts: list[dict[str, object]] | None = None
+    current_observed_at: datetime | None = None
+    snapshot_positions: list[dict[str, object]] = []
+    current_reconciliation: list[dict[str, object]] = []
+    sweep_vehicle_count: int | None = None
+    current_transport: str | None = None
+    current_balance_available_count = 0
+    current_position_account_count = 0
+    if spec["schema_version"] == SPEC_SCHEMA_VERSION:
+        (
+            current_accounts,
+            snapshot_positions,
+            current_observed_at,
+            sweep_vehicle_count,
+            current_transport,
+            current_balance_available_count,
+            current_position_account_count,
+            current_artifact,
+        ) = _current_snapshot(
+            spec["current_snapshot"],
+            roots=roots,
+            generation_as_of=generation_as_of,
+            account_ids=set(crosswalk.values()),
+        )
+        artifacts = tuple(
+            sorted((*artifacts, current_artifact), key=lambda item: item.artifact_id)
+        )
     txn_partial_gap: dict[str, object] | None = None
     expected_export_record_count: int | None = None
     if sources.get("MANUAL_TRANSACTION_JSON_ALL"):
@@ -1443,6 +1564,9 @@ def build_generation(
         transactions, transaction_reconciliation = _transactions(
             sources["WCH_TRANSACTION_JSON"], sources["MANUAL_TRANSACTION_JSON"]
         )
+    manual_nav_anchored = bool(
+        sources.get("MANUAL_NAV_CSV") or sources.get("MANUAL_NAV_CSV_ALL")
+    )
     if sources.get("MANUAL_NAV_CSV_ALL"):
         nav, nav_reconciliation = _nav_all(
             sources["WCH_NAV_CSV"],
@@ -1450,43 +1574,39 @@ def build_generation(
             suffix_to_internal=suffix_to_internal,
             source_artifact_ids=nav_source_artifact_ids,
         )
-    else:
+    elif sources.get("MANUAL_NAV_CSV"):
         nav, nav_reconciliation = _nav(
             sources["WCH_NAV_CSV"],
             sources["MANUAL_NAV_CSV"],
             nav_source_artifact_ids,
         )
+    else:
+        # No manual NAV role: only a developer-API current snapshot may anchor
+        # the NAV reconciliation (owner direction 2026-09-04, #374 + #283).
+        if (
+            current_accounts is None
+            or current_observed_at is None
+            or current_transport != "DEVELOPER_API"
+        ):
+            raise SchwabGenerationError(
+                "a developer-API current snapshot is required "
+                "when no manual NAV role is present"
+            )
+        nav, nav_reconciliation = _nav_api(
+            sources["WCH_NAV_CSV"],
+            snapshot_account_ids={str(item["account_id"]) for item in current_accounts},
+            snapshot_observed_at=current_observed_at,
+            source_artifact_ids=nav_source_artifact_ids,
+        )
     manual_positions, manual_position_as_of, unavailable_position_quantity = _positions(
         sources["MANUAL_POSITION_CSV"][0][1], suffix_to_internal
     )
-    current_accounts: list[dict[str, object]] | None = None
     positions = manual_positions
     position_as_of: object = manual_position_as_of
-    current_reconciliation: list[dict[str, object]] = []
-    sweep_vehicle_count: int | None = None
-    current_transport: str | None = None
-    current_balance_available_count = 0
-    current_position_account_count = 0
-    if spec["schema_version"] == SPEC_SCHEMA_VERSION:
-        (
-            current_accounts,
-            positions,
-            current_observed_at,
-            sweep_vehicle_count,
-            current_transport,
-            current_balance_available_count,
-            current_position_account_count,
-            current_artifact,
-        ) = _current_snapshot(
-            spec["current_snapshot"],
-            roots=roots,
-            generation_as_of=generation_as_of,
-            account_ids=set(crosswalk.values()),
-        )
+    if current_accounts is not None:
+        assert current_observed_at is not None
+        positions = snapshot_positions
         position_as_of = current_observed_at.isoformat()
-        artifacts = tuple(
-            sorted((*artifacts, current_artifact), key=lambda item: item.artifact_id)
-        )
         current_reconciliation.append(
             _current_position_reconciliation(positions, manual_positions)
         )
@@ -1521,7 +1641,11 @@ def build_generation(
             and current_position_account_count < len(crosswalk)
             else ()
         ),
-        "historical NAV has one later manual date per brokerage account",
+        *(
+            ("historical NAV has one later manual date per brokerage account",)
+            if manual_nav_anchored
+            else ()
+        ),
         "two account histories contain documented intraday restatements",
         "Investor Checking is outside the accepted brokerage boundary",
         *(
