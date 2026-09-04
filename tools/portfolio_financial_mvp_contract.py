@@ -259,15 +259,11 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
         ),
         (
             "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
-            (
-                "output/20260816T141010.494Z/csv/subscription_details.csv"
-            ),
+            ("output/20260816T141010.494Z/csv/subscription_details.csv"),
             "17c302bd8cd3400ab44fad82aa162ad5e14ca2ab6f47f60bdfba5384fa28ecc8",
         ): (
             "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-            (
-                "output/20260903T051029.331Z/csv/subscription_details.csv"
-            ),
+            ("output/20260903T051029.331Z/csv/subscription_details.csv"),
             "5ce7c6e3780df78a3f3b684329dbf4b382265a3411b0db9b036965e2c75db800",
         ),
     },
@@ -1550,7 +1546,9 @@ def _verify_strategy_version_history_evidence(
                     current_manifest_sha256,
                 ) = source_rebind
                 expected_generation_id = (
-                    accepted_generation_id if accepted_authority else current_generation_id
+                    accepted_generation_id
+                    if accepted_authority
+                    else current_generation_id
                 )
                 expected_manifest_sha256 = (
                     accepted_manifest_sha256
