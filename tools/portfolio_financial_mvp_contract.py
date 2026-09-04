@@ -224,6 +224,229 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
         "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
     ),
 }
+# Issue #374 Phase C: the direct Matrixport/Portfolio123/Quantbase lanes
+# re-pin to the refreshed provider generations.  Every re-pointed history
+# receipt is enumerated as ``accepted identity -> refreshed identity``; the
+# current contract must carry the refreshed identity, the accepted authority
+# is projected forward, and receipts outside this table (including the
+# retained Portfolio123 managed-performance artifact, which the refreshed
+# generation no longer carries) remain frozen to the accepted bytes.
+_HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
+    "MATRIXPORT": {
+        (
+            "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
+            "CURRENT.json",
+            "cbd433b2c99079b26ea14ba6d541ec80ea29c74c2902759f070ae75b934edfff",
+        ): (
+            "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+            "CURRENT.json",
+            "2b76a70db6ccbc9181930d94d95bfc70af61278f8145a36a7f63dfdb76cfcc0d",
+        ),
+        (
+            "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
+            (
+                "generations/6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6"
+                "a22dc74e816a1fdc/generation.json"
+            ),
+            "325c65ddc5985094799d2abfdce6a944d5443802333f734a40a34541c4d09f79",
+        ): (
+            "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+            (
+                "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c37251"
+                "5af23a4e3225d9ccc/generation.json"
+            ),
+            "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
+        ),
+        (
+            "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
+            (
+                "output/20260816T141010.494Z/csv/subscription_details.csv"
+            ),
+            "17c302bd8cd3400ab44fad82aa162ad5e14ca2ab6f47f60bdfba5384fa28ecc8",
+        ): (
+            "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+            (
+                "output/20260903T051029.331Z/csv/subscription_details.csv"
+            ),
+            "5ce7c6e3780df78a3f3b684329dbf4b382265a3411b0db9b036965e2c75db800",
+        ),
+    },
+    "PORTFOLIO123": {
+        (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            "CURRENT.json",
+            "d0d3ebc232d66518654a63dce3ca343d33b9600b539a82ae4c4fd8ea69649ba1",
+        ): (
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            "CURRENT.json",
+            "92f1f7af811227a93988875016d73eb7d07cafcce5b17df7c923bce71039e8a1",
+        ),
+        (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            (
+                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
+                "de384ad4a3182af1/generation.json"
+            ),
+            "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907",
+        ): (
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            (
+                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
+                "1e24af6dd0ec6d45/generation.json"
+            ),
+            "b1e6ed8e6b447fff4116900b73e712496d7a6edf00fa729f5f81f896471b7a53",
+        ),
+        (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            (
+                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
+                "de384ad4a3182af1/tables/returns_daily.parquet"
+            ),
+            "ea900ebf4b6073c715922535559bded916ff9f1283cb6326cef5b1177861045e",
+        ): (
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            (
+                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
+                "1e24af6dd0ec6d45/tables/returns_daily.parquet"
+            ),
+            "ea900ebf4b6073c715922535559bded916ff9f1283cb6326cef5b1177861045e",
+        ),
+        (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            (
+                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
+                "de384ad4a3182af1/tables/strategy_relationships.parquet"
+            ),
+            "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc",
+        ): (
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            (
+                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
+                "1e24af6dd0ec6d45/tables/strategy_relationships.parquet"
+            ),
+            "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc",
+        ),
+        (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            (
+                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
+                "de384ad4a3182af1/tables/har_managed_metadata.parquet"
+            ),
+            "bf40e5b0502c2b8f4795279da6279a70e0062b7d26af308697bf6f6c6a583329",
+        ): (
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            (
+                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
+                "1e24af6dd0ec6d45/tables/har_managed_metadata.parquet"
+            ),
+            "b9d69e97b25afcdbc7dc319a67618900a82bfef5ee635334b037a920d374e52b",
+        ),
+        (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            (
+                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
+                "de384ad4a3182af1/tables/har_equity_curve.parquet"
+            ),
+            "b87f760a1cd369bfd40ebc5e8db6b44e3626f9b4c53950e3d1e8c7ea0abf2b4e",
+        ): (
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            (
+                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
+                "1e24af6dd0ec6d45/tables/har_equity_curve.parquet"
+            ),
+            "39cabac6c6088c4ec100e7883d17713d952f4768fa4ff8888333b139264d311c",
+        ),
+    },
+    "QUANTBASE": {
+        (
+            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+            "CURRENT.json",
+            "10ea84966c0a20fd5520690a58c67e0e098490e4030b77e270225fd1fc4fd6b3",
+        ): (
+            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "CURRENT.json",
+            "6a9d0ba89762a64f5a8cbcbca06c79c0a040879394509ffcd9458c694d548f15",
+        ),
+        (
+            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+            (
+                "generations/ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058"
+                "e56f615872904d4f/generation.json"
+            ),
+            "fa5a8cf49572ebb66632909662f707f0072134234425f4fa1ceee049cefdf87f",
+        ): (
+            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            (
+                "generations/948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5"
+                "d96df874263c4d39/generation.json"
+            ),
+            "4d575a4155e2cede745e16c324be7023cec09a29ab038e9a658a81359a3d8828",
+        ),
+        (
+            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+            (
+                "source-runs/legacy-20260816-4108d8b8b58d/artifacts/csv/"
+                "dashboard_Volatis_Strategy_pricehistory.csv"
+            ),
+            "c03f1ae7a8363386a388670bf66699135727be5eeeeeea9508bc83b42ac501c4",
+        ): (
+            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            (
+                "source-runs/legacy-20260902-7b9f89c26ecc/artifacts/csv/"
+                "dashboard_Volatis_Strategy_pricehistory.csv"
+            ),
+            "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e",
+        ),
+        (
+            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+            (
+                "source-runs/legacy-20260816-4108d8b8b58d/artifacts/csv/"
+                "ssg_Volatis_Strategy_pricehistory.csv"
+            ),
+            "140301858179cbb4ca56539931c3d7701c190334aafd0d4e7bde30a621186772",
+        ): (
+            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            (
+                "source-runs/legacy-20260902-7b9f89c26ecc/artifacts/csv/"
+                "ssg_Volatis_Strategy_pricehistory.csv"
+            ),
+            "83bab8b0828bee2d8abb51f26b6cbbf44fa5f4bab98e69a80097f5cba9b80fa2",
+        ),
+        (
+            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+            (
+                "source-runs/legacy-20260816-4108d8b8b58d/artifacts/csv/"
+                "account_activity.csv"
+            ),
+            "b4c5a7b23f24636a17090003b0203ee40b91703e6f0c8b3236d5884d6d1e62e0",
+        ): (
+            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            (
+                "source-runs/legacy-20260902-7b9f89c26ecc/artifacts/csv/"
+                "account_activity.csv"
+            ),
+            "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0",
+        ),
+    },
+}
+# Issue #374 Phase C: materialized history segments sourced from a refreshed
+# direct provider lane follow the same admitted transition.  Each entry pins
+# the accepted (old) and required current (refreshed) source-generation
+# receipt for the segment's source segment.
+_HISTORY_PROVIDER_SOURCE_REBINDS: Final = {
+    "matrixport-account-generation": (
+        "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
+        "325c65ddc5985094799d2abfdce6a944d5443802333f734a40a34541c4d09f79",
+        "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+        "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
+    ),
+    "quantbase-account-generation": (
+        "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+        "fa5a8cf49572ebb66632909662f707f0072134234425f4fa1ceee049cefdf87f",
+        "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+        "4d575a4155e2cede745e16c324be7023cec09a29ab038e9a658a81359a3d8828",
+    ),
+}
 _HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
     # Issue #374: the account-return path is canonical only after provider-ledger
     # selection, independent provider reconciliation, and elimination of the
@@ -1122,6 +1345,28 @@ def _verify_strategy_version_history_evidence(
         )
         projected = {key: receipt.get(key) for key in receipt_keys}
         if projected["authority_root"] != "PROVIDER_LEDGER":
+            lane_rebinds = _HISTORY_PROVIDER_RECEIPT_REBINDS.get(
+                str(projected["authority_root"])
+            )
+            if lane_rebinds is not None:
+                accepted_identity = (
+                    str(projected["generation_id"] or ""),
+                    str(projected["artifact_selector"] or ""),
+                    str(projected["sha256"] or ""),
+                )
+                rebind = lane_rebinds.get(accepted_identity)
+                if rebind is not None:
+                    if not accepted_authority:
+                        raise FinancialMvpContractError(
+                            "provider-lane history receipt differs from the "
+                            "admitted rebind: "
+                            f"{projected['artifact_role']}"
+                        )
+                    (
+                        projected["generation_id"],
+                        projected["artifact_selector"],
+                        projected["sha256"],
+                    ) = rebind
             return projected
 
         generation_id = str(projected["generation_id"] or "")
@@ -1293,6 +1538,36 @@ def _verify_strategy_version_history_evidence(
                 projected["source_generation_sha256"] = (
                     _HISTORY_PROVIDER_LEDGER_TRANSITION["current_manifest_sha256"]
                 )
+        else:
+            source_rebind = _HISTORY_PROVIDER_SOURCE_REBINDS.get(
+                str(projected.get("source_id"))
+            )
+            if source_rebind is not None:
+                (
+                    accepted_generation_id,
+                    accepted_manifest_sha256,
+                    current_generation_id,
+                    current_manifest_sha256,
+                ) = source_rebind
+                expected_generation_id = (
+                    accepted_generation_id if accepted_authority else current_generation_id
+                )
+                expected_manifest_sha256 = (
+                    accepted_manifest_sha256
+                    if accepted_authority
+                    else current_manifest_sha256
+                )
+                if (
+                    projected.get("source_generation_id") != expected_generation_id
+                    or projected.get("source_generation_sha256")
+                    != expected_manifest_sha256
+                ):
+                    raise FinancialMvpContractError(
+                        "provider-lane history lineage differs from the admitted rebind"
+                    )
+                if accepted_authority:
+                    projected["source_generation_id"] = current_generation_id
+                    projected["source_generation_sha256"] = current_manifest_sha256
         return projected
 
     accepted_segments = {
