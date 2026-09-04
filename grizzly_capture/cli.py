@@ -139,7 +139,12 @@ def run_capture(
     Fail-closed: when the authenticated marker is absent this raises
     ``LoginRequiredError`` before anything is written.
     """
-    navigate_and_idle(page, model_url(base_url, model_slug))
+    model_path = f"/models/{model_slug}"
+    if model_path not in (page.url or ""):
+        # A full page load can bounce an authenticated session to /premium
+        # while the SPA hydrates; an in-site navigation does not. Reuse the
+        # owner's already-loaded model tab when present.
+        navigate_and_idle(page, model_url(base_url, model_slug))
     require_authenticated(page)
     create_run_dir(run_dir)
     manifest = CaptureManifest(
