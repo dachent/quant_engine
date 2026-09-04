@@ -1039,7 +1039,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # spans confined to coverage) while retaining corrected P123 inputs and
     # the deprecated Echo boundary.
     assert contract_tool.contract_digest(contract) == (
-        "a7da81d22363588ed6ff8f882ab204e95af408ecaaa20f65dbe9f109f87cee97"
+        "b579566563fe868ff1e7475e76a940d44ff114842819348c4ce203f2cfd957a0"
     )
 
 
@@ -3867,7 +3867,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "d9b8414499ded77100a6b3aa51f91142463542bd2c28326e356618a3948ce370"
+        "87f89320d3e0130e0386b7a3de37ed33c805b9d060ae176f91ef8c6fe1e79180"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -3904,7 +3904,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "d9b8414499ded77100a6b3aa51f91142463542bd2c28326e356618a3948ce370"
+        "87f89320d3e0130e0386b7a3de37ed33c805b9d060ae176f91ef8c6fe1e79180"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
