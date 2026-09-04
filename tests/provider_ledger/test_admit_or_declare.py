@@ -796,3 +796,236 @@ def test_product_data_class_requires_matching_admission_fact() -> None:
             provider_facts,
             (),
         )
+
+
+def _repin_dataset_pins(
+    authority: dict[str, Any],
+    provider_id: str,
+    manifests: dict[str, GenerationManifest],
+    catalogs: dict[str, dict[str, Any]],
+    provider_facts: dict[str, dict[str, list[dict[str, Any]]]],
+    *,
+    admitted_too: bool,
+) -> None:
+    """Recompute one lane's #303 pins after a fixture mutation (digests only)."""
+
+    source = authority["sources"][ledger._PROVIDER_SOURCE_SEGMENTS[provider_id]]
+    policy = source["admission"]["dataset_disposition_policy"]
+    inventory = ledger._provider_inventory(
+        provider_id, manifests[provider_id], catalogs[provider_id], source
+    )
+    policy["upstream_inventory_sha256"] = ledger._inventory_digest(inventory)
+    product_count, product_digest = ledger._product_data_class_set_digest(inventory)
+    policy["product_data_class_count"] = product_count
+    policy["product_data_class_set_sha256"] = product_digest
+    if not admitted_too:
+        return
+    dispositions = [
+        ledger._dataset_disposition(
+            item,
+            source,
+            policy,
+            DAY,
+            DAY,
+            provider_facts[provider_id],
+            (),
+            "c" * 64,
+        )
+        for item in inventory
+    ]
+    admitted_count, admitted_digest = ledger._admitted_item_set_digest(dispositions)
+    policy["admitted_item_count"] = admitted_count
+    policy["admitted_item_set_sha256"] = admitted_digest
+
+
+def _schwab_retained_journal_lane(
+    *, admit_external_flow: bool
+) -> tuple[
+    dict[str, Any],
+    list[ProviderGenerationIdentity],
+    dict[str, GenerationManifest],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, list[dict[str, Any]]]],
+]:
+    """One Schwab lane whose retained Journal wch capture materializes a flow."""
+
+    authority, identities, manifests, catalogs, provider_facts = _fixture()
+    if admit_external_flow:
+        source = authority["sources"]["schwab-account-generation"]
+        source["admission"]["facts"].append("EXTERNAL_FLOW")
+    journal_id = "wch/transactions/account-38b653b91ff43a10.json"
+    journal_bytes = b"synthetic-schwab-retained-journal"
+    manifest = manifests["schwab"]
+    manifests["schwab"] = GenerationManifest.build(
+        as_of_date=manifest.as_of_date,
+        adapter=manifest.adapter,
+        coverage=manifest.coverage,
+        artifacts=(
+            *manifest.artifacts,
+            SourceArtifact(
+                artifact_id=journal_id,
+                sha256=hashlib.sha256(journal_bytes).hexdigest(),
+                size_bytes=len(journal_bytes),
+                as_of_date=DAY,
+                schema_name="schwab-wch-transactions",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    provider_facts["schwab"]["flows"] = [
+        {
+            "account_id": "private-schwab-journal",
+            "as_of_date": DAY.isoformat(),
+            "evidence_layer": "ACCOUNT_LIVE",
+            "mapping_basis": "PINNED_RETAINED_JOURNAL",
+            "mapping_status": "MAPPED",
+            "provider_id": "schwab",
+            "record_id": "schwab-flow:private-journal-record",
+            "source_artifact_id": journal_id,
+            "strategy_id": "strategy-schwab",
+        }
+    ]
+    _repin_dataset_pins(
+        authority,
+        "schwab",
+        manifests,
+        catalogs,
+        provider_facts,
+        admitted_too=admit_external_flow,
+    )
+    return authority, identities, manifests, catalogs, provider_facts
+
+
+def test_schwab_pinned_journal_artifact_admits_external_flow() -> None:
+    """The retained Schwab Journal wch capture is an admitted capital fact."""
+
+    authority, identities, manifests, catalogs, provider_facts = (
+        _schwab_retained_journal_lane(admit_external_flow=True)
+    )
+
+    receipt, _ = ledger._admit_or_declare_receipt(
+        authority,
+        identities,
+        manifests,
+        catalogs,
+        provider_facts,
+        (),
+    )
+    journal = next(
+        row
+        for row in receipt["dispositions"]
+        if row["provider_id"] == "schwab"
+        and row["item_id"] == "wch/transactions/account-38b653b91ff43a10.json"
+    )
+    assert journal["item_kind"] == "ARTIFACT"
+    assert journal["action"] == "ADMIT"
+    assert journal["target_facts"] == ["flows"]
+    assert journal["materialized_record_count"] == 1
+
+
+def test_schwab_retained_journal_flow_requires_the_admitted_fact() -> None:
+    """Without EXTERNAL_FLOW authority the retained Journal artifact fails."""
+
+    authority, identities, manifests, catalogs, provider_facts = (
+        _schwab_retained_journal_lane(admit_external_flow=False)
+    )
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="schwab materialized target facts differ from authority",
+    ):
+        ledger._admit_or_declare_receipt(
+            authority,
+            identities,
+            manifests,
+            catalogs,
+            provider_facts,
+            (),
+        )
+
+
+def _portfolio123_retained_transactions_lane(
+    *, admit_transaction: bool
+) -> tuple[
+    dict[str, Any],
+    list[ProviderGenerationIdentity],
+    dict[str, GenerationManifest],
+    dict[str, dict[str, Any]],
+    dict[str, dict[str, list[dict[str, Any]]]],
+]:
+    """One P123 lane whose refreshed generation declares a transactions dataset."""
+
+    authority, identities, manifests, catalogs, provider_facts = _fixture()
+    if admit_transaction:
+        source = authority["sources"]["portfolio123-model-generation"]
+        source["admission"]["facts"].append("TRANSACTION")
+    manifest = manifests["portfolio123"]
+    manifests["portfolio123"] = GenerationManifest.build(
+        as_of_date=manifest.as_of_date,
+        adapter=manifest.adapter,
+        coverage=replace(
+            manifest.coverage,
+            fact_types=(*manifest.coverage.fact_types, "transactions"),
+        ),
+        artifacts=manifest.artifacts,
+        verification=VerificationStatus.VERIFIED,
+    )
+    _repin_dataset_pins(
+        authority,
+        "portfolio123",
+        manifests,
+        catalogs,
+        provider_facts,
+        admitted_too=admit_transaction,
+    )
+    return authority, identities, manifests, catalogs, provider_facts
+
+
+def test_portfolio123_transactions_fact_excludes_retained_model_evidence() -> None:
+    """A retained P123 model transactions dataset declares, never admits."""
+
+    authority, identities, manifests, catalogs, provider_facts = (
+        _portfolio123_retained_transactions_lane(admit_transaction=True)
+    )
+
+    receipt, _ = ledger._admit_or_declare_receipt(
+        authority,
+        identities,
+        manifests,
+        catalogs,
+        provider_facts,
+        (),
+    )
+    transactions = next(
+        row
+        for row in receipt["dispositions"]
+        if row["provider_id"] == "portfolio123" and row["item_id"] == "transactions"
+    )
+    assert transactions["item_kind"] == "COVERAGE_FACT_TYPE"
+    assert transactions["action"] == "EXCLUDE"
+    assert transactions["reason"] == "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
+    assert transactions["readiness_impact"] == "REQUIRED_NOT_READY"
+    assert transactions["materialized_record_count"] == 0
+    assert transactions["target_facts"] == []
+
+
+def test_portfolio123_retained_transactions_require_the_admitted_fact() -> None:
+    """Without TRANSACTION authority the retained dataset fails the gate."""
+
+    authority, identities, manifests, catalogs, provider_facts = (
+        _portfolio123_retained_transactions_lane(admit_transaction=False)
+    )
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="portfolio123 materialized target facts differ from authority",
+    ):
+        ledger._admit_or_declare_receipt(
+            authority,
+            identities,
+            manifests,
+            catalogs,
+            provider_facts,
+            (),
+        )
