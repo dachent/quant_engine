@@ -166,27 +166,31 @@ _SCHWAB_FLOW_KINDS: Final = frozenset(
         "Wire Sent",
     }
 )
+# Pins the three retained, independently audited Schwab Journal records to the
+# accepted Schwab refresh generation 4e47b7b8 (dataSchwab CURRENT) as of
+# 2026-09-04, whose per-account WCH transaction captures re-assigned two
+# record_ids and renamed both source artifacts.
 _SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS: Final = {
     (
         "account-38b653b91ff43a10",
-        "txn-55861c64ba8de7d6a1fa2e6d",
+        "txn-84ed102899eaaa7ba1d2f0d4",
         "2025-12-29",
         Decimal("7000"),
     ): {
-        "source_artifact_id": "wch/transactions/account-02.json",
+        "source_artifact_id": "wch/transactions/account-38b653b91ff43a10.json",
         "source_artifact_sha256": (
-            "7c6f8d00a21b7f71b5e52627a89a611da73b02b4f30eb86b541492e4a23c7afe"
+            "521cadb20162bba19a39064e2ed165425493ac37df1f35638653bcb2ebfa6514"
         ),
     },
     (
         "account-38b653b91ff43a10",
-        "txn-ab66e92846c1cfb18f4222e2",
+        "txn-855f069db9ce99988c6707ea",
         "2026-01-02",
         Decimal("7500"),
     ): {
-        "source_artifact_id": "wch/transactions/account-02.json",
+        "source_artifact_id": "wch/transactions/account-38b653b91ff43a10.json",
         "source_artifact_sha256": (
-            "7c6f8d00a21b7f71b5e52627a89a611da73b02b4f30eb86b541492e4a23c7afe"
+            "521cadb20162bba19a39064e2ed165425493ac37df1f35638653bcb2ebfa6514"
         ),
     },
     (
@@ -195,9 +199,9 @@ _SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS: Final = {
         "2026-01-02",
         Decimal("-50000"),
     ): {
-        "source_artifact_id": "wch/transactions/account-04.json",
+        "source_artifact_id": "wch/transactions/account-702c489650e59956.json",
         "source_artifact_sha256": (
-            "842ad4fde31ad20206cef1de7eb6f9bba699828fe5602008c18c45cb71c1b5e5"
+            "69856742fdf963136a326fc61ca4897e0a5e9a1d99c7e1db4231625c9ab9ee2a"
         ),
     },
 }

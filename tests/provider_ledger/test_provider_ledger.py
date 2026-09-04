@@ -217,29 +217,29 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
             "2024-10-03",
         ),
         "ibkr": (
-            "b348d1ebcf882b099e64dba261b1877fd7a8efba9c1a4d8f443f7cb3e5a7715a",
-            "fa89abb805f4fdb83f752097f5aba13cab6f3d70f0a0afab98edd3495fb84891",
-            "2026-08-16",
+            "0917837a0b15ff473300bbdff2ca0ed34f96ed3b5e5a606258849dc20533dd65",
+            "eafeda509254eb086c4a7889db14709ad7963777799f4a4320d6906f229c93eb",
+            "2026-09-03",
         ),
         "matrixport": (
-            "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
-            "325c65ddc5985094799d2abfdce6a944d5443802333f734a40a34541c4d09f79",
-            "2026-08-16",
+            "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+            "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
+            "2026-09-03",
         ),
         "portfolio123": (
-            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
-            "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907",
-            "2026-08-14",
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            "b1e6ed8e6b447fff4116900b73e712496d7a6edf00fa729f5f81f896471b7a53",
+            "2026-09-02",
         ),
         "quantbase": (
-            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
-            "fa5a8cf49572ebb66632909662f707f0072134234425f4fa1ceee049cefdf87f",
-            "2026-08-16",
+            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "4d575a4155e2cede745e16c324be7023cec09a29ab038e9a658a81359a3d8828",
+            "2026-09-02",
         ),
         "schwab": (
-            "ad6d1fb65e44144a121f7d7bbe3cbd53ce57b47fe326c5dad5460176bfe4dbe7",
-            "1ac35c989b3a2341540c80898848c56781a0a8bd5420f6144afedc671bd2c463",
-            "2026-08-14",
+            "4e47b7b85d8ccad2f7d8ef510738db6f18f55685d17dbada362c2f279ce02a24",
+            "e84f4491b6896cc866adf4f387824f1128bd618f0ff363c8fb23f9a13af6c968",
+            "2026-09-04",
         ),
     }
 
@@ -1983,20 +1983,20 @@ def test_projected_schwab_flow_uses_effective_date_for_nav_recognition() -> None
 
 
 def _schwab_journal_override_manifest(
-    *, corrupt_4054_source: bool = False
+    *, corrupt_joint_source: bool = False
 ) -> GenerationManifest:
     """The two retained WCH transaction artifacts that prove the exceptions."""
 
     source_hashes = {
-        "wch/transactions/account-02.json": (
-            "7c6f8d00a21b7f71b5e52627a89a611da73b02b4f30eb86b541492e4a23c7afe"
+        "wch/transactions/account-38b653b91ff43a10.json": (
+            "521cadb20162bba19a39064e2ed165425493ac37df1f35638653bcb2ebfa6514"
         ),
-        "wch/transactions/account-04.json": (
-            "842ad4fde31ad20206cef1de7eb6f9bba699828fe5602008c18c45cb71c1b5e5"
+        "wch/transactions/account-702c489650e59956.json": (
+            "69856742fdf963136a326fc61ca4897e0a5e9a1d99c7e1db4231625c9ab9ee2a"
         ),
     }
-    if corrupt_4054_source:
-        source_hashes["wch/transactions/account-04.json"] = "f" * 64
+    if corrupt_joint_source:
+        source_hashes["wch/transactions/account-702c489650e59956.json"] = "f" * 64
     return GenerationManifest.build(
         as_of_date=date(2026, 8, 14),
         adapter=AdapterIdentity(name="test-provider-ledger", version="1"),
@@ -2045,8 +2045,8 @@ def test_schwab_pinned_journal_flows_require_exact_record_and_retained_source() 
     joint = "account-702c489650e59956"
     catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
     catalog["transactions"] = [
-        _schwab_journal_row(ira, "txn-55861c64ba8de7d6a1fa2e6d", "2025-12-29", "7000"),
-        _schwab_journal_row(ira, "txn-ab66e92846c1cfb18f4222e2", "2026-01-02", "7500"),
+        _schwab_journal_row(ira, "txn-84ed102899eaaa7ba1d2f0d4", "2025-12-29", "7000"),
+        _schwab_journal_row(ira, "txn-855f069db9ce99988c6707ea", "2026-01-02", "7500"),
         _schwab_journal_row(
             joint, "txn-1699da38ec4afacd94bd2876", "2026-01-02", "-50000"
         ),
@@ -2081,21 +2081,21 @@ def test_schwab_pinned_journal_flows_require_exact_record_and_retained_source() 
 
     flows = projected["flows"]
     assert [(flow["source_record_id"], flow["amount"]["value"]) for flow in flows] == [
-        ("txn-55861c64ba8de7d6a1fa2e6d", "7000"),
+        ("txn-84ed102899eaaa7ba1d2f0d4", "7000"),
         ("txn-1699da38ec4afacd94bd2876", "-50000"),
-        ("txn-ab66e92846c1cfb18f4222e2", "7500"),
+        ("txn-855f069db9ce99988c6707ea", "7500"),
     ]
     assert {flow["mapping_basis"] for flow in flows} == {"PINNED_RETAINED_JOURNAL"}
     assert {
         (flow["source_artifact_id"], flow["source_artifact_sha256"]) for flow in flows
     } == {
         (
-            "wch/transactions/account-02.json",
-            "7c6f8d00a21b7f71b5e52627a89a611da73b02b4f30eb86b541492e4a23c7afe",
+            "wch/transactions/account-38b653b91ff43a10.json",
+            "521cadb20162bba19a39064e2ed165425493ac37df1f35638653bcb2ebfa6514",
         ),
         (
-            "wch/transactions/account-04.json",
-            "842ad4fde31ad20206cef1de7eb6f9bba699828fe5602008c18c45cb71c1b5e5",
+            "wch/transactions/account-702c489650e59956.json",
+            "69856742fdf963136a326fc61ca4897e0a5e9a1d99c7e1db4231625c9ab9ee2a",
         ),
     }
 
@@ -2127,7 +2127,7 @@ def test_schwab_pinned_journal_flow_rejects_changed_retained_source_hash() -> No
                     }
                 ]
             },
-            manifest=_schwab_journal_override_manifest(corrupt_4054_source=True),
+            manifest=_schwab_journal_override_manifest(corrupt_joint_source=True),
         )
 
 
@@ -2147,7 +2147,7 @@ def test_schwab_pinned_journal_flow_does_not_admit_changed_fact(
     account_id = "account-38b653b91ff43a10"
     catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
     catalog["transactions"] = [
-        _schwab_journal_row(account_id, "txn-55861c64ba8de7d6a1fa2e6d", day, amount)
+        _schwab_journal_row(account_id, "txn-84ed102899eaaa7ba1d2f0d4", day, amount)
     ]
     projected, _ = ledger._project_account_facts(
         "schwab",
@@ -2232,10 +2232,10 @@ def test_schwab_5722_twr_uses_two_pinned_journal_flows() -> None:
             "record_id": "retained-funds-received",
         },
         _schwab_journal_row(
-            account_id, "txn-55861c64ba8de7d6a1fa2e6d", "2025-12-29", "7000"
+            account_id, "txn-84ed102899eaaa7ba1d2f0d4", "2025-12-29", "7000"
         ),
         _schwab_journal_row(
-            account_id, "txn-ab66e92846c1cfb18f4222e2", "2026-01-02", "7500"
+            account_id, "txn-855f069db9ce99988c6707ea", "2026-01-02", "7500"
         ),
     ]
     projected, _ = ledger._project_account_facts(

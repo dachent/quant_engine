@@ -1039,7 +1039,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # spans confined to coverage) while retaining corrected P123 inputs and
     # the deprecated Echo boundary.
     assert contract_tool.contract_digest(contract) == (
-        "887eef73757ed1f2410ea2d9c6b06b4d3a5b12cf38b2e94766016671d5a4a167"
+        "15176f1b518ce5f96bf52ab1c481eb7e013e80c5788903321f3a65bc4fd7d990"
     )
 
 
@@ -1079,10 +1079,10 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             "source_version": "ibkr-catalog-v4",
             "schema_version": "4",
             "generation_id": (
-                "b348d1ebcf882b099e64dba261b1877fd7a8efba9c1a4d8f443f7cb3e5a7715a"
+                "0917837a0b15ff473300bbdff2ca0ed34f96ed3b5e5a606258849dc20533dd65"
             ),
             "generation_sha256": (
-                "fa89abb805f4fdb83f752097f5aba13cab6f3d70f0a0afab98edd3495fb84891"
+                "eafeda509254eb086c4a7889db14709ad7963777799f4a4320d6906f229c93eb"
             ),
             "upstream_inventory_sha256": (
                 "5116bff54b7a8aed6010e763592e18b959b75eceaa9df89bec17f664b21cb650"
@@ -1123,7 +1123,7 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             assert source["current_generation"] == {
                 "generation_id": wanted["generation_id"],
                 "sha256": wanted["generation_sha256"],
-                "as_of": "2026-08-16",
+                "as_of": "2026-09-03",
             }
             assert (
                 policy["upstream_inventory_sha256"]
@@ -1913,11 +1913,11 @@ def test_two_vintage_history_accepts_2961_active_and_retains_07c590_echo() -> No
         for row in contract["strategies"]
         if row["strategy_id"] == "volatis-strategy"
     )
-    assert volatis["live_implementation_identity"]["generation_id"].startswith("ca1970")
+    assert volatis["live_implementation_identity"]["generation_id"].startswith("948e7c")
     robuxio = next(
         row for row in contract["strategies"] if row["strategy_id"] == "robuxio-crypto"
     )
-    assert robuxio["live_implementation_identity"]["generation_id"].startswith("6a4dcb")
+    assert robuxio["live_implementation_identity"]["generation_id"].startswith("3badac")
 
     _validate(contract)
     assert contract_tool._verify_strategy_version_history_evidence(contract) == 3
@@ -3847,7 +3847,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "85707e4a6b1ae3ac1f3384fe5e6893c375ae1a03c7c0418d77bb3d96b0146a77"
+        "8816c2b3b665fd7f8d4052b0a07585b2d45987430b4984a3342b4be3c2634f54"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -3884,7 +3884,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "85707e4a6b1ae3ac1f3384fe5e6893c375ae1a03c7c0418d77bb3d96b0146a77"
+        "8816c2b3b665fd7f8d4052b0a07585b2d45987430b4984a3342b4be3c2634f54"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
@@ -4000,7 +4000,7 @@ def test_generated_views_are_deterministic_and_match_authoritative_bytes(
         first.summary_markdown
     )
     assert b"robuxio-account-live-after-funding" in first.summary_markdown
-    assert b"MATRIXPORT:output/20260816T141010.494Z/csv/subscription_details.csv" in (
+    assert b"MATRIXPORT:output/20260903T051029.331Z/csv/subscription_details.csv" in (
         first.summary_markdown
     )
     assert b"p123-eu-provider-live" in first.summary_markdown
