@@ -1039,7 +1039,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # spans confined to coverage) while retaining corrected P123 inputs and
     # the deprecated Echo boundary.
     assert contract_tool.contract_digest(contract) == (
-        "15176f1b518ce5f96bf52ab1c481eb7e013e80c5788903321f3a65bc4fd7d990"
+        "a7da81d22363588ed6ff8f882ab204e95af408ecaaa20f65dbe9f109f87cee97"
     )
 
 
@@ -1085,32 +1085,38 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
                 "eafeda509254eb086c4a7889db14709ad7963777799f4a4320d6906f229c93eb"
             ),
             "upstream_inventory_sha256": (
-                "5116bff54b7a8aed6010e763592e18b959b75eceaa9df89bec17f664b21cb650"
+                "4765503faa2cbd0b57832e21041d0c99aa1475ce9e6cef1efbd7b71a686317fa"
             ),
             "product_data_class_set_sha256": (
-                "05ea5fd0e8123abea5b8989dfb32e0b8d0dfb5a0270755f4713b89f5fd6b8b85"
+                "03b4a13d4df8a3afbe166f33ada430ac842510b7aa85af6feb8468dca2270044"
             ),
-            "admitted_item_count": 23,
+            "admitted_item_count": 24,
             "admitted_item_set_sha256": (
-                "8887e70f99a0179857dc1ac53a8827c35a2350805e2ed1fa4d89b6cbd6904daf"
+                "90f111837e9be3728398a1b184bdec9f079e33ec176111b1ae1c423bdad4d49a"
             ),
         },
         "matrixport-account-generation": {
             "admitted_item_count": 5,
             "admitted_item_set_sha256": (
-                "1d688e9c752a8591f258339bc58281eb54cc1a7145b4bf380ebfd6d67a73a9b0"
+                "230adba3c8a0a2523f1b38e2fc5521b1e292a2fff90f5fc0a924d7de925c0629"
             ),
         },
         "quantbase-account-generation": {
             "admitted_item_count": 5,
             "admitted_item_set_sha256": (
-                "fe929820011bfeca50a52aeb9f7c03344f3227c29691db8339ef187f2be9dfda"
+                "95406eafada9522e22943c31c9b3cb594b992cd696fc7edf239e0a3c1661655b"
             ),
         },
         "schwab-account-generation": {
-            "admitted_item_count": 16,
+            "admitted_item_count": 18,
             "admitted_item_set_sha256": (
-                "76886239e575ae248524b32459e101807fbd4ce1b9413f87af5b67cdc4e02484"
+                "804f6e5c7746e33df817a62e2c246fd23951a3d065f3865efc5992a22dde8017"
+            ),
+        },
+        "portfolio123-model-generation": {
+            "admitted_item_count": 0,
+            "admitted_item_set_sha256": (
+                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
             ),
         },
     }
@@ -1135,6 +1141,20 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             )
         assert policy["admitted_item_count"] == wanted["admitted_item_count"]
         assert policy["admitted_item_set_sha256"] == wanted["admitted_item_set_sha256"]
+    schwab = _source(contract, "schwab-account-generation")
+    assert "EXTERNAL_FLOW" in schwab["admission"]["facts"]
+    p123 = _source(contract, "portfolio123-model-generation")
+    assert p123["admission"]["facts"] == [
+        "STRATEGY_VERSION_REFERENCE",
+        "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1_CANDIDATE",
+        "TRANSACTION",
+    ]
+    assert p123["admission"]["dataset_disposition_policy"][
+        "allowed_exclusion_reasons"
+    ] == [
+        "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
+        "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER",
+    ]
 
 
 def test_current_strategy_registry_binds_exact_applicability_plan_bytes() -> None:
@@ -1440,7 +1460,7 @@ def test_p123_admitted_set_and_hwm_bind_independently_computed_contract_hashes()
     p123 = _source(contract, "portfolio123-model-generation")
     assert (
         p123["admission"]["dataset_disposition_policy"]["admitted_item_set_sha256"]
-        == "b1fa77780c774e1d3ede18bf9698e00137447527c787aa30fdd62b5b8ad67643"
+        == "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
     )
 
     raw_sha256 = hashlib.sha256(contract_bytes).hexdigest()
@@ -3847,7 +3867,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "8816c2b3b665fd7f8d4052b0a07585b2d45987430b4984a3342b4be3c2634f54"
+        "d9b8414499ded77100a6b3aa51f91142463542bd2c28326e356618a3948ce370"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -3884,7 +3904,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "8816c2b3b665fd7f8d4052b0a07585b2d45987430b4984a3342b4be3c2634f54"
+        "d9b8414499ded77100a6b3aa51f91142463542bd2c28326e356618a3948ce370"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
