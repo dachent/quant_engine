@@ -61,11 +61,19 @@ def browser_session(port: int = DEFAULT_CDP_PORT) -> Iterator[BrowserSession]:
         playwright.stop()
 
 
-def first_or_new_page(session: BrowserSession) -> Any:
-    """Reuse the owner's current tab when one exists, else open a new one."""
+def first_or_new_page(
+    session: BrowserSession, base_url: str = DEFAULT_BASE_URL
+) -> Any:
+    """Reuse the owner's tab for the target site when one exists, else open a
+    new one. With multiple tabs open, pages[0] may belong to a different
+    site entirely, so prefer a tab already on the target host."""
     contexts = session.browser.contexts
     context = contexts[0] if contexts else session.browser.new_context()
     pages = context.pages
+    host = base_url.split("//")[-1].split("/")[0].lower()
+    for page in pages:
+        if host in (page.url or "").lower():
+            return page
     return pages[0] if pages else context.new_page()
 
 

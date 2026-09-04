@@ -190,7 +190,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         with browser_session(args.cdp_port) as session:
-            page = first_or_new_page(session)
+            page = first_or_new_page(session, base_url=args.base_url)
             return run_capture(
                 page,
                 run_dir=Path(args.run_dir),
