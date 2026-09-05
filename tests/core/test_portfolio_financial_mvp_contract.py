@@ -1039,7 +1039,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # spans confined to coverage) while retaining corrected P123 inputs and
     # the deprecated Echo boundary.
     assert contract_tool.contract_digest(contract) == (
-        "b579566563fe868ff1e7475e76a940d44ff114842819348c4ce203f2cfd957a0"
+        "51146395041b31111709b6b07360e90085d41c8b3ed9c62bf18c7ab23d659a16"
     )
 
 
@@ -1108,9 +1108,9 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             ),
         },
         "schwab-account-generation": {
-            "admitted_item_count": 18,
+            "admitted_item_count": 19,
             "admitted_item_set_sha256": (
-                "804f6e5c7746e33df817a62e2c246fd23951a3d065f3865efc5992a22dde8017"
+                "e20b207466b46110e3dc7bf01a3e94c0aff1c4b76963516a117412d52c86d88e"
             ),
         },
         "portfolio123-model-generation": {
@@ -3867,7 +3867,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "87f89320d3e0130e0386b7a3de37ed33c805b9d060ae176f91ef8c6fe1e79180"
+        "fa0ae5ac10bc386cfec5679f7c954dc91d43cf70f5b32e22fb817f836a7e3ce3"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -3904,7 +3904,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "87f89320d3e0130e0386b7a3de37ed33c805b9d060ae176f91ef8c6fe1e79180"
+        "fa0ae5ac10bc386cfec5679f7c954dc91d43cf70f5b32e22fb817f836a7e3ce3"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
