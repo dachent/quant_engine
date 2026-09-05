@@ -173,7 +173,10 @@ Strategy performance level supports a deterministic candidate
 return or `Cash Added` interpretation is admitted pending #303 and no
 exact-version backtest is accepted;
 Volatis provider/account-live history is not a backtest; EchoTrade is
-deprecated with no retained history; and Composer is immaterial and its
+deprecated and historical-only, with its $0.19 retained only as clearly labeled
+historical evidence and excluded from every current strategy, allocation,
+account-selector, count, manifest, consolidated-value, decomposition,
+dependence, HWM, and funded-product surface; and Composer is immaterial and its
 history is not connected. Similar long EU curves are different model books and
 cannot substitute for the connected EU model.
 
@@ -319,9 +322,10 @@ financial-MVP perimeter, and the immutable baseline allocation generation. It
 contains 21 unordered pairs for each of `LIVE_ONLY` and
 `LIVE_PLUS_BACKTEST`. The hybrid currently uses zero backtest rows and is
 truthfully live-only-equivalent. Composer is excluded as immaterial and
-EchoTrade as deprecated history-only. The common complete calculation boundary
-is disclosed with its contract-derived warning threshold and exact limiting
-history series; age alone does not invalidate a complete historical
+EchoTrade as deprecated history-only; EchoTrade's $0.19 remains historical
+evidence only and is excluded from current and consolidated values. The common complete
+calculation boundary is disclosed with its contract-derived warning threshold
+and exact limiting history series; age alone does not invalidate a complete historical
 calculation, while a future allocation snapshot fails. Schema-7 composition rejects a legacy correlation
 evidence proof or any source package that fails independent verification.
 
@@ -413,11 +417,13 @@ $env:PLAYWRIGHT_EXECUTABLE_PATH = '<chromium-browser-executable>'
 
 node apps\portfolio-control-panel\browser_qa.mjs `
   --html (Join-Path '<candidate-directory>' 'index.html') `
-  --output $qaRoot
+  --output $qaRoot `
+  --expected-calculation-cutoff 2026-08-13
 
 node apps\portfolio-control-panel\interaction_qa.mjs `
   --html (Join-Path '<candidate-directory>' 'index.html') `
-  --output (Join-Path $qaRoot 'interaction-results.json')
+  --output (Join-Path $qaRoot 'interaction-results.json') `
+  --expected-calculation-cutoff 2026-08-13
 
 & $enginePython tools\portfolio_control_panel.py qa `
   --candidate-dir '<candidate-directory>' `
@@ -540,9 +546,8 @@ unavailable until their source facts are admitted:
   backtest; retained long EU curves from other model books are different
   histories, not substitutes;
 - version-matched pre-live history for Robuxio if it becomes available and is
-  admitted; admissible daily target history for EchoTrade and connected
-  account-live target history for Composer, which remain required outside the
-  material HWM denominator;
+  admitted; Composer's immaterial excluded history and EchoTrade's retained
+  historical record are not current-product source-admission gaps;
 - complete daily account cash and fee paths, plus order/fill timestamps and
   slippage evidence, for causal model-to-account gap decomposition;
 - accepted provider/model paths where no exact-common-date comparison exists;

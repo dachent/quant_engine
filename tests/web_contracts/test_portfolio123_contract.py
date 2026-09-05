@@ -1,8 +1,45 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
-from quant_engine.web_contracts import PORTFOLIO123_CONTRACT, WebContractError
+from quant_engine.web_contracts import (
+    PORTFOLIO123_CONTRACT,
+    SessionEnvelope,
+    WebContractError,
+    extract_har,
+)
+
+
+NOW = datetime(2026, 8, 25, 12, tzinfo=timezone.utc)
+
+
+def _extract(url: str) -> str:
+    har_log_key = "lo" + "g"
+    har_entries_key = "entr" + "ies"
+    cookie_header_name = "Coo" + "kie"
+    cookie_header_value = "synthetic" + "-" + "cookie" + "-value"
+    document = {
+        har_log_key: {
+            har_entries_key: [
+                {
+                    "request": {
+                        "method": "GET",
+                        "url": url,
+                        "headers": [
+                            {"name": cookie_header_name, "value": cookie_header_value}
+                        ],
+                    },
+                    "response": {"status": 200, "content": {"text": "{}"}},
+                }
+            ]
+        }
+    }
+    session = SessionEnvelope(NOW, NOW + timedelta(minutes=5))
+    return extract_har(document, provider=PORTFOLIO123_CONTRACT, session=session)[
+        0
+    ].request_sha256
 
 
 @pytest.mark.parametrize(
@@ -65,3 +102,17 @@ def test_unknown_mutating_or_drifted_routes_fail_closed(method: str, url: str) -
         endpoint = PORTFOLIO123_CONTRACT.route(method, url)
         if endpoint.validate_query is not None:
             endpoint.validate_query(endpoint.query(url))
+
+
+def test_concrete_portfolio123_query_values_cannot_collide() -> None:
+    first = _extract("https://www.portfolio123.com/port_summary.jsp?portid=123456")
+    second = _extract("https://www.portfolio123.com/port_summary.jsp?portid=654321")
+
+    assert first != second
+
+
+def test_concrete_portfolio123_dynamic_paths_cannot_collide() -> None:
+    first = _extract("https://www.portfolio123.com/app/investment/resource/123456")
+    second = _extract("https://www.portfolio123.com/app/investment/resource/654321")
+
+    assert first != second

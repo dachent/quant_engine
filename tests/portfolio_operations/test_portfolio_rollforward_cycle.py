@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from datetime import date
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 import sys
 
 import pytest
+from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -22,28 +25,68 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
-MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_rollforward_cycle.py"
-SPEC = importlib.util.spec_from_file_location(
-    "portfolio_rollforward_cycle", MODULE_PATH
+RECOMPUTE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_control_recompute.py"
+CYCLE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_rollforward_cycle.py"
+SCHEMA_PATH = (
+    REPOSITORY_ROOT / "schemas" / "portfolio" / "control-recomputation.schema.json"
 )
-if SPEC is None or SPEC.loader is None:
-    raise RuntimeError("unable to load rollforward cycle tool")
-cycle = importlib.util.module_from_spec(SPEC)
-sys.modules[SPEC.name] = cycle
-SPEC.loader.exec_module(cycle)
+
+
+def _load_tool(name: str, path: Path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"unable to load {name}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+recompute = _load_tool("portfolio_control_recompute_for_cycle", RECOMPUTE_PATH)
+cycle = _load_tool("portfolio_rollforward_cycle", CYCLE_PATH)
 
 CURRENT = date(2026, 8, 6)
 PREVIOUS = date(2026, 8, 3)
 
 
-def _ledger(root: Path) -> tuple[str, dict[str, object]]:
-    source = b"synthetic-ledger\n"
+def _publish(root: Path, filename: str, payload: dict[str, object], name: str) -> str:
+    source = canonical_json_bytes({"source": name})
     manifest = GenerationManifest.build(
-        as_of_date=PREVIOUS,
-        adapter=AdapterIdentity("synthetic-ledger", "1.0.0"),
+        as_of_date=CURRENT,
+        adapter=AdapterIdentity(name, "1.0.0"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="synthetic ledger",
+            boundary="synthetic control input",
+            fact_types=("correlation-one-stress",),
+            observed_start=CURRENT,
+            observed_end=CURRENT,
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id=f"input/{name}.json",
+                sha256=hashlib.sha256(source).hexdigest(),
+                size_bytes=len(source),
+                as_of_date=CURRENT,
+                schema_name="synthetic-input",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    staged = stage_generation(root, manifest)
+    (staged.parent / filename).write_bytes(canonical_json_bytes(payload))
+    publish_generation(root, manifest.generation_id)
+    return manifest.generation_id
+
+
+def _ledger(root: Path, marker: str) -> tuple[str, dict[str, object]]:
+    source = canonical_json_bytes({"catalog": marker})
+    manifest = GenerationManifest.build(
+        as_of_date=PREVIOUS,
+        adapter=AdapterIdentity(f"synthetic-ledger-{marker}", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic provider ledger",
             fact_types=("strategy_returns",),
             observed_start=PREVIOUS,
             observed_end=PREVIOUS,
@@ -54,18 +97,19 @@ def _ledger(root: Path) -> tuple[str, dict[str, object]]:
                 sha256=hashlib.sha256(source).hexdigest(),
                 size_bytes=len(source),
                 as_of_date=PREVIOUS,
-                schema_name="synthetic-ledger",
+                schema_name="synthetic-provider-ledger",
                 schema_version="1",
             ),
         ),
         verification=VerificationStatus.VERIFIED,
     )
     staged = stage_generation(root, manifest)
-    (staged.parent / "provider-ledger.json").write_bytes(source)
+    catalog_path = staged.parent / "provider-ledger.json"
+    catalog_path.write_bytes(source)
     publish_generation(root, manifest.generation_id)
     manifest_path = staged.parent / "generation.json"
     return manifest.generation_id, {
-        "as_of_date": manifest.as_of_date.isoformat(),
+        "as_of_date": PREVIOUS.isoformat(),
         "catalog_sha256": hashlib.sha256(source).hexdigest(),
         "catalog_size_bytes": len(source),
         "generation_id": manifest.generation_id,
@@ -74,124 +118,183 @@ def _ledger(root: Path) -> tuple[str, dict[str, object]]:
     }
 
 
+def _freshness(
+    ledger_identity: dict[str, object], *, stale: bool = False
+) -> dict[str, object]:
+    return {
+        "assessment_schema_version": 3,
+        "as_of_date": CURRENT.isoformat(),
+        "assessments": [
+            {
+                "acquired_at": None,
+                "blocks_current_consumers": stale,
+                "coverage_status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                "escalation_required": stale,
+                "evaluated_on": CURRENT.isoformat(),
+                "fact_type": "strategy-returns",
+                "lane": "ACCOUNT",
+                "last_accepted_date": PREVIOUS.isoformat()
+                if stale
+                else CURRENT.isoformat(),
+                "next_expected_date": CURRENT.isoformat(),
+                "policy_id": "synthetic-daily",
+                "provider_id": "portfolio123" if stale else "synthetic",
+                "reason": "stale" if stale else "fresh",
+                "required_for_current": True,
+                "revision_state": "ORIGINAL",
+                "state": "STALE" if stale else "FRESH",
+                "subject_id": "p123-ai-factor" if stale else "synthetic",
+                "subject_type": "DATASET",
+            }
+        ],
+        "policies": [
+            {
+                "calendar": "CALENDAR_DAY",
+                "expected_interval_days": 1,
+                "grace_days": 0,
+                "mode": "RECURRING",
+                "policy_id": "synthetic-daily",
+                "stale_after_days": 1,
+            }
+        ],
+        "provider_ledger": ledger_identity,
+    }
+
+
+def _panel_id(artifact_sha256: dict[str, str]) -> str:
+    return hashlib.sha256(
+        canonical_json_bytes(dict(sorted(artifact_sha256.items())))
+    ).hexdigest()
+
+
+def _candidate(
+    root: Path,
+    correlation_generation: str,
+    report_generation: str,
+    freshness: dict[str, object],
+) -> tuple[Path, Path]:
+    dashboard = {
+        "advisory": {"correlation_one_stress": "0.3"},
+        "meta": {
+            "correlation_generation_id": correlation_generation,
+            "freshness_evaluated_on": CURRENT.isoformat(),
+            "report_generation_id": report_generation,
+        },
+    }
+    files = {
+        "data/dashboard_data.json": canonical_json_bytes(dashboard),
+        "data/freshness-health.json": canonical_json_bytes(freshness),
+    }
+    artifact_sha256 = {
+        name: hashlib.sha256(content).hexdigest() for name, content in files.items()
+    }
+    panel_id = _panel_id(artifact_sha256)
+    candidate = root / "candidates" / panel_id
+    for name, content in files.items():
+        path = candidate / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    (candidate / "candidate.json").write_bytes(
+        canonical_json_bytes(
+            {
+                "artifact_sha256": artifact_sha256,
+                "panel_id": panel_id,
+                "report_generation_id": report_generation,
+            }
+        )
+    )
+    return candidate, candidate / "data" / "freshness-health.json"
+
+
+def _cycle_inputs(
+    tmp_path: Path, *, marker: str = "one", stale: bool = False
+) -> tuple[Path, str, Path, dict[str, object]]:
+    correlation_root = tmp_path / f"correlation-{marker}"
+    correlation_generation = _publish(
+        correlation_root,
+        "correlation.json",
+        {
+            "dependence": {
+                "correlation_one": {
+                    "components": [
+                        {
+                            "allocation_weight": "0.4",
+                            "conservative_loss_fraction": "0.25",
+                            "loss_contribution": "0.1",
+                        },
+                        {
+                            "adverse_loss_fraction": "0.5",
+                            "allocation_weight": "0.4",
+                            "loss_contribution": "0.2",
+                        },
+                    ],
+                    "loss": "0.3",
+                }
+            }
+        },
+        f"correlation-{marker}",
+    )
+    report_root = tmp_path / f"report-{marker}"
+    report_generation = _publish(
+        report_root,
+        "portfolio-report-data.json",
+        {"portfolio_summary": [{"metric": "Correlation-one stress", "value": "0.3"}]},
+        f"report-{marker}",
+    )
+    ledger_root = tmp_path / f"ledger-{marker}"
+    ledger_generation, ledger_identity = _ledger(ledger_root, marker)
+    candidate, freshness = _candidate(
+        tmp_path / f"panel-{marker}",
+        correlation_generation,
+        report_generation,
+        _freshness(ledger_identity, stale=stale),
+    )
+    recomputation = recompute.build_receipt(
+        correlation_root,
+        report_root,
+        candidate,
+        freshness,
+        ledger_root,
+        ledger_generation,
+        CURRENT,
+    )
+    return ledger_root, ledger_generation, freshness, recomputation
+
+
 def _write(path: Path, value: dict[str, object]) -> None:
     path.write_bytes(canonical_json_bytes(value))
 
 
-def _input_identity(
-    tmp_path: Path, name: str, *, panel: bool = False
-) -> dict[str, object]:
-    path = tmp_path / "control-inputs" / f"{name}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    content = canonical_json_bytes({"source": name})
-    path.write_bytes(content)
-    identity: dict[str, object] = {
-        "path": str(path),
-        "sha256": hashlib.sha256(content).hexdigest(),
-        "size_bytes": len(content),
-    }
-    identity["panel_id" if panel else "generation_id"] = hashlib.sha256(
-        name.encode("utf-8")
-    ).hexdigest()
-    if not panel:
-        identity["as_of_date"] = PREVIOUS.isoformat()
-    return identity
-
-
-def _recomputation(tmp_path: Path) -> dict[str, object]:
-    return {
-        "as_of_date": CURRENT.isoformat(),
-        "component_count": 2,
-        "declared_values": {
-            "correlation_stress": "0.3",
-            "panel_headline": "0.3",
-            "report_headline": "0.3",
-        },
-        "differences": {
-            "correlation_declared": "0",
-            "declared_contribution_sum": "0",
-            "maximum_component": "0",
-            "panel_headline": "0",
-            "report_headline": "0",
-        },
-        "generation_checks": {
-            "panel_correlation_matches_current": True,
-            "panel_freshness_matches_evaluation_date": True,
-            "panel_report_matches_current": True,
-        },
-        "inputs": {
-            "correlation": _input_identity(tmp_path, "correlation"),
-            "panel": _input_identity(tmp_path, "panel", panel=True),
-            "report": _input_identity(tmp_path, "report"),
-        },
-        "method": "DECIMAL_SUM_ALLOCATION_WEIGHT_TIMES_ADVERSE_LOSS_FRACTION",
-        "recomputed_correlation_one_stress": "0.3",
-        "receipt_schema_version": 1,
-        "status": "PASS",
-        "tolerance": "0.000000000001",
-    }
-
-
-def test_cycle_records_unauthorized_reads_and_local_notification(
+def test_cycle_accepts_real_v2_recomputation_and_retains_escalation(
     tmp_path: Path,
 ) -> None:
-    ledger_root = tmp_path / "ledger"
-    generation_id, ledger_identity = _ledger(ledger_root)
-    freshness = tmp_path / "freshness.json"
-    _write(
-        freshness,
-        {
-            "assessment_schema_version": 3,
-            "as_of_date": CURRENT.isoformat(),
-            "assessments": [
-                {
-                    "escalation_required": True,
-                    "evaluated_on": CURRENT.isoformat(),
-                    "fact_type": "strategy-returns",
-                    "lane": "ACCOUNT",
-                    "provider_id": "portfolio123",
-                    "required_for_current": True,
-                    "state": "STALE",
-                    "subject_id": "p123-ai-factor",
-                },
-                {
-                    "escalation_required": False,
-                    "evaluated_on": CURRENT.isoformat(),
-                    "fact_type": "strategy-returns",
-                    "lane": "PROVIDER",
-                    "provider_id": "portfolio123",
-                    "required_for_current": False,
-                    "state": "STALE",
-                    "subject_id": "p123-ai-factor",
-                },
-            ],
-            "policies": [],
-            "provider_ledger": ledger_identity,
-        },
+    ledger_root, generation_id, freshness, recomputation = _cycle_inputs(
+        tmp_path, stale=True
     )
-    recomputation = tmp_path / "recomputation.json"
-    _write(recomputation, _recomputation(tmp_path))
+    recomputation_path = tmp_path / "real-control-recomputation.json"
+    _write(recomputation_path, recomputation)
 
     receipt = cycle.build_receipt(
         ledger_root,
         generation_id,
         freshness,
-        recomputation,
+        recomputation_path,
         CURRENT,
         PREVIOUS,
     )
 
+    expected_request_identity = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "evaluation_date": CURRENT.isoformat(),
+                "fact_type": "strategy-returns",
+                "lane": "ACCOUNT",
+                "provider_id": "portfolio123",
+                "subject_id": "p123-ai-factor",
+            }
+        )
+    ).hexdigest()
     assert receipt["status"] == "PASS_WITH_RETAINED_ESCALATIONS"
-    assert receipt["dated_cycle_evidence"]["status"] == (
-        "SECOND_DATED_MANUAL_CYCLE_RECORDED"
-    )
-    assert receipt["notification_receipt"] == {
-        "channel": "LOCAL_CONTROL_PANEL_OPERATOR_QUEUE",
-        "external_notification_sent": False,
-        "recorded_escalation_count": 1,
-        "status": "RECORDED_FOR_NEXT_PANEL_GENERATION",
-    }
-    assert receipt["pointer_effects"]["advanced"] is False
     assert receipt["provider_read_plan"] == [
         {
             "acquisition_path": "HAR_FIRST_API_ONLY_FOR_DECLARED_HAR_GAP_WITH_APPROVAL",
@@ -199,96 +302,73 @@ def test_cycle_records_unauthorized_reads_and_local_notification(
             "fact_type": "strategy-returns",
             "lane": "ACCOUNT",
             "provider_id": "portfolio123",
-            "request_identity": receipt["provider_read_plan"][0]["request_identity"],
+            "request_identity": expected_request_identity,
             "retry_limit": 0,
             "status": "NOT_AUTHORIZED_NOT_EXECUTED",
             "subject_id": "p123-ai-factor",
         }
     ]
+    assert receipt["pointer_effects"]["advanced"] is False
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    validator.validate(recomputation)
+    missing = deepcopy(recomputation)
+    del missing["inputs"]["panel"]["candidate_record"]
+    with pytest.raises(ValidationError):
+        validator.validate(missing)
+    extra = deepcopy(recomputation)
+    extra["inputs"]["freshness"]["unexpected"] = True
+    with pytest.raises(ValidationError):
+        validator.validate(extra)
 
 
-def test_cycle_fails_when_freshness_date_is_replayed(tmp_path: Path) -> None:
-    ledger_root = tmp_path / "ledger"
-    generation_id, ledger_identity = _ledger(ledger_root)
-    freshness = tmp_path / "freshness.json"
-    _write(
-        freshness,
-        {
-            "assessment_schema_version": 3,
-            "as_of_date": PREVIOUS.isoformat(),
-            "assessments": [],
-            "policies": [],
-            "provider_ledger": ledger_identity,
-        },
+def test_cycle_rejects_real_recomputation_cross_paired_to_other_valid_freshness_and_ledger(
+    tmp_path: Path,
+) -> None:
+    ledger_one, generation_one, freshness_one, recomputation_one = _cycle_inputs(
+        tmp_path, marker="one"
     )
-    recomputation = tmp_path / "recomputation.json"
-    _write(recomputation, _recomputation(tmp_path))
+    _ledger_two, _generation_two, _freshness_two, recomputation_two = _cycle_inputs(
+        tmp_path, marker="two"
+    )
+    cross_paired = deepcopy(recomputation_one)
+    cross_paired["inputs"]["freshness"] = recomputation_two["inputs"]["freshness"]
+    cross_paired["inputs"]["provider_ledger"] = recomputation_two["inputs"][
+        "provider_ledger"
+    ]
+    cross_paired["inputs"]["panel"] = recomputation_two["inputs"]["panel"]
+    assert all(cross_paired["generation_checks"].values())
+    recomputation_path = tmp_path / "cross-paired-recomputation.json"
+    _write(recomputation_path, cross_paired)
+
+    with pytest.raises(cycle.RollforwardCycleError, match="freshness identity differs"):
+        cycle.build_receipt(
+            ledger_one,
+            generation_one,
+            freshness_one,
+            recomputation_path,
+            CURRENT,
+            PREVIOUS,
+        )
+
+
+def test_cycle_rejects_replayed_freshness_date_before_recomputation_validation(
+    tmp_path: Path,
+) -> None:
+    ledger_root, generation_id, freshness, recomputation = _cycle_inputs(tmp_path)
+    freshness_payload = json.loads(freshness.read_text(encoding="utf-8"))
+    freshness_payload["as_of_date"] = PREVIOUS.isoformat()
+    freshness_payload["assessments"][0]["evaluated_on"] = PREVIOUS.isoformat()
+    freshness.write_bytes(canonical_json_bytes(freshness_payload))
+    recomputation_path = tmp_path / "real-recomputation.json"
+    _write(recomputation_path, recomputation)
 
     with pytest.raises(cycle.RollforwardCycleError, match="evaluation date differs"):
         cycle.build_receipt(
             ledger_root,
             generation_id,
             freshness,
-            recomputation,
-            CURRENT,
-            PREVIOUS,
-        )
-
-
-def test_cycle_rejects_freshness_from_another_ledger(tmp_path: Path) -> None:
-    ledger_root = tmp_path / "ledger"
-    generation_id, ledger_identity = _ledger(ledger_root)
-    ledger_identity["generation_id"] = "b" * 64
-    freshness = tmp_path / "freshness.json"
-    _write(
-        freshness,
-        {
-            "assessment_schema_version": 3,
-            "as_of_date": CURRENT.isoformat(),
-            "assessments": [],
-            "policies": [],
-            "provider_ledger": ledger_identity,
-        },
-    )
-    recomputation = tmp_path / "recomputation.json"
-    _write(recomputation, _recomputation(tmp_path))
-
-    with pytest.raises(cycle.RollforwardCycleError, match="ledger identity differs"):
-        cycle.build_receipt(
-            ledger_root,
-            generation_id,
-            freshness,
-            recomputation,
-            CURRENT,
-            PREVIOUS,
-        )
-
-
-def test_cycle_rejects_truncated_recomputation_receipt(tmp_path: Path) -> None:
-    ledger_root = tmp_path / "ledger"
-    generation_id, ledger_identity = _ledger(ledger_root)
-    freshness = tmp_path / "freshness.json"
-    _write(
-        freshness,
-        {
-            "assessment_schema_version": 3,
-            "as_of_date": CURRENT.isoformat(),
-            "assessments": [],
-            "policies": [],
-            "provider_ledger": ledger_identity,
-        },
-    )
-    recomputation = tmp_path / "recomputation.json"
-    _write(recomputation, {"as_of_date": CURRENT.isoformat(), "status": "PASS"})
-
-    with pytest.raises(
-        cycle.RollforwardCycleError, match="recomputation fields differ"
-    ):
-        cycle.build_receipt(
-            ledger_root,
-            generation_id,
-            freshness,
-            recomputation,
+            recomputation_path,
             CURRENT,
             PREVIOUS,
         )

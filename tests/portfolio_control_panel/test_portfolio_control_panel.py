@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 import hashlib
 import importlib.util
 import json
+import os
+import shutil
+import subprocess
 import tempfile
 from pathlib import Path
 import runpy
@@ -23,9 +27,14 @@ from quant_engine.core import (
     publish_generation,
     read_current,
     stage_generation,
+    stage_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import decimal_text
+from tools.account_strategy_manifest import (
+    build_manifest_candidate,
+    validate_manifest_schema,
+)
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_control_panel.py"
@@ -49,7 +58,23 @@ def _portable_hwm_bundle(
         if schema_version == 3
         else "_as_held_hwm_fixture"
     )
-    fixture = HWM_TEST_NAMESPACE[fixture_name]()
+    fixture_builder = HWM_TEST_NAMESPACE[fixture_name]
+    fixture_globals = fixture_builder.__globals__
+    authority_bytes = {
+        "_PORT_HWM4_POLICY_BYTES": panel._PORTABLE_HWM_POLICY.read_bytes(),
+        "_PORT_HWM4_POLICY_SHA256": hashlib.sha256(
+            panel._PORTABLE_HWM_POLICY.read_bytes()
+        ).hexdigest(),
+        "_PRODUCT_CONTRACT_BYTES": panel._PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes(),
+        "_PERFORMANCE_POLICY_BYTES": panel._PORTABLE_HWM_PERFORMANCE_POLICY.read_bytes(),
+        "_LEGACY_HWM_POLICY_BYTES": panel.HWM_POLICY.read_bytes(),
+    }
+    prior_authority_bytes = {key: fixture_globals[key] for key in authority_bytes}
+    try:
+        fixture_globals.update(authority_bytes)
+        fixture = fixture_builder()
+    finally:
+        fixture_globals.update(prior_authority_bytes)
     return (
         HWM_TEST_NAMESPACE["_compute_as_held"](fixture),
         fixture["input_generation_bytes"],
@@ -72,6 +97,159 @@ STRATEGY_NAMES = (
     "Strategy 7",
     "Strategy 8",
 )
+# The product surface is the seven active strategies. Composer and Echo remain
+# in STRATEGY_NAMES for explicit immaterial/deprecated-history tests.
+ACTIVE_STRATEGY_NAMES = STRATEGY_NAMES[:7]
+ACTIVE_STRATEGY_IDS = (
+    "p123-ai-factor",
+    "p123-eu",
+    "qsi",
+    "tt-portfolio",
+    "volatis-strategy",
+    "grizzlybears-vtma",
+    "robuxio-crypto",
+)
+ALL_STRATEGY_NAMES_BY_ID = {
+    **dict(zip(ACTIVE_STRATEGY_IDS, ACTIVE_STRATEGY_NAMES, strict=True)),
+    "composer-holy-grail": STRATEGY_NAMES[7],
+    "echotrade-growth-pivots": STRATEGY_NAMES[8],
+}
+# These three independently declared tables deliberately repeat the 13
+# current-epoch identities.  The composed lineage proof must not construct its
+# manifest/crosswalk expectation from the report surface it is validating.
+_LINEAGE_REPORT_IDENTITIES = (
+    ("account-00", "p123-ai-factor", "2026-01-01", None),
+    ("account-01", "p123-eu", "2026-01-01", None),
+    ("account-02", "qsi", "2026-01-01", None),
+    ("account-03", "tt-portfolio", "2026-01-01", None),
+    ("account-04", "volatis-strategy", "2026-01-01", None),
+    ("account-05", "grizzlybears-vtma", "2026-01-01", None),
+    ("account-06", "robuxio-crypto", "2026-01-01", None),
+    ("account-07", "p123-ai-factor", "2026-01-01", None),
+    ("account-08", "p123-eu", "2026-01-01", None),
+    ("account-09", "qsi", "2026-01-01", None),
+    ("account-10", "tt-portfolio", "2026-01-01", None),
+    ("account-11", "volatis-strategy", "2026-01-01", None),
+    ("account-12", "grizzlybears-vtma", "2026-01-01", None),
+)
+_LINEAGE_MANIFEST_CROSSWALK_IDENTITIES = (
+    ("account-00", "p123-ai-factor", "2026-01-01", None),
+    ("account-01", "p123-eu", "2026-01-01", None),
+    ("account-02", "qsi", "2026-01-01", None),
+    ("account-03", "tt-portfolio", "2026-01-01", None),
+    ("account-04", "volatis-strategy", "2026-01-01", None),
+    ("account-05", "grizzlybears-vtma", "2026-01-01", None),
+    ("account-06", "robuxio-crypto", "2026-01-01", None),
+    ("account-07", "p123-ai-factor", "2026-01-01", None),
+    ("account-08", "p123-eu", "2026-01-01", None),
+    ("account-09", "qsi", "2026-01-01", None),
+    ("account-10", "tt-portfolio", "2026-01-01", None),
+    ("account-11", "volatis-strategy", "2026-01-01", None),
+    ("account-12", "grizzlybears-vtma", "2026-01-01", None),
+)
+_LINEAGE_EXPECTED_IDENTITIES = frozenset(
+    {
+        ("account-00", "p123-ai-factor", "2026-01-01", None),
+        ("account-01", "p123-eu", "2026-01-01", None),
+        ("account-02", "qsi", "2026-01-01", None),
+        ("account-03", "tt-portfolio", "2026-01-01", None),
+        ("account-04", "volatis-strategy", "2026-01-01", None),
+        ("account-05", "grizzlybears-vtma", "2026-01-01", None),
+        ("account-06", "robuxio-crypto", "2026-01-01", None),
+        ("account-07", "p123-ai-factor", "2026-01-01", None),
+        ("account-08", "p123-eu", "2026-01-01", None),
+        ("account-09", "qsi", "2026-01-01", None),
+        ("account-10", "tt-portfolio", "2026-01-01", None),
+        ("account-11", "volatis-strategy", "2026-01-01", None),
+        ("account-12", "grizzlybears-vtma", "2026-01-01", None),
+    }
+)
+
+
+def test_json_snapshot_reads_an_ordinary_file_beyond_legacy_windows_max_path(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path
+    while (
+        len(str((path / "current-strategy-decomposition-plan.json").absolute())) <= 270
+    ):
+        path /= "long-decomposition-component"
+    path /= "current-strategy-decomposition-plan.json"
+    storage_path = (
+        Path(f"\\\\?\\{path.absolute()}") if sys.platform == "win32" else path
+    )
+    storage_path.parent.mkdir(parents=True)
+    expected = canonical_json_bytes({"schema_version": 3})
+    storage_path.write_bytes(expected)
+
+    payload, content, sha256 = panel._json_snapshot(path, "current decomposition plan")
+
+    assert payload == {"schema_version": 3}
+    assert content == expected
+    assert sha256 == hashlib.sha256(expected).hexdigest()
+
+
+def test_weekly_parser_accepts_seven_source_bound_current_strategies() -> None:
+    strategy_rows = [
+        {
+            "display_groups": ["STRATEGY"],
+            "display_name": f"Strategy {index}",
+            "observation_meta_by_mode": {
+                "LIVE_ONLY": {},
+                "LIVE_PLUS_BACKTEST": {},
+            },
+            "primary_group": "STRATEGY",
+            "series_id": f"strategy:Strategy {index}",
+            "values_by_mode": {"LIVE_ONLY": {}, "LIVE_PLUS_BACKTEST": {}},
+        }
+        for index in range(7)
+    ]
+    benchmark_rows = [
+        {
+            "display_groups": ["CORE_BENCHMARK"],
+            "observation_meta": {},
+            "primary_group": "STYLE_MULTI_ASSET",
+            "series_id": f"market:Benchmark {index}",
+            "values": {},
+        }
+        for index in range(9)
+    ]
+    weekly = {
+        "analytics_schema_version": 1,
+        "current_week": {"default_visible": False},
+        "default_evidence_mode": "LIVE_ONLY",
+        "display_groups": [
+            "STRATEGY",
+            "ECONOMIC_FACTOR_US",
+            "ECONOMIC_FACTOR_EUROPE",
+            "STYLE_US_EQUITY",
+            "STYLE_MULTI_ASSET",
+            "SECTOR",
+            "INDUSTRY",
+            "CORE_BENCHMARK",
+        ],
+        "observation_meta_fields": [
+            "daily_observation_count",
+            "actual_observed_start",
+            "actual_observed_end",
+            "coverage_status",
+            "boundary_reasons",
+        ],
+        "series": [*strategy_rows, *benchmark_rows],
+        "strategy_evidence_modes": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
+        "week_policy": {
+            "absent_value": "UNAVAILABLE_NOT_ZERO",
+            "aggregation": "PRODUCT_OF_ONE_PLUS_DAILY_RETURN_MINUS_ONE",
+        },
+        "weeks": ["2026-08-10"],
+    }
+
+    accepted = panel._weekly_return_analysis(
+        weekly,
+        {"generation_id": "a" * 64, "sha256": "b" * 64},
+    )
+
+    assert sum(row["primary_group"] == "STRATEGY" for row in accepted["series"]) == 7
 
 
 def test_report_panel_expectations_follow_accepted_rollforward() -> None:
@@ -96,6 +274,59 @@ def test_report_panel_expectations_follow_accepted_rollforward() -> None:
     }
 
 
+def test_primary_factor_consumer_derives_seven_row_perimeter_from_contract() -> None:
+    """Fails if _current_primary_factor_analyses stops applying contract scope."""
+
+    strategy_names = {
+        "p123-ai-factor": STRATEGY_NAMES[0],
+        "p123-eu": STRATEGY_NAMES[1],
+        "qsi": STRATEGY_NAMES[2],
+        "tt-portfolio": STRATEGY_NAMES[3],
+        "volatis-strategy": STRATEGY_NAMES[4],
+        "grizzlybears-vtma": STRATEGY_NAMES[5],
+        "robuxio-crypto": STRATEGY_NAMES[6],
+        "composer-holy-grail": STRATEGY_NAMES[7],
+        "echotrade-growth-pivots": STRATEGY_NAMES[8],
+    }
+    decomposition = _decomposition()
+    required_names = set(STRATEGY_NAMES[:7])
+
+    factor, dynamic = panel._current_primary_factor_analyses(
+        decomposition,
+        {"generation_id": "a" * 64, "sha256": "b" * 64},
+        strategy_names,
+        (
+            REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+        ).read_bytes(),
+    )
+
+    assert {row["series_id"] for row in factor["series"]} == required_names
+    assert {row["series_id"] for row in dynamic["series"]} == required_names
+    assert {row["series_id"] for row in decomposition["model_selections"]} == set(
+        STRATEGY_NAMES
+    )
+    assert {row["series_id"] for row in decomposition["model_results"]} == set(
+        STRATEGY_NAMES
+    )
+
+
+def test_factor_source_perimeter_filters_excluded_series_without_mutating_source() -> (
+    None
+):
+    decomposition = _decomposition()
+    required_names = set(STRATEGY_NAMES[:7])
+
+    filtered, selected_names = panel._factor_decomposition_perimeter(
+        decomposition, required_names
+    )
+
+    assert selected_names == required_names
+    assert {row["series_id"] for row in filtered["model_selections"]} == required_names
+    assert {row["series_id"] for row in filtered["model_results"]} == required_names
+    assert len(decomposition["model_selections"]) == 9
+    assert len(decomposition["model_results"]) == 9
+
+
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
@@ -105,7 +336,182 @@ def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _directory_identity(path: Path) -> dict[str, object]:
+    """Independent test fixture identity; this is not a signing boundary."""
+    rows: list[dict[str, object]] = []
+    for item in sorted(path.rglob("*")):
+        if item.is_symlink():
+            raise AssertionError(f"fixture cannot inventory linked path: {item}")
+        if item.is_file():
+            content = item.read_bytes()
+            rows.append(
+                {
+                    "path": item.relative_to(path).as_posix(),
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                    "size_bytes": len(content),
+                }
+            )
+    content = canonical_json_bytes(rows)
+    return {
+        "file_count": len(rows),
+        "inventory_sha256": hashlib.sha256(content).hexdigest(),
+    }
+
+
+def _coordinated_release_receipt(
+    tmp_path: Path, output_root: Path, candidate: Path, qa_dir: Path
+) -> Path:
+    receipt = {
+        "schema_version": 1,
+        "operation": "PUBLISH_PANEL_CURRENT",
+        "state": "AUTHORIZED",
+        "coordinator": "portfolio-release-builder",
+        "release_id": "test-release-id",
+        "release_commit": "a" * 40,
+        "output_root": str(output_root.resolve()),
+        "candidate": {
+            "path": str(candidate.resolve()),
+            **_directory_identity(candidate),
+        },
+        "qa": {"path": str(qa_dir.resolve()), **_directory_identity(qa_dir)},
+    }
+    path = tmp_path / "panel-publication-authorization.json"
+    path.write_bytes(canonical_json_bytes(receipt))
+    return path
+
+
+def _frozen_financial_receipt(
+    tmp_path: Path,
+    inputs: dict[str, Path],
+    candidate: Path,
+    qa_dir: Path,
+    financial: dict[str, object],
+) -> Path:
+    """Freeze independently verified semantic QA before inventorying the receipt."""
+    verification = panel.verify_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        candidate,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    (qa_dir / "semantic-validation.json").write_bytes(
+        canonical_json_bytes(verification)
+    )
+    panel.validate_qa(candidate, qa_dir)
+    return _coordinated_release_receipt(tmp_path, inputs["output"], candidate, qa_dir)
+
+
+def _canonical_return_series_fixture() -> dict[str, Any]:
+    """Bind the seven active test strategies to one canonical live window.
+
+    Each emitted surface deliberately derives its identifiers, dates, count,
+    and digest from the same return rows.  The panel still recomputes the
+    digest from the separately-carried report rows, so a one-surface mutation
+    remains observable rather than being hidden by this fixture convenience.
+    """
+
+    observed_start = "2026-01-02"
+    observed_end = "2026-07-30"
+    generation_id = "a" * 64
+    report_returns: list[dict[str, str]] = []
+    provider_evidence: list[dict[str, Any]] = []
+    dependence_composition: dict[str, dict[str, Any]] = {}
+    by_series_id: dict[str, dict[str, Any]] = {}
+    for index, series_id in enumerate(ACTIVE_STRATEGY_NAMES):
+        strategy_id = ACTIVE_STRATEGY_IDS[index]
+        strategy_version = f"synthetic-version:{strategy_id}"
+        rows = [
+            {
+                "date": observed_start,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return": f"0.0{index + 1}",
+                "strategy_id": strategy_id,
+            },
+            {
+                "date": observed_end,
+                "evidence_layer": "ACCOUNT_LIVE",
+                "return": f"-0.0{index + 1}",
+                "strategy_id": strategy_id,
+            },
+        ]
+        canonical_rows = [
+            {"date": row["date"], "return": row["return"]} for row in rows
+        ]
+        canonical_sha256 = hashlib.sha256(
+            (
+                json.dumps(
+                    canonical_rows,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    ensure_ascii=True,
+                )
+                + "\n"
+            ).encode("utf-8")
+        ).hexdigest()
+        window = {
+            "canonical_live_series_sha256": canonical_sha256,
+            "observed_end": observed_end,
+            "observed_start": observed_start,
+            "return_observations": len(rows),
+            "strategy_version": strategy_version,
+        }
+        report_returns.extend(rows)
+        provider_evidence.append(
+            {
+                "account": {
+                    "observed_end": observed_end,
+                    "observed_start": observed_start,
+                    "return_observations": len(rows),
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_as_of_date": observed_end,
+                "generation_id": generation_id,
+                "provider_id": {
+                    "p123-ai-factor": "ibkr",
+                    "robuxio-crypto": "matrixport",
+                    "volatis-strategy": "quantbase",
+                }.get(strategy_id, "synthetic"),
+                "strategy_id": strategy_id,
+                "strategy_version": strategy_version,
+                **(
+                    {
+                        "current_snapshot": {},
+                        "overlap": {},
+                        "provider": {
+                            "observed_end": "2026-07-29",
+                            "observed_start": observed_start,
+                            "return_observations": len(rows),
+                        },
+                    }
+                    if strategy_id == "p123-ai-factor"
+                    else {}
+                ),
+            }
+        )
+        dependence_composition[series_id] = {
+            "canonical_live_series_sha256": canonical_sha256,
+            "live_evidence_layer": "ACCOUNT_LIVE",
+            "live_inception": observed_start,
+            "live_observations": len(rows),
+            "live_version_ref": strategy_version,
+            "observed_end": observed_end,
+            "observed_start": observed_start,
+            "series_id": series_id,
+            "strategy_version": strategy_version,
+        }
+        by_series_id[series_id] = window
+    return {
+        "by_series_id": by_series_id,
+        "dependence_composition": dependence_composition,
+        "provider_evidence": provider_evidence,
+        "report_returns": report_returns,
+    }
+
+
 def _report() -> dict[str, object]:
+    canonical = _canonical_return_series_fixture()
     strategies = [
         {
             "account_live_cumulative_return": "0.01" if index < 5 else None,
@@ -116,24 +522,24 @@ def _report() -> dict[str, object]:
             "economic_family": f"Synthetic family {index}",
             "implementation_gap_status": "tested" if index < 4 else "UNAVAILABLE",
             "nav_evidence_layer": "ACCOUNT_LIVE",
-            "nav_status": "AVAILABLE" if index < 6 else "UNAVAILABLE",
-            "strategy_id": f"strategy-{index}",
+            "nav_status": "AVAILABLE",
+            "strategy_id": ACTIVE_STRATEGY_IDS[index],
             "strategy_name": STRATEGY_NAMES[index],
-            "systematic_weight": str(1 / 9),
+            "systematic_weight": str(1 / 7),
             "version_ref": None,
             "version_compatibility_reason": "Synthetic version remains unresolved.",
             "version_compatibility_status": "UNRESOLVED",
             "live_plus_backtest_reason": "UNRESOLVED: Synthetic version remains unresolved.",
             "live_plus_backtest_status": "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE",
         }
-        for index in range(9)
+        for index in range(7)
     ]
     accounts = [
         {
             "account_id": f"account-{index:02d}",
             "provider": ("SCHWAB", "IBKR", "ALPACA")[index % 3],
         }
-        for index in range(19)
+        for index in range(panel.CURRENT_PRODUCT_EPOCH_COUNT)
     ]
     allocations = [
         {
@@ -150,10 +556,10 @@ def _report() -> dict[str, object]:
                 "current_value_usd": str(1000 + index),
                 "scope": "SYSTEMATIC",
                 "source_key": "synthetic-allocations",
-                "strategy_id": f"strategy-{index}",
-                "systematic_weight": str(1 / 9),
+                "strategy_id": ACTIVE_STRATEGY_IDS[index],
+                "systematic_weight": str(1 / 7),
             }
-            for index in range(9)
+            for index in range(7)
         ],
     ]
     coverage = [
@@ -240,7 +646,7 @@ def _report() -> dict[str, object]:
                 "quantity": "3",
                 "security_id": "security-synthetic",
                 "status": "AVAILABLE_MAPPED",
-                "strategy_id": "strategy-0",
+                "strategy_id": ACTIVE_STRATEGY_IDS[0],
                 "symbol": "SYNTH",
             }
         ],
@@ -256,37 +662,35 @@ def _report() -> dict[str, object]:
             {"check_id": "synthetic-total", "status": "PASS", "value_usd": "510316.01"}
         ],
         "report_schema_version": 1,
+        "strategy_provider_evidence": canonical["provider_evidence"],
+        "strategy_returns": canonical["report_returns"],
         "strategy_summary": strategies,
         "twr_mwr": [
             {
-                "account_id": "account-00",
+                "account_id": f"account-{index:02d}",
+                "effective_end": None,
+                "effective_start": "2026-01-01",
                 "mwr_status": "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
                 "mwr_xirr": None,
                 "nav_observations": 20,
                 "observed_end": "2026-07-30",
                 "observed_start": "2026-07-01",
-                "strategy_id": "strategy-0",
+                "strategy_id": ACTIVE_STRATEGY_IDS[index % len(ACTIVE_STRATEGY_IDS)],
                 "twr": "0.01",
                 "twr_status": "AVAILABLE_WITH_INFERRED_FLOW_TIMING",
-            },
-            {
-                "account_id": "account-01",
-                "mwr_status": "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
-                "mwr_xirr": None,
-                "nav_observations": 0,
-                "strategy_id": None,
-                "twr": None,
-                "twr_status": "UNMAPPED",
-            },
+            }
+            for index in range(13)
         ],
     }
 
 
 def _decomposition() -> dict[str, object]:
+    canonical = _canonical_return_series_fixture()["by_series_id"]
     selections = []
     models = []
     for index, series_id in enumerate(STRATEGY_NAMES):
         model_id = f"model-{index}" if index < 5 else None
+        canonical_window = canonical.get(series_id)
         selections.append(
             {
                 "model_id": model_id,
@@ -303,13 +707,44 @@ def _decomposition() -> dict[str, object]:
         coverage = {
             "aligned_observations": 80 if model_id else 0,
             "alignment_ratio": "1" if model_id else "0",
-            "canonical_live_series_sha256": "9" * 64,
+            "canonical_live_series_sha256": (
+                canonical_window["canonical_live_series_sha256"]
+                if canonical_window is not None
+                else "9" * 64
+            ),
+            "canonical_live_observed_end": (
+                canonical_window["observed_end"]
+                if canonical_window is not None
+                else None
+            ),
+            "canonical_live_observed_start": (
+                canonical_window["observed_start"]
+                if canonical_window is not None
+                else None
+            ),
+            "canonical_live_observations": (
+                canonical_window["return_observations"]
+                if canonical_window is not None
+                else 0
+            ),
             "factor_missing_target_dates": 0,
             "factor_missing_weekdays": 0,
             "factor_missing_weekends": 0,
-            "observed_end": "2026-07-30" if model_id else None,
-            "observed_start": "2026-01-02" if model_id else None,
-            "target_observations": 80 if model_id else 0,
+            "observed_end": (
+                canonical_window["observed_end"]
+                if canonical_window is not None
+                else None
+            ),
+            "observed_start": (
+                canonical_window["observed_start"]
+                if canonical_window is not None
+                else None
+            ),
+            "target_observations": (
+                canonical_window["return_observations"]
+                if canonical_window is not None
+                else 0
+            ),
             "test_observations": 2 if model_id else 0,
             "train_observations": 78 if model_id else 0,
         }
@@ -461,11 +896,12 @@ def _decomposition() -> dict[str, object]:
 
 
 def _correlation() -> dict[str, object]:
-    size = len(STRATEGY_NAMES)
+    canonical = _canonical_return_series_fixture()
+    size = len(ACTIVE_STRATEGY_NAMES)
     observed_pairs = {
         (left, right)
-        for index, left in enumerate(STRATEGY_NAMES[:5])
-        for right in STRATEGY_NAMES[index + 1 : 5]
+        for index, left in enumerate(ACTIVE_STRATEGY_NAMES[:5])
+        for right in ACTIVE_STRATEGY_NAMES[index + 1 : 5]
     }
 
     def matrix(off_diagonal: str | None) -> list[list[str | None]]:
@@ -479,9 +915,9 @@ def _correlation() -> dict[str, object]:
     cells = []
     blends = []
     implementation = []
-    for left_index, left in enumerate(STRATEGY_NAMES):
+    for left_index, left in enumerate(ACTIVE_STRATEGY_NAMES):
         for right_index in range(left_index + 1, size):
-            right = STRATEGY_NAMES[right_index]
+            right = ACTIVE_STRATEGY_NAMES[right_index]
             available = (left, right) in observed_pairs
             if available:
                 observed[left_index][right_index] = "0.5"
@@ -609,29 +1045,29 @@ def _correlation() -> dict[str, object]:
                         "series_id": series_id,
                         "status": "MEASURED",
                     }
-                    for series_id in STRATEGY_NAMES
+                    for series_id in ACTIVE_STRATEGY_NAMES
                 ],
                 "dependence_matrix": {"missing_pair_rule": "GOVERNED_CONCEPTUAL_PRIOR"},
                 "governs_readiness": False,
                 "loss": "0.2",
-                "measured_component_count": 9,
+                "measured_component_count": 7,
                 "measured_pair_count": 10,
                 "method": "SQRT_V_TRANSPOSE_CORRELATION_V",
-                "prior_pair_count": 26,
+                "prior_pair_count": 11,
                 "prior_component_count": 0,
                 "status": "AVAILABLE_NOT_A_PROBABILITY_FORECAST",
             },
             "correlation_one": {
                 "components": [
                     {
-                        "allocation_weight": str(1 / 9),
+                        "allocation_weight": str(1 / 7),
                         "conservative_loss_fraction": "0.37249726899852387",
                         "loss_contribution": str(
-                            Decimal("0.37249726899852387") / Decimal(9)
+                            Decimal("0.37249726899852387") / Decimal(7)
                         ),
                         "series_id": series_id,
                     }
-                    for series_id in STRATEGY_NAMES
+                    for series_id in ACTIVE_STRATEGY_NAMES
                 ],
                 "declared_loss": "0.37249726899852387",
                 "governs_readiness": True,
@@ -698,7 +1134,8 @@ def _correlation() -> dict[str, object]:
                 },
             },
             "observed_cells": cells,
-            "series_ids": list(STRATEGY_NAMES),
+            "series_composition": canonical["dependence_composition"],
+            "series_ids": list(ACTIVE_STRATEGY_NAMES),
         },
         "policy": {},
         "source": {},
@@ -712,21 +1149,17 @@ def _correlation_v2() -> dict[str, object]:
     live["evidence_mode"] = "LIVE_ONLY"
     live["series_composition"] = {
         series_id: {
+            **composition,
             "backtest_evidence_layer": "BACKTEST",
             "backtest_observations_excluded_at_or_after_live_inception": 20,
             "backtest_observations_used": 0,
             "evidence_mode": "LIVE_ONLY",
             "ignored_other_version_observations": 0,
-            "live_evidence_layer": "ACCOUNT_LIVE",
-            "live_inception": "2026-01-02",
-            "live_observations": 80,
-            "observed_end": "2026-07-30",
-            "observed_start": "2026-01-02",
-            "series_id": series_id,
             "status": "AVAILABLE_LIVE_ONLY",
-            "strategy_version": f"synthetic-version:strategy-{index}",
         }
-        for index, series_id in enumerate(STRATEGY_NAMES)
+        for series_id, composition in _canonical_return_series_fixture()[
+            "dependence_composition"
+        ].items()
     }
     combined = json.loads(json.dumps(live))
     combined["evidence_mode"] = "LIVE_PLUS_BACKTEST"
@@ -748,6 +1181,565 @@ def _correlation_v2() -> dict[str, object]:
         "LIVE_PLUS_BACKTEST": combined,
     }
     return value
+
+
+def _nine_series_live_only_correlation() -> dict[str, object]:
+    """A distinguishable retained source with excluded rows interleaved."""
+
+    source_order = (
+        STRATEGY_NAMES[3],
+        STRATEGY_NAMES[7],
+        STRATEGY_NAMES[0],
+        STRATEGY_NAMES[8],
+        STRATEGY_NAMES[6],
+        STRATEGY_NAMES[2],
+        STRATEGY_NAMES[4],
+        STRATEGY_NAMES[1],
+        STRATEGY_NAMES[5],
+    )
+    size = len(source_order)
+
+    def matrix(base: str) -> list[list[str]]:
+        return [
+            [
+                "1"
+                if row == column
+                else str(
+                    Decimal(base)
+                    + Decimal(min(row, column) * 10 + max(row, column))
+                    / Decimal("1000")
+                )
+                for column in range(size)
+            ]
+            for row in range(size)
+        ]
+
+    observed_cells: list[dict[str, object]] = []
+    blend_cells: list[dict[str, object]] = []
+    implementation_cells: list[dict[str, object]] = []
+    for left_index, left in enumerate(source_order):
+        for right_index in range(left_index + 1, size):
+            right = source_order[right_index]
+            observed_cells.append(
+                {
+                    "left": left,
+                    "pearson": str(
+                        Decimal("0.3")
+                        + Decimal(left_index * 10 + right_index) / Decimal("1000")
+                    ),
+                    "right": right,
+                    "status": "AVAILABLE",
+                }
+            )
+            blend_cells.append(
+                {
+                    "decision_correlation": str(
+                        Decimal("0.4")
+                        + Decimal(left_index * 10 + right_index) / Decimal("1000")
+                    ),
+                    "decision_status": "OBSERVED_SUPPORTED_POSTERIOR",
+                    "left": left,
+                    "observations": 100 + left_index * 10 + right_index,
+                    "observed_correlation": "0.3",
+                    "right": right,
+                }
+            )
+            implementation_cells.append(
+                {
+                    "left": left,
+                    "right": right,
+                    "shared_instruments": [],
+                    "shared_providers": [],
+                    "shared_venues": [],
+                    "status": "AVAILABLE_NO_SHARED_IMPLEMENTATION",
+                }
+            )
+
+    correlation_loss_contributions = (
+        "0.011",
+        "0.022",
+        "0.033",
+        "0.044",
+        "0.055",
+        "0.066",
+        "0.077",
+        "0.088",
+        "0.099",
+    )
+    allocation_weights = (
+        "0.11",
+        "0.12",
+        "0.13",
+        "0.14",
+        "0.15",
+        "0.16",
+        "0.17",
+        "0.18",
+        "0.19",
+    )
+    adverse_loss_fractions = (
+        "0.21",
+        "0.22",
+        "0.23",
+        "0.24",
+        "0.25",
+        "0.26",
+        "0.27",
+        "0.28",
+        "0.29",
+    )
+    dependence = {
+        "blend_cells": blend_cells,
+        "central_case": {
+            "classification": "MEASURED_MAX_DRAWDOWN_PSD_PROJECTED",
+            "components": [
+                {
+                    "adverse_loss_fraction": adverse_loss_fractions[index],
+                    "allocation_weight": allocation_weights[index],
+                    "loss_scale_contribution": str(
+                        Decimal(allocation_weights[index])
+                        * Decimal(adverse_loss_fractions[index])
+                    ),
+                    "series_id": series_id,
+                    "status": "MEASURED" if index != 1 else "PRIOR",
+                }
+                for index, series_id in enumerate(source_order)
+            ],
+            "dependence_matrix": {
+                "input_values": matrix("0.1"),
+                "projection": {
+                    "minimum_eigenvalue_post_projection": "0.01",
+                    "minimum_eigenvalue_pre_projection": "-0.02",
+                },
+                "values": matrix("0.1"),
+            },
+            "governs_readiness": False,
+            "loss": "9.999",
+            "measured_component_count": 8,
+            "measured_pair_count": 36,
+            "method": "SQRT_V_TRANSPOSE_CORRELATION_V",
+            "prior_component_count": 1,
+            "prior_pair_count": 0,
+            "status": "AVAILABLE_NOT_A_PROBABILITY_FORECAST",
+        },
+        "correlation_one": {
+            "components": [
+                {
+                    "allocation_weight": allocation_weights[index],
+                    "conservative_loss_fraction": "0.5",
+                    "loss_contribution": correlation_loss_contributions[index],
+                    "series_id": series_id,
+                }
+                for index, series_id in enumerate(source_order)
+            ],
+            "declared_loss": "9.999",
+            "governs_readiness": True,
+            "loss": "9.999",
+            "method": "SUM_WEIGHT_TIMES_GOVERNED_CONSERVATIVE_BOUND_INPUT",
+            "reconciliation_difference": "9.999",
+            "status": "AVAILABLE_RECONCILED_SEPARATE_CONSERVATIVE_BOUND",
+        },
+        "drawdown_matrices": {
+            regime: {"classification": "SYNTHETIC", "values": matrix("0.4")}
+            for regime in ("either_strategy_underwater", "both_strategies_underwater")
+        },
+        "evidence_mode": "LIVE_ONLY",
+        "horizon_matrices": {
+            horizon: {"classification": "SYNTHETIC", "values": matrix("0.2")}
+            for horizon in ("5", "21", "22", "63", "126", "130", "252", "260")
+        },
+        "implementation_cells": implementation_cells,
+        "matrices": {
+            name: {
+                "classification": "SYNTHETIC",
+                **(
+                    {
+                        "projection": {
+                            "minimum_eigenvalue_post_projection": "0.01",
+                            "minimum_eigenvalue_pre_projection": "-0.02",
+                        }
+                    }
+                    if name in {"posterior", "stress"}
+                    else {}
+                ),
+                "values": matrix("0.3"),
+            }
+            for name in (
+                "conceptual_prior",
+                "decision_no_missing_diversification_credit",
+                "observed_pearson",
+                "observed_spearman",
+                "posterior",
+                "stress",
+            )
+        },
+        "observed_cells": observed_cells,
+        "performance": {
+            series_id: {
+                "cumulative_return": f"0.{index + 1:02d}",
+                "status": "AVAILABLE",
+            }
+            for index, series_id in enumerate(source_order)
+        },
+        "series_composition": {
+            series_id: {
+                "evidence_mode": "LIVE_ONLY",
+                "series_id": series_id,
+                "strategy_version": f"version-{index}",
+            }
+            for index, series_id in enumerate(source_order)
+        },
+        "series_ids": list(source_order),
+    }
+    return {
+        "analytics_hash": "f" * 64,
+        "analytics_schema_version": 2,
+        "as_of_date": "2026-07-30",
+        "builder_version": "synthetic-nine",
+        "default_evidence_mode": "LIVE_ONLY",
+        "dependence": dependence,
+        "dependence_modes": {"LIVE_ONLY": dependence},
+        "policy": {},
+        "source": {},
+    }
+
+
+def test_nine_series_live_only_projection_is_exact_and_recomputes_losses(
+    inputs: dict[str, Path],
+) -> None:
+    """Dropping the identity-bound 9-to-7 projection must reject this source."""
+
+    source = _nine_series_live_only_correlation()
+    source["dependence"]["central_case"]["components"].reverse()
+    source["dependence"]["correlation_one"]["components"].reverse()
+    source["dependence_modes"]["LIVE_ONLY"] = source["dependence"]
+    projected = panel._current_product_correlation_projection(
+        source,
+        ALL_STRATEGY_NAMES_BY_ID,
+        include_hybrid=False,
+    )
+    analysis = panel._dependence_analysis(
+        projected,
+        {"generation_id": "a" * 64, "sha256": "b" * 64},
+        set(ACTIVE_STRATEGY_NAMES),
+        dependence_payload=projected["dependence"],
+    )
+
+    expected_names = [
+        STRATEGY_NAMES[3],
+        STRATEGY_NAMES[0],
+        STRATEGY_NAMES[6],
+        STRATEGY_NAMES[2],
+        STRATEGY_NAMES[4],
+        STRATEGY_NAMES[1],
+        STRATEGY_NAMES[5],
+    ]
+    expected_pairs = {
+        frozenset((STRATEGY_NAMES[3], STRATEGY_NAMES[0])),
+        frozenset((STRATEGY_NAMES[3], STRATEGY_NAMES[6])),
+        frozenset((STRATEGY_NAMES[3], STRATEGY_NAMES[2])),
+        frozenset((STRATEGY_NAMES[3], STRATEGY_NAMES[4])),
+        frozenset((STRATEGY_NAMES[3], STRATEGY_NAMES[1])),
+        frozenset((STRATEGY_NAMES[3], STRATEGY_NAMES[5])),
+        frozenset((STRATEGY_NAMES[0], STRATEGY_NAMES[6])),
+        frozenset((STRATEGY_NAMES[0], STRATEGY_NAMES[2])),
+        frozenset((STRATEGY_NAMES[0], STRATEGY_NAMES[4])),
+        frozenset((STRATEGY_NAMES[0], STRATEGY_NAMES[1])),
+        frozenset((STRATEGY_NAMES[0], STRATEGY_NAMES[5])),
+        frozenset((STRATEGY_NAMES[6], STRATEGY_NAMES[2])),
+        frozenset((STRATEGY_NAMES[6], STRATEGY_NAMES[4])),
+        frozenset((STRATEGY_NAMES[6], STRATEGY_NAMES[1])),
+        frozenset((STRATEGY_NAMES[6], STRATEGY_NAMES[5])),
+        frozenset((STRATEGY_NAMES[2], STRATEGY_NAMES[4])),
+        frozenset((STRATEGY_NAMES[2], STRATEGY_NAMES[1])),
+        frozenset((STRATEGY_NAMES[2], STRATEGY_NAMES[5])),
+        frozenset((STRATEGY_NAMES[4], STRATEGY_NAMES[1])),
+        frozenset((STRATEGY_NAMES[4], STRATEGY_NAMES[5])),
+        frozenset((STRATEGY_NAMES[1], STRATEGY_NAMES[5])),
+    }
+    assert analysis["series_ids"] == expected_names
+    assert {
+        frozenset((cell["left"], cell["right"])) for cell in analysis["cells"]
+    } == expected_pairs
+    assert len(expected_pairs) == analysis["pair_count"] == 21
+    assert analysis["matrices"]["posterior"]["values"][1][2] == "0.324"
+    assert "projection" not in analysis["matrices"]["posterior"]
+    assert analysis["horizon_matrices"]["21"]["values"][1][2] == "0.224"
+    assert (
+        analysis["drawdown_matrices"]["both_strategies_underwater"]["values"][1][2]
+        == "0.424"
+    )
+    assert list(projected["dependence"]["performance"]) == expected_names
+    assert list(analysis["series_composition"]) == expected_names
+
+    expected_correlation_one = sum(
+        map(Decimal, ("0.011", "0.033", "0.055", "0.066", "0.077", "0.088", "0.099"))
+    )
+    assert Decimal(analysis["correlation_one"]["loss"]) == expected_correlation_one
+    assert [
+        component["series_id"]
+        for component in analysis["correlation_one"]["components"]
+    ] == expected_names
+    assert [
+        component["allocation_weight"]
+        for component in analysis["correlation_one"]["components"]
+    ] == ["0.11", "0.13", "0.15", "0.16", "0.17", "0.18", "0.19"]
+
+    central = analysis["central_case"]
+    assert [
+        component["series_id"] for component in central["components"]
+    ] == expected_names
+    vectors_by_id = {
+        STRATEGY_NAMES[3]: Decimal("0.11") * Decimal("0.21"),
+        STRATEGY_NAMES[0]: Decimal("0.13") * Decimal("0.23"),
+        STRATEGY_NAMES[6]: Decimal("0.15") * Decimal("0.25"),
+        STRATEGY_NAMES[2]: Decimal("0.16") * Decimal("0.26"),
+        STRATEGY_NAMES[4]: Decimal("0.17") * Decimal("0.27"),
+        STRATEGY_NAMES[1]: Decimal("0.18") * Decimal("0.28"),
+        STRATEGY_NAMES[5]: Decimal("0.19") * Decimal("0.29"),
+    }
+    vectors = [vectors_by_id[series_id] for series_id in expected_names]
+    matrix_values = [
+        list(map(Decimal, ("1", ".102", ".104", ".105", ".106", ".107", ".108"))),
+        list(map(Decimal, (".102", "1", ".124", ".125", ".126", ".127", ".128"))),
+        list(map(Decimal, (".104", ".124", "1", ".145", ".146", ".147", ".148"))),
+        list(map(Decimal, (".105", ".125", ".145", "1", ".156", ".157", ".158"))),
+        list(map(Decimal, (".106", ".126", ".146", ".156", "1", ".167", ".168"))),
+        list(map(Decimal, (".107", ".127", ".147", ".157", ".167", "1", ".178"))),
+        list(map(Decimal, (".108", ".128", ".148", ".158", ".168", ".178", "1"))),
+    ]
+    expected_central = sum(
+        vectors[row] * matrix_values[row][column] * vectors[column]
+        for row in range(7)
+        for column in range(7)
+    ).sqrt()
+    assert float(central["loss"]) == pytest.approx(float(expected_central), abs=1e-12)
+    assert central["measured_component_count"] == 7
+    assert central["prior_component_count"] == 0
+    assert central["measured_pair_count"] == 21
+    assert central["prior_pair_count"] == 0
+    assert "projection" not in central["dependence_matrix"]
+
+
+def test_projected_semantic_hash_ignores_excluded_data_but_binds_retained_data(
+    inputs: dict[str, Path],
+) -> None:
+    """Hashing the retained payload must ignore only the two governed exclusions."""
+
+    source = _nine_series_live_only_correlation()
+    identity = hashlib.sha256(canonical_json_bytes(source)).hexdigest()
+    excluded_mutation = json.loads(json.dumps(source))
+    excluded_mutation["dependence"]["performance"][STRATEGY_NAMES[7]][
+        "cumulative_return"
+    ] = "0.777"
+    excluded_mutation["dependence_modes"]["LIVE_ONLY"] = excluded_mutation["dependence"]
+    retained_mutation = json.loads(json.dumps(source))
+    retained_mutation["dependence"]["matrices"]["posterior"]["values"][0][2] = "0.987"
+    retained_mutation["dependence"]["matrices"]["posterior"]["values"][2][0] = "0.987"
+    retained_mutation["dependence_modes"]["LIVE_ONLY"] = retained_mutation["dependence"]
+
+    projected = panel._current_product_correlation_projection(
+        source, ALL_STRATEGY_NAMES_BY_ID, include_hybrid=False
+    )
+    projected_excluded = panel._current_product_correlation_projection(
+        excluded_mutation, ALL_STRATEGY_NAMES_BY_ID, include_hybrid=False
+    )
+    projected_retained = panel._current_product_correlation_projection(
+        retained_mutation, ALL_STRATEGY_NAMES_BY_ID, include_hybrid=False
+    )
+
+    assert (
+        identity != hashlib.sha256(canonical_json_bytes(excluded_mutation)).hexdigest()
+    )
+    assert projected_excluded == projected
+    assert projected_excluded["analytics_hash"] == projected["analytics_hash"]
+    assert (
+        projected_retained["dependence"]["matrices"]["posterior"]["values"][0][1]
+        == "0.987"
+    )
+    assert projected_retained["analytics_hash"] != projected["analytics_hash"]
+    source_analysis = panel._dependence_analysis(
+        projected,
+        {"generation_id": "a" * 64, "sha256": identity},
+        set(ACTIVE_STRATEGY_NAMES),
+        dependence_payload=projected["dependence"],
+    )
+    excluded_identity = hashlib.sha256(
+        canonical_json_bytes(excluded_mutation)
+    ).hexdigest()
+    excluded_analysis = panel._dependence_analysis(
+        projected_excluded,
+        {"generation_id": "a" * 64, "sha256": excluded_identity},
+        set(ACTIVE_STRATEGY_NAMES),
+        dependence_payload=projected_excluded["dependence"],
+    )
+    assert (
+        source_analysis["generation_id"]
+        == excluded_analysis["generation_id"]
+        == "a" * 64
+    )
+    assert source_analysis["source_sha256"] == identity
+    assert excluded_analysis["source_sha256"] == excluded_identity
+    assert source_analysis["source_sha256"] != excluded_analysis["source_sha256"]
+
+
+def test_candidate_uses_projected_seven_series_stress_not_stale_report_stress(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+) -> None:
+    """A retained nine-series report value must not replace projected analytics."""
+
+    correlation = _nine_series_live_only_correlation()
+    correlation["dependence"]["series_composition"].update(
+        _canonical_return_series_fixture()["dependence_composition"]
+    )
+    correlation["dependence_modes"]["LIVE_ONLY"] = correlation["dependence"]
+    _publish_analytics(
+        inputs["correlation"],
+        "correlation.json",
+        correlation,
+        "synthetic-retained-nine-correlation",
+    )
+    report = _report_with_baseline(inputs)
+    report_root = tmp_path / "real-retained-report"
+    _publish_report(
+        report_root,
+        tmp_path / "real-retained-report.json",
+        _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog()),
+    )
+    lens_root, plan_bundle = _lens_inputs(tmp_path)
+    legacy_panel = inputs["legacy"]
+    build_kwargs = {
+        "correlation_root": inputs["correlation"],
+        "decomposition_lenses_root": lens_root,
+        "decomposition_plan_bundle": plan_bundle,
+        "freshness_health_path": inputs["freshness"],
+        "baseline_root": inputs["baseline"],
+        "weekly_returns_root": inputs["weekly"],
+    }
+    result = panel.build_candidate(
+        report_root,
+        legacy_panel,
+        tmp_path / "panel-output",
+        **build_kwargs,
+    )
+    candidate = Path(result["candidate_dir"])
+    verification = panel.verify_candidate(
+        report_root,
+        legacy_panel,
+        candidate,
+        **build_kwargs,
+    )
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+
+    assert verification["all_passed"] is True
+    assert data["advisory"]["correlation_one_stress"] == "0.429"
+    assert data["dependence_analysis"]["correlation_one"]["loss"] == "0.429"
+    assert data["advisory"]["correlation_one_stress"] != "0.37249726899852387"
+
+
+def test_exact_nine_candidate_without_optional_decomposition_plan_projects_and_verifies(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+) -> None:
+    """Removing the optional plan must not hide governed Echo/Composer identities."""
+
+    correlation = _nine_series_live_only_correlation()
+    correlation["dependence"]["series_composition"].update(
+        _canonical_return_series_fixture()["dependence_composition"]
+    )
+    correlation["dependence_modes"]["LIVE_ONLY"] = correlation["dependence"]
+    _publish_analytics(
+        inputs["correlation"],
+        "correlation.json",
+        correlation,
+        "synthetic-retained-nine-correlation-no-plan",
+    )
+    _correlation, correlation_identity, _correlation_path = panel._current_analytics(
+        inputs["correlation"],
+        filename="correlation.json",
+        field_name="portfolio correlation",
+        expected_schema_version=(1, 2),
+    )
+    report = _report_with_baseline(inputs)
+    report_root = tmp_path / "no-plan-report"
+    _publish_report(
+        report_root,
+        tmp_path / "no-plan-report.json",
+        _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog()),
+    )
+    build_kwargs = {
+        "correlation_root": inputs["correlation"],
+        "freshness_health_path": inputs["freshness"],
+        "baseline_root": inputs["baseline"],
+        "weekly_returns_root": inputs["weekly"],
+    }
+
+    result = panel.build_candidate(
+        report_root,
+        inputs["legacy"],
+        tmp_path / "no-plan-panel-output",
+        **build_kwargs,
+    )
+    candidate = Path(result["candidate_dir"])
+    verification = panel.verify_candidate(
+        report_root,
+        inputs["legacy"],
+        candidate,
+        **build_kwargs,
+    )
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+
+    assert verification["all_passed"] is True
+    assert data["dependence_analysis"]["series_ids"] == [
+        STRATEGY_NAMES[3],
+        STRATEGY_NAMES[0],
+        STRATEGY_NAMES[6],
+        STRATEGY_NAMES[2],
+        STRATEGY_NAMES[4],
+        STRATEGY_NAMES[1],
+        STRATEGY_NAMES[5],
+    ]
+    assert data["dependence_analysis"]["pair_count"] == 21
+    assert (
+        data["dependence_analysis"]["generation_id"]
+        == data["meta"]["correlation_generation_id"]
+        == correlation_identity["generation_id"]
+    )
+    assert (
+        data["dependence_analysis"]["source_sha256"]
+        == data["meta"]["correlation_sha256"]
+        == correlation_identity["sha256"]
+    )
+
+
+@pytest.mark.parametrize("mutation", ("unknown", "duplicate", "missing"))
+def test_current_product_correlation_projection_rejects_nonexact_series(
+    mutation: str,
+) -> None:
+    """Counts alone must not admit an unknown, duplicate, or missing current series."""
+
+    source = _nine_series_live_only_correlation()
+    series_ids = source["dependence"]["series_ids"]
+    if mutation == "unknown":
+        series_ids[0] = "Unknown strategy"
+    elif mutation == "duplicate":
+        series_ids[1] = series_ids[0]
+    else:
+        series_ids.pop()
+    source["dependence_modes"]["LIVE_ONLY"] = source["dependence"]
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="current-product correlation series identity",
+    ):
+        panel._current_product_correlation_projection(
+            source, ALL_STRATEGY_NAMES_BY_ID, include_hybrid=False
+        )
 
 
 def _publish_analytics(root: Path, filename: str, value: object, adapter: str) -> None:
@@ -831,19 +1823,33 @@ def _with_hwm_summary(
     freshness_rows = json.loads(freshness_path.read_text(encoding="utf-8"))[
         "assessments"
     ]
+    strategy_product_controls = panel._financial_mvp_product_controls()
+    current_product_catalog = panel._validate_current_product_baseline_projection(
+        report, baseline_catalog, strategy_product_controls
+    )
+    current_strategies = panel._current_product_rows(
+        report["strategy_summary"], strategy_product_controls
+    )
     policy, _policy_hash = panel._hwm_policy(
         date.fromisoformat(freshness_rows[0]["evaluated_on"])
     )
+    effective_hwm_policy = panel._effective_hwm_policy_for_current_strategies(
+        current_strategies, policy
+    )
     _strategies, coverage_summary = panel._governed_hwm_coverage(
-        report["strategy_summary"],
-        policy,
+        current_strategies,
+        effective_hwm_policy,
         freshness_rows,
         require_freshness=True,
     )
     report["hwm_summary"] = {
         **coverage_summary,
-        **panel._compute_panel_numerical_hwm(baseline_catalog),
+        **panel._compute_panel_numerical_hwm(current_product_catalog),
     }
+    for row in report["portfolio_summary"]:
+        if row.get("metric") == "Full-systematic HWM":
+            row["value"] = report["hwm_summary"]["status"]
+            break
     return report
 
 
@@ -854,6 +1860,8 @@ def _panel_baseline_catalog(
 ) -> dict[str, Any]:
     """The governed baseline catalog matching the panel fixture report."""
     from decimal import Decimal
+
+    canonical = _canonical_return_series_fixture()
 
     # Compute matching allocations from the envelope and crosswalk so the
     # endpoint recomputation produces delta=0.  When no envelope is provided,
@@ -903,7 +1911,7 @@ def _panel_baseline_catalog(
             )
     else:
         # No envelope — use default SYSTEMATIC allocations for perimeter.
-        for index in range(9):
+        for index in range(7):
             matching_allocations.append(
                 {
                     "as_of_date": "2026-07-30",
@@ -913,17 +1921,37 @@ def _panel_baseline_catalog(
                         "value": str(1000 + index),
                     },
                     "scope": "SYSTEMATIC",
-                    "strategy_id": f"strategy-{index}",
+                    "strategy_id": ACTIVE_STRATEGY_IDS[index],
                 }
             )
 
     catalog: dict[str, Any] = {
+        "accounts": [
+            {"account_id": f"account-{index:02d}", "provider": "SYNTHETIC"}
+            for index in range(19)
+        ],
         "allocations": matching_allocations,
         "as_of_date": "2026-07-30",
+        "assignments": [
+            {
+                "account_id": f"account-{index:02d}",
+                "strategy_id": ACTIVE_STRATEGY_IDS[index % len(ACTIVE_STRATEGY_IDS)],
+                "strategy_mapping_disposition": "STRATEGY_MAPPED",
+                "effective_start": "2026-01-01",
+                "effective_end": None,
+            }
+            for index in range(panel.CURRENT_PRODUCT_EPOCH_COUNT)
+        ],
         "baseline_schema_version": 1,
         "policy_version": "PORT-PERF-1",
         "source_artifacts": [],
-        "strategy_returns": list(crosswalk or []),
+        "strategies": [
+            {"name": strategy_name, "strategy_id": strategy_id}
+            for strategy_id, strategy_name in ALL_STRATEGY_NAMES_BY_ID.items()
+        ],
+        "strategy_returns": list(
+            canonical["report_returns"] if crosswalk is None else crosswalk
+        ),
     }
     if envelope is not None:
         catalog["hwm_inputs"] = envelope
@@ -992,21 +2020,44 @@ def _publish_baseline(
     }
 
 
-def _lens_inputs(tmp_path: Path) -> tuple[Path, Path]:
+def _translate_decomposition_series(
+    value: dict[str, Any], strategy_names: Sequence[str]
+) -> dict[str, Any]:
+    translated_names = dict(zip(STRATEGY_NAMES, strategy_names, strict=True))
+    for field in ("model_selections", "model_results"):
+        for row in value[field]:
+            row["series_id"] = translated_names[row["series_id"]]
+    return value
+
+
+def _lens_inputs(
+    tmp_path: Path, strategy_names: Sequence[str] = STRATEGY_NAMES
+) -> tuple[Path, Path]:
     lens_root = tmp_path / "analytics" / "decomposition-lenses"
+    legacy_strategy_ids = [
+        "p123-ai-factor",
+        "p123-eu",
+        "qsi",
+        "tt-portfolio",
+        "volatis-strategy",
+        "grizzlybears-vtma",
+        "robuxio-crypto",
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    ]
     assignments = {
-        "europe-economic": ("ECONOMIC_FACTOR", {STRATEGY_NAMES[1]}),
+        "europe-economic": ("ECONOMIC_FACTOR", {strategy_names[1]}),
         "multi-asset-style": (
             "ETF_STYLE",
-            set(STRATEGY_NAMES[3:7]),
+            set(strategy_names[3:7]),
         ),
-        "us-economic": ("ECONOMIC_FACTOR", {STRATEGY_NAMES[0]}),
-        "us-equity-style": ("ETF_STYLE", {STRATEGY_NAMES[2]}),
-        "us-industry": ("RETURN_INDUSTRY", {STRATEGY_NAMES[8]}),
-        "us-sector": ("RETURN_SECTOR", {STRATEGY_NAMES[7]}),
+        "us-economic": ("ECONOMIC_FACTOR", {strategy_names[0]}),
+        "us-equity-style": ("ETF_STYLE", {strategy_names[2]}),
+        "us-industry": ("RETURN_INDUSTRY", {strategy_names[8]}),
+        "us-sector": ("RETURN_SECTOR", {strategy_names[6]}),
     }
     for source_key, (analysis_lens, selected_names) in assignments.items():
-        value = _decomposition()
+        value = _translate_decomposition_series(_decomposition(), strategy_names)
         value["analysis_lens"] = analysis_lens
         value["model_selections"] = [
             row
@@ -1037,13 +2088,13 @@ def _lens_inputs(tmp_path: Path) -> tuple[Path, Path]:
             {
                 "default_disposition": (
                     "UNAVAILABLE_MISSING_ACCEPTED_CRYPTO_CANDIDATE"
-                    if index == 7
+                    if index == 6
                     else "OUT_OF_SCOPE_UNDECLARED_LENS"
                 ),
                 "series_id": name,
-                "strategy_id": f"strategy-{index}",
+                "strategy_id": legacy_strategy_ids[index],
             }
-            for index, name in enumerate(STRATEGY_NAMES)
+            for index, name in enumerate(strategy_names)
         ],
     }
     _write_json(plan_path, plan)
@@ -1074,6 +2125,33 @@ def _lens_inputs(tmp_path: Path) -> tuple[Path, Path]:
 @pytest.fixture
 def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     report_root = tmp_path / "reporting"
+    financial_contract = json.loads(
+        panel.FINANCIAL_MVP_CONTRACT.read_text(encoding="utf-8")
+    )
+    for strategy in financial_contract["strategies"]:
+        strategy.pop("funded_membership", None)
+    financial_contract_path = tmp_path / "financial-mvp-source.json"
+    financial_contract_path.write_bytes(canonical_json_bytes(financial_contract))
+    portable_hwm_policy = json.loads(
+        panel._PORTABLE_HWM_POLICY.read_text(encoding="utf-8")
+    )
+    portable_hwm_policy["product_authority"].update(
+        {
+            "raw_sha256": hashlib.sha256(
+                financial_contract_path.read_bytes()
+            ).hexdigest(),
+            "semantic_digest": hashlib.sha256(
+                canonical_json_bytes(financial_contract)
+            ).hexdigest(),
+        }
+    )
+    portable_hwm_policy_path = tmp_path / "portfolio-hwm-policy-v4.json"
+    portable_hwm_policy_path.write_bytes(canonical_json_bytes(portable_hwm_policy))
+    monkeypatch.setattr(panel, "FINANCIAL_MVP_CONTRACT", financial_contract_path)
+    monkeypatch.setattr(
+        panel, "_PORTABLE_HWM_PRODUCT_CONTRACT", financial_contract_path
+    )
+    monkeypatch.setattr(panel, "_PORTABLE_HWM_POLICY", portable_hwm_policy_path)
     source_report = tmp_path / "synthetic-portfolio-report-data.json"
     decomposition_root = tmp_path / "analytics" / "decomposition"
     correlation_root = tmp_path / "analytics" / "correlation"
@@ -1088,6 +2166,87 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
         "correlation.json",
         _correlation(),
         "synthetic-correlation",
+    )
+    weekly_root = tmp_path / "analytics" / "weekly"
+    canonical = _canonical_return_series_fixture()["by_series_id"]
+    weekly_rows = [
+        {
+            "display_groups": ["STRATEGY"],
+            "display_name": name,
+            "mode_coverage": {
+                mode: {
+                    "canonical_live_series_sha256": canonical[name][
+                        "canonical_live_series_sha256"
+                    ],
+                    "live_daily_observations": canonical[name]["return_observations"],
+                    "strategy_version": canonical[name]["strategy_version"],
+                }
+                for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
+            },
+            "observation_meta_by_mode": {
+                mode: {
+                    "2026-07-27": [
+                        canonical[name]["observed_end"],
+                        canonical[name]["observed_start"],
+                        canonical[name]["observed_end"],
+                    ]
+                }
+                for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
+            },
+            "primary_group": "STRATEGY",
+            "series_id": name,
+            "values_by_mode": {
+                mode: {"2026-07-27": "0.01"}
+                for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
+            },
+        }
+        for name in ACTIVE_STRATEGY_NAMES
+    ]
+    weekly_rows.extend(
+        {
+            "display_groups": ["CORE_BENCHMARK"],
+            "display_name": f"Benchmark {index}",
+            "observation_meta": {"2026-07-27": {}},
+            "primary_group": "STYLE_MULTI_ASSET",
+            "series_id": f"market:Benchmark {index}",
+            "values": {"2026-07-27": "0.01"},
+        }
+        for index in range(9)
+    )
+    _publish_analytics(
+        weekly_root,
+        "weekly-returns.json",
+        {
+            "analytics_schema_version": 1,
+            "as_of_date": "2026-07-30",
+            "current_week": {"default_visible": False},
+            "default_evidence_mode": "LIVE_ONLY",
+            "display_groups": [
+                "STRATEGY",
+                "ECONOMIC_FACTOR_US",
+                "ECONOMIC_FACTOR_EUROPE",
+                "STYLE_US_EQUITY",
+                "STYLE_MULTI_ASSET",
+                "SECTOR",
+                "INDUSTRY",
+                "CORE_BENCHMARK",
+            ],
+            "observation_meta_fields": [
+                "daily_observation_count",
+                "actual_observed_start",
+                "actual_observed_end",
+                "coverage_status",
+                "boundary_reasons",
+            ],
+            "series": weekly_rows,
+            "strategy_evidence_modes": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"],
+            "week_policy": {
+                "absent_value": "UNAVAILABLE_NOT_ZERO",
+                "aggregation": "PRODUCT_OF_ONE_PLUS_DAILY_RETURN_MINUS_ONE",
+            },
+            "weeks": ["2026-07-27"],
+        },
+        "synthetic-weekly-returns",
     )
     legacy = tmp_path / "legacy"
     source_content = {
@@ -1176,9 +2335,9 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
                     "reason": "accepted observation is within cadence and grace",
                     "revision_state": "ORIGINAL",
                     "state": "FRESH",
-                    "subject_id": f"strategy-{index}",
+                    "subject_id": ACTIVE_STRATEGY_IDS[index],
                 }
-                for index in range(9)
+                for index in range(7)
             ],
             "policy": {
                 "expected_interval_days": 1,
@@ -1208,6 +2367,7 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
         "correlation": correlation_root,
         "decomposition": decomposition_root,
         "freshness": freshness,
+        "weekly": weekly_root,
         "legacy": legacy,
         "output": tmp_path / "control-panel",
         "report": report_root,
@@ -1216,28 +2376,53 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
 
 def _qa(candidate: Path, root: Path) -> Path:
     qa = root / "qa"
+    candidate_record_bytes = (candidate / "candidate.json").read_bytes()
+    candidate_record = json.loads(candidate_record_bytes)
+    candidate_record_sha256 = hashlib.sha256(candidate_record_bytes).hexdigest()
+    artifact_sha256 = candidate_record["artifact_sha256"]
+    png = bytes.fromhex(
+        "89504e470d0a1a0a0000000d494844520000000100000001"
+        "08060000001f15c4890000000049454e44ae426082"
+    )
     for name in panel.CAPTURES:
         folder = qa / name
         folder.mkdir(parents=True, exist_ok=True)
-        (folder / "screenshot.png").write_bytes(b"synthetic-png-evidence")
+        (folder / "screenshot.png").write_bytes(png)
         _write_json(folder / "console-events.json", [])
         _write_json(folder / "request-failures.json", [])
         _write_json(
             folder / "manifest.json",
-            {"target": f"file:///{candidate.name}/index.html#{name}"},
+            {
+                "artifact_sha256": artifact_sha256,
+                "candidate_record_sha256": candidate_record_sha256,
+                "target": f"file:///{candidate.name}/index.html#{name}",
+            },
         )
     for name in panel.LINT_CAPTURES:
         _write_json(
             qa / name / "visual-lint.json", {"finding_count": 0, "findings": []}
         )
-    (qa / "desktop-command" / "page.pdf").write_bytes(b"synthetic-pdf-evidence")
+    (qa / "desktop-command" / "page.pdf").write_bytes(b"%PDF-synthetic-evidence")
     checks = [
-        {"check": f"synthetic interaction {index}", "status": "PASS"}
+        {
+            "check": (
+                "Epoch manifest DOM matches exact source values and blockers"
+                if index == 0
+                else f"synthetic interaction {index}"
+            ),
+            "status": "PASS",
+        }
         for index in range(6)
     ]
     _write_json(
         qa / "interaction-results.json",
-        {"all_passed": True, "checks": checks, "panel_id": candidate.name},
+        {
+            "all_passed": True,
+            "artifact_sha256": artifact_sha256,
+            "candidate_record_sha256": candidate_record_sha256,
+            "checks": checks,
+            "panel_id": candidate.name,
+        },
     )
     return qa
 
@@ -1249,6 +2434,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
     )
     second = panel.build_candidate(
         inputs["report"],
@@ -1256,6 +2442,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
     )
     assert first["panel_id"] == second["panel_id"]
     assert (
@@ -1267,6 +2454,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         Path(first["candidate_dir"]),
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
     )
     assert result["all_passed"] is True
     assert result["checks_passed"] == result["checks_total"]
@@ -1276,8 +2464,11 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         )
     )
     assert data["panel_schema_version"] == panel.PANEL_SCHEMA_VERSION
-    assert len(data["account_summary"]) == 19
-    assert len({row["account_id"] for row in data["account_summary"]}) == 19
+    assert len(data["account_summary"]) == panel.CURRENT_PRODUCT_EPOCH_COUNT
+    assert (
+        len({row["account_id"] for row in data["account_summary"]})
+        == panel.CURRENT_PRODUCT_EPOCH_COUNT
+    )
     assert {
         row["account_id"] for row in [*data["performance"], *data["positions"]]
     } <= {row["account_id"] for row in data["account_summary"]}
@@ -1295,7 +2486,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
             "quantity": "3",
             "security_id": "security-synthetic",
             "status": "AVAILABLE_MAPPED",
-            "strategy_id": "strategy-0",
+            "strategy_id": ACTIVE_STRATEGY_IDS[0],
             "strategy_name": STRATEGY_NAMES[0],
             "symbol": "SYNTH",
         }
@@ -1303,9 +2494,9 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
     assert data["factor_analysis"]["available_count"] == 4
     assert data["factor_analysis"]["diagnostic_count"] == 1
     assert data["factor_analysis"]["dynamic_available_count"] == 1
-    assert data["factor_analysis"]["unavailable_count"] == 4
+    assert data["factor_analysis"]["unavailable_count"] == 2
     assert data["dependence_analysis"]["available_pair_count"] == 10
-    assert data["dependence_analysis"]["pair_count"] == 36
+    assert data["dependence_analysis"]["pair_count"] == 21
     assert data["dependence_analysis"]["central_case"]["loss"] == "0.2"
     assert data["advisory"]["central_case_loss"] == "0.2"
     assert data["advisory"]["readiness_loss_measure"] == (
@@ -1320,7 +2511,7 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
     assert cluster_budget["systematic_loss_limit"] == "0.15"
     assert cluster_budget["status"] == "BREACHES_SYSTEMATIC_LOSS_LIMIT"
     assert float(cluster_budget["limit_breach"]) == pytest.approx(0.22249726899852387)
-    assert cluster_budget["clusters"][0]["members"] == list(STRATEGY_NAMES)
+    assert cluster_budget["clusters"][0]["members"] == list(STRATEGY_NAMES[:7])
     assert float(cluster_budget["clusters"][0]["loss_contribution"]) == (
         pytest.approx(0.37249726899852387)
     )
@@ -1329,11 +2520,11 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
     assert data["hybrid_mode_gate"]["status"] == (
         "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
     )
-    assert len(data["hybrid_mode_gate"]["blocked_strategies"]) == 9
+    assert len(data["hybrid_mode_gate"]["blocked_strategies"]) == 7
     assert data["hybrid_mode_gate"]["eligible_strategies"] == []
     underwriting = data["strategy_underwriting"]
     assert underwriting["policy_id"] == "PORT-UNDERWRITE-1"
-    assert underwriting["counts"]["strategies"] == 9
+    assert underwriting["counts"]["strategies"] == 7
     assert underwriting["authority_boundary"] == {
         "allocation_authority": "NONE",
         "automatic_drop_authority": "NONE",
@@ -1352,6 +2543,520 @@ def test_build_is_deterministic_and_verifies(inputs: dict[str, Path]) -> None:
         }
         for row in underwriting["rows"]
     )
+
+
+def test_build_allows_explicit_weekly_fallback(inputs: dict[str, Path]) -> None:
+    """An omitted weekly root is an explicit unavailable monitor, not a partial feed."""
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=None,
+    )
+    data = _candidate_data(built)
+
+    assert data["weekly_returns"]["status"] == "UNAVAILABLE_NOT_CONFIGURED"
+    assert data["weekly_returns"]["series"] == []
+
+
+@pytest.mark.parametrize(
+    ("matching", "identity_mutation"),
+    (
+        (False, None),
+        (True, None),
+        (True, "report"),
+        (True, "manifest"),
+    ),
+    ids=(
+        "mismatch",
+        "match",
+        "report-identity-divergence",
+        "manifest-identity-divergence",
+    ),
+)
+def test_composed_schema9_performance_lineage_paths(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    matching: bool,
+    identity_mutation: str | None,
+) -> None:
+    """Real schema-9 ledger identities drive both retained and rejected paths."""
+
+    manifest_identity = {
+        "schema_name": "provider-ledger-catalog",
+        "schema_version": "1",
+        "sha256": ("2" if matching else "1") * 64,
+    }
+    baseline_identity = {
+        "schema_name": "provider-ledger-catalog",
+        "schema_version": "1",
+        "sha256": "2" * 64,
+    }
+    baseline_catalog = _panel_baseline_catalog()
+    baseline_catalog["source_artifacts"] = [
+        {
+            "artifact_id": "providers/synthetic-provider-ledger.json",
+            **baseline_identity,
+        }
+    ]
+    baseline_root = tmp_path / "lineage-baseline"
+    baseline_reference = _publish_baseline(
+        baseline_root, tmp_path / "lineage-baseline.json", baseline_catalog
+    )
+    report = _report()
+    report["baseline"] = baseline_reference
+    for performance, identity in zip(
+        report["twr_mwr"], _LINEAGE_REPORT_IDENTITIES, strict=True
+    ):
+        account_id, strategy_id, effective_start, effective_end = identity
+        performance["account_id"] = account_id
+        performance["strategy_id"] = strategy_id
+        performance["effective_start"] = effective_start
+        performance["effective_end"] = effective_end
+    if identity_mutation == "report":
+        report["twr_mwr"][0]["effective_start"] = "2026-01-02"
+    _with_hwm_summary(report, inputs["freshness"], baseline_catalog)
+    for row in report["strategy_summary"]:
+        row.update(
+            {
+                "benchmark_assignment_status": "AVAILABLE",
+                "benchmark_id": "synthetic-benchmark",
+                "benchmark_effective_start": "2026-07-01",
+                "benchmark_effective_end": "2026-07-30",
+                "benchmark_version_ref": "benchmark-v1",
+                "benchmark_rationale": "report benchmark rationale",
+                "benchmark_comparison_status": "AVAILABLE",
+                "benchmark_comparison_disposition": "AVAILABLE_EXACT_DATE_COMPARISON",
+                "benchmark_comparison_observations": 20,
+                "benchmark_comparison_observed_start": "2026-07-01",
+                "benchmark_comparison_observed_end": "2026-07-30",
+                "benchmark_account_cumulative_return": "0.01",
+                "benchmark_reference_cumulative_return": "0.02",
+                "benchmark_cumulative_gap": "-0.01",
+                "benchmark_active_return_annualized": "-0.02",
+                "benchmark_tracking_error_annualized": "0.10",
+                "benchmark_information_ratio": "-0.20",
+                "benchmark_beta": "0.90",
+                "benchmark_correlation": "0.80",
+                "benchmark_upside_capture": "0.90",
+                "benchmark_downside_capture": "1.10",
+                "benchmark_relative_drawdown": "-0.03",
+                "provider_comparison_status": "AVAILABLE",
+                "provider_comparison_disposition": "AVAILABLE_EXACT_DATE_COMPARISON",
+                "provider_comparison_version_compatibility": "MATCHED",
+                "provider_comparison_observations": 20,
+                "provider_comparison_observed_start": "2026-07-01",
+                "provider_comparison_observed_end": "2026-07-30",
+                "provider_account_cumulative_return": "0.01",
+                "provider_reference_cumulative_return": "0.02",
+                "provider_cumulative_gap": "-0.01",
+                "provider_active_return_annualized": "-0.02",
+                "provider_tracking_error_annualized": "0.10",
+                "provider_information_ratio": "-0.20",
+                "provider_beta": "0.90",
+                "provider_correlation": "0.80",
+                "provider_upside_capture": "0.90",
+                "provider_downside_capture": "1.10",
+                "provider_relative_drawdown": "-0.03",
+                "cash_drag_status": "AVAILABLE",
+                "cash_drag_reason": "report cash-drag rationale",
+                "legacy_baseline_disposition": "REPORT_DERIVED",
+                "annual_external_cost_rate_pre_tax": "0.01",
+                "annual_external_cost_usd": "100.00",
+                "after_tax_annual_cost_rate": "0.02",
+                "after_tax_status": "AVAILABLE",
+                "fees_status": "AVAILABLE",
+            }
+        )
+    report_root = tmp_path / "lineage-report"
+    _publish_report(report_root, tmp_path / "lineage-report.json", report)
+
+    # The verified schema-9 fixture contributes the complete formal manifest
+    # shape; identities and row tuples are independently rebuilt from the
+    # declared report/baseline fixtures below, never from production helpers.
+    payloads, _independent_report = _panel_verified_payloads()
+    account_manifest = json.loads(payloads[_PANEL_EPOCH_ARTIFACT])
+    epoch_rows = []
+    for index, identity in enumerate(_LINEAGE_MANIFEST_CROSSWALK_IDENTITIES):
+        account_id, strategy_id, effective_start, effective_end = identity
+        manifest_row = account_manifest["rows"][index]
+        manifest_row.update(
+            {
+                "account_id": account_id,
+                "strategy_id": strategy_id,
+                "effective_start": effective_start,
+                "effective_end": effective_end,
+            }
+        )
+        epoch_rows.append(
+            {
+                "account_id": account_id,
+                "account_label": f"Synthetic {index:02d}",
+                "assignment_id": f"assignment-{index:02d}",
+                "effective_start": effective_start,
+                "effective_end": effective_end,
+                "last_four": None,
+                "owner_reason": "OWNER_CONFIRMED_CURRENT_PRODUCT_EPOCH",
+                "product_epoch_disposition": "INCLUDED_PRODUCT_EPOCH",
+                "provider": "SYNTHETIC",
+                "strategy_id": strategy_id,
+            }
+        )
+    if identity_mutation == "manifest":
+        account_manifest["rows"][0]["effective_start"] = "2026-01-02"
+    account_manifest["source_identities"]["ledger"]["artifact"].update(
+        {
+            "schema": {
+                "name": manifest_identity["schema_name"],
+                "version": manifest_identity["schema_version"],
+            },
+            "sha256": manifest_identity["sha256"],
+        }
+    )
+    crosswalk = {
+        "artifact_id": "account-strategy-current-epoch-crosswalk",
+        "as_of_date": "2026-07-30",
+        "calculation_cutoff_date": "2026-07-30",
+        "disposition_counts": {
+            "EXCLUDED_DEPRECATED_HISTORY_ONLY": 1,
+            "EXCLUDED_IMMATERIAL": 1,
+            "INCLUDED_PRODUCT_EPOCH": 13,
+        },
+        "rows": [
+            *epoch_rows,
+            {
+                "account_id": "excluded-composer",
+                "account_label": "Excluded composer",
+                "assignment_id": "excluded-composer",
+                "effective_start": "2025-09-22",
+                "effective_end": None,
+                "last_four": None,
+                "owner_reason": "COMPOSER_OWNER_EXCLUDED_IMMATERIAL",
+                "product_epoch_disposition": "EXCLUDED_IMMATERIAL",
+                "provider": "SYNTHETIC",
+                "strategy_id": "composer-holy-grail",
+            },
+            {
+                "account_id": "excluded-echo",
+                "account_label": "Excluded echo",
+                "assignment_id": "excluded-echo",
+                "effective_start": "2025-09-27",
+                "effective_end": "2025-11-24",
+                "last_four": None,
+                "owner_reason": "ECHOTRADE_DEPRECATED_EFFECTIVE_2025_11_25",
+                "product_epoch_disposition": "EXCLUDED_DEPRECATED_HISTORY_ONLY",
+                "provider": "SYNTHETIC",
+                "strategy_id": "echotrade-growth-pivots",
+            },
+        ],
+        "schema_version": 1,
+        "selected_baseline": {
+            "artifact_id": "normalized/portfolio-baseline.json",
+            "as_of_date": "2026-07-30",
+            "generation_id": baseline_reference["generation_id"],
+            "schema_name": "portfolio-baseline-catalog",
+            "schema_version": "1",
+            "sha256": baseline_reference["catalog_sha256"],
+            "size_bytes": 1,
+        },
+    }
+
+    def account_manifest_reader(
+        *_args: object, **_kwargs: object
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return account_manifest, {
+            "authority_profile": "INTERNAL_VALIDATION_ONLY_NON_RELEASEABLE",
+            "sha256": "3" * 64,
+            "size_bytes": 1,
+            "current_epoch_crosswalk": crosswalk,
+            "verification": {
+                "status": "INTERNAL_SCHEMA_AND_SEMANTIC_VALIDATION_ONLY",
+                "method": "SELF_CONTAINED_SCHEMA_AND_DERIVATION_CHECKS",
+                "producer_readiness": account_manifest["authority_readiness"],
+                "publication_readiness": "NOT_READY",
+            },
+        }
+
+    monkeypatch.setattr(panel, "_account_manifest", account_manifest_reader)
+
+    build_kwargs = {
+        "freshness_health_path": inputs["freshness"],
+        "baseline_root": baseline_root,
+        "weekly_returns_root": inputs["weekly"],
+        "account_manifest_path": tmp_path / "schema9-account-manifest.json",
+    }
+    if identity_mutation is not None:
+        with pytest.raises(
+            panel.ControlPanelValidationError,
+            match="current manifest and performance identities differ",
+        ):
+            panel.build_candidate(
+                report_root, inputs["legacy"], inputs["output"], **build_kwargs
+            )
+        return
+    built = panel.build_candidate(
+        report_root, inputs["legacy"], inputs["output"], **build_kwargs
+    )
+    data = _candidate_data(built)
+
+    assert len(data["performance"]) == 13
+    assert len(data["strategies"]) == 7
+    if matching:
+        assert data["meta"]["performance_lineage"] == {
+            "baseline_provider_ledger": baseline_identity,
+            "manifest_provider_ledger": manifest_identity,
+            "status": "PASS",
+        }
+        assert all(row["twr"] == "0.01" for row in data["performance"])
+        assert [row["account_live_status"] for row in data["strategies"]] == [
+            row["account_live_status"] for row in report["strategy_summary"]
+        ]
+        assert all(
+            row["benchmark_comparison_status"] == "AVAILABLE"
+            and row["provider_comparison_status"] == "AVAILABLE"
+            for row in data["strategies"]
+        )
+        assert data["hwm_summary"] == report["hwm_summary"]
+        panel._validate_panel_data_schema(data)
+        return
+    assert {
+        (
+            row["account_id"],
+            row["strategy_id"],
+            row["effective_start"],
+            row["effective_end"],
+        )
+        for row in data["performance"]
+    } == _LINEAGE_EXPECTED_IDENTITIES
+    account_suppressed_fields = {
+        "flow_count",
+        "flow_timing",
+        "mwr_xirr",
+        "nav_observations",
+        "observed_start",
+        "observed_end",
+        "return_path_account_binding",
+        "return_path_assignment_id",
+        "return_path_authority",
+        "return_path_cumulative_return",
+        "return_path_evidence_layer",
+        "return_path_generation_id",
+        "return_path_observations",
+        "return_path_observed_start",
+        "return_path_observed_end",
+        "return_path_series_sha256",
+        "twr",
+    }
+    assert all(
+        row[field] is None
+        for row in data["performance"]
+        for field in account_suppressed_fields
+    )
+    assert all(
+        row[field] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+        for row in data["performance"]
+        for field in ("twr_status", "mwr_status", "return_path_status")
+    )
+    strategy_suppressed_fields = {
+        "account_live_cagr",
+        "account_live_cumulative_return",
+        "account_live_max_drawdown",
+        "account_live_observed_end",
+        "account_live_observed_start",
+        "account_live_return_authority",
+        "account_live_return_observations",
+        "account_live_return_series_schema",
+        "account_live_return_series_sha256",
+        "account_live_source_generation",
+        "account_live_source_generation_as_of_date",
+        "account_live_source_provider",
+        "account_live_source_sha256",
+        "available_twr_segments",
+        "current_value_usd",
+        "hwm_current_drawdown",
+        "hwm_freshness_status",
+        "hwm_max_drawdown",
+        "hwm_source",
+        "nav_evidence_layer",
+        "nav_observed_end",
+        "nav_observed_start",
+        "nav_return_observations",
+        "benchmark_id",
+        "benchmark_effective_start",
+        "benchmark_effective_end",
+        "benchmark_version_ref",
+        "benchmark_rationale",
+        "benchmark_comparison_observations",
+        "benchmark_comparison_observed_start",
+        "benchmark_comparison_observed_end",
+        "benchmark_account_cumulative_return",
+        "benchmark_reference_cumulative_return",
+        "benchmark_cumulative_gap",
+        "benchmark_active_return_annualized",
+        "benchmark_tracking_error_annualized",
+        "benchmark_information_ratio",
+        "benchmark_beta",
+        "benchmark_correlation",
+        "benchmark_upside_capture",
+        "benchmark_downside_capture",
+        "benchmark_relative_drawdown",
+        "provider_comparison_observations",
+        "provider_comparison_observed_start",
+        "provider_comparison_observed_end",
+        "provider_account_cumulative_return",
+        "provider_reference_cumulative_return",
+        "provider_cumulative_gap",
+        "provider_active_return_annualized",
+        "provider_tracking_error_annualized",
+        "provider_information_ratio",
+        "provider_beta",
+        "provider_correlation",
+        "provider_upside_capture",
+        "provider_downside_capture",
+        "provider_relative_drawdown",
+        "provider_comparison_version_compatibility",
+        "cash_drag_status",
+        "cash_drag_reason",
+        "legacy_baseline_disposition",
+        "annual_external_cost_rate_pre_tax",
+        "annual_external_cost_usd",
+        "after_tax_annual_cost_rate",
+        "after_tax_status",
+        "fees_status",
+        "systematic_weight",
+    }
+    assert all(
+        row[field] is None
+        for row in data["strategies"]
+        for field in strategy_suppressed_fields
+    )
+    assert all(
+        row[field] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+        for row in data["strategies"]
+        for field in (
+            "account_live_cagr_status",
+            "account_live_status",
+            "nav_status",
+            "benchmark_assignment_status",
+            "benchmark_comparison_status",
+            "benchmark_comparison_disposition",
+            "provider_comparison_status",
+            "provider_comparison_disposition",
+        )
+    )
+    assert data["meta"]["performance_lineage"] == {
+        "baseline_provider_ledger": baseline_identity,
+        "manifest_provider_ledger": manifest_identity,
+        "status": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH",
+    }
+    assert data["hwm_summary"]["status"] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+    assert data["hwm_summary"]["nav_coverage"] is None
+    assert data["advisory"] == {
+        **data["advisory"],
+        "central_case_loss": None,
+        "correlation_one_stress": None,
+        "nav_coverage": None,
+        "readiness": "DO_NOT_EXPAND_SYSTEMATIC_RISK",
+        "hwm_status": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH",
+        "hwm_numerical_status": "UNAVAILABLE",
+        "hwm_numerical_reason": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH",
+    }
+    assert "hwm_portable_proof" not in data
+    assert "hwm_governed_proof" not in data
+    assert data["strategy_underwriting"]["counts"] == {
+        "strategies": 7,
+        "authoritative_design": 0,
+        "version_matched_long_history": 0,
+        "quantified_model_account_gap": 0,
+        "empirical_regime_comparison": 0,
+    }
+    assert all(
+        row["model_account_gap"]["status"] == "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
+        for row in data["strategy_underwriting"]["rows"]
+    )
+    panel._validate_panel_data_schema(data)
+
+
+def test_public_build_rejects_mutated_canonical_dependence_hash(
+    inputs: dict[str, Path],
+) -> None:
+    """A one-surface canonical hash mutation cannot reach a candidate."""
+
+    correlation = _correlation()
+    correlation["dependence"]["series_composition"][ACTIVE_STRATEGY_NAMES[0]][
+        "canonical_live_series_sha256"
+    ] = "f" * 64
+    _publish_analytics(
+        inputs["correlation"],
+        "correlation.json",
+        correlation,
+        "synthetic-correlation-mutated-canonical-hash",
+    )
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="report/dependence canonical-series value parity failed",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            weekly_returns_root=inputs["weekly"],
+        )
+
+
+@pytest.mark.parametrize(
+    ("file_name", "injected_content"),
+    [
+        (
+            "index.html",
+            '<script src="file:///C:/mutable/override.js"></script>',
+        ),
+        ("index.html", '<img src="//attacker.invalid/pixel.png" alt="">'),
+        ("index.html", '<link rel="stylesheet" href="unexpected.css">'),
+        ("styles.css", "body { background: url(https://attacker.invalid/x); }"),
+        ("styles.css", r"body { background: u\72l(https://attacker.invalid/x); }"),
+        ("styles.css", r"@im\70ort 'https://attacker.invalid/x.css';"),
+        (
+            "styles.css",
+            "body { background: u/**/rl(https://attacker.invalid/x); }",
+        ),
+    ],
+)
+def test_verify_rejects_frontend_resources_outside_closed_allowlist(
+    inputs: dict[str, Path], file_name: str, injected_content: str
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    candidate = Path(built["candidate_dir"])
+    target = candidate / file_name
+    target.write_text(
+        target.read_text(encoding="utf-8") + "\n" + injected_content,
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="Closed local frontend resource allowlist",
+    ):
+        panel.verify_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+        )
 
 
 def test_underwriting_gap_signatures_are_diagnostic_not_fabricated() -> None:
@@ -1445,6 +3150,7 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
         decomposition_plan_bundle=plan_bundle,
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
     )
     candidate = Path(result["candidate_dir"])
     verification = panel.verify_candidate(
@@ -1455,6 +3161,7 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
         decomposition_plan_bundle=plan_bundle,
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
     )
     assert verification["all_passed"] is True
     data = json.loads(
@@ -1468,11 +3175,11 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
         "RETURN_INDUSTRY",
         "RETURN_SECTOR",
     }
-    assert all(len(row["series"]) == 9 for row in lenses.values())
+    assert all(len(row["series"]) == 7 for row in lenses.values())
     robuxio = next(
         row
         for row in lenses["ECONOMIC_FACTOR"]["series"]
-        if row["series_id"] == STRATEGY_NAMES[7]
+        if row["series_id"] == ACTIVE_STRATEGY_NAMES[6]
     )
     assert robuxio["unavailable_reasons"] == [
         "UNAVAILABLE_MISSING_ACCEPTED_CRYPTO_CANDIDATE"
@@ -1487,6 +3194,153 @@ def test_control_panel_keeps_factor_style_sector_and_industry_lenses_separate(
     assert lenses["DYNAMIC_STYLE"]["dynamic_available_count"] == 1
 
 
+def _rewrite_legacy_plan_strategy_ids(
+    plan_bundle: Path, strategy_ids: list[str]
+) -> None:
+    plan_path = (
+        plan_bundle
+        / "inputs"
+        / "governance"
+        / "current-strategy-decomposition-plan.json"
+    )
+    plan = json.loads(plan_path.read_text(encoding="utf-8"))
+    for item, strategy_id in zip(plan["strategies"], strategy_ids):
+        item["strategy_id"] = strategy_id
+    plan["strategies"] = plan["strategies"][: len(strategy_ids)]
+    _write_json(plan_path, plan)
+    manifest_path = plan_bundle / "plan-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["inputs"][0]["sha256"] = _sha(plan_path)
+    _write_json(manifest_path, manifest)
+
+
+def test_schema_one_legacy_plan_accepts_current_seven_plus_known_exclusions(
+    tmp_path: Path,
+) -> None:
+    lens_root, plan_bundle = _lens_inputs(tmp_path)
+    product_ids = [
+        "p123-ai-factor",
+        "p123-eu",
+        "qsi",
+        "tt-portfolio",
+        "volatis-strategy",
+        "grizzlybears-vtma",
+        "robuxio-crypto",
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    ]
+    _rewrite_legacy_plan_strategy_ids(plan_bundle, product_ids)
+    strategy_names = dict(zip(product_ids, STRATEGY_NAMES))
+
+    result, _bindings = panel._decomposition_lenses_for_mode(
+        lens_root,
+        plan_bundle,
+        strategy_names,
+        set(STRATEGY_NAMES[:7]),
+        "LIVE_ONLY",
+    )
+
+    assert all(
+        row["series_id"] not in {STRATEGY_NAMES[7], STRATEGY_NAMES[8]}
+        for lens in result["lenses"]
+        for row in lens["series"]
+    )
+
+
+@pytest.mark.parametrize("mutation", ("unknown_extra", "missing_current"))
+def test_schema_one_legacy_plan_rejects_non_product_strategy_perimeter(
+    tmp_path: Path, mutation: str
+) -> None:
+    lens_root, plan_bundle = _lens_inputs(tmp_path)
+    product_ids = [
+        "p123-ai-factor",
+        "p123-eu",
+        "qsi",
+        "tt-portfolio",
+        "volatis-strategy",
+        "grizzlybears-vtma",
+        "robuxio-crypto",
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    ]
+    if mutation == "unknown_extra":
+        product_ids[-1] = "unknown-strategy"
+    else:
+        product_ids = product_ids[1:]
+    _rewrite_legacy_plan_strategy_ids(plan_bundle, product_ids)
+    strategy_names = {
+        strategy_id: STRATEGY_NAMES[index]
+        for index, strategy_id in enumerate(
+            (
+                "p123-ai-factor",
+                "p123-eu",
+                "qsi",
+                "tt-portfolio",
+                "volatis-strategy",
+                "grizzlybears-vtma",
+                "robuxio-crypto",
+            )
+        )
+    }
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="legacy decomposition plan differs",
+    ):
+        panel._decomposition_lenses_for_mode(
+            lens_root,
+            plan_bundle,
+            strategy_names,
+            set(STRATEGY_NAMES[:7]),
+            "LIVE_ONLY",
+        )
+
+
+def test_schema_one_legacy_plan_rejects_duplicate_strategy_identity(
+    tmp_path: Path,
+) -> None:
+    lens_root, plan_bundle = _lens_inputs(tmp_path)
+    product_ids = [
+        "p123-ai-factor",
+        "p123-eu",
+        "qsi",
+        "tt-portfolio",
+        "volatis-strategy",
+        "grizzlybears-vtma",
+        "robuxio-crypto",
+        "composer-holy-grail",
+        "echotrade-growth-pivots",
+    ]
+    product_ids[-1] = product_ids[0]
+    _rewrite_legacy_plan_strategy_ids(plan_bundle, product_ids)
+    strategy_names = {
+        strategy_id: STRATEGY_NAMES[index]
+        for index, strategy_id in enumerate(
+            (
+                "p123-ai-factor",
+                "p123-eu",
+                "qsi",
+                "tt-portfolio",
+                "volatis-strategy",
+                "grizzlybears-vtma",
+                "robuxio-crypto",
+            )
+        )
+    }
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="duplicate strategy identities",
+    ):
+        panel._decomposition_lenses_for_mode(
+            lens_root,
+            plan_bundle,
+            strategy_names,
+            set(STRATEGY_NAMES[:7]),
+            "LIVE_ONLY",
+        )
+
+
 def _current_surface_lens_inputs(base: Path) -> tuple[Path, Path]:
     """Schema-2 (0.17) plan bundle + lens generations in the new
     <root>/<evidence_mode>/<surface>/<source_key> release layout.
@@ -1498,8 +3352,8 @@ def _current_surface_lens_inputs(base: Path) -> tuple[Path, Path]:
         "europe-economic": ("ECONOMIC_FACTOR", {STRATEGY_NAMES[1]}),
         "us-economic": ("ECONOMIC_FACTOR", {STRATEGY_NAMES[0]}),
         "us-equity-style": ("ETF_STYLE", {STRATEGY_NAMES[2]}),
-        "us-industry": ("RETURN_INDUSTRY", {STRATEGY_NAMES[8]}),
-        "us-sector": ("RETURN_SECTOR", {STRATEGY_NAMES[7]}),
+        "us-industry": ("RETURN_INDUSTRY", {STRATEGY_NAMES[3]}),
+        "us-sector": ("RETURN_SECTOR", {STRATEGY_NAMES[4]}),
     }
     for source_key, (analysis_lens, selected_names) in assignments.items():
         value = _decomposition()
@@ -1550,9 +3404,9 @@ def _current_surface_lens_inputs(base: Path) -> tuple[Path, Path]:
                     }
                     for source_key in assignments
                 },
-                "strategy_id": f"strategy-{index}",
+                "strategy_id": ACTIVE_STRATEGY_IDS[index],
             }
-            for index, name in enumerate(STRATEGY_NAMES)
+            for index, name in enumerate(STRATEGY_NAMES[:7])
         ],
     }
     _write_json(plan_path, plan)
@@ -1601,6 +3455,7 @@ def test_panel_consumes_current_surface_lens_generations(
         decomposition_plan_bundle=plan_bundle,
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
     )
     candidate = Path(result["candidate_dir"])
     data = json.loads(
@@ -1613,7 +3468,7 @@ def test_panel_consumes_current_surface_lens_generations(
         "RETURN_INDUSTRY",
         "RETURN_SECTOR",
     }
-    assert all(len(row["series"]) == 9 for row in lenses.values())
+    assert all(len(row["series"]) == 7 for row in lenses.values())
     economic = lenses["ECONOMIC_FACTOR"]
     us_economic_rows = [
         row for row in economic["series"] if row["series_id"] == STRATEGY_NAMES[0]
@@ -1633,6 +3488,44 @@ def test_panel_consumes_current_surface_lens_generations(
             inputs["legacy"],
             tmp_path / "legacy-output",
             decomposition_lenses_root=legacy_tree_root,
+            decomposition_plan_bundle=plan_bundle,
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            weekly_returns_root=inputs["weekly"],
+        )
+
+
+def test_current_surface_lens_rejects_static_dynamic_divergence(
+    inputs: dict[str, Path], tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    base = tmp_path_factory.getbasetemp() / "s2diverge"
+    lens_root, plan_bundle = _current_surface_lens_inputs(base)
+    static_root = lens_root / "LIVE_ONLY" / "STATIC" / "us-economic"
+    static_pointer = read_current(static_root)
+    static_path = (
+        static_root
+        / "generations"
+        / static_pointer.generation_id
+        / "decomposition.json"
+    )
+    divergent = json.loads(static_path.read_text(encoding="utf-8"))
+    divergent["analytics_hash"] = "divergent-static-dynamic-surface"
+    _publish_analytics(
+        lens_root / "LIVE_ONLY" / "DYNAMIC_FLS" / "us-economic",
+        "decomposition.json",
+        divergent,
+        "synthetic-us-economic-dynamic-divergent",
+    )
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="STATIC and DYNAMIC_FLS surfaces differ",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            decomposition_lenses_root=lens_root,
             decomposition_plan_bundle=plan_bundle,
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
@@ -1677,7 +3570,17 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
     )
+    verification = panel.verify_candidate(
+        report_root,
+        inputs["legacy"],
+        Path(result["candidate_dir"]),
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    assert verification["all_passed"] is True
     data = json.loads(
         (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
             encoding="utf-8"
@@ -1694,10 +3597,110 @@ def test_layered_dependence_modes_are_preserved_without_changing_default_authori
     )
     assert data["advisory"]["correlation_one_stress"] == "0.37249726899852387"
     assert data["hybrid_mode_gate"]["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
-    assert len(data["hybrid_mode_gate"]["eligible_strategies"]) == 9
+    assert len(data["hybrid_mode_gate"]["eligible_strategies"]) == 7
 
 
-def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
+def test_current_analytics_walks_a_long_finalized_generation(
+    tmp_path: Path,
+) -> None:
+    physical_root = tmp_path / "lens"
+    _publish_analytics(
+        physical_root, "decomposition.json", _decomposition(), "long-lens"
+    )
+    pointer = read_current(physical_root)
+    long_component = physical_root / ("long-root-" + "x" * 100)
+    long_component.mkdir()
+    root = long_component / ".."
+    artifact_path = root / "generations" / pointer.generation_id / "decomposition.json"
+    assert len(str(artifact_path.absolute())) > 270
+
+    value, identity, returned_path = panel._current_analytics(
+        root,
+        filename="decomposition.json",
+        field_name="long decomposition",
+        expected_schema_version=(1, 2),
+    )
+
+    assert value["analytics_schema_version"] == 1
+    assert identity["generation_id"] == pointer.generation_id
+    assert returned_path == artifact_path
+
+
+def test_report_dependence_identity_does_not_replace_report_artifact_identity(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+) -> None:
+    correlation = _correlation_v2()
+    _publish_analytics(
+        inputs["correlation"],
+        "correlation.json",
+        correlation,
+        "synthetic-correlation-v2",
+    )
+    _accepted, correlation_identity, _path = panel._current_analytics(
+        inputs["correlation"],
+        filename="correlation.json",
+        field_name="portfolio correlation",
+        expected_schema_version=(1, 2),
+    )
+    report = _report_with_baseline(inputs)
+    for strategy in report["strategy_summary"]:
+        strategy.update(
+            {
+                "live_plus_backtest_reason": "Synthetic compatibility is proven.",
+                "live_plus_backtest_status": "ELIGIBLE_PROVEN_COMPATIBLE",
+                "version_compatibility_reason": "Synthetic compatibility is proven.",
+                "version_compatibility_status": "PROVEN_COMPATIBLE",
+                "version_ref": f"synthetic-version:{strategy['strategy_id']}",
+            }
+        )
+    report = _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog())
+    report["dependence_analysis"] = {
+        "analytics_hash": correlation["analytics_hash"],
+        "identity": {
+            "correlation_sha256": correlation_identity["sha256"],
+            "generation_id": correlation_identity["generation_id"],
+            "manifest_sha256": correlation_identity["manifest_sha256"],
+        },
+        "mode_payload_sha256": hashlib.sha256(
+            canonical_json_bytes(correlation["dependence_modes"])
+        ).hexdigest(),
+        "pair_count": 21,
+        "pair_mode_count": 42,
+        "series_ids": list(ACTIVE_STRATEGY_NAMES),
+        "status": "AVAILABLE",
+    }
+    report_root = tmp_path / "report-with-dependence"
+    report_source = tmp_path / "report-with-dependence.json"
+    _publish_report(report_root, report_source, report)
+
+    result = panel.build_candidate(
+        report_root,
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+
+    data = json.loads(
+        (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_bytes()
+    )
+    expected_report_sha256 = _sha(report_source)
+    report_provenance = next(
+        row
+        for row in data["provenance"]
+        if row["artifact"] == "portfolio-report-generation"
+    )
+    assert report_provenance["sha256"] == expected_report_sha256
+    assert data["meta"]["report_sha256"] == expected_report_sha256
+    hwm_policy_provenance = next(
+        row for row in data["provenance"] if row["artifact"] == "portfolio-hwm-policy"
+    )
+    assert hwm_policy_provenance["as_of_date"] == "2026-07-30"
+
+
+def test_partial_hybrid_eligibility_exposes_only_live_only_globally(
     inputs: dict[str, Path],
     tmp_path: Path,
 ) -> None:
@@ -1713,6 +3716,7 @@ def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
             "version_compatibility_reason": "Synthetic compatibility is proven.",
             "version_compatibility_status": "PROVEN_COMPATIBLE",
             "version_ref": "synthetic-version:strategy-0",
+            "backtest_version_ref": "synthetic-version:p123-ai-factor",
         }
     )
     report_root = tmp_path / "partially-compatible-reporting"
@@ -1727,7 +3731,7 @@ def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
     hybrid_composition = correlation["dependence_modes"]["LIVE_PLUS_BACKTEST"][
         "series_composition"
     ]
-    for strategy_name in STRATEGY_NAMES[1:]:
+    for strategy_name in ACTIVE_STRATEGY_NAMES[1:]:
         row = hybrid_composition[strategy_name]
         row["backtest_observations_used"] = 0
         row["observed_start"] = row["live_inception"]
@@ -1745,6 +3749,7 @@ def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
     )
     candidate = Path(result["candidate_dir"])
     verification = panel.verify_candidate(
@@ -1753,6 +3758,7 @@ def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
         candidate,
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
     )
     assert verification["all_passed"] is True
     data = json.loads(
@@ -1763,10 +3769,12 @@ def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
     assert [row["strategy_name"] for row in gate["eligible_strategies"]] == [
         STRATEGY_NAMES[0]
     ]
-    assert len(gate["blocked_strategies"]) == 8
-    assert set(data["dependence_modes"]) == {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}
+    assert len(gate["blocked_strategies"]) == 6
+    assert list(data["dependence_modes"]) == ["LIVE_ONLY"]
+    assert data["decomposition_lenses"]["evidence_modes"] == ["LIVE_ONLY"]
+    assert list(data["decomposition_lenses"]["modes"]) == ["LIVE_ONLY"]
     assert data["weekly_returns"]["hybrid_mode_status"] == (
-        "UNAVAILABLE_NOT_CONFIGURED"
+        "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
     )
     governed_weekly = panel._govern_weekly_hybrid_modes(
         {
@@ -1803,16 +3811,13 @@ def test_hybrid_analytics_are_enabled_independently_per_compatible_strategy(
         },
         gate,
     )
-    assert governed_weekly["strategy_evidence_modes"] == [
-        "LIVE_ONLY",
-        "LIVE_PLUS_BACKTEST",
-    ]
+    assert governed_weekly["strategy_evidence_modes"] == ["LIVE_ONLY"]
     weekly_by_id = {
         row["series_id"]: row
         for row in governed_weekly["series"]
         if row["primary_group"] == "STRATEGY"
     }
-    assert "LIVE_PLUS_BACKTEST" in weekly_by_id[STRATEGY_NAMES[0]]["values_by_mode"]
+    assert list(weekly_by_id[STRATEGY_NAMES[0]]["values_by_mode"]) == ["LIVE_ONLY"]
     assert list(weekly_by_id[STRATEGY_NAMES[1]]["values_by_mode"]) == ["LIVE_ONLY"]
     assert list(weekly_by_id[STRATEGY_NAMES[1]]["mode_coverage"]) == ["LIVE_ONLY"]
 
@@ -1867,29 +3872,96 @@ def test_weekly_hybrid_rejects_a_registry_version_mismatch() -> None:
         panel._govern_weekly_hybrid_modes(weekly, gate)
 
 
-def test_unresolved_versions_reject_hybrid_backtest_observations(
+def test_hybrid_gate_binds_the_compatible_backtest_version() -> None:
+    """Hybrid history is versioned by the backtest twin, not the live path."""
+
+    gate = panel._hybrid_mode_gate(
+        [
+            {
+                "backtest_version_ref": "p123-live-sim-twin:backtest",
+                "live_plus_backtest_reason": "Compatible live/simulation twin.",
+                "live_plus_backtest_status": "ELIGIBLE_PROVEN_COMPATIBLE",
+                "strategy_id": "p123-ai-factor",
+                "strategy_name": "AI Factor [P123]",
+                "version_compatibility_status": "PROVEN_COMPATIBLE",
+                "version_ref": "accepted-live-path:live",
+            }
+        ]
+    )
+
+    assert gate["eligible_strategies"] == [
+        {
+            "compatibility_status": "PROVEN_COMPATIBLE",
+            "reason": "Compatible live/simulation twin.",
+            "strategy_id": "p123-ai-factor",
+            "strategy_name": "AI Factor [P123]",
+            "version_ref": "p123-live-sim-twin:backtest",
+        }
+    ]
+
+
+def test_unresolved_versions_do_not_parse_invalid_hybrid_observations(
     inputs: dict[str, Path],
+    tmp_path: Path,
 ) -> None:
+    correlation = _correlation_v2()
+    correlation["dependence_modes"]["LIVE_PLUS_BACKTEST"] = "INVALID_NOT_A_MAPPING"
     _publish_analytics(
         inputs["correlation"],
         "correlation.json",
-        _correlation_v2(),
+        correlation,
         "synthetic-correlation-v2",
     )
-    with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="unresolved strategy uses backtest history in hybrid dependence",
-    ):
-        panel.build_candidate(
-            inputs["report"],
-            inputs["legacy"],
-            inputs["output"],
-            freshness_health_path=inputs["freshness"],
-            baseline_root=inputs["baseline"],
+    lens_root, plan_bundle = _lens_inputs(tmp_path)
+    malformed_hybrid_lens = lens_root / "LIVE_PLUS_BACKTEST"
+    malformed_hybrid_lens.mkdir(parents=True)
+    (malformed_hybrid_lens / "CURRENT.json").write_text(
+        "MALFORMED_HYBRID_DECOMPOSITION", encoding="utf-8"
+    )
+    weekly, _weekly_identity, _weekly_path = panel._current_analytics(
+        inputs["weekly"],
+        filename="weekly-returns.json",
+        field_name="portfolio weekly returns",
+        expected_schema_version=1,
+    )
+    for row in weekly["series"]:
+        if row.get("primary_group") == "STRATEGY":
+            row["values_by_mode"]["LIVE_PLUS_BACKTEST"] = (
+                "MALFORMED_HYBRID_WEEKLY_VALUES"
+            )
+            row["observation_meta_by_mode"]["LIVE_PLUS_BACKTEST"] = (
+                "MALFORMED_HYBRID_WEEKLY_METADATA"
+            )
+    _publish_analytics(
+        inputs["weekly"],
+        "weekly-returns.json",
+        weekly,
+        "synthetic-weekly-malformed-hybrid",
+    )
+    result = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+        decomposition_lenses_root=lens_root,
+        decomposition_plan_bundle=plan_bundle,
+    )
+    data = json.loads(
+        (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
+            encoding="utf-8"
         )
+    )
+    assert list(data["dependence_modes"]) == ["LIVE_ONLY"]
+    assert data["weekly_returns"]["strategy_evidence_modes"] == ["LIVE_ONLY"]
+    assert "MALFORMED_HYBRID" not in json.dumps(data, sort_keys=True)
+    assert data["hybrid_mode_gate"]["status"] == (
+        "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
+    )
 
 
-def test_unresolved_versions_retain_zero_backtest_hybrid_as_live_only_equivalent(
+def test_unresolved_versions_omit_even_zero_backtest_hybrid_mode(
     inputs: dict[str, Path],
 ) -> None:
     correlation = _correlation_v2()
@@ -1911,6 +3983,7 @@ def test_unresolved_versions_retain_zero_backtest_hybrid_as_live_only_equivalent
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
     )
     data = json.loads(
         (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
@@ -1918,12 +3991,12 @@ def test_unresolved_versions_retain_zero_backtest_hybrid_as_live_only_equivalent
         )
     )
 
-    assert list(data["dependence_modes"]) == ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]
+    assert list(data["dependence_modes"]) == ["LIVE_ONLY"]
     assert data["weekly_returns"]["strategy_evidence_modes"] == ["LIVE_ONLY"]
     assert data["hybrid_mode_gate"]["status"] == (
         "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"
     )
-    assert len(data["hybrid_mode_gate"]["blocked_strategies"]) == 9
+    assert len(data["hybrid_mode_gate"]["blocked_strategies"]) == 7
     assert data["hybrid_mode_gate"]["eligible_strategies"] == []
 
 
@@ -1967,41 +4040,36 @@ def test_template_line_endings_do_not_change_identity(
 def test_provider_evidence_overlay_preserves_separate_account_and_provider_dates(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
+    strategy_id = ACTIVE_STRATEGY_IDS[0]
+    provider_evidence = _canonical_return_series_fixture()["provider_evidence"]
+    target_evidence = next(
+        row for row in provider_evidence if row["strategy_id"] == strategy_id
+    )
+    target_evidence.update(
+        {
+            "provider": {
+                "observed_start": "2025-05-12",
+                "observed_end": "2026-07-24",
+                "return_observations": 315,
+            },
+        }
+    )
     evidence = tmp_path / "strategy-evidence.json"
     _write_json(
         evidence,
         {
-            "as_of_date": "2026-07-31",
+            "as_of_date": "2026-07-30",
             "schema_version": 1,
-            "strategies": [
-                {
-                    "account": {
-                        "observed_start": "2026-01-22",
-                        "observed_end": "2026-07-14",
-                        "return_observations": 124,
-                    },
-                    "current_snapshot": {"observed_date": "2026-07-27"},
-                    "evidence_layer": "PROVIDER_LIVE_RECONCILED_TO_ACCOUNT_LIVE",
-                    "generation_id": "e" * 64,
-                    "generation_as_of_date": "2026-07-31",
-                    "overlap": {
-                        "account_minus_provider_cumulative": "-0.1642",
-                        "annualized_tracking_error": "0.1177",
-                        "daily_return_correlation": "0.8267",
-                        "status": "TESTED_EXACT_DATE_PATHS",
-                    },
-                    "provider": {
-                        "observed_start": "2025-05-12",
-                        "observed_end": "2026-07-24",
-                        "return_observations": 315,
-                    },
-                    "provider_id": "portfolio123",
-                    "sources": {},
-                    "strategy_id": "strategy-0",
-                    "strategy_name": STRATEGY_NAMES[0],
-                }
-            ],
+            "strategies": provider_evidence,
         },
+    )
+
+    report = _report()
+    report["baseline"] = inputs["baseline_identity"]
+    report["strategy_provider_evidence"] = provider_evidence
+    _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog())
+    _publish_report(
+        inputs["report"], tmp_path / "provider-evidence-overlay-report.json", report
     )
 
     built = panel.build_candidate(
@@ -2011,6 +4079,7 @@ def test_provider_evidence_overlay_preserves_separate_account_and_provider_dates
         strategy_evidence_path=evidence,
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
     )
     data = json.loads(
         (Path(built["candidate_dir"]) / "data" / "dashboard_data.json").read_text(
@@ -2019,11 +4088,11 @@ def test_provider_evidence_overlay_preserves_separate_account_and_provider_dates
     )
 
     attached = data["strategies"][0]["provider_evidence"]
-    assert attached["account"]["observed_end"] == "2026-07-14"
+    assert attached["account"]["observed_end"] == "2026-07-30"
     assert attached["provider"]["observed_end"] == "2026-07-24"
-    assert data["meta"]["strategy_evidence_as_of"] == "2026-07-31"
+    assert data["meta"]["strategy_evidence_as_of"] == "2026-07-30"
     assert any(
-        row["artifact"] == "current-strategy-provider-evidence"
+        row["artifact"] == "canonical-report-strategy-provider-evidence"
         for row in data["provenance"]
     )
 
@@ -2119,9 +4188,9 @@ def test_freshness_health_is_visible_with_dates_and_reason(
                         "reason": "accepted observation is within cadence and grace",
                         "revision_state": "ORIGINAL",
                         "state": "FRESH",
-                        "subject_id": f"strategy-{index}",
+                        "subject_id": ACTIVE_STRATEGY_IDS[index],
                     }
-                    for index in range(9)
+                    for index in range(7)
                 ],
             ],
             "policy": {
@@ -2132,6 +4201,13 @@ def test_freshness_health_is_visible_with_dates_and_reason(
                 "stale_after_days": 5,
             },
         },
+    )
+    _republish_report(
+        inputs["report"],
+        tmp_path,
+        _with_hwm_summary(
+            _report_with_baseline(inputs), health, _panel_baseline_catalog()
+        ),
     )
 
     built = panel.build_candidate(
@@ -2357,7 +4433,9 @@ def test_candidate_tamper_fails_closed(inputs: dict[str, Path]) -> None:
         )
 
 
-def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> None:
+def test_nonfinancial_candidate_cannot_be_published(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
     built = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
@@ -2366,9 +4444,37 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
         baseline_root=inputs["baseline"],
     )
     candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="publication requires financial mode",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+        )
+
+
+def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
     qa_result = panel.validate_qa(candidate, qa)
     assert qa_result["all_passed"] is True
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
     published = panel.publish_panel(
         inputs["report"],
         inputs["legacy"],
@@ -2377,6 +4483,8 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        coordinated_release_receipt=receipt,
+        **financial,
     )
     pointer = read_current(inputs["output"])
     assert published["publication_state"] == "PUBLISHED"
@@ -2412,15 +4520,18 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
 def test_stable_launcher_browser_qa_proves_redirect(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
     built = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        **financial,
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "candidate")
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
     published = panel.publish_panel(
         inputs["report"],
         inputs["legacy"],
@@ -2429,6 +4540,8 @@ def test_stable_launcher_browser_qa_proves_redirect(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        coordinated_release_receipt=receipt,
+        **financial,
     )
     launcher = inputs["output"] / "index.html"
     launcher_qa = _qa(candidate, tmp_path / "launcher")
@@ -2468,15 +4581,18 @@ def test_stable_launcher_browser_qa_proves_redirect(
 def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
     built = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        **financial,
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path / "candidate")
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
     published = panel.publish_panel(
         inputs["report"],
         inputs["legacy"],
@@ -2485,6 +4601,8 @@ def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        coordinated_release_receipt=receipt,
+        **financial,
     )
     launcher = inputs["output"] / "index.html"
     launcher_qa = _qa(candidate, tmp_path / "launcher")
@@ -2523,15 +4641,18 @@ def test_publication_manifest_uses_later_operational_freshness_date(
     for assessment in freshness["assessments"]:
         assessment["evaluated_on"] = "2026-07-31"
     _write_json(inputs["freshness"], freshness)
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
     built = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        **financial,
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
 
     published = panel.publish_panel(
         inputs["report"],
@@ -2541,6 +4662,8 @@ def test_publication_manifest_uses_later_operational_freshness_date(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        coordinated_release_receipt=receipt,
+        **financial,
     )
 
     generation = inputs["output"] / "generations" / str(published["generation_id"])
@@ -2559,6 +4682,7 @@ def test_publication_manifest_uses_later_operational_freshness_date(
 def test_launcher_failure_restores_prior_pointer_and_launcher(
     inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
     previous = GenerationManifest.build(
         as_of_date=date(2026, 7, 1),
         adapter=AdapterIdentity("prior-panel", "1.0.0"),
@@ -2592,9 +4716,11 @@ def test_launcher_failure_restores_prior_pointer_and_launcher(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        **financial,
     )
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
 
     original = panel._publish_current_launcher
 
@@ -2612,6 +4738,8 @@ def test_launcher_failure_restores_prior_pointer_and_launcher(
             inputs["output"],
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
+            coordinated_release_receipt=receipt,
+            **financial,
         )
 
     assert read_current(inputs["output"]).generation_id == previous.generation_id
@@ -2631,6 +4759,45 @@ def test_browser_qa_rejects_console_error(
     candidate = Path(built["candidate_dir"])
     qa = _qa(candidate, tmp_path)
     _write_json(qa / "desktop-risk" / "console-events.json", [{"text": "boom"}])
+    with pytest.raises(panel.ControlPanelValidationError, match="browser QA failed"):
+        panel.validate_qa(candidate, qa)
+
+
+def test_browser_qa_rejects_evidence_not_bound_to_candidate_artifacts(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path)
+    manifest_path = qa / "desktop-command" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["candidate_record_sha256"] = "0" * 64
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(panel.ControlPanelValidationError, match="browser QA failed"):
+        panel.validate_qa(candidate, qa)
+
+
+def test_browser_qa_rejects_non_png_screenshot(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path)
+    (qa / "desktop-command" / "screenshot.png").write_bytes(b"not a png")
+
     with pytest.raises(panel.ControlPanelValidationError, match="browser QA failed"):
         panel.validate_qa(candidate, qa)
 
@@ -2709,13 +4876,13 @@ def test_governed_hwm_perimeter_excludes_composer_and_accepts_provider_nav() -> 
 
 
 def test_hwm_policy_enforces_exclusion_effective_date() -> None:
-    before, _ = panel._hwm_policy(date(2026, 7, 31))
-    effective, _ = panel._hwm_policy(date(2026, 8, 1))
-    echo_effective, _ = panel._hwm_policy(date(2026, 8, 6))
+    before_echo_close, _ = panel._hwm_policy(date(2025, 11, 24))
+    after_echo_close, _ = panel._hwm_policy(date(2025, 11, 25))
+    composer_effective, _ = panel._hwm_policy(date(2026, 8, 1))
 
-    assert before["excluded_strategy_ids"] == []
-    assert effective["excluded_strategy_ids"] == ["composer-holy-grail"]
-    assert echo_effective["excluded_strategy_ids"] == [
+    assert before_echo_close["excluded_strategy_ids"] == []
+    assert after_echo_close["excluded_strategy_ids"] == ["echotrade-growth-pivots"]
+    assert composer_effective["excluded_strategy_ids"] == [
         "composer-holy-grail",
         "echotrade-growth-pivots",
     ]
@@ -2751,12 +4918,12 @@ def test_hwm_coverage_names_freshness_block_without_denigrating_nav() -> None:
     rows, summary = panel._governed_hwm_coverage(
         [
             {
-                "current_value_usd": "0.19",
+                "current_value_usd": "1",
                 "nav_evidence_layer": "ACCOUNT_LIVE",
                 "nav_status": "AVAILABLE",
-                "strategy_id": "echo-trade",
-                "strategy_name": "EchoTrade",
-                "systematic_weight": "0.000000463",
+                "strategy_id": "synthetic-included-strategy",
+                "strategy_name": "Synthetic Included Strategy",
+                "systematic_weight": "0.001",
             }
         ],
         {
@@ -2769,7 +4936,7 @@ def test_hwm_coverage_names_freshness_block_without_denigrating_nav() -> None:
                 "blocks_current_consumers": True,
                 "fact_type": "strategy-returns",
                 "status": "STALE",
-                "subject_id": "echo-trade",
+                "subject_id": "synthetic-included-strategy",
             }
         ],
         require_freshness=True,
@@ -2795,7 +4962,7 @@ def test_hwm_coverage_names_freshness_block_without_denigrating_nav() -> None:
     )
     nav = next(row for row in reconciled if row["item"] == "nav")
     assert "not HWM-qualified" in nav["known_gap"]
-    assert "EchoTrade ($0.19; FRESHNESS_STALE" in nav["known_gap"]
+    assert "Synthetic Included Strategy ($1; FRESHNESS_STALE" in nav["known_gap"]
     assert "lacks accepted daily NAV" not in nav["known_gap"]
 
 
@@ -2897,7 +5064,7 @@ def test_renderer_keeps_exact_hwm_dollars_and_accessible_table_headers() -> None
     assert '<th scope="col"' in renderer
     assert '<th scope="row"' in renderer
     assert "0.00x" not in renderer
-    assert "data.panel_schema_version !== 18" in renderer
+    assert "data.panel_schema_version !== 21" in renderer
     assert "corrOne.expected_loss" not in renderer
     assert "const centralCase = dependence.central_case" in renderer
     assert "Central case" in renderer
@@ -3117,7 +5284,7 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
     assert "const disabled = await button.isDisabled();" in qa
     assert (
         "item.requested_beta_rows.every((row) => row.beta_visible || "
-        "row.model_unavailable)" in qa
+        "row.model_diagnostic || row.model_unavailable)" in qa
     )
     assert "Clean-room dynamic FLS path and same-factor validation are rendered" in qa
     assert "All observed windows and both true drawdown regimes are exercised" in qa
@@ -3125,24 +5292,34 @@ def test_interaction_qa_exercises_every_analytic_selector_state() -> None:
     assert "Dependence live and hybrid evidence disclosures are exercised" in qa
     assert "Weekly returns disclose live and hybrid strategy evidence" in qa
     assert "const weeklyHybridDisabled = await weeklyHybridMode.isDisabled();" in qa
-    assert 'weeklyHybridTitle?.includes("not PROVEN_COMPATIBLE")' in qa
     assert (
         "Privacy-safe account context filters lifecycle, positions, and performance"
         in qa
     )
 
 
-def test_control_panel_schema_version_matches_renderer_contract() -> None:
+def test_control_panel_schema_validates_rendered_surface_shapes() -> None:
+    """Exercise JSON Schema behavior while leaving semantic identity to Python."""
+
+    from jsonschema import Draft202012Validator, FormatChecker
+
     schema = json.loads(
         (Path("schemas/portfolio/control-panel-data.schema.json")).read_text(
             encoding="utf-8"
         )
     )
 
-    assert schema["properties"]["panel_schema_version"]["const"] == (
-        panel.PANEL_SCHEMA_VERSION
-    )
-    assert "canonical_strategy_series" in schema["required"]
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+    performance = schema["properties"]["performance"]
+    strategies = schema["properties"]["strategies"]
+
+    assert validator.evolve(schema=performance).is_valid([{}] * 13)
+    assert not validator.evolve(schema=performance).is_valid([{}] * 12)
+    assert validator.evolve(schema=strategies).is_valid([{}] * 7)
+    assert not validator.evolve(schema=strategies).is_valid([{}] * 8)
+    # These valid arrays contain duplicate generic objects intentionally; the
+    # Python current-epoch validator enforces semantic identity uniqueness.
     assert "hybrid_mode_gate" in schema["required"]
     assert "strategy_underwriting" in schema["required"]
     assert "central_case" in schema["properties"]["dependence_analysis"]["required"]
@@ -3211,9 +5388,15 @@ def test_control_panel_schema_version_matches_renderer_contract() -> None:
     assert set(canonical["required"]) == {
         "canonical_live_series_sha256",
         "evidence_layer",
+        "factor_window_observed_end",
+        "factor_window_observed_start",
+        "factor_window_return_observations",
+        "factor_window_series_sha256",
         "generation_id",
+        "live_version_ref",
         "observed_end",
         "observed_start",
+        "report_catalog_version_ref",
         "return_observations",
         "series_id",
         "strategy_id",
@@ -3477,12 +5660,12 @@ def test_accessibility_contract_covers_reflow_touch_motion_and_glossary() -> Non
 
 _PANEL_HWM_DAYS = ("2026-07-28", "2026-07-29", "2026-07-30")
 _PANEL_HWM_CAPITAL = {
-    "strategy-0": {"2026-07-29": "100", "2026-07-30": "110"},
-    "strategy-1": {"2026-07-29": "300", "2026-07-30": "285"},
+    ACTIVE_STRATEGY_IDS[0]: {"2026-07-29": "100", "2026-07-30": "110"},
+    ACTIVE_STRATEGY_IDS[1]: {"2026-07-29": "300", "2026-07-30": "285"},
 }
 _PANEL_HWM_RETURNS = {
-    "2026-07-29": {"strategy-0": "0.10", "strategy-1": "-0.05"},
-    "2026-07-30": {"strategy-0": "0.02", "strategy-1": "0.04"},
+    "2026-07-29": {ACTIVE_STRATEGY_IDS[0]: "0.10", ACTIVE_STRATEGY_IDS[1]: "-0.05"},
+    "2026-07-30": {ACTIVE_STRATEGY_IDS[0]: "0.02", ACTIVE_STRATEGY_IDS[1]: "0.04"},
 }
 # Numerical keys the composite block contributes to an hwm_summary.
 _NUMERICAL_KEYS = {
@@ -3514,8 +5697,8 @@ def _panel_hwm_envelope(crosswalk: list[dict[str, object]]) -> dict[str, object]
     }
     periods: list[dict[str, object]] = []
     for day in _PANEL_HWM_DAYS:
-        for index in range(9):
-            strategy_id = f"strategy-{index}"
+        for index in range(7):
+            strategy_id = ACTIVE_STRATEGY_IDS[index]
             if day == "2026-07-28":
                 periods.append(
                     {
@@ -3583,8 +5766,8 @@ def _panel_hwm_crosswalk() -> list[dict[str, object]]:
     evidence path)."""
     rows: list[dict[str, object]] = []
     for day in ("2026-07-29", "2026-07-30"):
-        for index in range(9):
-            strategy_id = f"strategy-{index}"
+        for index in range(7):
+            strategy_id = ACTIVE_STRATEGY_IDS[index]
             reference = hashlib.sha256(
                 canonical_json_bytes(
                     {
@@ -3631,16 +5814,15 @@ def _candidate_data(candidate: dict[str, object]) -> dict[str, object]:
 
 
 def _expected_hwm_numerics() -> dict[str, str]:
-    """Hand-computed composite: day 1 (100*0.10 + 300*(-0.05) + 700*0)/1100,
-    day 2 (110*0.02 + 285*0.04 + 700*0)/1095, geometrically linked."""
+    """Hand-computed seven-strategy composite with five zero-return sleeves."""
     with localcontext() as ctx:
         ctx.prec = 34
         ctx.rounding = ROUND_HALF_EVEN
         r1 = (Decimal(100) * Decimal("0.10") + Decimal(300) * Decimal("-0.05")) / (
-            Decimal(1100)
+            Decimal(900)
         )
         r2 = (Decimal(110) * Decimal("0.02") + Decimal(285) * Decimal("0.04")) / (
-            Decimal(1095)
+            Decimal(895)
         )
         index = Decimal("1.0")
         peak = index
@@ -4102,7 +6284,7 @@ def test_panel_rejects_coherently_tampered_report_copies(
         inputs,
         tmp_path,
         report,
-        "report hwm_inputs differs from the governed baseline catalog",
+        "report hwm_inputs differs",
     )
 
 
@@ -4117,7 +6299,7 @@ def test_panel_rejects_truncated_envelope(
         inputs,
         tmp_path,
         report,
-        "report hwm_inputs differs from the governed baseline catalog",
+        "report hwm_inputs differs",
     )
 
 
@@ -4134,7 +6316,7 @@ def test_panel_rejects_envelope_missing_date(
         inputs,
         tmp_path,
         report,
-        "report hwm_inputs differs from the governed baseline catalog",
+        "report hwm_inputs differs",
     )
 
 
@@ -4149,7 +6331,7 @@ def test_panel_rejects_envelope_capital_mismatch(
         inputs,
         tmp_path,
         report,
-        "report strategy_returns differ from the governed baseline catalog",
+        "report strategy_returns differ",
     )
 
 
@@ -4166,7 +6348,7 @@ def test_panel_rejects_envelope_component_mismatch(
         inputs,
         tmp_path,
         report,
-        "report hwm_inputs differs from the governed baseline catalog",
+        "report hwm_inputs differs",
     )
 
 
@@ -4469,7 +6651,10 @@ def test_panel_rejects_available_confirmed_attestation_payload_unverifiable(
     report["baseline"] = identity
     report["hwm_inputs"] = envelope
     report["strategy_returns"] = crosswalk
-    _with_hwm_summary(report, inputs["freshness"], _panel_baseline_catalog())
+    summary_source = _with_hwm_summary(
+        _report(), inputs["freshness"], _panel_baseline_catalog()
+    )
+    report["hwm_summary"] = summary_source["hwm_summary"]
     report["hwm_summary"]["hwm_numerical_status"] = "UNAVAILABLE"
     report["hwm_summary"]["hwm_numerical_reason"] = "NO_HWM_INPUTS"
     _expect_panel_rejection(
@@ -4529,7 +6714,7 @@ def test_panel_rejects_policy_exclusion_fraud_probe(
 
     def mutate(catalog: dict[str, Any]) -> None:
         for row in catalog["hwm_inputs"]["periods"]:
-            if row["strategy_id"] == "strategy-1":
+            if row["strategy_id"] == ACTIVE_STRATEGY_IDS[1]:
                 row["disposition"] = "EXCLUDED_BY_POLICY"
                 row["beginning_capital_usd"] = None
                 row["return_source_record_id"] = None
@@ -4691,6 +6876,8 @@ def test_panel_valid_envelope_with_full_context_passes(
 # ---------------------------------------------------------------------------
 
 _VERSION = "abc123def4567890abcdef0123456789abcdef01"
+_SERIES_SHA = "d17937bb4803cde13954de0fe35cde1e7ca76d7fb06c426b5c1954d7a45b28ca"
+_FACTOR_PREFIX_SHA = "a9fa330746ec2794d1f631492e1135e2f0271dd4d86026d4e1744d061bc21729"
 
 
 def _parity_dependence(
@@ -4700,9 +6887,9 @@ def _parity_dependence(
 ) -> dict[str, Any]:
     """Minimal valid dependence-series-composition row."""
     return {
-        "canonical_live_series_sha256": "e" * 64,
+        "canonical_live_series_sha256": _SERIES_SHA,
         "live_evidence_layer": "ACCOUNT_LIVE",
-        "live_observations": 80,
+        "live_observations": 2,
         "live_version_ref": live_version,
         "observed_end": "2026-07-30",
         "observed_start": "2026-01-02",
@@ -4747,7 +6934,7 @@ def _parity_weekly(version: str | None = _VERSION) -> dict[str, Any]:
                 "display_name": "test-series",
                 "mode_coverage": {
                     "LIVE_ONLY": {
-                        "canonical_live_series_sha256": "e" * 64,
+                        "canonical_live_series_sha256": _SERIES_SHA,
                         "live_daily_observations": 196,
                         "strategy_version": version,
                     }
@@ -4772,14 +6959,43 @@ def _parity_factor() -> dict[str, Any]:
             {
                 "series_id": "test-series",
                 "coverage": {
-                    "canonical_live_series_sha256": "e" * 64,
+                    "canonical_live_series_sha256": _SERIES_SHA,
                     "canonical_live_observed_end": "2026-07-30",
                     "canonical_live_observed_start": "2026-01-02",
-                    "canonical_live_observations": 80,
+                    "canonical_live_observations": 2,
                 },
             }
         ]
     }
+
+
+def _parity_report_returns() -> list[dict[str, Any]]:
+    """Literal report rows whose first two normalized values hash to _SERIES_SHA.
+
+    The third row proves parity is evaluated over the dependence window rather
+    than accidentally comparing the report's longer full path.
+    """
+
+    return [
+        {
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.0100",
+            "strategy_id": "strategy-0",
+        },
+        {
+            "date": "2026-07-30",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "-0.020",
+            "strategy_id": "strategy-0",
+        },
+        {
+            "date": "2026-08-13",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return": "0.50",
+            "strategy_id": "strategy-0",
+        },
+    ]
 
 
 def test_canonical_series_identity_same_version_passes() -> None:
@@ -4795,7 +7011,7 @@ def test_canonical_series_identity_same_version_passes() -> None:
     weekly = _parity_weekly()
 
     contracts = panel._canonical_strategy_series_contracts(
-        evidence, names, factor, dependence, weekly
+        evidence, names, factor, dependence, weekly, _parity_report_returns()
     )
     assert len(contracts) == 1
     assert contracts[0]["strategy_version"] == _VERSION
@@ -4803,22 +7019,63 @@ def test_canonical_series_identity_same_version_passes() -> None:
     assert contracts[0]["return_observations"] == 223
 
 
-def test_canonical_series_identity_different_version_fails() -> None:
-    """Mismatched live versions fail closed with a named reason."""
-    evidence = {"strategy-0": _parity_evidence("strategy-0", version="version-a")}
+def test_canonical_series_factor_prefix_is_checked_on_its_own_window() -> None:
+    """An older factor lens may be an exact prefix of current dependence data."""
+
+    evidence = {"strategy-0": _parity_evidence("strategy-0", version=_VERSION)}
     names = {"strategy-0": "test-series"}
     dependence = {
         "series_composition": {
-            "test-series": _parity_dependence("test-series", live_version="version-b")
+            "test-series": _parity_dependence("test-series", version=_VERSION)
         }
     }
+    factor = _parity_factor()
+    factor["series"][0]["coverage"].update(
+        {
+            "canonical_live_observations": 1,
+            "canonical_live_observed_end": "2026-01-02",
+            "canonical_live_series_sha256": _FACTOR_PREFIX_SHA,
+        }
+    )
+
+    contracts = panel._canonical_strategy_series_contracts(
+        evidence,
+        names,
+        factor,
+        dependence,
+        _parity_weekly(),
+        _parity_report_returns(),
+    )
+
+    assert contracts[0]["canonical_live_series_sha256"] == _SERIES_SHA
+    assert contracts[0]["factor_window_series_sha256"] == _FACTOR_PREFIX_SHA
+    assert contracts[0]["factor_window_observed_end"] == "2026-01-02"
+    assert contracts[0]["factor_window_return_observations"] == 1
+
+
+def test_canonical_series_identity_mutated_report_value_fails() -> None:
+    """A changed report return fails even when every identity label is unchanged."""
+    evidence = {"strategy-0": _parity_evidence("strategy-0", version=_VERSION)}
+    names = {"strategy-0": "test-series"}
+    dependence = {
+        "series_composition": {
+            "test-series": _parity_dependence("test-series", live_version=_VERSION)
+        }
+    }
+    report_returns = _parity_report_returns()
+    report_returns[1] = {**report_returns[1], "return": "-0.021"}
 
     with pytest.raises(
         panel.ControlPanelValidationError,
-        match="dependence canonical-series version parity failed",
+        match="report/dependence canonical-series value parity failed",
     ):
         panel._canonical_strategy_series_contracts(
-            evidence, names, _parity_factor(), dependence, _parity_weekly()
+            evidence,
+            names,
+            _parity_factor(),
+            dependence,
+            _parity_weekly(),
+            report_returns,
         )
 
 
@@ -4843,9 +7100,12 @@ def test_canonical_series_identity_full_version_divergence_passes() -> None:
         _parity_factor(),
         dependence,
         _parity_weekly(version="deprecated-no-history:2026-08-08"),
+        _parity_report_returns(),
     )
     assert len(contracts) == 1
-    assert contracts[0]["strategy_version"] == _VERSION
+    assert contracts[0]["strategy_version"] == "deprecated-no-history:2026-08-08"
+    assert contracts[0]["live_version_ref"] == _VERSION
+    assert contracts[0]["report_catalog_version_ref"] == _VERSION
 
 
 def test_canonical_series_identity_missing_live_version_fails() -> None:
@@ -4863,7 +7123,12 @@ def test_canonical_series_identity_missing_live_version_fails() -> None:
         match="dependence live version is absent",
     ):
         panel._canonical_strategy_series_contracts(
-            evidence, names, _parity_factor(), dependence, _parity_weekly()
+            evidence,
+            names,
+            _parity_factor(),
+            dependence,
+            _parity_weekly(),
+            _parity_report_returns(),
         )
 
 
@@ -4882,7 +7147,12 @@ def test_canonical_series_identity_missing_evidence_version_fails() -> None:
         match="evidence strategy version is absent",
     ):
         panel._canonical_strategy_series_contracts(
-            evidence, names, _parity_factor(), dependence, _parity_weekly()
+            evidence,
+            names,
+            _parity_factor(),
+            dependence,
+            _parity_weekly(),
+            _parity_report_returns(),
         )
 
 
@@ -4907,7 +7177,12 @@ def test_canonical_series_identity_malformed_evidence_version_fails() -> None:
         match="evidence strategy version is absent",
     ):
         panel._canonical_strategy_series_contracts(
-            evidence, names, _parity_factor(), dependence, _parity_weekly()
+            evidence,
+            names,
+            _parity_factor(),
+            dependence,
+            _parity_weekly(),
+            _parity_report_returns(),
         )
 
 
@@ -4926,7 +7201,12 @@ def test_canonical_series_identity_missing_dependence_version_fails() -> None:
         match="dependence strategy version is absent",
     ):
         panel._canonical_strategy_series_contracts(
-            evidence, names, _parity_factor(), dependence, _parity_weekly()
+            evidence,
+            names,
+            _parity_factor(),
+            dependence,
+            _parity_weekly(),
+            _parity_report_returns(),
         )
 
 
@@ -4942,7 +7222,12 @@ def test_canonical_series_identity_counts_still_displayed() -> None:
     }
 
     contracts = panel._canonical_strategy_series_contracts(
-        evidence, names, _parity_factor(), dependence, _parity_weekly()
+        evidence,
+        names,
+        _parity_factor(),
+        dependence,
+        _parity_weekly(),
+        _parity_report_returns(),
     )
     assert len(contracts) == 1
     # Evidence raw count 223, decomposition lens live_observations 80.
@@ -4967,10 +7252,10 @@ def test_canonical_series_dependence_beyond_evidence_fails() -> None:
 
     with pytest.raises(
         panel.ControlPanelValidationError,
-        match="extends beyond the evidenced live path",
+        match="canonical-series value parity failed",
     ):
         panel._canonical_strategy_series_contracts(
-            evidence, names, factor, dependence, weekly
+            evidence, names, factor, dependence, weekly, _parity_report_returns()
         )
 
 
@@ -5002,8 +7287,15 @@ def _governed_hwm_bundle() -> tuple[dict[str, Any], bytes, bytes, bytes]:
 
 
 def test_panel_reconciles_governed_proof(
-    inputs: dict[str, Any], tmp_path: Path
+    inputs: dict[str, Any], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    product_contract = (
+        REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+    )
+    hwm_policy = REPOSITORY_ROOT / "contracts" / "portfolio-hwm-policy-v4.json"
+    monkeypatch.setattr(panel, "FINANCIAL_MVP_CONTRACT", product_contract)
+    monkeypatch.setattr(panel, "_PORTABLE_HWM_PRODUCT_CONTRACT", product_contract)
+    monkeypatch.setattr(panel, "_PORTABLE_HWM_POLICY", hwm_policy)
     report, _catalog = _envelope_report(inputs, tmp_path)
     result, generation_bytes, calendar_bytes, receipt_bytes = _governed_hwm_bundle()
     proof = panel._panel_governed_hwm_proof(
@@ -5101,10 +7393,960 @@ def _write_manifest(path: Path, rows: list[dict[str, Any]]) -> Path:
     return path
 
 
-def test_account_manifest_flows_through_build_and_verify(
+_PANEL_EPOCH_ARTIFACT = "outputs/account-strategy-manifest.json"
+_PANEL_EPOCH_REPORT_PATH = "verification/independent-verification.json"
+_PANEL_EPOCH_FAKE_REPORT = b'{"fixture":"panel-epoch"}\n'
+_PANEL_EPOCH_VERIFIED_CACHE: tuple[tuple[tuple[str, bytes], ...], bytes] | None = None
+
+
+def _panel_verified_payloads() -> tuple[dict[str, bytes], bytes]:
+    """Build the established mixed subjects and their genuine independent report."""
+
+    global _PANEL_EPOCH_VERIFIED_CACHE
+    if _PANEL_EPOCH_VERIFIED_CACHE is not None:
+        cached_payloads, cached_report = _PANEL_EPOCH_VERIFIED_CACHE
+        return dict(cached_payloads), cached_report
+
+    fixture_name = "_panel_manifest_fixture_module"
+    fixture_module = sys.modules.get(fixture_name)
+    if fixture_module is None:
+        fixture_path = (
+            REPOSITORY_ROOT
+            / "tests"
+            / "portfolio_control_panel"
+            / "test_account_manifest_generation.py"
+        )
+        fixture_spec = importlib.util.spec_from_file_location(
+            fixture_name, fixture_path
+        )
+        assert fixture_spec is not None and fixture_spec.loader is not None
+        fixture_module = importlib.util.module_from_spec(fixture_spec)
+        sys.modules[fixture_name] = fixture_module
+        fixture_spec.loader.exec_module(fixture_module)
+
+    producer_name = "_panel_manifest_fixture_producer"
+    producer = sys.modules.get(producer_name)
+    if producer is None:
+        producer_spec = importlib.util.spec_from_file_location(
+            producer_name, fixture_module.MODULE_PATH
+        )
+        assert producer_spec is not None and producer_spec.loader is not None
+        producer = importlib.util.module_from_spec(producer_spec)
+        sys.modules[producer_name] = producer
+        producer_spec.loader.exec_module(producer)
+
+    selected = fixture_module._mixed_composer_selected_inputs(producer)
+    payloads = dict(producer.build_account_manifest_payloads(selected))
+    payload = payloads[_PANEL_EPOCH_ARTIFACT]
+    decoded = json.loads(payload)
+    validate_manifest_schema(decoded)
+    # The live producer currently emits schema 9; this fixture must consume
+    # that payload rather than relabeling it as an older schema.
+    assert decoded["schema_version"] == 9
+
+    verifier_name = "_panel_manifest_fixture_verifier"
+    verifier = sys.modules.get(verifier_name)
+    if verifier is None:
+        verifier_spec = importlib.util.spec_from_file_location(
+            verifier_name, fixture_module.VERIFIER_MODULE_PATH
+        )
+        assert verifier_spec is not None and verifier_spec.loader is not None
+        verifier = importlib.util.module_from_spec(verifier_spec)
+        sys.modules[verifier_name] = verifier
+        verifier_spec.loader.exec_module(verifier)
+    report = verifier.IndependentAccountManifestVerifier().verify(
+        fixture_module._mixed_verifier_inputs(verifier, selected), payloads
+    )
+    _PANEL_EPOCH_VERIFIED_CACHE = tuple(sorted(payloads.items())), report
+    return dict(payloads), report
+
+
+def _panel_manifest_bytes() -> bytes:
+    return _panel_verified_payloads()[0][_PANEL_EPOCH_ARTIFACT]
+
+
+def _panel_forged_report() -> bytes:
+    """Keep a report schema-valid while forging its account-manifest subject."""
+
+    _payloads, report_bytes = _panel_verified_payloads()
+    report = json.loads(report_bytes)
+    subject = next(
+        item for item in report["subjects"] if item["path"] == _PANEL_EPOCH_ARTIFACT
+    )
+    subject["sha256"] = "0" * 64
+    report["subjects_semantic_sha256"] = hashlib.sha256(
+        canonical_json_bytes({"subjects": report["subjects"]})
+    ).hexdigest()
+    return canonical_json_bytes(report)
+
+
+def _panel_renamed_receipt() -> tuple[dict[str, bytes], bytes]:
+    """Refresh report subject hashes while substituting its receipt path."""
+
+    payloads, report_bytes = _panel_verified_payloads()
+    report = json.loads(report_bytes)
+    fixed_paths = {
+        _PANEL_EPOCH_ARTIFACT,
+        "authority/account-assignment-crosswalk.json",
+        "authority/account-assignment-perimeter.json",
+        "authority/account-flow-coverage.json",
+        "authority/account-interval-retrieval-receipt-authority.json",
+        "authority/calculation-inputs.json",
+        "authority/classified-flows.json",
+        "authority/code-identities.json",
+        "authority/flow-classification-policy.json",
+        "authority/mapped-epoch-admission.json",
+        "authority/selected-input-identities.json",
+    }
+    receipt_subject = next(
+        subject for subject in report["subjects"] if subject["path"] not in fixed_paths
+    )
+    old_path = receipt_subject["path"]
+    replacement_path = "evidence/forged-receipt.json"
+    payloads[replacement_path] = payloads.pop(old_path)
+    receipt_subject["path"] = replacement_path
+    report["subjects_semantic_sha256"] = hashlib.sha256(
+        canonical_json_bytes({"subjects": report["subjects"]})
+    ).hexdigest()
+    return payloads, canonical_json_bytes(report)
+
+
+def _panel_mixed_case_receipts() -> tuple[dict[str, bytes], bytes]:
+    """Build two exact receipt identities whose two contract orders differ."""
+
+    payloads, report_bytes = _panel_verified_payloads()
+    report = json.loads(report_bytes)
+    selected_path = "authority/selected-input-identities.json"
+    authority_path = "authority/account-interval-retrieval-receipt-authority.json"
+    output_path = _PANEL_EPOCH_ARTIFACT
+    old_receipt_path = next(
+        item["receipt_id"]
+        for item in report["selected_source_identities"]["retrieval_receipts"]
+    )
+    receipt_bytes = payloads.pop(old_receipt_path)
+    receipt_paths = ("receipt/Z.json", "receipt/a.json")
+    for path in receipt_paths:
+        payloads[path] = receipt_bytes
+    receipt_identity = {
+        "sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+        "size_bytes": len(receipt_bytes),
+    }
+
+    authority = json.loads(payloads[authority_path])
+    authority_receipt = authority["receipts"][0]
+    authority["receipts"] = [
+        {**authority_receipt, "artifact_id": path}
+        for path in ("receipt/a.json", "receipt/Z.json")
+    ]
+    payloads[authority_path] = canonical_json_bytes(authority)
+
+    selected = json.loads(payloads[selected_path])
+    selected["retrieval_receipts"] = [
+        {"receipt_id": path, **receipt_identity} for path in receipt_paths
+    ]
+    selected["receipt_authority"] = {
+        "sha256": hashlib.sha256(payloads[authority_path]).hexdigest(),
+        "size_bytes": len(payloads[authority_path]),
+    }
+    payloads[selected_path] = canonical_json_bytes(selected)
+
+    manifest = json.loads(payloads[output_path])
+    manifest["source_identities"]["flow_coverage"]["receipt_authority"].update(
+        selected["receipt_authority"]
+    )
+    manifest["source_identities"]["selected_inputs"].update(
+        {
+            "sha256": hashlib.sha256(payloads[selected_path]).hexdigest(),
+            "size_bytes": len(payloads[selected_path]),
+        }
+    )
+    payloads[output_path] = canonical_json_bytes(manifest)
+    validate_manifest_schema(manifest)
+
+    report["selected_source_identities"] = selected
+    fixed_subjects = report["subjects"][:11]
+    for subject in fixed_subjects:
+        path = subject["path"]
+        subject.update(
+            {
+                "sha256": hashlib.sha256(payloads[path]).hexdigest(),
+                "size_bytes": len(payloads[path]),
+            }
+        )
+    report["subjects"] = [
+        *fixed_subjects,
+        *(
+            {"path": path, **receipt_identity}
+            for path in ("receipt/a.json", "receipt/Z.json")
+        ),
+    ]
+    report["subjects_semantic_sha256"] = hashlib.sha256(
+        canonical_json_bytes({"subjects": report["subjects"]})
+    ).hexdigest()
+    return payloads, canonical_json_bytes(report)
+
+
+def _panel_contradictory_counts_report() -> bytes:
+    """Keep the report schema-valid while contradicting exact chain counts."""
+
+    _payloads, report_bytes = _panel_verified_payloads()
+    report = json.loads(report_bytes)
+    report["counts"]["complete_coverage_row_count"] += 1
+    report["counts"]["blocked_coverage_row_count"] -= 1
+    return canonical_json_bytes(report)
+
+
+def _public_build_with_crosswalk_identity(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    crosswalk: object,
+) -> None:
+    """Send a generated bundle's crosswalk through the public build path."""
+
+    subject_payloads, independent_report = _panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=independent_report,
+    )
+    real_reader = panel._verified_bundle_account_manifest
+
+    def read_with_crosswalk_override(
+        staged_path: Path, generation_root: Path, generation_id: str
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        value, identity = real_reader(staged_path, generation_root, generation_id)
+        return value, {**identity, "current_epoch_crosswalk": crosswalk}
+
+    monkeypatch.setattr(
+        panel, "_verified_bundle_account_manifest", read_with_crosswalk_override
+    )
+    panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        account_manifest_generation_root=root,
+        account_manifest_generation_id=manifest.generation_id,
+    )
+
+
+def test_public_build_reaches_panel_data_with_generated_schema9_crosswalk(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A generated schema-9 bundle supplies its crosswalk to panel data."""
+
+    subject_payloads, independent_report = _panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    crosswalk = json.loads(
+        subject_payloads["authority/account-assignment-crosswalk.json"]
+    )
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=independent_report,
+    )
+    captured: list[object] = []
+
+    def panel_data_probe(*args: object, **kwargs: object) -> dict[str, Any]:
+        del args
+        captured.append(kwargs["account_manifest_identity"])
+        raise RuntimeError("panel data consumer reached")
+
+    monkeypatch.setattr(panel, "_panel_data", panel_data_probe)
+    with pytest.raises(RuntimeError, match="panel data consumer reached"):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_generation_root=root,
+            account_manifest_generation_id=manifest.generation_id,
+        )
+    assert len(captured) == 1
+    assert captured[0]["current_epoch_crosswalk"] == crosswalk  # type: ignore[index]
+
+
+def _stage_panel_bundle(
+    root: Path,
+    payload: bytes,
+    *,
+    subject_payloads: dict[str, bytes] | None = None,
+    independent_report: bytes = _PANEL_EPOCH_FAKE_REPORT,
+    report_schema_name: str = "account-manifest-independent-verification",
+    report_schema_version: str | None = None,
+) -> GenerationManifest:
+    as_of = date(2026, 2, 1)
+    manifest_payload = json.loads(payload)
+    manifest_schema_version = manifest_payload.get("schema_version")
+    assert manifest_schema_version in {8, 9}
+    report_object = json.loads(independent_report)
+    report_version = report_object.get("schema_version")
+    if type(report_version) is not int:
+        report_version = 3
+    bundle_payloads = (
+        {_PANEL_EPOCH_ARTIFACT: payload}
+        if subject_payloads is None
+        else dict(subject_payloads)
+    )
+    assert bundle_payloads[_PANEL_EPOCH_ARTIFACT] == payload
+    bundle_payloads[_PANEL_EPOCH_REPORT_PATH] = independent_report
+    artifacts = tuple(
+        SourceArtifact(
+            artifact_id=artifact_id,
+            sha256=hashlib.sha256(contents).hexdigest(),
+            size_bytes=len(contents),
+            as_of_date=as_of,
+            schema_name=(
+                "account-strategy-manifest"
+                if artifact_id == _PANEL_EPOCH_ARTIFACT
+                else (
+                    report_schema_name
+                    if artifact_id == _PANEL_EPOCH_REPORT_PATH
+                    else "account-manifest-subject"
+                )
+            ),
+            schema_version=(
+                str(manifest_schema_version)
+                if artifact_id == _PANEL_EPOCH_ARTIFACT
+                else (
+                    report_schema_version or str(report_version)
+                    if artifact_id == _PANEL_EPOCH_REPORT_PATH
+                    else "1"
+                )
+            ),
+        )
+        for artifact_id, contents in sorted(bundle_payloads.items())
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-panel-epoch", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic verified-bundle panel fixture",
+            fact_types=("synthetic",),
+            observed_start=as_of,
+            observed_end=as_of,
+            known_gaps=(),
+        ),
+        artifacts=artifacts,
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        root,
+        manifest,
+        bundle_payloads,
+    )
+    return manifest
+
+
+def test_verified_bundle_panel_manifest_reads_binds_and_preserves_literal_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replacing the bundle seam with raw-five reconstruction loses exact lineage."""
+
+    subject_payloads, independent_report = _panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    generation_root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(
+        generation_root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=independent_report,
+    )
+    staged_path = tmp_path / "staged-account-strategy-manifest.json"
+    staged_path.write_bytes(payload)
+
+    real_reader = panel.read_generation_bundle
+    real_source_builder = panel._epoch_manifest_source_from_bundle
+    read_bundles: list[object] = []
+    binder_bundles: list[object] = []
+    staged_reads = 0
+    real_path_read_bytes = Path.read_bytes
+
+    def read_once(root: Path, generation_id: str) -> object:
+        assert root == generation_root
+        assert generation_id == manifest.generation_id
+        bundle = real_reader(root, generation_id)
+        read_bundles.append(bundle)
+        return bundle
+
+    def source_builder(bundle: object, payload: bytes) -> object:
+        binder_bundles.append(bundle)
+        assert read_bundles == [bundle]
+        assert bundle is read_bundles[0]
+        return real_source_builder(bundle, payload)
+
+    def counted_read_bytes(path: Path) -> bytes:
+        nonlocal staged_reads
+        if path == staged_path:
+            staged_reads += 1
+        return real_path_read_bytes(path)
+
+    def producer_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("legacy raw-five producer was invoked")
+
+    monkeypatch.setattr(panel, "read_generation_bundle", read_once)
+    monkeypatch.setattr(panel, "_epoch_manifest_source_from_bundle", source_builder)
+    monkeypatch.setattr(panel, "build_manifest_candidate", producer_must_not_run)
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+
+    decoded, identity = panel._verified_bundle_account_manifest(
+        staged_path,
+        generation_root,
+        manifest.generation_id,
+    )
+
+    assert len(read_bundles) == 1
+    assert binder_bundles == read_bundles
+    assert staged_reads == 1
+    assert hashlib.sha256(payload).hexdigest() == next(
+        artifact.sha256
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == _PANEL_EPOCH_ARTIFACT
+    )
+    assert len(payload) == next(
+        artifact.size_bytes
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == _PANEL_EPOCH_ARTIFACT
+    )
+    ok_row = next(row for row in decoded["rows"] if row["status"] == "OK")
+    assert {
+        key: ok_row[key]
+        for key in (
+            "opening_capital",
+            "deposits",
+            "invested",
+            "net_capital",
+            "current_value",
+            "gain",
+            "nav_observations",
+        )
+    } == {
+        "opening_capital": "50",
+        "deposits": "10",
+        "invested": "60",
+        "net_capital": "60",
+        "current_value": "70",
+        "gain": "10",
+        "nav_observations": 3,
+    }
+    blocked_row = next(
+        row for row in decoded["rows"] if row["account_id"] == "synthetic-account-02"
+    )
+    assert blocked_row == {
+        "account_id": "synthetic-account-02",
+        "account_label": "Synthetic 02",
+        "admission_authority_kind": "NONE",
+        "admission_policy_reference": "NONE",
+        "admission_status": "BLOCKED",
+        "blocking_reason": "SYNTHETIC_BLOCKED",
+        "continuity_to_successor": False,
+        "effective_end": None,
+        "effective_start": "2025-01-01",
+        "funded_nav_record_ids": [],
+        "last_four": "0002",
+        "provider": "SYNTHETIC",
+        "status": "BLOCKED_ADMISSION",
+        "strategy_id": "synthetic-strategy-02",
+    }
+
+
+def test_verified_bundle_panel_manifest_reads_its_long_finalized_path(
+    tmp_path: Path,
+) -> None:
+    subject_payloads, independent_report = _panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    generation_root = tmp_path
+    while (
+        len(
+            str(
+                (
+                    generation_root / "generations" / ("a" * 64) / _PANEL_EPOCH_ARTIFACT
+                ).absolute()
+            )
+        )
+        <= 270
+    ):
+        generation_root /= "long-epoch-component"
+    manifest = _stage_panel_bundle(
+        generation_root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=independent_report,
+    )
+    finalized = (
+        generation_root / "generations" / manifest.generation_id / _PANEL_EPOCH_ARTIFACT
+    )
+    if sys.platform == "win32":
+        assert len(str(finalized.absolute())) > 260
+
+    decoded, identity = panel._verified_bundle_account_manifest(
+        finalized,
+        generation_root,
+        manifest.generation_id,
+    )
+
+    assert decoded["rows"]
+    assert identity["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert identity["authority_profile"] == ("VERIFIED_GENERATION_BUNDLE_EXACT_BYTES")
+    source = identity["epoch_manifest_source"]
+    assert source["generation_id"] == manifest.generation_id
+    assert source["artifact"]["path"] == _PANEL_EPOCH_ARTIFACT
+    assert source["artifact"]["sha256"] == hashlib.sha256(payload).hexdigest()
+    assert source["artifact"]["size_bytes"] == len(payload)
+    assert source["artifact"]["schema"]["version"] == str(decoded["schema_version"])
+    assert identity["verification"]["status"] == (
+        "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
+    )
+    assert (
+        identity["verification"]["independent_report"]["report_schema_version"]
+        == json.loads(independent_report)["schema_version"]
+    )
+
+
+def test_verified_bundle_panel_manifest_rejects_legacy_manifest_only_generation(
+    tmp_path: Path,
+) -> None:
+    """A schema label in generation.json cannot replace detached bundle controls."""
+
+    payload = _panel_manifest_bytes()
+    root = tmp_path / "legacy"
+    manifest = _stage_panel_bundle(tmp_path / "source", payload)
+    stage_generation(root, manifest)
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="verified epoch-manifest generation bundle",
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+def test_verified_bundle_panel_manifest_rejects_valid_alternate_bundle(
+    tmp_path: Path,
+) -> None:
+    """Selecting another valid generation must not substitute its manifest bytes."""
+
+    payload = _panel_manifest_bytes()
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+    alternate = json.loads(payload)
+    blocked = next(
+        row for row in alternate["rows"] if row["account_id"] == "synthetic-account-02"
+    )
+    blocked["blocking_reason"] = "SYNTHETIC_BLOCKED_ALTERNATE"
+    alternate_payload = canonical_json_bytes(alternate)
+    validate_manifest_schema(alternate)
+    manifest = _stage_panel_bundle(tmp_path / "alternate", alternate_payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="staged account manifest differs from verified generation bundle",
+    ):
+        panel._verified_bundle_account_manifest(
+            staged, tmp_path / "alternate", manifest.generation_id
+        )
+
+
+def test_verified_bundle_panel_manifest_wraps_payload_binding_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A binder import failure must not escape the panel validation boundary."""
+
+    payload = _panel_manifest_bytes()
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(root, payload)
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    def payload_binding_failure(_bundle: object, _payload: bytes) -> object:
+        raise ImportError("synthetic payload binding failure")
+
+    monkeypatch.setattr(
+        panel, "_epoch_manifest_source_from_bundle", payload_binding_failure
+    )
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="generation bundle binding failed",
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+def test_verified_bundle_panel_manifest_does_not_promote_not_ready_payload(
+    tmp_path: Path,
+) -> None:
+    """Envelope verification and a report-shaped file cannot assert product readiness."""
+
+    subject_payloads, _genuine_report = _panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=_panel_forged_report(),
+    )
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independent verification report subjects differ",
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+def test_verified_bundle_panel_manifest_never_elevates_copied_self_consistent_report(
+    tmp_path: Path,
+) -> None:
+    """Unsigned report bytes can be replayed, so attestation is not publication proof."""
+
+    subject_payloads, genuine_report = _panel_verified_payloads()
+    copied_report = bytes(bytearray(genuine_report))
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=copied_report,
+    )
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    _decoded, identity = panel._verified_bundle_account_manifest(
+        staged, root, manifest.generation_id
+    )
+
+    report_artifact = next(
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id == _PANEL_EPOCH_REPORT_PATH
+    )
+    assert report_artifact.sha256 == hashlib.sha256(copied_report).hexdigest()
+    assert identity["verification"]["status"] == (
+        "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
+    )
+    assert identity["verification"]["publication_readiness"] == "NOT_READY"
+
+
+def test_verified_bundle_panel_manifest_rejects_refreshed_receipt_substitution(
+    tmp_path: Path,
+) -> None:
+    """Outer hashes cannot conceal a receipt path absent from selected identities."""
+
+    subject_payloads, forged_report = _panel_renamed_receipt()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=forged_report,
+    )
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independent verification report receipt identities differ",
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+def test_verified_bundle_panel_manifest_accepts_distinct_mixed_case_receipt_orders(
+    tmp_path: Path,
+) -> None:
+    """Selected-identity order must not override casefold subject order."""
+
+    subject_payloads, report = _panel_mixed_case_receipts()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    selected = json.loads(subject_payloads["authority/selected-input-identities.json"])
+    report_object = json.loads(report)
+    assert [item["receipt_id"] for item in selected["retrieval_receipts"]] == [
+        "receipt/Z.json",
+        "receipt/a.json",
+    ]
+    assert [item["path"] for item in report_object["subjects"][-2:]] == [
+        "receipt/a.json",
+        "receipt/Z.json",
+    ]
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=report,
+    )
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    decoded, identity = panel._verified_bundle_account_manifest(
+        staged, root, manifest.generation_id
+    )
+
+    assert decoded["authority_readiness"]["publication_readiness"] == "NOT_READY"
+    assert identity["verification"]["status"] == (
+        "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
+    )
+    assert identity["verification"]["publication_readiness"] == "NOT_READY"
+
+
+def test_verified_bundle_panel_manifest_rejects_schema_valid_count_contradiction(
+    tmp_path: Path,
+) -> None:
+    """Schema-valid count partitions must still equal the exact report chains."""
+
+    subject_payloads, _report = _panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=_panel_contradictory_counts_report(),
+    )
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independent verification report coverage or admission counts differ",
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+@pytest.mark.parametrize(
+    ("schema_name", "schema_version"),
+    (
+        ("independent-verification", "3"),
+        ("account-manifest-independent-verification", "2"),
+    ),
+)
+def test_verified_bundle_panel_manifest_rejects_report_artifact_schema_mismatch(
+    tmp_path: Path,
+    schema_name: str,
+    schema_version: str,
+) -> None:
+    """Receipt binding cannot replace the report artifact's semantic schema."""
+
+    subject_payloads, report = _panel_verified_payloads()
+    payload = subject_payloads[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subject_payloads,
+        independent_report=report,
+        report_schema_name=schema_name,
+        report_schema_version=schema_version,
+    )
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match=(
+            "independent verification report "
+            "(artifact identity differs|authority fields differ)"
+        ),
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+@pytest.mark.parametrize("mutation", ("bundle", "staged"))
+def test_verified_bundle_panel_manifest_rejects_one_byte_mutation(
+    tmp_path: Path, mutation: str
+) -> None:
+    """A byte changed at either side of the boundary must never reach the panel."""
+
+    payload = _panel_manifest_bytes()
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(root, payload)
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(payload)
+    target = (
+        root
+        / "generations"
+        / manifest.generation_id
+        / "outputs"
+        / "account-strategy-manifest.json"
+        if mutation == "bundle"
+        else staged
+    )
+    changed = bytearray(target.read_bytes())
+    changed[0] = ord("[")
+    target.write_bytes(changed)
+
+    with pytest.raises(panel.ControlPanelValidationError):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+def test_verified_bundle_panel_manifest_rejects_schema_invalid_bundled_bytes(
+    tmp_path: Path,
+) -> None:
+    """A generic verified envelope must not promote an invalid manifest payload."""
+
+    payload = _panel_manifest_bytes()
+    invalid = json.loads(payload)
+    invalid["rows"][0]["status"] = "FABRICATED"
+    invalid_payload = canonical_json_bytes(invalid)
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(root, invalid_payload)
+    staged = tmp_path / "staged.json"
+    staged.write_bytes(invalid_payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="account manifest is invalid",
+    ):
+        panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
+
+
+def test_account_manifest_generation_pair_is_atomic_and_exclusive(
+    tmp_path: Path,
+) -> None:
+    """The exact bundle route cannot be partially or jointly selected."""
+
+    payload = _panel_manifest_bytes()
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(root, payload)
+    legacy_path = tmp_path / "legacy-manifest.json"
+    legacy_path.write_bytes(payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="generation root and generation id must be supplied together",
+    ):
+        panel._account_manifest(
+            None,
+            financial_mode=False,
+            ledger_path=None,
+            ledger_identity_path=None,
+            baseline_root=None,
+            baseline_generation_id=None,
+            classified_flows_path=None,
+            flow_coverage_path=None,
+            classification_policy_path=None,
+            admission_policy_path=None,
+            account_manifest_generation_root=root,
+            account_manifest_generation_id=None,
+        )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="generation root and generation id must be supplied together",
+    ):
+        panel._account_manifest(
+            None,
+            financial_mode=False,
+            ledger_path=None,
+            ledger_identity_path=None,
+            baseline_root=None,
+            baseline_generation_id=None,
+            classified_flows_path=None,
+            flow_coverage_path=None,
+            classification_policy_path=None,
+            admission_policy_path=None,
+            account_manifest_generation_root=None,
+            account_manifest_generation_id=manifest.generation_id,
+        )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="cannot be combined with legacy account-manifest inputs",
+    ):
+        panel._account_manifest(
+            legacy_path,
+            financial_mode=False,
+            ledger_path=None,
+            ledger_identity_path=None,
+            baseline_root=None,
+            baseline_generation_id=None,
+            classified_flows_path=None,
+            flow_coverage_path=None,
+            classification_policy_path=None,
+            admission_policy_path=None,
+            account_manifest_generation_root=root,
+            account_manifest_generation_id=manifest.generation_id,
+        )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="cannot be combined with legacy account-manifest inputs",
+    ):
+        panel._account_manifest(
+            None,
+            financial_mode=True,
+            ledger_path=None,
+            ledger_identity_path=None,
+            baseline_root=None,
+            baseline_generation_id=None,
+            classified_flows_path=None,
+            flow_coverage_path=None,
+            classification_policy_path=None,
+            admission_policy_path=None,
+            account_manifest_generation_root=root,
+            account_manifest_generation_id=manifest.generation_id,
+        )
+
+
+def test_verified_bundle_cli_dispatches_generation_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary build CLI passes the pair without legacy manifest options."""
+
+    captured: dict[str, object] = {}
+
+    def fake_build(*_args: object, **kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"status": "captured"}
+
+    monkeypatch.setattr(panel, "build_candidate", fake_build)
+    assert (
+        panel.main(
+            [
+                "build",
+                "--report-root",
+                "report",
+                "--legacy-panel",
+                "legacy",
+                "--output-root",
+                "output",
+                "--freshness-health",
+                "freshness",
+                "--baseline-root",
+                "baseline",
+                "--account-manifest-generation-root",
+                "bundle",
+                "--account-manifest-generation-id",
+                "a" * 64,
+            ]
+        )
+        == 0
+    )
+    assert captured["account_manifest_generation_root"] == Path("bundle")
+    assert captured["account_manifest_generation_id"] == "a" * 64
+    assert captured["account_manifest_path"] is None
+
+
+def test_account_manifest_blocked_flows_through_build_and_verify(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
-    manifest_path = _write_manifest(tmp_path / "manifest.json", [_manifest_row()])
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "manifest",
+        "56832.54",
+        accepted_baseline_root=inputs["baseline"],
+    )
     built_with = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
@@ -5112,10 +8354,50 @@ def test_account_manifest_flows_through_build_and_verify(
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         account_manifest_path=manifest_path,
+        financial_mode=True,
+        manifest_ledger_path=authority["ledger"],
+        manifest_ledger_identity_path=authority["ledger_identity"],
+        manifest_baseline_root=authority["baseline"],
+        manifest_classified_flows_path=authority["flows"],
+        manifest_flow_coverage_path=authority["flow_coverage"],
+        manifest_classification_policy_path=authority["classification_policy"],
+        manifest_admission_policy_path=authority["policy"],
     )
     data = _candidate_data(built_with)
-    assert data["account_manifest"]["rows"][0]["gain"] == "6832.54"
+    row = data["account_manifest"]["rows"][0]
+    assert row["status"] == "BLOCKED_UNPROVABLE_OPENING_FLOWS"
+    assert row["blocking_reason"] == "FLOW_COMPLETENESS_NOT_PROVEN"
+    assert (
+        not {
+            "start",
+            "end",
+            "opening_capital",
+            "deposits",
+            "internal_in",
+            "invested",
+            "external_withdrawals",
+            "internal_out",
+            "withdrawn",
+            "net_capital",
+            "current_value",
+            "gain",
+            "return_on_net_capital",
+            "annualized_return_on_net_capital",
+            "xirr_diagnostic",
+            "observation_linked_return",
+            "observed_hwm_index",
+            "observed_max_drawdown",
+            "opening_basis",
+            "observation_trace",
+            "capital_flow_trace",
+            "nav_observations",
+        }
+        & row.keys()
+    )
     assert data["meta"]["account_manifest_sha256"] == panel._hash(manifest_path)
+    assert data["meta"]["account_manifest_size_bytes"] == len(
+        manifest_path.read_bytes()
+    )
     # Determinism: identical artifact -> identical panel id.
     again = panel.build_candidate(
         inputs["report"],
@@ -5124,6 +8406,14 @@ def test_account_manifest_flows_through_build_and_verify(
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         account_manifest_path=manifest_path,
+        financial_mode=True,
+        manifest_ledger_path=authority["ledger"],
+        manifest_ledger_identity_path=authority["ledger_identity"],
+        manifest_baseline_root=authority["baseline"],
+        manifest_classified_flows_path=authority["flows"],
+        manifest_flow_coverage_path=authority["flow_coverage"],
+        manifest_classification_policy_path=authority["classification_policy"],
+        manifest_admission_policy_path=authority["policy"],
     )
     assert again["panel_id"] == built_with["panel_id"]
 
@@ -5136,6 +8426,14 @@ def test_account_manifest_flows_through_build_and_verify(
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
         )["all_passed"]
         is True
     )
@@ -5144,6 +8442,28 @@ def test_account_manifest_flows_through_build_and_verify(
     renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
     assert "data.account_manifest" in renderer
     assert "renderAccountManifest" in renderer
+
+
+def test_panel_formal_schema_embeds_strict_manifest_v6_contract(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    data = _candidate_data(built)
+    data["account_manifest"]["undeclared_field"] = "must fail"
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="panel data violates formal schema",
+    ):
+        panel._validate_panel_data_schema(data)
 
 
 def test_account_manifest_absent_leaves_panel_neutral(
@@ -5155,10 +8475,1177 @@ def test_account_manifest_absent_leaves_panel_neutral(
         inputs["output"],
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
     )
     data = _candidate_data(built)
     assert data["account_manifest"] is None
     assert data["meta"]["account_manifest_sha256"] is None
+    assert (
+        data["meta"]["account_manifest_authority_profile"]
+        == panel.MANIFEST_AUTHORITY_ABSENT
+    )
+
+
+def test_underwriting_projection_keeps_excluded_history_out_and_requires_all_active_ids() -> (
+    None
+):
+    controls = {
+        **{
+            f"strategy-{index}": {"product_requirement": "REQUIRED"}
+            for index in range(7)
+        },
+        "composer-holy-grail": {"product_requirement": "EXCLUDED"},
+        "echotrade-growth-pivots": {"product_requirement": "EXCLUDED"},
+    }
+    rows = [{"strategy_id": f"strategy-{index}"} for index in range(7)]
+    rows.extend(
+        [
+            {"strategy_id": "composer-holy-grail"},
+            {"strategy_id": "echotrade-growth-pivots"},
+        ]
+    )
+
+    projected = panel._current_product_rows(rows, controls)
+
+    assert {row["strategy_id"] for row in projected} == {
+        f"strategy-{index}" for index in range(7)
+    }
+    assert {row["strategy_id"] for row in projected} == {
+        row["strategy_id"] for row in rows[:7]
+    }
+    missing_active = projected[:-1]
+    assert {row["strategy_id"] for row in missing_active} != {
+        f"strategy-{index}" for index in range(7)
+    }
+
+
+def test_financial_mode_requires_manifest_and_independent_authorities(
+    inputs: dict[str, Path],
+) -> None:
+    """A financial panel cannot silently fall back to an unbound manifest."""
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="financial mode requires an account manifest",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            financial_mode=True,
+        )
+
+
+def test_financial_mode_requires_separately_selected_flow_coverage(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """Omitting the receipt input must not let financial mode treat flows as zero."""
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "manifest", "56832.54", accepted_baseline_root=inputs["baseline"]
+    )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independently selected.*flow coverage",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_manifest_rejects_mutated_flow_coverage_input(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The panel rebuild must bind the exact receipt bytes, not only its path."""
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    coverage_path = Path(financial["manifest_flow_coverage_path"])
+    coverage_path.write_bytes(b" " + coverage_path.read_bytes())
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="account manifest differs from independently rebuilt candidate",
+    ):
+        panel.verify_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            Path(built["candidate_dir"]),
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+
+
+def test_financial_mode_does_not_reuse_generic_report_baseline(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    manifest_path, authority = _produce_manifest(tmp_path / "baseline-seam", "56832.54")
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independently selected baseline root",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_mode_rejects_distinct_manifest_baseline_root(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    alternate_root = tmp_path / "alternate-baseline-root"
+    shutil.copytree(inputs["baseline"], alternate_root)
+    financial["manifest_baseline_root"] = alternate_root
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="manifest baseline root differs from panel authority",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+
+
+def test_financial_mode_rejects_manifest_from_a_different_as_of_candidate(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "date-seam",
+        "56832.54",
+        as_of="2026-07-29",
+        accepted_baseline_root=inputs["baseline"],
+    )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="manifest source dates differ from the report candidate",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_mode_rejects_manifest_outside_usd_reporting_perimeter(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "eur-seam",
+        "56832.54",
+        accepted_baseline_root=inputs["baseline"],
+        accounting_currency="EUR",
+    )
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="financial manifest accounting currency must be USD",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_mode_rejects_self_consistent_unapproved_policy_path(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "canonical",
+        "56832.54",
+        accepted_baseline_root=inputs["baseline"],
+    )
+    copied_policy = tmp_path / "copied-policy.json"
+    copied_policy.write_bytes(panel.FLOW_CLASSIFICATION_POLICY.read_bytes())
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="repository-governed flow classification policy",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
+            manifest_classification_policy_path=copied_policy,
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_mode_rejects_report_unbound_manifest_baseline(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "foreign-baseline", "56832.54"
+    )
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match=(
+            "independent account-manifest rebuild failed|"
+            "manifest baseline differs from the report authority"
+        ),
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_mode_rejects_caller_selected_renderer(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    forged_templates = tmp_path / "forged-templates"
+    shutil.copytree(panel.DEFAULT_TEMPLATE_ROOT, forged_templates)
+    app_path = forged_templates / "app.js"
+    app_path.write_text(
+        app_path.read_text(encoding="utf-8") + "\n// falsified renderer\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="repository-governed panel templates",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            template_root=forged_templates,
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+
+
+@pytest.mark.parametrize(
+    "drifted_authority",
+    [
+        "ledger",
+        "ledger_identity",
+        "baseline",
+        "classified_flows",
+        "classification_policy",
+        "admission_policy",
+    ],
+)
+def test_financial_mode_rebuild_rejects_independent_authority_drift(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    drifted_authority: str,
+) -> None:
+    manifest_path, authority = _produce_manifest(
+        tmp_path / drifted_authority,
+        "56832.54",
+        accepted_baseline_root=inputs["baseline"],
+    )
+    if drifted_authority == "ledger":
+        payload = json.loads(authority["ledger"].read_text(encoding="utf-8"))
+        payload["nav_observations"][-1]["nav"]["value"] = "57999.99"
+        _write_json(authority["ledger"], payload)
+    elif drifted_authority == "ledger_identity":
+        payload = json.loads(authority["ledger_identity"].read_text(encoding="utf-8"))
+        payload["generation_id"] = "3" * 64
+        _write_json(authority["ledger_identity"], payload)
+    elif drifted_authority == "baseline":
+        forged_baseline = tmp_path / "forged-baseline"
+        shutil.copytree(authority["baseline"], forged_baseline)
+        authority["baseline"] = forged_baseline
+        generation_id = read_current(forged_baseline).generation_id
+        baseline_path = (
+            authority["baseline"]
+            / "generations"
+            / generation_id
+            / "portfolio-baseline.json"
+        )
+        payload = json.loads(baseline_path.read_text(encoding="utf-8"))
+        payload["accounts"][0]["provider"] = "DRIFTED"
+        _write_json(baseline_path, payload)
+    elif drifted_authority == "classified_flows":
+        payload = json.loads(authority["flows"].read_text(encoding="utf-8"))
+        payload["classification_policy"]["policy_version"] = "2"
+        _write_json(authority["flows"], payload)
+    elif drifted_authority == "classification_policy":
+        payload = json.loads(
+            authority["classification_policy"].read_text(encoding="utf-8")
+        )
+        payload["event_dispositions"]["exact"][0]["disposition"] = "INTERNAL"
+        forged_policy = tmp_path / "forged-flow-classification-policy.json"
+        _write_json(forged_policy, payload)
+        authority["classification_policy"] = forged_policy
+    else:
+        payload = json.loads(authority["policy"].read_text(encoding="utf-8"))
+        payload["admissions"][0]["authority"] = "DRIFTED_TEST_AUTHORITY"
+        _write_json(authority["policy"], payload)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match=(
+            "independent account-manifest rebuild failed|"
+            "independently rebuilt candidate|"
+            "repository-governed flow classification policy"
+        ),
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_financial_mode_rebuild_rejects_self_consistent_status_downgrade(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "status-downgrade",
+        "56832.54",
+        accepted_baseline_root=inputs["baseline"],
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    row = manifest["rows"][0]
+    row["admission_status"] = "BLOCKED"
+    row["admission_policy_reference"] = "NONE"
+    row["admission_authority_kind"] = "NONE"
+    row["funded_nav_record_ids"] = []
+    row["continuity_to_successor"] = False
+    row["status"] = "BLOCKED_ADMISSION"
+    row["blocking_reason"] = "EPOCH_NOT_EXPLICITLY_FUNDED"
+    for field in (
+        "start",
+        "end",
+        "opening_capital",
+        "deposits",
+        "internal_in",
+        "invested",
+        "external_withdrawals",
+        "internal_out",
+        "withdrawn",
+        "net_capital",
+        "current_value",
+        "gain",
+        "return_on_net_capital",
+        "annualized_return_on_net_capital",
+        "xirr_diagnostic",
+        "observation_linked_return",
+        "observed_hwm_index",
+        "observed_max_drawdown",
+        "opening_basis",
+        "observation_trace",
+        "capital_flow_trace",
+        "nav_observations",
+    ):
+        row.pop(field, None)
+    validate_manifest_schema(manifest)
+    _write_json(manifest_path, manifest)
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="independently rebuilt candidate",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+            financial_mode=True,
+            manifest_ledger_path=authority["ledger"],
+            manifest_ledger_identity_path=authority["ledger_identity"],
+            manifest_baseline_root=authority["baseline"],
+            manifest_classified_flows_path=authority["flows"],
+            manifest_flow_coverage_path=authority["flow_coverage"],
+            manifest_classification_policy_path=authority["classification_policy"],
+            manifest_admission_policy_path=authority["policy"],
+        )
+
+
+def test_account_manifest_snapshot_bytes_are_read_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path, _ = _produce_manifest(tmp_path / "snapshot", "56832.54")
+    original_read_bytes = Path.read_bytes
+    reads = 0
+
+    def counted_read_bytes(path: Path) -> bytes:
+        nonlocal reads
+        if path == manifest_path:
+            reads += 1
+            if reads > 1:
+                raise AssertionError("account manifest was reread")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    manifest, identity = panel._account_manifest(
+        manifest_path,
+        financial_mode=False,
+        ledger_path=None,
+        ledger_identity_path=None,
+        baseline_root=None,
+        baseline_generation_id=None,
+        classified_flows_path=None,
+        flow_coverage_path=None,
+        classification_policy_path=None,
+        admission_policy_path=None,
+    )
+
+    assert manifest is not None
+    assert identity is not None
+    assert identity["authority_profile"] == panel.MANIFEST_AUTHORITY_INTERNAL
+    assert reads == 1
+
+
+def test_render_snapshots_core_inputs_once_and_binds_emitted_bytes(
+    inputs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A render must parse, bind, and emit one immutable byte snapshot per input.
+
+    This deliberately counts ``Path.open`` rather than just ``read_bytes``:
+    template text reads and ``hash_file`` calls are included in the same
+    no-reread contract.
+    """
+
+    decomposition_pointer = panel.read_current(inputs["decomposition"])
+    correlation_pointer = panel.read_current(inputs["correlation"])
+    decomposition_path = (
+        inputs["decomposition"]
+        / "generations"
+        / decomposition_pointer.generation_id
+        / "decomposition.json"
+    ).resolve()
+    correlation_path = (
+        inputs["correlation"]
+        / "generations"
+        / correlation_pointer.generation_id
+        / "correlation.json"
+    ).resolve()
+    tracked = {
+        inputs["freshness"].resolve(),
+        (inputs["legacy"] / "data" / "dashboard_data.json").resolve(),
+        (inputs["legacy"] / "styles.css").resolve(),
+        decomposition_path,
+        correlation_path,
+        *(
+            panel.DEFAULT_TEMPLATE_ROOT.joinpath(name).resolve()
+            for name in ("index.html", "analytics.css", "app.js")
+        ),
+    }
+    expected_hashes = {
+        name: _sha(path)
+        for name, path in {
+            "freshness": inputs["freshness"],
+            "legacy": inputs["legacy"] / "data" / "dashboard_data.json",
+            "legacy_styles": inputs["legacy"] / "styles.css",
+            "decomposition": decomposition_path,
+            "correlation": correlation_path,
+        }.items()
+    }
+    expected_template_bytes = {
+        name: (panel.DEFAULT_TEMPLATE_ROOT / name)
+        .read_bytes()
+        .replace(b"\r\n", b"\n")
+        .replace(b"\r", b"\n")
+        for name in ("index.html", "analytics.css", "app.js")
+    }
+    expected_template_source_hashes = {
+        name: _sha(panel.DEFAULT_TEMPLATE_ROOT / name)
+        for name in ("index.html", "analytics.css", "app.js")
+    }
+    expected_styles = (inputs["legacy"] / "styles.css").read_bytes()
+    expected_freshness = inputs["freshness"].read_bytes()
+    counts: dict[Path, int] = {}
+    original_open = Path.open
+
+    def counted_open(path: Path, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+        resolved = path.resolve()
+        if resolved in tracked:
+            counts[resolved] = counts.get(resolved, 0) + 1
+            if counts[resolved] > 1:
+                raise AssertionError(f"mutable input was reread: {resolved}")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    files, _data, bound_inputs = panel._rendered_files(
+        inputs["report"],
+        inputs["legacy"],
+        panel.DEFAULT_TEMPLATE_ROOT,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+
+    expected_raw = {
+        "freshness": inputs["freshness"],
+        "legacy": inputs["legacy"] / "data" / "dashboard_data.json",
+        "legacy_styles": inputs["legacy"] / "styles.css",
+        "decomposition": decomposition_path,
+        "correlation": correlation_path,
+    }
+    for name, path in expected_raw.items():
+        assert counts[path.resolve()] == 1
+        assert bound_inputs[name][1] == expected_hashes[name]
+    for name in ("index.html", "analytics.css", "app.js"):
+        path = panel.DEFAULT_TEMPLATE_ROOT / name
+        assert counts[path.resolve()] == 1
+        assert files[name] == expected_template_bytes[name]
+        assert (
+            bound_inputs[f"template:{name}"][1] == expected_template_source_hashes[name]
+        )
+    assert files["styles.css"] == expected_styles
+    assert files["data/freshness-health.json"] == expected_freshness
+
+
+def test_render_snapshots_optional_strategy_evidence_once(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "strategy-evidence.json"
+    fixture_report = _report()
+    _write_json(
+        evidence,
+        {
+            "as_of_date": fixture_report["as_of_date"],
+            "schema_version": 1,
+            "strategies": fixture_report["strategy_provider_evidence"],
+        },
+    )
+    original_open = Path.open
+    reads = 0
+
+    def counted_open(path: Path, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+        nonlocal reads
+        if path.resolve() == evidence.resolve():
+            reads += 1
+            if reads > 1:
+                raise AssertionError("strategy evidence was reread")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        strategy_evidence_path=evidence,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+    )
+    assert reads == 1
+    candidate = Path(built["candidate_dir"])
+    record = json.loads((candidate / "candidate.json").read_text(encoding="utf-8"))
+    assert record["artifact_sha256"]["data/dashboard_data.json"] == _sha(
+        candidate / "data" / "dashboard_data.json"
+    )
+
+
+def test_render_snapshots_optional_candidate_driver_map_once(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cluster_ids = sorted(panel.DRIVER_MAP_CLUSTER_IDS)
+
+    def score(cluster_id: str) -> dict[str, object]:
+        return {
+            "cluster_id": cluster_id,
+            "status": "AVAILABLE_DESCRIPTIVE_FROZEN",
+            "missing_members": [],
+            "downside_correlation_mean": "0.2",
+            "pearson_mean": "0.1",
+            "worst_decile_candidate_return_minimum": "0.01",
+            "descriptive_rank": 1,
+            "window_start": "2026-01-01",
+            "window_end": "2026-07-17",
+        }
+
+    payload = {
+        "schema_version": 1,
+        "as_of_date": "2026-07-24",
+        "research_status": "FROZEN_EVIDENCE_NOT_CURRENT",
+        "coverage": {
+            "candidate_count": 33,
+            "measured_candidate_count": 33,
+            "unavailable_candidate_count": 0,
+            "refresh_status": "UNAVAILABLE_RAW_RETURN_INPUTS_NOT_RETAINED",
+        },
+        "portfolio": {"systematic_loss_limit": "0.15"},
+        "candidates": [
+            {
+                "candidate_id": f"candidate-{index}",
+                "ticker": f"C{index:02d}",
+                "category": "Test category",
+                "tier": "Tier 1",
+                "portfolio_role": "Research only",
+                "cost": {
+                    "status": "AVAILABLE_COMPONENTS_NO_MODELED_NOTIONAL",
+                    "expense_ratio": "0.01",
+                    "annual_fixed_cost": "0",
+                },
+                "live_metrics": {
+                    "status": "AVAILABLE_FROZEN_LIVE_VEHICLE_METRICS",
+                    "start_date": "2020-01-01",
+                    "end_date": "2026-07-24",
+                    "observations": 1000,
+                },
+                "cluster_scores": [score(cluster_id) for cluster_id in cluster_ids],
+            }
+            for index in range(33)
+        ],
+        "driver_clusters": [
+            {
+                "cluster_id": cluster_id,
+                "members": [f"member-{index}"],
+                "allocation_weight": "0.2",
+                "adverse_loss_budget": "0.03",
+                "budget_status": "WITHIN_LIMIT",
+                "observed_pair_count": 1,
+                "observed_pair_correlation_minimum": "0.1",
+                "observed_pair_correlation_maximum": "0.1",
+            }
+            for index, cluster_id in enumerate(cluster_ids)
+        ],
+        "tactical_leave_one_out": [
+            {
+                "series_id": f"strategy-{index}",
+                "correlation_one_loss_reduction": "0.01",
+                "central_case_loss_reduction": "0.005",
+                "cluster_loss_without": "0.1",
+                "cluster_budget_status_without": "WITHIN_LIMIT",
+            }
+            for index in range(4)
+        ],
+        "authority_boundary": {
+            "allocation_effect": "NONE",
+            "execution_effect": "NONE",
+            "readiness_effect": "NONE",
+            "automatic_add_drop_authority": "NONE",
+        },
+    }
+    driver_map = tmp_path / "candidate-driver-map.json"
+    _write_json(driver_map, payload)
+    expected_driver_map_bytes = driver_map.read_bytes()
+    original_open = Path.open
+    reads = 0
+
+    def counted_open(path: Path, *args: Any, **kwargs: Any):  # type: ignore[no-untyped-def]
+        nonlocal reads
+        if path.resolve() == driver_map.resolve():
+            reads += 1
+            if reads > 1:
+                raise AssertionError("candidate driver map was reread")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", counted_open)
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        candidate_driver_map_path=driver_map,
+    )
+    assert reads == 1
+    candidate = Path(built["candidate_dir"])
+    assert (
+        candidate / panel.DRIVER_MAP_PANEL_FILE
+    ).read_bytes() == expected_driver_map_bytes
+
+
+def test_account_manifest_renderer_is_decimal_safe_and_uses_exact_blockers() -> None:
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    section = (
+        "// Epoch-manifest decimals"
+        + renderer.split("// Epoch-manifest decimals", 1)[1].split(
+            "function renderSignals", 1
+        )[0]
+    )
+
+    assert "BigInt(" in section
+    assert "row.status" in section
+    assert "row.blocking_reason" in section
+    assert "no NAV" not in section
+    assert "Observed return" in section
+    assert "observed_hwm_index" in section
+    assert "manifestBlockerText" in section
+    assert "row.late_flows" not in section
+    index = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
+    assert 'id="account-manifest-authority"' in index
+    assert "Independently rebuilt in financial mode" not in index
+
+
+def test_account_manifest_renderer_formats_exact_percentages_in_node() -> None:
+    node = shutil.which("node")
+    assert node is not None, "Node.js is required to verify the browser formatter"
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    section = (
+        "// Epoch-manifest decimals"
+        + renderer.split("// Epoch-manifest decimals", 1)[1].split(
+            "function renderSignals", 1
+        )[0]
+    )
+    probe = (
+        "const safe=(value)=>String(value ?? '');\n"
+        + section
+        + "\nconsole.log(JSON.stringify(["
+        + "manifestPct('0'),manifestPct('0.005'),manifestPct('0.1367'),"
+        + "manifestPct('-0.2289'),manifestFixed('9007199254740993.005',2),"
+        + "manifestFixed('9007199254740993.015',2),manifestPct('-0.00001'),"
+        + "manifestBlockerText({status:'FLOWS_AFTER_CLOSING_NAV'})"
+        + "]));"
+    )
+    result = subprocess.run(
+        [node, "-e", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert json.loads(result.stdout) == [
+        "0.00%",
+        "0.50%",
+        "13.67%",
+        "-22.89%",
+        "9,007,199,254,740,993.00",
+        "9,007,199,254,740,993.02",
+        "0.00%",
+        "FLOWS_AFTER_CLOSING_NAV",
+    ]
+
+
+def _run_rendered_epoch_manifest_probe(html: Path) -> dict[str, object]:
+    """Exercise the shipped static page in Chromium and return its DOM evidence."""
+
+    node = shutil.which("node")
+    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
+    if not node or not runtime_node:
+        pytest.skip("Chromium runtime is not available for rendered browser proof")
+    playwright_module = (
+        Path(runtime_node).resolve().parent
+        / "node_modules"
+        / "playwright"
+        / "index.mjs"
+    )
+    if not playwright_module.exists():
+        pytest.skip("Playwright module is not available for rendered browser proof")
+    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
+        Path(os.environ.get("LOCALAPPDATA", ""))
+        / "ms-playwright"
+        / "chromium-1237"
+        / "chrome-win64"
+        / "chrome.exe"
+    )
+    if not Path(executable).exists():
+        pytest.skip("Chromium executable is not available for rendered browser proof")
+    probe = r"""
+import { pathToFileURL } from "node:url";
+const { chromium } = await import(pathToFileURL(process.env.PLAYWRIGHT_MODULE).href);
+const browser = await chromium.launch({
+  headless: true,
+  ...(process.env.PLAYWRIGHT_EXECUTABLE_PATH
+    ? { executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH }
+    : {}),
+});
+try {
+  const page = await browser.newPage({ viewport: { width: 1440, height: 900 } });
+  await page.goto(pathToFileURL(process.env.MANIFEST_HTML).href + "#risk", { waitUntil: "load" });
+  await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
+  const evidence = await page.evaluate(() => ({
+    body: document.body.innerText,
+    legend: document.querySelector("#account-manifest-legend")?.textContent?.trim() ?? "",
+    rows: Array.from(document.querySelectorAll("#account-manifest-table tbody tr"), (row) => ({
+      accountId: row.getAttribute("data-account-id"),
+      label: row.querySelector("td")?.textContent?.trim() ?? "",
+      strategyId: row.querySelector("td:nth-child(2)")?.textContent?.trim() ?? "",
+    })),
+  }));
+  console.log(JSON.stringify(evidence));
+} finally {
+  await browser.close();
+}
+"""
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = str(playwright_module)
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
+    env["MANIFEST_HTML"] = str(html.resolve())
+    result = subprocess.run(
+        [node, "--input-type=module", "-e", probe],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=30,
+    )
+    return json.loads(result.stdout)
+
+
+def _write_dashboard_data_script(candidate: Path, data: dict[str, object]) -> None:
+    serialized = json.dumps(data, separators=(",", ":"), ensure_ascii=False)
+    (candidate / "data" / "dashboard_data.js").write_text(
+        "window.PORTFOLIO_DATA = " + serialized + ";\n", encoding="utf-8"
+    )
+    (candidate / "data" / "dashboard_data.json").write_text(
+        serialized + "\n", encoding="utf-8"
+    )
+
+
+def _copy_epoch_browser_fixture(tmp_path: Path) -> Path:
+    """Use the supplied schema-9 renderer fixture without rebuilding other lanes."""
+
+    source = (
+        Path(__file__).parents[2]
+        / ".superpowers"
+        / "sdd"
+        / "2026-08-25-real-epoch-manifest"
+        / "browser-display-evidence"
+        / "browser-fixture"
+    )
+    if not source.is_dir():
+        pytest.skip("supplied schema-9 browser fixture is not available")
+    candidate = tmp_path / "browser-fixture"
+    shutil.copytree(source, candidate)
+    shutil.copy2(panel.DEFAULT_TEMPLATE_ROOT / "app.js", candidate / "app.js")
+    return candidate
+
+
+def _run_interaction_qa(
+    candidate: Path, output: Path
+) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
+    """Run the shipped Chromium acceptance harness against one candidate."""
+
+    node = shutil.which("node")
+    runtime_node = os.environ.get("CODEX_MCP_NODE_PATH")
+    if not node or not runtime_node:
+        pytest.skip("Chromium runtime is not available for rendered browser proof")
+    playwright_module = (
+        Path(runtime_node).resolve().parent
+        / "node_modules"
+        / "playwright"
+        / "index.mjs"
+    )
+    executable = os.environ.get("PLAYWRIGHT_EXECUTABLE_PATH") or str(
+        Path(os.environ.get("LOCALAPPDATA", ""))
+        / "ms-playwright"
+        / "chromium-1237"
+        / "chrome-win64"
+        / "chrome.exe"
+    )
+    if not playwright_module.exists() or not executable:
+        pytest.skip("Playwright module or Chromium executable is not available")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["PLAYWRIGHT_MODULE"] = str(playwright_module)
+    env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
+    result = subprocess.run(
+        [
+            node,
+            str(panel.DEFAULT_TEMPLATE_ROOT / "interaction_qa.mjs"),
+            "--html",
+            str(candidate / "index.html"),
+            "--output",
+            str(output),
+            "--exclude-candidates",
+            "true",
+            "--epoch-only",
+            "true",
+            "--expected-calculation-cutoff",
+            "2026-08-13",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=env,
+        timeout=60,
+    )
+    if not output.exists():
+        raise AssertionError(f"interaction QA did not write evidence: {result.stderr}")
+    return result, json.loads(output.read_text(encoding="utf-8"))
+
+
+def test_schema9_epoch_manifest_browser_uses_authority_labels_and_cutoff(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The rendered schema-9 table binds labels/cutoff to the manifest itself."""
+
+    candidate = _copy_epoch_browser_fixture(tmp_path)
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    manifest = data["account_manifest"]
+    assert isinstance(manifest, dict)
+    assert manifest["schema_version"] == 9
+    rows = manifest["rows"]
+    assert isinstance(rows, list)
+    assert len(rows) == 13
+    assert len({row["strategy_id"] for row in rows}) == 7
+    assert all(
+        not any(
+            term in str(row.get("strategy_id", "")).lower()
+            for term in ("echo", "composer")
+        )
+        for row in rows
+    )
+    first = rows[0]
+    first["account_label"] = "Authority label •6907"
+    for account in data["account_summary"]:
+        if account["account_id"] == first["account_id"]:
+            account["provider_id"] = "wrong-summary-provider"
+    _write_dashboard_data_script(candidate, data)
+
+    evidence = _run_rendered_epoch_manifest_probe(candidate / "index.html")
+    rendered_rows = evidence["rows"]
+    assert isinstance(rendered_rows, list)
+    assert rendered_rows[0]["label"] == "Authority label •6907"
+    assert rendered_rows[0]["label"] != "wrong-summary-provider account 1"
+    assert evidence["legend"].find("Calculations through 2026-08-13") >= 0
+    assert evidence["legend"].find("Artifact/provider capture date: 2026-08-16") >= 0
+
+
+def test_schema9_epoch_manifest_browser_tracks_label_mutations_and_discloses_missing_cutoff(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A changed bound label is rendered, while a missing cutoff is never invented."""
+
+    candidate = _copy_epoch_browser_fixture(tmp_path)
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    manifest = data["account_manifest"]
+    assert isinstance(manifest, dict)
+    rows = manifest["rows"]
+    assert isinstance(rows, list)
+    rows[0]["account_label"] = "Changed authority label •6907"
+    _write_dashboard_data_script(candidate, data)
+    changed = _run_rendered_epoch_manifest_probe(candidate / "index.html")
+    assert changed["rows"][0]["label"] == "Changed authority label •6907"
+
+    manifest["calculation_cutoff_date"] = "2026-08-14"
+    _write_dashboard_data_script(candidate, data)
+    changed_cutoff = _run_rendered_epoch_manifest_probe(candidate / "index.html")
+    assert "Calculations through 2026-08-14" in changed_cutoff["legend"]
+    result, qa = _run_interaction_qa(
+        candidate, tmp_path / "interaction-changed-cutoff.json"
+    )
+    assert result.returncode != 0
+    assert any(
+        item["check"]
+        == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
+        and item["status"] == "FAIL"
+        for item in qa["checks"]
+    )
+
+    manifest.pop("calculation_cutoff_date")
+    _write_dashboard_data_script(candidate, data)
+    missing = _run_rendered_epoch_manifest_probe(candidate / "index.html")
+    assert "Calculation cutoff unavailable" in missing["legend"]
+    assert "Calculations through 2026-08-13" not in missing["legend"]
+    result, qa = _run_interaction_qa(
+        candidate, tmp_path / "interaction-missing-cutoff.json"
+    )
+    assert result.returncode != 0
+    assert any(
+        item["check"]
+        == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
+        and item["status"] == "FAIL"
+        for item in qa["checks"]
+    )
+
+
+def test_schema9_epoch_manifest_browser_does_not_fallback_to_ledger_capture_date(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A missing classified-flow capture date stays visibly unavailable."""
+
+    candidate = _copy_epoch_browser_fixture(tmp_path)
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    manifest = data["account_manifest"]
+    assert isinstance(manifest, dict)
+    identities = manifest["source_identities"]
+    assert isinstance(identities, dict)
+    classified = identities["classified_flows"]
+    assert isinstance(classified, dict)
+    ledger_identity = classified["ledger_identity"]
+    assert isinstance(ledger_identity, dict)
+    artifact = ledger_identity["artifact"]
+    assert isinstance(artifact, dict)
+    artifact["as_of_date"] = "2026-08-17"
+    _write_dashboard_data_script(candidate, data)
+    changed = _run_rendered_epoch_manifest_probe(candidate / "index.html")
+    assert "Artifact/provider capture date: 2026-08-17." in changed["legend"]
+    result, qa = _run_interaction_qa(
+        candidate, tmp_path / "interaction-changed-capture.json"
+    )
+    assert result.returncode == 0
+    assert any(
+        item["check"]
+        == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
+        and item["status"] == "PASS"
+        for item in qa["checks"]
+    )
+    artifact["as_of_date"] = "2026-09-31"
+    _write_dashboard_data_script(candidate, data)
+    result, qa = _run_interaction_qa(
+        candidate, tmp_path / "interaction-invalid-capture.json"
+    )
+    assert result.returncode != 0
+    assert any(
+        item["check"]
+        == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
+        and item["status"] == "FAIL"
+        for item in qa["checks"]
+    )
+    artifact["as_of_date"] = "2026-08-12"
+    _write_dashboard_data_script(candidate, data)
+    result, qa = _run_interaction_qa(
+        candidate, tmp_path / "interaction-early-capture.json"
+    )
+    assert result.returncode != 0
+    assert any(
+        item["check"]
+        == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
+        and item["status"] == "FAIL"
+        for item in qa["checks"]
+    )
+    artifact.pop("as_of_date")
+    identities["ledger"] = {"artifact": {"as_of_date": "UNAUTHORIZED-LEGACY-DATE"}}
+    _write_dashboard_data_script(candidate, data)
+
+    evidence = _run_rendered_epoch_manifest_probe(candidate / "index.html")
+    assert "Artifact/provider capture date: unavailable." in evidence["legend"]
+    assert "UNAUTHORIZED-LEGACY-DATE" not in evidence["legend"]
+    result, qa = _run_interaction_qa(
+        candidate, tmp_path / "interaction-missing-capture.json"
+    )
+    assert result.returncode != 0
+    assert any(
+        item["check"]
+        == "Epoch manifest legend distinguishes calculation cutoff from provider capture"
+        and item["status"] == "FAIL"
+        for item in qa["checks"]
+    )
+
+
+def test_schema9_epoch_manifest_browser_acceptance_rejects_echo_and_composer(
+    inputs: dict[str, Path], tmp_path: Path
+) -> None:
+    """The actual Chromium acceptance harness rejects deprecated/current contamination."""
+
+    candidate = _copy_epoch_browser_fixture(tmp_path)
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    manifest = data["account_manifest"]
+    assert isinstance(manifest, dict)
+    rows = manifest["rows"]
+    assert isinstance(rows, list)
+    assert len(rows) == 13
+    assert len({row["strategy_id"] for row in rows}) == 7
+    for contamination in (
+        "Growth at Market Pivot Points [EchoTrade]",
+        "[Composer] - The Holy Grail (Buy Copy)",
+    ):
+        mutated = json.loads(json.dumps(data))
+        mutated_manifest = mutated["account_manifest"]
+        mutated_manifest["rows"][0]["strategy_id"] = contamination
+        _write_dashboard_data_script(candidate, mutated)
+        result, qa = _run_interaction_qa(
+            candidate, tmp_path / f"interaction-{contamination[:4]}.json"
+        )
+        assert result.returncode != 0
+        failed = [item for item in qa["checks"] if item["status"] == "FAIL"]
+        assert any("13-row / 7-strategy subject" in item["check"] for item in failed)
 
 
 def test_account_manifest_money_identity_fails_closed(
@@ -5168,7 +9655,7 @@ def test_account_manifest_money_identity_fails_closed(
     manifest_path = _write_manifest(tmp_path / "broken-manifest.json", [broken_row])
     with pytest.raises(
         panel.ControlPanelValidationError,
-        match="money identity differs",
+        match="account manifest is invalid",
     ):
         panel.build_candidate(
             inputs["report"],
@@ -5198,7 +9685,7 @@ def test_account_manifest_epoch_continuity_fails_closed(
     )
     with pytest.raises(
         panel.ControlPanelValidationError,
-        match="epoch continuity differs",
+        match="account manifest is invalid",
     ):
         panel.build_candidate(
             inputs["report"],
@@ -5210,7 +9697,7 @@ def test_account_manifest_epoch_continuity_fails_closed(
         )
 
 
-def test_account_manifest_epoch_continuity_accepts_rollover(
+def test_account_manifest_v1_rollover_is_rejected(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     first = _manifest_row(strategy_id="strategy-a", current_value="56832.54")
@@ -5226,94 +9713,781 @@ def test_account_manifest_epoch_continuity_accepts_rollover(
     manifest_path = _write_manifest(
         tmp_path / "continuous-manifest.json", [first, successor]
     )
-    built = panel.build_candidate(
-        inputs["report"],
-        inputs["legacy"],
-        inputs["output"],
-        freshness_health_path=inputs["freshness"],
-        baseline_root=inputs["baseline"],
-        account_manifest_path=manifest_path,
-    )
-    data = _candidate_data(built)
-    assert len(data["account_manifest"]["rows"]) == 2
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="account manifest is invalid",
+    ):
+        panel.build_candidate(
+            inputs["report"],
+            inputs["legacy"],
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            account_manifest_path=manifest_path,
+        )
 
 
-def _produce_manifest(target_dir: Path, closing: str) -> Path:
-    """Run the real producer CLI over synthetic governed inputs."""
-    import subprocess
+def _synthetic_flow_classification_policy(as_of_date: str) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "artifact_id": "policy/synthetic-flow-classification.json",
+        "as_of_date": as_of_date,
+        "policy_id": "SYNTHETIC-FLOW-CLASSIFICATION",
+        "policy_version": "1",
+        "event_dispositions": {
+            "exact": [
+                {
+                    "flow_type": value,
+                    "disposition": "EXTERNAL",
+                    "amount_sign": amount_sign,
+                }
+                for value, amount_sign in (
+                    ("EXTERNAL_CONTRIBUTION", "POSITIVE"),
+                    ("EXTERNAL_WITHDRAWAL", "NEGATIVE"),
+                    ("EXTERNAL_PROVIDER_TRANSFER", "NONZERO"),
+                    ("DEPOSIT_OR_WITHDRAWAL", "NONZERO"),
+                )
+            ]
+            + [
+                {
+                    "flow_type": "ACCOUNT_TRANSFER",
+                    "disposition": "INTERNAL",
+                    "amount_sign": "NONZERO",
+                    "counterparty_rule": (
+                        "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+                    ),
+                }
+            ],
+            "prefix": [
+                {
+                    "flow_type_prefix": "TRANSFER:INTERNAL:",
+                    "disposition": "INTERNAL",
+                    "amount_sign": "NONZERO",
+                    "counterparty_rule": (
+                        "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+                    ),
+                }
+            ],
+        },
+    }
 
+
+def _produce_manifest(
+    target_dir: Path,
+    closing: str,
+    *,
+    as_of: str = "2026-07-30",
+    accepted_baseline_root: Path | None = None,
+    accounting_currency: str = "USD",
+) -> tuple[Path, dict[str, Path]]:
+    """Build a real v6 manifest and retain its independently selected inputs."""
     target_dir.mkdir(parents=True, exist_ok=True)
     ledger_path = target_dir / "ledger.json"
-    _write_json(
-        ledger_path,
-        {
-            "nav_observations": [
-                {
-                    "account_id": "account-seam",
-                    "as_of_date": day,
-                    "nav": {"status": "AVAILABLE", "value": value},
-                }
-                for day, value in (
-                    ("2026-01-02", "50000"),
-                    ("2026-03-01", "50500"),
-                    ("2026-06-01", "51000"),
-                    ("2026-08-13", closing),
-                )
-            ],
-            "flows": [],
+    ledger = {
+        "accounting_currency": accounting_currency,
+        "nav_observations": [
+            {
+                "record_id": f"nav-{day}",
+                "account_id": "account-seam",
+                "as_of_date": day,
+                "nav": {
+                    "currency": accounting_currency,
+                    "status": "AVAILABLE",
+                    "value": value,
+                },
+            }
+            for day, value in (
+                ("2026-01-02", "50000"),
+                ("2026-03-01", "50500"),
+                ("2026-06-01", "51000"),
+                (as_of, closing),
+            )
+        ],
+        "flows": [],
+    }
+    _write_json(ledger_path, ledger)
+    ledger_bytes = ledger_path.read_bytes()
+    ledger_identity_path = target_dir / "ledger-identity.json"
+    ledger_identity = {
+        "schema_version": 1,
+        "generation_id": "1" * 64,
+        "artifact": {
+            "artifact_id": "normalized/synthetic-ledger.json",
+            "as_of_date": as_of,
+            "schema": {"name": "provider-ledger", "version": "1"},
+            "sha256": hashlib.sha256(ledger_bytes).hexdigest(),
+            "size_bytes": len(ledger_bytes),
         },
-    )
-    baseline_root = target_dir / "baseline"
-    generation_dir = baseline_root / "generations" / "seam-generation"
-    generation_dir.mkdir(parents=True)
-    (baseline_root / "CURRENT.json").write_text(
-        '{"generation_id": "seam-generation"}', encoding="utf-8"
-    )
-    _write_json(
-        generation_dir / "portfolio-baseline.json",
-        {
-            "accounts": [{"account_id": "account-seam", "provider": "SCHWAB"}],
+    }
+    _write_json(ledger_identity_path, ledger_identity)
+    if accepted_baseline_root is None:
+        baseline_root = target_dir / "baseline"
+        generation_id = "2" * 64
+        generation_dir = baseline_root / "generations" / generation_id
+        generation_dir.mkdir(parents=True)
+        _write_json(baseline_root / "CURRENT.json", {"generation_id": generation_id})
+        baseline = {
+            "as_of_date": as_of,
+            "baseline_schema_version": 1,
+            "accounts": [{"account_id": "account-seam", "provider": "SYNTHETIC"}],
             "assignments": [
                 {
                     "account_id": "account-seam",
                     "strategy_id": "strategy-a",
+                    "strategy_mapping_disposition": "STRATEGY_MAPPED",
                     "effective_start": "2026-01-01",
                     "effective_end": None,
                 }
             ],
+        }
+        _write_json(generation_dir / "portfolio-baseline.json", baseline)
+    else:
+        baseline_root = accepted_baseline_root
+        generation_id = read_current(baseline_root).generation_id
+        baseline = json.loads(
+            (
+                baseline_root
+                / "generations"
+                / generation_id
+                / "portfolio-baseline.json"
+            ).read_text(encoding="utf-8")
+        )
+    assignments = baseline["assignments"]
+    funded_assignment = next(
+        assignment
+        for assignment in assignments
+        if assignment["effective_start"] <= as_of
+        and (
+            assignment["effective_end"] is None or as_of <= assignment["effective_end"]
+        )
+    )
+    funded_account_id = funded_assignment["account_id"]
+    if funded_account_id != "account-seam":
+        for observation in ledger["nav_observations"]:
+            observation["account_id"] = funded_account_id
+        _write_json(ledger_path, ledger)
+        ledger_bytes = ledger_path.read_bytes()
+        ledger_identity["artifact"]["sha256"] = hashlib.sha256(ledger_bytes).hexdigest()
+        ledger_identity["artifact"]["size_bytes"] = len(ledger_bytes)
+        _write_json(ledger_identity_path, ledger_identity)
+    assignment_sha256 = hashlib.sha256(
+        json.dumps(
+            [
+                {
+                    key: assignment[key]
+                    for key in (
+                        "account_id",
+                        "strategy_id",
+                        "effective_start",
+                        "effective_end",
+                    )
+                }
+                for assignment in assignments
+            ],
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    admission_policy_path = target_dir / "admission-policy.json"
+    _write_json(
+        admission_policy_path,
+        {
+            "schema_version": 2,
+            "policy_id": "SYNTHETIC-ADMISSION",
+            "policy_version": "1",
+            "artifact_id": "policy/synthetic-admission.json",
+            "as_of_date": as_of,
+            "assignment_sha256": assignment_sha256,
+            "admissions": [
+                (
+                    {
+                        **{
+                            key: assignment[key]
+                            for key in (
+                                "account_id",
+                                "strategy_id",
+                                "effective_start",
+                                "effective_end",
+                            )
+                        },
+                        "status": "FUNDED",
+                        "authority_kind": "LEDGER_AVAILABLE_POSITIVE_NAV_V1",
+                        "funded_nav_record_ids": [f"nav-{as_of}"],
+                        "continuity_to_successor": False,
+                    }
+                    if assignment is funded_assignment
+                    else {
+                        **{
+                            key: assignment[key]
+                            for key in (
+                                "account_id",
+                                "strategy_id",
+                                "effective_start",
+                                "effective_end",
+                            )
+                        },
+                        "status": "BLOCKED",
+                        "reason": "NO_SYNTHETIC_NAV_EVIDENCE_FOR_ASSIGNMENT",
+                        "continuity_to_successor": False,
+                    }
+                )
+                for assignment in assignments
+            ],
         },
     )
-    flows_path = target_dir / "flow-classes.json"
-    _write_json(flows_path, {"events": []})
-    proc = subprocess.run(
-        [
-            sys.executable,
-            str(REPOSITORY_ROOT / "tools" / "account_strategy_manifest.py"),
-            "--ledger-json",
-            str(ledger_path),
-            "--baseline-root",
-            str(baseline_root),
-            "--flow-classes-json",
-            str(flows_path),
-            "--format",
-            "json",
-        ],
-        capture_output=True,
-        text=True,
-        timeout=120,
+    classification_policy_path = panel.FLOW_CLASSIFICATION_POLICY
+    classification_policy = json.loads(
+        classification_policy_path.read_text(encoding="utf-8")
     )
-    assert proc.returncode == 0, proc.stderr
+    classification_policy_sha256 = hashlib.sha256(
+        classification_policy_path.read_bytes()
+    ).hexdigest()
+    flows_path = target_dir / "flow-classes.json"
+    _write_json(
+        flows_path,
+        {
+            "schema_version": 3,
+            "artifact_id": "classified/synthetic-flows.json",
+            "as_of_date": as_of,
+            "ledger_identity": {
+                "generation_id": ledger_identity["generation_id"],
+                "artifact": ledger_identity["artifact"],
+            },
+            "classification_policy": {
+                "policy_id": classification_policy["policy_id"],
+                "policy_version": classification_policy["policy_version"],
+                "policy_as_of_date": classification_policy["as_of_date"],
+                "policy_sha256": classification_policy_sha256,
+            },
+            "events": [],
+        },
+    )
+    flow_coverage_path = target_dir / "flow-coverage.json"
+    classified_bytes = flows_path.read_bytes()
+    _write_json(
+        flow_coverage_path,
+        {
+            "schema_version": 2,
+            "artifact_id": "coverage/synthetic-account-flow-coverage.json",
+            "as_of_date": as_of,
+            "ledger_identity": {
+                "generation_id": ledger_identity["generation_id"],
+                "artifact": ledger_identity["artifact"],
+            },
+            "classified_flows_artifact": {
+                "artifact_id": "classified/synthetic-flows.json",
+                "as_of_date": as_of,
+                "schema": {"name": "classified-flows", "version": "3"},
+                "sha256": hashlib.sha256(classified_bytes).hexdigest(),
+                "size_bytes": len(classified_bytes),
+            },
+            "mapped_assignments_identity": {
+                "sha256": assignment_sha256,
+                "count": len(assignments),
+            },
+            "receipt_artifacts": [],
+            "rows": [
+                {
+                    "assignment": {
+                        key: assignment[key]
+                        for key in (
+                            "account_id",
+                            "strategy_id",
+                            "effective_start",
+                            "effective_end",
+                        )
+                    },
+                    "requested_start": assignment["effective_start"],
+                    "requested_end": assignment["effective_end"] or as_of,
+                    "status": "BLOCKED",
+                    "authority_kind": "NONE",
+                    "receipt_artifact_id": None,
+                    "blocker_code": "LEGACY_RECEIPT_UNVERIFIABLE",
+                    "blocker_detail": "synthetic direct-consumer fixture has no retained v2 receipt",
+                }
+                for assignment in assignments
+            ],
+        },
+    )
+    manifest = build_manifest_candidate(
+        ledger_path=ledger_path,
+        ledger_identity_path=ledger_identity_path,
+        baseline_root=baseline_root,
+        baseline_generation_id=generation_id,
+        classified_flows_path=flows_path,
+        flow_coverage_path=flow_coverage_path,
+        classification_policy_path=classification_policy_path,
+        admission_policy_path=admission_policy_path,
+    )
     manifest_path = target_dir / "produced-manifest.json"
-    manifest_path.write_text(proc.stdout, encoding="utf-8")
-    return manifest_path
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    return manifest_path, {
+        "ledger": ledger_path,
+        "ledger_identity": ledger_identity_path,
+        "baseline": baseline_root,
+        "flows": flows_path,
+        "flow_coverage": flow_coverage_path,
+        "classification_policy": classification_policy_path,
+        "policy": admission_policy_path,
+    }
 
 
-def test_account_manifest_producer_to_publish_seam(
+def _financial_manifest_kwargs(
+    target_dir: Path, accepted_baseline_root: Path
+) -> dict[str, Any]:
+    manifest_path, authority = _produce_manifest(
+        target_dir, "56832.54", accepted_baseline_root=accepted_baseline_root
+    )
+    return {
+        "account_manifest_path": manifest_path,
+        "financial_mode": True,
+        "manifest_ledger_path": authority["ledger"],
+        "manifest_ledger_identity_path": authority["ledger_identity"],
+        "manifest_baseline_root": authority["baseline"],
+        "manifest_classified_flows_path": authority["flows"],
+        "manifest_flow_coverage_path": authority["flow_coverage"],
+        "manifest_classification_policy_path": authority["classification_policy"],
+        "manifest_admission_policy_path": authority["policy"],
+    }
+
+
+def test_publish_requires_coordinated_receipt_after_immutable_staging(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing the receipt authority must retain, but never publish, a generation."""
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+
+    def pointer_writer_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("pointer writer was invoked without authorization")
+
+    monkeypatch.setattr(panel, "publish_generation", pointer_writer_must_not_run)
+    with pytest.raises(panel.ControlPanelValidationError, match="coordinated release"):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()
+    assert not (inputs["output"] / "index.html").exists()
+    assert any((inputs["output"] / "generations").iterdir())
+
+
+def test_publish_cli_requires_coordinated_receipt_argument() -> None:
+    with pytest.raises(SystemExit) as exc_info:
+        panel._parser().parse_args(
+            [
+                "publish",
+                "--report-root",
+                "report",
+                "--legacy-panel",
+                "legacy",
+                "--candidate-dir",
+                "candidate",
+                "--qa-dir",
+                "qa",
+                "--output-root",
+                "output",
+                "--freshness-health",
+                "freshness",
+                "--baseline-root",
+                "baseline",
+            ]
+        )
+    assert exc_info.value.code == 2
+
+
+@pytest.mark.parametrize("mutation", ("duplicate", "noncanonical", "bool", "path"))
+def test_coordinated_receipt_decoder_rejects_strict_contract_mutations(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Each mutation catches a decoder weakening before pointer inspection."""
+    output = tmp_path / "output"
+    candidate = tmp_path / "candidate"
+    qa = tmp_path / "qa"
+    candidate.mkdir()
+    qa.mkdir()
+    (candidate / "panel.txt").write_text("candidate", encoding="utf-8")
+    (qa / "qa.txt").write_text("qa", encoding="utf-8")
+    receipt_path = _coordinated_release_receipt(tmp_path, output, candidate, qa)
+    if mutation == "duplicate":
+        content = receipt_path.read_bytes().replace(
+            b'"schema_version":1,', b'"schema_version":1,"schema_version":1,'
+        )
+        receipt_path.write_bytes(content)
+    elif mutation == "noncanonical":
+        receipt_path.write_bytes(receipt_path.read_bytes() + b"\n")
+    else:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        if mutation == "bool":
+            receipt["schema_version"] = True
+        else:
+            receipt["candidate"]["path"] += " "
+        receipt_path.write_bytes(canonical_json_bytes(receipt))
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="coordinated release receipt"
+    ):
+        panel._validated_coordinated_release_receipt(
+            receipt_path, output, candidate, qa
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "missing-root-key",
+        "extra-root-key",
+        "malformed-receipt",
+        "schema-version-value",
+        "schema-version-type",
+        "candidate-malformed",
+        "candidate-non-object",
+        "qa-malformed",
+        "qa-non-object",
+        "operation",
+        "state",
+        "coordinator",
+        "output-root",
+        "candidate-path",
+        "candidate-file-count",
+        "candidate-inventory",
+        "qa-path",
+        "qa-file-count",
+        "qa-inventory",
+        "empty-release-id",
+        "empty-release-commit",
+    ),
+)
+def test_publish_rejects_every_authorization_receipt_mutation_before_pointer_write(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    """Every strict receipt field fails closed after staging, before pointer I/O."""
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    receipt_path = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if mutation == "missing-root-key":
+        receipt.pop("release_id")
+    elif mutation == "extra-root-key":
+        receipt["unexpected"] = True
+    elif mutation == "malformed-receipt":
+        receipt_path.write_bytes(b"{")
+        receipt = None
+    elif mutation == "schema-version-value":
+        receipt["schema_version"] = 2
+    elif mutation == "schema-version-type":
+        receipt["schema_version"] = "1"
+    elif mutation == "candidate-malformed":
+        receipt["candidate"] = {"path": str(candidate.resolve())}
+    elif mutation == "candidate-non-object":
+        receipt["candidate"] = []
+    elif mutation == "qa-malformed":
+        receipt["qa"] = {"path": str(qa.resolve())}
+    elif mutation == "qa-non-object":
+        receipt["qa"] = None
+    elif mutation == "operation":
+        receipt["operation"] = "PUBLISH_OTHER"
+    elif mutation == "state":
+        receipt["state"] = "DRAFT"
+    elif mutation == "coordinator":
+        receipt["coordinator"] = "other-coordinator"
+    elif mutation == "output-root":
+        receipt["output_root"] = str(tmp_path / "other-output")
+    elif mutation == "candidate-path":
+        receipt["candidate"]["path"] = str(tmp_path / "other-candidate")
+    elif mutation == "candidate-file-count":
+        receipt["candidate"]["file_count"] += 1
+    elif mutation == "candidate-inventory":
+        receipt["candidate"]["inventory_sha256"] = "0" * 64
+    elif mutation == "qa-path":
+        receipt["qa"]["path"] = str(tmp_path / "other-qa")
+    elif mutation == "qa-file-count":
+        receipt["qa"]["file_count"] += 1
+    elif mutation == "qa-inventory":
+        receipt["qa"]["inventory_sha256"] = "0" * 64
+    elif mutation == "empty-release-id":
+        receipt["release_id"] = ""
+    else:
+        assert mutation == "empty-release-commit"
+        receipt["release_commit"] = ""
+    if receipt is not None:
+        receipt_path.write_bytes(canonical_json_bytes(receipt))
+
+    def pointer_writer_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError(f"pointer writer invoked for {mutation}")
+
+    monkeypatch.setattr(panel, "publish_generation", pointer_writer_must_not_run)
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="coordinated release receipt"
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            coordinated_release_receipt=receipt_path,
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()
+
+
+@pytest.mark.parametrize("mutated_tree", ("candidate", "qa"))
+def test_publish_rejects_post_receipt_tree_mutation_before_pointer_write(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutated_tree: str,
+) -> None:
+    """Receipt identities are checked after QA snapshots, immediately before pointer I/O."""
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    receipt_path = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
+    original = panel._validated_qa_snapshots
+
+    def validate_then_mutate(*args: Any, **kwargs: Any) -> Any:
+        result = original(*args, **kwargs)
+        root = candidate if mutated_tree == "candidate" else qa
+        (root / f"post-receipt-{mutated_tree}.txt").write_text(
+            "changed", encoding="utf-8"
+        )
+        return result
+
+    def pointer_writer_must_not_run(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("pointer writer invoked after receipt-bound tree mutation")
+
+    monkeypatch.setattr(panel, "_validated_qa_snapshots", validate_then_mutate)
+    monkeypatch.setattr(panel, "publish_generation", pointer_writer_must_not_run)
+    with pytest.raises(panel.ControlPanelValidationError, match="identity differs"):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            coordinated_release_receipt=receipt_path,
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()
+
+
+@pytest.mark.parametrize("kind", ("file", "directory"))
+def test_coordinated_receipt_rejects_nested_symlinked_tree_entry(
+    tmp_path: Path, kind: str
+) -> None:
+    """Inventory rejects every nested link before it can represent authority."""
+    output = tmp_path / "output"
+    candidate = tmp_path / "candidate"
+    qa = tmp_path / "qa"
+    target = tmp_path / "target"
+    candidate.mkdir()
+    qa.mkdir()
+    target.mkdir()
+    (candidate / "panel.txt").write_text("candidate", encoding="utf-8")
+    (qa / "qa.txt").write_text("qa", encoding="utf-8")
+    (target / "outside.txt").write_text("outside", encoding="utf-8")
+    receipt_path = _coordinated_release_receipt(tmp_path, output, candidate, qa)
+    root = candidate if kind == "file" else qa
+    link = root / ("linked.txt" if kind == "file" else "linked")
+    try:
+        link.symlink_to(
+            target / "outside.txt" if kind == "file" else target,
+            target_is_directory=kind == "directory",
+        )
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+    with pytest.raises(panel.ControlPanelValidationError, match="contains a link"):
+        panel._validated_coordinated_release_receipt(
+            receipt_path, output, candidate, qa
+        )
+
+
+def test_filesystem_path_normalizes_dot_segments_before_windows_extended_prefix(
+    tmp_path: Path,
+) -> None:
+    """A long path containing ``..`` remains usable after extended-prefix conversion."""
+    first = "first-" + ("x" * 110)
+    second = "second-" + ("y" * 110)
+    readable = tmp_path / "readable.txt"
+    readable.write_text("stable", encoding="utf-8")
+    first_directory = tmp_path / first
+    second_directory = first_directory / second
+    for directory in (first_directory, second_directory):
+        storage_directory = (
+            Path(f"\\\\?\\{directory.absolute()}")
+            if sys.platform == "win32"
+            else directory
+        )
+        storage_directory.mkdir()
+    candidate = second_directory / ".." / ".." / readable.name
+
+    assert len(str(candidate.absolute())) >= 248
+    resolved = panel._filesystem_path(candidate)
+
+    assert resolved.is_file()
+    assert resolved.read_bytes() == b"stable"
+
+
+def test_authorization_reparse_metadata_is_classified_as_link(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Windows reparse attributes fail closed even where junction setup is unavailable."""
+    reparse_point = 0x400
+    monkeypatch.setattr(
+        panel.stat, "FILE_ATTRIBUTE_REPARSE_POINT", reparse_point, raising=False
+    )
+
+    class ReparsePoint:
+        def lstat(self) -> object:
+            return type("Stat", (), {"st_file_attributes": reparse_point})()
+
+        def is_symlink(self) -> bool:
+            return False
+
+    assert panel._is_link_or_reparse_point(ReparsePoint()) is True
+
+
+def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_receipt(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The wrapper passes canonical authority bytes into the real panel seam."""
+    builder_spec = importlib.util.spec_from_file_location(
+        "portfolio_release_builder_panel_seam",
+        REPOSITORY_ROOT / "tools" / "portfolio_release_builder.py",
+    )
+    assert builder_spec is not None and builder_spec.loader is not None
+    builder = importlib.util.module_from_spec(builder_spec)
+    builder_spec.loader.exec_module(builder)
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    recipe_path = tmp_path / "recipe.json"
+    recipe_path.write_bytes(b'{"fixture":"builder-panel-seam"}')
+    recipe = {
+        "pipeline_id": "synthetic-builder-panel-seam",
+        "release_commit": "a" * 40,
+        "legacy_panel": {"path": str(inputs["legacy"])},
+        "schema_version": 6,
+    }
+    monkeypatch.setattr(builder, "_recipe", lambda _path: recipe)
+    monkeypatch.setattr(builder, "_panel_financial_arguments", lambda *_args: [])
+    panel_result: dict[str, Any] = {}
+
+    def real_panel_tool(*args: object, **_kwargs: object) -> dict[str, Any]:
+        nonlocal panel_result
+        assert args[0] == "portfolio_control_panel.py"
+        command = args[1]
+        if command == "verify":
+            return panel.verify_candidate(
+                inputs["report"],
+                inputs["legacy"],
+                candidate,
+                freshness_health_path=inputs["freshness"],
+                baseline_root=inputs["baseline"],
+                **financial,
+            )
+        if command == "qa":
+            return panel.validate_qa(candidate, qa)
+        assert command == "publish"
+        receipt_path = Path(str(args[args.index("--coordinated-release-receipt") + 1]))
+        receipt_bytes = receipt_path.read_bytes()
+        assert receipt_bytes == canonical_json_bytes(json.loads(receipt_bytes))
+        panel_result = panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            coordinated_release_receipt=receipt_path,
+            **financial,
+        )
+        return panel_result
+
+    monkeypatch.setattr(builder, "_tool", real_panel_tool)
+    result = builder.publish_panel(
+        recipe_path,
+        inputs["report"],
+        inputs["baseline"],
+        tmp_path / "bundle",
+        {
+            "decomposition_root": str(tmp_path / "decomposition"),
+            "decomposition_lenses_root": str(tmp_path / "lenses"),
+            "correlation_root": str(tmp_path / "correlation"),
+            "weekly_root": str(tmp_path / "weekly"),
+        },
+        inputs["freshness"],
+        candidate,
+        qa,
+        inputs["output"],
+    )
+
+    assert result["publication_state"] == "PUBLISHED"
+    assert (
+        result["coordinated_release_receipt_sha256"]
+        == panel_result["coordinated_release_receipt_sha256"]
+    )
+    assert result["release_id"] == panel_result["release_id"]
+
+
+def test_account_manifest_producer_to_publish_blocked_seam(
     inputs: dict[str, Path], tmp_path: Path
 ) -> None:
     """Reviewer P1: the producer's OWN CLI output must survive build ->
     verify -> publish, and distinct manifests must yield distinct panels."""
-    manifest_path = _produce_manifest(tmp_path / "primary", "56832.54")
+    manifest_path, authority = _produce_manifest(
+        tmp_path / "primary",
+        "56832.54",
+        accepted_baseline_root=inputs["baseline"],
+    )
     built = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
@@ -5321,15 +10495,65 @@ def test_account_manifest_producer_to_publish_seam(
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         account_manifest_path=manifest_path,
+        financial_mode=True,
+        manifest_ledger_path=authority["ledger"],
+        manifest_ledger_identity_path=authority["ledger_identity"],
+        manifest_baseline_root=authority["baseline"],
+        manifest_classified_flows_path=authority["flows"],
+        manifest_flow_coverage_path=authority["flow_coverage"],
+        manifest_classification_policy_path=authority["classification_policy"],
+        manifest_admission_policy_path=authority["policy"],
     )
     candidate = Path(built["candidate_dir"])
-    row = _candidate_data(built)["account_manifest"]["rows"][0]
-    assert row["status"] == "OK"
-    assert Decimal(row["invested"]) == Decimal("50000")
-    assert Decimal(row["current_value"]) == Decimal("56832.54")
-    assert Decimal(row["gain"]) == Decimal("56832.54") - Decimal("50000")
+    built_data = _candidate_data(built)
+    assert (
+        built_data["meta"]["account_manifest_authority_profile"]
+        == panel.MANIFEST_AUTHORITY_FINANCIAL
+    )
+    row = built_data["account_manifest"]["rows"][0]
+    assert row["status"] == "BLOCKED_UNPROVABLE_OPENING_FLOWS"
+    assert row["blocking_reason"] == "FLOW_COMPLETENESS_NOT_PROVEN"
+    assert (
+        not {
+            "start",
+            "end",
+            "opening_capital",
+            "deposits",
+            "internal_in",
+            "invested",
+            "external_withdrawals",
+            "internal_out",
+            "withdrawn",
+            "net_capital",
+            "current_value",
+            "gain",
+            "return_on_net_capital",
+            "annualized_return_on_net_capital",
+            "xirr_diagnostic",
+            "observation_linked_return",
+            "observed_hwm_index",
+            "observed_max_drawdown",
+            "opening_basis",
+            "observation_trace",
+            "capital_flow_trace",
+            "nav_observations",
+        }
+        & row.keys()
+    )
 
     qa = _qa(candidate, tmp_path / "qa-primary")
+    financial = {
+        "account_manifest_path": manifest_path,
+        "financial_mode": True,
+        "manifest_ledger_path": authority["ledger"],
+        "manifest_ledger_identity_path": authority["ledger_identity"],
+        "manifest_baseline_root": authority["baseline"],
+        "manifest_classified_flows_path": authority["flows"],
+        "manifest_flow_coverage_path": authority["flow_coverage"],
+        "manifest_classification_policy_path": authority["classification_policy"],
+        "manifest_admission_policy_path": authority["policy"],
+    }
+    receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
     published = panel.publish_panel(
         inputs["report"],
         inputs["legacy"],
@@ -5339,11 +10563,24 @@ def test_account_manifest_producer_to_publish_seam(
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         account_manifest_path=manifest_path,
+        financial_mode=True,
+        manifest_ledger_path=authority["ledger"],
+        manifest_ledger_identity_path=authority["ledger_identity"],
+        manifest_baseline_root=authority["baseline"],
+        manifest_classified_flows_path=authority["flows"],
+        manifest_flow_coverage_path=authority["flow_coverage"],
+        manifest_classification_policy_path=authority["classification_policy"],
+        manifest_admission_policy_path=authority["policy"],
+        coordinated_release_receipt=receipt,
     )
     assert published["publication_state"] == "PUBLISHED"
 
     # Distinct manifest bytes must produce a distinct panel id.
-    other = _produce_manifest(tmp_path / "alternate", "57999.99")
+    other, other_authority = _produce_manifest(
+        tmp_path / "alternate",
+        "57999.99",
+        accepted_baseline_root=inputs["baseline"],
+    )
     rebuilt = panel.build_candidate(
         inputs["report"],
         inputs["legacy"],
@@ -5351,5 +10588,260 @@ def test_account_manifest_producer_to_publish_seam(
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         account_manifest_path=other,
+        financial_mode=True,
+        manifest_ledger_path=other_authority["ledger"],
+        manifest_ledger_identity_path=other_authority["ledger_identity"],
+        manifest_baseline_root=other_authority["baseline"],
+        manifest_classified_flows_path=other_authority["flows"],
+        manifest_flow_coverage_path=other_authority["flow_coverage"],
+        manifest_classification_policy_path=other_authority["classification_policy"],
+        manifest_admission_policy_path=other_authority["policy"],
     )
     assert rebuilt["panel_id"] != built["panel_id"]
+
+
+def test_financial_publish_rejects_manifest_change_after_verification(
+    inputs: dict[str, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    manifest_path = financial["account_manifest_path"]
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    original_verify = panel.verify_candidate
+
+    def verify_then_change(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = original_verify(*args, **kwargs)
+        manifest_path.write_bytes(b" " + manifest_path.read_bytes())
+        return result
+
+    monkeypatch.setattr(panel, "verify_candidate", verify_then_change)
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="candidate changed after verification or source snapshot drifted",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutated_input",
+    [
+        "report",
+        "freshness",
+        "account_manifest",
+        "ledger",
+        "ledger_identity",
+        "classified_flows",
+        "classification_policy",
+        "admission_policy",
+        "baseline_catalog",
+        "baseline_generation_manifest",
+        "calculation_code",
+        "template_app",
+        "legacy_styles",
+    ],
+)
+def test_financial_publish_rejects_input_change_after_final_render(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutated_input: str,
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    original_rendered_files = panel._rendered_files
+    original_read_bytes = Path.read_bytes
+    calls = 0
+    mutate_active = False
+
+    baseline_generation_id = read_current(
+        financial["manifest_baseline_root"]
+    ).generation_id
+    mutation_paths = {
+        "account_manifest": financial["account_manifest_path"],
+        "admission_policy": financial["manifest_admission_policy_path"],
+        "baseline_catalog": (
+            financial["manifest_baseline_root"]
+            / "generations"
+            / baseline_generation_id
+            / "portfolio-baseline.json"
+        ),
+        "baseline_generation_manifest": (
+            financial["manifest_baseline_root"]
+            / "generations"
+            / baseline_generation_id
+            / "generation.json"
+        ),
+        "calculation_code": panel.ACCOUNT_MANIFEST_CALCULATION_CODE,
+        "classification_policy": financial["manifest_classification_policy_path"],
+        "classified_flows": financial["manifest_classified_flows_path"],
+        "freshness": inputs["freshness"],
+        "ledger": financial["manifest_ledger_path"],
+        "ledger_identity": financial["manifest_ledger_identity_path"],
+        "legacy_styles": inputs["legacy"] / "styles.css",
+        "template_app": panel.DEFAULT_TEMPLATE_ROOT / "app.js",
+    }
+    report_generation_id = read_current(inputs["report"]).generation_id
+    mutation_paths["report"] = (
+        inputs["report"]
+        / "generations"
+        / report_generation_id
+        / "portfolio-report-data.json"
+    )
+    mutation_path = mutation_paths[mutated_input].resolve()
+
+    def render_then_change(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls, mutate_active
+        result = original_rendered_files(*args, **kwargs)
+        calls += 1
+        if calls == 2:
+            mutate_active = True
+        return result
+
+    def changed_read_bytes(path: Path) -> bytes:
+        content = original_read_bytes(path)
+        if mutate_active and path.resolve() == mutation_path:
+            return b" " + content
+        return content
+
+    monkeypatch.setattr(panel, "_rendered_files", render_then_change)
+    monkeypatch.setattr(Path, "read_bytes", changed_read_bytes)
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="publication input changed after final render",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()
+
+
+def test_financial_publish_revalidates_private_qa_snapshot_after_final_render(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "qa")
+    original_rendered_files = panel._rendered_files
+    calls = 0
+
+    def render_then_corrupt_qa(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        result = original_rendered_files(*args, **kwargs)
+        calls += 1
+        if calls == 2:
+            (qa / "interaction-results.json").write_text("{}", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(panel, "_rendered_files", render_then_corrupt_qa)
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="interaction.checks must be an array",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()
+
+
+def test_financial_publish_rejects_coherent_candidate_and_qa_swap(
+    inputs: dict[str, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    financial = _financial_manifest_kwargs(tmp_path / "manifest", inputs["baseline"])
+    built = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        **financial,
+    )
+    candidate = Path(built["candidate_dir"])
+    qa = _qa(candidate, tmp_path / "original")
+    original_validated_qa_snapshots = panel._validated_qa_snapshots
+
+    def swap_then_validate_private_snapshot(*args: Any, **kwargs: Any) -> Any:
+        app_path = candidate / "app.js"
+        app_path.write_bytes(app_path.read_bytes() + b"\n/* swapped candidate */\n")
+        candidate_files = {
+            relative: (candidate / relative).read_bytes()
+            for relative in panel.PANEL_FILES
+        }
+        data = json.loads(candidate_files["data/dashboard_data.json"])
+        (candidate / "candidate.json").write_bytes(
+            canonical_json_bytes(panel._candidate_record(candidate_files, data))
+        )
+        replacement_qa = _qa(candidate, tmp_path / "replacement")
+        shutil.rmtree(qa)
+        shutil.copytree(replacement_qa, qa)
+        return original_validated_qa_snapshots(*args, **kwargs)
+
+    monkeypatch.setattr(
+        panel, "_validated_qa_snapshots", swap_then_validate_private_snapshot
+    )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="browser QA failed",
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()

@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from quant_engine.portfolio_ledger.hwm import (
+    AS_HELD_HWM_RETURN_BASIS,
     HwmCoverageError,
     _canonical_json_bytes,
 )
@@ -149,7 +150,7 @@ def _period(sid, start, end, ret, cap):
         "interval_end": end,
         "beginning_capital_usd": cap,
         "net_return": ret,
-        "return_basis": "ACCOUNT_LIVE_NET",
+        "return_basis": AS_HELD_HWM_RETURN_BASIS,
         "return_evidence_sha256": _sha(f"{sid}:{start}:{end}:{ret}"),
         "membership_evidence_sha256": _sha(f"m-{sid}"),
         "policy_binding_sha256": "0" * 64,
@@ -333,6 +334,21 @@ def test_governed_entry_computes_hand_worked_composite(tmp_path):
     mon = result["periods"][3]
     b_mon = [c for c in mon["components"] if c["strategy_id"] == "b-session"]
     assert b_mon[0]["period_return"] == Decimal("0.002")
+
+
+def test_governed_entry_rejects_account_live_net_basis_mutant(tmp_path):
+    fx = _fixture(tmp_path)
+    mutant = json.loads(json.dumps(fx["generation"], sort_keys=True))
+    for row in mutant["component_periods"]:
+        row["return_basis"] = "ACCOUNT_LIVE_NET"
+    canonical = json.dumps(
+        {k: v for k, v in mutant.items() if k != "generation_evidence_sha256"},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    mutant["generation_evidence_sha256"] = hashlib.sha256(canonical).hexdigest()
+    with pytest.raises(HwmCoverageError, match="governed return basis differs"):
+        _run(fx, generation=mutant)
 
 
 def test_governed_entry_requires_ready_seam(tmp_path):

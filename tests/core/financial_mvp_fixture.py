@@ -148,6 +148,7 @@ def build_financial_mvp_fixture(
         ready=ready,
     )
     contract: dict[str, Any] = {
+        "contract_schema_version": 6,
         "current_census": {
             "account_sleeves": [],
             "census_id": "SYNTHETIC_CENSUS",
@@ -231,7 +232,7 @@ def build_financial_mvp_fixture(
         )
     manifest = GenerationManifest.build(
         as_of_date=DAY,
-        adapter=AdapterIdentity("quant-engine-provider-ledger", "2"),
+        adapter=AdapterIdentity("quant-engine-provider-ledger", "5"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary="portable seven-provider composition authority",

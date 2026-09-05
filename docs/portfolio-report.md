@@ -30,8 +30,9 @@ The workbook has these fixed sheets:
 9. Source Reconciliation
 10. Coverage Data Quality
 11. Corrections
-12. Methodology
-13. Provenance
+12. Dependence
+13. Methodology
+14. Provenance
 
 The workbook is read-only and advisory. It contains no provider connection,
 external link, macro, order-submission path, candidate refresh, optimization,
@@ -49,15 +50,32 @@ uv run --frozen --no-sync python tools/portfolio_report.py build `
   --output-root (Join-Path $portfolioRoot 'reporting')
 ```
 
-The build writes a content-addressed candidate containing the canonical report
-JSON, initial workbook, native-Excel job, and workbook validation contract.
-Before publication:
+The build writes a content-addressed, non-authoritative candidate containing the
+canonical report JSON, initial workbook, xlsx-win job, and workbook validation
+contract. Repository-created sidecars can bind the exact final workbook, job,
+result, validation, canonicalization, and parity bytes for immutable audit
+association only:
 
-1. Run the generated job through `xlsx-win` on Windows with Excel installed.
-2. Require the top-level native-Excel result to report `ok: true`.
-3. Validate the Excel-saved copy against `workbook-contract.json` and require
-   `all_passed: true`.
-4. Run the repository verifier against the current accepted baseline:
+```powershell
+uv run --frozen --no-sync python tools/portfolio_report.py bind-workbook-evidence `
+  --candidate-dir "<candidate>" `
+  --excel-workbook "<candidate>\excel\portfolio-report.xlsx" `
+  --xlsx-result "<candidate>\xlsx-result.json" `
+  --validation-result "<candidate>\workbook-validation.json" `
+  --evidence "<candidate>\workbook-evidence-binding.json"
+```
+
+`bind-workbook-evidence` validates the supplied xlsx-run result, validation
+receipt, job, independent workbook-cell parity, final-workbook bytes, and the
+successful `open`/`recalc`/`save_as` step facts. Its closed binding is
+`WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED` /
+`ELIGIBLE_FOR_NON_AUTHORITY_DELIVERY`; it binds delivery QA and the initial
+workbook hash, not native provenance or report authority. The raw xlsx-run
+`run_id` is preserved exactly; the repository never derives it from an
+idempotency key.
+
+The repository verifier can still compare a staged workbook to the current
+accepted baseline:
 
 ```powershell
 uv run --frozen --no-sync python tools/portfolio_report.py verify `
@@ -70,23 +88,46 @@ The verifier rejects changed baseline inputs, candidate identity drift,
 external links, workbook connections, macros, missing sheets or tables, and a
 missing reconciliation formula.
 
-## Publish and recover
+## Authority publication and workbook delivery
 
-Publish only after the governing code commit and exact-SHA CI are accepted:
+`publish` creates two distinct, create-only outputs. The immutable report
+generation under `reporting\generations\<generation-id>` contains
+`portfolio-report-data.json`, its report verification, and JSON evidence and
+manifest artifacts. It contains no `.xlsx` file, so the current authority
+pointer and generation inventory are independent of Office or SharePoint
+workbook rewrites.
 
-```powershell
-uv run --frozen --no-sync python tools/portfolio_report.py publish `
-  --baseline-root (Join-Path $portfolioRoot 'baseline') `
-  --candidate-dir "<candidate>" `
-  --excel-workbook "<candidate>\excel\portfolio-report.xlsx" `
-  --xlsx-result "<candidate>\xlsx-result.json" `
-  --validation-result "<candidate>\workbook-validation.json" `
-  --output-root (Join-Path $portfolioRoot 'reporting')
-```
+The sibling `reporting\deliveries\<generation-id>` contains the human-facing
+`portfolio-report.xlsx` and `report-delivery.json`. The delivery receipt is
+validated by `schemas/portfolio/report-delivery.schema.json`; it labels the
+workbook `NON_AUTHORITY_HUMAN_DELIVERY` and binds the exact authority generation
+ID, manifest hash, inventory hash, and canonical JSON payload hash used to
+materialize it.
 
-Publication is immutable and advances `CURRENT.json` only after all checks
-pass. A failed build, native recalculation, validation, or publication leaves
-the previously accepted report pointer unchanged. Recovery is therefore to fix
-the cause, create or reuse the identical content-addressed candidate, rerun the
-evidence gates, and publish a new accepted generation; never overwrite an
-accepted generation.
+Both paths are create-only: exact-byte reruns are idempotent, while an existing
+different delivery workbook or receipt fails closed. A subsequent Office or
+SharePoint rewrite may make the delivery workbook drift from the receipt, but
+that drift neither changes nor invalidates the JSON report authority.
+
+`publish` recomputes and requires that exact closed delivery-evidence binding;
+manual label, hash, size, run, step, validation, missing-field, or extra-field
+changes fail before any authority output or current-pointer change. The JSON
+report remains the sole authority; the workbook evidence only gates creation of
+the optional static human-delivery artifact in this combined producer API.
+Unit fixtures model the evidence shape only. Final operational acceptance still
+requires an actual xlsx-win/Excel run and independently performed workbook-cell
+parity. Production publication and accepted-pointer movement remain prohibited
+until that operational evidence is recorded.
+
+The current A1.3 seam is owned across these in-repository surfaces:
+
+- `tools/portfolio_report.py` is the producer of the JSON-only report authority
+  and the sibling non-authority human workbook delivery.
+- `tools/portfolio_release_builder.py` consumes the delivery receipt and
+  requires exact non-authority workbook evidence before accepting the report
+  release stage.
+- `tools/portfolio_pipeline_materialize.py` keeps the report generation free of
+  workbook and delivery paths while routing workbook work as its separate stage.
+- `tools/portfolio_control_panel.py` binds a hash-addressed report candidate for
+  the pre-publication panel path; this binding was added at `32bb7f8` and does
+  not promote the candidate or workbook to report authority.

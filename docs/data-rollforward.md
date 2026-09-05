@@ -176,13 +176,16 @@ under `DATA-RECOVERY-001` before this workflow is accepted for perpetual use.
 A manual cycle may evaluate accepted immutable evidence without authorizing a
 provider call or advancing a pointer. First build freshness for the local
 operational date. Then independently recompute the headline correlation-one
-control from each component's allocation weight and adverse-loss fraction and
-reconcile it to the accepted correlation generation, portfolio report, and
-staged panel. The recomputation tolerance is `1e-12`.
+control from each component's allocation weight and conservative-loss fraction
+(falling back to adverse-loss fraction only when conservative loss is absent)
+and reconcile it to the accepted correlation generation, portfolio report, and
+staged panel. The recomputation tolerance is `1e-12`. The recomputation binds
+the selected freshness file and current provider-ledger generation to the exact
+`data/freshness-health.json` bytes and candidate record in that staged panel.
 
 ```powershell
 python tools/portfolio_freshness.py --provider-ledger-root 'C:\Tools\quant-engine\data\provider-ledger' --provider-ledger-generation-id <current-id> --evaluation-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'freshness-health.json')
-python tools/portfolio_control_recompute.py --correlation-root 'C:\Tools\quant-engine\data\analytics\correlation' --report-root <accepted-report-root> --panel-candidate <staged-panel-candidate> --evaluation-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'control-recomputation.json')
+python tools/portfolio_control_recompute.py --correlation-root 'C:\Tools\quant-engine\data\analytics\correlation' --report-root <accepted-report-root> --panel-candidate <staged-panel-candidate> --freshness (Join-Path $cycleRoot 'freshness-health.json') --provider-ledger-root 'C:\Tools\quant-engine\data\provider-ledger' --provider-ledger-generation-id <current-id> --evaluation-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'control-recomputation.json')
 python tools/portfolio_rollforward_cycle.py --provider-ledger-root 'C:\Tools\quant-engine\data\provider-ledger' --provider-ledger-generation-id <current-id> --freshness (Join-Path $cycleRoot 'freshness-health.json') --recomputation (Join-Path $cycleRoot 'control-recomputation.json') --evaluation-date <yyyy-mm-dd> --previous-cycle-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'cycle-receipt.json')
 ```
 
@@ -233,6 +236,15 @@ snapshot fails before calculation.
 Composer and EchoTrade are owner-excluded from this financial-MVP calculation;
 the hybrid mode is retained only with zero version-unmatched backtest rows.
 
+A financial epoch-manifest release uses schema 8, which strictly extends
+schema 7. It requires one reusable provider-ledger generation plus exactly four
+caller-supplied, hash-bound files: ledger payload, ledger identity,
+event-reconciled classified flows, and admission policy. The classification
+policy and panel templates are repository-pinned and cannot be replaced by the
+recipe. The report's exact baseline generation controls manifest construction;
+missing inputs, a baseline mismatch, or a changed stage argument blocks every
+stage rather than falling back to a non-financial panel.
+
 The retained 2026-08-03 p28 recipe is archival: its pipeline recipe names a
 deleted p27 QA directory. Do not edit that evidence or manufacture a
 hash-equivalent replacement. A runnable cycle must rebuild every stage, run
@@ -241,10 +253,10 @@ specification from the new root.
 
 ```powershell
 $env:QE_PIPELINE_PYTHON = 'C:\Tools\quant-engine\.venv\Scripts\python.exe'
-python tools/portfolio_release_builder.py recipe --provider-ledger-generation <exact-verified-generation-directory> --baseline-spec <new-root-baseline-spec.json> --base-factor-file <new-root-factor-file.csv> --implementation-reconciliation <exact-implementation-reconciliation.json> --implementation-return-attribution <exact-return-attribution.json> --strategy-attribution-root <exact-strategy-attribution-root> --decomposition-plan-bundle <new-root-plan-bundle> --correlation-source-root <new-root-correlation-source> --legacy-panel <accepted-legacy-panel> --as-of-date <yyyy-mm-dd> --pipeline-id <new-vertical-id> --release-commit <exact-commit> --output (Join-Path $cycleRoot 'vertical-recipe.json')
+python tools/portfolio_release_builder.py recipe --provider-ledger-generation <exact-verified-generation-directory> --account-strategy-ledger <exact-ledger.json> --account-strategy-ledger-identity <exact-ledger-identity.json> --account-strategy-classified-flows <exact-classified-flows.json> --account-strategy-admission-policy <exact-admission-policy.json> --baseline-spec <new-root-baseline-spec.json> --base-factor-file <new-root-factor-file.csv> --implementation-reconciliation <exact-implementation-reconciliation.json> --implementation-return-attribution <exact-return-attribution.json> --strategy-attribution-root <exact-strategy-attribution-root> --decomposition-plan-bundle <new-root-plan-bundle> --correlation-source-root <new-root-correlation-source> --legacy-panel <accepted-legacy-panel> --as-of-date <yyyy-mm-dd> --pipeline-id <new-vertical-id> --release-commit <exact-commit> --output (Join-Path $cycleRoot 'vertical-recipe.json')
 python tools/portfolio_release_builder.py build --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot
 <run browser and interaction QA against the emitted panel candidate>
-python tools/portfolio_release_builder.py stage --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot --role panel --qa-dir $qaRoot
+python tools/portfolio_release_builder.py stage --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot --role panel --qa-dir $qaRoot --manifest-ledger <exact-ledger.json> --manifest-ledger-identity <exact-ledger-identity.json> --manifest-classified-flows <exact-classified-flows.json> --manifest-admission-policy <exact-admission-policy.json>
 python tools/portfolio_pipeline_materialize.py recipe --vertical-recipe (Join-Path $cycleRoot 'vertical-recipe.json') --proof-root $proofRoot --qa-dir $qaRoot --pipeline-id <new-pipeline-id> --output (Join-Path $cycleRoot 'pipeline-recipe.json')
 python tools/portfolio_pipeline_materialize.py spec --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') --output-root $runRoot --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py plan --spec (Join-Path $runRoot 'pipeline-spec.json')

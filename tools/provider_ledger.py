@@ -12,8 +12,9 @@ from __future__ import annotations
 import argparse
 from collections import defaultdict
 import csv
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, timedelta
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from functools import wraps
 import hashlib
 import importlib.util
 import io
@@ -23,7 +24,7 @@ import re
 import shutil
 import sys
 import tempfile
-from typing import Any, Final, Mapping, Sequence
+from typing import Any, Callable, Final, Mapping, Sequence
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -59,7 +60,7 @@ from quant_engine.portfolio_ledger import (
 SCHEMA_VERSION: Final = 2
 CATALOG_SCHEMA_VERSION: Final = 2
 ADMIT_OR_DECLARE_SCHEMA_VERSION: Final = 1
-ADAPTER_VERSION: Final = "3"
+ADAPTER_VERSION: Final = "5"
 REPOSITORY_ROOT: Final = Path(__file__).resolve().parents[1]
 _PROVIDER_CATALOGS: Final = {
     "alpaca": ("alpaca-generation.json", frozenset({1})),
@@ -80,9 +81,9 @@ _ACCOUNT_FACTS: Final = {
         "positions",
         "transactions",
     ),
-    "matrixport": ("nav_observations",),
+    "matrixport": ("capital_anchors", "nav_observations"),
     "portfolio123": (),
-    "quantbase": ("flows", "nav_observations"),
+    "quantbase": ("capital_anchors", "nav_observations"),
     "schwab": ("nav_observations", "positions", "transactions"),
 }
 _PROVIDER_SOURCE_SEGMENTS: Final = {
@@ -107,6 +108,7 @@ def _canonical_json_value_bytes(value: object) -> bytes:
 
 _DATA_CLASS_TARGET_FACT: Final = {
     "ACCOUNT_NAV": "nav_observations",
+    "CAPITAL_ANCHOR": "capital_anchors",
     "POSITION": "positions",
     "TRANSACTION": "transactions",
     "EXTERNAL_FLOW": "flows",
@@ -115,6 +117,7 @@ _DATA_CLASS_TARGET_FACT: Final = {
 }
 _TARGET_ADMISSION_FACT: Final = {
     "corporate_actions": "CORPORATE_ACTION",
+    "capital_anchors": "CAPITAL_ANCHOR",
     "flows": "EXTERNAL_FLOW",
     "nav_observations": "NAV_OBSERVATION",
     "positions": "POSITION",
@@ -138,6 +141,8 @@ _DATA_CLASS_ADMISSION_FACT: Final = {
     "TRANSACTION": "TRANSACTION",
 }
 _SOURCE_FACT_TARGET: Final = {
+    "account_activity": "capital_anchors",
+    "subscription_details": "capital_anchors",
     "cash_flows": "flows",
     "corporate_actions": "corporate_actions",
     "flows": "flows",
@@ -149,6 +154,8 @@ _CSV_FACT_ACCOUNT: Final[dict[str, str]] = {
     "matrixport": "account-d2e5821e608e25f1",
     "quantbase": "account-58e75e8d952fa1b8",
 }
+_MATRIXPORT_ROBUXIO_PRODUCT_ID: Final = "7361599360326447104"
+_MATRIXPORT_ROBUXIO_ORDER_ID: Final = "7402822649690198016"
 _QUANTBASE_FUND_ID: Final = "107"
 _SCHWAB_FLOW_KINDS: Final = frozenset(
     {
@@ -159,7 +166,51 @@ _SCHWAB_FLOW_KINDS: Final = frozenset(
         "Wire Sent",
     }
 )
-_DATE_FIELDS: Final = ("as_of_date", "event_date", "effective_date")
+# Pins the three retained, independently audited Schwab Journal records to the
+# accepted Schwab refresh generation 4e47b7b8 (dataSchwab CURRENT) as of
+# 2026-09-04, whose per-account WCH transaction captures re-assigned two
+# record_ids and renamed both source artifacts.
+_SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS: Final = {
+    (
+        "account-38b653b91ff43a10",
+        "txn-84ed102899eaaa7ba1d2f0d4",
+        "2025-12-29",
+        Decimal("7000"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-38b653b91ff43a10.json",
+        "source_artifact_sha256": (
+            "521cadb20162bba19a39064e2ed165425493ac37df1f35638653bcb2ebfa6514"
+        ),
+    },
+    (
+        "account-38b653b91ff43a10",
+        "txn-855f069db9ce99988c6707ea",
+        "2026-01-02",
+        Decimal("7500"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-38b653b91ff43a10.json",
+        "source_artifact_sha256": (
+            "521cadb20162bba19a39064e2ed165425493ac37df1f35638653bcb2ebfa6514"
+        ),
+    },
+    (
+        "account-702c489650e59956",
+        "txn-1699da38ec4afacd94bd2876",
+        "2026-01-02",
+        Decimal("-50000"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-702c489650e59956.json",
+        "source_artifact_sha256": (
+            "69856742fdf963136a326fc61ca4897e0a5e9a1d99c7e1db4231625c9ab9ee2a"
+        ),
+    },
+}
+_DATE_FIELDS: Final = (
+    "as_of_date",
+    "event_date",
+    "effective_date",
+    "nav_recognition_date",
+)
 _NAV_VALUE_BASIS_BY_PROVIDER: Final = {
     "ibkr": "ACCOUNT_TOTAL",
     "matrixport": "ACCOUNT_TOTAL",
@@ -592,6 +643,195 @@ def _matrixport_nav_observations(
     return observations
 
 
+def _matrixport_capital_anchors(
+    generation_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Admit exact strategy subscriptions without allocating wallet deposits.
+
+    A wallet deposit proves only account-level funding.  It does not establish
+    the strategy's funded amount across currencies, fees, or retained cash.
+    The subscription record, by contrast, names the product and its exact
+    source-declared subscription amount.
+    """
+    account_id = _CSV_FACT_ACCOUNT["matrixport"]
+    source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
+    run_root = root / "output" / source_run_id
+    artifact_id = "csv/subscription_details.csv"
+    artifact = _find_manifest_artifact(
+        manifest, artifact_id, "matrixport subscription details"
+    )
+    rows = _verified_csv_rows(
+        _exact_file(run_root, Path(artifact_id), "matrixport subscription details"),
+        artifact.sha256,
+        {
+            "actual_subscription_amount",
+            "confirm_nav_time_utc",
+            "order_id",
+            "product_id",
+            "subscription_amount",
+            "subscription_currency",
+            "subscription_time_utc",
+        },
+        "matrixport subscription details",
+    )
+    matching_rows = [
+        row
+        for row in rows
+        if row.get("product_id") == _MATRIXPORT_ROBUXIO_PRODUCT_ID
+        and row.get("order_id") == _MATRIXPORT_ROBUXIO_ORDER_ID
+    ]
+    if len(rows) != 1 or len(matching_rows) != 1:
+        raise ProviderLedgerError("MATRIXPORT_ROBUXIO_SUBSCRIPTION_IDENTITY_DIFFERS")
+    rows = matching_rows
+    nav_artifact_id = "csv/daily_portfolio_totals.csv"
+    nav_artifact = _find_manifest_artifact(
+        manifest, nav_artifact_id, "matrixport daily portfolio totals"
+    )
+    nav_rows = _verified_csv_rows(
+        _exact_file(
+            run_root, Path(nav_artifact_id), "matrixport daily portfolio totals"
+        ),
+        nav_artifact.sha256,
+        {
+            "portfolio_value_usd_observed",
+            "portfolio_value_usd_strict",
+            "strict_complete",
+            "utc_date",
+        },
+        "matrixport daily portfolio totals",
+    )
+
+    def timestamp_day(value: object, name: str) -> date:
+        try:
+            return datetime.fromisoformat(
+                _text(value, name).replace("Z", "+00:00")
+            ).date()
+        except ValueError as exc:
+            raise ProviderLedgerError(f"{name} is not an ISO timestamp") from exc
+
+    nav_rows_by_day: dict[date, list[dict[str, str]]] = defaultdict(list)
+    for row in nav_rows:
+        nav_rows_by_day[
+            _day(row.get("utc_date"), "matrixport portfolio utc_date")
+        ].append(row)
+
+    anchors: list[dict[str, Any]] = []
+    for row in sorted(
+        rows, key=lambda item: (item["subscription_time_utc"], item["order_id"])
+    ):
+        amount = _observed_decimal(
+            row.get("subscription_amount"), "matrixport subscription amount"
+        )
+        actual_amount = _observed_decimal(
+            row.get("actual_subscription_amount"),
+            "matrixport actual subscription amount",
+        )
+        if (
+            amount is None
+            or amount <= 0
+            or actual_amount is None
+            or actual_amount != amount
+        ):
+            raise ProviderLedgerError(
+                "matrixport subscription amount is absent, non-positive, or inconsistent"
+            )
+        event_day = timestamp_day(
+            row["subscription_time_utc"], "matrixport subscription time"
+        )
+        recognition_day = timestamp_day(
+            row["confirm_nav_time_utc"], "matrixport subscription confirmation time"
+        )
+        if recognition_day < event_day:
+            raise ProviderLedgerError(
+                "matrixport subscription recognition predates subscription"
+            )
+        # The subscription's economic date remains evidence of when capital
+        # was committed.  Its funded epoch starts only when that capital is
+        # recognized in the account NAV.
+        strategy_id, mapping_status = _mapped_strategy_for_account(
+            account_id, recognition_day, accounts, strategies, assignments
+        )
+        source_record_id = _text(
+            row.get("order_id"), "matrixport subscription order_id"
+        )
+        opening = not anchors
+        anchor: dict[str, Any] = {
+            "account_id": account_id,
+            "amount": {
+                "currency": _text(
+                    row.get("subscription_currency"),
+                    "matrixport subscription currency",
+                ),
+                "status": "AVAILABLE",
+                "value": format(amount.normalize(), "f"),
+            },
+            "capital_type": (
+                "OPENING_CAPITAL_ANCHOR" if opening else "STRATEGY_CAPITAL_ALLOCATION"
+            ),
+            "event_date": event_day.isoformat(),
+            "evidence_layer": "ACCOUNT_LIVE",
+            "generation_id": generation_id,
+            "mapping_basis": "EXACT_STRATEGY_SUBSCRIPTION",
+            "mapping_status": mapping_status,
+            "nav_recognition_date": recognition_day.isoformat(),
+            "provider_id": "matrixport",
+            "record_id": f"matrixport-capital-anchor:{source_record_id}",
+            "source_artifact_id": artifact_id,
+            "source_product_id": _text(
+                row.get("product_id"), "matrixport subscription product_id"
+            ),
+            "source_record_id": source_record_id,
+            "strategy_id": strategy_id,
+        }
+        if opening:
+            matched_nav_rows = nav_rows_by_day.get(recognition_day, [])
+            if len(matched_nav_rows) != 1:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_OPENING_NAV_UNAVAILABLE: expected one daily "
+                    "account total at subscription recognition"
+                )
+            matched_nav = matched_nav_rows[0]
+            observed_nav = _observed_decimal(
+                matched_nav.get("portfolio_value_usd_observed"),
+                "matrixport opening portfolio_value_usd_observed",
+            )
+            strict_nav = _observed_decimal(
+                matched_nav.get("portfolio_value_usd_strict"),
+                "matrixport opening portfolio_value_usd_strict",
+            )
+            if (
+                matched_nav.get("strict_complete") != "true"
+                or observed_nav is None
+                or strict_nav is None
+                or observed_nav <= 0
+                or observed_nav != strict_nav
+            ):
+                raise ProviderLedgerError(
+                    "MATRIXPORT_OPENING_NAV_UNAVAILABLE: first account total "
+                    "is partial, absent, non-positive, or inconsistent"
+                )
+            if observed_nav.quantize(Decimal("0.01")) != amount.quantize(
+                Decimal("0.01")
+            ):
+                raise ProviderLedgerError(
+                    "MATRIXPORT_OPENING_NAV_SUBSCRIPTION_MISMATCH"
+                )
+            anchor["opening_nav"] = {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": format(observed_nav.normalize(), "f"),
+            }
+            anchor["nav_source_artifact_id"] = nav_artifact_id
+        anchors.append(anchor)
+    return anchors
+
+
 def _quantbase_nav_observations(
     generation_id: str,
     manifest: GenerationManifest,
@@ -658,7 +898,7 @@ def _quantbase_nav_observations(
     return observations
 
 
-def _quantbase_flows(
+def _quantbase_capital_anchors(
     generation_id: str,
     manifest: GenerationManifest,
     catalog: Mapping[str, Any],
@@ -667,13 +907,13 @@ def _quantbase_flows(
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> list[dict[str, Any]]:
-    """Admit Quantbase capital contributions as flows.
+    """Admit Quantbase strategy funding without inventing external cash flow.
 
-    Mirrors the legacy reconciliation (tools/portfolio_target_series.py):
-    contributions are filled_txn BUY rows on the fund, matched in order
-    against cost-basis increases in the dashboard history, and booked on the
-    day the cost basis rises. A contribution that does not reconcile is a
-    hard failure — never a silently mis-booked flow."""
+    A filled fund BUY is an economic strategy allocation.  The dashboard's
+    cost-basis increase supplies its later NAV-recognition date, but must not
+    overwrite the source activity date or turn the allocation into an
+    account-external deposit.
+    """
     account_id = _CSV_FACT_ACCOUNT["quantbase"]
     run_id = _run_id(
         _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
@@ -689,7 +929,7 @@ def _quantbase_flows(
     price_rows = _verified_csv_rows(
         _exact_file(run_root, price_rel, "quantbase Volatis pricehistory"),
         price_artifact.sha256,
-        {"time", "cost_basis"},
+        {"time", "cost_basis", "value"},
         "quantbase Volatis pricehistory",
     )
     activity_rel = Path("csv/account_activity.csv")
@@ -723,22 +963,26 @@ def _quantbase_flows(
         contributions.append((observed, amount))
     contributions.sort(key=lambda item: item[0])
 
-    history: list[tuple[date, Decimal]] = []
+    history: list[tuple[date, Decimal, Decimal | None]] = []
     for row in price_rows:
         cost_basis = _observed_decimal(row.get("cost_basis"), "quantbase cost basis")
         if cost_basis is None or cost_basis < 0:
             continue
         history.append(
-            (_quantbase_day(row["time"], "quantbase Volatis time"), cost_basis)
+            (
+                _quantbase_day(row["time"], "quantbase Volatis time"),
+                cost_basis,
+                _observed_decimal(row.get("value"), "quantbase Volatis value"),
+            )
         )
     history.sort(key=lambda item: item[0])
 
     pending: list[tuple[datetime, Decimal]] = []
     contribution_index = 0
     previous_cost_basis = Decimal(0)
-    booked_flows: dict[date, Decimal] = {}
+    booked_anchors: list[tuple[datetime, Decimal, date, Decimal]] = []
     tolerance = Decimal("0.02")
-    for day, cost_basis in history:
+    for day, cost_basis, nav_value in history:
         while (
             contribution_index < len(contributions)
             and contributions[contribution_index][0].date() <= day
@@ -757,40 +1001,62 @@ def _quantbase_flows(
                 if running > delta + tolerance:
                     break
             if matched_count:
-                booked_flows[day] = running
+                if nav_value is None or nav_value <= 0:
+                    raise ProviderLedgerError(
+                        "quantbase capital recognition lacks a positive NAV"
+                    )
+                booked_anchors.extend(
+                    (timestamp, amount, day, nav_value)
+                    for timestamp, amount in pending[:matched_count]
+                )
                 pending = pending[matched_count:]
         previous_cost_basis = cost_basis
     if contribution_index != len(contributions) or pending:
         raise ProviderLedgerError("quantbase capital additions do not reconcile")
 
-    flows: list[dict[str, Any]] = []
-    for day, amount in sorted(booked_flows.items()):
+    anchors: list[dict[str, Any]] = []
+    for index, (timestamp, amount, recognition_day, nav_value) in enumerate(
+        sorted(booked_anchors, key=lambda item: item[0])
+    ):
+        event_day = timestamp.date()
+        # Keep the activity timestamp as the economic capital date, but map
+        # against the first dashboard NAV that recognizes the allocation.
         strategy_id, mapping_status = _mapped_strategy_for_account(
-            account_id, day, accounts, strategies, assignments
+            account_id, recognition_day, accounts, strategies, assignments
         )
-        flows.append(
-            {
-                "account_id": account_id,
-                "amount": {
-                    # The wrapped money shape the ledger contract requires.
-                    "currency": "USD",
-                    "status": "AVAILABLE",
-                    "value": format(amount.normalize(), "f"),
-                },
-                "event_date": day.isoformat(),
-                "evidence_layer": "ACCOUNT_LIVE",
-                "flow_type": "EXTERNAL_PROVIDER_TRANSFER",
-                "generation_id": generation_id,
-                "mapping_basis": "RECONCILED_COST_BASIS_INCREASE",
-                "mapping_status": mapping_status,
-                "provider_id": "quantbase",
-                "record_id": f"quantbase-flow:{day.isoformat()}",
-                "source_artifact_id": f"source/{activity_rel.as_posix()}",
-                "source_record_id": day.isoformat(),
-                "strategy_id": strategy_id,
+        anchor: dict[str, Any] = {
+            "account_id": account_id,
+            "amount": {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": format(amount.normalize(), "f"),
+            },
+            "capital_type": (
+                "OPENING_CAPITAL_ANCHOR"
+                if index == 0
+                else "STRATEGY_CAPITAL_ALLOCATION"
+            ),
+            "event_date": event_day.isoformat(),
+            "evidence_layer": "ACCOUNT_LIVE",
+            "generation_id": generation_id,
+            "mapping_basis": "RECONCILED_PROVIDER_STRATEGY_CAPITAL",
+            "mapping_status": mapping_status,
+            "nav_recognition_date": recognition_day.isoformat(),
+            "nav_source_artifact_id": f"source/{price_rel.as_posix()}",
+            "provider_id": "quantbase",
+            "record_id": f"quantbase-capital-anchor:{timestamp.isoformat()}",
+            "source_artifact_id": f"source/{activity_rel.as_posix()}",
+            "source_record_id": timestamp.isoformat(),
+            "strategy_id": strategy_id,
+        }
+        if index == 0:
+            anchor["opening_nav"] = {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": format(nav_value.normalize(), "f"),
             }
-        )
-    return flows
+        anchors.append(anchor)
+    return anchors
 
 
 def _load_spec(path: Path) -> dict[str, Any]:
@@ -1063,6 +1329,7 @@ def _provider(
 
 def _assignment_index(
     provenance: Mapping[str, Any],
+    financial_contract: Mapping[str, Any] | None = None,
 ) -> tuple[set[str], set[str], dict[str, list[dict[str, Any]]]]:
     accounts = {
         _text(item.get("account_id"), "account_id")
@@ -1084,6 +1351,44 @@ def _assignment_index(
         assignments[_text(item.get("account_id"), "assignment.account_id")].append(
             normalized
         )
+    if financial_contract is not None:
+        expected_start: date | None = None
+        for strategy in _objects(
+            financial_contract.get("strategies"), "financial MVP strategies"
+        ):
+            if strategy.get("strategy_id") != "robuxio-crypto":
+                continue
+            membership = _object(
+                strategy.get("funded_membership"), "Robuxio funded_membership"
+            )
+            if membership.get("status") != "EVIDENCED":
+                break
+            expected_start = _day(
+                membership.get("effective_start"),
+                "Robuxio funded_membership.effective_start",
+            )
+            break
+        if expected_start is None:
+            raise ProviderLedgerError("MATRIXPORT_OWNER_FUNDING_BOUNDARY_DIFFERS")
+        owner_assignments = [
+            item
+            for item in assignments.get(_CSV_FACT_ACCOUNT["matrixport"], [])
+            if item.get("mapping_status") == "MAPPED"
+            and item.get("strategy_id") == "robuxio-crypto"
+        ]
+        if len(owner_assignments) != 1:
+            raise ProviderLedgerError("MATRIXPORT_OWNER_FUNDING_BOUNDARY_DIFFERS")
+        owner_assignment = owner_assignments[0]
+        if (
+            _day(
+                owner_assignment.get("effective_start"),
+                "Matrixport owner assignment.effective_start",
+            )
+            != expected_start
+            or owner_assignment.get("source_classification")
+            != "financial_mvp_funded_membership_reconciled"
+        ):
+            raise ProviderLedgerError("MATRIXPORT_OWNER_FUNDING_BOUNDARY_DIFFERS")
     return accounts, strategies, assignments
 
 
@@ -1142,6 +1447,7 @@ def _project_account_facts(
     for source_fact in _ACCOUNT_FACTS[provider_id]:
         target_fact = "flows" if source_fact == "cash_flows" else source_fact
         if provider_id in _CSV_FACT_ACCOUNT and source_fact in {
+            "capital_anchors",
             "flows",
             "nav_observations",
         }:
@@ -1150,9 +1456,29 @@ def _project_account_facts(
                     f"{provider_id} CSV facts require a manifest and root"
                 )
             if provider_id == "matrixport":
-                if source_fact != "nav_observations":
-                    continue
-                rows: list[dict[str, Any]] = _matrixport_nav_observations(
+                rows = (
+                    _matrixport_capital_anchors(
+                        generation_id,
+                        manifest,
+                        catalog,
+                        root,
+                        accounts,
+                        strategies,
+                        assignments,
+                    )
+                    if source_fact == "capital_anchors"
+                    else _matrixport_nav_observations(
+                        generation_id,
+                        manifest,
+                        catalog,
+                        root,
+                        accounts,
+                        strategies,
+                        assignments,
+                    )
+                )
+            elif source_fact == "capital_anchors":
+                rows = _quantbase_capital_anchors(
                     generation_id,
                     manifest,
                     catalog,
@@ -1172,14 +1498,8 @@ def _project_account_facts(
                     assignments,
                 )
             else:
-                rows = _quantbase_flows(
-                    generation_id,
-                    manifest,
-                    catalog,
-                    root,
-                    accounts,
-                    strategies,
-                    assignments,
+                raise ProviderLedgerError(
+                    f"unsupported CSV fact mapping: {provider_id}.{source_fact}"
                 )
             projections[target_fact].extend(rows)
             for row in rows:
@@ -1205,9 +1525,16 @@ def _project_account_facts(
         for row in rows:
             day = _row_day(row)
             account_id = str(row.get("account_id") or "")
-            strategy_id, mapping_status = _mapped_strategy(
-                row, accounts, strategies, assignments
-            )
+            if (
+                provider_id == "ibkr"
+                and source_fact == "flows"
+                and row.get("provider_account_scope") != "STATEMENT_ACCOUNT"
+            ):
+                strategy_id, mapping_status = None, "UNMAPPED"
+            else:
+                strategy_id, mapping_status = _mapped_strategy(
+                    row, accounts, strategies, assignments
+                )
             source_id = _text(
                 row.get("record_id"), f"{provider_id}.{source_fact}.record_id"
             )
@@ -1224,19 +1551,32 @@ def _project_account_facts(
             for field in (
                 "amount",
                 "as_of_date",
+                "effective_date",
                 "event_date",
                 "flow_type",
                 "kind",
                 "market_value",
+                "nav_recognition_date",
                 "nav",
                 "price",
                 "quantity",
                 "security_id",
                 "source_artifact_id",
+                "settle_date",
+                "provider_activity_id_sha256",
+                "provider_account_scope",
                 "value_basis",
             ):
                 if field in row:
                     record[field] = row[field]
+            if (
+                source_fact == "flows"
+                and record.get("flow_type") == "DEPOSIT_OR_WITHDRAWAL"
+            ):
+                amount = _observed_decimal(record.get("amount"), "flow amount")
+                record["capital_disposition"] = (
+                    "NON_CAPITAL" if amount == 0 else "EXTERNAL_CAPITAL"
+                )
             projections[target_fact].append(record)
             if mapping_status == "UNMAPPED":
                 exceptions.append(
@@ -1260,9 +1600,28 @@ def _project_account_facts(
                         **record,
                         "flow_type": "EXTERNAL_PROVIDER_TRANSFER",
                         "mapping_basis": "INFERRED_PROVIDER_KIND",
+                        "nav_recognition_date": record.get("effective_date")
+                        or record.get("event_date"),
                         "record_id": f"schwab-flow:{source_id}",
                     }
                 )
+            elif provider_id == "schwab" and source_fact == "transactions":
+                pinned_journal = _schwab_pinned_journal_external_flow(
+                    row,
+                    manifest,
+                )
+                if pinned_journal is not None:
+                    projections["flows"].append(
+                        {
+                            **record,
+                            **pinned_journal,
+                            "flow_type": "EXTERNAL_PROVIDER_TRANSFER",
+                            "mapping_basis": "PINNED_RETAINED_JOURNAL",
+                            "nav_recognition_date": record.get("effective_date")
+                            or record.get("event_date"),
+                            "record_id": f"schwab-flow:{source_id}",
+                        }
+                    )
 
     for rows in projections.values():
         rows.sort(
@@ -1276,6 +1635,45 @@ def _project_account_facts(
                 f"{provider_id} projected fact identifiers collide"
             )
     return dict(projections), exceptions
+
+
+def _schwab_pinned_journal_external_flow(
+    row: Mapping[str, Any],
+    manifest: GenerationManifest | None,
+) -> dict[str, str] | None:
+    """Classify only three retained, independently audited Schwab Journals."""
+
+    if str(row.get("kind") or "").strip().upper() != "JOURNAL":
+        return None
+    effective_date = row.get("effective_date") or row.get("event_date")
+    if not isinstance(effective_date, str):
+        return None
+    try:
+        amount = _observed_decimal(row.get("amount"), "Schwab Journal amount")
+    except ProviderLedgerError:
+        return None
+    if amount is None:
+        return None
+    key = (
+        str(row.get("account_id") or ""),
+        str(row.get("record_id") or ""),
+        effective_date,
+        amount,
+    )
+    pinned = _SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS.get(key)
+    if pinned is None:
+        return None
+    if manifest is None:
+        raise ProviderLedgerError("pinned Journal source requires a Schwab manifest")
+    source_artifact_id = pinned["source_artifact_id"]
+    source_artifact_sha256 = pinned["source_artifact_sha256"]
+    artifact_by_id = {artifact.artifact_id: artifact for artifact in manifest.artifacts}
+    source_artifact = artifact_by_id.get(source_artifact_id)
+    if source_artifact is None or source_artifact.sha256 != source_artifact_sha256:
+        raise ProviderLedgerError(
+            "pinned Journal source artifact is absent or has a different hash"
+        )
+    return dict(pinned)
 
 
 _CASH_TRANSACTION_KINDS: Final = frozenset(
@@ -1393,7 +1791,12 @@ def _validate_nav_observation_moves(
         key = (
             str(row["provider_id"]),
             str(row["account_id"]),
-            str(row.get("event_date") or row.get("as_of_date") or ""),
+            str(
+                row.get("nav_recognition_date")
+                or row.get("event_date")
+                or row.get("as_of_date")
+                or ""
+            ),
         )
         activity_amounts[key] += abs(amount)
     by_account: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
@@ -1626,10 +2029,27 @@ def _observed_bounds(rows: Sequence[Mapping[str, Any]]) -> tuple[date, date]:
     return min(days), max(days)
 
 
+def _catalog_decimal_context(function: Callable[..., Any]) -> Callable[..., Any]:
+    """Run provider-ledger catalog arithmetic under its fixed Decimal context."""
+
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> Any:
+        with localcontext() as context:
+            context.prec = 28
+            context.rounding = ROUND_HALF_EVEN
+            return function(*args, **kwargs)
+
+    return wrapped
+
+
+@_catalog_decimal_context
 def _broker_strategy_returns(
     nav_rows: Sequence[Mapping[str, Any]],
     flow_rows: Sequence[Mapping[str, Any]],
     authoritative_provider_ids: set[str],
+    *,
+    capital_anchors: Sequence[Mapping[str, Any]] = (),
+    declared_nav_gap_dates_by_provider: Mapping[str, frozenset[date]] | None = None,
 ) -> list[dict[str, Any]]:
     """Create flow-adjusted account-live returns from admitted broker NAV.
 
@@ -1638,17 +2058,42 @@ def _broker_strategy_returns(
     Multiple accounts assigned to one strategy are beginning-capital weighted.
     """
 
+    declared_gaps = declared_nav_gap_dates_by_provider or {}
+    internal_accounts_by_activity: dict[tuple[str, str], set[str]] = defaultdict(set)
+    for row in flow_rows:
+        if not str(row.get("flow_type") or "").startswith("TRANSFER:INTERNAL"):
+            continue
+        activity_id = row.get("provider_activity_id_sha256")
+        if not isinstance(activity_id, str) or not activity_id:
+            continue
+        account_id = str(row.get("account_id") or "")
+        if account_id:
+            internal_accounts_by_activity[
+                (str(row.get("provider_id") or ""), activity_id)
+            ].add(account_id)
     flows: dict[tuple[str, str, str], Decimal] = defaultdict(Decimal)
+    flow_timing_by_provider: dict[str, set[str]] = defaultdict(set)
     for row in flow_rows:
         if row.get("mapping_status") != "MAPPED":
             continue
         provider_id = str(row["provider_id"])
         if provider_id not in authoritative_provider_ids:
             continue
+        if (
+            provider_id == "ibkr"
+            and row.get("provider_account_scope") != "STATEMENT_ACCOUNT"
+        ):
+            raise ProviderLedgerError("IBKR flow lacks STATEMENT_ACCOUNT scope")
         account_id = str(row["account_id"])
-        day = str(row.get("event_date") or "")
+        recognition_day = row.get("nav_recognition_date")
+        day = str(recognition_day or row.get("event_date") or "")
         if not day:
             continue
+        flow_timing_by_provider[provider_id].add(
+            "PROVIDER_NAV_RECOGNITION_DATE"
+            if recognition_day is not None
+            else "DATE_ONLY_END_OF_DAY"
+        )
         raw_amount = row.get("amount")
         amount_missing = raw_amount is None or (
             isinstance(raw_amount, str) and not raw_amount.strip()
@@ -1656,18 +2101,35 @@ def _broker_strategy_returns(
         amount = (
             None if amount_missing else _observed_decimal(raw_amount, "flow amount")
         )
-        if str(row.get("flow_type") or "").startswith("TRANSFER:INTERNAL") and (
-            amount_missing or amount is None
-        ):
-            # Intra-account currency-ledger moves without a USD amount net to
-            # zero at account level; they are never contributions. An internal
-            # transfer WITH an available amount is real capital movement and
-            # is counted (both sides net out within an account; across
-            # accounts each side adjusts its own sleeve).
+        if row.get("capital_disposition") == "NON_CAPITAL":
+            if (
+                row.get("flow_type") != "DEPOSIT_OR_WITHDRAWAL"
+                or amount_missing
+                or amount != 0
+            ):
+                raise ProviderLedgerError("non-capital flow declaration is invalid")
             continue
         if amount_missing:
             raise ProviderLedgerError("mapped flow amount is missing")
         if amount is None:
+            activity_id = row.get("provider_activity_id_sha256")
+            if str(row.get("flow_type") or "").startswith("TRANSFER:INTERNAL"):
+                if (
+                    isinstance(activity_id, str)
+                    and len(
+                        internal_accounts_by_activity.get(
+                            (provider_id, activity_id), set()
+                        )
+                    )
+                    > 1
+                ):
+                    raise ProviderLedgerError(
+                        "unresolved cross-account internal transfer amount"
+                    )
+                # A one-sided/unpaired internal FX row has no usable USD
+                # amount. It is retained as evidence but cannot be imputed as
+                # either external capital or a zero-valued cash movement.
+                continue
             raise ProviderLedgerError("mapped flow amount is unavailable")
         flows[(provider_id, account_id, day)] += amount
 
@@ -1680,13 +2142,118 @@ def _broker_strategy_returns(
             continue
         by_account[(provider_id, str(row["account_id"]))].append(row)
 
+    quantbase_anchor_adjustments: dict[tuple[str, str, str], Decimal] = defaultdict(
+        Decimal
+    )
+    quantbase_opening_dates: set[tuple[str, str, str]] = set()
+    quantbase_anchor_strategies: dict[tuple[str, str, str], str] = {}
+    quantbase_opening_accounts: set[tuple[str, str, str]] = set()
+    quantbase_allocation_accounts: set[tuple[str, str, str]] = set()
+    seen_quantbase_anchor_ids: set[str] = set()
+    for row in capital_anchors:
+        if row.get("provider_id") != "quantbase":
+            continue
+        if "quantbase" not in authoritative_provider_ids:
+            continue
+        record_id = _text(row.get("record_id"), "quantbase capital anchor record_id")
+        if record_id in seen_quantbase_anchor_ids:
+            raise ProviderLedgerError("duplicate quantbase capital anchor record_id")
+        seen_quantbase_anchor_ids.add(record_id)
+        account_id = _text(row.get("account_id"), "quantbase capital anchor account_id")
+        strategy_id = _text(
+            row.get("strategy_id"), "quantbase capital anchor strategy_id"
+        )
+        if (
+            row.get("mapping_status") != "MAPPED"
+            or row.get("evidence_layer") != "ACCOUNT_LIVE"
+            or row.get("mapping_basis") != "RECONCILED_PROVIDER_STRATEGY_CAPITAL"
+        ):
+            raise ProviderLedgerError("quantbase capital anchor mapping is unavailable")
+        event_day = _day(row.get("event_date"), "quantbase capital anchor event_date")
+        recognition_day = _day(
+            row.get("nav_recognition_date"),
+            "quantbase capital anchor nav_recognition_date",
+        )
+        if recognition_day < event_day:
+            raise ProviderLedgerError(
+                "quantbase capital anchor recognition precedes economic event"
+            )
+        anchor_amount = _object(row.get("amount"), "quantbase capital anchor amount")
+        if (
+            set(anchor_amount) != {"currency", "status", "value"}
+            or anchor_amount.get("currency") != "USD"
+        ):
+            raise ProviderLedgerError("quantbase capital anchor amount is invalid")
+        amount_value = _observed_decimal(
+            anchor_amount, "quantbase capital anchor amount"
+        )
+        if amount_value is None or amount_value <= 0:
+            raise ProviderLedgerError("quantbase capital anchor amount is invalid")
+        capital_type = row.get("capital_type")
+        if capital_type not in {
+            "OPENING_CAPITAL_ANCHOR",
+            "STRATEGY_CAPITAL_ALLOCATION",
+        }:
+            raise ProviderLedgerError("quantbase capital anchor type is invalid")
+        account_strategy = ("quantbase", account_id, strategy_id)
+        anchor_key = ("quantbase", account_id, recognition_day.isoformat())
+        previous_strategy = quantbase_anchor_strategies.setdefault(
+            anchor_key, strategy_id
+        )
+        if previous_strategy != strategy_id:
+            raise ProviderLedgerError(
+                "quantbase capital anchors conflict at NAV recognition date"
+            )
+        if capital_type == "OPENING_CAPITAL_ANCHOR":
+            if account_strategy in quantbase_opening_accounts:
+                raise ProviderLedgerError("duplicate quantbase opening capital anchor")
+            quantbase_opening_accounts.add(account_strategy)
+            quantbase_opening_dates.add(anchor_key)
+        else:
+            quantbase_allocation_accounts.add(account_strategy)
+            quantbase_anchor_adjustments[anchor_key] += amount_value
+            flow_timing_by_provider["quantbase"].add("PROVIDER_NAV_RECOGNITION_DATE")
+
+    for account_strategy in quantbase_allocation_accounts:
+        if account_strategy not in quantbase_opening_accounts:
+            raise ProviderLedgerError(
+                "quantbase capital allocation lacks an opening capital anchor"
+            )
+    for (
+        provider_id,
+        account_id,
+        recognition_day,
+    ), strategy_id in quantbase_anchor_strategies.items():
+        if not any(
+            str(row.get("as_of_date")) == recognition_day
+            and row.get("mapping_status") == "MAPPED"
+            and row.get("strategy_id") == strategy_id
+            for row in by_account.get((provider_id, account_id), [])
+        ):
+            raise ProviderLedgerError(
+                "quantbase capital anchor does not match a mapped recognized NAV"
+            )
+
     contributions: dict[
         tuple[str, str], list[tuple[Decimal, Decimal, str, str, str]]
     ] = defaultdict(list)
+    quantbase_return_paths: set[tuple[str, str, str]] = set()
     for (provider_id, account_id), rows in by_account.items():
         ordered = sorted(rows, key=lambda item: str(item["as_of_date"]))
         for previous, current in zip(ordered, ordered[1:]):
             if previous.get("strategy_id") != current.get("strategy_id"):
+                continue
+            previous_day = _day(previous.get("as_of_date"), "prior NAV date")
+            current_day = _day(current.get("as_of_date"), "ending NAV date")
+            provider_gaps = declared_gaps.get(provider_id, frozenset())
+            if previous_day in provider_gaps or current_day in provider_gaps:
+                raise ProviderLedgerError(
+                    "declared NAV gap contains an admitted NAV observation"
+                )
+            if any(previous_day < gap < current_day for gap in provider_gaps):
+                # The next observed account value spans an explicitly missing
+                # source date.  It is valid NAV evidence but not a one-period
+                # daily return and therefore cannot enter strategy_returns.
                 continue
             prior_nav = _observed_decimal(previous.get("nav"), "prior NAV")
             ending_nav = _observed_decimal(current.get("nav"), "ending NAV")
@@ -1695,11 +2262,19 @@ def _broker_strategy_returns(
             if prior_nav <= 0 or ending_nav < 0:
                 continue
             day = str(current["as_of_date"])
+            strategy_id = _text(current.get("strategy_id"), "strategy_id")
+            if provider_id == "quantbase":
+                quantbase_return_paths.add((provider_id, account_id, strategy_id))
+            anchor_key = (provider_id, account_id, day)
+            if anchor_key in quantbase_opening_dates:
+                # An opening anchor establishes the first funded NAV baseline;
+                # it is not a period cash flow and must not fabricate a return.
+                continue
             net_flow = flows.get((provider_id, account_id, day), Decimal(0))
+            net_flow += quantbase_anchor_adjustments.get(anchor_key, Decimal(0))
             period_return = (ending_nav - net_flow) / prior_nav - Decimal(1)
             if period_return <= -1:
                 raise ProviderLedgerError("flow-adjusted account return is invalid")
-            strategy_id = _text(current.get("strategy_id"), "strategy_id")
             contributions[(strategy_id, day)].append(
                 (
                     prior_nav,
@@ -1710,16 +2285,32 @@ def _broker_strategy_returns(
                 )
             )
 
+    for return_path in quantbase_return_paths:
+        if return_path not in quantbase_opening_accounts:
+            raise ProviderLedgerError(
+                "quantbase mapped NAV lacks exactly one opening capital anchor"
+            )
+
     result: list[dict[str, Any]] = []
     for (strategy_id, day), items in sorted(contributions.items()):
         denominator = sum((item[0] for item in items), Decimal(0))
         if denominator <= 0:
             continue
+        # A one-account sleeve is already its own exact return.  Multiplying
+        # and dividing it by the same beginning capital applies Decimal
+        # context rounding a second time and can change the final digit.
         composite = (
-            sum((capital * value for capital, value, _, _, _ in items), Decimal(0))
+            items[0][1]
+            if len(items) == 1
+            else sum((capital * value for capital, value, _, _, _ in items), Decimal(0))
             / denominator
         )
         providers = sorted({item[2] for item in items})
+        timing_modes = {
+            mode
+            for provider in providers
+            for mode in flow_timing_by_provider.get(provider, {"DATE_ONLY_END_OF_DAY"})
+        }
         account_ids = sorted({item[3] for item in items})
         source_record_ids = sorted(item[4] for item in items)
         result.append(
@@ -1739,7 +2330,11 @@ def _broker_strategy_returns(
                 "beginning_capital": format(denominator, "f"),
                 "date": day,
                 "evidence_layer": "ACCOUNT_LIVE",
-                "flow_timing": "DATE_ONLY_END_OF_DAY",
+                "flow_timing": (
+                    next(iter(timing_modes))
+                    if len(timing_modes) == 1
+                    else "MIXED_PROVIDER_FLOW_TIMING"
+                ),
                 "provider_id": providers[0]
                 if len(providers) == 1
                 else "multi-provider",
@@ -1753,14 +2348,259 @@ def _broker_strategy_returns(
     return result
 
 
+def _declared_nav_gap_dates_by_provider(
+    manifests: Mapping[str, GenerationManifest],
+) -> dict[str, frozenset[date]]:
+    """Project explicit provider NAV omissions into return-period boundaries."""
+
+    result: dict[str, frozenset[date]] = {}
+    prefix = "nav_missing_date:"
+    for provider_id, manifest in manifests.items():
+        dates = {
+            _day(exclusion.item.removeprefix(prefix), "declared NAV gap date")
+            for exclusion in manifest.coverage.declared_exclusions
+            if exclusion.item.startswith(prefix)
+        }
+        if dates:
+            result[provider_id] = frozenset(dates)
+    return result
+
+
+def _returns_within_declared_nav_gaps(
+    rows: Sequence[Mapping[str, Any]],
+    declared_nav_gap_dates_by_provider: Mapping[str, frozenset[date]],
+) -> list[Mapping[str, Any]]:
+    """Omit retained daily returns whose observation interval crosses a gap."""
+
+    grouped: dict[tuple[str, str, str], list[tuple[int, date]]] = defaultdict(list)
+    for index, row in enumerate(rows):
+        provider_id = _text(row.get("provider_id"), "strategy return provider_id")
+        grouped[
+            (
+                provider_id,
+                _text(row.get("strategy_id"), "strategy return strategy_id"),
+                _text(row.get("evidence_layer"), "strategy return evidence_layer"),
+            )
+        ].append((index, _day(row.get("date"), "strategy return date")))
+
+    omitted: set[int] = set()
+    for (provider_id, _strategy_id, _layer), dated_rows in grouped.items():
+        gaps = declared_nav_gap_dates_by_provider.get(provider_id, frozenset())
+        if not gaps:
+            continue
+        previous_day: date | None = None
+        for index, current_day in sorted(dated_rows, key=lambda item: item[1]):
+            if current_day in gaps:
+                raise ProviderLedgerError(
+                    "declared NAV gap contains a retained strategy return"
+                )
+            if previous_day is not None and any(
+                previous_day < gap < current_day for gap in gaps
+            ):
+                omitted.add(index)
+            previous_day = current_day
+    return [row for index, row in enumerate(rows) if index not in omitted]
+
+
+def _funded_account_live_boundaries(
+    financial_contract: Mapping[str, Any],
+) -> dict[str, tuple[date, date]]:
+    """Read the accepted funded ACCOUNT_LIVE intervals from product authority."""
+
+    history = _object(
+        financial_contract.get("history_corrections"),
+        "financial MVP history_corrections",
+    )
+    boundaries: dict[str, tuple[date, date]] = {}
+    for row in _objects(
+        history.get("materialized_segment_identities"),
+        "financial MVP materialized_segment_identities",
+    ):
+        if row.get("evidence_layer") != "ACCOUNT_LIVE":
+            continue
+        strategy_id = _text(row.get("strategy_id"), "funded strategy_id")
+        if strategy_id in boundaries:
+            raise ProviderLedgerError("funded ACCOUNT_LIVE interval is duplicated")
+        observed_start = _day(row.get("observed_start"), "funded observed_start")
+        observed_end = _day(row.get("observed_end"), "funded observed_end")
+        if observed_end < observed_start:
+            raise ProviderLedgerError("funded ACCOUNT_LIVE interval is reversed")
+        boundaries[strategy_id] = (observed_start, observed_end)
+
+    required = {
+        _text(row.get("strategy_id"), "required financial MVP strategy_id")
+        for row in _objects(
+            financial_contract.get("strategies"), "financial MVP strategies"
+        )
+        if row.get("product_requirement") == "REQUIRED"
+    }
+    if set(boundaries) != required:
+        raise ProviderLedgerError("funded ACCOUNT_LIVE strategy boundary differs")
+    return boundaries
+
+
+def _provider_native_account_return_strategy_ids(
+    financial_contract: Mapping[str, Any],
+) -> set[str]:
+    """Select account-return paths whose materialized authority is a provider."""
+
+    history = _object(
+        financial_contract.get("history_corrections"),
+        "financial MVP history_corrections",
+    )
+    native_source_ids = frozenset(_PROVIDER_SOURCE_SEGMENTS.values())
+    return {
+        _text(row.get("strategy_id"), "provider-native strategy_id")
+        for row in _objects(
+            history.get("materialized_segment_identities"),
+            "financial MVP materialized_segment_identities",
+        )
+        if row.get("evidence_layer") == "ACCOUNT_LIVE"
+        and row.get("source_id") in native_source_ids
+    }
+
+
+def _validate_provider_native_strategy_evidence(
+    evidence_rows: Sequence[Mapping[str, Any]],
+    strategy_ids: set[str] | frozenset[str],
+    manifests: Mapping[str, GenerationManifest],
+) -> None:
+    """Require provider-native evidence to name exact current manifest artifacts."""
+
+    evidence_by_strategy = {
+        _text(row.get("strategy_id"), "strategy evidence strategy_id"): row
+        for row in evidence_rows
+    }
+    for strategy_id in sorted(strategy_ids):
+        row = evidence_by_strategy.get(strategy_id)
+        if row is None:
+            raise ProviderLedgerError(
+                f"provider-native strategy evidence is absent: {strategy_id}"
+            )
+        provider_id = _text(
+            row.get("provider_id"), "provider-native evidence provider_id"
+        )
+        manifest = manifests.get(provider_id)
+        if manifest is None or row.get("generation_id") != manifest.generation_id:
+            raise ProviderLedgerError(
+                "provider-native strategy evidence generation differs"
+            )
+        artifacts = {artifact.artifact_id: artifact for artifact in manifest.artifacts}
+        sources = _object(row.get("sources"), "provider-native evidence sources")
+        bound_artifact_count = 0
+        for source in sources.values():
+            source_row = _object(source, "provider-native evidence source")
+            artifact_id = source_row.get("artifact_id")
+            if artifact_id is None:
+                continue
+            artifact = artifacts.get(
+                _text(artifact_id, "provider-native evidence artifact_id")
+            )
+            if artifact is None:
+                raise ProviderLedgerError(
+                    "provider-native evidence artifact is absent from current manifest"
+                )
+            if (
+                source_row.get("sha256") != artifact.sha256
+                or source_row.get("size_bytes") != artifact.size_bytes
+            ):
+                raise ProviderLedgerError(
+                    "provider-native evidence provider artifact identity differs"
+                )
+            bound_artifact_count += 1
+        if bound_artifact_count == 0:
+            raise ProviderLedgerError(
+                "provider-native strategy evidence lacks a current manifest artifact"
+            )
+
+
+def _account_live_returns_within_funded_boundaries(
+    rows: Sequence[Mapping[str, Any]],
+    boundaries: Mapping[str, tuple[date, date]],
+) -> list[Mapping[str, Any]]:
+    """Keep required strategy returns only inside accepted funded intervals."""
+
+    result: list[Mapping[str, Any]] = []
+    for row in rows:
+        strategy_id = _text(row.get("strategy_id"), "strategy return strategy_id")
+        boundary = boundaries.get(strategy_id)
+        if row.get("evidence_layer") != "ACCOUNT_LIVE" or boundary is None:
+            result.append(row)
+            continue
+        observed = _day(row.get("date"), "strategy return date")
+        if boundary[0] <= observed <= boundary[1]:
+            result.append(row)
+    return result
+
+
+_ROLLFORWARD_FIELDS: Final = (
+    "account_reconciliation_sha256",
+    "beginning_capital",
+    "component_account_count",
+    "component_account_ids",
+    "flow_timing",
+    "source_record_ids",
+)
+_ROLLFORWARD_SHA256: Final = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _complete_broker_rollforward(row: Mapping[str, Any]) -> bool:
+    """Require a usable complete broker rollforward before enriching a return."""
+
+    digest = row.get("account_reconciliation_sha256")
+    if not isinstance(digest, str) or _ROLLFORWARD_SHA256.fullmatch(digest) is None:
+        return False
+    try:
+        beginning_capital = _decimal(
+            row.get("beginning_capital"), "broker beginning capital"
+        )
+    except ProviderLedgerError:
+        return False
+    if beginning_capital <= 0:
+        return False
+    account_ids = row.get("component_account_ids")
+    source_record_ids = row.get("source_record_ids")
+    component_count = row.get("component_account_count")
+    flow_timing = row.get("flow_timing")
+    return (
+        isinstance(account_ids, list)
+        and bool(account_ids)
+        and all(isinstance(value, str) and value.strip() for value in account_ids)
+        and len(set(account_ids)) == len(account_ids)
+        and isinstance(component_count, int)
+        and not isinstance(component_count, bool)
+        and component_count > 0
+        and component_count == len(account_ids)
+        and isinstance(flow_timing, str)
+        and bool(flow_timing.strip())
+        and isinstance(source_record_ids, list)
+        and bool(source_record_ids)
+        and all(isinstance(value, str) and value.strip() for value in source_record_ids)
+    )
+
+
 def _merge_account_returns(
     source_rows: Sequence[Mapping[str, Any]],
     broker_rows: Sequence[Mapping[str, Any]],
     strategy_names: Mapping[str, str],
+    *,
+    provider_native_strategy_ids: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
-    """Append newer broker observations without rewriting accepted history."""
+    """Apply the contract-selected account-return authority for each strategy."""
 
-    result = [dict(item) for item in source_rows]
+    result = [
+        dict(item)
+        for item in source_rows
+        if not (
+            item.get("evidence_layer") == "ACCOUNT_LIVE"
+            and str(item.get("strategy_id")) in provider_native_strategy_ids
+        )
+    ]
+    retained_account_rows = {
+        (str(row["strategy_id"]), str(row["date"])): row
+        for row in result
+        if row.get("evidence_layer") == "ACCOUNT_LIVE"
+    }
     last_source: dict[str, str] = {}
     for row in result:
         if row.get("evidence_layer") == "ACCOUNT_LIVE":
@@ -1770,7 +2610,14 @@ def _merge_account_returns(
             )
     for broker_row in broker_rows:
         strategy_id = str(broker_row["strategy_id"])
-        if str(broker_row["date"]) <= last_source.get(strategy_id, ""):
+        if strategy_id not in provider_native_strategy_ids and str(
+            broker_row["date"]
+        ) <= last_source.get(strategy_id, ""):
+            retained = retained_account_rows.get((strategy_id, str(broker_row["date"])))
+            if retained is not None and _complete_broker_rollforward(broker_row):
+                retained.update(
+                    {field: broker_row[field] for field in _ROLLFORWARD_FIELDS}
+                )
             continue
         result.append(
             {
@@ -1792,8 +2639,10 @@ def _merge_account_returns(
 def _strategy_return_overlap_checks(
     source_rows: Sequence[Mapping[str, Any]],
     broker_rows: Sequence[Mapping[str, Any]],
+    *,
+    provider_native_strategy_ids: set[str] | frozenset[str] = frozenset(),
 ) -> list[dict[str, object]]:
-    """Retain explicit parity evidence for broker observations not rolled forward."""
+    """Retain explicit parity evidence and state which overlapping path won."""
 
     tolerance = Decimal("0.000001")
     source = {
@@ -1827,12 +2676,18 @@ def _strategy_return_overlap_checks(
         rows.append(
             {
                 "adjudication": (
-                    "METHOD_AND_FLOW_BOUNDARY_VARIANCE; accepted tracker account "
-                    "path retains its correction set; broker NAV path is retained "
-                    "as reconciliation evidence and rollforward input only"
+                    "CONTRACT_SELECTED_PROVIDER_GENERATION; retained tracker path "
+                    "is comparison evidence only"
+                    if strategy_id in provider_native_strategy_ids
+                    else "METHOD_AND_FLOW_BOUNDARY_VARIANCE; accepted tracker "
+                    "account path retains its correction set; broker NAV path is "
+                    "retained as reconciliation evidence and rollforward input only"
                 ),
                 "authority_effect": (
-                    "INHERITED_ACCOUNT_PATH_RETAINED; BROKER_OVERLAP_NOT_PROMOTED"
+                    "CURRENT_PROVIDER_ACCOUNT_PATH_PROMOTED; "
+                    "RETAINED_ACCOUNT_PATH_SUPERSEDED"
+                    if strategy_id in provider_native_strategy_ids
+                    else "INHERITED_ACCOUNT_PATH_RETAINED; BROKER_OVERLAP_NOT_PROMOTED"
                 ),
                 "blocking": False,
                 "check_id": f"strategy-return-overlap-{strategy_id}",
@@ -2065,6 +2920,7 @@ def _portfolio123_provider_returns(
             item["provider"].get("provider_id") == "portfolio123"
             or item.get("provider_id") == "portfolio123"
         )
+        and item.get("generation_id") == manifest.generation_id
         and item["provider"].get("entity_id") not in {None, ""}
     ]
     if not p123_rows:
@@ -2076,7 +2932,12 @@ def _portfolio123_provider_returns(
         Path("tables/har_equity_curve.parquet"),
         "Portfolio123 equity curve",
     )
-    artifact = next(
+    performance_path = _exact_file(
+        generation_root,
+        Path("tables/har_managed_performance.parquet"),
+        "Portfolio123 managed performance",
+    )
+    equity_artifact = next(
         (
             item
             for item in manifest.artifacts
@@ -2084,50 +2945,170 @@ def _portfolio123_provider_returns(
         ),
         None,
     )
-    if artifact is None or hash_file(equity_path) != (
-        artifact.sha256,
-        artifact.size_bytes,
+    performance_artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "tables/har_managed_performance.parquet"
+        ),
+        None,
+    )
+    if equity_artifact is None or hash_file(equity_path) != (
+        equity_artifact.sha256,
+        equity_artifact.size_bytes,
     ):
         raise ProviderLedgerError("Portfolio123 equity curve differs from its manifest")
+    if performance_artifact is None or hash_file(performance_path) != (
+        performance_artifact.sha256,
+        performance_artifact.size_bytes,
+    ):
+        raise ProviderLedgerError(
+            "Portfolio123 managed performance differs from its manifest"
+        )
     try:
         import pyarrow.parquet as pq  # type: ignore[import-untyped]
 
-        table = pq.read_table(
+        equity_table = pq.read_table(
             equity_path,
             columns=["_entity_id", "Date", "Total Equity", "Cash Added"],
         )
     except Exception as exc:
         raise ProviderLedgerError("Portfolio123 equity curve is unreadable") from exc
-    selected: dict[str, dict[date, tuple[Decimal, Decimal]]] = {
+    try:
+        performance_table = pq.read_table(
+            performance_path,
+            columns=["_entity_id", "field", "value"],
+        )
+    except Exception as exc:
+        raise ProviderLedgerError(
+            "Portfolio123 managed performance is unreadable"
+        ) from exc
+    selected: dict[str, dict[str, str]] = {
         _text(item["provider"].get("entity_id"), "Portfolio123 entity_id"): {}
         for item in p123_rows
     }
-    for row in table.to_pylist():
+    equity_observations: dict[str, dict[date, tuple[Decimal, Decimal]]] = {
+        entity_id: {} for entity_id in selected
+    }
+    for row in equity_table.to_pylist():
+        entity_id = str(row.get("_entity_id") or "")
+        if entity_id not in equity_observations:
+            continue
+        observed = _day(str(row.get("Date") or ""), "Portfolio123 equity date")
+        equity_value = _decimal(row.get("Total Equity"), "Portfolio123 equity")
+        cash_added = _decimal(row.get("Cash Added") or "0", "Portfolio123 cash added")
+        if equity_value <= 0:
+            raise ProviderLedgerError("Portfolio123 equity must be positive")
+        equity_observation = (equity_value, cash_added)
+        prior_observation = equity_observations[entity_id].get(observed)
+        if prior_observation is not None and prior_observation != equity_observation:
+            raise ProviderLedgerError(
+                "Portfolio123 equity curve has conflicting duplicate dates"
+            )
+        equity_observations[entity_id][observed] = equity_observation
+    for row in performance_table.to_pylist():
         entity_id = str(row.get("_entity_id") or "")
         if entity_id not in selected:
             continue
-        day = _day(str(row.get("Date") or ""), "Portfolio123 equity date")
-        selected[entity_id][day] = (
-            _decimal(row.get("Total Equity"), "Portfolio123 equity"),
-            _decimal(row.get("Cash Added") or "0", "Portfolio123 cash added"),
+        field = _text(row.get("field"), "Portfolio123 managed performance field")
+        selected_value = _text(
+            row.get("value"), "Portfolio123 managed performance value"
         )
+        prior_selected_value = selected[entity_id].get(field)
+        if prior_selected_value is not None and prior_selected_value != selected_value:
+            raise ProviderLedgerError(
+                "Portfolio123 managed performance has conflicting captures"
+            )
+        selected[entity_id][field] = selected_value
+
     result: list[dict[str, Any]] = []
+    required_fields = {"data", "date", "dateLast", "panels"}
     for p123 in p123_rows:
         entity_id = _text(p123["provider"].get("entity_id"), "Portfolio123 entity_id")
-        ordered = sorted(selected[entity_id].items())
-        if len(ordered) < 2:
+        fields = selected[entity_id]
+        if not required_fields <= set(fields):
             raise ProviderLedgerError(
                 f"Portfolio123 provider path is unavailable: {entity_id}"
             )
-        previous = ordered[0][1][0]
-        for day, (equity, cash_added) in ordered[1:]:
-            period_return = (equity - cash_added) / previous - Decimal(1)
+        try:
+            performance_start = _day(fields["date"], "Portfolio123 managed start")
+            performance_end = _day(fields["dateLast"], "Portfolio123 managed end")
+            data = json.loads(fields["data"], parse_float=Decimal, parse_int=Decimal)
+            panels = json.loads(fields["panels"])
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise ProviderLedgerError(
+                "Portfolio123 managed performance is invalid"
+            ) from exc
+        if not isinstance(data, list) or not isinstance(panels, list):
+            raise ProviderLedgerError("Portfolio123 managed performance shape differs")
+        graphs = [
+            graph
+            for panel in panels
+            if isinstance(panel, dict)
+            for graph in panel.get("graphs", [])
+            if isinstance(graph, dict)
+        ]
+        if not any(
+            graph.get("idx") == 0 and graph.get("s") == "Strategy" for graph in graphs
+        ) or not any(
+            graph.get("idx") == 1 and graph.get("s") == "Total Value"
+            for graph in graphs
+        ):
+            raise ProviderLedgerError(
+                "Portfolio123 managed performance selector differs"
+            )
+        calendar: list[date] = []
+        observed = performance_start
+        while observed <= performance_end:
+            if observed.weekday() < 5:
+                calendar.append(observed)
+            observed += timedelta(days=1)
+        if len(calendar) != len(data):
+            raise ProviderLedgerError(
+                "Portfolio123 managed performance calendar differs"
+            )
+        parsed: list[tuple[date, Decimal, Decimal, Decimal]] = []
+        for observed, raw in zip(calendar, data, strict=True):
+            if not isinstance(raw, list) or len(raw) != 3:
+                raise ProviderLedgerError(
+                    "Portfolio123 managed performance observation differs"
+                )
+            wealth = Decimal(1) + _decimal(
+                raw[0], "Portfolio123 managed strategy performance"
+            ) / Decimal(100)
+            total_equity = _decimal(raw[1], "Portfolio123 managed total value")
+            cash_added = _decimal(raw[2], "Portfolio123 managed cash added")
+            if wealth <= 0 or total_equity <= 0:
+                raise ProviderLedgerError(
+                    "Portfolio123 managed performance contains invalid values"
+                )
+            parsed.append((observed, wealth, total_equity, cash_added))
+        if len(parsed) < 2:
+            raise ProviderLedgerError(
+                f"Portfolio123 provider path is unavailable: {entity_id}"
+            )
+        ordered_equity = sorted(equity_observations[entity_id].items())
+        overlap = 0
+        for observed, _wealth, total_equity, cash_added in parsed:
+            if observed not in equity_observations[entity_id]:
+                continue
+            overlap += 1
+            if equity_observations[entity_id][observed] != (total_equity, cash_added):
+                raise ProviderLedgerError(
+                    "Portfolio123 managed performance and equity differ"
+                )
+        if len(ordered_equity) < 2 or overlap < 2:
+            raise ProviderLedgerError(
+                "Portfolio123 managed performance/equity overlap is insufficient"
+            )
+        for previous, current in zip(parsed, parsed[1:], strict=False):
+            period_return = current[1] / previous[1] - Decimal(1)
             if period_return <= -1:
                 raise ProviderLedgerError("Portfolio123 provider return is invalid")
             result.append(
                 {
                     "cost": None,
-                    "date": day.isoformat(),
+                    "date": current[0].isoformat(),
                     "evidence_layer": "PROVIDER_LIVE",
                     "generation_id": manifest.generation_id,
                     "provider_id": "portfolio123",
@@ -2138,7 +3119,6 @@ def _portfolio123_provider_returns(
                     "strategy_name": str(p123["strategy_name"]),
                 }
             )
-            previous = equity
     result.sort(key=lambda item: (str(item["strategy_id"]), str(item["date"])))
     return result
 
@@ -2357,6 +3337,59 @@ def _source_segment(
     return source
 
 
+def _validate_current_census_provider_generations(
+    authority: Mapping[str, Any],
+    identities: Sequence[ProviderGenerationIdentity],
+    manifests: Mapping[str, GenerationManifest],
+) -> None:
+    """Bind candidate inputs to the contract's direct provider-lane census.
+
+    The accepted provider-ledger generation is retained history evidence.  It
+    is not the authority for a new candidate's provider inputs; those inputs
+    must match the frozen direct lanes in ``current_census`` independently.
+    """
+
+    contract = _object(authority.get("contract"), "financial MVP contract")
+    census = _object(contract.get("current_census"), "current_census")
+    lanes = _objects(census.get("provider_lanes"), "current_census.provider_lanes")
+    expected: dict[str, dict[str, Any]] = {}
+    for lane in lanes:
+        provider_id = _text(
+            lane.get("provider_id"), "current census provider_id"
+        ).lower()
+        generation = lane.get("generation")
+        if generation is None:
+            continue
+        if provider_id in expected:
+            raise ProviderLedgerError(
+                f"current census provider generation is duplicated: {provider_id}"
+            )
+        expected[provider_id] = _object(
+            generation, f"current census provider generation {provider_id}"
+        )
+
+    selected = {identity.provider_id: identity for identity in identities}
+    if (
+        set(expected) != set(_PROVIDER_CATALOGS)
+        or len(selected) != len(identities)
+        or set(selected) != set(expected)
+        or set(manifests) != set(expected)
+    ):
+        raise ProviderLedgerError("current census provider generation set differs")
+
+    for provider_id, generation in expected.items():
+        identity = selected[provider_id]
+        manifest = manifests[provider_id]
+        if (
+            identity.generation_id != generation.get("generation_id")
+            or identity.manifest_sha256 != generation.get("manifest_sha256")
+            or manifest.as_of_date.isoformat() != generation.get("as_of")
+        ):
+            raise ProviderLedgerError(
+                f"{provider_id} generation differs from current census authority"
+            )
+
+
 def _catalog_dataset_items(
     provider_id: str, catalog: Mapping[str, Any], schema_version: str
 ) -> list[ProviderDatasetInventoryItem]:
@@ -2557,7 +3590,7 @@ def _materialized_rows(
     elif item.item_kind is DatasetItemKind.ARTIFACT:
         if (
             provider_id == "portfolio123"
-            and item.item_id == "tables/har_equity_curve.parquet"
+            and item.item_id == "tables/har_managed_performance.parquet"
         ):
             target_facts = ("provider_strategy_returns",)
             rows = [
@@ -2902,6 +3935,7 @@ def _admit_or_declare_receipt(
     return receipt, canonical_json_bytes(receipt)
 
 
+@_catalog_decimal_context
 def build_catalog(
     spec_path: Path,
 ) -> tuple[dict[str, Any], GenerationManifest, bytes, bytes]:
@@ -2911,7 +3945,9 @@ def build_catalog(
     authority = _financial_mvp_authority(spec)
     as_of = _day(spec["as_of_date"], "spec.as_of_date")
     provenance, provenance_artifact = _provenance(spec)
-    accounts, strategies, assignments = _assignment_index(provenance)
+    accounts, strategies, assignments = _assignment_index(
+        provenance, _object(authority.get("contract"), "financial MVP contract")
+    )
     identities: list[ProviderGenerationIdentity] = []
     provider_coverage: list[dict[str, Any]] = []
     provider_artifacts: list[SourceArtifact] = []
@@ -2954,11 +3990,27 @@ def build_catalog(
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
 
-    source_strategy_returns, evidence_rows, strategy_artifacts = _strategy_inputs(
+    _validate_current_census_provider_generations(authority, identities, manifests)
+
+    strategy_return_rows, evidence_rows, strategy_artifacts = _strategy_inputs(
         spec["strategy_inputs"],
         provenance,
         as_of,
         _object(spec["strategy_provider_map"], "strategy_provider_map"),
+    )
+    source_strategy_returns: Sequence[Mapping[str, Any]] = strategy_return_rows
+    declared_nav_gaps = _declared_nav_gap_dates_by_provider(manifests)
+    source_strategy_returns = _returns_within_declared_nav_gaps(
+        source_strategy_returns,
+        declared_nav_gaps,
+    )
+    provider_native_strategy_ids = _provider_native_account_return_strategy_ids(
+        _object(authority.get("contract"), "financial MVP contract")
+    )
+    _validate_provider_native_strategy_evidence(
+        evidence_rows,
+        provider_native_strategy_ids,
+        manifests,
     )
     strategy_names = {
         _text(item.get("strategy_id"), "strategy_id"): _text(
@@ -3002,12 +4054,48 @@ def build_catalog(
         combined.get("nav_observations", []),
         combined.get("flows", []),
         authoritative_provider_ids,
+        capital_anchors=combined.get("capital_anchors", []),
+        declared_nav_gap_dates_by_provider=declared_nav_gaps,
     )
-    strategy_returns = _merge_account_returns(
-        source_strategy_returns, broker_returns, strategy_names
+    strategy_returns: Sequence[Mapping[str, Any]] = _merge_account_returns(
+        source_strategy_returns,
+        broker_returns,
+        strategy_names,
+        provider_native_strategy_ids=provider_native_strategy_ids,
+    )
+    funded_boundaries = _funded_account_live_boundaries(
+        _object(authority.get("contract"), "financial MVP contract")
+    )
+    eligible_source_strategy_returns = _account_live_returns_within_funded_boundaries(
+        source_strategy_returns,
+        funded_boundaries,
+    )
+    strategy_returns = _account_live_returns_within_funded_boundaries(
+        strategy_returns,
+        funded_boundaries,
+    )
+    superseded_retained_return_count = sum(
+        row.get("evidence_layer") == "ACCOUNT_LIVE"
+        and str(row.get("strategy_id")) in provider_native_strategy_ids
+        for row in eligible_source_strategy_returns
+    )
+    promoted_provider_return_count = sum(
+        row.get("evidence_layer") == "ACCOUNT_LIVE"
+        and str(row.get("strategy_id")) in provider_native_strategy_ids
+        for row in strategy_returns
+    )
+    retained_source_return_count = (
+        len(eligible_source_strategy_returns) - superseded_retained_return_count
+    )
+    appended_broker_return_count = (
+        len(strategy_returns)
+        - retained_source_return_count
+        - promoted_provider_return_count
     )
     overlap_checks = _strategy_return_overlap_checks(
-        source_strategy_returns, broker_returns
+        source_strategy_returns,
+        broker_returns,
+        provider_native_strategy_ids=provider_native_strategy_ids,
     )
     provider_strategy_returns = _portfolio123_provider_returns(
         _object(spec["providers"], "providers")["portfolio123"],
@@ -3064,6 +4152,7 @@ def build_catalog(
     catalog: dict[str, Any] = {
         "admissions": [item.to_dict() for item in admissions],
         "as_of_date": as_of.isoformat(),
+        "capital_anchors": combined.get("capital_anchors", []),
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
         "corporate_actions": combined.get("corporate_actions", []),
         "fact_counts": fact_counts,
@@ -3103,10 +4192,11 @@ def build_catalog(
                 "status": "PASS",
             },
             {
-                "appended_broker_return_count": len(strategy_returns)
-                - len(source_strategy_returns),
+                "appended_broker_return_count": appended_broker_return_count,
                 "check_id": "broker-nav-rollforward",
+                "promoted_provider_return_count": promoted_provider_return_count,
                 "status": "PASS",
+                "superseded_retained_return_count": (superseded_retained_return_count),
             },
             *overlap_checks,
         ],

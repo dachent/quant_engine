@@ -10,14 +10,30 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
-from typing import Any, Iterable, Mapping, Sequence
+from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from functools import wraps
+from typing import Any, Callable, Iterable, Mapping, Sequence, TypeVar
 from zoneinfo import ZoneInfo
 
 
 UTC = timezone.utc
 CHICAGO = ZoneInfo("America/Chicago")
 PARITY_CURRENCIES = frozenset({"USD", "USDC", "USDT"})
+_VALUATION_DECIMAL_PRECISION = 28
+_T = TypeVar("_T")
+
+
+def _fixed_decimal_context(function: Callable[..., _T]) -> Callable[..., _T]:
+    """Run valuation arithmetic independently of the caller's Decimal context."""
+
+    @wraps(function)
+    def wrapped(*args: Any, **kwargs: Any) -> _T:
+        with localcontext() as context:
+            context.prec = _VALUATION_DECIMAL_PRECISION
+            context.rounding = ROUND_HALF_EVEN
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 @dataclass(frozen=True, order=True)
@@ -453,6 +469,7 @@ def _quantized_equal(left: Decimal, right: Decimal, quantum: Decimal | None) -> 
         return left == right
 
 
+@_fixed_decimal_context
 def reconstruct_daily_valuations(
     events: Iterable[PositionEvent | Mapping[str, Any]],
     nav_rows: Iterable[Mapping[str, Any]],

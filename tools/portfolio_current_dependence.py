@@ -22,9 +22,14 @@ from quant_engine.core.contracts import GenerationManifest, canonical_json_bytes
 
 
 BUILDER: Final = "portfolio-current-dependence-source"
-BUILDER_VERSION: Final = "1.1.0"
+BUILDER_VERSION: Final = "1.2.0"
 SCHEMA_VERSION: Final = 1
 POLICY_ID: Final = "PORT-DEPENDENCE-1"
+LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
+# The dependence policy pins the accepted 31030553... receipt produced by 1.14.0.
+# This consumer validates that exact historical authority; it does not follow
+# the version of whichever layered-history producer happens to be installed.
+LAYERED_HISTORY_BUILDER_VERSION: Final = "1.14.0"
 REQUIRED_HISTORY_FILES: Final = frozenset(
     {
         "coverage.json",
@@ -230,7 +235,7 @@ def _verified_history(
     policy: Mapping[str, Any],
     contract: Mapping[str, Any],
     evaluated_on: date,
-) -> tuple[list[dict[str, str]], list[dict[str, object]], date, dict[str, Any]]:
+) -> tuple[list[dict[str, str]], list[dict[str, object]], date, dict[str, Any], bytes]:
     root = generation_root.resolve()
     if root.is_symlink() or not root.is_dir():
         raise CurrentDependenceError("layered history generation must be a directory")
@@ -256,14 +261,15 @@ def _verified_history(
     if _sha256(canonical_json_bytes(without_id)) != generation_id:
         raise CurrentDependenceError("layered history receipt content identity differs")
     if (
-        manifest.get("builder") != "portfolio-target-series/layered-history-1"
-        or manifest.get("builder_version") != "1.12.0"
+        manifest.get("builder") != LAYERED_HISTORY_BUILDER
+        or manifest.get("builder_version") != LAYERED_HISTORY_BUILDER_VERSION
         or manifest.get("schema_version") != 1
         or manifest.get("verification") != "VERIFIED"
     ):
         raise CurrentDependenceError("layered history receipt contract differs")
     output_authority = _object(authority.get("outputs"), "history outputs")
     receipt_outputs = _object(manifest.get("outputs"), "history receipt outputs")
+    verified_output_content: dict[str, bytes] = {}
     for name in sorted(REQUIRED_HISTORY_FILES - {"generation.json"}):
         expected = _object(output_authority.get(name), f"history authority {name}")
         receipt = _object(receipt_outputs.get(name), f"history receipt {name}")
@@ -298,8 +304,9 @@ def _verified_history(
             raise CurrentDependenceError(
                 f"layered history receipt output differs: {name}"
             )
+        verified_output_content[name] = content
 
-    segment_content = _regular_file(root / "segments.csv", "layered history segments")
+    segment_content = verified_output_content["segments.csv"]
     segments = _csv_rows(segment_content, SEGMENT_FIELDS, "layered history segments")
     if segment_content != _csv_content(SEGMENT_FIELDS, segments):
         raise CurrentDependenceError("layered history segments are not canonical")
@@ -429,7 +436,8 @@ def _verified_history(
         str(row["series_id"]) for row in policy_series
     }:
         raise CurrentDependenceError("dependence projection lacks a required series")
-    return projected, selected_identities, complete_through, manifest
+    coverage_content = verified_output_content["coverage.json"]
+    return projected, selected_identities, complete_through, manifest, coverage_content
 
 
 def _verified_allocations(
@@ -896,9 +904,13 @@ def build_source(
     evaluated_on: date,
 ) -> dict[str, bytes | dict[str, Any]]:
     contract, policy, identities = _load_authorities(contract_path, policy_path)
-    projection, segment_identities, complete_through, history_manifest = (
-        _verified_history(history_generation_root, policy, contract, evaluated_on)
-    )
+    (
+        projection,
+        segment_identities,
+        complete_through,
+        history_manifest,
+        history_coverage_content,
+    ) = _verified_history(history_generation_root, policy, contract, evaluated_on)
     policy_series = _objects(policy.get("series"), "dependence policy series")
     required_ids = [str(row["strategy_id"]) for row in policy_series]
     weights, allocation_identity = _verified_allocations(
@@ -1076,6 +1088,10 @@ def build_source(
             if row["product_requirement"] == "EXCLUDED"
         ),
         "history_authority": {
+            "coverage": {
+                "sha256": _sha256(history_coverage_content),
+                "size_bytes": len(history_coverage_content),
+            },
             "generation_id": history_manifest["generation_id"],
             "receipt_sha256": policy["history_authority"]["receipt_sha256"],
             "selected_segment_identities": sorted(
@@ -1105,6 +1121,7 @@ def build_source(
     receipt = {"bundle_id": bundle_id, **source_identity}
     return {
         "dependence-source.json": canonical_json_bytes(receipt),
+        "history-coverage.json": history_coverage_content,
         "returns.csv": returns_content,
         "segments.csv": segments_content,
         "spec.json": spec_content,
@@ -1164,6 +1181,7 @@ def verify_source(source_root: Path, **kwargs: Any) -> dict[str, Any]:
         raise CurrentDependenceError("dependence source directory identity differs")
     expected_files = {
         "dependence-source.json",
+        "history-coverage.json",
         "returns.csv",
         "segments.csv",
         "spec.json",
@@ -1197,6 +1215,7 @@ def verify_packaged_source(
     root = source_root.resolve()
     expected_files = {
         "dependence-source.json",
+        "history-coverage.json",
         "returns.csv",
         "segments.csv",
         "spec.json",
@@ -1223,6 +1242,25 @@ def verify_packaged_source(
         or root.name != bundle_id
     ):
         raise CurrentDependenceError("dependence bundle identity differs")
+    history_coverage = _json_bytes(
+        contents["history-coverage.json"], "dependence history coverage"
+    )
+    if canonical_json_bytes(history_coverage) != contents["history-coverage.json"]:
+        raise CurrentDependenceError("dependence history coverage is not canonical")
+    receipt_history_authority = _object(
+        receipt.get("history_authority"), "dependence history authority"
+    )
+    receipt_coverage = _object(
+        receipt_history_authority.get("coverage"), "dependence history coverage receipt"
+    )
+    if receipt_coverage != {
+        "sha256": _sha256(contents["history-coverage.json"]),
+        "size_bytes": len(contents["history-coverage.json"]),
+    }:
+        raise CurrentDependenceError("dependence history coverage differs")
+    epoch_hpr_receipts = history_coverage.get("epoch_hpr_receipts", [])
+    if not isinstance(epoch_hpr_receipts, list):
+        raise CurrentDependenceError("dependence history epoch HPR receipts differ")
 
     contract, policy, identities = _load_authorities(contract_path, policy_path)
     evaluated_on = _day(receipt.get("evaluated_on"), "dependence evaluated_on")
@@ -1287,6 +1325,10 @@ def verify_packaged_source(
             if row["product_requirement"] == "EXCLUDED"
         ),
         "history_authority": {
+            "coverage": {
+                "sha256": _sha256(contents["history-coverage.json"]),
+                "size_bytes": len(contents["history-coverage.json"]),
+            },
             "generation_id": policy["history_authority"]["generation_id"],
             "receipt_sha256": policy["history_authority"]["receipt_sha256"],
             "selected_segment_identities": sorted(
@@ -1317,6 +1359,7 @@ def verify_packaged_source(
     return {
         "bundle_id": bundle_id,
         "complete_through": complete_through.isoformat(),
+        "epoch_hpr_receipts": epoch_hpr_receipts,
         "pair_count": pair_count,
         "pair_mode_count": pair_count * 2,
         "verification": "VALID",

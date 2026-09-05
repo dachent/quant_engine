@@ -94,6 +94,29 @@ def test_mapping_covers_existing_ledger_records_and_explicit_gaps() -> None:
     assert any("No provider generation" in gap for gap in contract["known_gaps"])
 
 
+def test_transfer_mapping_names_position_amount_in_base_and_pair_proof() -> None:
+    contract = _load(MAPPING_PATH)
+    transfer = next(
+        item
+        for item in contract["fact_mappings"]
+        if item["target_record"] == "CashFlow" and item["source_section"] == "Transfer"
+    )
+    assert "positionAmountInBase" in transfer["target_fields"]["amount.value"]
+    assert "statement base currency" in transfer["target_fields"]["amount.currency"]
+    assert transfer["target_fields"]["value_basis"] == (
+        "POSITION_AMOUNT_IN_BASE only for the proved positionAmountInBase projection"
+    )
+    assert transfer["target_fields"]["event_date"] == "date(dateTime_or_date)"
+    assert transfer["target_fields"]["nav_recognition_date"] == "reportDate"
+    required_verification = {
+        "Use event_date for economic cash timing and nav_recognition_date for flow-adjusted NAV return links; never substitute one for the other.",
+        "A positionAmountInBase projection requires exactly two distinct internal accounts with one shared transaction/activity identity, same date and conid, IN/OUT directions, and exactly opposite retained source-base values.",
+        "Do not infer cash value from quantity or price; a missing or unproved positionAmountInBase remains UNAVAILABLE.",
+        "Both paired rows must be type INTERNAL, have identical statement base currencies, and use positive IN / negative OUT positionAmountInBase signs.",
+    }
+    assert required_verification <= set(transfer["verification"])
+
+
 def test_every_legacy_artifact_has_a_unique_hash_and_disposition() -> None:
     manifest = _load(EVIDENCE_PATH)
     artifacts = manifest["artifacts"]

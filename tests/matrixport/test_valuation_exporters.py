@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Context, Decimal, ROUND_UP, localcontext
 from pathlib import Path
 
 import openpyxl
@@ -28,6 +28,55 @@ def _ms(day: str) -> int:
     return int(
         datetime.fromisoformat(day).replace(tzinfo=timezone.utc).timestamp() * 1000
     )
+
+
+def test_daily_portfolio_total_is_independent_of_callers_decimal_context() -> None:
+    """Ambient low precision must not change the reconstructed account total."""
+
+    subscriptions = [
+        {
+            "product_id": "P1",
+            "confirmed_share": "123456789.123456789",
+            "confirmed_at_ms": str(_ms("2026-01-01")),
+            "serial_number": "SUB-1",
+        },
+        {
+            "product_id": "P2",
+            "confirmed_share": "987654321.987654321",
+            "confirmed_at_ms": str(_ms("2026-01-01")),
+            "serial_number": "SUB-2",
+        },
+    ]
+    nav = [
+        {
+            "product_id": "P1",
+            "date": "2026-01-01",
+            "nav": "1.23456789123456789",
+            "nav_usd": "1.23456789123456789",
+            "currency": "USD",
+        },
+        {
+            "product_id": "P2",
+            "date": "2026-01-01",
+            "nav": "9.87654321987654321",
+            "nav_usd": "9.87654321987654321",
+            "currency": "USD",
+        },
+    ]
+    holdings = [
+        {"product_id": "P1", "share": "123456789.123456789", "currency": "USD"},
+        {"product_id": "P2", "share": "987654321.987654321", "currency": "USD"},
+    ]
+
+    expected = build_daily_valuation(
+        subscriptions, [], nav, holdings, run_end_ms=_ms("2026-01-01")
+    ).daily_portfolio_totals[0]["portfolio_value_usd_strict"]
+    with localcontext(Context(prec=4, rounding=ROUND_UP)):
+        actual = build_daily_valuation(
+            subscriptions, [], nav, holdings, run_end_ms=_ms("2026-01-01")
+        ).daily_portfolio_totals[0]["portfolio_value_usd_strict"]
+
+    assert actual == expected
 
 
 def test_position_events_are_confirmed_decimal_only_and_fail_closed() -> None:

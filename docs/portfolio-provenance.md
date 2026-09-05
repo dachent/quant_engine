@@ -1,7 +1,7 @@
 # Portfolio provenance runbook
 
 `tools/portfolio_provenance.py` builds the first portfolio baseline's private
-source and current-strategy catalog. It is intentionally a tool, not a new
+source and retained-strategy registry. It is intentionally a tool, not a new
 strategy-intelligence package.
 
 ## Boundaries
@@ -12,10 +12,12 @@ strategy-intelligence package.
   keeps root IDs and relative paths, never absolute workstation paths.
 - Every source file is listed explicitly. The builder never walks a directory,
   expands a glob, calls a provider, or copies source content.
-- Exactly nine current strategies are required. Candidate/provider research may
-  be hash-anchored as evidence but cannot become a strategy record.
-- The v2 specification also requires exactly one current, effective-dated
-  strategy-version row for each of those nine strategies. Design,
+- Exactly nine retained strategy registry records are required: seven REQUIRED
+  active current strategies, Echo as `DEPRECATED_HISTORY_ONLY`, and Composer as
+  `IMMATERIAL_EXCLUDED`. Candidate/provider research may be hash-anchored as
+  evidence but cannot become a strategy record.
+- The v2 specification also requires exactly one effective-dated
+  strategy-version row for each of those nine retained records. Design,
   configuration, backtest, live-boundary, cost, benchmark, and source-route
   evidence are separate slots; an admitted return-series hash is not silently
   relabeled as a design or backtest version.
@@ -73,7 +75,7 @@ internal account IDs, validates the strategy catalog, and stages:
 
 Repeated staging is idempotent only for identical bytes. A missing source,
 hash mismatch, unknown tracker label, invalid interval, ambiguous strategy
-alias, missing reserve, non-nine strategy set, missing version row, or
+alias, missing reserve, non-nine retained-registry set, missing version row, or
 unadmitted version-evidence hash fails before publication.
 
 ## Publish

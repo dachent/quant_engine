@@ -10,11 +10,17 @@ from pathlib import Path
 import shutil
 import sys
 from typing import Any, Callable
+from types import SimpleNamespace
 
 import pytest
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+CANONICAL_PUBLIC_FACTOR_OUTPUT_NAMES = {
+    "us_factors": "us_factors_daily.csv",
+    "europe_factors": "europe_factors_daily.csv",
+    "us_industries": "us_49_industries_value_weighted_daily.csv",
+}
 CONTRACT_PATH = REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_current_decomposition_plan.py"
 SPEC = importlib.util.spec_from_file_location(
@@ -52,6 +58,18 @@ sys.modules[HISTORY_TEST_SPEC.name] = history_tests
 HISTORY_TEST_SPEC.loader.exec_module(history_tests)
 
 
+@pytest.fixture(autouse=True)
+def synthetic_current_decomposition_history_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """This module consumes only the shared synthetic layered-history producer."""
+
+    history_tests._install_synthetic_history_authority(monkeypatch)
+    verifier = planner._layered_history_module()
+    history_tests._install_synthetic_history_authority(monkeypatch, verifier)
+    monkeypatch.setattr(planner, "_layered_history_module", lambda: verifier)
+
+
 def _canonical(value: object) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
@@ -69,6 +87,37 @@ def _release_builder_module(name: str) -> Any:
     release_builder = importlib.util.module_from_spec(release_spec)
     sys.modules[release_spec.name] = release_builder
     release_spec.loader.exec_module(release_builder)
+    original_util = release_builder.importlib.util
+
+    def synthetic_planner_spec(
+        module_name: str, location: object, **kwargs: object
+    ) -> Any:
+        spec = original_util.spec_from_file_location(module_name, location, **kwargs)
+        if module_name != "portfolio_current_decomposition_plan_for_release_builder":
+            return spec
+        if spec is None or spec.loader is None:
+            return spec
+        loader = spec.loader
+
+        class SyntheticPlannerLoader:
+            def create_module(self, spec: object) -> object:
+                return loader.create_module(spec)
+
+            def exec_module(self, module: Any) -> None:
+                loader.exec_module(module)
+                verifier = module._layered_history_module()
+                verifier._history_contract = history_tests._synthetic_history_contract
+                module._layered_history_module = lambda: verifier
+
+        spec.loader = SyntheticPlannerLoader()
+        return spec
+
+    release_builder.importlib = SimpleNamespace(
+        util=SimpleNamespace(
+            module_from_spec=original_util.module_from_spec,
+            spec_from_file_location=synthetic_planner_spec,
+        )
+    )
     return release_builder
 
 
@@ -161,7 +210,7 @@ def _public_factor_manifest(
         )
         outputs.append(
             {
-                "path": path.name,
+                "path": CANONICAL_PUBLIC_FACTOR_OUTPUT_NAMES[key],
                 "sha256": hashlib.sha256(content).hexdigest(),
                 "bytes": len(content),
                 "coverage": (
@@ -507,6 +556,39 @@ def _fixture(
         "evaluation_date": public_evaluation_date.isoformat(),
         "plan_document": plan_document,
     }
+
+
+def _canonical_public_manifest_with_renamed_inputs(
+    tmp_path: Path,
+) -> tuple[dict[str, Path], Path, str, date]:
+    """Model canonical public outputs supplied under audit-local filenames."""
+    audit_filenames = {
+        "us_factors": "us_factors.csv",
+        "europe_factors": "europe_factors.csv",
+        "us_industries": "us_industries.csv",
+    }
+    days = _weekdays(5)
+    market_paths = {
+        "us_factors": tmp_path / "us.csv",
+        "europe_factors": tmp_path / "eu.csv",
+        "us_industries": tmp_path / "industries.csv",
+    }
+    _write_market(market_paths["us_factors"], ("rf", "mkt_rf", "smb"), days)
+    _write_market(market_paths["europe_factors"], ("rf", "unused"), days)
+    _write_market(market_paths["us_industries"], ("rf", "unused"), days)
+    catalog_sha256 = "a" * 64
+    evaluation_date = date(2026, 3, 17)
+    manifest = _public_factor_manifest(catalog_sha256, market_paths, evaluation_date)
+    output_names = {output["path"] for output in manifest["outputs"]}
+    assert output_names == set(CANONICAL_PUBLIC_FACTOR_OUTPUT_NAMES.values())
+    for key in CANONICAL_PUBLIC_FACTOR_OUTPUT_NAMES:
+        path = market_paths[key]
+        renamed = path.with_name(audit_filenames[key])
+        path.replace(renamed)
+        market_paths[key] = renamed
+    _reidentify_public_manifest(manifest)
+    manifest_path = _write_json(tmp_path / "public-factor-manifest.json", manifest)
+    return market_paths, manifest_path, catalog_sha256, evaluation_date
 
 
 def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -> None:
@@ -908,15 +990,9 @@ def test_release_builder_admits_exact_planner_bundle(tmp_path: Path) -> None:
     manifest = json.loads(
         (destination / "plan-manifest.json").read_text(encoding="utf-8")
     )
-    release_path = REPOSITORY_ROOT / "tools" / "portfolio_release_builder.py"
-    release_spec = importlib.util.spec_from_file_location(
-        "portfolio_release_builder_for_current_plan", release_path
+    release_builder = _release_builder_module(
+        "portfolio_release_builder_for_current_plan"
     )
-    if release_spec is None or release_spec.loader is None:
-        raise RuntimeError("unable to load portfolio release builder")
-    release_builder = importlib.util.module_from_spec(release_spec)
-    sys.modules[release_spec.name] = release_builder
-    release_spec.loader.exec_module(release_builder)
 
     admitted = release_builder._current_release_plan_specs(destination, manifest)
 
@@ -2099,6 +2175,49 @@ def test_build_rejects_manifest_drift(tmp_path: Path) -> None:
         )
 
 
+def test_public_manifest_accepts_canonical_outputs_via_renamed_inputs(
+    tmp_path: Path,
+) -> None:
+    market_paths, manifest_path, catalog_sha256, evaluation_date = (
+        _canonical_public_manifest_with_renamed_inputs(tmp_path)
+    )
+
+    boundaries, _capture_age = planner._verify_public_factor_manifest(
+        manifest_path,
+        market_paths,
+        catalog_sha256,
+        evaluation_date,
+        "DEVELOPMENT",
+    )
+
+    assert boundaries == {key: date(2026, 1, 8) for key in market_paths}
+
+
+@pytest.mark.parametrize("failure", ("swapped", "mutated"))
+def test_public_manifest_rejects_wrong_renamed_input_bytes(
+    tmp_path: Path, failure: str
+) -> None:
+    market_paths, manifest_path, catalog_sha256, evaluation_date = (
+        _canonical_public_manifest_with_renamed_inputs(tmp_path)
+    )
+    if failure == "swapped":
+        market_paths["us_factors"], market_paths["europe_factors"] = (
+            market_paths["europe_factors"],
+            market_paths["us_factors"],
+        )
+    else:
+        market_paths["us_factors"].write_bytes(b"mutated audit input\n")
+
+    with pytest.raises(planner.CurrentPlanError, match="differs from its manifest"):
+        planner._verify_public_factor_manifest(
+            manifest_path,
+            market_paths,
+            catalog_sha256,
+            evaluation_date,
+            "DEVELOPMENT",
+        )
+
+
 def test_public_manifest_binds_receipts_sources_captures_and_bundle(
     tmp_path: Path,
 ) -> None:
@@ -2156,7 +2275,11 @@ def test_public_factor_coherent_interior_gap_is_rejected(tmp_path: Path) -> None
 
     manifest_path = inputs["public_factor_manifest_path"]
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    output = next(row for row in manifest["outputs"] if row["path"] == path.name)
+    output = next(
+        row
+        for row in manifest["outputs"]
+        if row["path"] == CANONICAL_PUBLIC_FACTOR_OUTPUT_NAMES["us_factors"]
+    )
     content = path.read_bytes()
     output["sha256"] = hashlib.sha256(content).hexdigest()
     output["bytes"] = len(content)

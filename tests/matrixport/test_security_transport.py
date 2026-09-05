@@ -21,6 +21,7 @@ from quant_engine.matrixport.credentials import (
     CredentialError,
     load_credentials,
 )
+from quant_engine.matrixport.governance import authorize_live_read
 from quant_engine.matrixport.signing import (
     build_v2_headers,
     encode_query,
@@ -59,7 +60,16 @@ def credentials():
     return ApiCredentials("access-key-canary", "secret-key-canary")
 
 
-def make_transport(credentials, session=None, **kwargs):
+def make_transport(credentials, synthetic_live_read_evidence, session=None, **kwargs):
+    evidence = synthetic_live_read_evidence(
+        scope=tuple(
+            (endpoint.method, endpoint.path)
+            for endpoint in ENDPOINTS
+            if endpoint.live_enabled
+        ),
+        max_requests=100,
+    )
+    governance = authorize_live_read(evidence, operation="extract", mode="full")
     return ReadOnlyTransport(
         credentials,
         session=session or FakeSession(),
@@ -68,6 +78,7 @@ def make_transport(credentials, session=None, **kwargs):
         clock=lambda: 1_731_931_956.0,
         monotonic=lambda: 100.0,
         random_source=lambda: 0.0,
+        governance=governance,
         **kwargs,
     )
 
@@ -195,9 +206,11 @@ def test_catalog_matches_documented_rfq_and_prime_read_parameters():
     assert orders.required_params == frozenset({"limit"})
 
 
-def test_rfq_order_requires_both_documented_identifiers_before_network(credentials):
+def test_rfq_order_requires_both_documented_identifiers_before_network(
+    credentials, synthetic_live_read_evidence
+):
     session = FakeSession()
-    transport = make_transport(credentials, session)
+    transport = make_transport(credentials, synthetic_live_read_evidence, session)
     with pytest.raises(TransportPolicyError):
         transport.get("/trader/v2/api/order", {"order_id": "123"})
     with pytest.raises(TransportPolicyError):
@@ -224,18 +237,20 @@ def test_rfq_order_requires_both_documented_identifiers_before_network(credentia
     ],
 )
 def test_policy_rejects_unsafe_requests_before_network(
-    credentials, method, target, params
+    credentials, synthetic_live_read_evidence, method, target, params
 ):
     session = FakeSession()
-    transport = make_transport(credentials, session)
+    transport = make_transport(credentials, synthetic_live_read_evidence, session)
     with pytest.raises(TransportPolicyError):
         transport.request(method, target, params=params)
     assert session.calls == []
 
 
-def test_policy_rejects_forged_endpoint_before_network(credentials):
+def test_policy_rejects_forged_endpoint_before_network(
+    credentials, synthetic_live_read_evidence
+):
     session = FakeSession()
-    transport = make_transport(credentials, session)
+    transport = make_transport(credentials, synthetic_live_read_evidence, session)
     canonical = get_endpoint("/mapi/v1/wallet/balance")
     forged = replace(canonical, allowed_params=frozenset({"signature"}))
     with pytest.raises(TransportPolicyError):
@@ -243,9 +258,11 @@ def test_policy_rejects_forged_endpoint_before_network(credentials):
     assert session.calls == []
 
 
-def test_transport_sends_exact_signed_url_and_hardened_options(credentials):
+def test_transport_sends_exact_signed_url_and_hardened_options(
+    credentials, synthetic_live_read_evidence
+):
     session = FakeSession()
-    transport = make_transport(credentials, session)
+    transport = make_transport(credentials, synthetic_live_read_evidence, session)
     response = transport.get(
         "/mapi/v1/wallet/bills",
         [("currency", "USD T"), ("limit", 50)],
@@ -268,29 +285,48 @@ def test_transport_sends_exact_signed_url_and_hardened_options(credentials):
     assert sent["headers"]["X-Signature"] == expected
 
 
-def test_redirect_is_never_followed_and_error_is_sanitized(credentials):
+def test_redirect_is_never_followed_and_error_is_sanitized(
+    credentials, synthetic_live_read_evidence
+):
     session = FakeSession(
         [FakeResponse(302, b"secret-key-canary", {"Location": "https://evil.example"})]
     )
-    transport = make_transport(credentials, session)
+    transport = make_transport(credentials, synthetic_live_read_evidence, session)
     with pytest.raises(TransportError) as raised:
         transport.get("/mapi/v1/wallet/balance")
     assert "secret-key-canary" not in str(raised.value)
     assert len(session.calls) == 1
 
 
-def test_retry_after_and_retry_limit(credentials):
-    responses = [FakeResponse(429, headers={"Retry-After": "0"}) for _ in range(6)]
-    session = FakeSession(responses)
-    transport = make_transport(credentials, session, max_retries=5)
+def test_governed_transport_rejects_nonzero_retry_configuration(
+    credentials, synthetic_live_read_evidence
+):
+    with pytest.raises(ValueError, match="max_retries=0"):
+        make_transport(credentials, synthetic_live_read_evidence, max_retries=1)
+
+
+def test_transport_defaults_to_one_network_attempt(
+    credentials, synthetic_live_read_evidence
+):
+    session = FakeSession(
+        [
+            requests.ConnectionError("first attempt fails"),
+            FakeResponse(200),
+        ]
+    )
+    transport = make_transport(credentials, synthetic_live_read_evidence, session)
+
     with pytest.raises(TransportError):
         transport.get("/mapi/v1/wallet/balance")
-    assert len(session.calls) == 6
+
+    assert len(session.calls) == 1
 
 
-def test_connection_exception_is_sanitized(credentials):
+def test_connection_exception_is_sanitized(credentials, synthetic_live_read_evidence):
     session = FakeSession([requests.ConnectionError("secret-key-canary")])
-    transport = make_transport(credentials, session, max_retries=0)
+    transport = make_transport(
+        credentials, synthetic_live_read_evidence, session, max_retries=0
+    )
     with pytest.raises(TransportError) as raised:
         transport.get("/mapi/v1/wallet/balance")
     assert "secret-key-canary" not in str(raised.value)

@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import argparse
 import csv
-from datetime import date
+from datetime import date, timedelta
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -36,9 +37,9 @@ from quant_engine.core import (
 SPEC_SCHEMA_VERSION: Final = 2
 CATALOG_SCHEMA_VERSION: Final = 2
 STRATEGY_VERSION_CATALOG_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "2.0.0"
+BUILDER_VERSION: Final = "2.0.1"
 POLICY_VERSION: Final = "PORT-PERF-1"
-CURRENT_STRATEGY_COUNT: Final = 9
+RETAINED_STRATEGY_COUNT: Final = 9
 SYSTEMATIC_POOL_ID: Final = "systematic-capital"
 RESERVE_POOL_ID: Final = "reserve-capital"
 
@@ -216,7 +217,8 @@ def _load_spec(path: Path) -> dict[str, Any]:
             "strategies",
             "strategy_version_catalog",
             "tracker_imports",
-        },
+        }
+        | ({"financial_mvp"} if "financial_mvp" in spec else set()),
         "spec",
     )
     if spec["schema_version"] != SPEC_SCHEMA_VERSION:
@@ -226,6 +228,87 @@ def _load_spec(path: Path) -> dict[str, Any]:
     _date(spec["as_of_date"], "spec.as_of_date")
     _date(spec["acquisition_date"], "spec.acquisition_date")
     return spec
+
+
+def _financial_mvp_memberships(value: object | None) -> dict[str, str]:
+    """Load only hash-pinned funded-membership dates from the static contract."""
+
+    if value is None:
+        return {}
+    authority = _object(value, "financial_mvp")
+    _strict_keys(
+        authority,
+        {
+            "contract_path",
+            "contract_sha256",
+            "registry_path",
+            "registry_sha256",
+            "schema_path",
+            "schema_sha256",
+        },
+        "financial_mvp",
+    )
+    paths: dict[str, Path] = {}
+    for name in ("contract", "registry", "schema"):
+        candidate = Path(_text(authority[f"{name}_path"], f"financial_mvp.{name}_path"))
+        if not candidate.is_absolute():
+            raise ProvenanceValidationError(
+                f"financial MVP {name} path must be absolute"
+            )
+        try:
+            resolved = candidate.resolve(strict=True)
+            actual_hash = hashlib.sha256(resolved.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise ProvenanceValidationError(
+                f"financial MVP {name} is unavailable"
+            ) from exc
+        expected_hash = _optional_hash(
+            authority[f"{name}_sha256"], f"financial_mvp.{name}_sha256"
+        )
+        if expected_hash is None:
+            raise ProvenanceValidationError(f"financial MVP {name} hash is required")
+        if actual_hash != expected_hash:
+            raise ProvenanceValidationError(f"financial MVP {name} hash differs")
+        paths[name] = resolved
+
+    module_path = Path(__file__).with_name("portfolio_financial_mvp_contract.py")
+    module_spec = importlib.util.spec_from_file_location(
+        "portfolio_provenance_financial_mvp_contract", module_path
+    )
+    if module_spec is None or module_spec.loader is None:
+        raise ProvenanceValidationError(
+            "financial MVP contract validator is unavailable"
+        )
+    module = importlib.util.module_from_spec(module_spec)
+    sys.modules[module_spec.name] = module
+    module_spec.loader.exec_module(module)
+    try:
+        contract = module.load_contract(
+            paths["contract"], paths["registry"], paths["schema"]
+        )
+    except (OSError, TypeError, ValueError) as exc:
+        raise ProvenanceValidationError(
+            "financial MVP contract public validation failed"
+        ) from exc
+
+    memberships: dict[str, str] = {}
+    for strategy in _objects(contract.get("strategies"), "financial MVP strategies"):
+        strategy_id = _identifier(
+            strategy.get("strategy_id"), "financial MVP strategy_id"
+        )
+        membership = _object(
+            strategy.get("funded_membership"), "financial MVP funded_membership"
+        )
+        if (
+            membership.get("status") != "EVIDENCED"
+            or strategy.get("product_requirement") == "EXCLUDED"
+        ):
+            continue
+        memberships[strategy_id] = _date(
+            membership.get("effective_start"),
+            "financial MVP funded_membership.effective_start",
+        ).isoformat()
+    return memberships
 
 
 def _portable_relative(value: object, field_name: str) -> str:
@@ -399,9 +482,10 @@ def _validate_strategies(
     value: object, source_ids: set[str]
 ) -> tuple[list[dict[str, Any]], dict[str, str]]:
     strategies = _objects(value, "strategies")
-    if len(strategies) != CURRENT_STRATEGY_COUNT:
+    if len(strategies) != RETAINED_STRATEGY_COUNT:
         raise ProvenanceValidationError(
-            f"first baseline requires exactly {CURRENT_STRATEGY_COUNT} current strategies"
+            "first baseline requires exactly "
+            f"{RETAINED_STRATEGY_COUNT} retained strategy registry records"
         )
     accepted: list[dict[str, Any]] = []
     strategy_ids: set[str] = set()
@@ -514,7 +598,7 @@ def _validate_strategy_version_catalog(
     source_hashes: set[str],
     strategies: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """Validate one current, effective-dated version disposition per strategy."""
+    """Validate one as-of-effective version disposition per retained record."""
 
     catalog = _object(value, "strategy_version_catalog")
     _strict_keys(
@@ -536,9 +620,10 @@ def _validate_strategy_version_catalog(
         str(item["strategy_id"]): item.get("version_ref") for item in strategies
     }
     rows = _objects(catalog["strategies"], "strategy_version_catalog.strategies")
-    if len(rows) != CURRENT_STRATEGY_COUNT:
+    if len(rows) != RETAINED_STRATEGY_COUNT:
         raise ProvenanceValidationError(
-            f"strategy version catalog requires exactly {CURRENT_STRATEGY_COUNT} rows"
+            "strategy version catalog requires exactly "
+            f"{RETAINED_STRATEGY_COUNT} retained strategy registry rows"
         )
 
     def slot(value: object, field_name: str) -> dict[str, Any]:
@@ -662,7 +747,7 @@ def _validate_strategy_version_catalog(
             and (effective_end < effective_start or effective_end < generation_as_of)
         ):
             raise ProvenanceValidationError(
-                f"strategy version is not current at as_of_date: {strategy_id}"
+                f"strategy version is not effective at as_of_date: {strategy_id}"
             )
         disposition = _text(row["disposition"], "strategy_version.disposition")
         if disposition not in _VERSION_DISPOSITIONS:
@@ -844,7 +929,7 @@ def _validate_strategy_version_catalog(
         )
     if seen_ids != expected_ids:
         raise ProvenanceValidationError(
-            "strategy version catalog membership differs from current strategies"
+            "strategy version catalog membership differs from retained strategy registry"
         )
     return {
         "as_of_date": catalog_as_of.isoformat(),
@@ -912,6 +997,7 @@ def _import_tracker(
     membership: Mapping[tuple[str, str], str],
     strategies: Sequence[Mapping[str, Any]],
     alias_map: Mapping[str, str],
+    funded_memberships: Mapping[str, str],
     reserve_value: object,
     generation_as_of: date,
 ) -> tuple[
@@ -953,6 +1039,7 @@ def _import_tracker(
     assignment_rows = _read_csv(assignment_path, _ASSIGNMENT_FIELDS, "assignments")
     accounts_by_alias: dict[str, dict[str, Any]] = {}
     assignments: list[dict[str, Any]] = []
+    funded_replaced_starts: dict[int, str] = {}
     strategy_ids = {str(item["strategy_id"]) for item in strategies}
     for row in assignment_rows:
         institution = _text(row["institution"], "assignment.institution")
@@ -995,6 +1082,19 @@ def _import_tracker(
             and date.fromisoformat(period_end) < date.fromisoformat(period_start)
         ):
             raise ProvenanceValidationError("assignment interval is reversed")
+        source_classification = _text(row["source"], "assignment.source")
+        original_period_start = period_start
+        if (
+            strategy_id is not None
+            and source_classification == "provider_account_live_start"
+        ):
+            try:
+                period_start = funded_memberships[strategy_id]
+            except KeyError as exc:
+                raise ProvenanceValidationError(
+                    "provider account-live start requires financial MVP authority"
+                ) from exc
+            source_classification = "financial_mvp_funded_membership_reconciled"
         is_current = (
             not period_start or date.fromisoformat(period_start) <= generation_as_of
         ) and (not period_end or date.fromisoformat(period_end) >= generation_as_of)
@@ -1011,14 +1111,65 @@ def _import_tracker(
             "observed_label": observed_label,
             "pool_id": SYSTEMATIC_POOL_ID,
             "pool_mapping_status": "MAPPED",
-            "source_classification": _text(row["source"], "assignment.source"),
+            "source_classification": source_classification,
             "source_id": assignment_source,
             "strategy_id": strategy_id,
             "strategy_mapping_disposition": strategy_disposition,
         }
-        assignments.append(
-            {"assignment_id": _record_id("assignment", payload), **payload}
+        assignment = {"assignment_id": _record_id("assignment", payload), **payload}
+        assignments.append(assignment)
+        if original_period_start != period_start:
+            funded_replaced_starts[id(assignment)] = original_period_start
+
+    current_mapped_by_strategy: dict[str, list[dict[str, Any]]] = {}
+    for assignment in assignments:
+        if assignment["mapping_status"] != "MAPPED":
+            continue
+        strategy_id = str(assignment["strategy_id"])
+        start_value = assignment.get("effective_start")
+        end_value = assignment.get("effective_end")
+        if (
+            start_value is not None
+            and date.fromisoformat(str(start_value)) > generation_as_of
+        ):
+            continue
+        if (
+            end_value is not None
+            and date.fromisoformat(str(end_value)) < generation_as_of
+        ):
+            continue
+        current_mapped_by_strategy.setdefault(strategy_id, []).append(assignment)
+    for strategy_id, current_assignments in current_mapped_by_strategy.items():
+        funded_start = funded_memberships.get(strategy_id)
+        if funded_start is None or len(current_assignments) != 1:
+            continue
+        current_assignment = current_assignments[0]
+        original_start = funded_replaced_starts.get(
+            id(current_assignment), current_assignment["effective_start"]
         )
+        current_assignment["effective_start"] = funded_start
+        current_assignment["source_classification"] = (
+            "financial_mvp_funded_membership_reconciled"
+        )
+        if original_start is None or funded_start <= original_start:
+            continue
+        original_start_date = date.fromisoformat(str(original_start))
+        preceding_ends = {
+            original_start_date.isoformat(),
+            (original_start_date - timedelta(days=1)).isoformat(),
+        }
+        funded_predecessor_end = (
+            date.fromisoformat(funded_start) - timedelta(days=1)
+        ).isoformat()
+        for assignment in assignments:
+            if (
+                assignment["account_id"] == current_assignment["account_id"]
+                and assignment["mapping_status"] == "UNMAPPED"
+                and str(assignment["observed_label"]).casefold() in unmapped_labels
+                and assignment["effective_end"] in preceding_ends
+            ):
+                assignment["effective_end"] = funded_predecessor_end
+                break
 
     # A current legacy ``General`` row is the account-level implementation of
     # the reserve pool, not a missing systematic strategy.  Keep historical
@@ -1150,6 +1301,7 @@ def build_catalog(
         for file in _objects(source.get("files"), "source_artifacts.files")
     }
     strategies, alias_map = _validate_strategies(spec["strategies"], source_ids)
+    funded_memberships = _financial_mvp_memberships(spec.get("financial_mvp"))
     strategy_version_catalog = _validate_strategy_version_catalog(
         spec["strategy_version_catalog"],
         generation_as_of=generation_as_of,
@@ -1173,6 +1325,7 @@ def build_catalog(
         membership=membership,
         strategies=strategies,
         alias_map=alias_map,
+        funded_memberships=funded_memberships,
         reserve_value=spec["reserve_account"],
         generation_as_of=generation_as_of,
     )
@@ -1223,7 +1376,9 @@ def build_catalog(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
             boundary=(
                 "explicitly configured portfolio provenance sources, accounts, "
-                "and nine current strategies; data completeness remains in catalog gaps"
+                "and nine retained strategy registry records (seven REQUIRED active "
+                "current, Echo DEPRECATED_HISTORY_ONLY, and Composer "
+                "IMMATERIAL_EXCLUDED); data completeness remains in catalog gaps"
             ),
             fact_types=(
                 "accounts",

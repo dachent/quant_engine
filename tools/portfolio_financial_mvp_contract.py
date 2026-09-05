@@ -23,6 +23,11 @@ import re
 import subprocess
 from typing import Any, Final, Mapping, Sequence
 
+from quant_engine.core import (
+    GenerationBundle,
+    VerificationStatus,
+    read_generation_bundle,
+)
 from quant_engine.core.contracts import canonical_json_bytes
 
 
@@ -156,6 +161,33 @@ _CENSUS_OWNER_NON_DECISIONS: Final = (
     "POINTER_OR_PUBLICATION",
 )
 _CENSUS_TT_CONTINUITY_INTERVAL: Final = (date(2026, 7, 14), date(2026, 7, 30))
+_MATRIXPORT_OWNER_EPOCH: Final = {
+    "effective_start": "2025-12-06",
+    "observed_start": "2025-12-07",
+    "observed_end": "2026-08-13",
+}
+_MATRIXPORT_GAP_SPAN_RECEIPTS: Final = (
+    {
+        "end_endpoint_sha256": "95817f10e04c822520b68c5fb3fd830b4ec46a11333dadb0b52007adcd0f8071",
+        "missing_source_date": "2026-01-27",
+        "return": "-0.0171168077656820827224611394",
+        "span_days": 2,
+        "span_end_date": "2026-01-28",
+        "span_start_date": "2026-01-26",
+        "start_endpoint_sha256": "995713643650d85967d7f422cb5795bd688b37e27cb3b229ec49161b50ee6704",
+        "subscription_events_in_span": 0,
+    },
+    {
+        "end_endpoint_sha256": "6c47be0408a18df390624a902e678f3bab3585c91f913f04187a8c70cebd0489",
+        "missing_source_date": "2026-07-03",
+        "return": "-0.0194870412190052918911981303",
+        "span_days": 2,
+        "span_end_date": "2026-07-04",
+        "span_start_date": "2026-07-02",
+        "start_endpoint_sha256": "d3c4e152375d1ee77ded278b0123b29580f23c45dbbfe857b79cbad0f850b015",
+        "subscription_events_in_span": 0,
+    },
+)
 _HISTORY_AUTHORITY_COMMIT: Final = "41473d47dc9cba6e6a6e189b05f1268c56bd5fa4"
 _HISTORY_AUTHORITY_RAW_SHA256: Final = (
     "b267305a59682e660379abb58f380209f86391e193d24c420af201b8168fbc6b"
@@ -163,6 +195,352 @@ _HISTORY_AUTHORITY_RAW_SHA256: Final = (
 _HISTORY_AUTHORITY_SEMANTIC_SHA256: Final = (
     "00309632bf3afc35f4c3582883ffa765131e75d4a2a2999b59e6eb369f939512"
 )
+_HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
+    "accepted_generation_id": (
+        "4b3de4f4656c236c3334eb76fb091b73c4a1a8afdbc9f3893485ed97403e0e36"
+    ),
+    "accepted_manifest_sha256": (
+        "33342e04b45ab070ba21bc74884be1b7eb9c1868589e95b435fb320a33330e06"
+    ),
+    "accepted_catalog_sha256": (
+        "315471b602bb4ce61cd854195162708ab188f6e08d6597deb9b9da11ca5bce44"
+    ),
+    "current_generation_id": (
+        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
+    ),
+    "current_manifest_sha256": (
+        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
+    ),
+    "current_catalog_sha256": (
+        "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
+    ),
+    "legacy_generation_id": (
+        "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
+    ),
+    "legacy_manifest_sha256": (
+        "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db"
+    ),
+    "legacy_catalog_sha256": (
+        "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
+    ),
+}
+# Issue #374 Phase C: the direct Matrixport/Portfolio123/Quantbase lanes
+# re-pin to the refreshed provider generations.  Every re-pointed history
+# receipt is enumerated as ``accepted identity -> refreshed identity``; the
+# current contract must carry the refreshed identity, the accepted authority
+# is projected forward, and receipts outside this table (including the
+# retained Portfolio123 managed-performance artifact, which the refreshed
+# generation no longer carries) remain frozen to the accepted bytes.
+_HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
+    "MATRIXPORT": {
+        (
+            "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
+            "CURRENT.json",
+            "cbd433b2c99079b26ea14ba6d541ec80ea29c74c2902759f070ae75b934edfff",
+        ): (
+            "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+            "CURRENT.json",
+            "2b76a70db6ccbc9181930d94d95bfc70af61278f8145a36a7f63dfdb76cfcc0d",
+        ),
+        (
+            "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
+            (
+                "generations/6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6"
+                "a22dc74e816a1fdc/generation.json"
+            ),
+            "325c65ddc5985094799d2abfdce6a944d5443802333f734a40a34541c4d09f79",
+        ): (
+            "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+            (
+                "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c37251"
+                "5af23a4e3225d9ccc/generation.json"
+            ),
+            "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
+        ),
+        (
+            "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
+            ("output/20260816T141010.494Z/csv/subscription_details.csv"),
+            "17c302bd8cd3400ab44fad82aa162ad5e14ca2ab6f47f60bdfba5384fa28ecc8",
+        ): (
+            "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+            ("output/20260903T051029.331Z/csv/subscription_details.csv"),
+            "5ce7c6e3780df78a3f3b684329dbf4b382265a3411b0db9b036965e2c75db800",
+        ),
+    },
+    "PORTFOLIO123": {
+        (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            "CURRENT.json",
+            "d0d3ebc232d66518654a63dce3ca343d33b9600b539a82ae4c4fd8ea69649ba1",
+        ): (
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            "CURRENT.json",
+            "92f1f7af811227a93988875016d73eb7d07cafcce5b17df7c923bce71039e8a1",
+        ),
+        (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            (
+                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
+                "de384ad4a3182af1/generation.json"
+            ),
+            "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907",
+        ): (
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            (
+                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
+                "1e24af6dd0ec6d45/generation.json"
+            ),
+            "b1e6ed8e6b447fff4116900b73e712496d7a6edf00fa729f5f81f896471b7a53",
+        ),
+        (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            (
+                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
+                "de384ad4a3182af1/tables/returns_daily.parquet"
+            ),
+            "ea900ebf4b6073c715922535559bded916ff9f1283cb6326cef5b1177861045e",
+        ): (
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            (
+                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
+                "1e24af6dd0ec6d45/tables/returns_daily.parquet"
+            ),
+            "ea900ebf4b6073c715922535559bded916ff9f1283cb6326cef5b1177861045e",
+        ),
+        (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            (
+                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
+                "de384ad4a3182af1/tables/strategy_relationships.parquet"
+            ),
+            "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc",
+        ): (
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            (
+                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
+                "1e24af6dd0ec6d45/tables/strategy_relationships.parquet"
+            ),
+            "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc",
+        ),
+        (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            (
+                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
+                "de384ad4a3182af1/tables/har_managed_metadata.parquet"
+            ),
+            "bf40e5b0502c2b8f4795279da6279a70e0062b7d26af308697bf6f6c6a583329",
+        ): (
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            (
+                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
+                "1e24af6dd0ec6d45/tables/har_managed_metadata.parquet"
+            ),
+            "b9d69e97b25afcdbc7dc319a67618900a82bfef5ee635334b037a920d374e52b",
+        ),
+        (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            (
+                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
+                "de384ad4a3182af1/tables/har_equity_curve.parquet"
+            ),
+            "b87f760a1cd369bfd40ebc5e8db6b44e3626f9b4c53950e3d1e8c7ea0abf2b4e",
+        ): (
+            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            (
+                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
+                "1e24af6dd0ec6d45/tables/har_equity_curve.parquet"
+            ),
+            "39cabac6c6088c4ec100e7883d17713d952f4768fa4ff8888333b139264d311c",
+        ),
+    },
+    "QUANTBASE": {
+        (
+            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+            "CURRENT.json",
+            "10ea84966c0a20fd5520690a58c67e0e098490e4030b77e270225fd1fc4fd6b3",
+        ): (
+            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "CURRENT.json",
+            "6a9d0ba89762a64f5a8cbcbca06c79c0a040879394509ffcd9458c694d548f15",
+        ),
+        (
+            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+            (
+                "generations/ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058"
+                "e56f615872904d4f/generation.json"
+            ),
+            "fa5a8cf49572ebb66632909662f707f0072134234425f4fa1ceee049cefdf87f",
+        ): (
+            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            (
+                "generations/948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5"
+                "d96df874263c4d39/generation.json"
+            ),
+            "4d575a4155e2cede745e16c324be7023cec09a29ab038e9a658a81359a3d8828",
+        ),
+        (
+            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+            (
+                "source-runs/legacy-20260816-4108d8b8b58d/artifacts/csv/"
+                "dashboard_Volatis_Strategy_pricehistory.csv"
+            ),
+            "c03f1ae7a8363386a388670bf66699135727be5eeeeeea9508bc83b42ac501c4",
+        ): (
+            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            (
+                "source-runs/legacy-20260902-7b9f89c26ecc/artifacts/csv/"
+                "dashboard_Volatis_Strategy_pricehistory.csv"
+            ),
+            "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e",
+        ),
+        (
+            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+            (
+                "source-runs/legacy-20260816-4108d8b8b58d/artifacts/csv/"
+                "ssg_Volatis_Strategy_pricehistory.csv"
+            ),
+            "140301858179cbb4ca56539931c3d7701c190334aafd0d4e7bde30a621186772",
+        ): (
+            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            (
+                "source-runs/legacy-20260902-7b9f89c26ecc/artifacts/csv/"
+                "ssg_Volatis_Strategy_pricehistory.csv"
+            ),
+            "83bab8b0828bee2d8abb51f26b6cbbf44fa5f4bab98e69a80097f5cba9b80fa2",
+        ),
+        (
+            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+            (
+                "source-runs/legacy-20260816-4108d8b8b58d/artifacts/csv/"
+                "account_activity.csv"
+            ),
+            "b4c5a7b23f24636a17090003b0203ee40b91703e6f0c8b3236d5884d6d1e62e0",
+        ): (
+            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            (
+                "source-runs/legacy-20260902-7b9f89c26ecc/artifacts/csv/"
+                "account_activity.csv"
+            ),
+            "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0",
+        ),
+    },
+}
+# Issue #374 Phase C: materialized history segments sourced from a refreshed
+# direct provider lane follow the same admitted transition.  Each entry pins
+# the accepted (old) and required current (refreshed) source-generation
+# receipt for the segment's source segment.
+_HISTORY_PROVIDER_SOURCE_REBINDS: Final = {
+    "matrixport-account-generation": (
+        "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
+        "325c65ddc5985094799d2abfdce6a944d5443802333f734a40a34541c4d09f79",
+        "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+        "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
+    ),
+    "quantbase-account-generation": (
+        "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
+        "fa5a8cf49572ebb66632909662f707f0072134234425f4fa1ceee049cefdf87f",
+        "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+        "4d575a4155e2cede745e16c324be7023cec09a29ab038e9a658a81359a3d8828",
+    ),
+}
+_HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
+    # Issue #374: the account-return path is canonical only after provider-ledger
+    # selection, independent provider reconciliation, and elimination of the
+    # redundant one-account capital-weighting round trip.  The latter changes
+    # only the final Decimal-context digits/canonical decimal bytes; date
+    # perimeters and provider-formula values remain independently checked by
+    # the layered-history builder.
+    "grizzlybears-vtma:account-live": (
+        "4c4a15c30b3fb38e2ee8df757677d7e2f645a498026634e3abf1b36fa08b6e38",
+        "1c0bbf5915e13f08342f02298e86c9e748294933e6a6c1f46793be8b3df4c529",
+    ),
+    "p123-ai-factor:account-live": (
+        "7c854731f513fb5b6b02e7800d56e842b05a2a912b5a23aa3248c3ef20e0c0cd",
+        "68582e28bae1045494561a807f1b0db0b892cca62385f74a67daca16c101c754",
+    ),
+    "p123-eu:account-live": (
+        "a5af42de3a2aa3b2b960b60fc9880bc5a73cab286d5bd3e504d21535e74db63d",
+        "340539d1ff53a1e1386846043757e0bd6ba785bf216ade8daf820faa64e38a1b",
+    ),
+    "robuxio-crypto:account-live": (
+        "cb9609449f633b3077fd2dbfd3cd67764f61290c0d0dee682368d235cae77b13",
+        "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+    ),
+}
+_HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final = {
+    # Matrixport daily observations stop at the financial-MVP cutoff.  Its two
+    # declared two-day holding-period links are retained in coverage only and
+    # must not be folded into this daily materialized segment identity.
+    "robuxio-crypto:account-live": {
+        "observed_end": "2026-08-13",
+        "return_observations": 246,
+        "sha256": "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+    },
+}
+EPOCH_MANIFEST_ARTIFACT_PATH: Final = "outputs/account-strategy-manifest.json"
+EPOCH_MANIFEST_ARTIFACT_SCHEMA_NAME: Final = "account-strategy-manifest"
+EPOCH_MANIFEST_ARTIFACT_SCHEMA_VERSIONS: Final = frozenset({"8", "9"})
+EPOCH_CROSSWALK_ARTIFACT_PATH: Final = "authority/account-assignment-crosswalk.json"
+EPOCH_CROSSWALK_ARTIFACT_SCHEMA_NAME: Final = "account-strategy-current-epoch-crosswalk"
+EPOCH_CROSSWALK_ARTIFACT_SCHEMA_VERSION: Final = "1"
+EPOCH_INDEPENDENT_REPORT_PATH: Final = "verification/independent-verification.json"
+EPOCH_INDEPENDENT_REPORT_SCHEMA_NAME: Final = (
+    "account-manifest-independent-verification"
+)
+EPOCH_INDEPENDENT_REPORT_SCHEMA_VERSION: Final = "3"
+_V9_TRACE_CLASSES: Final = frozenset(
+    {"EXTERNAL_IN", "EXTERNAL_OUT", "INTERNAL_IN", "INTERNAL_OUT"}
+)
+_V9_OPENING_BASES: Final = frozenset(
+    {
+        "PROVIDER_CAPITAL_ANCHOR",
+        "FIRST_AVAILABLE_NAV",
+        "PREDECESSOR_CLOSING_NAV",
+    }
+)
+_V9_TRACE_ITEM_KEYS: Final = frozenset(
+    {"class", "event_date", "nav_recognition_date", "amount"}
+)
+_V9_REPORT_INVARIANTS: Final = frozenset(
+    {
+        "exact_subject_set",
+        "canonical_subject_bytes",
+        "selected_source_binding",
+        "fact_disposition_complete",
+        "unassigned_numeric_exclusion",
+        "classified_flow_reconciliation",
+        "mapped_row_bijection",
+        "blocker_propagation",
+        "blocked_numeric_exclusion",
+        "privacy_safe_projection",
+    }
+)
+_V9_DECIMAL: Final = re.compile(r"^-?(0|[1-9][0-9]*)(\.[0-9]+)?$")
+_EPOCH_MANIFEST_SOURCE_KEYS_BY_VERSION: Final = {
+    "8": frozenset(
+        {
+            "generation_id",
+            "generation_manifest_sha256",
+            "generation_receipt_sha256",
+            "full_directory_inventory_sha256",
+            "artifact",
+        }
+    ),
+    "9": frozenset(
+        {
+            "generation_id",
+            "generation_manifest_sha256",
+            "generation_receipt_sha256",
+            "full_directory_inventory_sha256",
+            "artifact",
+            "crosswalk",
+        }
+    ),
+}
+_EPOCH_MANIFEST_ARTIFACT_KEYS: Final = frozenset(
+    {"path", "sha256", "size_bytes", "schema"}
+)
+_EPOCH_MANIFEST_SCHEMA_KEYS: Final = frozenset({"name", "version"})
 _CENSUS_SOURCE_VERSION_OVERRIDES: Final = {
     "alpaca-account-generation": {
         "binding": "DEPRECATED_ECHOTRADE_EVENT_HISTORY_ONLY",
@@ -202,6 +580,452 @@ class GeneratedViews:
 
     summary_markdown: bytes
     source_matrix_json: bytes
+
+
+def _is_deprecated_event_only_history(
+    strategy: Mapping[str, Any], correction: Mapping[str, Any]
+) -> bool:
+    """Identify the one non-current, rejected historical evidence class."""
+
+    return (
+        strategy.get("product_requirement") == "EXCLUDED"
+        and strategy.get("lifecycle_status") == "DEPRECATED_HISTORY_ONLY"
+        and _object(
+            strategy.get("live_implementation_identity"),
+            "deprecated strategy live implementation identity",
+        ).get("status")
+        == "REJECTED"
+        and correction.get("source_id") == "owner-account-live-history"
+        and correction.get("evidence_layer") == "ACCOUNT_LIVE"
+        and _object(
+            correction.get("strategy_version"), "deprecated history strategy version"
+        ).get("status")
+        == "UNRESOLVED"
+        and _object(
+            correction.get("mode_admission"), "deprecated history mode admission"
+        )
+        == {
+            "LIVE_ONLY": "EXCLUDE_EVENT_ONLY_RECONSTRUCTION",
+            "LIVE_PLUS_BACKTEST": "EXCLUDE_EVENT_ONLY_RECONSTRUCTION",
+        }
+        and isinstance(correction.get("rejected_evidence_identity"), dict)
+    )
+
+
+def _epoch_artifact_descriptor(
+    bundle: GenerationBundle,
+    *,
+    artifact_id: str,
+    schema_name: str,
+    schema_version: str,
+    label: str,
+) -> tuple[dict[str, object], bytes]:
+    artifacts = [
+        artifact
+        for artifact in bundle.manifest.artifacts
+        if artifact.artifact_id == artifact_id
+    ]
+    if len(artifacts) != 1:
+        raise FinancialMvpContractError(
+            f"epoch manifest source requires exactly one {label} artifact"
+        )
+    artifact = artifacts[0]
+    if artifact.schema_name != schema_name:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {label} schema name differs"
+        )
+    if artifact.schema_version != schema_version:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {label} schema version differs"
+        )
+    if artifact.size_bytes <= 0:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {label} requires positive byte size"
+        )
+    payload = bundle.payloads.get(artifact_id)
+    if type(payload) is not bytes:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {label} payload is absent"
+        )
+    payload_sha256 = hashlib.sha256(payload).hexdigest()
+    if payload_sha256 != artifact.sha256 or len(payload) != artifact.size_bytes:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {label} bytes differ from manifest"
+        )
+    return (
+        {
+            "path": artifact_id,
+            "sha256": payload_sha256,
+            "size_bytes": len(payload),
+            "schema": {"name": schema_name, "version": schema_version},
+        },
+        payload,
+    )
+
+
+def _epoch_payload_json(payload: bytes, name: str) -> dict[str, object]:
+    try:
+        value = json.loads(payload)
+    except (TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {name} payload is not JSON"
+        ) from exc
+    if type(value) is not dict:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {name} payload must be an object"
+        )
+    return value
+
+
+def _v9_report_count(report: Mapping[str, object], name: str) -> int:
+    counts = report.get("counts")
+    if type(counts) is not dict:
+        raise FinancialMvpContractError("epoch manifest source report counts differ")
+    value = counts.get(name)
+    if type(value) is not int or value < 0:
+        raise FinancialMvpContractError("epoch manifest source report counts differ")
+    return value
+
+
+def _v9_date(value: object, name: str) -> date:
+    if type(value) is not str:
+        raise FinancialMvpContractError(f"epoch manifest source {name} differs")
+    try:
+        return date.fromisoformat(value)
+    except ValueError as exc:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {name} differs"
+        ) from exc
+
+
+def _validate_v9_flow_trace(trace: object) -> None:
+    if type(trace) is not list:
+        raise FinancialMvpContractError(
+            "epoch manifest source artifact v9 flow trace differs"
+        )
+    for item in trace:
+        if type(item) is not dict or set(item) != _V9_TRACE_ITEM_KEYS:
+            raise FinancialMvpContractError(
+                "epoch manifest source artifact v9 flow trace differs"
+            )
+        if item["class"] not in _V9_TRACE_CLASSES:
+            raise FinancialMvpContractError(
+                "epoch manifest source artifact v9 flow trace differs"
+            )
+        _v9_date(item["event_date"], "artifact v9 flow trace")
+        _v9_date(item["nav_recognition_date"], "artifact v9 flow trace")
+        if (
+            type(item["amount"]) is not str
+            or _V9_DECIMAL.fullmatch(item["amount"]) is None
+        ):
+            raise FinancialMvpContractError(
+                "epoch manifest source artifact v9 flow trace differs"
+            )
+
+
+def _validate_v9_epoch_release_controls(
+    manifest_payload: bytes,
+    manifest_descriptor: Mapping[str, object],
+    crosswalk_descriptor: Mapping[str, object],
+    crosswalk_payload: bytes,
+    report_descriptor: Mapping[str, object],
+    report_payload: bytes,
+    generation_as_of_date: date,
+) -> None:
+    manifest = _epoch_payload_json(manifest_payload, "artifact")
+    if (
+        type(manifest.get("schema_version")) is not int
+        or manifest.get("schema_version") != 9
+    ):
+        raise FinancialMvpContractError(
+            "epoch manifest source artifact schema v9 differs"
+        )
+    cutoff = _v9_date(manifest.get("calculation_cutoff_date"), "artifact cutoff")
+    crosswalk = _epoch_payload_json(crosswalk_payload, "crosswalk")
+    crosswalk_cutoff = _v9_date(
+        crosswalk.get("calculation_cutoff_date"), "crosswalk cutoff"
+    )
+    if cutoff != crosswalk_cutoff:
+        raise FinancialMvpContractError(
+            "epoch manifest source crosswalk cutoff differs"
+        )
+    if cutoff > generation_as_of_date:
+        raise FinancialMvpContractError("epoch manifest source artifact cutoff differs")
+    rows = manifest.get("rows")
+    if type(rows) is not list or not rows:
+        raise FinancialMvpContractError("epoch manifest source artifact rows differ")
+    ok_rows = 0
+    blocked_rows = 0
+    for row in rows:
+        if type(row) is not dict:
+            raise FinancialMvpContractError(
+                "epoch manifest source artifact row differs"
+            )
+        if "date" in row:
+            raise FinancialMvpContractError(
+                "epoch manifest source artifact has v8 trace"
+            )
+        status = row.get("status")
+        if status == "OK":
+            ok_rows += 1
+            if row.get("opening_basis") not in _V9_OPENING_BASES:
+                raise FinancialMvpContractError(
+                    "epoch manifest source artifact anchor differs"
+                )
+            _validate_v9_flow_trace(row.get("capital_flow_trace"))
+        elif status == "BLOCKED_ADMISSION":
+            blocked_rows += 1
+        else:
+            raise FinancialMvpContractError(
+                "epoch manifest source artifact status differs"
+            )
+
+    report = _epoch_payload_json(report_payload, "independent report")
+    if (
+        type(report.get("schema_version")) is not int
+        or report.get("schema_version") != 3
+    ):
+        raise FinancialMvpContractError("epoch manifest source report schema differs")
+    if report.get("status") != "VERIFIED":
+        raise FinancialMvpContractError("epoch manifest source report status differs")
+    if report_descriptor["path"] != EPOCH_INDEPENDENT_REPORT_PATH:
+        raise FinancialMvpContractError(
+            "epoch manifest source report descriptor differs"
+        )
+    selected = report.get("selected_source_identities")
+    if type(selected) is not dict:
+        raise FinancialMvpContractError(
+            "epoch manifest source report source identities differ"
+        )
+    reported_crosswalk = selected.get("current_epoch_crosswalk")
+    if type(reported_crosswalk) is not dict or any(
+        reported_crosswalk.get(key) != crosswalk_descriptor[key]
+        for key in ("sha256", "size_bytes")
+    ):
+        raise FinancialMvpContractError(
+            "epoch manifest source report crosswalk differs"
+        )
+    subjects = report.get("subjects")
+    if type(subjects) is not list:
+        raise FinancialMvpContractError("epoch manifest source report subjects differ")
+    for descriptor in (manifest_descriptor, crosswalk_descriptor):
+        matches = [
+            subject
+            for subject in subjects
+            if type(subject) is dict
+            and all(
+                subject.get(key) == descriptor[key]
+                for key in ("path", "sha256", "size_bytes")
+            )
+        ]
+        if len(matches) != 1:
+            raise FinancialMvpContractError(
+                "epoch manifest source report subjects differ"
+            )
+    invariants = report.get("invariants")
+    if (
+        type(invariants) is not dict
+        or set(invariants) != _V9_REPORT_INVARIANTS
+        or any(invariants[name] is not True for name in _V9_REPORT_INVARIANTS)
+    ):
+        raise FinancialMvpContractError(
+            "epoch manifest source report invariants differ"
+        )
+    report_cutoff = report.get("calculation_cutoff_date")
+    if report_cutoff is not None and _v9_date(report_cutoff, "report cutoff") != cutoff:
+        raise FinancialMvpContractError("epoch manifest source report cutoff differs")
+    numeric = report.get("numeric_verification")
+    if (
+        type(numeric) is not dict
+        or type(numeric.get("discrepancy_count")) is not int
+        or numeric.get("discrepancy_count") != 0
+        or numeric.get("disposition") != "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
+    ):
+        raise FinancialMvpContractError(
+            "epoch manifest source report numeric verification differs"
+        )
+    if (
+        _v9_report_count(report, "output_row_count") != len(rows)
+        or _v9_report_count(report, "ok_output_row_count") != ok_rows
+        or _v9_report_count(report, "blocked_output_row_count") != blocked_rows
+    ):
+        raise FinancialMvpContractError("epoch manifest source report counts differ")
+
+
+def epoch_manifest_source_from_bundle(bundle: GenerationBundle) -> dict[str, object]:
+    """Bind a verified v8 or v9 generation bundle to the closed source shape."""
+
+    if type(bundle) is not GenerationBundle:
+        raise FinancialMvpContractError(
+            "epoch manifest source requires GenerationBundle"
+        )
+    if bundle.manifest.verification is not VerificationStatus.VERIFIED:
+        raise FinancialMvpContractError(
+            "epoch manifest source requires VERIFIED bundle"
+        )
+    generation_id = bundle.manifest.generation_id
+    if (
+        bundle.inventory.generation_id != generation_id
+        or bundle.receipt.generation_id != generation_id
+    ):
+        raise FinancialMvpContractError("epoch manifest source generation IDs differ")
+    artifacts = [
+        artifact
+        for artifact in bundle.manifest.artifacts
+        if artifact.artifact_id == EPOCH_MANIFEST_ARTIFACT_PATH
+    ]
+    if len(artifacts) != 1:
+        raise FinancialMvpContractError(
+            "epoch manifest source requires exactly one required artifact"
+        )
+    artifact_version = artifacts[0].schema_version
+    if artifact_version not in EPOCH_MANIFEST_ARTIFACT_SCHEMA_VERSIONS:
+        raise FinancialMvpContractError(
+            "epoch manifest source artifact schema version differs"
+        )
+    artifact, manifest_payload = _epoch_artifact_descriptor(
+        bundle,
+        artifact_id=EPOCH_MANIFEST_ARTIFACT_PATH,
+        schema_name=EPOCH_MANIFEST_ARTIFACT_SCHEMA_NAME,
+        schema_version=artifact_version,
+        label="artifact",
+    )
+    source: dict[str, object] = {
+        "generation_id": generation_id,
+        "generation_manifest_sha256": bundle.receipt.manifest.sha256,
+        "generation_receipt_sha256": hashlib.sha256(bundle.receipt_bytes).hexdigest(),
+        "full_directory_inventory_sha256": bundle.full_directory_inventory_sha256,
+        "artifact": artifact,
+    }
+    if artifact_version == "9":
+        crosswalk, crosswalk_payload = _epoch_artifact_descriptor(
+            bundle,
+            artifact_id=EPOCH_CROSSWALK_ARTIFACT_PATH,
+            schema_name=EPOCH_CROSSWALK_ARTIFACT_SCHEMA_NAME,
+            schema_version=EPOCH_CROSSWALK_ARTIFACT_SCHEMA_VERSION,
+            label="crosswalk",
+        )
+        report, report_payload = _epoch_artifact_descriptor(
+            bundle,
+            artifact_id=EPOCH_INDEPENDENT_REPORT_PATH,
+            schema_name=EPOCH_INDEPENDENT_REPORT_SCHEMA_NAME,
+            schema_version=EPOCH_INDEPENDENT_REPORT_SCHEMA_VERSION,
+            label="report",
+        )
+        receipt_report = bundle.receipt.independent_report
+        if (
+            receipt_report.artifact_id != EPOCH_INDEPENDENT_REPORT_PATH
+            or receipt_report.schema_name != EPOCH_INDEPENDENT_REPORT_SCHEMA_NAME
+            or receipt_report.schema_version != EPOCH_INDEPENDENT_REPORT_SCHEMA_VERSION
+            or receipt_report.sha256 != report["sha256"]
+            or receipt_report.size_bytes != report["size_bytes"]
+        ):
+            raise FinancialMvpContractError(
+                "epoch manifest source receipt report differs"
+            )
+        _validate_v9_epoch_release_controls(
+            manifest_payload,
+            artifact,
+            crosswalk,
+            crosswalk_payload,
+            report,
+            report_payload,
+            bundle.manifest.as_of_date,
+        )
+        source["crosswalk"] = crosswalk
+    return source
+
+
+def _epoch_manifest_source_value(actual: object, expected: object, name: str) -> None:
+    if type(actual) is not type(expected) or actual != expected:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {name} differs from verified bundle"
+        )
+
+
+def _validate_epoch_source_descriptor(
+    actual: object, expected: object, name: str
+) -> None:
+    if type(actual) is not dict or type(expected) is not dict:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {name} must be an object"
+        )
+    if set(actual) != _EPOCH_MANIFEST_ARTIFACT_KEYS:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {name} keys differ from contract"
+        )
+    for key in ("path", "sha256"):
+        _epoch_manifest_source_value(actual[key], expected[key], f"{name}.{key}")
+    size_bytes = actual["size_bytes"]
+    if type(size_bytes) is not int:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {name}.size_bytes must be an integer"
+        )
+    _epoch_manifest_source_value(
+        size_bytes, expected["size_bytes"], f"{name}.size_bytes"
+    )
+    schema = actual["schema"]
+    expected_schema = expected["schema"]
+    if type(schema) is not dict or type(expected_schema) is not dict:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {name}.schema must be an object"
+        )
+    if set(schema) != _EPOCH_MANIFEST_SCHEMA_KEYS:
+        raise FinancialMvpContractError(
+            f"epoch manifest source {name}.schema keys differ from contract"
+        )
+    for key in ("name", "version"):
+        _epoch_manifest_source_value(
+            schema[key], expected_schema[key], f"{name}.schema.{key}"
+        )
+
+
+def validate_epoch_manifest_source(source: object, *, bundle: GenerationBundle) -> None:
+    """Validate closed epoch-manifest source values against a verified bundle."""
+
+    expected = epoch_manifest_source_from_bundle(bundle)
+    if type(source) is not dict:
+        raise FinancialMvpContractError("epoch manifest source must be an object")
+    artifact = source.get("artifact")
+    if type(artifact) is not dict or type(artifact.get("schema")) is not dict:
+        raise FinancialMvpContractError(
+            "epoch manifest source artifact must be an object"
+        )
+    version = artifact["schema"].get("version")
+    expected_artifact = expected["artifact"]
+    if (
+        type(expected_artifact) is not dict
+        or type(expected_artifact.get("schema")) is not dict
+    ):
+        raise AssertionError("verified epoch source artifact shape is invalid")
+    _epoch_manifest_source_value(
+        version,
+        expected_artifact["schema"]["version"],
+        "artifact.schema.version",
+    )
+    if version not in _EPOCH_MANIFEST_SOURCE_KEYS_BY_VERSION:
+        raise FinancialMvpContractError(
+            "epoch manifest source artifact schema version differs"
+        )
+    if version == "9" and "crosswalk" not in source:
+        raise FinancialMvpContractError("epoch manifest source crosswalk is required")
+    if set(source) != _EPOCH_MANIFEST_SOURCE_KEYS_BY_VERSION[version]:
+        raise FinancialMvpContractError(
+            "epoch manifest source keys differ from contract"
+        )
+    for key in (
+        "generation_id",
+        "generation_manifest_sha256",
+        "generation_receipt_sha256",
+        "full_directory_inventory_sha256",
+    ):
+        _epoch_manifest_source_value(source[key], expected[key], key)
+
+    _validate_epoch_source_descriptor(artifact, expected["artifact"], "artifact")
+    if version == "9":
+        _validate_epoch_source_descriptor(
+            source["crosswalk"], expected["crosswalk"], "crosswalk"
+        )
 
 
 def _load_json(path: Path, name: str) -> dict[str, Any]:
@@ -279,24 +1103,29 @@ def _verify_history_receipt(
         raise FinancialMvpContractError(f"history receipt locator differs: {role}")
     expected_hash = _hash(receipt["sha256"], "history receipt sha256")
 
-    pointer_path = _evidence_file(root, "CURRENT.json", f"{authority_root}/CURRENT")
-    pointer = _load_json(pointer_path, f"{authority_root} current pointer")
-    if (
-        pointer.get("state") != "PUBLISHED"
-        or pointer.get("generation_id") != generation_id
-    ):
-        raise FinancialMvpContractError(
-            f"history receipt generation is not the published current authority: {role}"
-        )
+    pointer_path: Path | None = None
+    pointer: dict[str, Any] | None = None
+    if locator == "CURRENT_POINTER":
+        if selector != "CURRENT.json" or manifest_artifact_id is not None:
+            raise FinancialMvpContractError(
+                f"history current-pointer selector differs: {role}"
+            )
+        pointer_path = _evidence_file(root, "CURRENT.json", f"{authority_root}/CURRENT")
+        pointer = _load_json(pointer_path, f"{authority_root} current pointer")
+        if (
+            pointer.get("state") != "PUBLISHED"
+            or pointer.get("generation_id") != generation_id
+        ):
+            raise FinancialMvpContractError(
+                "history receipt generation is not the published current "
+                f"authority: {role}"
+            )
+
     generation_selector = f"generations/{generation_id}/generation.json"
     manifest_path = _evidence_file(
         root, generation_selector, f"{authority_root}/{generation_id}/manifest"
     )
     manifest_hash, _manifest_size = _file_identity(manifest_path)
-    if pointer.get("manifest_sha256") != manifest_hash:
-        raise FinancialMvpContractError(
-            f"history authority pointer/manifest identity differs: {role}"
-        )
     manifest = _load_json(manifest_path, f"{authority_root} generation manifest")
     if (
         manifest.get("verification") != "VERIFIED"
@@ -307,9 +1136,10 @@ def _verify_history_receipt(
         )
 
     if locator == "CURRENT_POINTER":
-        if selector != "CURRENT.json" or manifest_artifact_id is not None:
+        assert pointer is not None and pointer_path is not None
+        if pointer.get("manifest_sha256") != manifest_hash:
             raise FinancialMvpContractError(
-                f"history current-pointer selector differs: {role}"
+                f"history authority pointer/manifest identity differs: {role}"
             )
         actual_hash, _actual_size = _file_identity(pointer_path)
     elif locator == "GENERATION_MANIFEST":
@@ -389,7 +1219,7 @@ def _verify_strategy_version_history_evidence(
     Repeating a version reference in two mutable source rows is not independent
     evidence.  The workstation gate freezes the exact pre-census product,
     source, correction, and materialized-segment version projection, permits
-    only the explicit #302 provider-lane deltas, and then requires two distinct
+    only the explicit #302/#374 provider-lane deltas, and then requires two distinct
     captured history layers whose receipt selectors have already been resolved
     against governed bytes by :func:`verify_history_evidence`.
     """
@@ -432,6 +1262,19 @@ def _verify_strategy_version_history_evidence(
             row.get("strategy_version"), "accepted #319 strategy_version"
         )
         for row in _objects(accepted.get("strategies"), "accepted #319 strategies")
+    }
+    current_strategies = {
+        _text(row.get("strategy_id"), "governed strategy_id"): row
+        for row in _objects(contract.get("strategies"), "strategies")
+    }
+    current_history_for_projection = _object(
+        contract.get("history_corrections"), "history_corrections"
+    )
+    current_corrections_by_id = {
+        _text(row.get("correction_id"), "history correction_id"): row
+        for row in _objects(
+            current_history_for_projection.get("corrections"), "history corrections"
+        )
     }
 
     accepted_sources = {
@@ -481,7 +1324,12 @@ def _verify_strategy_version_history_evidence(
                 f"history authority: {source_id}"
             )
 
-    def correction_projection(row: Mapping[str, Any]) -> dict[str, object]:
+    def receipt_projection(
+        receipt: Mapping[str, Any],
+        *,
+        accepted_authority: bool,
+        deprecated_event_only: bool,
+    ) -> dict[str, object]:
         receipt_keys = (
             "artifact_role",
             "authority_root",
@@ -491,15 +1339,128 @@ def _verify_strategy_version_history_evidence(
             "manifest_artifact_id",
             "sha256",
         )
+        projected = {key: receipt.get(key) for key in receipt_keys}
+        if projected["authority_root"] != "PROVIDER_LEDGER":
+            lane_rebinds = _HISTORY_PROVIDER_RECEIPT_REBINDS.get(
+                str(projected["authority_root"])
+            )
+            if lane_rebinds is not None:
+                accepted_identity = (
+                    str(projected["generation_id"] or ""),
+                    str(projected["artifact_selector"] or ""),
+                    str(projected["sha256"] or ""),
+                )
+                rebind = lane_rebinds.get(accepted_identity)
+                if rebind is not None:
+                    if not accepted_authority:
+                        raise FinancialMvpContractError(
+                            "provider-lane history receipt differs from the "
+                            "admitted rebind: "
+                            f"{projected['artifact_role']}"
+                        )
+                    (
+                        projected["generation_id"],
+                        projected["artifact_selector"],
+                        projected["sha256"],
+                    ) = rebind
+            return projected
+
+        generation_id = str(projected["generation_id"] or "")
+        selector = str(projected["artifact_selector"] or "")
+        generation_prefix = f"generations/{generation_id}/"
+        if not generation_id or not selector.startswith(generation_prefix):
+            raise FinancialMvpContractError(
+                "provider-ledger history receipt selector differs"
+            )
+        suffix = selector.removeprefix(generation_prefix)
+        if suffix == "generation.json":
+            accepted_sha_key = "accepted_manifest_sha256"
+            current_sha_key = "current_manifest_sha256"
+        elif suffix == "provider-ledger.json":
+            accepted_sha_key = "accepted_catalog_sha256"
+            current_sha_key = "current_catalog_sha256"
+        else:
+            raise FinancialMvpContractError(
+                "provider-ledger history receipt selector differs"
+            )
+
+        expected_generation_key = (
+            "accepted_generation_id"
+            if accepted_authority
+            else (
+                "legacy_generation_id"
+                if deprecated_event_only
+                else "current_generation_id"
+            )
+        )
+        expected_sha_key = accepted_sha_key if accepted_authority else current_sha_key
+        legacy_sha_key = (
+            "legacy_manifest_sha256"
+            if suffix == "generation.json"
+            else "legacy_catalog_sha256"
+        )
+        if not accepted_authority and deprecated_event_only:
+            expected_sha_key = legacy_sha_key
+        if (
+            generation_id
+            != _HISTORY_PROVIDER_LEDGER_TRANSITION[expected_generation_key]
+            or projected["sha256"]
+            != _HISTORY_PROVIDER_LEDGER_TRANSITION[expected_sha_key]
+        ):
+            raise FinancialMvpContractError(
+                "provider-ledger history lineage differs from the admitted transition"
+            )
+        if accepted_authority:
+            target_generation_key = (
+                "legacy_generation_id"
+                if deprecated_event_only
+                else "current_generation_id"
+            )
+            target_sha_key = (
+                legacy_sha_key if deprecated_event_only else current_sha_key
+            )
+            current_generation = _HISTORY_PROVIDER_LEDGER_TRANSITION[
+                target_generation_key
+            ]
+            projected["generation_id"] = current_generation
+            projected["artifact_selector"] = (
+                f"generations/{current_generation}/{suffix}"
+            )
+            projected["sha256"] = _HISTORY_PROVIDER_LEDGER_TRANSITION[target_sha_key]
+        return projected
+
+    def correction_projection(
+        row: Mapping[str, Any], *, accepted_authority: bool
+    ) -> dict[str, object]:
+        strategy_id = _text(row.get("strategy_id"), "history correction strategy_id")
+        semantic_row = (
+            current_corrections_by_id.get(
+                _text(row.get("correction_id"), "history correction_id"), row
+            )
+            if accepted_authority
+            else row
+        )
+        strategy = current_strategies.get(strategy_id)
+        if strategy is None:
+            raise FinancialMvpContractError(
+                f"history correction has unknown strategy: {strategy_id}"
+            )
+        deprecated_event_only = _is_deprecated_event_only_history(
+            strategy, semantic_row
+        )
         receipts = [
-            {key: receipt.get(key) for key in receipt_keys}
+            receipt_projection(
+                receipt,
+                accepted_authority=accepted_authority,
+                deprecated_event_only=deprecated_event_only,
+            )
             for receipt in _objects(
                 row.get("source_receipts"), "history correction source_receipts"
             )
         ]
         receipts.sort(key=canonical_json_bytes)
         return {
-            "strategy_id": row.get("strategy_id"),
+            "strategy_id": strategy_id,
             "evidence_layer": row.get("evidence_layer"),
             "source_id": row.get("source_id"),
             "capture_status": _object(
@@ -520,14 +1481,14 @@ def _verify_strategy_version_history_evidence(
     accepted_corrections = {
         _text(
             row.get("correction_id"), "accepted history correction_id"
-        ): correction_projection(row)
+        ): correction_projection(row, accepted_authority=True)
         for row in _objects(
             accepted_history.get("corrections"), "accepted history corrections"
         )
     }
     current_corrections = {
         _text(row.get("correction_id"), "history correction_id"): correction_projection(
-            row
+            row, accepted_authority=False
         )
         for row in _objects(current_history.get("corrections"), "history corrections")
     }
@@ -536,26 +1497,109 @@ def _verify_strategy_version_history_evidence(
             "history correction version projection differs from accepted history authority"
         )
 
-    def segment_projection(row: Mapping[str, Any]) -> dict[str, object]:
+    def segment_projection(
+        row: Mapping[str, Any], *, accepted_authority: bool
+    ) -> dict[str, object]:
         # A live implementation identity is derived from the materialized
         # segment hash and its governed source generation.  Freezing only the
         # version-bearing fields would let a caller coherently replace both the
         # segment hash and the derived live identity while retaining a real
         # generation receipt.  #302 does not authorize any change to the
         # accepted #319 materialized rows, so bind the complete row.
-        return dict(row)
+        projected = dict(row)
+        if projected.get("source_id") == "owner-account-live-history":
+            generation_key = (
+                "accepted_generation_id"
+                if accepted_authority
+                else "current_generation_id"
+            )
+            manifest_key = (
+                "accepted_manifest_sha256"
+                if accepted_authority
+                else "current_manifest_sha256"
+            )
+            if (
+                projected.get("source_generation_id")
+                != _HISTORY_PROVIDER_LEDGER_TRANSITION[generation_key]
+                or projected.get("source_generation_sha256")
+                != _HISTORY_PROVIDER_LEDGER_TRANSITION[manifest_key]
+            ):
+                raise FinancialMvpContractError(
+                    "provider-ledger history lineage differs from the admitted transition"
+                )
+            if accepted_authority:
+                projected["source_generation_id"] = _HISTORY_PROVIDER_LEDGER_TRANSITION[
+                    "current_generation_id"
+                ]
+                projected["source_generation_sha256"] = (
+                    _HISTORY_PROVIDER_LEDGER_TRANSITION["current_manifest_sha256"]
+                )
+        else:
+            source_rebind = _HISTORY_PROVIDER_SOURCE_REBINDS.get(
+                str(projected.get("source_id"))
+            )
+            if source_rebind is not None:
+                (
+                    accepted_generation_id,
+                    accepted_manifest_sha256,
+                    current_generation_id,
+                    current_manifest_sha256,
+                ) = source_rebind
+                expected_generation_id = (
+                    accepted_generation_id
+                    if accepted_authority
+                    else current_generation_id
+                )
+                expected_manifest_sha256 = (
+                    accepted_manifest_sha256
+                    if accepted_authority
+                    else current_manifest_sha256
+                )
+                if (
+                    projected.get("source_generation_id") != expected_generation_id
+                    or projected.get("source_generation_sha256")
+                    != expected_manifest_sha256
+                ):
+                    raise FinancialMvpContractError(
+                        "provider-lane history lineage differs from the admitted rebind"
+                    )
+                if accepted_authority:
+                    projected["source_generation_id"] = current_generation_id
+                    projected["source_generation_sha256"] = current_manifest_sha256
+        return projected
 
     accepted_segments = {
         _text(row.get("segment_id"), "accepted history segment_id"): segment_projection(
-            row
+            row, accepted_authority=True
         )
         for row in _objects(
             accepted_history.get("materialized_segment_identities"),
             "accepted history materialized_segment_identities",
         )
     }
+    for segment_id, (
+        accepted_sha256,
+        corrected_sha256,
+    ) in _HISTORY_SEGMENT_SHA256_OVERRIDES.items():
+        accepted_segment = accepted_segments.get(segment_id)
+        if accepted_segment is None or accepted_segment.get("sha256") != (
+            accepted_sha256
+        ):
+            raise FinancialMvpContractError(
+                f"accepted history correction authority differs: {segment_id}"
+            )
+        accepted_segment["sha256"] = corrected_sha256
+    for segment_id, projection in _HISTORY_SEGMENT_PROJECTION_OVERRIDES.items():
+        accepted_segment = accepted_segments.get(segment_id)
+        if accepted_segment is None:
+            raise FinancialMvpContractError(
+                f"accepted history correction authority differs: {segment_id}"
+            )
+        accepted_segment.update(projection)
     current_segments = {
-        _text(row.get("segment_id"), "history segment_id"): segment_projection(row)
+        _text(row.get("segment_id"), "history segment_id"): segment_projection(
+            row, accepted_authority=False
+        )
         for row in _objects(
             current_history.get("materialized_segment_identities"),
             "history materialized_segment_identities",
@@ -716,18 +1760,11 @@ def verify_census_evidence(
         governed_provider_ids.append(provider_id)
 
     baseline_root = authority_roots.get("BASELINE")
-    ledger_root = authority_roots.get("PROVIDER_LEDGER")
-    if baseline_root is None or ledger_root is None:
-        raise FinancialMvpContractError(
-            "census baseline/ledger roots were not supplied"
-        )
+    if baseline_root is None:
+        raise FinancialMvpContractError("census baseline root was not supplied")
     baseline = _load_json(
         _census_receipt_path(census, "BASELINE_CATALOG", baseline_root),
         "census baseline catalog",
-    )
-    ledger = _load_json(
-        _census_receipt_path(census, "PROVIDER_LEDGER_CATALOG", ledger_root),
-        "census provider-ledger catalog",
     )
 
     sleeves = _objects(census["account_sleeves"], "census account_sleeves")
@@ -771,32 +1808,6 @@ def verify_census_evidence(
     if actual_assignment_counts != expected_assignment_counts:
         raise FinancialMvpContractError("census redacted assignment counts differ")
 
-    lane_generations = {
-        str(lane["provider_id"]).lower(): lane["generation"]
-        for lane in provider_lanes
-        if lane["generation"] is not None
-    }
-    ledger_generations = _objects(
-        ledger.get("provider_generations"), "provider-ledger generations"
-    )
-    if {str(row.get("provider_id")) for row in ledger_generations} != set(
-        lane_generations
-    ):
-        raise FinancialMvpContractError("census provider-ledger provider set differs")
-    for row in ledger_generations:
-        provider_id = str(row["provider_id"])
-        generation = _object(
-            lane_generations[provider_id], f"census provider generation {provider_id}"
-        )
-        if (
-            row.get("generation_id") != generation["generation_id"]
-            or row.get("manifest_sha256") != generation["manifest_sha256"]
-            or row.get("generation_as_of_date") != generation["as_of"]
-        ):
-            raise FinancialMvpContractError(
-                f"census provider-ledger generation differs: {provider_id}"
-            )
-
     return {
         "account_sleeves": len(sleeves),
         "assignment_mappings": sum(actual_assignment_counts.values()),
@@ -832,6 +1843,12 @@ def schema_errors(
         return schema_errors(target, value, root, path)
 
     errors: list[str] = []
+    negated = node.get("not")
+    if negated is not None:
+        if not isinstance(negated, dict):
+            raise FinancialMvpContractError("schema not must be an object")
+        if not schema_errors(negated, value, root, path):
+            errors.append(f"{path}: must not match")
     all_of = node.get("allOf", [])
     if not isinstance(all_of, list):
         raise FinancialMvpContractError("schema allOf must be an array")
@@ -2100,6 +3117,10 @@ def _validate_strategies(
             raise FinancialMvpContractError(
                 f"strategy product interval is reversed: {strategy_id}"
             )
+        if requirement == "EXCLUDED" and effective_end is None:
+            raise FinancialMvpContractError(
+                f"excluded strategy product interval remains open: {strategy_id}"
+            )
         version = _object(row["strategy_version"], "strategy.strategy_version")
         _strict_keys(version, {"status", "version_ref"}, "strategy_version")
         if version["status"] not in {"EVIDENCED", "NOT_APPLICABLE", "UNRESOLVED"}:
@@ -2151,7 +3172,7 @@ def _validate_strategies(
                 raise FinancialMvpContractError(
                     f"required strategy is not active: {strategy_id}"
                 )
-            if live_status != "EVIDENCED":
+            if live_status != "EVIDENCED" and readiness != "REQUIRED_NOT_READY":
                 raise FinancialMvpContractError(
                     f"active strategy lacks evidenced live implementation: {strategy_id}"
                 )
@@ -2439,9 +3460,6 @@ def _validate_current_census(
         "BASELINE_CATALOG",
         "BASELINE_CURRENT_POINTER",
         "BASELINE_GENERATION_MANIFEST",
-        "PROVIDER_LEDGER_CATALOG",
-        "PROVIDER_LEDGER_CURRENT_POINTER",
-        "PROVIDER_LEDGER_GENERATION_MANIFEST",
     }
     receipt_roles: set[str] = set()
     for receipt in receipts:
@@ -3109,7 +4127,22 @@ def _validate_history_corrections(
             source_generation = _object(
                 source["current_generation"], "history source current_generation"
             )
-            if (
+            deprecated_event_only = _is_deprecated_event_only_history(
+                strategy_by_id[strategy_id], row
+            )
+            if deprecated_event_only:
+                if (
+                    generation_id
+                    != _HISTORY_PROVIDER_LEDGER_TRANSITION["legacy_generation_id"]
+                    or generation_sha
+                    != _HISTORY_PROVIDER_LEDGER_TRANSITION["legacy_manifest_sha256"]
+                    or capture["as_of"] != source_generation["as_of"]
+                ):
+                    raise FinancialMvpContractError(
+                        "deprecated event-only history must retain its legacy receipt: "
+                        f"{correction_id}"
+                    )
+            elif (
                 source_generation["generation_id"] != generation_id
                 or source_generation["sha256"] != generation_sha
                 or source_generation["as_of"] != capture["as_of"]
@@ -3671,6 +4704,87 @@ def _validate_history_corrections(
         )
 
 
+def _validate_active_blocked_numeric_identities(
+    strategies: Sequence[Mapping[str, Any]],
+    sources: Sequence[Mapping[str, Any]],
+    history: Mapping[str, Any],
+) -> None:
+    """Permit no numeric identity only behind explicit generic fail-closed guards."""
+
+    materialized = _objects(
+        history.get("materialized_segment_identities"),
+        "materialized history segment identities",
+    )
+    corrections = _objects(history.get("corrections"), "history corrections")
+    for strategy in strategies:
+        strategy_id = _text(strategy.get("strategy_id"), "active blocked strategy_id")
+        live_identity = _object(
+            strategy.get("live_implementation_identity"),
+            f"active blocked live identity {strategy_id}",
+        )
+        if live_identity.get("status") == "EVIDENCED":
+            continue
+        if not (
+            strategy.get("lifecycle_status") == "ACTIVE"
+            and strategy.get("product_requirement") == "REQUIRED"
+        ):
+            continue
+        if strategy.get("readiness") != "REQUIRED_NOT_READY":
+            raise FinancialMvpContractError(
+                f"active strategy lacks evidenced live implementation: {strategy_id}"
+            )
+        dispositions = _object(
+            strategy.get("outcome_dispositions"),
+            f"active blocked outcome dispositions {strategy_id}",
+        )
+        if set(dispositions) != set(OUTCOME_IDS) or set(dispositions.values()) != {
+            "REQUIRED"
+        }:
+            raise FinancialMvpContractError(
+                f"active blocked strategy outcome differs: {strategy_id}"
+            )
+        accepted_numeric = [
+            row
+            for row in materialized
+            if row.get("strategy_id") == strategy_id
+            and row.get("evidence_layer") == "ACCOUNT_LIVE"
+            and row.get("mode_admission") == "INCLUDE_SELECTED_LIVE"
+        ]
+        accepted_numeric.extend(
+            row
+            for row in corrections
+            if row.get("strategy_id") == strategy_id
+            and row.get("evidence_layer") == "ACCOUNT_LIVE"
+            and "INCLUDE_SELECTED_LIVE"
+            in _object(
+                row.get("mode_admission"),
+                f"active blocked mode admission {strategy_id}",
+            ).values()
+        )
+        if accepted_numeric:
+            raise FinancialMvpContractError(
+                f"active blocked strategy asserts accepted numeric history: {strategy_id}"
+            )
+        blocking_sources = []
+        for source in sources:
+            subjects = _object(source.get("subjects"), "active blocked source subjects")
+            if strategy_id not in subjects.get("strategy_ids", []):
+                continue
+            if (
+                source.get("evidence_layer") == "ACCOUNT_LIVE"
+                and source.get("product_requirement") == "REQUIRED"
+                and source.get("readiness") == "REQUIRED_NOT_READY"
+                and source.get("blockers")
+                and source.get("invalidated_outputs")
+                and "FAIL" in str(source.get("absence_behavior", ""))
+            ):
+                blocking_sources.append(source)
+        if not blocking_sources:
+            raise FinancialMvpContractError(
+                f"active blocked numeric source is not fail-closed: {strategy_id}"
+            )
+
+
 def _validate_outcomes(outcomes: list[dict[str, Any]]) -> None:
     if [row.get("outcome_id") for row in outcomes] != list(OUTCOME_IDS):
         raise FinancialMvpContractError(
@@ -4123,6 +5237,7 @@ def _validate_matrixport_gap_policy(row: Mapping[str, Any], source_id: str) -> N
             "reason",
             "return_transform",
             "return_rule",
+            "span_return_receipts",
             "unavailable_return_dates",
         },
         "Matrixport declared_gap_policy",
@@ -4185,6 +5300,11 @@ def _validate_matrixport_gap_policy(row: Mapping[str, Any], source_id: str) -> N
         raise FinancialMvpContractError("Matrixport omitted return dates differ")
     if unavailable_dates != missing_dates | omitted_dates:
         raise FinancialMvpContractError("Matrixport unavailable return dates differ")
+    span_receipts = policy["span_return_receipts"]
+    if not isinstance(span_receipts, list) or tuple(span_receipts) != (
+        _MATRIXPORT_GAP_SPAN_RECEIPTS
+    ):
+        raise FinancialMvpContractError("Matrixport span return receipts differ")
     temporal = _object(row["temporal"], "Matrixport temporal")
     if (policy["calendar"], policy["frequency"]) != (
         temporal.get("calendar"),
@@ -4195,10 +5315,89 @@ def _validate_matrixport_gap_policy(row: Mapping[str, Any], source_id: str) -> N
         )
 
 
+def _validate_robuxio_owner_funded_boundary(contract: Mapping[str, Any]) -> None:
+    """Pin the owner-held epoch apart from the earlier provider launch history."""
+
+    sources = {
+        _text(row.get("source_id"), "source segment id"): row
+        for row in _objects(contract.get("source_segments"), "source segments")
+    }
+    source = _object(
+        sources.get("matrixport-account-generation"), "Matrixport source segment"
+    )
+    strategies = {
+        _text(row.get("strategy_id"), "strategy id"): row
+        for row in _objects(contract.get("strategies"), "strategies")
+    }
+    strategy = _object(strategies.get("robuxio-crypto"), "Robuxio strategy")
+    census = _object(contract.get("current_census"), "current census")
+    sleeves = _objects(census.get("account_sleeves"), "current census sleeves")
+    sleeve = next(
+        (row for row in sleeves if row.get("sleeve_alias") == "matrixport-robuxio-01"),
+        None,
+    )
+    corrections = _objects(
+        _object(contract.get("history_corrections"), "history corrections").get(
+            "corrections"
+        ),
+        "history corrections",
+    )
+    correction = next(
+        (
+            row
+            for row in corrections
+            if row.get("correction_id") == "robuxio-account-live-after-funding"
+        ),
+        None,
+    )
+    if not isinstance(sleeve, dict) or not isinstance(correction, dict):
+        raise FinancialMvpContractError("Robuxio owner-funded boundary differs")
+    assignment = _objects(sleeve.get("assignments"), "Robuxio sleeve assignments")
+    if len(assignment) != 1:
+        raise FinancialMvpContractError("Robuxio owner-funded boundary differs")
+    source_interval = _object(source.get("interval"), "Matrixport source interval")
+    correction_interval = _object(
+        correction.get("interval"), "Robuxio correction interval"
+    )
+    funding_event = _object(correction.get("funding_event"), "Robuxio funding event")
+    funded_membership = _object(
+        strategy.get("funded_membership"), "Robuxio funded membership"
+    )
+    if (
+        any(
+            value != _MATRIXPORT_OWNER_EPOCH["effective_start"]
+            for value in (
+                source_interval.get("effective_start"),
+                correction_interval.get("effective_start"),
+                funding_event.get("event_date"),
+                funding_event.get("account_live_start"),
+                funded_membership.get("effective_start"),
+                assignment[0].get("effective_start"),
+            )
+        )
+        or any(
+            value != _MATRIXPORT_OWNER_EPOCH["observed_start"]
+            for value in (
+                source_interval.get("observed_start"),
+                correction_interval.get("observed_start"),
+            )
+        )
+        or any(
+            value != _MATRIXPORT_OWNER_EPOCH["observed_end"]
+            for value in (
+                source_interval.get("observed_end"),
+                correction_interval.get("observed_end"),
+            )
+        )
+    ):
+        raise FinancialMvpContractError("Robuxio owner-funded boundary differs")
+
+
 def _validate_sources(
     sources: list[dict[str, Any]],
     registry_ids: set[str],
     required_strategy_ids: set[str],
+    active_blocked_strategy_ids: set[str],
 ) -> None:
     source_ids: set[str] = set()
     data_classes: set[str] = set()
@@ -4684,6 +5883,8 @@ def _validate_sources(
         "INDUSTRY_RETURN",
     }
     for strategy_id, strategy_classes in decomposition_classes_by_strategy.items():
+        if strategy_id in active_blocked_strategy_ids:
+            continue
         missing_classes = required_decomposition_classes - strategy_classes
         if missing_classes:
             raise FinancialMvpContractError(
@@ -5320,29 +6521,137 @@ def _validate_golden_case(golden: Mapping[str, Any]) -> None:
         raise FinancialMvpContractError("golden report/panel parity differs")
 
 
+def _validate_epoch_manifest_source_shape(source: object) -> None:
+    """Validate the v7 source shape without claiming equality to any bundle."""
+
+    source_object = _object(source, "epoch_manifest_source")
+    artifact = _object(source_object.get("artifact"), "epoch_manifest_source.artifact")
+    schema = _object(artifact.get("schema"), "epoch_manifest_source.artifact.schema")
+    version = _text(
+        schema.get("version"), "epoch_manifest_source.artifact.schema.version"
+    )
+    expected_source_keys = _EPOCH_MANIFEST_SOURCE_KEYS_BY_VERSION.get(version)
+    if expected_source_keys is None:
+        raise FinancialMvpContractError(
+            "epoch_manifest_source.artifact.schema.version differs"
+        )
+    _strict_keys(
+        source_object,
+        set(expected_source_keys),
+        "epoch_manifest_source",
+    )
+    for name in (
+        "generation_id",
+        "generation_manifest_sha256",
+        "generation_receipt_sha256",
+        "full_directory_inventory_sha256",
+    ):
+        _hash(source_object[name], f"epoch_manifest_source.{name}")
+
+    _strict_keys(
+        artifact,
+        {"path", "sha256", "size_bytes", "schema"},
+        "epoch_manifest_source.artifact",
+    )
+    if artifact["path"] != EPOCH_MANIFEST_ARTIFACT_PATH:
+        raise FinancialMvpContractError("epoch_manifest_source.artifact.path differs")
+    _hash(artifact["sha256"], "epoch_manifest_source.artifact.sha256")
+    size_bytes = artifact["size_bytes"]
+    if type(size_bytes) is not int or size_bytes <= 0:
+        raise FinancialMvpContractError(
+            "epoch_manifest_source.artifact.size_bytes must be a positive integer"
+        )
+
+    _strict_keys(
+        schema,
+        {"name", "version"},
+        "epoch_manifest_source.artifact.schema",
+    )
+    if schema["name"] != EPOCH_MANIFEST_ARTIFACT_SCHEMA_NAME:
+        raise FinancialMvpContractError(
+            "epoch_manifest_source.artifact.schema.name differs"
+        )
+    if schema["version"] != version:
+        raise AssertionError("epoch source version changed during validation")
+    if version == "9":
+        crosswalk = _object(
+            source_object["crosswalk"], "epoch_manifest_source.crosswalk"
+        )
+        _strict_keys(
+            crosswalk,
+            {"path", "sha256", "size_bytes", "schema"},
+            "epoch_manifest_source.crosswalk",
+        )
+        if crosswalk["path"] != EPOCH_CROSSWALK_ARTIFACT_PATH:
+            raise FinancialMvpContractError(
+                "epoch_manifest_source.crosswalk.path differs"
+            )
+        _hash(crosswalk["sha256"], "epoch_manifest_source.crosswalk.sha256")
+        if type(crosswalk["size_bytes"]) is not int or crosswalk["size_bytes"] <= 0:
+            raise FinancialMvpContractError(
+                "epoch_manifest_source.crosswalk.size_bytes must be a positive integer"
+            )
+        crosswalk_schema = _object(
+            crosswalk["schema"], "epoch_manifest_source.crosswalk.schema"
+        )
+        _strict_keys(
+            crosswalk_schema,
+            {"name", "version"},
+            "epoch_manifest_source.crosswalk.schema",
+        )
+        if crosswalk_schema["name"] != EPOCH_CROSSWALK_ARTIFACT_SCHEMA_NAME:
+            raise FinancialMvpContractError(
+                "epoch_manifest_source.crosswalk.schema.name differs"
+            )
+        if crosswalk_schema["version"] != EPOCH_CROSSWALK_ARTIFACT_SCHEMA_VERSION:
+            raise FinancialMvpContractError(
+                "epoch_manifest_source.crosswalk.schema.version differs"
+            )
+
+
 def validate_contract(
-    contract: Mapping[str, Any], *, registry: Mapping[str, Any]
+    contract: Mapping[str, Any],
+    *,
+    registry: Mapping[str, Any],
+    epoch_manifest_bundle: GenerationBundle | None = None,
 ) -> dict[str, Any]:
     """Validate executable product/source semantics and return a plain object."""
 
     _reject_private_values(contract)
-    _strict_keys(
-        contract,
-        {
-            "$schema",
-            "contract_schema_version",
-            "current_census",
-            "financial_outcomes",
-            "golden_case",
-            "history_corrections",
-            "product",
-            "source_segments",
-            "strategies",
-        },
-        "financial MVP contract",
-    )
-    if contract["contract_schema_version"] != 6:
-        raise FinancialMvpContractError("contract_schema_version must be 6")
+    v6_keys = {
+        "$schema",
+        "contract_schema_version",
+        "current_census",
+        "financial_outcomes",
+        "golden_case",
+        "history_corrections",
+        "product",
+        "source_segments",
+        "strategies",
+    }
+    version = contract.get("contract_schema_version")
+    if version == 6:
+        _strict_keys(contract, v6_keys, "financial MVP contract")
+    elif version == 7:
+        _strict_keys(
+            contract,
+            v6_keys | {"epoch_manifest_source"},
+            "financial MVP contract",
+        )
+        _validate_epoch_manifest_source_shape(contract["epoch_manifest_source"])
+        if epoch_manifest_bundle is None:
+            raise FinancialMvpContractError(
+                "contract schema v7 requires a verified epoch-manifest bundle"
+            )
+        validate_epoch_manifest_source(
+            contract["epoch_manifest_source"], bundle=epoch_manifest_bundle
+        )
+    else:
+        raise FinancialMvpContractError("contract_schema_version must be 6 or 7")
+    if version == 6 and epoch_manifest_bundle is not None:
+        raise FinancialMvpContractError(
+            "contract schema v6 cannot bind an epoch-manifest bundle"
+        )
     if contract["$schema"] != (
         "../schemas/portfolio/financial-mvp-source-contract.schema.json"
     ):
@@ -5360,7 +6669,20 @@ def validate_contract(
         for row in strategies
         if row["product_requirement"] == "REQUIRED"
     }
-    _validate_sources(sources, set(registry_ids), required_strategy_ids)
+    active_blocked_strategy_ids = {
+        row["strategy_id"]
+        for row in strategies
+        if row["lifecycle_status"] == "ACTIVE"
+        and row["product_requirement"] == "REQUIRED"
+        and row["readiness"] == "REQUIRED_NOT_READY"
+        and row["live_implementation_identity"]["status"] != "EVIDENCED"
+    }
+    _validate_sources(
+        sources,
+        set(registry_ids),
+        required_strategy_ids,
+        active_blocked_strategy_ids,
+    )
     _validate_strategy_version_evidence(strategies, sources)
     _validate_current_census(
         _object(contract["current_census"], "current_census"),
@@ -5373,6 +6695,13 @@ def validate_contract(
         sources,
         set(registry_ids),
     )
+    _validate_robuxio_owner_funded_boundary(contract)
+    _verify_strategy_version_history_evidence(contract)
+    _validate_active_blocked_numeric_identities(
+        strategies,
+        sources,
+        _object(contract["history_corrections"], "history_corrections"),
+    )
     _validate_golden_case(_object(contract["golden_case"], "golden_case"))
     return dict(contract)
 
@@ -5381,8 +6710,29 @@ def load_contract(
     contract_path: Path = DEFAULT_CONTRACT,
     registry_path: Path = DEFAULT_REGISTRY,
     schema_path: Path = DEFAULT_SCHEMA,
+    *,
+    epoch_manifest_generation_root: Path | None = None,
+    epoch_manifest_generation_id: str | None = None,
 ) -> dict[str, Any]:
     """Load and validate the one current financial-product authority."""
+
+    if (epoch_manifest_generation_root is None) != (
+        epoch_manifest_generation_id is None
+    ):
+        raise FinancialMvpContractError(
+            "epoch-manifest generation root and id must be supplied together"
+        )
+    epoch_manifest_bundle: GenerationBundle | None = None
+    if epoch_manifest_generation_root is not None:
+        assert epoch_manifest_generation_id is not None
+        try:
+            epoch_manifest_bundle = read_generation_bundle(
+                epoch_manifest_generation_root, epoch_manifest_generation_id
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise FinancialMvpContractError(
+                "epoch-manifest generation bundle verification failed"
+            ) from exc
 
     contract = _load_json(contract_path, "financial MVP contract")
     schema = _load_json(schema_path, "financial MVP contract schema")
@@ -5392,7 +6742,11 @@ def load_contract(
             "financial MVP contract schema validation failed: " + "; ".join(errors[:10])
         )
     registry = _load_json(registry_path, "current strategy registry")
-    return validate_contract(contract, registry=registry)
+    return validate_contract(
+        contract,
+        registry=registry,
+        epoch_manifest_bundle=epoch_manifest_bundle,
+    )
 
 
 def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
@@ -5411,6 +6765,11 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
     materialized_segments = _objects(
         history["materialized_segment_identities"],
         "materialized history segment identities",
+    )
+    epoch_manifest_source = (
+        _object(contract["epoch_manifest_source"], "epoch_manifest_source")
+        if "epoch_manifest_source" in contract
+        else None
     )
     lines = [
         "# Current financial MVP",
@@ -5582,21 +6941,38 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             "|---|---|---|---|---|---|---|---|---|",
         ]
     )
-    for row in strategies:
-        version = row["strategy_version"]
-        membership = row["funded_membership"]
-        blockers = ", ".join(f"#{value}" for value in row["blockers"]) or "None"
-        version_text = version["version_ref"] or version["status"]
-        live_identity = row["live_implementation_identity"]
-        live_text = live_identity["version_ref"] or live_identity["status"]
-        history_series = row["history_series_id"] or "NOT_CAPTURED"
-        lines.append(
-            f"| {row['strategy_id']} | {row['lifecycle_status']} | {history_series} | "
-            f"{row['product_requirement']} | "
-            f"{row['readiness']} | {version_text} | {live_text} | "
-            f"{membership['status']} | "
-            f"{blockers} |"
-        )
+
+    def append_strategy_rows(rows: Sequence[Mapping[str, Any]]) -> None:
+        for row in rows:
+            version = row["strategy_version"]
+            membership = row["funded_membership"]
+            blockers = ", ".join(f"#{value}" for value in row["blockers"]) or "None"
+            version_text = version["version_ref"] or version["status"]
+            live_identity = row["live_implementation_identity"]
+            live_text = live_identity["version_ref"] or live_identity["status"]
+            history_series = row["history_series_id"] or "NOT_CAPTURED"
+            lines.append(
+                f"| {row['strategy_id']} | {row['lifecycle_status']} | "
+                f"{history_series} | {row['product_requirement']} | "
+                f"{row['readiness']} | {version_text} | {live_text} | "
+                f"{membership['status']} | {blockers} |"
+            )
+
+    append_strategy_rows(
+        [row for row in strategies if row["product_requirement"] == "REQUIRED"]
+    )
+    lines.extend(
+        [
+            "",
+            "## Historical/owner exclusions",
+            "",
+            "| Strategy | Lifecycle | History series | Requirement | Readiness | Design/config version | Live implementation | Funded membership | Blockers |",
+            "|---|---|---|---|---|---|---|---|---|",
+        ]
+    )
+    append_strategy_rows(
+        [row for row in strategies if row["product_requirement"] == "EXCLUDED"]
+    )
     lines.extend(
         [
             "",
@@ -5829,6 +7205,44 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
             "",
         ]
     )
+    if epoch_manifest_source is not None:
+        epoch_artifact = _object(
+            epoch_manifest_source["artifact"], "epoch_manifest_source artifact"
+        )
+        epoch_schema = _object(
+            epoch_artifact["schema"], "epoch_manifest_source artifact schema"
+        )
+        lines.extend(
+            [
+                "## Epoch manifest source",
+                "",
+                f"- Generation ID: `{epoch_manifest_source['generation_id']}`",
+                f"- Generation manifest SHA-256: `{epoch_manifest_source['generation_manifest_sha256']}`",
+                f"- Generation receipt SHA-256: `{epoch_manifest_source['generation_receipt_sha256']}`",
+                f"- Full directory inventory SHA-256: `{epoch_manifest_source['full_directory_inventory_sha256']}`",
+                f"- Artifact path: `{epoch_artifact['path']}`",
+                f"- Artifact SHA-256: `{epoch_artifact['sha256']}`",
+                f"- Artifact size bytes: `{epoch_artifact['size_bytes']}`",
+                f"- Artifact schema: `{epoch_schema['name']}@{epoch_schema['version']}`",
+            ]
+        )
+        if epoch_schema["version"] == "9":
+            epoch_crosswalk = _object(
+                epoch_manifest_source["crosswalk"], "epoch_manifest_source crosswalk"
+            )
+            epoch_crosswalk_schema = _object(
+                epoch_crosswalk["schema"], "epoch_manifest_source crosswalk schema"
+            )
+            lines.extend(
+                [
+                    f"- Crosswalk path: `{epoch_crosswalk['path']}`",
+                    f"- Crosswalk SHA-256: `{epoch_crosswalk['sha256']}`",
+                    f"- Crosswalk size bytes: `{epoch_crosswalk['size_bytes']}`",
+                    "- Crosswalk schema: "
+                    f"`{epoch_crosswalk_schema['name']}@{epoch_crosswalk_schema['version']}`",
+                ]
+            )
+        lines.append("")
     summary = ("\n".join(lines)).encode("utf-8")
 
     matrix_rows: list[dict[str, Any]] = []
@@ -5964,25 +7378,26 @@ def render_views(contract: Mapping[str, Any]) -> GeneratedViews:
                         "current_generation": source["current_generation"],
                     }
                 )
+    source_matrix = {
+        "contract_sha256": digest,
+        "census_sha256": accepted_census_digest,
+        "invested_capital_policy_sha256": invested_policy_digest,
+        "owner_decision_receipts": {
+            decision_id: receipts[decision_id]["payload_sha256"]
+            for decision_id in OWNER_DECISION_IDS
+        },
+        "history_corrections": history,
+        "current_census": census,
+        "census_rows": census_rows,
+        "as_of_policy": product["as_of_policy"],
+        "product_version": product["product_version"],
+        "rows": matrix_rows,
+    }
+    if epoch_manifest_source is not None:
+        source_matrix["epoch_manifest_source"] = epoch_manifest_source
     return GeneratedViews(
         summary_markdown=summary,
-        source_matrix_json=canonical_json_bytes(
-            {
-                "contract_sha256": digest,
-                "census_sha256": accepted_census_digest,
-                "invested_capital_policy_sha256": invested_policy_digest,
-                "owner_decision_receipts": {
-                    decision_id: receipts[decision_id]["payload_sha256"]
-                    for decision_id in OWNER_DECISION_IDS
-                },
-                "history_corrections": history,
-                "current_census": census,
-                "census_rows": census_rows,
-                "as_of_policy": product["as_of_policy"],
-                "product_version": product["product_version"],
-                "rows": matrix_rows,
-            }
-        ),
+        source_matrix_json=canonical_json_bytes(source_matrix),
     )
 
 
@@ -6046,27 +7461,26 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--provider-ledger-root", type=Path)
     parser.add_argument("--quantbase-root", type=Path)
     parser.add_argument("--schwab-root", type=Path)
+    parser.add_argument("--epoch-manifest-generation-root", type=Path)
+    parser.add_argument("--epoch-manifest-generation-id")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    contract = load_contract(
+        args.contract,
+        args.registry,
+        epoch_manifest_generation_root=args.epoch_manifest_generation_root,
+        epoch_manifest_generation_id=args.epoch_manifest_generation_id,
+    )
     if args.command == "decision-digests":
-        contract = _load_json(args.contract, "financial MVP contract")
-        schema = _load_json(DEFAULT_SCHEMA, "financial MVP contract schema")
-        errors = schema_errors(schema, contract, schema)
-        if errors:
-            raise FinancialMvpContractError(
-                "financial MVP contract schema validation failed: "
-                + "; ".join(errors[:10])
-            )
         print(
             json.dumps(
                 owner_decision_receipt_digests(contract), indent=2, sort_keys=True
             )
         )
         return 0
-    contract = load_contract(args.contract, args.registry)
     result: Mapping[str, object]
     if args.command == "verify-census-evidence":
         roots = {

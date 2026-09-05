@@ -33,6 +33,7 @@
   "properties": {
     "report_schema_version": {"const": 1},
     "as_of_date": {"type": "string", "format": "date"},
+    "calculation_cutoff_date": {"type": "string", "format": "date"},
     "baseline": {
       "type": "object",
       "additionalProperties": false,
@@ -44,7 +45,7 @@
     },
     "portfolio_summary": {"type": "array", "minItems": 8, "items": {"type": "object"}},
     "account_summary": {"type": "array", "minItems": 1, "items": {"type": "object"}},
-    "strategy_summary": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "object"}},
+    "strategy_summary": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"type": "object"}},
     "provider_admissions": {"type": "array", "items": {"type": "object"}},
     "provider_coverage": {"type": "array", "items": {"type": "object"}},
     "provider_strategy_returns": {"type": "array", "items": {"type": "object"}},
@@ -69,7 +70,7 @@
     },
     "transactions_and_flows": {"type": "array", "items": {"type": "object"}},
     "twr_mwr": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/performance"}},
-    "allocation_history": {"type": "array", "minItems": 10, "maxItems": 10, "items": {"type": "object"}},
+    "allocation_history": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"type": "object"}},
     "flow_reconciliation": {"type": "array", "items": {"type": "object"}},
     "reconciliation_checks": {"type": "array", "minItems": 3, "items": {"type": "object"}},
     "coverage_data_quality": {"type": "array", "minItems": 1, "items": {"type": "object"}},
@@ -230,9 +231,9 @@
       "additionalProperties": false,
       "required": ["benchmark_assignments", "comparisons", "costs", "generation_id"],
       "properties": {
-        "benchmark_assignments": {"type": "array", "minItems": 9, "maxItems": 9},
-        "comparisons": {"type": "array", "minItems": 9, "maxItems": 9},
-        "costs": {"type": "array", "minItems": 9, "maxItems": 9},
+        "benchmark_assignments": {"type": "array", "minItems": 7, "maxItems": 7},
+        "comparisons": {"type": "array", "minItems": 7, "maxItems": 7},
+        "costs": {"type": "array", "minItems": 7, "maxItems": 7},
         "generation_id": {"$ref": "#/$defs/sha256"}
       }
     },
@@ -328,38 +329,265 @@
     },
     "performance": {
       "type": "object",
-      "additionalProperties": true,
+      "additionalProperties": false,
       "required": [
         "account_id",
+        "account_label",
         "assignment_id",
-        "strategy_id",
-        "twr",
-        "twr_status",
-        "mwr_xirr",
+        "effective_end",
+        "effective_start",
+        "flow_count",
+        "flow_timing",
+        "last_four",
         "mwr_status",
-        "flow_timing"
+        "mwr_xirr",
+        "nav_observations",
+        "observed_end",
+        "observed_start",
+        "pool_id",
+        "pool_mapping_status",
+        "strategy_id",
+        "strategy_mapping_disposition",
+        "twr",
+        "twr_status"
       ],
       "properties": {
         "account_id": {"type": "string", "minLength": 1},
+        "account_label": {"type": ["string", "null"]},
         "assignment_id": {"type": "string", "minLength": 1},
+        "effective_end": {"type": ["string", "null"], "format": "date"},
+        "effective_start": {"type": ["string", "null"], "format": "date"},
         "strategy_id": {"type": ["string", "null"]},
         "twr": {"type": ["string", "null"]},
         "twr_status": {
           "enum": [
             "AVAILABLE_WITH_INFERRED_FLOW_TIMING",
-            "UNAVAILABLE",
-            "UNMAPPED",
+              "UNAVAILABLE",
+              "HISTORICAL_ONLY_EXCLUDED_FROM_CURRENT_PRODUCT",
+              "UNMAPPED",
             "UNAVAILABLE_INSUFFICIENT_NAV",
             "UNAVAILABLE_MISSING_NAV",
             "UNAVAILABLE_FLOW_WITHOUT_SAME_DATE_NAV",
             "UNAVAILABLE_FLOW_AMOUNT",
-            "UNAVAILABLE_NONPOSITIVE_PRIOR_NAV"
+            "UNAVAILABLE_NONPOSITIVE_PRIOR_NAV",
+            "BLOCKED_ADMISSION"
           ]
         },
         "mwr_xirr": {"type": "null"},
-        "mwr_status": {"const": "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE"},
-        "flow_timing": {"const": "DATE_ONLY_END_OF_DAY_INFERRED_TIMING"}
-      }
+        "mwr_status": {
+          "enum": ["UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE", "BLOCKED_ADMISSION"]
+        },
+        "flow_timing": {
+          "type": ["string", "null"],
+          "enum": ["DATE_ONLY_END_OF_DAY_INFERRED_TIMING", null]
+        },
+        "flow_count": {"type": ["integer", "null"], "minimum": 0},
+        "last_four": {"type": ["string", "null"]},
+        "nav_observations": {"type": ["integer", "null"], "minimum": 0},
+        "observed_end": {"type": ["string", "null"], "format": "date"},
+        "observed_start": {"type": ["string", "null"], "format": "date"},
+        "pool_id": {"type": ["string", "null"]},
+        "pool_mapping_status": {"type": ["string", "null"]},
+        "strategy_mapping_disposition": {"type": ["string", "null"]},
+        "epoch_admission_status": {"enum": ["FUNDED", "BLOCKED", null]},
+        "epoch_output_status": {"enum": ["OK", "BLOCKED_ADMISSION", null]},
+        "epoch_blocking_reason": {"type": ["string", "null"]},
+        "return_path_account_binding": {
+          "enum": [
+            "EVIDENCE_ACCOUNT_SCOPE",
+            "UNIQUE_CURRENT_EFFECTIVE_DATED_ASSIGNMENT",
+            null
+          ]
+        },
+        "return_path_assignment_id": {"type": ["string", "null"]},
+        "return_path_authority": {
+          "enum": ["CANONICAL_ACCOUNT_LIVE_STRATEGY_RETURNS", null]
+        },
+        "return_path_cumulative_return": {"type": ["string", "null"]},
+        "return_path_evidence_layer": {"enum": ["ACCOUNT_LIVE", null]},
+        "return_path_generation_id": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "return_path_observations": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "return_path_observed_end": {
+          "type": ["string", "null"],
+          "format": "date"
+        },
+        "return_path_observed_start": {
+          "type": ["string", "null"],
+          "format": "date"
+        },
+        "return_path_series_sha256": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "return_path_status": {
+          "enum": [
+            "AVAILABLE_ACCOUNT_LIVE_RETURN_PATH",
+            "BLOCKED_ADMISSION",
+            null
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "epoch_admission_status": {"enum": ["FUNDED", "BLOCKED"]}
+            },
+            "required": ["epoch_admission_status"]
+          },
+          "then": {
+            "required": [
+              "epoch_admission_status",
+              "epoch_blocking_reason",
+              "epoch_output_status",
+              "return_path_account_binding",
+              "return_path_assignment_id",
+              "return_path_authority",
+              "return_path_cumulative_return",
+              "return_path_evidence_layer",
+              "return_path_generation_id",
+              "return_path_observations",
+              "return_path_observed_end",
+              "return_path_observed_start",
+              "return_path_series_sha256",
+              "return_path_status"
+            ]
+          }
+        },
+        {
+          "if": {
+            "anyOf": [
+              {
+                "properties": {
+                  "epoch_admission_status": {"const": "BLOCKED"}
+                },
+                "required": ["epoch_admission_status"]
+              },
+              {
+                "properties": {
+                  "epoch_output_status": {"const": "BLOCKED_ADMISSION"}
+                },
+                "required": ["epoch_output_status"]
+              },
+              {
+                "properties": {
+                  "return_path_status": {"const": "BLOCKED_ADMISSION"}
+                },
+                "required": ["return_path_status"]
+              },
+              {
+                "properties": {
+                  "mwr_status": {"const": "BLOCKED_ADMISSION"}
+                },
+                "required": ["mwr_status"]
+              },
+              {
+                "properties": {
+                  "twr_status": {"const": "BLOCKED_ADMISSION"}
+                },
+                "required": ["twr_status"]
+              }
+            ]
+          },
+          "then": {
+            "properties": {
+              "epoch_blocking_reason": {"type": "string", "minLength": 1},
+              "epoch_output_status": {"const": "BLOCKED_ADMISSION"},
+              "flow_count": {"type": "null"},
+              "flow_timing": {"type": "null"},
+              "mwr_status": {"const": "BLOCKED_ADMISSION"},
+              "mwr_xirr": {"type": "null"},
+              "nav_observations": {"type": "null"},
+              "observed_end": {"type": "null"},
+              "observed_start": {"type": "null"},
+              "return_path_account_binding": {"type": "null"},
+              "return_path_assignment_id": {"type": "null"},
+              "return_path_authority": {"type": "null"},
+              "return_path_cumulative_return": {"type": "null"},
+              "return_path_evidence_layer": {"type": "null"},
+              "return_path_generation_id": {"type": "null"},
+              "return_path_observations": {"type": "null"},
+              "return_path_observed_end": {"type": "null"},
+              "return_path_observed_start": {"type": "null"},
+              "return_path_series_sha256": {"type": "null"},
+              "return_path_status": {"const": "BLOCKED_ADMISSION"},
+              "twr": {"type": "null"},
+              "twr_status": {"const": "BLOCKED_ADMISSION"}
+            }
+          }
+        }
+      ]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "provenance": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "artifact": {
+                  "enum": [
+                    "epoch-manifest-source.json",
+                    "account-strategy-current-epoch-crosswalk",
+                    "account-strategy-manifest",
+                    "account-manifest-generation"
+                  ]
+                }
+              },
+              "required": ["artifact"]
+            }
+          }
+        },
+        "required": ["provenance"]
+      },
+      "then": {
+        "required": ["calculation_cutoff_date"],
+        "properties": {
+          "twr_mwr": {
+            "items": {
+              "required": [
+                "epoch_admission_status",
+                "epoch_blocking_reason",
+                "epoch_output_status",
+                "return_path_account_binding",
+                "return_path_assignment_id",
+                "return_path_authority",
+                "return_path_cumulative_return",
+                "return_path_evidence_layer",
+                "return_path_generation_id",
+                "return_path_observations",
+                "return_path_observed_end",
+                "return_path_observed_start",
+                "return_path_series_sha256",
+                "return_path_status"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "twr_mwr": {
+            "contains": {
+              "type": "object",
+              "properties": {
+                "epoch_admission_status": {"enum": ["FUNDED", "BLOCKED"]}
+              },
+              "required": ["epoch_admission_status"]
+            }
+          }
+        },
+        "required": ["twr_mwr"]
+      },
+      "then": {"required": ["calculation_cutoff_date"]}
+    }
+  ]
 }

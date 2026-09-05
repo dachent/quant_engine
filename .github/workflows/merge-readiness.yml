@@ -18,6 +18,7 @@ permissions:
   contents: read
   pull-requests: read
   checks: read
+  statuses: read
 
 concurrency:
   group: merge-readiness-${{ github.event.pull_request.number || github.event.pull_request.head.sha || github.ref }}

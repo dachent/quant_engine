@@ -30,6 +30,7 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.ibkr.flex import (
     FlexDailyStatement,
+    FlexTransfer,
     FlexValidationError,
     parse_flex_file,
 )
@@ -579,6 +580,72 @@ def _dedupe(records: Sequence[dict[str, Any]], name: str) -> list[dict[str, Any]
     return [accepted[key] for key in sorted(accepted)]
 
 
+def _proven_position_transfer_pairs(
+    statements: Sequence[FlexDailyStatement], crosswalk: Mapping[str, str]
+) -> frozenset[tuple[str, FlexTransfer]]:
+    """Return zero-cash position transfers with a proven internal counter-leg.
+
+    A source base valuation is capital evidence only when exactly two distinct
+    internal accounts report one shared provider activity with same-date,
+    same-security, opposite directions, and exactly opposite source values.
+    """
+
+    candidates: dict[str, list[tuple[str, str, FlexTransfer]]] = {}
+    for statement in statements:
+        for transfer in statement.transfers:
+            if transfer.cash_amount not in (
+                None,
+                Decimal("0"),
+            ) or transfer.position_amount_in_base in (None, Decimal("0")):
+                continue
+            candidates.setdefault(transfer.transaction_id, []).append(
+                (statement.raw_account_id, statement.base_currency, transfer)
+            )
+
+    proven: set[tuple[str, FlexTransfer]] = set()
+    for legs in candidates.values():
+        if len(legs) != 2:
+            continue
+        (
+            (left_raw_account, left_base_currency, left),
+            (
+                right_raw_account,
+                right_base_currency,
+                right,
+            ),
+        ) = legs
+        if {left.direction.upper(), right.direction.upper()} != {"IN", "OUT"}:
+            continue
+        incoming = left if left.direction.upper() == "IN" else right
+        outgoing = right if incoming is left else left
+        left_position_amount = left.position_amount_in_base
+        right_position_amount = right.position_amount_in_base
+        incoming_position_amount = incoming.position_amount_in_base
+        outgoing_position_amount = outgoing.position_amount_in_base
+        if (
+            left_raw_account == right_raw_account
+            or crosswalk[left_raw_account] == crosswalk[right_raw_account]
+            or not left.reported_account_matches_statement
+            or not right.reported_account_matches_statement
+            or left.transfer_type.upper() != "INTERNAL"
+            or right.transfer_type.upper() != "INTERNAL"
+            or left_base_currency != right_base_currency
+            or left.event_date != right.event_date
+            or left.conid is None
+            or left.conid != right.conid
+            or left_position_amount is None
+            or right_position_amount is None
+            or incoming_position_amount is None
+            or outgoing_position_amount is None
+            or left_position_amount != -right_position_amount
+            or incoming_position_amount <= 0
+            or outgoing_position_amount >= 0
+        ):
+            continue
+        proven.update((raw_account, transfer) for raw_account, _, transfer in legs)
+    return frozenset(proven)
+
+
 def _normalize(
     statements: Sequence[FlexDailyStatement],
     baseline: Mapping[str, Any],
@@ -605,6 +672,7 @@ def _normalize(
     tws_account_values: list[dict[str, Any]] = []
     tws_positions: list[dict[str, Any]] = []
     account_scope_mismatches = 0
+    proven_position_transfers = _proven_position_transfer_pairs(statements, crosswalk)
 
     def security(conid: str | None, currency: str) -> str | None:
         if conid is None:
@@ -706,6 +774,11 @@ def _normalize(
                 {"record_id": _record_id("transaction", payload), **payload}
             )
         for cash in statement.cash_transactions:
+            if cash.level_of_detail != "DETAIL":
+                # Flex SUMMARY rows are statement-level rollups. They can
+                # duplicate or aggregate DETAIL activities and are retained in
+                # the hash-bound source artifact, never as economic flows.
+                continue
             status, strategy_id = _strategy_for_date(
                 assignments, account_id, cash.event_date
             )
@@ -721,6 +794,7 @@ def _normalize(
                 },
                 "event_date": cash.event_date.isoformat(),
                 "mapping_status": status,
+                "nav_recognition_date": cash.nav_recognition_date.isoformat(),
                 "provider_activity_id_sha256": hashlib.sha256(
                     cash.transaction_id.encode()
                 ).hexdigest(),
@@ -759,6 +833,17 @@ def _normalize(
                 }
                 if transfer.cash_amount is not None and transfer.cash_amount != 0
                 else {
+                    "currency": statement.base_currency,
+                    "status": "AVAILABLE",
+                    "value": decimal_text(transfer.position_amount_in_base),
+                }
+                if (
+                    transfer.position_amount_in_base is not None
+                    and transfer.position_amount_in_base != 0
+                    and (statement.raw_account_id, transfer)
+                    in proven_position_transfers
+                )
+                else {
                     "currency": transfer.currency,
                     "status": "UNAVAILABLE",
                     "value": None,
@@ -770,6 +855,7 @@ def _normalize(
                 "event_date": transfer.event_date.isoformat(),
                 "flow_type": f"TRANSFER:{transfer.transfer_type}:{transfer.direction}",
                 "mapping_status": status,
+                "nav_recognition_date": transfer.nav_recognition_date.isoformat(),
                 "provider_activity_id_sha256": hashlib.sha256(
                     transfer.transaction_id.encode()
                 ).hexdigest(),
@@ -781,6 +867,13 @@ def _normalize(
                 "source_artifact_id": statement.artifact_id,
                 "strategy_id": strategy_id,
             }
+            if (
+                transfer.cash_amount in (None, Decimal("0"))
+                and transfer.position_amount_in_base is not None
+                and transfer.position_amount_in_base != 0
+                and (statement.raw_account_id, transfer) in proven_position_transfers
+            ):
+                transfer_payload["value_basis"] = "POSITION_AMOUNT_IN_BASE"
             flows.append(
                 {
                     "record_id": _record_id("flow", transfer_payload),

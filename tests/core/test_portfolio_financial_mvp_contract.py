@@ -6,9 +6,27 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import shutil
 import sys
+from types import SimpleNamespace
 
 import pytest
+from jsonschema import Draft202012Validator
+
+from quant_engine.core import (
+    AdapterIdentity,
+    CoverageClaim,
+    CoverageStatus,
+    GenerationBundle,
+    GenerationConflictError,
+    GenerationManifest,
+    ManifestValidationError,
+    SourceArtifact,
+    VerificationStatus,
+    read_generation_bundle,
+    stage_generation_bundle,
+)
+from quant_engine.core.contracts import canonical_json_bytes
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -27,6 +45,791 @@ SCHEMA_PATH = (
 )
 REGISTRY_PATH = ROOT / "docs" / "analytics" / "current-strategy-decomposition-plan.json"
 GENERATED_ROOT = ROOT / "generated" / "financial-mvp"
+HWM_POLICY_PATH = ROOT / "contracts" / "portfolio-hwm-policy-v4.json"
+
+EPOCH_MANIFEST_ARTIFACT_PATH = "outputs/account-strategy-manifest.json"
+SYNTHETIC_EPOCH_PAYLOAD = b'{"fixture":"synthetic-task-6","version":8}\n'
+SYNTHETIC_INDEPENDENT_REPORT = b'{"fixture":"synthetic-task-6-report"}\n'
+EPOCH_CROSSWALK_ARTIFACT_PATH = "authority/account-assignment-crosswalk.json"
+EPOCH_INDEPENDENT_REPORT_PATH = "verification/independent-verification.json"
+FRESH_V9_GENERATION_ID = (
+    "177353fc5a0e3dd2144b57495593228b204714e26d7e1db0b11ae0ebcf98ab11"
+)
+FRESH_V9_BUNDLE_ROOT = ROOT / ".q" / "nlv2m2"
+FRESH_V9_BUNDLE_PATH = FRESH_V9_BUNDLE_ROOT / "generations" / FRESH_V9_GENERATION_ID
+FRESH_V9_SIDECAR_PATH = (
+    FRESH_V9_BUNDLE_ROOT
+    / "report-inputs"
+    / FRESH_V9_GENERATION_ID
+    / "epoch-manifest-source.json"
+)
+
+
+def _literal_epoch_manifest_source() -> dict[str, object]:
+    """Handwritten oracle for the deterministic synthetic Task-6 bundle."""
+
+    return {
+        "generation_id": (
+            "b4888a18780058e777f8147530062a882a473aaef19596562480a1bf43425cd8"
+        ),
+        "generation_manifest_sha256": (
+            "2d88627c2283c31aa3c5a9333bc6ee423a1fcdd22d7df495a69c1768d384bb3d"
+        ),
+        "generation_receipt_sha256": (
+            "041b1343070f24c99488b27e227264bf6ff9d8d9a0047f8732c7bcc3887bb25f"
+        ),
+        "full_directory_inventory_sha256": (
+            "50769d0200857b7fe43c67cc814a21dea8e2564f916ab65ebfcb635b0910cfb1"
+        ),
+        "artifact": {
+            "path": "outputs/account-strategy-manifest.json",
+            "sha256": (
+                "810eb288a0d472414c805824cf91283fb3fa5b3c394ce5edec685ab9c3c64834"
+            ),
+            "size_bytes": 43,
+            "schema": {"name": "account-strategy-manifest", "version": "8"},
+        },
+    }
+
+
+def _synthetic_epoch_bundle(
+    tmp_path: Path,
+    *,
+    artifact_id: str = EPOCH_MANIFEST_ARTIFACT_PATH,
+    schema_name: str = "account-strategy-manifest",
+    schema_version: str = "8",
+    payload: bytes = SYNTHETIC_EPOCH_PAYLOAD,
+) -> GenerationBundle:
+    """Stage and re-read synthetic Task-6 evidence through the real verifier."""
+
+    as_of = date(2026, 8, 24)
+    artifact = SourceArtifact(
+        artifact_id=artifact_id,
+        sha256=hashlib.sha256(payload).hexdigest(),
+        size_bytes=len(payload),
+        as_of_date=as_of,
+        schema_name=schema_name,
+        schema_version=schema_version,
+    )
+    independent_report = SourceArtifact(
+        artifact_id="verification/independent-verification.json",
+        sha256=hashlib.sha256(SYNTHETIC_INDEPENDENT_REPORT).hexdigest(),
+        size_bytes=len(SYNTHETIC_INDEPENDENT_REPORT),
+        as_of_date=as_of,
+        schema_name="independent-verification",
+        schema_version="1",
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-task-6-prewire", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic Task-6 prewire fixture",
+            fact_types=("synthetic",),
+            observed_start=as_of,
+            observed_end=as_of,
+            known_gaps=(),
+        ),
+        artifacts=(artifact, independent_report),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        tmp_path,
+        manifest,
+        {
+            artifact.artifact_id: payload,
+            independent_report.artifact_id: SYNTHETIC_INDEPENDENT_REPORT,
+        },
+    )
+    return read_generation_bundle(tmp_path, manifest.generation_id)
+
+
+def _synthetic_v9_epoch_bundle(
+    tmp_path: Path,
+    *,
+    manifest_payload: bytes | None = None,
+    crosswalk_payload: bytes | None = None,
+    report_payload: bytes | None = None,
+    opening_basis: str = "PROVIDER_CAPITAL_ANCHOR",
+) -> GenerationBundle:
+    """Stage a v9 bundle whose independent report pins its two binder inputs."""
+
+    as_of = date(2026, 8, 24)
+    manifest_payload = manifest_payload or canonical_json_bytes(
+        {
+            "calculation_cutoff_date": "2026-08-13",
+            "rows": [
+                {
+                    "capital_flow_trace": [],
+                    "opening_basis": opening_basis,
+                    "status": "OK",
+                }
+            ],
+            "schema_version": 9,
+        }
+    )
+    crosswalk_payload = crosswalk_payload or canonical_json_bytes(
+        {
+            "calculation_cutoff_date": "2026-08-13",
+            "schema_version": 1,
+            "selected_baseline": "synthetic",
+        }
+    )
+    manifest_artifact = SourceArtifact(
+        artifact_id=EPOCH_MANIFEST_ARTIFACT_PATH,
+        sha256=hashlib.sha256(manifest_payload).hexdigest(),
+        size_bytes=len(manifest_payload),
+        as_of_date=as_of,
+        schema_name="account-strategy-manifest",
+        schema_version="9",
+    )
+    crosswalk_artifact = SourceArtifact(
+        artifact_id=EPOCH_CROSSWALK_ARTIFACT_PATH,
+        sha256=hashlib.sha256(crosswalk_payload).hexdigest(),
+        size_bytes=len(crosswalk_payload),
+        as_of_date=as_of,
+        schema_name="account-strategy-current-epoch-crosswalk",
+        schema_version="1",
+    )
+    report_payload = report_payload or canonical_json_bytes(
+        {
+            "counts": {
+                "blocked_output_row_count": 0,
+                "ok_output_row_count": 1,
+                "output_row_count": 1,
+            },
+            "invariants": {
+                "blocked_numeric_exclusion": True,
+                "blocker_propagation": True,
+                "canonical_subject_bytes": True,
+                "classified_flow_reconciliation": True,
+                "exact_subject_set": True,
+                "fact_disposition_complete": True,
+                "mapped_row_bijection": True,
+                "privacy_safe_projection": True,
+                "selected_source_binding": True,
+                "unassigned_numeric_exclusion": True,
+            },
+            "numeric_verification": {
+                "discrepancy_count": 0,
+                "disposition": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES",
+            },
+            "schema_version": 3,
+            "selected_source_identities": {
+                "current_epoch_crosswalk": {
+                    "sha256": crosswalk_artifact.sha256,
+                    "size_bytes": crosswalk_artifact.size_bytes,
+                }
+            },
+            "status": "VERIFIED",
+            "subjects": [
+                {
+                    "path": manifest_artifact.artifact_id,
+                    "sha256": manifest_artifact.sha256,
+                    "size_bytes": manifest_artifact.size_bytes,
+                },
+                {
+                    "path": crosswalk_artifact.artifact_id,
+                    "sha256": crosswalk_artifact.sha256,
+                    "size_bytes": crosswalk_artifact.size_bytes,
+                },
+            ],
+        }
+    )
+    independent_report = SourceArtifact(
+        artifact_id=EPOCH_INDEPENDENT_REPORT_PATH,
+        sha256=hashlib.sha256(report_payload).hexdigest(),
+        size_bytes=len(report_payload),
+        as_of_date=as_of,
+        schema_name="account-manifest-independent-verification",
+        schema_version="3",
+    )
+    generation = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("synthetic-v9-binder", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic v9 binder fixture",
+            fact_types=("synthetic",),
+            observed_start=as_of,
+            observed_end=as_of,
+            known_gaps=(),
+        ),
+        artifacts=(manifest_artifact, crosswalk_artifact, independent_report),
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(
+        tmp_path,
+        generation,
+        {
+            manifest_artifact.artifact_id: manifest_payload,
+            crosswalk_artifact.artifact_id: crosswalk_payload,
+            independent_report.artifact_id: report_payload,
+        },
+    )
+    return read_generation_bundle(tmp_path, generation.generation_id)
+
+
+def _replace_synthetic_bundle_payload(
+    bundle: GenerationBundle, artifact_id: str, payload: bytes
+) -> None:
+    """Deliberately forge a detached in-memory bundle for binder-only mutations."""
+
+    artifact = next(
+        item for item in bundle.manifest.artifacts if item.artifact_id == artifact_id
+    )
+    object.__setattr__(artifact, "sha256", hashlib.sha256(payload).hexdigest())
+    object.__setattr__(artifact, "size_bytes", len(payload))
+    if artifact_id == EPOCH_INDEPENDENT_REPORT_PATH:
+        object.__setattr__(bundle.receipt.independent_report, "sha256", artifact.sha256)
+        object.__setattr__(
+            bundle.receipt.independent_report, "size_bytes", artifact.size_bytes
+        )
+    object.__setattr__(bundle, "payloads", {**bundle.payloads, artifact_id: payload})
+
+
+def test_v9_epoch_source_derives_crosswalk_from_verified_bundle(tmp_path: Path) -> None:
+    """Dropping the v9 crosswalk branch would make this six-key source invalid."""
+
+    bundle = _synthetic_v9_epoch_bundle(tmp_path)
+
+    source = contract_tool.epoch_manifest_source_from_bundle(bundle)
+
+    assert set(source) == {
+        "generation_id",
+        "generation_manifest_sha256",
+        "generation_receipt_sha256",
+        "full_directory_inventory_sha256",
+        "artifact",
+        "crosswalk",
+    }
+    assert source["artifact"]["schema"] == {
+        "name": "account-strategy-manifest",
+        "version": "9",
+    }
+    assert source["crosswalk"] == {
+        "path": "authority/account-assignment-crosswalk.json",
+        "sha256": "266f1860169925cca2c8955f5b9f8d8b56a27a5ac50dc9730f2dc6c1f7d24e3e",
+        "size_bytes": 92,
+        "schema": {
+            "name": "account-strategy-current-epoch-crosswalk",
+            "version": "1",
+        },
+    }
+
+
+def test_v9_epoch_source_accepts_verified_first_available_nav_basis(
+    tmp_path: Path,
+) -> None:
+    """A verified schema-9 first-NAV opening remains a valid release source."""
+
+    bundle = _synthetic_v9_epoch_bundle(tmp_path, opening_basis="FIRST_AVAILABLE_NAV")
+
+    source = contract_tool.epoch_manifest_source_from_bundle(bundle)
+
+    assert source["artifact"]["schema"]["version"] == "9"
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("missing-crosswalk", "crosswalk"),
+        ("report-status", "report status"),
+        ("report-crosswalk", "report crosswalk"),
+        ("report-fact-disposition", "report invariants"),
+        ("report-unassigned-numeric", "report invariants"),
+        ("report-classified-flow", "report invariants"),
+        ("report-privacy", "report invariants"),
+        ("missing-cutoff", "cutoff"),
+        ("missing-crosswalk-cutoff", "crosswalk cutoff"),
+        ("future-cutoff", "cutoff"),
+        ("mismatched-cutoff", "crosswalk cutoff"),
+        ("v8-date", "v8 trace"),
+        ("trace-extra-key", "v9 flow trace"),
+        ("trace-missing-key", "v9 flow trace"),
+        ("wrong-anchor", "anchor"),
+    ],
+)
+def test_v9_epoch_source_rejects_release_control_mutations(
+    tmp_path: Path, mutation: str, message: str
+) -> None:
+    """Removing each release-control guard would admit a forged v9 assertion."""
+
+    bundle = _synthetic_v9_epoch_bundle(tmp_path)
+    if mutation == "missing-crosswalk":
+        source = contract_tool.epoch_manifest_source_from_bundle(bundle)
+        source.pop("crosswalk")
+        with pytest.raises(contract_tool.FinancialMvpContractError, match=message):
+            contract_tool.validate_epoch_manifest_source(source, bundle=bundle)
+        return
+    elif mutation == "report-status":
+        report = json.loads(bundle.payloads[EPOCH_INDEPENDENT_REPORT_PATH])
+        report["status"] = "PENDING"
+        _replace_synthetic_bundle_payload(
+            bundle, EPOCH_INDEPENDENT_REPORT_PATH, canonical_json_bytes(report)
+        )
+    elif mutation in {
+        "report-crosswalk",
+        "report-fact-disposition",
+        "report-unassigned-numeric",
+        "report-classified-flow",
+        "report-privacy",
+    }:
+        report = json.loads(bundle.payloads[EPOCH_INDEPENDENT_REPORT_PATH])
+        if mutation == "report-crosswalk":
+            report["selected_source_identities"]["current_epoch_crosswalk"][
+                "sha256"
+            ] = "0" * 64
+        else:
+            invariant = {
+                "report-fact-disposition": "fact_disposition_complete",
+                "report-unassigned-numeric": "unassigned_numeric_exclusion",
+                "report-classified-flow": "classified_flow_reconciliation",
+                "report-privacy": "privacy_safe_projection",
+            }[mutation]
+            report["invariants"][invariant] = False
+        _replace_synthetic_bundle_payload(
+            bundle, EPOCH_INDEPENDENT_REPORT_PATH, canonical_json_bytes(report)
+        )
+    else:
+        manifest = json.loads(bundle.payloads[EPOCH_MANIFEST_ARTIFACT_PATH])
+        crosswalk = json.loads(bundle.payloads[EPOCH_CROSSWALK_ARTIFACT_PATH])
+        if mutation == "missing-cutoff":
+            manifest.pop("calculation_cutoff_date")
+        elif mutation == "missing-crosswalk-cutoff":
+            crosswalk.pop("calculation_cutoff_date")
+        elif mutation == "future-cutoff":
+            manifest["calculation_cutoff_date"] = "2026-08-25"
+            crosswalk["calculation_cutoff_date"] = "2026-08-25"
+        elif mutation == "mismatched-cutoff":
+            crosswalk["calculation_cutoff_date"] = "2026-08-12"
+        elif mutation == "v8-date":
+            manifest["rows"][0]["date"] = "2026-08-13"
+        elif mutation == "trace-extra-key":
+            manifest["rows"][0]["capital_flow_trace"] = [
+                {
+                    "amount": "1",
+                    "class": "INTERNAL_IN",
+                    "date": "2026-08-13",
+                    "event_date": "2026-08-13",
+                    "nav_recognition_date": "2026-08-13",
+                }
+            ]
+        elif mutation == "trace-missing-key":
+            manifest["rows"][0]["capital_flow_trace"] = [
+                {
+                    "amount": "1",
+                    "class": "INTERNAL_IN",
+                    "event_date": "2026-08-13",
+                }
+            ]
+        else:
+            manifest["rows"][0]["opening_basis"] = "UNSUPPORTED"
+        _replace_synthetic_bundle_payload(
+            bundle, EPOCH_MANIFEST_ARTIFACT_PATH, canonical_json_bytes(manifest)
+        )
+        _replace_synthetic_bundle_payload(
+            bundle, EPOCH_CROSSWALK_ARTIFACT_PATH, canonical_json_bytes(crosswalk)
+        )
+
+    with pytest.raises(contract_tool.FinancialMvpContractError, match=message):
+        contract_tool.epoch_manifest_source_from_bundle(bundle)
+
+
+@pytest.mark.skipif(
+    not FRESH_V9_BUNDLE_PATH.is_dir(),
+    reason="retained real-data generation bundle is not available in this checkout",
+)
+def test_v9_binder_accepts_fresh_generation_bundle() -> None:
+    """The retained coverage-corrected candidate remains a usable evidence check."""
+
+    bundle = read_generation_bundle(FRESH_V9_BUNDLE_ROOT, FRESH_V9_GENERATION_ID)
+
+    source = contract_tool.epoch_manifest_source_from_bundle(bundle)
+
+    assert source == {
+        "generation_id": FRESH_V9_GENERATION_ID,
+        "generation_manifest_sha256": (
+            "e91b2f824100894e55004f07cf47eb3f4f766bffecb9fe3348ec9c387842823b"
+        ),
+        "generation_receipt_sha256": (
+            "64e76af7e0868947d0703bec94e6d633c72e4934e7f39d28a8f942fb23702177"
+        ),
+        "full_directory_inventory_sha256": (
+            "8f7959f9218d6b6784c8b73c2dd3f0945d6042e98c6e3759a9e29195c1ccd065"
+        ),
+        "artifact": {
+            "path": "outputs/account-strategy-manifest.json",
+            "sha256": "ea680c4a381b71e67baa8ac36279dccc9740cca82ccf5ea1ca38ab7b10ac8593",
+            "size_bytes": 236138,
+            "schema": {"name": "account-strategy-manifest", "version": "9"},
+        },
+        "crosswalk": {
+            "path": "authority/account-assignment-crosswalk.json",
+            "sha256": "deb4080f039517854cab29476636cc757e5b057112319b6c396474f79f32ef82",
+            "size_bytes": 5986,
+            "schema": {
+                "name": "account-strategy-current-epoch-crosswalk",
+                "version": "1",
+            },
+        },
+    }
+
+
+@pytest.mark.skipif(
+    not (FRESH_V9_BUNDLE_PATH.is_dir() and FRESH_V9_SIDECAR_PATH.is_file()),
+    reason="retained real-data generation bundle and sidecar are not available in this checkout",
+)
+def test_fresh_v9_sidecar_equals_bundle_derived_source() -> None:
+    """The retained sidecar cannot silently diverge from its verified bundle."""
+
+    bundle = read_generation_bundle(FRESH_V9_BUNDLE_ROOT, FRESH_V9_GENERATION_ID)
+
+    assert json.loads(FRESH_V9_SIDECAR_PATH.read_text(encoding="utf-8")) == (
+        contract_tool.epoch_manifest_source_from_bundle(bundle)
+    )
+
+
+@pytest.mark.parametrize(
+    "artifact_id",
+    [
+        EPOCH_MANIFEST_ARTIFACT_PATH,
+        EPOCH_CROSSWALK_ARTIFACT_PATH,
+        EPOCH_INDEPENDENT_REPORT_PATH,
+    ],
+)
+def test_v9_persisted_byte_mutation_is_rejected_before_binder(
+    tmp_path: Path, artifact_id: str
+) -> None:
+    """Detached controls must reject a copied bundle before binder semantics run."""
+
+    bundle = _synthetic_v9_epoch_bundle(tmp_path / "source")
+    source_directory = (
+        tmp_path / "source" / "generations" / bundle.manifest.generation_id
+    )
+    copied_root = tmp_path / "copied"
+    copied_directory = copied_root / "generations" / bundle.manifest.generation_id
+    copied_directory.parent.mkdir(parents=True)
+    shutil.copytree(source_directory, copied_directory)
+    target = copied_directory / artifact_id
+    target.write_bytes(target.read_bytes() + b" ")
+
+    with pytest.raises(GenerationConflictError, match="bundle"):
+        read_generation_bundle(copied_root, bundle.manifest.generation_id)
+
+
+def test_epoch_manifest_source_binds_every_literal_value_from_verified_bundle(
+    tmp_path: Path,
+) -> None:
+    """Changing any receipt, directory, or artifact binding must break this oracle."""
+
+    literal_source = _literal_epoch_manifest_source()
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    generation_directory = (
+        tmp_path
+        / "generations"
+        / "b4888a18780058e777f8147530062a882a473aaef19596562480a1bf43425cd8"
+    )
+    manifest_bytes = (generation_directory / "generation.json").read_bytes()
+    receipt_bytes = (generation_directory / "generation-receipt.json").read_bytes()
+    artifact_bytes = (
+        generation_directory / "outputs" / "account-strategy-manifest.json"
+    ).read_bytes()
+    assert generation_directory.name == literal_source["generation_id"]
+    assert (
+        hashlib.sha256(manifest_bytes).hexdigest()
+        == literal_source["generation_manifest_sha256"]
+    )
+    assert (
+        hashlib.sha256(receipt_bytes).hexdigest()
+        == literal_source["generation_receipt_sha256"]
+    )
+    assert (
+        hashlib.sha256(artifact_bytes).hexdigest()
+        == literal_source["artifact"]["sha256"]
+    )
+    assert len(artifact_bytes) == literal_source["artifact"]["size_bytes"]
+
+    persisted_files = {
+        path.relative_to(generation_directory).as_posix(): path.read_bytes()
+        for path in generation_directory.rglob("*")
+        if path.is_file()
+    }
+    directory_inventory = {
+        "files": [
+            {
+                "relative_path": relative_path,
+                "sha256": hashlib.sha256(contents).hexdigest(),
+                "size_bytes": len(contents),
+            }
+            for relative_path, contents in sorted(persisted_files.items())
+        ],
+        "inventory_schema_version": 1,
+    }
+    directory_inventory_bytes = (
+        json.dumps(
+            directory_inventory,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    assert (
+        hashlib.sha256(directory_inventory_bytes).hexdigest()
+        == literal_source["full_directory_inventory_sha256"]
+    )
+
+    assert contract_tool.epoch_manifest_source_from_bundle(bundle) == literal_source
+
+
+def test_validate_epoch_manifest_source_accepts_handwritten_literal_source(
+    tmp_path: Path,
+) -> None:
+    """An always-reject validator or shared binder drift breaks this literal input."""
+
+    contract_tool.validate_epoch_manifest_source(
+        _literal_epoch_manifest_source(), bundle=_synthetic_epoch_bundle(tmp_path)
+    )
+
+
+def test_epoch_manifest_source_rejects_non_bundle_and_forged_bundle_subclass(
+    tmp_path: Path,
+) -> None:
+    """Relaxing the exact GenerationBundle boundary would admit a structural substitute."""
+
+    bundle = _synthetic_epoch_bundle(tmp_path)
+
+    class ForgedGenerationBundle(GenerationBundle):
+        pass
+
+    forged = ForgedGenerationBundle(
+        manifest=bundle.manifest,
+        payloads=bundle.payloads,
+        inventory=bundle.inventory,
+        inventory_bytes=bundle.inventory_bytes,
+        receipt=bundle.receipt,
+        receipt_bytes=bundle.receipt_bytes,
+        full_directory_inventory_sha256=bundle.full_directory_inventory_sha256,
+    )
+    duck_typed = SimpleNamespace(
+        manifest=bundle.manifest,
+        payloads=bundle.payloads,
+        inventory=bundle.inventory,
+        inventory_bytes=bundle.inventory_bytes,
+        receipt=bundle.receipt,
+        receipt_bytes=bundle.receipt_bytes,
+        full_directory_inventory_sha256=bundle.full_directory_inventory_sha256,
+    )
+    for value in (bundle.manifest, object(), duck_typed, forged):
+        with pytest.raises(
+            contract_tool.FinancialMvpContractError, match="GenerationBundle"
+        ):
+            contract_tool.epoch_manifest_source_from_bundle(value)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("artifact_id", "schema_name", "schema_version", "payload", "message"),
+    [
+        (
+            "outputs/wrong.json",
+            "account-strategy-manifest",
+            "8",
+            SYNTHETIC_EPOCH_PAYLOAD,
+            "required artifact",
+        ),
+        (
+            EPOCH_MANIFEST_ARTIFACT_PATH,
+            "wrong-schema",
+            "8",
+            SYNTHETIC_EPOCH_PAYLOAD,
+            "schema name",
+        ),
+        (
+            EPOCH_MANIFEST_ARTIFACT_PATH,
+            "account-strategy-manifest",
+            "9",
+            SYNTHETIC_EPOCH_PAYLOAD,
+            "crosswalk",
+        ),
+    ],
+)
+def test_epoch_manifest_source_rejects_wrong_artifact_contract(
+    tmp_path: Path,
+    artifact_id: str,
+    schema_name: str,
+    schema_version: str,
+    payload: bytes,
+    message: str,
+) -> None:
+    bundle = _synthetic_epoch_bundle(
+        tmp_path,
+        artifact_id=artifact_id,
+        schema_name=schema_name,
+        schema_version=schema_version,
+        payload=payload,
+    )
+
+    with pytest.raises(contract_tool.FinancialMvpContractError, match=message):
+        contract_tool.epoch_manifest_source_from_bundle(bundle)
+
+
+def test_zero_byte_epoch_manifest_payload_is_rejected_by_real_envelope(
+    tmp_path: Path,
+) -> None:
+    """A zero-byte fixed JSON artifact cannot produce a GenerationBundle."""
+
+    with pytest.raises(
+        ManifestValidationError, match="payload JSON is not strict JSON"
+    ):
+        _synthetic_epoch_bundle(tmp_path, payload=b"")
+
+
+def test_empty_json_epoch_manifest_payload_is_stageable_and_re_readable(
+    tmp_path: Path,
+) -> None:
+    """The core envelope admits a real, semantically empty JSON payload only."""
+
+    bundle = _synthetic_epoch_bundle(tmp_path, payload=b"{}\n")
+
+    assert bundle.payloads["outputs/account-strategy-manifest.json"] == b"{}\n"
+    assert contract_tool.epoch_manifest_source_from_bundle(bundle)["artifact"] == {
+        "path": "outputs/account-strategy-manifest.json",
+        "sha256": "ca3d163bab055381827226140568f3bef7eaac187cebd76878e0b63e9e442356",
+        "size_bytes": 3,
+        "schema": {"name": "account-strategy-manifest", "version": "8"},
+    }
+
+
+def test_epoch_manifest_source_recomputes_persisted_payload_sha256(
+    tmp_path: Path,
+) -> None:
+    """Replacing payload hashing with manifest trust must fail this retained test."""
+
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    artifact = next(
+        item
+        for item in bundle.manifest.artifacts
+        if item.artifact_id == EPOCH_MANIFEST_ARTIFACT_PATH
+    )
+    # Deliberate in-memory tamper after a genuine staged/read bundle.
+    object.__setattr__(artifact, "sha256", "0" * 64)
+
+    with pytest.raises(contract_tool.FinancialMvpContractError, match="bytes differ"):
+        contract_tool.epoch_manifest_source_from_bundle(bundle)
+
+
+@pytest.mark.parametrize(
+    ("target", "attribute", "value", "message"),
+    [
+        ("manifest", "verification", VerificationStatus.PENDING, "VERIFIED"),
+        ("inventory", "generation_id", "0" * 64, "generation IDs"),
+        ("receipt", "generation_id", "0" * 64, "generation IDs"),
+    ],
+)
+def test_epoch_manifest_source_rejects_unverified_or_mismatched_controls(
+    tmp_path: Path,
+    target: str,
+    attribute: str,
+    value: object,
+    message: str,
+) -> None:
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    object.__setattr__(getattr(bundle, target), attribute, value)
+
+    with pytest.raises(contract_tool.FinancialMvpContractError, match=message):
+        contract_tool.epoch_manifest_source_from_bundle(bundle)
+
+
+def test_generation_manifest_constructor_rejects_duplicate_epoch_artifact_ids() -> None:
+    """Duplicate artifact IDs are rejected by GenerationManifest, before a bundle exists."""
+
+    as_of = date(2026, 8, 24)
+    artifact = SourceArtifact(
+        artifact_id=EPOCH_MANIFEST_ARTIFACT_PATH,
+        sha256=hashlib.sha256(SYNTHETIC_EPOCH_PAYLOAD).hexdigest(),
+        size_bytes=len(SYNTHETIC_EPOCH_PAYLOAD),
+        as_of_date=as_of,
+        schema_name="account-strategy-manifest",
+        schema_version="8",
+    )
+    with pytest.raises(ManifestValidationError, match="unique"):
+        GenerationManifest.build(
+            as_of_date=as_of,
+            adapter=AdapterIdentity("synthetic-task-6-duplicate", "1"),
+            coverage=CoverageClaim(
+                status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+                boundary="synthetic duplicate artifact fixture",
+                fact_types=("synthetic",),
+                observed_start=as_of,
+                observed_end=as_of,
+                known_gaps=(),
+            ),
+            artifacts=(artifact, artifact),
+            verification=VerificationStatus.VERIFIED,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        ("generation_id", "0" * 64),
+        ("generation_manifest_sha256", "1" * 64),
+        ("generation_receipt_sha256", "2" * 64),
+        ("full_directory_inventory_sha256", "3" * 64),
+        ("artifact.path", "outputs/wrong.json"),
+        ("artifact.sha256", "4" * 64),
+        ("artifact.size_bytes", 47),
+        ("artifact.schema.name", "wrong-schema"),
+        ("artifact.schema.version", "9"),
+    ],
+)
+def test_validate_epoch_manifest_source_rejects_each_bound_value(
+    tmp_path: Path, mutation: tuple[str, object]
+) -> None:
+    """Removing one exact comparison would allow its independently mutated value."""
+
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    source = _literal_epoch_manifest_source()
+    path, value = mutation
+    if path.startswith("artifact.schema."):
+        source["artifact"]["schema"][path.rsplit(".", 1)[1]] = value  # type: ignore[index]
+    elif path.startswith("artifact."):
+        source["artifact"][path.split(".", 1)[1]] = value  # type: ignore[index]
+    else:
+        source[path] = value
+
+    with pytest.raises(contract_tool.FinancialMvpContractError, match=path):
+        contract_tool.validate_epoch_manifest_source(source, bundle=bundle)
+
+
+def test_validate_epoch_manifest_source_rejects_closed_key_sets_and_boolean_size(
+    tmp_path: Path,
+) -> None:
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    extra = _literal_epoch_manifest_source()
+    extra["unexpected"] = "value"
+    with pytest.raises(contract_tool.FinancialMvpContractError, match="keys"):
+        contract_tool.validate_epoch_manifest_source(extra, bundle=bundle)
+
+    boolean_size = _literal_epoch_manifest_source()
+    boolean_size["artifact"]["size_bytes"] = True  # type: ignore[index]
+    with pytest.raises(contract_tool.FinancialMvpContractError, match="size_bytes"):
+        contract_tool.validate_epoch_manifest_source(boolean_size, bundle=bundle)
+
+
+def test_payload_byte_mutation_fails_bundle_read_before_binder(tmp_path: Path) -> None:
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    payload_path = (
+        tmp_path
+        / "generations"
+        / bundle.manifest.generation_id
+        / EPOCH_MANIFEST_ARTIFACT_PATH
+    )
+    payload_path.write_bytes(SYNTHETIC_EPOCH_PAYLOAD[:-1] + b"!")
+
+    with pytest.raises(GenerationConflictError, match="bundle"):
+        read_generation_bundle(tmp_path, bundle.manifest.generation_id)
 
 
 def _contract() -> dict[str, object]:
@@ -39,6 +842,40 @@ def _registry() -> dict[str, object]:
 
 def _validate(contract: dict[str, object]) -> dict[str, object]:
     return contract_tool.validate_contract(contract, registry=_registry())
+
+
+def test_excluded_product_interval_must_be_closed() -> None:
+    """An open excluded interval would let a generic consumer promote it again."""
+
+    contract = _contract()
+    excluded = next(
+        row
+        for row in contract["strategies"]
+        if row["product_requirement"] == "EXCLUDED"
+    )
+    excluded["effective_product_interval"] = {
+        "effective_start": "2025-09-27",
+        "effective_end": None,
+    }
+
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="excluded strategy product interval remains open",
+    ):
+        _validate(contract)
+
+    excluded["effective_product_interval"] = {
+        "effective_start": "2025-09-27",
+        "effective_end": "2025-11-24",
+    }
+    for row in contract["strategies"]:
+        if row["product_requirement"] != "EXCLUDED" or row is excluded:
+            continue
+        row["effective_product_interval"] = {
+            "effective_start": "2026-08-17",
+            "effective_end": "2026-08-17",
+        }
+    _validate(contract)
 
 
 def _source(contract: dict[str, object], source_id: str) -> dict[str, object]:
@@ -197,11 +1034,12 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
-    # Digest advanced from 5cef3271... when ibkr-account-generation was rebound
-    # to the enriched value-basis candidate (#368): NAV rows gained value_basis /
-    # source_artifact_id per the fail-closed #359/#361 contract.
+    # Digest binds the gap-safe, funded-boundary provider ledger and reconciled
+    # Robuxio daily-only segment through the financial-MVP cutoff (with HPR
+    # spans confined to coverage) while retaining corrected P123 inputs and
+    # the deprecated Echo boundary.
     assert contract_tool.contract_digest(contract) == (
-        "41367349fdc454cb064a4c2f0ad23bbc890e0f638e57ccce565f2c036bc85a38"
+        "51146395041b31111709b6b07360e90085d41c8b3ed9c62bf18c7ab23d659a16"
     )
 
 
@@ -232,6 +1070,91 @@ def test_quantbase_generation_is_account_live_from_accepted_membership() -> None
     assert admission["dataset_disposition_policy"]["policy_id"] == (
         "PROVIDER_ADMIT_OR_DECLARE_V1"
     )
+
+
+def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> None:
+    contract = _contract()
+    expected = {
+        "ibkr-account-generation": {
+            "source_version": "ibkr-catalog-v4",
+            "schema_version": "4",
+            "generation_id": (
+                "0917837a0b15ff473300bbdff2ca0ed34f96ed3b5e5a606258849dc20533dd65"
+            ),
+            "generation_sha256": (
+                "eafeda509254eb086c4a7889db14709ad7963777799f4a4320d6906f229c93eb"
+            ),
+            "upstream_inventory_sha256": (
+                "4765503faa2cbd0b57832e21041d0c99aa1475ce9e6cef1efbd7b71a686317fa"
+            ),
+            "product_data_class_set_sha256": (
+                "03b4a13d4df8a3afbe166f33ada430ac842510b7aa85af6feb8468dca2270044"
+            ),
+            "admitted_item_count": 24,
+            "admitted_item_set_sha256": (
+                "90f111837e9be3728398a1b184bdec9f079e33ec176111b1ae1c423bdad4d49a"
+            ),
+        },
+        "matrixport-account-generation": {
+            "admitted_item_count": 5,
+            "admitted_item_set_sha256": (
+                "230adba3c8a0a2523f1b38e2fc5521b1e292a2fff90f5fc0a924d7de925c0629"
+            ),
+        },
+        "quantbase-account-generation": {
+            "admitted_item_count": 5,
+            "admitted_item_set_sha256": (
+                "95406eafada9522e22943c31c9b3cb594b992cd696fc7edf239e0a3c1661655b"
+            ),
+        },
+        "schwab-account-generation": {
+            "admitted_item_count": 19,
+            "admitted_item_set_sha256": (
+                "e20b207466b46110e3dc7bf01a3e94c0aff1c4b76963516a117412d52c86d88e"
+            ),
+        },
+        "portfolio123-model-generation": {
+            "admitted_item_count": 0,
+            "admitted_item_set_sha256": (
+                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+            ),
+        },
+    }
+    for source_id, wanted in expected.items():
+        source = _source(contract, source_id)
+        policy = source["admission"]["dataset_disposition_policy"]
+        if "source_version" in wanted:
+            assert source["source_version"] == wanted["source_version"]
+            assert source["schema"]["version"] == wanted["schema_version"]
+            assert source["current_generation"] == {
+                "generation_id": wanted["generation_id"],
+                "sha256": wanted["generation_sha256"],
+                "as_of": "2026-09-03",
+            }
+            assert (
+                policy["upstream_inventory_sha256"]
+                == wanted["upstream_inventory_sha256"]
+            )
+            assert (
+                policy["product_data_class_set_sha256"]
+                == wanted["product_data_class_set_sha256"]
+            )
+        assert policy["admitted_item_count"] == wanted["admitted_item_count"]
+        assert policy["admitted_item_set_sha256"] == wanted["admitted_item_set_sha256"]
+    schwab = _source(contract, "schwab-account-generation")
+    assert "EXTERNAL_FLOW" in schwab["admission"]["facts"]
+    p123 = _source(contract, "portfolio123-model-generation")
+    assert p123["admission"]["facts"] == [
+        "STRATEGY_VERSION_REFERENCE",
+        "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1_CANDIDATE",
+        "TRANSACTION",
+    ]
+    assert p123["admission"]["dataset_disposition_policy"][
+        "allowed_exclusion_reasons"
+    ] == [
+        "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
+        "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER",
+    ]
 
 
 def test_current_strategy_registry_binds_exact_applicability_plan_bytes() -> None:
@@ -424,13 +1347,72 @@ def test_strategy_perimeter_matches_discoverable_registry_without_disappearing_r
         assert set(row["outcome_dispositions"].values()) == {expected}
 
 
+def test_summary_separates_current_perimeter_from_historical_owner_exclusions() -> None:
+    """The current table must not visually promote accepted exclusions."""
+
+    summary = contract_tool.render_views(_contract()).summary_markdown.decode("utf-8")
+    current_heading = "## Current perimeter"
+    exclusions_heading = "## Historical/owner exclusions"
+    census_heading = "## Current provider/account census — #302"
+
+    assert summary.count(current_heading) == 1
+    assert summary.count(exclusions_heading) == 1
+    assert summary.count(census_heading) == 1
+    assert (
+        summary.index(current_heading)
+        < summary.index(exclusions_heading)
+        < summary.index(census_heading)
+    )
+
+    current_section = summary.split(current_heading, 1)[1].split(exclusions_heading, 1)[
+        0
+    ]
+    exclusions_section = summary.split(exclusions_heading, 1)[1].split(
+        census_heading, 1
+    )[0]
+
+    def strategy_rows(section: str) -> list[tuple[str, str, str]]:
+        rows: list[tuple[str, str, str]] = []
+        for line in section.splitlines():
+            if not line.startswith("| "):
+                continue
+            cells = [cell.strip() for cell in line.strip("|").split("|")]
+            if cells[0] in {"Strategy", "---"}:
+                continue
+            rows.append((cells[0], cells[1], cells[3]))
+        return rows
+
+    current_rows = strategy_rows(current_section)
+    assert len(current_rows) == 7
+    assert current_rows == [
+        ("p123-ai-factor", "ACTIVE", "REQUIRED"),
+        ("p123-eu", "ACTIVE", "REQUIRED"),
+        ("qsi", "ACTIVE", "REQUIRED"),
+        ("tt-portfolio", "ACTIVE", "REQUIRED"),
+        ("volatis-strategy", "ACTIVE", "REQUIRED"),
+        ("grizzlybears-vtma", "ACTIVE", "REQUIRED"),
+        ("robuxio-crypto", "ACTIVE", "REQUIRED"),
+    ]
+
+    exclusions_rows = strategy_rows(exclusions_section)
+    assert len(exclusions_rows) == 2
+    assert exclusions_rows == [
+        ("echotrade-growth-pivots", "DEPRECATED_HISTORY_ONLY", "EXCLUDED"),
+        ("composer-holy-grail", "IMMATERIAL_EXCLUDED", "EXCLUDED"),
+    ]
+
+
 def test_current_census_binds_redacted_sleeves_memberships_and_transition() -> None:
     contract = _contract()
     census = contract["current_census"]
     assert census["authority_issue"] == 302
     assert len(census["account_sleeves"]) == 19
     assert len(census["provider_lanes"]) == 10
-    assert len(census["evidence_receipts"]) == 6
+    assert {row["role"] for row in census["evidence_receipts"]} == {
+        "BASELINE_CURRENT_POINTER",
+        "BASELINE_GENERATION_MANIFEST",
+        "BASELINE_CATALOG",
+    }
     current_counts: dict[str, int] = {}
     transition_rows: list[dict[str, object]] = []
     for sleeve in census["account_sleeves"]:
@@ -468,6 +1450,38 @@ def test_current_census_binds_redacted_sleeves_memberships_and_transition() -> N
     assert all(row["effective_end"] is None for row in tt_funded)
 
 
+def test_p123_admitted_set_and_hwm_bind_independently_computed_contract_hashes() -> (
+    None
+):
+    """Reusing production digest helpers here would conceal stale HWM bindings."""
+
+    contract_bytes = CONTRACT_PATH.read_bytes()
+    contract = json.loads(contract_bytes)
+    p123 = _source(contract, "portfolio123-model-generation")
+    assert (
+        p123["admission"]["dataset_disposition_policy"]["admitted_item_set_sha256"]
+        == "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+    )
+
+    raw_sha256 = hashlib.sha256(contract_bytes).hexdigest()
+    semantic_bytes = (
+        json.dumps(
+            contract,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    semantic_digest = hashlib.sha256(semantic_bytes).hexdigest()
+    hwm_policy = json.loads(HWM_POLICY_PATH.read_bytes())
+    assert hwm_policy["product_authority"] == {
+        "path": "contracts/portfolio-financial-mvp-source-v1.json",
+        "raw_sha256": raw_sha256,
+        "semantic_digest": semantic_digest,
+    }
+
+
 def test_census_owner_digest_and_generated_views_are_one_authority() -> None:
     contract = _contract()
     census = contract["current_census"]
@@ -495,6 +1509,7 @@ def test_census_owner_digest_and_generated_views_are_one_authority() -> None:
 
 def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     baseline = _contract()
+    assert contract_tool._verify_strategy_version_history_evidence(baseline) == 3
     approved_digest = baseline["current_census"]["decision_payload_sha256"]
     projection = contract_tool.census_owner_decision_projection(
         baseline["current_census"], baseline["strategies"]
@@ -578,12 +1593,11 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
         if row["strategy_id"] == "p123-ai-factor"
     )
     p123_identity["strategy_version"] = fake_version
-    _validate(coherently_repeated)
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match="differs from accepted history authority",
     ):
-        contract_tool._verify_strategy_version_history_evidence(coherently_repeated)
+        _validate(coherently_repeated)
 
     rewritten_accepted_version = copy.deepcopy(baseline)
     fake_p123_eu_version = "p123-eu-connected-model:" + "f" * 64
@@ -605,14 +1619,11 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     ]:
         if identity["strategy_id"] == "p123-eu":
             identity["strategy_version"] = fake_p123_eu_version
-    _validate(rewritten_accepted_version)
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match="differs from accepted history authority",
     ):
-        contract_tool._verify_strategy_version_history_evidence(
-            rewritten_accepted_version
-        )
+        _validate(rewritten_accepted_version)
 
     partial_source_rewrite = copy.deepcopy(baseline)
     _source(partial_source_rewrite, "ibkr-account-generation")["strategy_version"][
@@ -649,7 +1660,6 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     ]
     del ibkr_version["version_refs"]["p123-eu"]
     ibkr_version["status"] = "UNRESOLVED"
-    _validate(missing_source_assertion)
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match=(
@@ -657,9 +1667,7 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
             "history authority: ibkr-account-generation"
         ),
     ):
-        contract_tool._verify_strategy_version_history_evidence(
-            missing_source_assertion
-        )
+        _validate(missing_source_assertion)
 
     invented_source_assertion = copy.deepcopy(baseline)
     design_version = _source(
@@ -671,7 +1679,6 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
         if row["strategy_id"] == "p123-eu"
     )
     design_version["status"] = "MIXED"
-    _validate(invented_source_assertion)
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match=(
@@ -679,9 +1686,7 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
             "history authority: strategy-design-and-configuration"
         ),
     ):
-        contract_tool._verify_strategy_version_history_evidence(
-            invented_source_assertion
-        )
+        _validate(invented_source_assertion)
 
     erased_correction_assertion = copy.deepcopy(baseline)
     erased_correction = next(
@@ -695,7 +1700,6 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
         "compatibility": "UNRESOLVED",
         "authority": "CURRENT_CONNECTED_MODEL_VERSION_NOT_ASSERTED",
     }
-    _validate(erased_correction_assertion)
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match=(
@@ -703,9 +1707,7 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
             "history authority"
         ),
     ):
-        contract_tool._verify_strategy_version_history_evidence(
-            erased_correction_assertion
-        )
+        _validate(erased_correction_assertion)
 
     swapped_correction_receipts = copy.deepcopy(baseline)
     p123_ai_correction = next(
@@ -731,7 +1733,6 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
         replacement_receipts["portfolio123-simulation-returns"],
         replacement_receipts["portfolio123-strategy-relationships"],
     ]
-    _validate(swapped_correction_receipts)
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match=(
@@ -739,9 +1740,7 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
             "history authority"
         ),
     ):
-        contract_tool._verify_strategy_version_history_evidence(
-            swapped_correction_receipts
-        )
+        _validate(swapped_correction_receipts)
 
     rewritten_segment_identity = copy.deepcopy(baseline)
     p123_ai_segment = next(
@@ -761,7 +1760,6 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     p123_ai["live_implementation_identity"]["version_ref"] = (
         "account-live-segment:" + "0" * 64
     )
-    _validate(rewritten_segment_identity)
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match=(
@@ -769,9 +1767,7 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
             "history authority"
         ),
     ):
-        contract_tool._verify_strategy_version_history_evidence(
-            rewritten_segment_identity
-        )
+        _validate(rewritten_segment_identity)
 
     transition_removed = copy.deepcopy(baseline)
     for sleeve in transition_removed["current_census"]["account_sleeves"]:
@@ -820,6 +1816,229 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
         match="includes excluded strategies",
     ):
         _validate(reintroduced)
+
+
+def test_accepted_provider_ledger_history_identity_cannot_be_coherently_relabelled() -> (
+    None
+):
+    """History lineage is a fixed receipt, not a replaceable generation label."""
+
+    replacements = {
+        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62": ("a" * 64),
+        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2": ("b" * 64),
+        "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1": ("c" * 64),
+    }
+
+    def replace_lineage(value: object) -> object:
+        if isinstance(value, dict):
+            return {key: replace_lineage(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [replace_lineage(item) for item in value]
+        if isinstance(value, str):
+            result = value
+            for old, new in replacements.items():
+                result = result.replace(old, new)
+            return result
+        return value
+
+    relabelled = replace_lineage(copy.deepcopy(_contract()))
+    assert isinstance(relabelled, dict)
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="provider-ledger history lineage differs",
+    ):
+        _validate(relabelled)
+
+
+def test_two_vintage_history_accepts_2961_active_and_retains_07c590_echo() -> None:
+    """Active owner history advances without relabelling deprecated Echo evidence."""
+
+    active_generation = (
+        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
+    )
+    active_manifest = "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
+    active_catalog = "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
+    legacy_generation = (
+        "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
+    )
+    legacy_manifest = "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db"
+    legacy_catalog = "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
+
+    contract = _contract()
+    owner_source = _source(contract, "owner-account-live-history")
+    owner_source["current_generation"] = {
+        "generation_id": active_generation,
+        "sha256": active_manifest,
+        "as_of": "2026-08-16",
+    }
+
+    active_segments = {
+        row["strategy_id"]: row
+        for row in contract["history_corrections"]["materialized_segment_identities"]
+        if row["source_id"] == "owner-account-live-history"
+    }
+    assert set(active_segments) == {
+        "grizzlybears-vtma",
+        "p123-ai-factor",
+        "p123-eu",
+        "qsi",
+        "tt-portfolio",
+    }
+    for strategy_id, segment in active_segments.items():
+        segment["source_generation_id"] = active_generation
+        segment["source_generation_sha256"] = active_manifest
+        strategy = next(
+            row for row in contract["strategies"] if row["strategy_id"] == strategy_id
+        )
+        strategy["live_implementation_identity"]["generation_id"] = active_generation
+        strategy["live_implementation_identity"]["receipt_sha256"] = active_manifest
+
+    for correction in contract["history_corrections"]["corrections"]:
+        if correction["correction_id"] not in {
+            "p123-eu-account-live",
+            "volatis-account-live",
+        }:
+            continue
+        correction["capture"]["generation_id"] = active_generation
+        correction["capture"]["generation_sha256"] = active_manifest
+        for receipt in correction["source_receipts"]:
+            if receipt["authority_root"] != "PROVIDER_LEDGER":
+                continue
+            receipt["generation_id"] = active_generation
+            suffix = receipt["artifact_selector"].split("/")[-1]
+            receipt["artifact_selector"] = f"generations/{active_generation}/{suffix}"
+            receipt["sha256"] = (
+                active_manifest if suffix == "generation.json" else active_catalog
+            )
+
+    echo = next(
+        row
+        for row in contract["strategies"]
+        if row["strategy_id"] == "echotrade-growth-pivots"
+    )
+    assert echo["product_requirement"] == "EXCLUDED"
+    assert echo["lifecycle_status"] == "DEPRECATED_HISTORY_ONLY"
+    assert echo["live_implementation_identity"]["generation_id"] == legacy_generation
+    assert echo["live_implementation_identity"]["receipt_sha256"] == legacy_catalog
+    echo_correction = next(
+        row
+        for row in contract["history_corrections"]["corrections"]
+        if row["correction_id"] == "echotrade-event-only-account-live-rejected"
+    )
+    assert echo_correction["capture"]["generation_id"] == legacy_generation
+    assert echo_correction["capture"]["generation_sha256"] == legacy_manifest
+
+    volatis = next(
+        row
+        for row in contract["strategies"]
+        if row["strategy_id"] == "volatis-strategy"
+    )
+    assert volatis["live_implementation_identity"]["generation_id"].startswith("948e7c")
+    robuxio = next(
+        row for row in contract["strategies"] if row["strategy_id"] == "robuxio-crypto"
+    )
+    assert robuxio["live_implementation_identity"]["generation_id"].startswith("3badac")
+
+    _validate(contract)
+    assert contract_tool._verify_strategy_version_history_evidence(contract) == 3
+
+
+def test_owner_account_history_rebinds_to_corrected_2961_ledger_generation() -> None:
+    """The active owner-history lineage follows the corrected governed ledger."""
+
+    generation_id = "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
+    manifest_sha256 = "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
+    catalog_sha256 = "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
+    contract = _contract()
+    owner_source = _source(contract, "owner-account-live-history")
+    assert owner_source["current_generation"] == {
+        "generation_id": generation_id,
+        "sha256": manifest_sha256,
+        "as_of": "2026-08-16",
+    }
+    active_segments = [
+        row
+        for row in contract["history_corrections"]["materialized_segment_identities"]
+        if row["source_id"] == "owner-account-live-history"
+    ]
+    assert len(active_segments) == 5
+    assert all(
+        row["source_generation_id"] == generation_id
+        and row["source_generation_sha256"] == manifest_sha256
+        for row in active_segments
+    )
+    expected_provider_receipts = {
+        "p123-eu-account-live": {manifest_sha256, catalog_sha256},
+        "volatis-account-live": {manifest_sha256},
+    }
+    for correction_id, expected_receipts in expected_provider_receipts.items():
+        correction = _history_correction(contract, correction_id)
+        assert correction["capture"]["generation_id"] == generation_id
+        assert correction["capture"]["generation_sha256"] == manifest_sha256
+        assert {
+            receipt["sha256"]
+            for receipt in correction["source_receipts"]
+            if receipt["authority_root"] == "PROVIDER_LEDGER"
+        } == expected_receipts
+    _validate(contract)
+
+
+def test_two_vintage_history_rejects_legacy_rollbacks_and_rewrites() -> None:
+    """The deprecated event-only class cannot authorize active-lineage changes."""
+
+    active_generation = (
+        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
+    )
+    active_manifest = "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
+    legacy_generation = (
+        "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
+    )
+    legacy_manifest = "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db"
+
+    active_rollback = _contract()
+    p123_eu = _history_correction(active_rollback, "p123-eu-account-live")
+    p123_eu["capture"]["generation_id"] = legacy_generation
+    p123_eu["capture"]["generation_sha256"] = legacy_manifest
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="history correction generation differs from source",
+    ):
+        _validate(active_rollback)
+
+    echo_rewrite = _contract()
+    echo = _history_correction(
+        echo_rewrite, "echotrade-event-only-account-live-rejected"
+    )
+    echo["capture"]["generation_id"] = active_generation
+    echo["capture"]["generation_sha256"] = active_manifest
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="deprecated event-only history must retain its legacy receipt",
+    ):
+        _validate(echo_rewrite)
+
+    volatis_rewrite = _contract()
+    volatis = next(
+        row
+        for row in volatis_rewrite["strategies"]
+        if row["strategy_id"] == "volatis-strategy"
+    )
+    volatis["live_implementation_identity"]["generation_id"] = active_generation
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="live implementation identity differs from accepted segment",
+    ):
+        _validate(volatis_rewrite)
+
+    lifecycle_rewrite = _contract()
+    echo_strategy = next(
+        row
+        for row in lifecycle_rewrite["strategies"]
+        if row["strategy_id"] == "echotrade-growth-pivots"
+    )
+    echo_strategy["lifecycle_status"] = "IMMATERIAL_EXCLUDED"
+    with pytest.raises(contract_tool.FinancialMvpContractError):
+        _validate(lifecycle_rewrite)
 
 
 def test_census_fails_on_missing_duplicate_overlap_and_stale_provider_binding() -> None:
@@ -1273,12 +2492,14 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
     assert policy["return_transform"] == {
         "facts": [
             "ACCOUNT_LIVE_DAILY_RETURN",
+            "ACCOUNT_LIVE_HOLDING_PERIOD_RETURN",
             "PROVIDER_LIVE_DAILY_RETURN",
             "DECLARED_GAP_COVERAGE",
         ],
-        "transform": "matrixport-declared-gap-one-day-returns",
+        "transform": "matrixport-declared-gap-span-returns",
         "version": "1",
     }
+    assert [row["span_days"] for row in policy["span_return_receipts"]] == [2, 2]
     robuxio = next(
         row for row in contract["strategies"] if row["strategy_id"] == "robuxio-crypto"
     )
@@ -1302,7 +2523,7 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
     assert "## Declared source-gap policies" in markdown
     assert ", ".join(policy["declared_missing_source_dates"]) in markdown
     assert ", ".join(policy["omitted_return_dates"]) in markdown
-    assert "matrixport-declared-gap-one-day-returns@1" in markdown
+    assert "matrixport-declared-gap-span-returns@1" in markdown
     assert ", ".join(policy["return_transform"]["facts"]) in markdown
 
     changed_date = copy.deepcopy(contract)
@@ -1323,6 +2544,79 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
         match="lacks the owner-declared gap policy",
     ):
         _validate(missing_policy)
+
+
+def test_matrixport_owner_span_receipts_and_funded_epoch_reject_coherent_rebinds() -> (
+    None
+):
+    """The source contract cannot relabel August provider history as owner TWR."""
+
+    contract = _contract()
+    policy = _source(contract, "matrixport-account-generation")["declared_gap_policy"]
+    assert [item["span_days"] for item in policy["span_return_receipts"]] == [2, 2]
+
+    altered_span = copy.deepcopy(contract)
+    altered_policy = _source(altered_span, "matrixport-account-generation")[
+        "declared_gap_policy"
+    ]
+    altered_policy["span_return_receipts"][0]["return"] = "-0.017"
+    altered_policy["span_return_receipts"][0]["start_endpoint_sha256"] = "a" * 64
+    altered_policy["span_return_receipts"][0]["end_endpoint_sha256"] = "b" * 64
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="span return receipts differ",
+    ):
+        _validate(altered_span)
+
+    altered_epoch = copy.deepcopy(contract)
+    strategy = next(
+        row
+        for row in altered_epoch["strategies"]
+        if row["strategy_id"] == "robuxio-crypto"
+    )
+    strategy["funded_membership"]["effective_start"] = "2025-08-26"
+    sleeve = next(
+        row
+        for row in altered_epoch["current_census"]["account_sleeves"]
+        if row["sleeve_alias"] == "matrixport-robuxio-01"
+    )
+    sleeve["assignments"][0]["effective_start"] = "2025-08-26"
+    source = _source(altered_epoch, "matrixport-account-generation")
+    source["interval"].update(
+        {"effective_start": "2025-08-26", "observed_start": "2025-08-27"}
+    )
+    correction = next(
+        row
+        for row in altered_epoch["history_corrections"]["corrections"]
+        if row["correction_id"] == "robuxio-account-live-after-funding"
+    )
+    correction["interval"].update(
+        {"effective_start": "2025-08-26", "observed_start": "2025-08-27"}
+    )
+    correction["funding_event"].update(
+        {"event_date": "2025-08-26", "account_live_start": "2025-08-26"}
+    )
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="Robuxio owner-funded boundary differs",
+    ):
+        _validate(altered_epoch)
+
+    altered_cutoff = copy.deepcopy(contract)
+    _source(altered_cutoff, "matrixport-account-generation")["interval"][
+        "observed_end"
+    ] = "2026-08-16"
+    correction = next(
+        row
+        for row in altered_cutoff["history_corrections"]["corrections"]
+        if row["correction_id"] == "robuxio-account-live-after-funding"
+    )
+    correction["interval"]["observed_end"] = "2026-08-16"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="Robuxio owner-funded boundary differs",
+    ):
+        _validate(altered_cutoff)
 
 
 def test_history_existence_capture_and_evidence_layers_are_separate() -> None:
@@ -1459,7 +2753,19 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     echotrade = _history_correction(
         contract, "echotrade-event-only-account-live-rejected"
     )
-    assert echotrade["readiness"] == "REQUIRED_NOT_READY"
+    assert echotrade["history_existence"] == {
+        "status": "EXISTS",
+        "authority": "HASH_BOUND_PROVIDER_LEDGER_EVENT_ONLY_RECONSTRUCTION",
+    }
+    assert echotrade["interval"] == {
+        "assignment_date": "2025-09-27",
+        "observed_start": "2025-10-01",
+        "observed_end": "2025-11-24",
+        "effective_start": None,
+        "effective_end": None,
+    }
+    assert echotrade["readiness"] == "READY"
+    assert echotrade["blockers"] == []
     assert set(echotrade["mode_admission"].values()) == {
         "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
     }
@@ -1529,6 +2835,127 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         match="source receipt differs",
     ):
         _validate(wrong_receipt)
+
+
+def test_robuxio_materialized_identity_is_daily_only_and_cannot_be_rebound() -> None:
+    """The epoch HPR spans are coverage evidence, never daily segment rows."""
+
+    contract = _contract()
+    identity = next(
+        row
+        for row in contract["history_corrections"]["materialized_segment_identities"]
+        if row["segment_id"] == "robuxio-crypto:account-live"
+    )
+    assert {
+        key: identity[key]
+        for key in ("observed_start", "observed_end", "return_observations", "sha256")
+    } == {
+        "observed_start": "2025-12-07",
+        "observed_end": "2026-08-13",
+        "return_observations": 246,
+        "sha256": "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+    }
+    assert "epoch_holding_period_link_observations" not in identity
+    _validate(contract)
+
+    def rebind_live_identity(candidate: dict[str, object], value: str) -> None:
+        strategy = next(
+            row
+            for row in candidate["strategies"]  # type: ignore[index]
+            if row["strategy_id"] == "robuxio-crypto"
+        )
+        strategy["live_implementation_identity"]["version_ref"] = (  # type: ignore[index]
+            f"account-live-segment:{value}"
+        )
+
+    stale = copy.deepcopy(contract)
+    stale_identity = next(
+        row
+        for row in stale["history_corrections"]["materialized_segment_identities"]
+        if row["segment_id"] == "robuxio-crypto:account-live"
+    )
+    stale_identity.update(
+        {
+            "observed_end": "2026-08-16",
+            "return_observations": 249,
+            "sha256": "66bce89cab2a49833bfc47afe7db0b1d0aa06486f3e210cd172d319346cfd7c3",
+        }
+    )
+    rebind_live_identity(stale, stale_identity["sha256"])
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="materialized history version projection differs",
+    ):
+        _validate(stale)
+
+    hpr_folded = copy.deepcopy(contract)
+    folded_identity = next(
+        row
+        for row in hpr_folded["history_corrections"]["materialized_segment_identities"]
+        if row["segment_id"] == "robuxio-crypto:account-live"
+    )
+    folded_identity.update(
+        {
+            "return_observations": 248,
+            "sha256": "f" * 64,
+        }
+    )
+    rebind_live_identity(hpr_folded, folded_identity["sha256"])
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="materialized history version projection differs",
+    ):
+        _validate(hpr_folded)
+
+
+def test_volatis_account_live_materialized_authority_rejects_raw_contribution_series() -> (
+    None
+):
+    accepted_sha256 = "c2d93268f9b91eead304459ce029b8bf4b1110ca28d0bb8190361ab4df43183f"
+    rejected_raw_contribution_sha256 = (
+        "f989eed33cd7ce8e17d63acb5065032e56d511a765b4f0684e281df043d27016"
+    )
+    accepted = copy.deepcopy(_contract())
+    segment = next(
+        row
+        for row in accepted["history_corrections"]["materialized_segment_identities"]
+        if row["segment_id"] == "volatis-strategy:account-live"
+    )
+    volatis = next(
+        row
+        for row in accepted["strategies"]
+        if row["strategy_id"] == "volatis-strategy"
+    )
+    segment["sha256"] = accepted_sha256
+    volatis["live_implementation_identity"]["version_ref"] = (
+        f"account-live-segment:{accepted_sha256}"
+    )
+
+    _validate(accepted)
+
+    rejected = copy.deepcopy(accepted)
+    rejected_segment = next(
+        row
+        for row in rejected["history_corrections"]["materialized_segment_identities"]
+        if row["segment_id"] == "volatis-strategy:account-live"
+    )
+    rejected_volatis = next(
+        row
+        for row in rejected["strategies"]
+        if row["strategy_id"] == "volatis-strategy"
+    )
+    rejected_segment["sha256"] = rejected_raw_contribution_sha256
+    rejected_volatis["live_implementation_identity"]["version_ref"] = (
+        f"account-live-segment:{rejected_raw_contribution_sha256}"
+    )
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "materialized history version projection differs from accepted "
+            "history authority"
+        ),
+    ):
+        _validate(rejected)
 
 
 def test_history_correction_omission_and_capture_conflation_fail() -> None:
@@ -1811,6 +3238,33 @@ def test_history_receipts_resolve_to_governed_bytes_and_reject_coherent_rewrite(
     ):
         contract_tool.verify_history_evidence(
             coherent_rewrite, {"MATRIXPORT": authority}
+        )
+
+    # A generation receipt identifies immutable bytes, not whichever generation
+    # happens to be live now.  Removing CURRENT must not invalidate the retained
+    # manifest/artifact evidence, while the explicitly-current receipt must fail.
+    pointer_path.unlink()
+    retained_generation = copy.deepcopy(minimal)
+    retained_generation["history_corrections"]["corrections"][0]["source_receipts"] = (
+        receipts[1:]
+    )
+    assert (
+        contract_tool.verify_history_evidence(
+            retained_generation, {"MATRIXPORT": authority}
+        )["verified_receipts"]
+        == 2
+    )
+
+    current_pointer_only = copy.deepcopy(minimal)
+    current_pointer_only["history_corrections"]["corrections"][0]["source_receipts"] = (
+        receipts[:1]
+    )
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="history evidence file is missing",
+    ):
+        contract_tool.verify_history_evidence(
+            current_pointer_only, {"MATRIXPORT": authority}
         )
 
 
@@ -2221,6 +3675,327 @@ def test_every_golden_input_output_and_identity_is_reconciled() -> None:
         _validate(mutated)
 
 
+def _synthetic_contract_with_epoch_manifest_source(
+    source: dict[str, object] | None = None,
+) -> dict[str, object]:
+    contract = _contract()
+    contract["contract_schema_version"] = 7
+    contract["epoch_manifest_source"] = (
+        copy.deepcopy(source)
+        if source is not None
+        else _literal_epoch_manifest_source()
+    )
+    return contract
+
+
+def test_v7_epoch_manifest_source_requires_and_matches_verified_bundle(
+    tmp_path: Path,
+) -> None:
+    """A source-shaped object alone must never establish generation authority."""
+
+    bundle = _synthetic_epoch_bundle(tmp_path)
+    source = contract_tool.epoch_manifest_source_from_bundle(bundle)
+    contract = _synthetic_contract_with_epoch_manifest_source(source)
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    assert _schema_errors(schema, contract, schema) == []
+    assert list(Draft202012Validator(schema).iter_errors(contract)) == []
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="requires a verified epoch-manifest bundle",
+    ):
+        _validate(contract)
+
+    assert (
+        contract_tool.validate_contract(
+            contract,
+            registry=_registry(),
+            epoch_manifest_bundle=bundle,
+        )
+        == contract
+    )
+
+    invented = copy.deepcopy(contract)
+    invented["epoch_manifest_source"]["generation_receipt_sha256"] = "0" * 64
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError, match="verified bundle"
+    ):
+        contract_tool.validate_contract(
+            invented,
+            registry=_registry(),
+            epoch_manifest_bundle=bundle,
+        )
+
+
+def test_load_v7_contract_reopens_selected_generation_bundle(tmp_path: Path) -> None:
+    bundle = _synthetic_epoch_bundle(tmp_path / "runtime")
+    contract = _synthetic_contract_with_epoch_manifest_source(
+        contract_tool.epoch_manifest_source_from_bundle(bundle)
+    )
+    contract_path = tmp_path / "financial-v7.json"
+    contract_path.write_bytes(contract_tool.canonical_json_bytes(contract))
+
+    assert (
+        contract_tool.load_contract(
+            contract_path,
+            REGISTRY_PATH,
+            SCHEMA_PATH,
+            epoch_manifest_generation_root=tmp_path / "runtime",
+            epoch_manifest_generation_id=bundle.manifest.generation_id,
+        )
+        == contract
+    )
+
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="root and id must be supplied together",
+    ):
+        contract_tool.load_contract(
+            contract_path,
+            REGISTRY_PATH,
+            SCHEMA_PATH,
+            epoch_manifest_generation_root=tmp_path / "runtime",
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error_fragment"),
+    [
+        (
+            lambda contract: contract["epoch_manifest_source"].pop("generation_id"),
+            "generation_id",
+        ),
+        (
+            lambda contract: contract["epoch_manifest_source"]["artifact"].__setitem__(
+                "path", "outputs/other.json"
+            ),
+            "artifact.path",
+        ),
+        (
+            lambda contract: contract["epoch_manifest_source"]["artifact"].__setitem__(
+                "size_bytes", True
+            ),
+            "size_bytes",
+        ),
+        (
+            lambda contract: contract["epoch_manifest_source"]["artifact"].__setitem__(
+                "size_bytes", 0
+            ),
+            "size_bytes",
+        ),
+        (
+            lambda contract: contract["epoch_manifest_source"]["artifact"][
+                "schema"
+            ].__setitem__("version", "9"),
+            "crosswalk",
+        ),
+    ],
+)
+def test_v7_epoch_manifest_source_rejects_missing_or_mutated_shape(
+    mutation: object, error_fragment: str
+) -> None:
+    """Weakening a closed, typed, fixed-artifact source must be observable."""
+
+    contract = _synthetic_contract_with_epoch_manifest_source()
+    assert callable(mutation)
+    mutation(contract)  # type: ignore[operator]
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+
+    assert _schema_errors(schema, contract, schema)
+    assert list(Draft202012Validator(schema).iter_errors(contract))
+    with pytest.raises(contract_tool.FinancialMvpContractError, match=error_fragment):
+        _validate(contract)
+
+
+def test_synthetic_epoch_manifest_source_renders_exact_human_and_machine_views() -> (
+    None
+):
+    """Dropping or relabelling any dedicated lineage value breaks this oracle."""
+
+    rendered = contract_tool.render_views(
+        _synthetic_contract_with_epoch_manifest_source()
+    )
+    expected_markdown = b"""## Epoch manifest source
+
+- Generation ID: `b4888a18780058e777f8147530062a882a473aaef19596562480a1bf43425cd8`
+- Generation manifest SHA-256: `2d88627c2283c31aa3c5a9333bc6ee423a1fcdd22d7df495a69c1768d384bb3d`
+- Generation receipt SHA-256: `041b1343070f24c99488b27e227264bf6ff9d8d9a0047f8732c7bcc3887bb25f`
+- Full directory inventory SHA-256: `50769d0200857b7fe43c67cc814a21dea8e2564f916ab65ebfcb635b0910cfb1`
+- Artifact path: `outputs/account-strategy-manifest.json`
+- Artifact SHA-256: `810eb288a0d472414c805824cf91283fb3fa5b3c394ce5edec685ab9c3c64834`
+- Artifact size bytes: `43`
+- Artifact schema: `account-strategy-manifest@8`
+"""
+    assert rendered.summary_markdown.count(expected_markdown) == 1
+
+    matrix = json.loads(rendered.source_matrix_json)
+    assert matrix["epoch_manifest_source"] == {
+        "generation_id": (
+            "b4888a18780058e777f8147530062a882a473aaef19596562480a1bf43425cd8"
+        ),
+        "generation_manifest_sha256": (
+            "2d88627c2283c31aa3c5a9333bc6ee423a1fcdd22d7df495a69c1768d384bb3d"
+        ),
+        "generation_receipt_sha256": (
+            "041b1343070f24c99488b27e227264bf6ff9d8d9a0047f8732c7bcc3887bb25f"
+        ),
+        "full_directory_inventory_sha256": (
+            "50769d0200857b7fe43c67cc814a21dea8e2564f916ab65ebfcb635b0910cfb1"
+        ),
+        "artifact": {
+            "path": "outputs/account-strategy-manifest.json",
+            "sha256": (
+                "810eb288a0d472414c805824cf91283fb3fa5b3c394ce5edec685ab9c3c64834"
+            ),
+            "size_bytes": 43,
+            "schema": {"name": "account-strategy-manifest", "version": "8"},
+        },
+    }
+
+
+def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> None:
+    """Copying the epoch source into historical source rows breaks this proof."""
+
+    legacy_contract = _contract()
+    historical_bytes = (
+        json.dumps(
+            {"source_segments": legacy_contract["source_segments"]},
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    assert hashlib.sha256(historical_bytes).hexdigest() == (
+        "fa0ae5ac10bc386cfec5679f7c954dc91d43cf70f5b32e22fb817f836a7e3ce3"
+    )
+
+    legacy_views = contract_tool.render_views(legacy_contract)
+    assert (
+        legacy_views.summary_markdown
+        == (GENERATED_ROOT / "current-product.md").read_bytes()
+    )
+    assert (
+        legacy_views.source_matrix_json
+        == (GENERATED_ROOT / "source-matrix.json").read_bytes()
+    )
+    assert b"## Epoch manifest source" not in legacy_views.summary_markdown
+    legacy_matrix = json.loads(legacy_views.source_matrix_json)
+    assert "epoch_manifest_source" not in legacy_matrix
+
+    augmented_contract = copy.deepcopy(legacy_contract)
+    augmented_contract["epoch_manifest_source"] = _literal_epoch_manifest_source()
+    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    assert _schema_errors(schema, augmented_contract, schema)
+    assert list(Draft202012Validator(schema).iter_errors(augmented_contract))
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="financial MVP contract keys differ",
+    ):
+        _validate(augmented_contract)
+    assert hashlib.sha256(
+        (
+            json.dumps(
+                {"source_segments": augmented_contract["source_segments"]},
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            + b"\n"
+        )
+    ).hexdigest() == (
+        "fa0ae5ac10bc386cfec5679f7c954dc91d43cf70f5b32e22fb817f836a7e3ce3"
+    )
+    augmented_matrix = json.loads(
+        contract_tool.render_views(augmented_contract).source_matrix_json
+    )
+    assert legacy_matrix["rows"] != augmented_matrix["rows"]
+
+    legacy_rows_without_contract_identity = [
+        {key: value for key, value in row.items() if key != "contract_sha256"}
+        for row in legacy_matrix["rows"]
+    ]
+    augmented_rows_without_contract_identity = [
+        {key: value for key, value in row.items() if key != "contract_sha256"}
+        for row in augmented_matrix["rows"]
+    ]
+    assert (
+        augmented_rows_without_contract_identity
+        == legacy_rows_without_contract_identity
+    )
+    assert all(
+        legacy_row["contract_sha256"] != augmented_row["contract_sha256"]
+        for legacy_row, augmented_row in zip(
+            legacy_matrix["rows"], augmented_matrix["rows"], strict=True
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    ("view_name", "failure_mode"),
+    [
+        ("current-product.md", "missing"),
+        ("source-matrix.json", "missing"),
+        ("current-product.md", "one-byte-mutated"),
+        ("source-matrix.json", "one-byte-mutated"),
+        ("current-product.md", "stale-legacy"),
+        ("source-matrix.json", "stale-legacy"),
+    ],
+)
+def test_check_views_rejects_each_synthetic_epoch_view_with_exact_path(
+    tmp_path: Path, view_name: str, failure_mode: str
+) -> None:
+    """Missing, mutated, or legacy output must identify the exact stale file."""
+
+    augmented = _synthetic_contract_with_epoch_manifest_source()
+    augmented_views = contract_tool.render_views(augmented)
+    augmented_outputs = {
+        "current-product.md": augmented_views.summary_markdown,
+        "source-matrix.json": augmented_views.source_matrix_json,
+    }
+    legacy_views = contract_tool.render_views(_contract())
+    legacy_outputs = {
+        "current-product.md": legacy_views.summary_markdown,
+        "source-matrix.json": legacy_views.source_matrix_json,
+    }
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    for name, payload in augmented_outputs.items():
+        if name != view_name:
+            (tmp_path / name).write_bytes(payload)
+
+    target = tmp_path / view_name
+    if failure_mode == "one-byte-mutated":
+        payload = augmented_outputs[view_name]
+        target.write_bytes(bytes([payload[0] ^ 1]) + payload[1:])
+    elif failure_mode == "stale-legacy":
+        target.write_bytes(legacy_outputs[view_name])
+
+    with pytest.raises(contract_tool.FinancialMvpContractError) as failure:
+        contract_tool.check_views(augmented, tmp_path)
+    assert str(failure.value) == (
+        f"generated view drift: {target}; run the generate command"
+    )
+
+
+def test_check_views_accepts_exact_independently_inspected_synthetic_views(
+    tmp_path: Path,
+) -> None:
+    augmented = _synthetic_contract_with_epoch_manifest_source()
+    rendered = contract_tool.render_views(augmented)
+    matrix = json.loads(rendered.source_matrix_json)
+    assert matrix["epoch_manifest_source"]["artifact"] == {
+        "path": "outputs/account-strategy-manifest.json",
+        "schema": {"name": "account-strategy-manifest", "version": "8"},
+        "sha256": "810eb288a0d472414c805824cf91283fb3fa5b3c394ce5edec685ab9c3c64834",
+        "size_bytes": 43,
+    }
+    assert b"- Artifact size bytes: `43`\n" in rendered.summary_markdown
+
+    (tmp_path / "current-product.md").write_bytes(rendered.summary_markdown)
+    (tmp_path / "source-matrix.json").write_bytes(rendered.source_matrix_json)
+    contract_tool.check_views(augmented, tmp_path)
+
+
 def test_generated_views_are_deterministic_and_match_authoritative_bytes(
     tmp_path: Path,
 ) -> None:
@@ -2245,7 +4020,7 @@ def test_generated_views_are_deterministic_and_match_authoritative_bytes(
         first.summary_markdown
     )
     assert b"robuxio-account-live-after-funding" in first.summary_markdown
-    assert b"MATRIXPORT:output/20260816T141010.494Z/csv/subscription_details.csv" in (
+    assert b"MATRIXPORT:output/20260903T051029.331Z/csv/subscription_details.csv" in (
         first.summary_markdown
     )
     assert b"p123-eu-provider-live" in first.summary_markdown

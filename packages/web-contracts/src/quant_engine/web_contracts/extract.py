@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.web_contracts.contracts import ProviderContract, WebContractError
@@ -161,17 +162,23 @@ def extract_har(
                 and not auth_value.casefold().startswith("bearer ")
             ):
                 raise WebContractError("authenticated session evidence is missing")
+        query = endpoint.query(url)
         if endpoint.validate_query is not None:
-            endpoint.validate_query(endpoint.query(url))
+            endpoint.validate_query(query)
+        request_body = _request_body(request)
         if endpoint.validate_request is not None:
-            endpoint.validate_request(_request_body(request))
+            endpoint.validate_request(request_body)
+        elif request.get("postData") is not None:
+            raise WebContractError("request body has no reviewed validator")
         if status < 200 or status >= 300:
             raise WebContractError("allowlisted request did not succeed")
         request_identity = {
             "capability": endpoint.capability,
+            "body": request_body if endpoint.validate_request is not None else None,
             "method": endpoint.method,
             "origin": endpoint.origin,
-            "path": endpoint.path,
+            "path": urlsplit(url).path,
+            "query": query,
         }
         request_sha256 = hashlib.sha256(
             canonical_json_bytes(request_identity)

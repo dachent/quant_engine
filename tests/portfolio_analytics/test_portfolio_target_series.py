@@ -5,6 +5,8 @@ import hashlib
 import importlib.util
 import io
 import json
+from datetime import date, timedelta
+from decimal import Decimal, localcontext
 from pathlib import Path
 import sys
 
@@ -128,6 +130,49 @@ def _rebind_matrixport_nav(
     manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
 
 
+def _rebind_matrixport_daily_holdings(
+    manifest: Path,
+    nav: Path,
+    *,
+    declared_dates: tuple[str, ...],
+) -> Path:
+    """Bind the exact per-date share evidence used by a declared span."""
+
+    daily = nav.with_name("daily_holdings.csv")
+    nav_rows = list(csv.DictReader(io.StringIO(nav.read_text(encoding="utf-8"))))
+    rows = ["product_id,utc_date,share,nav,nav_available\n"]
+    for row in nav_rows:
+        if row["product_id"] != "P1":
+            continue
+        observed = target_series._utc_day(row["timestamp_utc"])
+        rows.append(f"P1,{observed.isoformat()},100,{row['nav']},true\n")
+    for observed in declared_dates:
+        rows.append(f"P1,{observed},100,,false\n")
+    daily_hash, daily_size = _write(daily, "".join(rows))
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    artifact = next(
+        (
+            row
+            for row in manifest_value["artifacts"]
+            if row["artifact_id"] == "csv/daily_holdings.csv"
+        ),
+        None,
+    )
+    if artifact is None:
+        manifest_value["artifacts"].append(
+            {
+                "artifact_id": "csv/daily_holdings.csv",
+                "sha256": daily_hash,
+                "size_bytes": daily_size,
+            }
+        )
+    else:
+        artifact["sha256"] = daily_hash
+        artifact["size_bytes"] = daily_size
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+    return daily
+
+
 def test_matrixport_target_starts_account_live_only_after_funding(
     tmp_path: Path,
 ) -> None:
@@ -142,7 +187,7 @@ def test_matrixport_target_starts_account_live_only_after_funding(
     assert [row["return"] for row in robuxio] == ["-0.1"]
     assert {row["evidence_layer"] for row in robuxio} == {"ACCOUNT_LIVE"}
     proof = json.loads(proof_bytes)
-    assert proof["builder"] == "portfolio-target-series/matrixport-3"
+    assert proof["builder"] == "portfolio-target-series/matrixport-4"
     assert proof["coverage"]["nav_observations"] == 3
     assert proof["coverage"]["provider_live_observed_end"] == "2026-01-01"
     assert proof["coverage"]["account_live_start"] == "2026-01-02"
@@ -154,6 +199,7 @@ def test_matrixport_target_starts_account_live_only_after_funding(
         "authority_bound": False,
         "declared_missing_source_dates": [],
         "omitted_return_dates": [],
+        "span_return_receipts": [],
         "unavailable_return_dates": [],
     }
 
@@ -173,9 +219,19 @@ def test_matrixport_target_omits_declared_gaps_and_spanning_returns(
         "P1,2026-01-08T00:00:00Z,1.54\n",
     )
     _rebind_matrixport_nav(manifest, nav, declared_dates=("2026-01-03", "2026-01-06"))
+    daily_holdings = _rebind_matrixport_daily_holdings(
+        manifest, nav, declared_dates=("2026-01-03", "2026-01-06")
+    )
 
     targets, proof_bytes = build_matrixport_targets(
-        base, manifest, nav, holdings, subscriptions, "P1", "Robuxio"
+        base,
+        manifest,
+        nav,
+        holdings,
+        subscriptions,
+        "P1",
+        "Robuxio",
+        daily_holdings_path=daily_holdings,
     )
     rows = list(csv.DictReader(io.StringIO(targets.decode("utf-8"))))
     robuxio = [row for row in rows if row["series_id"] == "Robuxio"]
@@ -196,6 +252,203 @@ def test_matrixport_target_omits_declared_gaps_and_spanning_returns(
         "2026-01-07",
     ]
     assert policy["authority_bound"] is False
+
+
+def test_matrixport_target_retains_declared_gap_span_for_epoch_twr_only(
+    tmp_path: Path,
+) -> None:
+    """A missing daily point cannot erase a verified multi-day owner return."""
+
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
+    subscription_hash, subscription_size = _write(
+        subscriptions,
+        "confirm_nav_time_utc,product_id,status,subscription_share,subscription_time_utc\n"
+        "2025-12-06T00:00:00Z,P1,300,100,2025-12-05T21:00:00Z\n",
+    )
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    subscription_artifact = next(
+        row
+        for row in manifest_value["artifacts"]
+        if row["artifact_id"] == "csv/subscription_details.csv"
+    )
+    subscription_artifact["sha256"] = subscription_hash
+    subscription_artifact["size_bytes"] = subscription_size
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+    owner_start = date(2025, 12, 6)
+    cutoff = date(2026, 8, 13)
+    jan_start = date(2026, 1, 26)
+    jan_end = date(2026, 1, 28)
+    jul_start = date(2026, 7, 2)
+    jul_end = date(2026, 7, 4)
+    with localcontext() as context:
+        context.prec = 60
+        jan_factor = Decimal("0.8315377590244603") / Decimal("0.8460189019350154")
+        jul_factor = Decimal("0.855405567489686") / Decimal("0.8724061827323055")
+        starting_nav = Decimal("49891.54999999999999999922202")
+        terminal_nav = Decimal("49273.51697711999539954620532")
+        old_daily_only_factor = terminal_nav / starting_nav / jan_factor / jul_factor
+        values = {
+            owner_start: starting_nav,
+            owner_start + timedelta(days=1): starting_nav * old_daily_only_factor,
+            jan_start: starting_nav * old_daily_only_factor,
+            jan_end: starting_nav * old_daily_only_factor * jan_factor,
+            jul_start: starting_nav * old_daily_only_factor * jan_factor,
+            jul_end: starting_nav * old_daily_only_factor * jan_factor * jul_factor,
+            cutoff: terminal_nav,
+        }
+    missing = {date(2026, 1, 27), date(2026, 7, 3)}
+    rows = ["product_id,timestamp_utc,nav\n"]
+    observed = owner_start
+    carried = starting_nav
+    while observed <= cutoff:
+        if observed not in missing:
+            carried = values.get(observed, carried)
+            rows.append(f"P1,{observed.isoformat()}T00:00:00Z,{carried}\n")
+        observed += timedelta(days=1)
+    rows.append(f"P1,2026-08-14T00:00:00Z,{terminal_nav * Decimal(2)}\n")
+    _write(nav, "".join(rows))
+    _rebind_matrixport_nav(manifest, nav, declared_dates=("2026-01-27", "2026-07-03"))
+    daily_holdings = _rebind_matrixport_daily_holdings(
+        manifest, nav, declared_dates=("2026-01-27", "2026-07-03")
+    )
+
+    _targets, proof_bytes = build_matrixport_targets(
+        base,
+        manifest,
+        nav,
+        holdings,
+        subscriptions,
+        "P1",
+        "Robuxio",
+        admission_cutoff=cutoff,
+        daily_holdings_path=daily_holdings,
+    )
+    coverage = json.loads(proof_bytes)["coverage"]
+
+    assert Decimal(coverage["daily_cumulative_return"]).quantize(
+        Decimal("1e-24")
+    ) == Decimal("0.02478159992980962757481709200").quantize(Decimal("1e-24"))
+    assert Decimal(coverage["epoch_cumulative_return"]).quantize(
+        Decimal("1e-24")
+    ) == Decimal("-0.01238752900801848410107576010").quantize(Decimal("1e-24"))
+    assert coverage["epoch_cumulative_return"] != coverage["daily_cumulative_return"]
+    assert coverage["account_nav_observations"] == 249
+    assert coverage["admission_cutoff"] == "2026-08-13"
+    assert coverage["return_observations"] == 246
+    assert coverage["epoch_holding_period_link_observations"] == 248
+    receipt = coverage["epoch_hpr_receipt"]
+    assert receipt["daily_return_observations"] == 246
+    assert receipt["epoch_holding_period_link_observations"] == 248
+    assert receipt["admission_cutoff"] == "2026-08-13"
+    assert receipt["epoch_cumulative_return"] == ("-0.0123875290080184841010757599")
+    assert receipt["daily_cumulative_return"] == coverage["daily_cumulative_return"]
+    assert receipt["epoch_cumulative_return"] != receipt["daily_cumulative_return"]
+    assert len(receipt["daily_return_series_sha256"]) == 64
+    assert [
+        (
+            row["missing_source_date"],
+            row["span_start_date"],
+            row["span_end_date"],
+            row["span_days"],
+        )
+        for row in coverage["span_return_receipts"]
+    ] == [
+        ("2026-01-27", "2026-01-26", "2026-01-28", 2),
+        ("2026-07-03", "2026-07-02", "2026-07-04", 2),
+    ]
+
+
+def test_matrixport_target_rejects_gap_span_when_retained_endpoint_shares_change(
+    tmp_path: Path,
+) -> None:
+    """A current holding cannot stand in for historical endpoint shares."""
+
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
+    _write(
+        nav,
+        "product_id,timestamp_utc,nav\n"
+        "P1,2026-01-01T00:00:00Z,1\n"
+        "P1,2026-01-02T00:00:00Z,1.1\n"
+        "P1,2026-01-04T00:00:00Z,1.2\n",
+    )
+    _rebind_matrixport_nav(manifest, nav, declared_dates=("2026-01-03",))
+    daily_holdings = tmp_path / "daily_holdings.csv"
+    daily_hash, daily_size = _write(
+        daily_holdings,
+        "product_id,utc_date,share,nav,nav_available\n"
+        "P1,2026-01-02,100,1.1,true\n"
+        "P1,2026-01-03,100,,false\n"
+        "P1,2026-01-04,99,1.2,true\n",
+    )
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_value["artifacts"].append(
+        {
+            "artifact_id": "csv/daily_holdings.csv",
+            "sha256": daily_hash,
+            "size_bytes": daily_size,
+        }
+    )
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+
+    with pytest.raises(TargetSeriesError, match="gap span endpoint shares differ"):
+        build_matrixport_targets(
+            base,
+            manifest,
+            nav,
+            holdings,
+            subscriptions,
+            "P1",
+            "Robuxio",
+            daily_holdings_path=daily_holdings,
+        )
+
+
+def test_matrixport_target_rejects_subscription_inserted_inside_gap_span(
+    tmp_path: Path,
+) -> None:
+    """A declared missing NAV date cannot conceal a successful funding event."""
+
+    base, manifest, nav, holdings, subscriptions = _sources(tmp_path)
+    _write(
+        nav,
+        "product_id,timestamp_utc,nav\n"
+        "P1,2026-01-01T00:00:00Z,1\n"
+        "P1,2026-01-02T00:00:00Z,1.1\n"
+        "P1,2026-01-04T00:00:00Z,1.2\n",
+    )
+    _rebind_matrixport_nav(manifest, nav, declared_dates=("2026-01-03",))
+    daily_holdings = _rebind_matrixport_daily_holdings(
+        manifest, nav, declared_dates=("2026-01-03",)
+    )
+    subscription_hash, subscription_size = _write(
+        subscriptions,
+        "confirm_nav_time_utc,product_id,status,subscription_share,subscription_time_utc\n"
+        "2026-01-02T00:00:00+00:00,P1,300,100,2026-01-01T21:00:00+00:00\n"
+        "2026-01-03T00:00:00+00:00,P1,300,1,2026-01-03T00:00:00+00:00\n",
+    )
+    manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
+    subscription_artifact = next(
+        row
+        for row in manifest_value["artifacts"]
+        if row["artifact_id"] == "csv/subscription_details.csv"
+    )
+    subscription_artifact["sha256"] = subscription_hash
+    subscription_artifact["size_bytes"] = subscription_size
+    manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
+
+    with pytest.raises(
+        TargetSeriesError, match="gap span contains a subscription/funding event"
+    ):
+        build_matrixport_targets(
+            base,
+            manifest,
+            nav,
+            holdings,
+            subscriptions,
+            "P1",
+            "Robuxio",
+            daily_holdings_path=daily_holdings,
+        )
 
 
 def test_matrixport_target_rejects_undeclared_or_stale_gap(
@@ -493,6 +746,83 @@ def test_quantbase_account_path_is_flow_adjusted_and_deterministic(
     assert proof["coverage"]["flow_events"] == 2
     assert proof["coverage"]["return_observations"] == 2
     assert proof["evidence_layer"] == "ACCOUNT_LIVE"
+
+
+def test_quantbase_independent_recalculation_selects_recalculated_authority() -> None:
+    ledger_rows = [
+        {
+            "series_id": "Volatis Strategy",
+            "date": "2026-01-02",
+            "return": "-0.06",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return_basis": "NET",
+            "return_type": "TOTAL",
+            "cost": "",
+        },
+        {
+            "series_id": "Volatis Strategy",
+            "date": "2026-01-03",
+            "return": "0.0200",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return_basis": "NET",
+            "return_type": "TOTAL",
+            "cost": "",
+        },
+    ]
+    independently_recalculated = [
+        {**ledger_rows[0], "return": "-0.060"},
+        {**ledger_rows[1], "return": "0.02"},
+    ]
+
+    selected = target_series._quantbase_account_live_from_ledger(
+        ledger_rows, independently_recalculated, set()
+    )
+
+    assert selected == independently_recalculated
+
+
+@pytest.mark.parametrize(
+    ("recalculated_rows", "message"),
+    [
+        (
+            [
+                {
+                    "date": "2026-01-02",
+                    "return": "-0.07",
+                }
+            ],
+            "differs from provider ledger",
+        ),
+        (
+            [
+                {
+                    "date": "2026-01-03",
+                    "return": "-0.06",
+                }
+            ],
+            "date perimeter differs",
+        ),
+    ],
+)
+def test_quantbase_independent_recalculation_rejects_ledger_drift(
+    recalculated_rows: list[dict[str, str]], message: str
+) -> None:
+    ledger_rows = [
+        {
+            "series_id": "Volatis Strategy",
+            "date": "2026-01-02",
+            "return": "-0.06",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "return_basis": "NET",
+            "return_type": "TOTAL",
+            "cost": "",
+        }
+    ]
+
+    with pytest.raises(TargetSeriesError, match=message):
+        target_series._quantbase_account_live_from_ledger(
+            ledger_rows, recalculated_rows, set()
+        )
 
 
 def test_quantbase_account_path_rejects_manifest_drift(tmp_path: Path) -> None:

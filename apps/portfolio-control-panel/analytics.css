@@ -916,6 +916,12 @@ section[data-view="capital"] .callout-neutral {
 }
 
 @media (max-width: 760px) {
+  .panel-heading > .badge {
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+
   .nav-item,
   .segment,
   .ghost-button,

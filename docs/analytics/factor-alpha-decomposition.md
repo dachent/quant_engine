@@ -271,12 +271,14 @@ its current provider/account path is not a backtest. The exact Portfolio123 EU
 candidate return transform is not admitted and therefore remains outside both
 analysis modes; its exact-version backtest is not captured, and other long EU
 curves are not interchangeable.
-EchoTrade's captured event-only reconstruction is inadmissible as daily NAV,
-and Composer has no connected account-live history. Both therefore remain
-required-not-ready for decomposition; their accepted de-minimis exclusions
-apply only to the material HWM denominator. Omitting all three arguments
-preserves the replay-compatible schema-v1 output. Supplying a partial set fails
-closed.
+EchoTrade is deprecated and historical-only, so it has no current decomposition,
+dependence, HWM, or funded-product obligation. Its retained $0.19 is historical
+evidence only and is excluded from current capital, allocation, account-selector,
+count, manifest, and consolidated-value surfaces. Composer is immaterial and
+excluded from every current financial-MVP outcome, so it has no current
+decomposition, dependence, HWM, or funded-product obligation.
+Omitting all three arguments preserves the replay-compatible schema-v1 output.
+Supplying a partial set fails closed.
 
 ## Build, verify, publish, and recover
 

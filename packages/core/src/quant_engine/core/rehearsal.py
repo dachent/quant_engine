@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 import hashlib
 import multiprocessing
+import os
 from pathlib import Path, PurePosixPath
 from typing import Callable, Final, Mapping, Protocol
 
@@ -49,6 +50,19 @@ _HARNESS_IDENTITY_KEYS: Final = frozenset(
         "runtime_platform",
     }
 )
+
+
+def _windows_publication_unavailable() -> dict[str, object] | None:
+    if _is_windows_platform():
+        return {
+            "reason": "WINDOWS_NAMESPACE_UNTRUSTED",
+            "status": "PUBLICATION_UNAVAILABLE",
+        }
+    return None
+
+
+def _is_windows_platform() -> bool:
+    return os.name == "nt"
 
 
 class RehearsalError(RuntimeError):
@@ -237,6 +251,9 @@ def rehearse_release_boundaries(
 ) -> dict[str, object]:
     """Prove caught-failure and process-termination recovery at every boundary."""
 
+    unavailable = _windows_publication_unavailable()
+    if unavailable is not None:
+        return unavailable
     source_before, manifest = _source_state(spec, release_id)
     if manifest.release_id != release_id:
         raise RehearsalError("release identity differs")
@@ -1011,6 +1028,9 @@ def _publish_synthetic_release(
 def rehearse_dated_rollforwards(output_root: Path) -> dict[str, object]:
     """Prove two rollforwards, append-only correction, and explicit restore."""
 
+    unavailable = _windows_publication_unavailable()
+    if unavailable is not None:
+        return unavailable
     root_ids = ("account-ledger", "excel-report", "analytics", "panel")
     roots = {root_id: output_root / "dated" / root_id for root_id in root_ids}
     coordination = output_root / "dated" / "coordination"
@@ -1113,6 +1133,9 @@ def run_recovery_rehearsal(
     output_root: Path,
     harness_identity: Mapping[str, str],
 ) -> dict[str, object]:
+    unavailable = _windows_publication_unavailable()
+    if unavailable is not None:
+        return unavailable
     if set(harness_identity) != _HARNESS_IDENTITY_KEYS:
         raise RehearsalError("recovery harness identity fields differ")
     code_commit = harness_identity["code_commit"].lower()

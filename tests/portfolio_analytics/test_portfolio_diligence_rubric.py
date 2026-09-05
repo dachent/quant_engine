@@ -27,15 +27,12 @@ SERIES = (
     "GrizzlyBears VTMA",
     "Robuxio Crypto (High Sharpe High Vol)",
     "EU [P123]",
-    "[Composer] - The Holy Grail (Buy Copy)",
-    "Growth at Market Pivot Points [EchoTrade]",
 )
 CLUSTERS = (
     "TACTICAL_TIMING_MULTI_ASSET",
     "US_SYSTEMATIC_EQUITY",
     "EUROPE_SYSTEMATIC_EQUITY",
     "CRYPTO_DIRECTIONAL",
-    "DE_MINIMIS_OPERATIONAL",
 )
 
 
@@ -50,11 +47,11 @@ def _dependence() -> dict[str, Any]:
         "dependence": {
             "series_ids": list(SERIES),
             "correlation_one": {
-                "loss": "0.135",
+                "loss": "0.105",
                 "components": [
                     {
                         "series_id": series_id,
-                        "allocation_weight": "0.1111111111111111",
+                        "allocation_weight": "0.1428571428571429",
                         "conservative_loss_fraction": "0.15",
                         "loss_contribution": "0.015",
                     }
@@ -62,7 +59,7 @@ def _dependence() -> dict[str, Any]:
                 ],
             },
             "central_case": {
-                "loss": format(math.sqrt(9 * 0.01**2), ".12g"),
+                "loss": format(math.sqrt(7 * 0.01**2), ".12g"),
                 "components": [
                     {
                         "series_id": series_id,
@@ -74,8 +71,8 @@ def _dependence() -> dict[str, Any]:
                 ],
                 "dependence_matrix": {
                     "values": [
-                        ["1" if left == right else "0" for right in range(9)]
-                        for left in range(9)
+                        ["1" if left == right else "0" for right in range(7)]
+                        for left in range(7)
                     ]
                 },
             },
@@ -223,17 +220,17 @@ def test_build_reproduces_baseline_and_executes_all_eight_gates(
     assert payload["gate_counts"] == {"PASS": 8, "FAIL": 0, "UNAVAILABLE": 0}
     assert [row["gate_id"] for row in payload["gates"]] == list(rubric.EXPECTED_GATES)
     assert payload["scenario"]["baseline"] == {
-        "correlation_one_loss": "0.135",
-        "central_case_loss": "0.03",
+        "correlation_one_loss": "0.105",
+        "central_case_loss": format(math.sqrt(7 * 0.01**2), ".12g"),
     }
-    assert payload["scenario"]["result"]["correlation_one_loss"] == "0.13325"
+    assert payload["scenario"]["result"]["correlation_one_loss"] == "0.10475"
     assert payload["scenario"]["result"]["central_case_status"] == "AVAILABLE"
     assert payload["replacement_comparison"] == {"status": "PASS", "reasons": []}
-    assert len(payload["leave_one_out"]) == 9
-    assert payload["leave_one_out"][0]["correlation_one_loss_without"] == "0.12"
+    assert len(payload["leave_one_out"]) == 7
+    assert payload["leave_one_out"][0]["correlation_one_loss_without"] == "0.09"
     assert float(
         payload["leave_one_out"][0]["central_case_loss_without"]
-    ) == pytest.approx(math.sqrt(8 * 0.01**2))
+    ) == pytest.approx(math.sqrt(6 * 0.01**2))
     assert payload["authority_boundary"] == {
         "allocation_effect": "NONE",
         "execution_effect": "NONE",
@@ -286,7 +283,7 @@ def test_missing_scenario_fact_emits_unavailable_without_losing_baseline(
     payload = rubric.build(dependence, candidate, tmp_path / "rubric.json")
 
     assert payload["scenario"]["status"] == "UNAVAILABLE"
-    assert payload["scenario"]["baseline"]["correlation_one_loss"] == "0.135"
+    assert payload["scenario"]["baseline"]["correlation_one_loss"] == "0.105"
     assert _gate(payload, "portfolio_hwm")["status"] == "UNAVAILABLE"
 
 
@@ -328,7 +325,7 @@ def test_resize_and_new_cluster_modes_are_deterministic(tmp_path: Path) -> None:
 
     resized = rubric.build(dependence, resize, tmp_path / "resize-output.json")
 
-    assert resized["scenario"]["result"]["correlation_one_loss"] == "0.13325"
+    assert resized["scenario"]["result"]["correlation_one_loss"] == "0.10475"
     assert resized["replacement_comparison"] == {
         "status": "NOT_APPLICABLE",
         "reasons": [],
@@ -354,7 +351,6 @@ def test_resize_and_new_cluster_modes_are_deterministic(tmp_path: Path) -> None:
         for row in added["scenario"]["result"]["cluster_budget_effects"]
     ] == [
         ("CRYPTO_DIRECTIONAL", "0.01425"),
-        ("DE_MINIMIS_OPERATIONAL", "0.0285"),
         ("EUROPE_SYSTEMATIC_EQUITY", "0.01425"),
         ("NEW_DEFENSIVE", "0.005"),
         ("TACTICAL_TIMING_MULTI_ASSET", "0.057"),
@@ -374,7 +370,7 @@ def test_verify_rejects_tampered_artifact(tmp_path: Path) -> None:
         rubric.verify(dependence, candidate, output)
 
 
-def test_current_portfolio_boundary_is_exactly_nine_series(tmp_path: Path) -> None:
+def test_current_portfolio_boundary_is_exactly_seven_series(tmp_path: Path) -> None:
     dependence_value = _dependence()
     dependence_value["dependence"]["series_ids"].pop()
     dependence = _write(tmp_path / "dependence.json", dependence_value)
@@ -396,7 +392,8 @@ def test_output_schema_preserves_fixed_authority_and_cardinality() -> None:
 
     assert schema["properties"]["gates"]["minItems"] == 8
     assert schema["properties"]["gates"]["maxItems"] == 8
-    assert schema["properties"]["leave_one_out"]["minItems"] == 9
+    assert schema["properties"]["leave_one_out"]["minItems"] == 7
+    assert schema["properties"]["leave_one_out"]["maxItems"] == 7
     boundary = schema["properties"]["authority_boundary"]["properties"]
     assert {field: value["const"] for field, value in boundary.items()} == {
         "allocation_effect": "NONE",

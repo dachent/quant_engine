@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "artifact_id": "contracts/account-strategy-flow-classification-policy-v1.json",
+  "as_of_date": "2026-07-30",
+  "policy_id": "ACCOUNT_STRATEGY_FLOW_CLASSIFICATION",
+  "policy_version": "1",
+  "event_dispositions": {
+    "exact": [
+      {"flow_type": "EXTERNAL_CONTRIBUTION", "disposition": "EXTERNAL", "amount_sign": "POSITIVE"},
+      {"flow_type": "EXTERNAL_WITHDRAWAL", "disposition": "EXTERNAL", "amount_sign": "NEGATIVE"},
+      {"flow_type": "EXTERNAL_PROVIDER_TRANSFER", "disposition": "EXTERNAL", "amount_sign": "NONZERO"},
+      {"flow_type": "DEPOSIT_OR_WITHDRAWAL", "disposition": "EXTERNAL", "amount_sign": "NONZERO"},
+      {
+        "flow_type": "ACCOUNT_TRANSFER",
+        "disposition": "INTERNAL",
+        "amount_sign": "NONZERO",
+        "counterparty_rule": "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+      }
+    ],
+    "prefix": [
+      {
+        "flow_type_prefix": "TRANSFER:INTERNAL:",
+        "disposition": "INTERNAL",
+        "amount_sign": "NONZERO",
+        "counterparty_rule": "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT",
+        "unpaired_disposition": "EXTERNAL"
+      }
+    ]
+  }
+}
