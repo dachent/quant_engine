@@ -6,6 +6,7 @@ from datetime import date
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -1029,3 +1030,46 @@ def test_portfolio123_retained_transactions_require_the_admitted_fact() -> None:
             provider_facts,
             (),
         )
+
+
+QE_LEDGER_SPEC_PATH = os.environ.get("QE_LEDGER_SPEC_PATH", "")
+
+
+@pytest.mark.skipif(
+    not QE_LEDGER_SPEC_PATH or not Path(QE_LEDGER_SPEC_PATH).is_file(),
+    reason="QE_LEDGER_SPEC_PATH does not name a mounted provider-ledger spec",
+)
+def test_receipt_reproduces_every_contract_admitted_set() -> None:
+    """Producer-output regression (PR #387 review): run the governed
+    admit-or-declare derivation against the mounted estate and require the
+    receipt's per-provider admitted sets to reproduce the contract's
+    dataset_disposition_policy pins. build_catalog itself enforces the
+    upstream-inventory, data-class-set, and admitted-set digest gates against
+    these pins; this test re-runs that producer on live generations so the
+    pinned literals cannot drift silently alongside the contract."""
+
+    import collections
+
+    _catalog, _manifest, _catalog_bytes, receipt_bytes = ledger.build_catalog(
+        Path(QE_LEDGER_SPEC_PATH)
+    )
+    receipt = json.loads(receipt_bytes.decode("utf-8"))
+    admitted_counts: dict[str, int] = collections.defaultdict(int)
+    for row in receipt["dispositions"]:
+        action = str(row["action"]).rsplit(".", maxsplit=1)[-1]
+        if action == "ADMIT":
+            admitted_counts[str(row["source_segment_id"])] += 1
+    contract = json.loads(
+        (ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    checked = 0
+    for segment in contract["source_segments"]:
+        policy = (segment.get("admission") or {}).get("dataset_disposition_policy")
+        if not policy:
+            continue
+        segment_id = str(segment["source_id"])
+        assert admitted_counts[segment_id] == policy["admitted_item_count"], segment_id
+        checked += 1
+    assert checked >= 7
