@@ -1034,12 +1034,11 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
-    # Digest binds the gap-safe, funded-boundary provider ledger and reconciled
-    # Robuxio daily-only segment through the financial-MVP cutoff (with HPR
-    # spans confined to coverage) while retaining corrected P123 inputs and
-    # the deprecated Echo boundary.
+    # Digest binds the verified current ledger, six reconciled account-history
+    # tails, native Quantbase receipts, and accepted method-scope plan while
+    # retaining the distinct Matrixport, P123, and deprecated Echo boundaries.
     assert contract_tool.contract_digest(contract) == (
-        "becee851ddcb537f784229a499366e877f82091c028c36693d04f94fd61ac569"
+        "eb6398ce447bb258ced02e535ab64c732712ea80c9dcb77df6c86e1dd4107c05"
     )
 
 
@@ -1102,9 +1101,9 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             ),
         },
         "quantbase-account-generation": {
-            "admitted_item_count": 5,
+            "admitted_item_count": 6,
             "admitted_item_set_sha256": (
-                "95406eafada9522e22943c31c9b3cb594b992cd696fc7edf239e0a3c1661655b"
+                "50fcb8d5a059f3496d56561f178d8f1b53fdeda620d733cf6e5f9a5c9b188923"
             ),
         },
         "schwab-account-generation": {
@@ -1173,7 +1172,7 @@ def test_current_strategy_registry_binds_exact_applicability_plan_bytes() -> Non
     assert source["current_generation"] == {
         "generation_id": digest,
         "sha256": digest,
-        "as_of": "2026-08-18",
+        "as_of": "2026-09-06",
     }
 
 
@@ -1824,9 +1823,9 @@ def test_accepted_provider_ledger_history_identity_cannot_be_coherently_relabell
     """History lineage is a fixed receipt, not a replaceable generation label."""
 
     replacements = {
-        "7e51e4dd1fad35f463b92871d23b71efef5ecba4045a65af25d0bfca7b6e10b8": ("a" * 64),
-        "45b2437990ce7e04d1a5ebe520b3cee259e8a11948193f3b0da2968d15e9d077": ("b" * 64),
-        "b12e4758210682c5ccdafd350e91673187161bc3ca440598d6853ed78b7a2bbb": ("c" * 64),
+        "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c": ("a" * 64),
+        "018105dbc99eea27c1bcd1a7b860809a5023baccd9b0c6af89809a1a4965ab34": ("b" * 64),
+        "495179faf7d6fcfb707db8682517871151eb335468263c1c8723ed30b3c87dcb": ("c" * 64),
     }
 
     def replace_lineage(value: object) -> object:
@@ -1991,10 +1990,10 @@ def test_two_vintage_history_accepts_current_active_and_retains_07c590_echo() ->
     """Active owner history advances without relabelling deprecated Echo evidence."""
 
     active_generation = (
-        "7e51e4dd1fad35f463b92871d23b71efef5ecba4045a65af25d0bfca7b6e10b8"
+        "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c"
     )
-    active_manifest = "45b2437990ce7e04d1a5ebe520b3cee259e8a11948193f3b0da2968d15e9d077"
-    active_catalog = "b12e4758210682c5ccdafd350e91673187161bc3ca440598d6853ed78b7a2bbb"
+    active_manifest = "018105dbc99eea27c1bcd1a7b860809a5023baccd9b0c6af89809a1a4965ab34"
+    active_catalog = "495179faf7d6fcfb707db8682517871151eb335468263c1c8723ed30b3c87dcb"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -2070,7 +2069,9 @@ def test_two_vintage_history_accepts_current_active_and_retains_07c590_echo() ->
         for row in contract["strategies"]
         if row["strategy_id"] == "volatis-strategy"
     )
-    assert volatis["live_implementation_identity"]["generation_id"].startswith("948e7c")
+    assert volatis["live_implementation_identity"]["generation_id"] == (
+        "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe"
+    )
     robuxio = next(
         row for row in contract["strategies"] if row["strategy_id"] == "robuxio-crypto"
     )
@@ -2141,9 +2142,9 @@ def test_deprecated_history_receipt_is_independent_of_current_source_as_of(
 def test_owner_account_history_rebinds_to_current_ledger_generation() -> None:
     """The active owner-history lineage follows the corrected governed ledger."""
 
-    generation_id = "7e51e4dd1fad35f463b92871d23b71efef5ecba4045a65af25d0bfca7b6e10b8"
-    manifest_sha256 = "45b2437990ce7e04d1a5ebe520b3cee259e8a11948193f3b0da2968d15e9d077"
-    catalog_sha256 = "b12e4758210682c5ccdafd350e91673187161bc3ca440598d6853ed78b7a2bbb"
+    generation_id = "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c"
+    manifest_sha256 = "018105dbc99eea27c1bcd1a7b860809a5023baccd9b0c6af89809a1a4965ab34"
+    catalog_sha256 = "495179faf7d6fcfb707db8682517871151eb335468263c1c8723ed30b3c87dcb"
     contract = _contract()
     owner_source = _source(contract, "owner-account-live-history")
     assert owner_source["current_generation"] == {
@@ -2182,9 +2183,9 @@ def test_two_vintage_history_rejects_legacy_rollbacks_and_rewrites() -> None:
     """The deprecated event-only class cannot authorize active-lineage changes."""
 
     active_generation = (
-        "7e51e4dd1fad35f463b92871d23b71efef5ecba4045a65af25d0bfca7b6e10b8"
+        "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c"
     )
-    active_manifest = "45b2437990ce7e04d1a5ebe520b3cee259e8a11948193f3b0da2968d15e9d077"
+    active_manifest = "018105dbc99eea27c1bcd1a7b860809a5023baccd9b0c6af89809a1a4965ab34"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -3106,7 +3107,7 @@ def test_robuxio_materialized_identity_is_daily_only_and_cannot_be_rebound() -> 
 def test_volatis_account_live_materialized_authority_rejects_raw_contribution_series() -> (
     None
 ):
-    accepted_sha256 = "c2d93268f9b91eead304459ce029b8bf4b1110ca28d0bb8190361ab4df43183f"
+    accepted_sha256 = "e8b3b66a38b6edfa027318496129a1e8f56bc6c29e3176e9d4c44215f01a66b4"
     rejected_raw_contribution_sha256 = (
         "f989eed33cd7ce8e17d63acb5065032e56d511a765b4f0684e281df043d27016"
     )
@@ -4062,7 +4063,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "48934a97ea5b5a3ef3c8ff220e322b249311f91d12a6590161a50c6949b748e8"
+        "c11741736f29c3aacc1979e8c4afd3641d980da55e947fa60be99eba1e8614fa"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4099,7 +4100,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "48934a97ea5b5a3ef3c8ff220e322b249311f91d12a6590161a50c6949b748e8"
+        "c11741736f29c3aacc1979e8c4afd3641d980da55e947fa60be99eba1e8614fa"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json

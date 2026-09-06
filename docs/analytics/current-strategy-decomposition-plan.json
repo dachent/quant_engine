@@ -77,9 +77,9 @@
       "archetype": "US_SMALL_MICROCAP_EQUITY",
       "source_dispositions": {
         "us-economic": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
-        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "europe-economic": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
         "us-equity-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
-        "multi-asset-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "multi-asset-style": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
         "us-sector": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
         "us-industry": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"}
       },
@@ -108,12 +108,29 @@
         {
           "source_key": "us-sector",
           "constraint": "UNCONSTRAINED",
-          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
+          "factor_sets": [
+            ["XLC", "XLK", "XLY"],
+            ["XLP", "XLV", "XLU"],
+            ["XLE", "XLB", "XLI"],
+            ["XLF", "XLRE"],
+            ["XLK", "XLP", "XLI", "XLF"]
+          ]
         },
         {
           "source_key": "us-industry",
           "constraint": "UNCONSTRAINED",
-          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
+          "factor_sets": [
+            ["Agric", "Food", "Soda", "Beer", "Smoke"],
+            ["Toys", "Fun", "Books", "Hshld", "Clths"],
+            ["Hlth", "MedEq", "Drugs", "LabEq"],
+            ["Chems", "Rubbr", "Txtls", "Paper", "Boxes"],
+            ["BldMt", "Cnstr", "Steel", "FabPr", "Mach", "ElcEq"],
+            ["Autos", "Aero", "Ships", "Guns", "Trans"],
+            ["Gold", "Mines", "Coal", "Oil", "Util"],
+            ["Telcm", "BusSv", "Hardw", "Softw", "Chips"],
+            ["PerSv", "Whlsl", "Rtail", "Meals", "Other"],
+            ["Banks", "Insur", "RlEst", "Fin"]
+          ]
         }
       ]
     },
@@ -122,12 +139,12 @@
       "series_id": "EU [P123]",
       "archetype": "EUROPE_EQUITY",
       "source_dispositions": {
-        "us-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-economic": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
         "europe-economic": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
-        "us-equity-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
-        "multi-asset-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
-        "us-sector": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
-        "us-industry": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"}
+        "us-equity-style": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
+        "multi-asset-style": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
+        "us-sector": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
+        "us-industry": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"}
       },
       "assignments": [
         {
@@ -147,7 +164,7 @@
       "archetype": "TACTICAL_MULTI_ASSET",
       "source_dispositions": {
         "us-economic": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
-        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "europe-economic": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
         "us-equity-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
         "multi-asset-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
         "us-sector": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
@@ -191,12 +208,29 @@
         {
           "source_key": "us-sector",
           "constraint": "UNCONSTRAINED",
-          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
+          "factor_sets": [
+            ["XLC", "XLK", "XLY"],
+            ["XLP", "XLV", "XLU"],
+            ["XLE", "XLB", "XLI"],
+            ["XLF", "XLRE"],
+            ["XLK", "XLP", "XLI", "XLF"]
+          ]
         },
         {
           "source_key": "us-industry",
           "constraint": "UNCONSTRAINED",
-          "model_policy": "EACH_CANDIDATE_ONE_FACTOR"
+          "factor_sets": [
+            ["Agric", "Food", "Soda", "Beer", "Smoke"],
+            ["Toys", "Fun", "Books", "Hshld", "Clths"],
+            ["Hlth", "MedEq", "Drugs", "LabEq"],
+            ["Chems", "Rubbr", "Txtls", "Paper", "Boxes"],
+            ["BldMt", "Cnstr", "Steel", "FabPr", "Mach", "ElcEq"],
+            ["Autos", "Aero", "Ships", "Guns", "Trans"],
+            ["Gold", "Mines", "Coal", "Oil", "Util"],
+            ["Telcm", "BusSv", "Hardw", "Softw", "Chips"],
+            ["PerSv", "Whlsl", "Rtail", "Meals", "Other"],
+            ["Banks", "Insur", "RlEst", "Fin"]
+          ]
         }
       ]
     },
@@ -206,7 +240,7 @@
       "archetype": "TACTICAL_MULTI_ASSET",
       "source_dispositions": {
         "us-economic": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
-        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "europe-economic": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
         "us-equity-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
         "multi-asset-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
         "us-sector": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
@@ -220,7 +254,7 @@
       "archetype": "TACTICAL_VOLATILITY",
       "source_dispositions": {
         "us-economic": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
-        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "europe-economic": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
         "us-equity-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
         "multi-asset-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
         "us-sector": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
@@ -234,7 +268,7 @@
       "archetype": "TACTICAL_VOLATILITY",
       "source_dispositions": {
         "us-economic": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
-        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_APPLICABILITY_NOT_ACCEPTED", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "europe-economic": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
         "us-equity-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
         "multi-asset-style": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
         "us-sector": {"requirement": "REQUIRED", "readiness": "READY_TO_MODEL", "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT", "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN"},
@@ -247,12 +281,12 @@
       "series_id": "Robuxio Crypto (High Sharpe High Vol)",
       "archetype": "CRYPTO_TACTICAL",
       "source_dispositions": {
-        "us-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
-        "europe-economic": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
-        "us-equity-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
+        "us-economic": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
+        "europe-economic": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
+        "us-equity-style": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
         "multi-asset-style": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
-        "us-sector": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"},
-        "us-industry": {"requirement": "REQUIRED", "readiness": "REQUIRED_NOT_READY", "reason": "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE", "authority": "FINANCIAL_MVP_DECOMPOSITION_REQUIRED_AND_ISSUE_328"}
+        "us-sector": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"},
+        "us-industry": {"requirement": "NOT_APPLICABLE_METHOD_SCOPE", "readiness": "NOT_APPLICABLE_METHOD_SCOPE", "reason": "NOT_APPLICABLE_METHOD_SCOPE", "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING"}
       }
     },
     {

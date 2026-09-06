@@ -206,13 +206,13 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
         "315471b602bb4ce61cd854195162708ab188f6e08d6597deb9b9da11ca5bce44"
     ),
     "current_generation_id": (
-        "7e51e4dd1fad35f463b92871d23b71efef5ecba4045a65af25d0bfca7b6e10b8"
+        "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c"
     ),
     "current_manifest_sha256": (
-        "45b2437990ce7e04d1a5ebe520b3cee259e8a11948193f3b0da2968d15e9d077"
+        "018105dbc99eea27c1bcd1a7b860809a5023baccd9b0c6af89809a1a4965ab34"
     ),
     "current_catalog_sha256": (
-        "b12e4758210682c5ccdafd350e91673187161bc3ca440598d6853ed78b7a2bbb"
+        "495179faf7d6fcfb707db8682517871151eb335468263c1c8723ed30b3c87dcb"
     ),
     "legacy_generation_id": (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
@@ -329,9 +329,9 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             "CURRENT.json",
             "10ea84966c0a20fd5520690a58c67e0e098490e4030b77e270225fd1fc4fd6b3",
         ): (
-            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
             "CURRENT.json",
-            "6a9d0ba89762a64f5a8cbcbca06c79c0a040879394509ffcd9458c694d548f15",
+            "1caffa0848f7da8659adc6c2206ae19dde23d497a56b192ee6febc24ded17d38",
         ),
         (
             "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
@@ -341,12 +341,11 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             ),
             "fa5a8cf49572ebb66632909662f707f0072134234425f4fa1ceee049cefdf87f",
         ): (
-            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
             (
-                "generations/948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5"
-                "d96df874263c4d39/generation.json"
+                "generations/d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe/generation.json"
             ),
-            "4d575a4155e2cede745e16c324be7023cec09a29ab038e9a658a81359a3d8828",
+            "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c",
         ),
         (
             "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
@@ -356,10 +355,9 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             ),
             "c03f1ae7a8363386a388670bf66699135727be5eeeeeea9508bc83b42ac501c4",
         ): (
-            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
             (
-                "source-runs/legacy-20260902-7b9f89c26ecc/artifacts/csv/"
-                "dashboard_Volatis_Strategy_pricehistory.csv"
+                "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv"
             ),
             "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e",
         ),
@@ -371,10 +369,9 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             ),
             "140301858179cbb4ca56539931c3d7701c190334aafd0d4e7bde30a621186772",
         ): (
-            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
             (
-                "source-runs/legacy-20260902-7b9f89c26ecc/artifacts/csv/"
-                "ssg_Volatis_Strategy_pricehistory.csv"
+                "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/ssg_Volatis_Strategy_pricehistory.csv"
             ),
             "83bab8b0828bee2d8abb51f26b6cbbf44fa5f4bab98e69a80097f5cba9b80fa2",
         ),
@@ -386,10 +383,9 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             ),
             "b4c5a7b23f24636a17090003b0203ee40b91703e6f0c8b3236d5884d6d1e62e0",
         ): (
-            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
             (
-                "source-runs/legacy-20260902-7b9f89c26ecc/artifacts/csv/"
-                "account_activity.csv"
+                "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/account_activity.csv"
             ),
             "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0",
         ),
@@ -409,8 +405,8 @@ _HISTORY_PROVIDER_SOURCE_REBINDS: Final = {
     "quantbase-account-generation": (
         "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
         "fa5a8cf49572ebb66632909662f707f0072134234425f4fa1ceee049cefdf87f",
-        "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
-        "4d575a4155e2cede745e16c324be7023cec09a29ab038e9a658a81359a3d8828",
+        "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
+        "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c",
     ),
 }
 _HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
@@ -438,13 +434,43 @@ _HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
     ),
 }
 _HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final = {
-    # Matrixport daily observations stop at the financial-MVP cutoff.  Its two
-    # declared two-day holding-period links are retained in coverage only and
-    # must not be folded into this daily materialized segment identity.
+    # Issue #374 current source refresh: six appended account-history tails
+    # preserve all prior numeric overlaps and accepted assignment boundaries.
+    # Matrixport's separate accepted daily/HPR disposition remains unchanged.
     "robuxio-crypto:account-live": {
         "observed_end": "2026-08-13",
         "return_observations": 246,
         "sha256": "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+    },
+    "grizzlybears-vtma:account-live": {
+        "observed_end": "2026-09-02",
+        "return_observations": 243,
+        "sha256": "a7271e772c6d21ee4b3b2ed76149ddd9639d10c5c8be371550203fc2d67c9b61",
+    },
+    "p123-ai-factor:account-live": {
+        "observed_end": "2026-09-02",
+        "return_observations": 160,
+        "sha256": "7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
+    },
+    "p123-eu:account-live": {
+        "observed_end": "2026-09-02",
+        "return_observations": 204,
+        "sha256": "63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
+    },
+    "qsi:account-live": {
+        "observed_end": "2026-09-02",
+        "return_observations": 241,
+        "sha256": "de46b08ec45f4096ae5bf501b39e6efa71ae51ae825bee63161aa804422067b3",
+    },
+    "tt-portfolio:account-live": {
+        "observed_end": "2026-09-02",
+        "return_observations": 282,
+        "sha256": "4235428716b167f3c21e2843a7e16dd8ea50d8e542cd465e0cf6887b89072435",
+    },
+    "volatis-strategy:account-live": {
+        "observed_end": "2026-09-02",
+        "return_observations": 687,
+        "sha256": "e8b3b66a38b6edfa027318496129a1e8f56bc6c29e3176e9d4c44215f01a66b4",
     },
 }
 EPOCH_MANIFEST_ARTIFACT_PATH: Final = "outputs/account-strategy-manifest.json"
