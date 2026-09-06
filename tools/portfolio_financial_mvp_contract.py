@@ -206,13 +206,13 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
         "315471b602bb4ce61cd854195162708ab188f6e08d6597deb9b9da11ca5bce44"
     ),
     "current_generation_id": (
-        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
+        "7e51e4dd1fad35f463b92871d23b71efef5ecba4045a65af25d0bfca7b6e10b8"
     ),
     "current_manifest_sha256": (
-        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
+        "45b2437990ce7e04d1a5ebe520b3cee259e8a11948193f3b0da2968d15e9d077"
     ),
     "current_catalog_sha256": (
-        "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
+        "b12e4758210682c5ccdafd350e91673187161bc3ca440598d6853ed78b7a2bbb"
     ),
     "legacy_generation_id": (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
@@ -223,14 +223,14 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
     "legacy_catalog_sha256": (
         "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
     ),
+    "legacy_as_of": "2026-08-16",
 }
 # Issue #374 Phase C: the direct Matrixport/Portfolio123/Quantbase lanes
 # re-pin to the refreshed provider generations.  Every re-pointed history
 # receipt is enumerated as ``accepted identity -> refreshed identity``; the
-# current contract must carry the refreshed identity, the accepted authority
-# is projected forward, and receipts outside this table (including the
-# retained Portfolio123 managed-performance artifact, which the refreshed
-# generation no longer carries) remain frozen to the accepted bytes.
+# current contract must carry the refreshed identity and the accepted authority
+# is projected forward.  The exact Portfolio123 EU provider-live correction
+# remains frozen to its complete accepted evidence vintage.
 _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
     "MATRIXPORT": {
         (
@@ -321,36 +321,6 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
                 "1e24af6dd0ec6d45/tables/strategy_relationships.parquet"
             ),
             "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc",
-        ),
-        (
-            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
-            (
-                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
-                "de384ad4a3182af1/tables/har_managed_metadata.parquet"
-            ),
-            "bf40e5b0502c2b8f4795279da6279a70e0062b7d26af308697bf6f6c6a583329",
-        ): (
-            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
-            (
-                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
-                "1e24af6dd0ec6d45/tables/har_managed_metadata.parquet"
-            ),
-            "b9d69e97b25afcdbc7dc319a67618900a82bfef5ee635334b037a920d374e52b",
-        ),
-        (
-            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
-            (
-                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
-                "de384ad4a3182af1/tables/har_equity_curve.parquet"
-            ),
-            "b87f760a1cd369bfd40ebc5e8db6b44e3626f9b4c53950e3d1e8c7ea0abf2b4e",
-        ): (
-            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
-            (
-                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
-                "1e24af6dd0ec6d45/tables/har_equity_curve.parquet"
-            ),
-            "39cabac6c6088c4ec100e7883d17713d952f4768fa4ff8888333b139264d311c",
         ),
     },
     "QUANTBASE": {
@@ -1329,6 +1299,7 @@ def _verify_strategy_version_history_evidence(
         *,
         accepted_authority: bool,
         deprecated_event_only: bool,
+        retain_accepted_receipt: bool,
     ) -> dict[str, object]:
         receipt_keys = (
             "artifact_role",
@@ -1341,6 +1312,8 @@ def _verify_strategy_version_history_evidence(
         )
         projected = {key: receipt.get(key) for key in receipt_keys}
         if projected["authority_root"] != "PROVIDER_LEDGER":
+            if retain_accepted_receipt:
+                return projected
             lane_rebinds = _HISTORY_PROVIDER_RECEIPT_REBINDS.get(
                 str(projected["authority_root"])
             )
@@ -1433,10 +1406,10 @@ def _verify_strategy_version_history_evidence(
         row: Mapping[str, Any], *, accepted_authority: bool
     ) -> dict[str, object]:
         strategy_id = _text(row.get("strategy_id"), "history correction strategy_id")
+        correction_id = _text(row.get("correction_id"), "history correction_id")
+        retain_accepted_p123_eu = correction_id == "p123-eu-provider-live"
         semantic_row = (
-            current_corrections_by_id.get(
-                _text(row.get("correction_id"), "history correction_id"), row
-            )
+            current_corrections_by_id.get(correction_id, row)
             if accepted_authority
             else row
         )
@@ -1453,24 +1426,27 @@ def _verify_strategy_version_history_evidence(
                 receipt,
                 accepted_authority=accepted_authority,
                 deprecated_event_only=deprecated_event_only,
+                retain_accepted_receipt=retain_accepted_p123_eu,
             )
             for receipt in _objects(
                 row.get("source_receipts"), "history correction source_receipts"
             )
         ]
         receipts.sort(key=canonical_json_bytes)
-        return {
+        capture = _object(row.get("capture"), "history correction capture")
+        projected = {
             "strategy_id": strategy_id,
             "evidence_layer": row.get("evidence_layer"),
             "source_id": row.get("source_id"),
-            "capture_status": _object(
-                row.get("capture"), "history correction capture"
-            ).get("status"),
+            "capture_status": capture.get("status"),
             "strategy_version": _object(
                 row.get("strategy_version"), "history correction strategy_version"
             ),
             "source_receipts": receipts,
         }
+        if retain_accepted_p123_eu:
+            projected["accepted_capture"] = dict(capture)
+        return projected
 
     accepted_history = _object(
         accepted.get("history_corrections"), "accepted history corrections"
@@ -4136,13 +4112,14 @@ def _validate_history_corrections(
                     != _HISTORY_PROVIDER_LEDGER_TRANSITION["legacy_generation_id"]
                     or generation_sha
                     != _HISTORY_PROVIDER_LEDGER_TRANSITION["legacy_manifest_sha256"]
-                    or capture["as_of"] != source_generation["as_of"]
+                    or capture["as_of"]
+                    != _HISTORY_PROVIDER_LEDGER_TRANSITION["legacy_as_of"]
                 ):
                     raise FinancialMvpContractError(
                         "deprecated event-only history must retain its legacy receipt: "
                         f"{correction_id}"
                     )
-            elif (
+            elif correction_id != "p123-eu-provider-live" and (
                 source_generation["generation_id"] != generation_id
                 or source_generation["sha256"] != generation_sha
                 or source_generation["as_of"] != capture["as_of"]

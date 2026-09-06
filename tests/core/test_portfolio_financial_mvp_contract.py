@@ -1039,7 +1039,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # spans confined to coverage) while retaining corrected P123 inputs and
     # the deprecated Echo boundary.
     assert contract_tool.contract_digest(contract) == (
-        "51146395041b31111709b6b07360e90085d41c8b3ed9c62bf18c7ab23d659a16"
+        "becee851ddcb537f784229a499366e877f82091c028c36693d04f94fd61ac569"
     )
 
 
@@ -1079,26 +1079,26 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             "source_version": "ibkr-catalog-v4",
             "schema_version": "4",
             "generation_id": (
-                "0917837a0b15ff473300bbdff2ca0ed34f96ed3b5e5a606258849dc20533dd65"
+                "70c078a45356a1dddbe01ddee2d4828ee16c9381fa6879b03de706636017d402"
             ),
             "generation_sha256": (
-                "eafeda509254eb086c4a7889db14709ad7963777799f4a4320d6906f229c93eb"
+                "71ef99d46f772c0a90ff69215fba7e3977f6f64741696ce720b7341f610d709a"
             ),
             "upstream_inventory_sha256": (
-                "4765503faa2cbd0b57832e21041d0c99aa1475ce9e6cef1efbd7b71a686317fa"
+                "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8"
             ),
             "product_data_class_set_sha256": (
-                "03b4a13d4df8a3afbe166f33ada430ac842510b7aa85af6feb8468dca2270044"
+                "eaeee09eac3d4f358f875c89b8c03e1b0ac3a3b509f9f715189b2981cf7a7153"
             ),
             "admitted_item_count": 24,
             "admitted_item_set_sha256": (
-                "90f111837e9be3728398a1b184bdec9f079e33ec176111b1ae1c423bdad4d49a"
+                "cf712a4c968f7e749342044ce3ca97a83c6785a0a1c2be2e2fe4e329ee3a7101"
             ),
         },
         "matrixport-account-generation": {
-            "admitted_item_count": 5,
+            "admitted_item_count": 0,
             "admitted_item_set_sha256": (
-                "230adba3c8a0a2523f1b38e2fc5521b1e292a2fff90f5fc0a924d7de925c0629"
+                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
             ),
         },
         "quantbase-account-generation": {
@@ -1108,9 +1108,9 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             ),
         },
         "schwab-account-generation": {
-            "admitted_item_count": 19,
+            "admitted_item_count": 22,
             "admitted_item_set_sha256": (
-                "e20b207466b46110e3dc7bf01a3e94c0aff1c4b76963516a117412d52c86d88e"
+                "569fbb987fe524049df348c261ee8d8cd9e0ebdd49775a9d84d2522ccf2173cf"
             ),
         },
         "portfolio123-model-generation": {
@@ -1824,9 +1824,9 @@ def test_accepted_provider_ledger_history_identity_cannot_be_coherently_relabell
     """History lineage is a fixed receipt, not a replaceable generation label."""
 
     replacements = {
-        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62": ("a" * 64),
-        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2": ("b" * 64),
-        "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1": ("c" * 64),
+        "7e51e4dd1fad35f463b92871d23b71efef5ecba4045a65af25d0bfca7b6e10b8": ("a" * 64),
+        "45b2437990ce7e04d1a5ebe520b3cee259e8a11948193f3b0da2968d15e9d077": ("b" * 64),
+        "b12e4758210682c5ccdafd350e91673187161bc3ca440598d6853ed78b7a2bbb": ("c" * 64),
     }
 
     def replace_lineage(value: object) -> object:
@@ -1850,14 +1850,151 @@ def test_accepted_provider_ledger_history_identity_cannot_be_coherently_relabell
         _validate(relabelled)
 
 
-def test_two_vintage_history_accepts_2961_active_and_retains_07c590_echo() -> None:
+def test_p123_history_accepts_exact_eu_vintage_with_current_ai_vintage() -> None:
+    """The accepted EU evidence remains distinct from the current AI generation."""
+
+    contract = _contract()
+    eu = _history_correction(contract, "p123-eu-provider-live")
+    ai = _history_correction(contract, "p123-ai-backtest-candidate")
+
+    assert eu["capture"] == {
+        "status": "CAPTURED_GOVERNED",
+        "capture_defect": None,
+        "generation_id": (
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1"
+        ),
+        "generation_sha256": (
+            "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907"
+        ),
+        "as_of": "2026-08-14",
+    }
+    assert [
+        (receipt["artifact_role"], receipt["generation_id"], receipt["sha256"])
+        for receipt in eu["source_receipts"]
+    ] == [
+        (
+            "portfolio123-generation-manifest",
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907",
+        ),
+        (
+            "portfolio123-managed-metadata",
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            "bf40e5b0502c2b8f4795279da6279a70e0062b7d26af308697bf6f6c6a583329",
+        ),
+        (
+            "portfolio123-managed-performance",
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            "6fe41e9c558d37df4e69c273ff67781284af03d1daedd0877799976ad86e29b8",
+        ),
+        (
+            "portfolio123-equity-curve",
+            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
+            "b87f760a1cd369bfd40ebc5e8db6b44e3626f9b4c53950e3d1e8c7ea0abf2b4e",
+        ),
+    ]
+    assert ai["capture"]["generation_id"] == (
+        "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45"
+    )
+    assert {receipt["generation_id"] for receipt in ai["source_receipts"]} == {
+        "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45"
+    }
+
+    contract_tool._validate_history_corrections(
+        contract["history_corrections"],
+        contract["strategies"],
+        contract["source_segments"],
+        {row["strategy_id"] for row in contract["strategies"]},
+    )
+    assert contract_tool._verify_strategy_version_history_evidence(contract) == 3
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("generation_id", "f" * 64),
+        ("generation_sha256", "f" * 64),
+        ("as_of", "2026-08-15"),
+    ],
+)
+def test_p123_eu_historical_capture_rejects_accepted_authority_tampering(
+    field: str, replacement: str
+) -> None:
+    contract = _contract()
+    eu = _history_correction(contract, "p123-eu-provider-live")
+    eu["capture"][field] = replacement
+
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="differs from accepted history authority",
+    ):
+        contract_tool._verify_strategy_version_history_evidence(contract)
+
+
+@pytest.mark.parametrize(
+    "artifact_role",
+    [
+        "portfolio123-generation-manifest",
+        "portfolio123-managed-metadata",
+        "portfolio123-managed-performance",
+        "portfolio123-equity-curve",
+    ],
+)
+def test_p123_eu_historical_receipts_reject_accepted_authority_tampering(
+    artifact_role: str,
+) -> None:
+    contract = _contract()
+    eu = _history_correction(contract, "p123-eu-provider-live")
+    receipt = next(
+        row for row in eu["source_receipts"] if row["artifact_role"] == artifact_role
+    )
+    receipt["sha256"] = "f" * 64
+
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="differs from accepted history authority",
+    ):
+        contract_tool._verify_strategy_version_history_evidence(contract)
+
+
+def test_p123_eu_history_exception_does_not_weaken_current_ai_capture() -> None:
+    contract = _contract()
+    ai = _history_correction(contract, "p123-ai-backtest-candidate")
+    ai["capture"].update(
+        {
+            "generation_id": (
+                "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1"
+            ),
+            "generation_sha256": (
+                "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907"
+            ),
+            "as_of": "2026-08-14",
+        }
+    )
+
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match=(
+            "history correction generation differs from source: "
+            "p123-ai-backtest-candidate"
+        ),
+    ):
+        contract_tool._validate_history_corrections(
+            contract["history_corrections"],
+            contract["strategies"],
+            contract["source_segments"],
+            {row["strategy_id"] for row in contract["strategies"]},
+        )
+
+
+def test_two_vintage_history_accepts_current_active_and_retains_07c590_echo() -> None:
     """Active owner history advances without relabelling deprecated Echo evidence."""
 
     active_generation = (
-        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
+        "7e51e4dd1fad35f463b92871d23b71efef5ecba4045a65af25d0bfca7b6e10b8"
     )
-    active_manifest = "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
-    active_catalog = "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
+    active_manifest = "45b2437990ce7e04d1a5ebe520b3cee259e8a11948193f3b0da2968d15e9d077"
+    active_catalog = "b12e4758210682c5ccdafd350e91673187161bc3ca440598d6853ed78b7a2bbb"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -1869,7 +2006,7 @@ def test_two_vintage_history_accepts_2961_active_and_retains_07c590_echo() -> No
     owner_source["current_generation"] = {
         "generation_id": active_generation,
         "sha256": active_manifest,
-        "as_of": "2026-08-16",
+        "as_of": "2026-09-04",
     }
 
     active_segments = {
@@ -1943,18 +2080,76 @@ def test_two_vintage_history_accepts_2961_active_and_retains_07c590_echo() -> No
     assert contract_tool._verify_strategy_version_history_evidence(contract) == 3
 
 
-def test_owner_account_history_rebinds_to_corrected_2961_ledger_generation() -> None:
+@pytest.mark.parametrize(
+    "tampered_field", [None, "generation_id", "generation_sha256", "as_of"]
+)
+def test_deprecated_history_receipt_is_independent_of_current_source_as_of(
+    tampered_field: str | None,
+) -> None:
+    """A current-source refresh neither redates nor weakens the legacy receipt."""
+
+    contract = _contract()
+    owner_source = _source(contract, "owner-account-live-history")
+    owner_source["current_generation"]["as_of"] = "2026-09-05"
+    for segment in contract["history_corrections"]["materialized_segment_identities"]:
+        if segment["source_id"] != "owner-account-live-history":
+            continue
+        strategy = next(
+            row
+            for row in contract["strategies"]
+            if row["strategy_id"] == segment["strategy_id"]
+        )
+        strategy["live_implementation_identity"] = {
+            "status": "EVIDENCED",
+            "version_ref": f"account-live-segment:{segment['sha256']}",
+            "generation_id": segment["source_generation_id"],
+            "receipt_sha256": segment["source_generation_sha256"],
+        }
+    for correction in contract["history_corrections"]["corrections"]:
+        if (
+            correction["source_id"] == "owner-account-live-history"
+            and correction["correction_id"]
+            != "echotrade-event-only-account-live-rejected"
+            and correction["capture"]["status"] == "CAPTURED_GOVERNED"
+        ):
+            correction["capture"]["as_of"] = "2026-09-05"
+    legacy = _history_correction(
+        contract, "echotrade-event-only-account-live-rejected"
+    )["capture"]
+    assert legacy["as_of"] == "2026-08-16"
+    if tampered_field is not None:
+        legacy[tampered_field] = "2026-09-05" if tampered_field == "as_of" else "f" * 64
+
+    def validate_history() -> None:
+        contract_tool._validate_history_corrections(
+            contract["history_corrections"],
+            contract["strategies"],
+            contract["source_segments"],
+            {row["strategy_id"] for row in contract["strategies"]},
+        )
+
+    if tampered_field is None:
+        validate_history()
+    else:
+        with pytest.raises(
+            contract_tool.FinancialMvpContractError,
+            match="deprecated event-only history must retain its legacy receipt",
+        ):
+            validate_history()
+
+
+def test_owner_account_history_rebinds_to_current_ledger_generation() -> None:
     """The active owner-history lineage follows the corrected governed ledger."""
 
-    generation_id = "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
-    manifest_sha256 = "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
-    catalog_sha256 = "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
+    generation_id = "7e51e4dd1fad35f463b92871d23b71efef5ecba4045a65af25d0bfca7b6e10b8"
+    manifest_sha256 = "45b2437990ce7e04d1a5ebe520b3cee259e8a11948193f3b0da2968d15e9d077"
+    catalog_sha256 = "b12e4758210682c5ccdafd350e91673187161bc3ca440598d6853ed78b7a2bbb"
     contract = _contract()
     owner_source = _source(contract, "owner-account-live-history")
     assert owner_source["current_generation"] == {
         "generation_id": generation_id,
         "sha256": manifest_sha256,
-        "as_of": "2026-08-16",
+        "as_of": "2026-09-04",
     }
     active_segments = [
         row
@@ -1987,9 +2182,9 @@ def test_two_vintage_history_rejects_legacy_rollbacks_and_rewrites() -> None:
     """The deprecated event-only class cannot authorize active-lineage changes."""
 
     active_generation = (
-        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
+        "7e51e4dd1fad35f463b92871d23b71efef5ecba4045a65af25d0bfca7b6e10b8"
     )
-    active_manifest = "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
+    active_manifest = "45b2437990ce7e04d1a5ebe520b3cee259e8a11948193f3b0da2968d15e9d077"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -3867,7 +4062,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "fa0ae5ac10bc386cfec5679f7c954dc91d43cf70f5b32e22fb817f836a7e3ce3"
+        "48934a97ea5b5a3ef3c8ff220e322b249311f91d12a6590161a50c6949b748e8"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -3904,7 +4099,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "fa0ae5ac10bc386cfec5679f7c954dc91d43cf70f5b32e22fb817f836a7e3ce3"
+        "48934a97ea5b5a3ef3c8ff220e322b249311f91d12a6590161a50c6949b748e8"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
