@@ -108,6 +108,20 @@ await page.waitForFunction(() => document.querySelector("#app")?.dataset.appStat
 
 const checks = [];
 if (!epochOnly) {
+  await page.keyboard.press("Tab");
+  const firstKeyboardTarget = await page.evaluate(() => ({
+    className: document.activeElement?.className,
+    text: document.activeElement?.textContent?.trim(),
+  }));
+  await page.keyboard.press("Enter");
+  const skipTarget = await page.evaluate(() => document.activeElement?.id);
+  checks.push(check(
+    "Keyboard skip link reaches the dashboard main region",
+    String(firstKeyboardTarget.className).includes("skip-link")
+      && firstKeyboardTarget.text === "Skip to dashboard"
+      && skipTarget === "main-content",
+    { first_keyboard_target: firstKeyboardTarget, skip_target: skipTarget },
+  ));
   await page.locator('[data-nav="data"]').click();
   const downloads = [
     "downloads/portfolio-report-data.json",
@@ -411,23 +425,6 @@ if (epochOnly) {
   if (!result.all_passed) process.exitCode = 1;
   process.exit();
 }
-await page.evaluate(() => {
-  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-});
-await page.keyboard.press("Tab");
-const firstKeyboardTarget = await page.evaluate(() => ({
-  className: document.activeElement?.className,
-  text: document.activeElement?.textContent?.trim(),
-}));
-await page.keyboard.press("Enter");
-const skipTarget = await page.evaluate(() => document.activeElement?.id);
-checks.push(check(
-  "Keyboard skip link reaches the dashboard main region",
-  String(firstKeyboardTarget.className).includes("skip-link")
-    && firstKeyboardTarget.text === "Skip to dashboard"
-    && skipTarget === "main-content",
-  { first_keyboard_target: firstKeyboardTarget, skip_target: skipTarget },
-));
 const views = ["command", "capital", "risk", "attribution", "dependence", "weekly", "data"];
 const requiredFactorLenses = [
   "ECONOMIC_FACTOR",
