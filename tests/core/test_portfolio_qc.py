@@ -270,6 +270,104 @@ def test_release_preflight_emits_measured_content_addressed_receipt(
     ]
 
 
+def test_release_preflight_emits_commit_authorization_bound_to_the_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text("{}", encoding="utf-8")
+    spec = _spec(tmp_path)
+    spec.state_root = tmp_path / "private-stage"
+    authorization = tmp_path / "authority" / "commit-authorization.json"
+    monkeypatch.setattr(qc, "_load_and_validate_spec", lambda _path: (spec, _proof()))
+    monkeypatch.setattr(qc, "_candidate_qa", lambda *_args: {})
+
+    argv = [
+        "--profile",
+        "release-preflight",
+        "--spec",
+        str(spec_path),
+        "--evidence-dir",
+        str(tmp_path / "evidence"),
+        "--emit-commit-authorization",
+        str(authorization),
+    ]
+    assert qc.main(argv) == 0
+
+    from quant_engine.core import GateEvidence
+
+    evidence = GateEvidence.from_dict(json.loads(authorization.read_bytes()))
+    assert evidence.gate_id == "owner-publication-authorization"
+    assert evidence.evidence_sha256 == qc._spec_sha256(spec)
+    # Re-running the same passing preflight is idempotent.
+    assert qc.main(argv) == 0
+
+
+def test_release_preflight_writes_no_authorization_when_a_check_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text("{}", encoding="utf-8")
+    spec = _spec(tmp_path)
+    authorization = tmp_path / "commit-authorization.json"
+    snapshots = [{"authority": {"exists": False}}, {"authority": {"exists": True}}]
+    monkeypatch.setattr(qc, "_load_and_validate_spec", lambda _path: (spec, _proof()))
+    monkeypatch.setattr(qc, "_candidate_qa", lambda *_args: {})
+    monkeypatch.setattr(qc, "_production_snapshot", lambda _spec: snapshots.pop(0))
+
+    assert (
+        qc.main(
+            [
+                "--profile",
+                "release-preflight",
+                "--spec",
+                str(spec_path),
+                "--evidence-dir",
+                str(tmp_path / "evidence"),
+                "--emit-commit-authorization",
+                str(authorization),
+            ]
+        )
+        == 1
+    )
+    assert not authorization.exists()
+
+
+def test_release_preflight_refuses_an_authorization_for_another_spec(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_text("{}", encoding="utf-8")
+    spec = _spec(tmp_path)
+    spec.state_root = tmp_path / "private-stage"
+    authorization = tmp_path / "commit-authorization.json"
+    authorization.write_bytes(
+        json.dumps(
+            {"evidence_sha256": "f" * 64, "gate_id": "owner-publication-authorization"},
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    monkeypatch.setattr(qc, "_load_and_validate_spec", lambda _path: (spec, _proof()))
+    monkeypatch.setattr(qc, "_candidate_qa", lambda *_args: {})
+
+    assert (
+        qc.main(
+            [
+                "--profile",
+                "release-preflight",
+                "--spec",
+                str(spec_path),
+                "--evidence-dir",
+                str(tmp_path / "evidence"),
+                "--emit-commit-authorization",
+                str(authorization),
+            ]
+        )
+        == 1
+    )
+    assert json.loads(authorization.read_bytes())["evidence_sha256"] == "f" * 64
+
+
 def test_release_preflight_rejects_pointer_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

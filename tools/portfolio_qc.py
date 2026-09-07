@@ -35,6 +35,8 @@ REQUIRED_OUTCOMES = (
     "DECOMPOSITION",
     "DEPENDENCE",
 )
+# The coordinated commit requires this gate; see core.pipeline.
+COMMIT_AUTHORIZATION_GATE_ID = "owner-publication-authorization"
 
 
 class PrerequisiteUnavailable(RuntimeError):
@@ -158,6 +160,32 @@ def _write_receipt(evidence_dir: Path, payload: Mapping[str, Any]) -> Path:
         if path.is_symlink() or path.read_bytes() != content:
             raise QualityControlFailure("content-addressed receipt collision") from None
     return path
+
+
+def _write_commit_authorization(path: Path, spec_sha256: str) -> None:
+    """Bind publication authority to the spec this preflight just verified.
+
+    The coordinated commit requires an owner-publication-authorization gate
+    whose evidence hash equals the spec hash. Emitting it here, only after every
+    preflight check has passed, makes the authority a product of verification
+    rather than a separate manual attestation: no passing preflight, no
+    authorization, and an authorization can never cover a different spec.
+    """
+    content = _canonical_bytes(
+        {"evidence_sha256": spec_sha256, "gate_id": COMMIT_AUTHORIZATION_GATE_ID}
+    )
+    if path.is_symlink():
+        raise QualityControlFailure("commit authorization path is linked")
+    if path.exists():
+        if not path.is_file():
+            raise QualityControlFailure("commit authorization path is not a file")
+        if path.read_bytes() != content:
+            raise QualityControlFailure(
+                "existing commit authorization covers a different spec"
+            )
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(content)
 
 
 def _read_preflight(path: Path, spec: Any) -> dict[str, Any]:
@@ -574,7 +602,7 @@ def _release_preflight(args: argparse.Namespace) -> Path:
     after = _production_snapshot(spec)
     if after != before:
         raise QualityControlFailure("production state changed during release preflight")
-    return _write_receipt(
+    receipt = _write_receipt(
         evidence_dir,
         {
             "candidate_qa": qa,
@@ -586,6 +614,9 @@ def _release_preflight(args: argparse.Namespace) -> Path:
             "status": "PASS",
         },
     )
+    if args.emit_commit_authorization is not None:
+        _write_commit_authorization(args.emit_commit_authorization, _spec_sha256(spec))
+    return receipt
 
 
 def _read_committed_release(spec: Any) -> Any:
@@ -680,6 +711,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--candidate-dir", type=Path)
     parser.add_argument("--evidence-dir", type=Path)
     parser.add_argument("--preflight-receipt", type=Path)
+    parser.add_argument("--emit-commit-authorization", type=Path)
     parser.add_argument("--expected-head")
     parser.add_argument("--pr", type=int)
     parser.add_argument("--test-target", action="append", default=[])
