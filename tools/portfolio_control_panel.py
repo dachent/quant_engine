@@ -4390,7 +4390,10 @@ def verify_decomposition_surface_against_plan(
         "size_bytes": len(spec_content),
         "source_key": source_key,
         "spec_id": expected_spec_id,
-        "spec_path": str(spec_path),
+        # bundle-relative: publish snapshots the plan bundle to a temporary root
+        # and rebuilds the report, so an absolute path here would make the report
+        # identity depend on where the bundle happens to be staged
+        "spec_path": relative_path.as_posix(),
         "surface": surface,
     }
 
@@ -4768,7 +4771,7 @@ def _decomposition_lenses_for_mode(
             if plan_spec is not None:
                 source_bindings.append(
                     (
-                        Path(plan_spec["spec_path"]),
+                        plan_bundle / Path(plan_spec["spec_path"]),
                         _text(plan_spec["sha256"], "spec sha256"),
                     )
                 )
