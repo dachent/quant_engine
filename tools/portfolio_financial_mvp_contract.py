@@ -161,10 +161,17 @@ _CENSUS_OWNER_NON_DECISIONS: Final = (
     "POINTER_OR_PUBLICATION",
 )
 _CENSUS_TT_CONTINUITY_INTERVAL: Final = (date(2026, 7, 14), date(2026, 7, 30))
+# The selected V4 provider receipt binds this exact pre-approval contract.
+# It remains valid for replay of those immutable account inputs; changed copies
+# receive the current pins and cannot claim this retained-source authority.
+_RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST: Final = (
+    "08b7d2061c2cc9be0c6bb1103d202a5145d432c38d16b1db6c2a209abae88b18"
+)
+
 _MATRIXPORT_OWNER_EPOCH: Final = {
     "effective_start": "2025-12-06",
     "observed_start": "2025-12-07",
-    "observed_end": "2026-08-13",
+    "observed_end": "2026-09-03",
 }
 _MATRIXPORT_GAP_SPAN_RECEIPTS: Final = (
     {
@@ -206,13 +213,13 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
         "315471b602bb4ce61cd854195162708ab188f6e08d6597deb9b9da11ca5bce44"
     ),
     "current_generation_id": (
-        "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c"
+        "314cb445ff0f83c1a6c5e7ac26bb93405fe123c3d37dc742069755cc0c50dca8"
     ),
     "current_manifest_sha256": (
-        "018105dbc99eea27c1bcd1a7b860809a5023baccd9b0c6af89809a1a4965ab34"
+        "d44ac9484e4cbcb43626dcc669ff22f5eef5d8eed9569a0a0a547918648bfa20"
     ),
     "current_catalog_sha256": (
-        "495179faf7d6fcfb707db8682517871151eb335468263c1c8723ed30b3c87dcb"
+        "f52199b936414af2e38e65264731a272f42c7d58493167708f9ebbe929682390"
     ),
     "legacy_generation_id": (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
@@ -434,13 +441,10 @@ _HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
     ),
 }
 _HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final = {
-    # Issue #374 current source refresh: six appended account-history tails
-    # preserve all prior numeric overlaps and accepted assignment boundaries.
-    # Matrixport's separate accepted daily/HPR disposition remains unchanged.
     "robuxio-crypto:account-live": {
-        "observed_end": "2026-08-13",
-        "return_observations": 246,
-        "sha256": "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+        "observed_end": "2026-09-03",
+        "return_observations": 267,
+        "sha256": "1ea12119e24f31fc6820593af890f80026955d7de05676433db18a5d0025a529",
     },
     "grizzlybears-vtma:account-live": {
         "observed_end": "2026-09-02",
@@ -1220,6 +1224,22 @@ def _verify_strategy_version_history_evidence(
     against governed bytes by :func:`verify_history_evidence`.
     """
 
+    ledger_transition = dict(_HISTORY_PROVIDER_LEDGER_TRANSITION)
+    segment_projections = dict(_HISTORY_SEGMENT_PROJECTION_OVERRIDES)
+    if contract_digest(contract) == _RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST:
+        ledger_transition.update(
+            {
+                "current_generation_id": "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c",
+                "current_manifest_sha256": "018105dbc99eea27c1bcd1a7b860809a5023baccd9b0c6af89809a1a4965ab34",
+                "current_catalog_sha256": "495179faf7d6fcfb707db8682517871151eb335468263c1c8723ed30b3c87dcb",
+            }
+        )
+        segment_projections["robuxio-crypto:account-live"] = {
+            "observed_end": "2026-08-13",
+            "return_observations": 246,
+            "sha256": "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+        }
+
     try:
         result = subprocess.run(  # noqa: S603
             [
@@ -1401,10 +1421,8 @@ def _verify_strategy_version_history_evidence(
         if not accepted_authority and deprecated_event_only:
             expected_sha_key = legacy_sha_key
         if (
-            generation_id
-            != _HISTORY_PROVIDER_LEDGER_TRANSITION[expected_generation_key]
-            or projected["sha256"]
-            != _HISTORY_PROVIDER_LEDGER_TRANSITION[expected_sha_key]
+            generation_id != ledger_transition[expected_generation_key]
+            or projected["sha256"] != ledger_transition[expected_sha_key]
         ):
             raise FinancialMvpContractError(
                 "provider-ledger history lineage differs from the admitted transition"
@@ -1418,14 +1436,12 @@ def _verify_strategy_version_history_evidence(
             target_sha_key = (
                 legacy_sha_key if deprecated_event_only else current_sha_key
             )
-            current_generation = _HISTORY_PROVIDER_LEDGER_TRANSITION[
-                target_generation_key
-            ]
+            current_generation = ledger_transition[target_generation_key]
             projected["generation_id"] = current_generation
             projected["artifact_selector"] = (
                 f"generations/{current_generation}/{suffix}"
             )
-            projected["sha256"] = _HISTORY_PROVIDER_LEDGER_TRANSITION[target_sha_key]
+            projected["sha256"] = ledger_transition[target_sha_key]
         return projected
 
     def correction_projection(
@@ -1522,20 +1538,20 @@ def _verify_strategy_version_history_evidence(
             )
             if (
                 projected.get("source_generation_id")
-                != _HISTORY_PROVIDER_LEDGER_TRANSITION[generation_key]
+                != ledger_transition[generation_key]
                 or projected.get("source_generation_sha256")
-                != _HISTORY_PROVIDER_LEDGER_TRANSITION[manifest_key]
+                != ledger_transition[manifest_key]
             ):
                 raise FinancialMvpContractError(
                     "provider-ledger history lineage differs from the admitted transition"
                 )
             if accepted_authority:
-                projected["source_generation_id"] = _HISTORY_PROVIDER_LEDGER_TRANSITION[
+                projected["source_generation_id"] = ledger_transition[
                     "current_generation_id"
                 ]
-                projected["source_generation_sha256"] = (
-                    _HISTORY_PROVIDER_LEDGER_TRANSITION["current_manifest_sha256"]
-                )
+                projected["source_generation_sha256"] = ledger_transition[
+                    "current_manifest_sha256"
+                ]
         else:
             source_rebind = _HISTORY_PROVIDER_SOURCE_REBINDS.get(
                 str(projected.get("source_id"))
@@ -1591,7 +1607,7 @@ def _verify_strategy_version_history_evidence(
                 f"accepted history correction authority differs: {segment_id}"
             )
         accepted_segment["sha256"] = corrected_sha256
-    for segment_id, projection in _HISTORY_SEGMENT_PROJECTION_OVERRIDES.items():
+    for segment_id, projection in segment_projections.items():
         accepted_segment = accepted_segments.get(segment_id)
         if accepted_segment is None:
             raise FinancialMvpContractError(
@@ -5321,6 +5337,9 @@ def _validate_matrixport_gap_policy(row: Mapping[str, Any], source_id: str) -> N
 def _validate_robuxio_owner_funded_boundary(contract: Mapping[str, Any]) -> None:
     """Pin the owner-held epoch apart from the earlier provider launch history."""
 
+    owner_epoch = dict(_MATRIXPORT_OWNER_EPOCH)
+    if contract_digest(contract) == _RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST:
+        owner_epoch["observed_end"] = "2026-08-13"
     sources = {
         _text(row.get("source_id"), "source segment id"): row
         for row in _objects(contract.get("source_segments"), "source segments")
@@ -5368,7 +5387,7 @@ def _validate_robuxio_owner_funded_boundary(contract: Mapping[str, Any]) -> None
     )
     if (
         any(
-            value != _MATRIXPORT_OWNER_EPOCH["effective_start"]
+            value != owner_epoch["effective_start"]
             for value in (
                 source_interval.get("effective_start"),
                 correction_interval.get("effective_start"),
@@ -5379,14 +5398,14 @@ def _validate_robuxio_owner_funded_boundary(contract: Mapping[str, Any]) -> None
             )
         )
         or any(
-            value != _MATRIXPORT_OWNER_EPOCH["observed_start"]
+            value != owner_epoch["observed_start"]
             for value in (
                 source_interval.get("observed_start"),
                 correction_interval.get("observed_start"),
             )
         )
         or any(
-            value != _MATRIXPORT_OWNER_EPOCH["observed_end"]
+            value != owner_epoch["observed_end"]
             for value in (
                 source_interval.get("observed_end"),
                 correction_interval.get("observed_end"),

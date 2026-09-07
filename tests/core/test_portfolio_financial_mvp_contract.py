@@ -1038,7 +1038,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # tails, native Quantbase receipts, and accepted method-scope plan while
     # retaining the distinct Matrixport, P123, and deprecated Echo boundaries.
     assert contract_tool.contract_digest(contract) == (
-        "eb6398ce447bb258ced02e535ab64c732712ea80c9dcb77df6c86e1dd4107c05"
+        "eb48ebd389d9e48a9f819440efa14a1a8945acb8b1f474838792ad98bd814444"
     )
 
 
@@ -1095,9 +1095,9 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             ),
         },
         "matrixport-account-generation": {
-            "admitted_item_count": 0,
+            "admitted_item_count": 3,
             "admitted_item_set_sha256": (
-                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+                "c2679e27fa63835000cf9ce77aac9cfcbb4ac32bf4c96a4a86555068eeebd15c"
             ),
         },
         "quantbase-account-generation": {
@@ -1109,7 +1109,7 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
         "schwab-account-generation": {
             "admitted_item_count": 22,
             "admitted_item_set_sha256": (
-                "569fbb987fe524049df348c261ee8d8cd9e0ebdd49775a9d84d2522ccf2173cf"
+                "e179a13eb016d9163be8b2c781d2bac9ac70f0b7d6a5d23294d38d5d85a7dc0b"
             ),
         },
         "portfolio123-model-generation": {
@@ -1172,7 +1172,7 @@ def test_current_strategy_registry_binds_exact_applicability_plan_bytes() -> Non
     assert source["current_generation"] == {
         "generation_id": digest,
         "sha256": digest,
-        "as_of": "2026-09-06",
+        "as_of": "2026-09-07",
     }
 
 
@@ -1823,9 +1823,9 @@ def test_accepted_provider_ledger_history_identity_cannot_be_coherently_relabell
     """History lineage is a fixed receipt, not a replaceable generation label."""
 
     replacements = {
-        "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c": ("a" * 64),
-        "018105dbc99eea27c1bcd1a7b860809a5023baccd9b0c6af89809a1a4965ab34": ("b" * 64),
-        "495179faf7d6fcfb707db8682517871151eb335468263c1c8723ed30b3c87dcb": ("c" * 64),
+        "314cb445ff0f83c1a6c5e7ac26bb93405fe123c3d37dc742069755cc0c50dca8": ("a" * 64),
+        "d44ac9484e4cbcb43626dcc669ff22f5eef5d8eed9569a0a0a547918648bfa20": ("b" * 64),
+        "f52199b936414af2e38e65264731a272f42c7d58493167708f9ebbe929682390": ("c" * 64),
     }
 
     def replace_lineage(value: object) -> object:
@@ -1990,10 +1990,10 @@ def test_two_vintage_history_accepts_current_active_and_retains_07c590_echo() ->
     """Active owner history advances without relabelling deprecated Echo evidence."""
 
     active_generation = (
-        "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c"
+        "314cb445ff0f83c1a6c5e7ac26bb93405fe123c3d37dc742069755cc0c50dca8"
     )
-    active_manifest = "018105dbc99eea27c1bcd1a7b860809a5023baccd9b0c6af89809a1a4965ab34"
-    active_catalog = "495179faf7d6fcfb707db8682517871151eb335468263c1c8723ed30b3c87dcb"
+    active_manifest = "d44ac9484e4cbcb43626dcc669ff22f5eef5d8eed9569a0a0a547918648bfa20"
+    active_catalog = "f52199b936414af2e38e65264731a272f42c7d58493167708f9ebbe929682390"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -2142,9 +2142,9 @@ def test_deprecated_history_receipt_is_independent_of_current_source_as_of(
 def test_owner_account_history_rebinds_to_current_ledger_generation() -> None:
     """The active owner-history lineage follows the corrected governed ledger."""
 
-    generation_id = "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c"
-    manifest_sha256 = "018105dbc99eea27c1bcd1a7b860809a5023baccd9b0c6af89809a1a4965ab34"
-    catalog_sha256 = "495179faf7d6fcfb707db8682517871151eb335468263c1c8723ed30b3c87dcb"
+    generation_id = "314cb445ff0f83c1a6c5e7ac26bb93405fe123c3d37dc742069755cc0c50dca8"
+    manifest_sha256 = "d44ac9484e4cbcb43626dcc669ff22f5eef5d8eed9569a0a0a547918648bfa20"
+    catalog_sha256 = "f52199b936414af2e38e65264731a272f42c7d58493167708f9ebbe929682390"
     contract = _contract()
     owner_source = _source(contract, "owner-account-live-history")
     assert owner_source["current_generation"] == {
@@ -2183,9 +2183,9 @@ def test_two_vintage_history_rejects_legacy_rollbacks_and_rewrites() -> None:
     """The deprecated event-only class cannot authorize active-lineage changes."""
 
     active_generation = (
-        "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c"
+        "314cb445ff0f83c1a6c5e7ac26bb93405fe123c3d37dc742069755cc0c50dca8"
     )
-    active_manifest = "018105dbc99eea27c1bcd1a7b860809a5023baccd9b0c6af89809a1a4965ab34"
+    active_manifest = "d44ac9484e4cbcb43626dcc669ff22f5eef5d8eed9569a0a0a547918648bfa20"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -2679,6 +2679,7 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
         "FINANCING_LIABILITY",
         "LEVERAGE_EXPOSURE",
         "FINANCING_COST",
+        "EXTERNAL_FLOW",
     ]
     assert admission["transform"] == "provider-ledger"
     assert admission["version"] == "1"
@@ -3047,9 +3048,9 @@ def test_robuxio_materialized_identity_is_daily_only_and_cannot_be_rebound() -> 
         for key in ("observed_start", "observed_end", "return_observations", "sha256")
     } == {
         "observed_start": "2025-12-07",
-        "observed_end": "2026-08-13",
-        "return_observations": 246,
-        "sha256": "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+        "observed_end": "2026-09-03",
+        "return_observations": 267,
+        "sha256": "1ea12119e24f31fc6820593af890f80026955d7de05676433db18a5d0025a529",
     }
     assert "epoch_holding_period_link_observations" not in identity
     _validate(contract)
@@ -3589,17 +3590,21 @@ def test_source_strategy_version_and_cost_are_explicit() -> None:
         _validate(mutated)
 
 
-def test_proposed_market_candidates_are_not_promoted_to_authority() -> None:
+def test_owner_approved_market_sources_bind_captured_generation_identities() -> None:
     contract = _contract()
     for source_id in (
         "public-economic-and-industry-factors",
         "public-etf-style-sector-and-market-prices",
     ):
         row = _source(contract, source_id)
-        assert row["authority"].endswith("PENDING_328")
-        assert row["acquisition"]["mode"] == (
-            "NO_ACQUISITION_BEFORE_OWNER_SOURCE_APPROVAL"
-        )
+        assert row["authority"].startswith("OWNER_APPROVED_")
+        assert row["authority"].endswith("_ISSUE_374")
+        assert row["acquisition"]["mode"] == "ALREADY_LOCAL_APPROVED_SOURCE_FREEZE"
+        assert row["readiness"] == "READY"
+        assert row["capture_status"] == "CAPTURED_GOVERNED"
+        assert row["blockers"] == []
+        for key in ("generation_id", "sha256"):
+            assert len(row["current_generation"][key]) == 64
 
 
 def test_public_factor_run_and_publication_timing_propagate_to_every_view() -> None:
@@ -4063,7 +4068,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "c11741736f29c3aacc1979e8c4afd3641d980da55e947fa60be99eba1e8614fa"
+        "883809719ab0cb01db7dffa56ec6a440300745ffe338a6282c8c393ad006c810"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4100,7 +4105,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "c11741736f29c3aacc1979e8c4afd3641d980da55e947fa60be99eba1e8614fa"
+        "883809719ab0cb01db7dffa56ec6a440300745ffe338a6282c8c393ad006c810"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
