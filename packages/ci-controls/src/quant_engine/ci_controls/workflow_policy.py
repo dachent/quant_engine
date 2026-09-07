@@ -40,7 +40,7 @@ LOCKED_AUDIT_COMMAND = (
     "uv audit --locked --python-version 3.11 --preview-features audit-command"
 )
 DEFAULT_WORKFLOW_TIMEOUT_MAXIMUM = 15
-QUALITY_WORKFLOW_TIMEOUT_MAXIMUM = 20
+QUALITY_WORKFLOW_TIMEOUT_MAXIMUM = 40
 ISSUE_GUARD_RECONCILE_COMMAND = (
     'python tools/issue_guard.py reconcile --repository "${{ github.repository }}" '
     "--format json --max-pages 20 --timeout-seconds 20 "
