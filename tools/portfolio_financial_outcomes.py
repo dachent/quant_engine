@@ -359,6 +359,31 @@ def selected_hwm_source_paths(spec: Any) -> dict[str, Path]:
     return result
 
 
+def verify_selected_capital_ledger(
+    input_generation_path: Path, provider_ledger_generation_path: Path
+) -> Path:
+    """Bind capital's provider ledger to the generation this candidate selected.
+
+    The capital input generation names its own provider-ledger file, and every
+    ledger generation built under one contract satisfies the same admission
+    receipt. Without this check an older ledger could validate while the
+    candidate selected a newer one. Containment is checked rather than the
+    parent name, because the ledger sits directly in the generation directory
+    on the governed route and under a normalized subdirectory elsewhere.
+    """
+    inputs = json.loads(input_generation_path.read_bytes())
+    bindings = inputs.get("source_bindings")
+    ledger = bindings.get("provider_ledger") if isinstance(bindings, Mapping) else None
+    if not isinstance(ledger, Mapping) or not isinstance(ledger.get("path"), str):
+        raise FinancialOutcomeError("capital provider ledger binding is absent")
+    selected_root = provider_ledger_generation_path.resolve().parent
+    if not Path(ledger["path"]).resolve().is_relative_to(selected_root):
+        raise FinancialOutcomeError(
+            "capital provider ledger differs from the selected generation"
+        )
+    return selected_root
+
+
 def verify_selected_hwm_generation(
     source_paths: Mapping[str, Path],
     *,
@@ -1011,8 +1036,9 @@ def validate_financial_outcomes(
         hwm_bytes[key] = _verified_file(
             Path(binding["path"]), binding["sha256"], binding["size_bytes"]
         )
+    selected_sources = selected_hwm_source_paths(spec)
     verify_selected_hwm_generation(
-        selected_hwm_source_paths(spec),
+        selected_sources,
         contract_path=contract_path,
         bindings={key: Path(value["path"]) for key, value in bindings.items()},
     )
@@ -1041,6 +1067,10 @@ def validate_financial_outcomes(
     capital = json.loads(capital_node.path.read_bytes())
     capital_input = capital["input_generation"]
     _artifact_for_digest(spec, capital_input["sha256"], capital_input["size_bytes"])
+    verify_selected_capital_ledger(
+        Path(capital_input["path"]),
+        selected_sources["provider_ledger_generation_path"],
+    )
     capital = verify_governed_capital_result(
         capital, Path(capital_input["path"]), contract_path
     )

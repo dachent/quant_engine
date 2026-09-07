@@ -403,3 +403,61 @@ def test_semantic_payload_requires_real_completion_proof():
         materializer._semantic_gate_payload(
             recipe, {}, financial_outcomes={"status": "BLOCKED"}
         )
+
+
+def _staged_ledger(root: Path, generation_id: str) -> Path:
+    """Stage one provider-ledger file inside its own generation directory."""
+    ledger = root / "generations" / generation_id / "normalized/provider-ledger.json"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_bytes(b'{"as_of_date": "2026-09-02"}')
+    return ledger
+
+
+def _capital_input(path: Path, ledger: Path) -> Path:
+    path.write_bytes(
+        json.dumps(
+            {"source_bindings": {"provider_ledger": {"path": str(ledger)}}}
+        ).encode("utf-8")
+    )
+    return path
+
+
+def test_capital_ledger_binding_accepts_the_selected_generation(tmp_path):
+    ledger = _staged_ledger(tmp_path, "a" * 64)
+    selected = ledger.parent.parent
+
+    assert (
+        outcomes.verify_selected_capital_ledger(
+            _capital_input(tmp_path / "capital-input.json", ledger),
+            selected / "generation.json",
+        )
+        == selected.resolve()
+    )
+
+
+def test_capital_ledger_binding_rejects_a_prior_generation(tmp_path):
+    selected = _staged_ledger(tmp_path, "a" * 64).parent.parent
+    # Byte-identical contents under a different generation: the older ledger
+    # still satisfies its own contract admission, so only identity rejects it.
+    prior = _staged_ledger(tmp_path, "b" * 64)
+
+    with pytest.raises(
+        outcomes.FinancialOutcomeError,
+        match="capital provider ledger differs from the selected generation",
+    ):
+        outcomes.verify_selected_capital_ledger(
+            _capital_input(tmp_path / "capital-input.json", prior),
+            selected / "generation.json",
+        )
+
+
+def test_capital_ledger_binding_requires_a_bound_ledger(tmp_path):
+    selected = _staged_ledger(tmp_path, "a" * 64).parent.parent
+    absent = tmp_path / "capital-input.json"
+    absent.write_bytes(b'{"source_bindings": {}}')
+
+    with pytest.raises(
+        outcomes.FinancialOutcomeError,
+        match="capital provider ledger binding is absent",
+    ):
+        outcomes.verify_selected_capital_ledger(absent, selected / "generation.json")
