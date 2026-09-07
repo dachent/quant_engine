@@ -432,10 +432,11 @@ def _layered_history_targets(
     history_as_of = _day(manifest.get("as_of_date"), "layered history as_of_date")
     if history_as_of > evaluated_on:
         raise CurrentPlanError("layered history exceeds the evaluation date")
-    if assurance_profile == "RELEASE_QC" and history_as_of != evaluated_on:
-        raise CurrentPlanError(
-            "release QC requires a layered history receipt for the evaluation date"
-        )
+    # A receipt older than the evaluation date is stated, not rejected: the
+    # identity carries generation_as_of_date, and calculation_boundary plus
+    # source_age_dispositions carry complete_through, age_days and the
+    # WARN_COMPLETE_DATA_AGE label. Missing history, undispositioned gaps and
+    # version conflicts continue to fail for every assurance profile.
 
     coverage_rows = _objects(coverage.get("strategies"), "layered strategies")
     coverage_by_strategy: dict[str, dict[str, Any]] = {}

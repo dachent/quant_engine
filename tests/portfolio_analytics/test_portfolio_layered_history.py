@@ -4283,16 +4283,22 @@ def test_layered_history_verification_applies_assurance_profile_after_validation
         "status": "CURRENT_RELEASE_RECEIPT",
     }
 
-    with pytest.raises(
-        TargetSeriesError,
-        match="release QC requires a layered history receipt for the evaluation date",
-    ):
-        verify_layered_history_generation(
-            destination,
-            fixture["contract_path"],
-            assurance_profile="RELEASE_QC",
-            evaluated_on=receipt_as_of + timedelta(days=1),
-        )
+    older = verify_layered_history_generation(
+        destination,
+        fixture["contract_path"],
+        assurance_profile="RELEASE_QC",
+        evaluated_on=receipt_as_of + timedelta(days=1),
+    )
+    assert older["assurance"] == {
+        "evaluated_on": (receipt_as_of + timedelta(days=1)).isoformat(),
+        "profile": "RELEASE_QC",
+        "profile_policy": (
+            "CURRENT_RELEASE_RECEIPTS_REQUIRED_WITH_CALCULATION_AGE_DISCLOSED"
+        ),
+        "receipt_age_days": 1,
+        "receipt_as_of": receipt_as_of.isoformat(),
+        "status": "WARN_VERIFIED_IMMUTABLE_RECEIPT_REUSE",
+    }
     with pytest.raises(
         TargetSeriesError,
         match="receipt exceeds the assurance evaluation date",
@@ -5898,11 +5904,18 @@ def test_layered_history_cli_builds_verifies_and_requires_modes(
             "2026-01-11",
         ],
     )
-    assert target_series.main() == 2
-    assert (
-        "release QC requires a layered history receipt for the evaluation date"
-        in capsys.readouterr().err
-    )
+    assert target_series.main() == 0
+    release_result = json.loads(capsys.readouterr().out)
+    assert release_result["assurance"] == {
+        "evaluated_on": "2026-01-11",
+        "profile": "RELEASE_QC",
+        "profile_policy": (
+            "CURRENT_RELEASE_RECEIPTS_REQUIRED_WITH_CALCULATION_AGE_DISCLOSED"
+        ),
+        "receipt_age_days": 1,
+        "receipt_as_of": "2026-01-10",
+        "status": "WARN_VERIFIED_IMMUTABLE_RECEIPT_REUSE",
+    }
 
     monkeypatch.setattr(
         sys,

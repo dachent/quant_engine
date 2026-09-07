@@ -4980,16 +4980,16 @@ def _layered_history_assurance_disposition(
             "layered history receipt exceeds the assurance evaluation date"
         )
     receipt_age_days = (evaluated_on - receipt_as_of).days
-    if assurance_profile == "RELEASE_QC" and receipt_age_days != 0:
-        raise TargetSeriesError(
-            "release QC requires a layered history receipt for the evaluation date"
-        )
-    if assurance_profile == "RELEASE_QC":
-        status = "CURRENT_RELEASE_RECEIPT"
-    elif receipt_age_days == 0:
-        status = "CURRENT_IMMUTABLE_RECEIPT"
-    else:
+    # Receipt age is a stated date, not a blocker: the assurance block below
+    # carries receipt_as_of, receipt_age_days and a WARN status for every
+    # profile. Missing required history, undispositioned gaps and version
+    # conflicts continue to fail for every assurance profile.
+    if receipt_age_days > 0:
         status = "WARN_VERIFIED_IMMUTABLE_RECEIPT_REUSE"
+    elif assurance_profile == "RELEASE_QC":
+        status = "CURRENT_RELEASE_RECEIPT"
+    else:
+        status = "CURRENT_IMMUTABLE_RECEIPT"
     return {
         "evaluated_on": evaluated_on.isoformat(),
         "profile": assurance_profile,

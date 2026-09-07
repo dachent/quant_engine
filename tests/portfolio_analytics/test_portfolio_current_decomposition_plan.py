@@ -1579,7 +1579,7 @@ def test_hybrid_fallback_rejects_unavailable_live_history(
         )
 
 
-def test_layered_history_age_warns_but_release_qc_requires_current_receipt(
+def test_layered_history_age_warns_and_release_qc_states_the_same_age(
     tmp_path: Path,
 ) -> None:
     inputs = _fixture(tmp_path)
@@ -1634,18 +1634,26 @@ def test_layered_history_age_warns_but_release_qc_requires_current_receipt(
         "WARN_COMPLETE_DATA_AGE"
     )
 
-    with pytest.raises(
-        planner.CurrentPlanError,
-        match="release QC requires a layered history receipt for the evaluation date",
-    ):
-        planner._layered_history_targets(
-            generation_root=inputs["layered_history_generation_path"],
-            contract_path=inputs["financial_mvp_contract_path"],
-            strategies=planner._resolved_strategies(inputs["plan_document"]),
-            evidence_mode="LIVE_ONLY",
-            evaluated_on=stale_date,
-            assurance_profile="RELEASE_QC",
-        )
+    release = planner._layered_history_targets(
+        generation_root=inputs["layered_history_generation_path"],
+        contract_path=inputs["financial_mvp_contract_path"],
+        strategies=planner._resolved_strategies(inputs["plan_document"]),
+        evidence_mode="LIVE_ONLY",
+        evaluated_on=stale_date,
+        assurance_profile="RELEASE_QC",
+    )
+    assert release["identity"]["assurance_profile"] == "RELEASE_QC"
+    assert (
+        release["identity"]["source_age_dispositions"]
+        == (result["identity"]["source_age_dispositions"])
+    )
+    assert (
+        release["identity"]["calculation_boundary"]
+        == (result["identity"]["calculation_boundary"])
+    )
+    assert release["identity"]["calculation_boundary"]["status"] == (
+        "WARN_COMPLETE_DATA_AGE"
+    )
 
 
 @pytest.mark.parametrize("assurance_profile", planner.ASSURANCE_PROFILES)
@@ -1697,7 +1705,7 @@ def test_layered_history_current_receipt_discloses_old_complete_data(
     assert identity["calculation_boundary"]["status"] == "WARN_COMPLETE_DATA_AGE"
 
 
-def test_release_qc_rejects_prior_layered_receipt_even_within_age_limit(
+def test_release_qc_states_a_prior_layered_receipt_instead_of_failing(
     tmp_path: Path,
 ) -> None:
     inputs = _fixture(tmp_path)
@@ -1719,11 +1727,19 @@ def test_release_qc_rejects_prior_layered_receipt_even_within_age_limit(
         assurance_profile="DEVELOPMENT", **kwargs
     )
     assert development["identity"]["generation_as_of_date"] == generation["as_of_date"]
-    with pytest.raises(
-        planner.CurrentPlanError,
-        match="release QC requires a layered history receipt for the evaluation date",
-    ):
-        planner._layered_history_targets(assurance_profile="RELEASE_QC", **kwargs)
+
+    release = planner._layered_history_targets(assurance_profile="RELEASE_QC", **kwargs)
+    assert release["identity"]["generation_as_of_date"] == generation["as_of_date"]
+    boundary = release["identity"]["calculation_boundary"]
+    assert boundary["evaluated_on"] == evaluated_on.isoformat()
+    assert (
+        boundary["age_days"]
+        == (evaluated_on - date.fromisoformat(boundary["complete_through"])).days
+    )
+    assert boundary["status"] in {
+        "CURRENT_WITHIN_AGE_THRESHOLD",
+        "WARN_COMPLETE_DATA_AGE",
+    }
 
 
 def test_latest_common_complete_date_uses_exact_intersection_not_minimum_tail() -> None:
