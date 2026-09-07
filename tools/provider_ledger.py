@@ -10,6 +10,7 @@ canonical portfolio projection.
 from __future__ import annotations
 
 import argparse
+import base64
 from collections import defaultdict
 import csv
 from datetime import date, datetime, timedelta
@@ -25,6 +26,7 @@ import shutil
 import sys
 import tempfile
 from typing import Any, Callable, Final, Mapping, Sequence
+from urllib.parse import urlsplit
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -83,7 +85,7 @@ _ACCOUNT_FACTS: Final = {
     ),
     "matrixport": ("capital_anchors", "nav_observations"),
     "portfolio123": (),
-    "quantbase": ("capital_anchors", "nav_observations"),
+    "quantbase": ("capital_anchors", "flows", "nav_observations"),
     "schwab": ("nav_observations", "positions", "transactions"),
 }
 _PROVIDER_SOURCE_SEGMENTS: Final = {
@@ -163,10 +165,12 @@ _SCHWAB_FLOW_KINDS: Final = frozenset(
         "Funds Received",
         "MoneyLink Deposit",
         "MoneyLink Transfer",
+        "MoneyLink Adj",
+        "Security Transfer",
         "Wire Sent",
     }
 )
-# Pins the three retained, independently audited Schwab Journal records to the
+# Pins the retained, independently audited Schwab Journal records to the
 # accepted Schwab refresh generation 4e47b7b8 (dataSchwab CURRENT) as of
 # 2026-09-04, whose per-account WCH transaction captures re-assigned two
 # record_ids and renamed both source artifacts.
@@ -181,6 +185,12 @@ _SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS: Final = {
         "source_artifact_sha256": (
             "521cadb20162bba19a39064e2ed165425493ac37df1f35638653bcb2ebfa6514"
         ),
+        "flow_type": "ACCOUNT_TRANSFER",
+        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
+        "provider_activity_id_sha256": (
+            "b9b1dbee9c9204408c81a823dde6d734d50104c6289aeb4da0b460a5e0f7fe95"
+        ),
+        "source_classification": "PAIRED_INTERNAL_JOURNAL",
     },
     (
         "account-38b653b91ff43a10",
@@ -192,6 +202,103 @@ _SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS: Final = {
         "source_artifact_sha256": (
             "521cadb20162bba19a39064e2ed165425493ac37df1f35638653bcb2ebfa6514"
         ),
+        "flow_type": "ACCOUNT_TRANSFER",
+        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
+        "provider_activity_id_sha256": (
+            "1d7acaaa5abb230c0cb48200c066e49fa0b554c2f2a4b3c321fcf0342fc85957"
+        ),
+        "source_classification": "PAIRED_INTERNAL_JOURNAL",
+    },
+    (
+        "account-a13937e26b8ae46d",
+        "txn-249d9f96964cbf7860830e82",
+        "2025-12-29",
+        Decimal("7000"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-a13937e26b8ae46d.json",
+        "source_artifact_sha256": "46ed86a97801fa9fc8905b7ccd2857b65ebed8f8915d6ba1fd81bad88a565688",
+        "flow_type": "ACCOUNT_TRANSFER",
+        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
+        "provider_activity_id_sha256": "3a2ef670763f2bf9938ee37386b05f376a46a2d3233d9541b49bfad56db5c747",
+        "source_classification": "PAIRED_INTERNAL_JOURNAL",
+    },
+    (
+        "account-a13937e26b8ae46d",
+        "txn-2f56f4cba6c5742b593c4ef2",
+        "2026-01-02",
+        Decimal("7500"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-a13937e26b8ae46d.json",
+        "source_artifact_sha256": "46ed86a97801fa9fc8905b7ccd2857b65ebed8f8915d6ba1fd81bad88a565688",
+        "flow_type": "ACCOUNT_TRANSFER",
+        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
+        "provider_activity_id_sha256": "d0b1437e4bcab56cc53f76f88206c36dc2c7b21301303705c695606fb3ac9f32",
+        "source_classification": "PAIRED_INTERNAL_JOURNAL",
+    },
+    (
+        "account-1825d6880d891d57",
+        "txn-dcaf6ac1f18e29cc54a3016c",
+        "2025-12-29",
+        Decimal("-7000"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-1825d6880d891d57.json",
+        "source_artifact_sha256": "9710d06c33985e76b62f3937443e6e51647fb695586d6b4c0a1d57b79e9ec96e",
+        "flow_type": "ACCOUNT_TRANSFER",
+        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
+        "provider_activity_id_sha256": "b9b1dbee9c9204408c81a823dde6d734d50104c6289aeb4da0b460a5e0f7fe95",
+        "source_classification": "PAIRED_INTERNAL_JOURNAL",
+    },
+    (
+        "account-1825d6880d891d57",
+        "txn-1270308650488c57b650afdc",
+        "2025-12-29",
+        Decimal("-7000"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-1825d6880d891d57.json",
+        "source_artifact_sha256": "9710d06c33985e76b62f3937443e6e51647fb695586d6b4c0a1d57b79e9ec96e",
+        "flow_type": "ACCOUNT_TRANSFER",
+        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
+        "provider_activity_id_sha256": "3a2ef670763f2bf9938ee37386b05f376a46a2d3233d9541b49bfad56db5c747",
+        "source_classification": "PAIRED_INTERNAL_JOURNAL",
+    },
+    (
+        "account-1825d6880d891d57",
+        "txn-16dd3f367043beadcabd3387",
+        "2026-01-02",
+        Decimal("-7500"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-1825d6880d891d57.json",
+        "source_artifact_sha256": "9710d06c33985e76b62f3937443e6e51647fb695586d6b4c0a1d57b79e9ec96e",
+        "flow_type": "ACCOUNT_TRANSFER",
+        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
+        "provider_activity_id_sha256": "1d7acaaa5abb230c0cb48200c066e49fa0b554c2f2a4b3c321fcf0342fc85957",
+        "source_classification": "PAIRED_INTERNAL_JOURNAL",
+    },
+    (
+        "account-1825d6880d891d57",
+        "txn-8e9ac98ba8accadd5544238b",
+        "2026-01-02",
+        Decimal("-7500"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-1825d6880d891d57.json",
+        "source_artifact_sha256": "9710d06c33985e76b62f3937443e6e51647fb695586d6b4c0a1d57b79e9ec96e",
+        "flow_type": "ACCOUNT_TRANSFER",
+        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
+        "provider_activity_id_sha256": "d0b1437e4bcab56cc53f76f88206c36dc2c7b21301303705c695606fb3ac9f32",
+        "source_classification": "PAIRED_INTERNAL_JOURNAL",
+    },
+    (
+        "account-61092059d066f056",
+        "txn-3361828c64f99b1e768e2575",
+        "2026-01-02",
+        Decimal("50000"),
+    ): {
+        "source_artifact_id": "wch/transactions/account-61092059d066f056.json",
+        "source_artifact_sha256": "5349b613f8863df1931f13cc8cc787c5e766c0bd0e749f21c5a5ae00e90d0425",
+        "flow_type": "ACCOUNT_TRANSFER",
+        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
+        "provider_activity_id_sha256": "6a69ba3b1c0054bd7c77fd972ad21af4beca0871600a2c62cd7e3d49e57b370a",
+        "source_classification": "PAIRED_INTERNAL_JOURNAL",
     },
     (
         "account-702c489650e59956",
@@ -200,9 +307,11 @@ _SCHWAB_PINNED_JOURNAL_EXTERNAL_FLOWS: Final = {
         Decimal("-50000"),
     ): {
         "source_artifact_id": "wch/transactions/account-702c489650e59956.json",
-        "source_artifact_sha256": (
-            "69856742fdf963136a326fc61ca4897e0a5e9a1d99c7e1db4231625c9ab9ee2a"
-        ),
+        "source_artifact_sha256": "69856742fdf963136a326fc61ca4897e0a5e9a1d99c7e1db4231625c9ab9ee2a",
+        "flow_type": "ACCOUNT_TRANSFER",
+        "mapping_basis": "PINNED_PAIRED_PROVIDER_JOURNAL",
+        "provider_activity_id_sha256": "6a69ba3b1c0054bd7c77fd972ad21af4beca0871600a2c62cd7e3d49e57b370a",
+        "source_classification": "PAIRED_INTERNAL_JOURNAL",
     },
 }
 _DATE_FIELDS: Final = (
@@ -222,7 +331,9 @@ _NAV_SOURCE_SCHEMA_NAMES_BY_PROVIDER: Final = {
     "schwab": frozenset({"schwab-wch-historical-balance"}),
 }
 _NAV_SOURCE_ARTIFACT_IDS_BY_PROVIDER: Final = {
-    "matrixport": frozenset({"csv/daily_portfolio_totals.csv"}),
+    "matrixport": frozenset(
+        {"csv/daily_holdings.csv", "csv/daily_portfolio_totals.csv"}
+    ),
     "quantbase": frozenset({"source/csv/dashboard_Volatis_Strategy_pricehistory.csv"}),
 }
 
@@ -247,6 +358,11 @@ def _object(value: object, name: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ProviderLedgerError(f"{name} must be an object")
     return value
+
+
+def _strict(value: Mapping[str, Any], keys: set[str], name: str) -> None:
+    if set(value) != keys:
+        raise ProviderLedgerError(f"{name} keys differ")
 
 
 def _objects(value: object, name: str) -> list[dict[str, Any]]:
@@ -343,9 +459,14 @@ def _exact_file(root: Path, relative: Path, name: str) -> Path:
         path.relative_to(root)
     except ValueError as exc:
         raise ProviderLedgerError(f"{name} escapes its configured root") from exc
-    if path.is_symlink() or not path.is_file():
+    io_path = (
+        Path(f"\\\\?\\{path}")
+        if sys.platform == "win32" and not str(path).startswith("\\\\?\\")
+        else path
+    )
+    if io_path.is_symlink() or not io_path.is_file():
         raise ProviderLedgerError(f"{name} must be a regular file")
-    return path
+    return io_path
 
 
 def _verify_hash(path: Path, expected: object, name: str) -> tuple[str, int]:
@@ -466,6 +587,114 @@ def _mapped_strategy_for_account(
     )
 
 
+def _matrixport_source_backed_usd_dates(
+    manifest: GenerationManifest,
+    run_root: Path,
+) -> set[date]:
+    """Return dates whose active holdings have source-backed USD values.
+
+    ``strict_complete`` is a completeness flag produced by the Matrixport
+    extractor.  It does not establish that a non-USD holding was converted by
+    a provider-reported value or rate.  In particular, the retained Robuxio
+    generation labels its USDT rows ``assumed_stablecoin_parity``.  Those rows
+    remain native-currency source facts and cannot be promoted to USD NAV.
+    """
+    holdings_artifact_id = "csv/daily_holdings.csv"
+    holdings_artifact = _find_manifest_artifact(
+        manifest, holdings_artifact_id, "matrixport daily holdings"
+    )
+    holdings = _verified_csv_rows(
+        _exact_file(run_root, Path(holdings_artifact_id), "matrixport daily holdings"),
+        holdings_artifact.sha256,
+        {
+            "currency",
+            "native_value",
+            "share",
+            "utc_date",
+            "valuation_source",
+            "value_usd_api_rate",
+            "value_usd_api_reported",
+            "value_usd_strict_component",
+        },
+        "matrixport daily holdings",
+    )
+    issues_artifact_id = "csv/valuation_quality_issues.csv"
+    issues_artifact = _find_manifest_artifact(
+        manifest, issues_artifact_id, "matrixport valuation quality issues"
+    )
+    issues = _verified_csv_rows(
+        _exact_file(
+            run_root,
+            Path(issues_artifact_id),
+            "matrixport valuation quality issues",
+        ),
+        issues_artifact.sha256,
+        {"reason", "source_index", "source_table"},
+        "matrixport valuation quality issues",
+    )
+    conflict_dates = {
+        _day(row["source_index"], "matrixport valuation issue source_index")
+        for row in issues
+        if row.get("source_table") == "daily_holdings"
+        and str(row.get("reason") or "").startswith("parity_fx_rate_conflict:")
+    }
+    by_day: dict[date, list[dict[str, str]]] = defaultdict(list)
+    for row in holdings:
+        day = _day(row.get("utc_date"), "matrixport daily holdings utc_date")
+        share = _observed_decimal(row.get("share"), "matrixport daily holdings share")
+        if share is None:
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_COMPONENT_INVALID: active share is absent"
+            )
+        if share != 0:
+            by_day[day].append(row)
+
+    qualified: set[date] = set()
+    for day, rows in by_day.items():
+        if day in conflict_dates:
+            continue
+        supported = True
+        for row in rows:
+            valuation_source = str(row.get("valuation_source") or "")
+            if valuation_source.startswith(("assumed_", "missing_")):
+                supported = False
+                break
+            native_value = _observed_decimal(
+                row.get("native_value"), "matrixport native holding value"
+            )
+            strict_value = _observed_decimal(
+                row.get("value_usd_strict_component"),
+                "matrixport strict USD holding value",
+            )
+            if native_value is None or strict_value is None:
+                supported = False
+                break
+            currency = _text(row.get("currency"), "matrixport holding currency")
+            if currency == "USD" and native_value == strict_value:
+                continue
+            reported_value = _observed_decimal(
+                row.get("value_usd_api_reported"),
+                "matrixport API-reported USD holding value",
+            )
+            if reported_value is not None and reported_value == strict_value:
+                continue
+            reported_rate = _observed_decimal(
+                row.get("value_usd_api_rate"),
+                "matrixport API-reported USD rate",
+            )
+            if (
+                reported_rate is not None
+                and reported_rate > 0
+                and native_value * reported_rate == strict_value
+            ):
+                continue
+            supported = False
+            break
+        if supported:
+            qualified.add(day)
+    return qualified
+
+
 def _matrixport_daily_component_total(
     manifest: GenerationManifest,
     run_root: Path,
@@ -516,6 +745,210 @@ def _matrixport_daily_component_total(
     return total
 
 
+def _daily_fx_evidence(
+    currency: str,
+    day: date,
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ],
+) -> dict[str, Any]:
+    generation_id, rates, _artifacts = fx_rates
+    rate = rates.get((currency, day))
+    if rate is None or rate <= 0:
+        raise ProviderLedgerError(
+            f"portfolio FX lacks {currency}/USD on {day.isoformat()}"
+        )
+    return {
+        "base_currency": "USD",
+        "currency": currency,
+        "date": day.isoformat(),
+        "field": "Close",
+        "generation_id": generation_id,
+        "provider": "yahoo",
+        "rate": format(rate, "f"),
+        "source_artifact_id": "rates.csv",
+        "timing": "UTC_DAILY_CLOSE",
+    }
+
+
+def _matrixport_daily_fx_totals(
+    manifest: GenerationManifest,
+    run_root: Path,
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ],
+) -> dict[date, tuple[Decimal, list[dict[str, Any]]]]:
+    """Convert every active native holding using its exact daily Close."""
+
+    artifact_id = "csv/daily_holdings.csv"
+    artifact = _find_manifest_artifact(
+        manifest, artifact_id, "matrixport daily holdings"
+    )
+    rows = _verified_csv_rows(
+        _exact_file(run_root, Path(artifact_id), "matrixport daily holdings"),
+        artifact.sha256,
+        {"currency", "native_value", "share", "utc_date"},
+        "matrixport daily holdings",
+    )
+    totals: dict[date, Decimal] = defaultdict(Decimal)
+    evidence: dict[date, dict[str, dict[str, Any]]] = defaultdict(dict)
+    incomplete_days: set[date] = set()
+    with localcontext() as context:
+        context.prec = 80
+        for row in rows:
+            day = _day(row.get("utc_date"), "matrixport daily holdings utc_date")
+            share = _observed_decimal(
+                row.get("share"), "matrixport daily holdings share"
+            )
+            if share is None:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_ACCOUNT_COMPONENT_INVALID: active share is absent"
+                )
+            if share == 0:
+                continue
+            native = _observed_decimal(
+                row.get("native_value"), "matrixport native holding value"
+            )
+            if native is None:
+                incomplete_days.add(day)
+                continue
+            currency = _text(row.get("currency"), "matrixport holding currency")
+            if currency == "USD":
+                totals[day] += native
+                continue
+            fx = _daily_fx_evidence(currency, day, fx_rates)
+            totals[day] += native * Decimal(str(fx["rate"]))
+            evidence[day][currency] = fx
+    for day in incomplete_days:
+        totals.pop(day, None)
+        evidence.pop(day, None)
+    if not totals:
+        raise ProviderLedgerError(
+            "MATRIXPORT_ACCOUNT_COMPONENTS_UNAVAILABLE: no active daily holdings exist"
+        )
+    return {
+        day: (
+            total,
+            [evidence[day][currency] for currency in sorted(evidence[day])],
+        )
+        for day, total in totals.items()
+    }
+
+
+def _matrixport_flows(
+    generation_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    accounts: set[str],
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ],
+) -> list[dict[str, Any]]:
+    """Project confirmed wallet deposits and withdrawals in their native units."""
+
+    account_id = _CSV_FACT_ACCOUNT["matrixport"]
+    if account_id not in accounts:
+        raise ProviderLedgerError("matrixport wallet account is unknown")
+    source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
+    run_root = root / "output" / source_run_id
+    datasets = (
+        ("csv/wallet_deposits.csv", Decimal("1")),
+        ("csv/wallet_withdrawals.csv", Decimal("-1")),
+    )
+    projected: list[dict[str, Any]] = []
+    seen: dict[str, str] = {}
+    for artifact_id, sign in datasets:
+        artifacts = [
+            artifact
+            for artifact in manifest.artifacts
+            if artifact.artifact_id == artifact_id
+        ]
+        if not artifacts:
+            continue
+        rows = _verified_csv_rows(
+            _exact_file(run_root, Path(artifact_id), f"matrixport {artifact_id}"),
+            artifacts[0].sha256,
+            {"amount", "created_at_utc", "currency", "state", "transaction_id"},
+            f"matrixport {artifact_id}",
+        )
+        for row in rows:
+            if str(row.get("state") or "").lower() not in {
+                "completed",
+                "confirmed",
+                "success",
+            }:
+                continue
+            source_id = _text(row.get("transaction_id"), "matrixport transaction_id")
+            row_sha256 = hashlib.sha256(canonical_json_bytes(dict(row))).hexdigest()
+            duplicate = seen.get(source_id)
+            if duplicate is not None:
+                if duplicate != row_sha256:
+                    raise ProviderLedgerError(
+                        "conflicting duplicate Matrixport wallet transaction"
+                    )
+                continue
+            seen[source_id] = row_sha256
+            amount = _observed_decimal(row.get("amount"), "matrixport wallet amount")
+            if amount is None or amount <= 0:
+                raise ProviderLedgerError("matrixport wallet amount is invalid")
+            try:
+                timestamp = datetime.fromisoformat(
+                    _text(
+                        row.get("created_at_utc"),
+                        "matrixport wallet created_at_utc",
+                    ).replace("Z", "+00:00")
+                )
+            except ValueError as exc:
+                raise ProviderLedgerError(
+                    "matrixport wallet timestamp is invalid"
+                ) from exc
+            if (
+                timestamp.tzinfo is None
+                or timestamp.utcoffset() is None
+                or timestamp.utcoffset() != timedelta(0)
+            ):
+                raise ProviderLedgerError("matrixport wallet timestamp is not UTC")
+            currency = _text(row.get("currency"), "matrixport wallet currency")
+            signed = amount * sign
+            projected.append(
+                {
+                    "account_id": account_id,
+                    "amount": {
+                        "currency": currency,
+                        "status": "AVAILABLE",
+                        "value": format(signed.normalize(), "f"),
+                    },
+                    "capital_disposition": "EXTERNAL_CAPITAL",
+                    "event_date": timestamp.date().isoformat(),
+                    "event_time_fx": _daily_fx_evidence(
+                        currency, timestamp.date(), fx_rates
+                    ),
+                    "event_timestamp": timestamp.isoformat(),
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+                    "generation_id": generation_id,
+                    "mapping_basis": "CONFIRMED_MATRIXPORT_WALLET_HISTORY_NATIVE",
+                    "mapping_status": "UNMAPPED",
+                    "provider_account_scope": "ACCOUNT_ONLY",
+                    "provider_id": "matrixport",
+                    "record_id": f"matrixport-flow:{source_id}",
+                    "source_artifact_id": artifact_id,
+                    "source_record_id": source_id,
+                    "source_row_sha256": row_sha256,
+                    "strategy_id": None,
+                }
+            )
+    projected.sort(key=lambda row: (str(row["event_timestamp"]), str(row["record_id"])))
+    return projected
+
+
 def _matrixport_nav_observations(
     generation_id: str,
     manifest: GenerationManifest,
@@ -524,11 +957,61 @@ def _matrixport_nav_observations(
     accounts: set[str],
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ]
+    | None = None,
 ) -> list[dict[str, Any]]:
     """Admit Matrixport daily portfolio totals as account NAV observations."""
     account_id = _CSV_FACT_ACCOUNT["matrixport"]
     source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
     run_root = root / "output" / source_run_id
+    if fx_rates is not None:
+        daily_totals = _matrixport_daily_fx_totals(manifest, run_root, fx_rates)
+        snapshot_date = _day(
+            catalog.get("observed_boundary_date"),
+            "matrixport observed_boundary_date",
+        )
+        if max(daily_totals) != snapshot_date:
+            raise ProviderLedgerError(
+                "MATRIXPORT_ACCOUNT_SNAPSHOT_DATE_MISMATCH: latest native holding "
+                "is not aligned with the declared boundary"
+            )
+        fx_observations: list[dict[str, Any]] = []
+        for day, (daily_value, valuation_fx) in sorted(daily_totals.items()):
+            if daily_value <= 0:
+                continue
+            strategy_id, mapping_status = _mapped_strategy_for_account(
+                account_id, day, accounts, strategies, assignments
+            )
+            source_id = day.isoformat()
+            wrapped = {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": format(daily_value.normalize(), "f"),
+            }
+            fx_observations.append(
+                {
+                    "account_id": account_id,
+                    "as_of_date": source_id,
+                    "component_source_artifact_id": "csv/daily_holdings.csv",
+                    "evidence_layer": "ACCOUNT_LIVE",
+                    "generation_id": generation_id,
+                    "mapping_status": mapping_status,
+                    "market_value": dict(wrapped),
+                    "nav": dict(wrapped),
+                    "provider_id": "matrixport",
+                    "record_id": f"matrixport:{source_id}",
+                    "source_artifact_id": "csv/daily_holdings.csv",
+                    "source_record_id": source_id,
+                    "strategy_id": strategy_id,
+                    "valuation_fx": valuation_fx,
+                    "value_basis": "ACCOUNT_TOTAL",
+                }
+            )
+        return fx_observations
     artifact_id = "csv/daily_portfolio_totals.csv"
     artifact = _find_manifest_artifact(
         manifest, artifact_id, "matrixport daily portfolio totals"
@@ -549,6 +1032,7 @@ def _matrixport_nav_observations(
         },
         "matrixport daily portfolio totals",
     )
+    source_backed_dates = _matrixport_source_backed_usd_dates(manifest, run_root)
     observations: list[dict[str, Any]] = []
     for row in rows:
         if row.get("strict_complete") != "true":
@@ -573,6 +1057,8 @@ def _matrixport_nav_observations(
             # A non-positive total is not a plausible portfolio NAV.
             continue
         day = _day(row["utc_date"], "matrixport portfolio utc_date")
+        if day not in source_backed_dates:
+            continue
         strategy_id, mapping_status = _mapped_strategy_for_account(
             account_id, day, accounts, strategies, assignments
         )
@@ -706,6 +1192,7 @@ def _matrixport_capital_anchors(
         },
         "matrixport daily portfolio totals",
     )
+    source_backed_dates = _matrixport_source_backed_usd_dates(manifest, run_root)
 
     def timestamp_day(value: object, name: str) -> date:
         try:
@@ -747,6 +1234,8 @@ def _matrixport_capital_anchors(
         recognition_day = timestamp_day(
             row["confirm_nav_time_utc"], "matrixport subscription confirmation time"
         )
+        if recognition_day not in source_backed_dates:
+            continue
         if recognition_day < event_day:
             raise ProviderLedgerError(
                 "matrixport subscription recognition predates subscription"
@@ -1059,6 +1548,150 @@ def _quantbase_capital_anchors(
     return anchors
 
 
+def _quantbase_flows(
+    generation_id: str,
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Project completed linked-Alpaca cash transfers as account flows.
+
+    Quantbase fund BUY/SELL rows are investment allocations.  They never
+    enter this account funding projection.  The captured linked account is an
+    Alpaca fiat account; the retained amount/amount_cents pair and Alpaca's
+    accepted USD account unit establish USD without applying any crypto parity.
+    """
+    account_id = _CSV_FACT_ACCOUNT["quantbase"]
+    run_id = _run_id(
+        _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
+            "run_id"
+        ),
+        "quantbase.legacy_lineage.run_id",
+    )
+    activity_rel = Path("csv/account_activity.csv")
+    artifact = _find_manifest_artifact(
+        manifest,
+        f"source/{activity_rel.as_posix()}",
+        "quantbase account activity",
+    )
+    rows = _verified_csv_rows(
+        _exact_file(
+            root / "source-runs" / run_id / "artifacts",
+            activity_rel,
+            "quantbase account activity",
+        ),
+        artifact.sha256,
+        {
+            "activity_type",
+            "amount",
+            "amount_cents",
+            "created_at",
+            "destination_account_id",
+            "id",
+            "origin_account_id",
+            "status",
+            "type",
+        },
+        "quantbase account activity",
+    )
+    selected: dict[str, tuple[str, Mapping[str, str]]] = {}
+    for row in rows:
+        transfer_type = str(row.get("type") or "").upper()
+        if (
+            row.get("activity_type") != "transfer"
+            or transfer_type not in {"DEPOSIT", "WITHDRAWAL"}
+            or row.get("status") != "C"
+        ):
+            continue
+        source_id = _text(row.get("id"), "quantbase transfer id")
+        row_sha256 = hashlib.sha256(canonical_json_bytes(dict(row))).hexdigest()
+        duplicate = selected.get(source_id)
+        if duplicate is not None:
+            if duplicate[0] != row_sha256:
+                raise ProviderLedgerError("conflicting duplicate Quantbase transfer id")
+            continue
+        selected[source_id] = (row_sha256, row)
+
+    projected: list[dict[str, Any]] = []
+    linked_account_ids: set[str] = set()
+    for source_id, (row_sha256, selected_row) in selected.items():
+        transfer_type = str(selected_row["type"]).upper()
+        amount = _observed_decimal(
+            selected_row.get("amount"), "quantbase transfer amount"
+        )
+        cents = _observed_decimal(
+            selected_row.get("amount_cents"), "quantbase transfer amount_cents"
+        )
+        if (
+            amount is None
+            or cents is None
+            or amount <= 0
+            or cents != cents.to_integral_value()
+            or cents != amount * 100
+        ):
+            raise ProviderLedgerError("quantbase transfer amount units differ")
+        try:
+            timestamp = datetime.fromisoformat(
+                _text(
+                    selected_row.get("created_at"),
+                    "quantbase transfer created_at",
+                ).replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ProviderLedgerError(
+                "quantbase transfer timestamp is invalid"
+            ) from exc
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ProviderLedgerError("quantbase transfer timestamp is invalid")
+        provider_account_id = _text(
+            selected_row.get(
+                "destination_account_id"
+                if transfer_type == "DEPOSIT"
+                else "origin_account_id"
+            ),
+            "quantbase linked Alpaca account",
+        )
+        linked_account_ids.add(provider_account_id)
+        if len(linked_account_ids) != 1:
+            raise ProviderLedgerError("Quantbase linked Alpaca account scope differs")
+        if account_id not in accounts:
+            raise ProviderLedgerError("quantbase transfer account is unknown")
+        signed = amount if selected_row["type"].upper() == "DEPOSIT" else -amount
+        projected.append(
+            {
+                "account_id": account_id,
+                "amount": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": format(signed.normalize(), "f"),
+                },
+                "capital_disposition": "EXTERNAL_CAPITAL",
+                "event_date": timestamp.date().isoformat(),
+                "evidence_layer": "ACCOUNT_LIVE",
+                "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+                "generation_id": generation_id,
+                "mapping_basis": "COMPLETED_ALPACA_ACCOUNT_TRANSFER_USD",
+                "mapping_status": "UNMAPPED",
+                "provider_account_scope": "ACCOUNT_ONLY",
+                "provider_account_id_sha256": hashlib.sha256(
+                    provider_account_id.encode("utf-8")
+                ).hexdigest(),
+                "provider_id": "quantbase",
+                "record_id": f"quantbase-flow:{source_id}",
+                "source_artifact_id": f"source/{activity_rel.as_posix()}",
+                "source_record_id": source_id,
+                "source_row_sha256": row_sha256,
+                "source_timestamp": timestamp.isoformat(),
+                "strategy_id": None,
+            }
+        )
+    projected.sort(key=lambda row: (str(row["event_date"]), str(row["record_id"])))
+    return projected
+
+
 def _load_spec(path: Path) -> dict[str, Any]:
     spec = _load_json(path, "provider-ledger spec")
     base_keys = {
@@ -1072,7 +1705,10 @@ def _load_spec(path: Path) -> dict[str, Any]:
     }
     version = spec.get("schema_version")
     expected = base_keys | ({"financial_mvp"} if version == SCHEMA_VERSION else set())
-    if set(spec) != expected or version not in {1, SCHEMA_VERSION}:
+    allowed = {frozenset(expected)}
+    if version == SCHEMA_VERSION:
+        allowed.add(frozenset({*expected, "portfolio_fx_rates"}))
+    if frozenset(spec) not in allowed or version not in {1, SCHEMA_VERSION}:
         raise ProviderLedgerError("provider-ledger spec keys or version differ")
     if version == 1:
         paths = {
@@ -1327,6 +1963,168 @@ def _provider(
     return identity, manifest, catalog, artifacts, root
 
 
+def _portfolio_fx_rates(
+    value: object,
+    baseline_as_of: date,
+) -> tuple[
+    str,
+    dict[tuple[str, date], Decimal],
+    tuple[SourceArtifact, SourceArtifact],
+]:
+    """Load an explicitly selected, hash-bound daily FX candidate."""
+
+    ref = _object(value, "portfolio_fx_rates")
+    expected = {
+        "catalog_sha256",
+        "generation_id",
+        "manifest_sha256",
+        "root",
+        "selection",
+    }
+    if set(ref) != expected:
+        raise ProviderLedgerError("portfolio FX reference keys differ")
+    if ref.get("selection") != "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT":
+        raise ProviderLedgerError("portfolio FX owner selection is absent")
+    root = Path(_text(ref["root"], "portfolio_fx_rates.root")).resolve()
+    generation_id = _run_id(ref["generation_id"], "portfolio_fx_rates.generation_id")
+    generation_root = root / "generations" / generation_id
+    manifest, manifest_hash, manifest_size = _manifest(
+        _exact_file(
+            generation_root,
+            Path("generation.json"),
+            "portfolio FX manifest",
+        ),
+        ref["manifest_sha256"],
+        "portfolio FX manifest",
+    )
+    if (
+        manifest.generation_id != generation_id
+        or manifest.as_of_date > baseline_as_of
+        or manifest.adapter.name != "agent-market-data-terminal-yfinance"
+        or manifest.adapter.version != "1"
+        or manifest.coverage.status
+        is not CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+        or manifest.coverage.fact_types != ("FX_RATE",)
+    ):
+        raise ProviderLedgerError("portfolio FX generation authority differs")
+    catalog, catalog_hash, catalog_size = _verified_json(
+        _exact_file(generation_root, Path("catalog.json"), "portfolio FX catalog"),
+        ref["catalog_sha256"],
+        "portfolio FX catalog",
+    )
+    catalog_artifact = _find_manifest_artifact(
+        manifest, "catalog.json", "portfolio FX catalog"
+    )
+    rates_artifact = _find_manifest_artifact(
+        manifest, "rates.csv", "portfolio FX daily rates"
+    )
+    if (
+        catalog_artifact.sha256 != catalog_hash
+        or catalog_artifact.size_bytes != catalog_size
+        or catalog.get("catalog_schema_version") != 1
+        or catalog.get("source_id") != "portfolio-fx-rates"
+        or catalog.get("source_provider") != "yahoo"
+        or catalog.get("generation_status") != "CANDIDATE_PENDING_OWNER_SELECTION"
+        or catalog.get("selector_authority") != "OWNER_SELECTION_REQUIRED"
+        or catalog.get("rates_artifact_id") != "rates.csv"
+        or catalog.get("tickers") != ["USDC-USD", "USDT-USD"]
+        or catalog.get("quote_convention")
+        != {
+            "base_currency": "USD",
+            "field": "Close",
+            "rate_meaning": "USD_PER_ONE_SOURCE_CURRENCY_UNIT",
+            "timing": "UTC_DAILY_CLOSE",
+        }
+    ):
+        raise ProviderLedgerError("portfolio FX catalog authority differs")
+    rows = _verified_csv_rows(
+        _exact_file(generation_root, Path("rates.csv"), "portfolio FX daily rates"),
+        rates_artifact.sha256,
+        {
+            "base_currency",
+            "currency",
+            "date",
+            "field",
+            "provider",
+            "rate",
+            "ticker",
+            "timing",
+        },
+        "portfolio FX daily rates",
+    )
+    expected_columns = {
+        "base_currency",
+        "currency",
+        "date",
+        "field",
+        "provider",
+        "rate",
+        "ticker",
+        "timing",
+    }
+    rates: dict[tuple[str, date], Decimal] = {}
+    tickers = {"USDC": "USDC-USD", "USDT": "USDT-USD"}
+    for row in rows:
+        currency = _text(row.get("currency"), "portfolio FX currency")
+        day = _day(row.get("date"), "portfolio FX date")
+        rate = _observed_decimal(row.get("rate"), "portfolio FX rate")
+        if (
+            set(row) != expected_columns
+            or currency not in tickers
+            or row.get("ticker") != tickers[currency]
+            or row.get("base_currency") != "USD"
+            or row.get("provider") != "yahoo"
+            or row.get("field") != "Close"
+            or row.get("timing") != "UTC_DAILY_CLOSE"
+            or rate is None
+            or rate <= 0
+        ):
+            raise ProviderLedgerError("portfolio FX rate row differs")
+        key = (currency, day)
+        if key in rates:
+            raise ProviderLedgerError("portfolio FX rate is duplicated")
+        rates[key] = rate
+    coverage = _object(catalog.get("coverage"), "portfolio FX coverage")
+    start = _day(coverage.get("observed_start"), "portfolio FX observed_start")
+    end = _day(coverage.get("observed_end"), "portfolio FX observed_end")
+    expected_dates = (end - start).days + 1
+    if (
+        start != manifest.coverage.observed_start
+        or end != manifest.coverage.observed_end
+        or coverage.get("status") != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+        or coverage.get("known_gaps") != []
+        or coverage.get("expected_date_count") != expected_dates
+        or coverage.get("rate_count") != len(rates)
+        or len(rates) != expected_dates * len(tickers)
+        or set(rates)
+        != {
+            (currency, start + timedelta(days=offset))
+            for currency in tickers
+            for offset in range(expected_dates)
+        }
+    ):
+        raise ProviderLedgerError("portfolio FX required coverage differs")
+    artifacts = (
+        SourceArtifact(
+            artifact_id="portfolio/fx-rates/generation.json",
+            sha256=manifest_hash,
+            size_bytes=manifest_size,
+            as_of_date=manifest.as_of_date,
+            schema_name="generation-manifest",
+            schema_version="1",
+        ),
+        SourceArtifact(
+            artifact_id="portfolio/fx-rates/catalog.json",
+            sha256=catalog_hash,
+            size_bytes=catalog_size,
+            as_of_date=manifest.as_of_date,
+            schema_name="portfolio-fx-rates-catalog",
+            schema_version="1",
+        ),
+    )
+    return generation_id, rates, artifacts
+
+
 def _assignment_index(
     provenance: Mapping[str, Any],
     financial_contract: Mapping[str, Any] | None = None,
@@ -1439,6 +2237,12 @@ def _project_account_facts(
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
     manifest: GenerationManifest | None = None,
     root: Path | None = None,
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ]
+    | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     projections: dict[str, list[dict[str, Any]]] = defaultdict(list)
     exceptions: list[dict[str, Any]] = []
@@ -1475,7 +2279,18 @@ def _project_account_facts(
                         accounts,
                         strategies,
                         assignments,
+                        fx_rates=fx_rates,
                     )
+                )
+            elif source_fact == "flows":
+                rows = _quantbase_flows(
+                    generation_id,
+                    manifest,
+                    catalog,
+                    root,
+                    accounts,
+                    strategies,
+                    assignments,
                 )
             elif source_fact == "capital_anchors":
                 rows = _quantbase_capital_anchors(
@@ -1553,6 +2368,7 @@ def _project_account_facts(
                 "as_of_date",
                 "effective_date",
                 "event_date",
+                "execution_price",
                 "flow_type",
                 "kind",
                 "market_value",
@@ -1610,18 +2426,61 @@ def _project_account_facts(
                     row,
                     manifest,
                 )
-                if pinned_journal is not None:
+                transfer: dict[str, Any] | None = pinned_journal
+                if transfer is None and row.get("kind") == "Journaled Shares":
+                    transfer = _schwab_share_transfer(row, rows)
+                elif (
+                    transfer is None
+                    and row.get("kind") == "Journal"
+                    and re.fullmatch(
+                        r"JOURNAL (?:FRM|TO) \.\.\.\d+",
+                        str(row.get("description") or ""),
+                    )
+                ):
+                    transfer = {
+                        "flow_type": "TRANSFER:INTERNAL:CASH",
+                        "mapping_basis": "PROVIDER_CASH_JOURNAL",
+                    }
+                if transfer is not None:
                     projections["flows"].append(
                         {
                             **record,
-                            **pinned_journal,
-                            "flow_type": "EXTERNAL_PROVIDER_TRANSFER",
-                            "mapping_basis": "PINNED_RETAINED_JOURNAL",
+                            **transfer,
+                            "flow_type": transfer.get(
+                                "flow_type", "EXTERNAL_PROVIDER_TRANSFER"
+                            ),
+                            "mapping_basis": transfer.get(
+                                "mapping_basis", "PINNED_RETAINED_JOURNAL"
+                            ),
                             "nav_recognition_date": record.get("effective_date")
                             or record.get("event_date"),
                             "record_id": f"schwab-flow:{source_id}",
                         }
                     )
+
+    if provider_id == "matrixport" and fx_rates is not None:
+        if manifest is None or root is None:
+            raise ProviderLedgerError("matrixport FX facts require a manifest and root")
+        flow_rows = _matrixport_flows(
+            generation_id,
+            manifest,
+            catalog,
+            root,
+            accounts,
+            fx_rates,
+        )
+        projections["flows"].extend(flow_rows)
+        for row in flow_rows:
+            exceptions.append(
+                {
+                    "account_in_provenance": row["account_id"] in accounts,
+                    "effective_date": row["event_date"],
+                    "fact_type": "flows",
+                    "provider_id": provider_id,
+                    "record_id": row["record_id"],
+                    "status": "UNMAPPED",
+                }
+            )
 
     for rows in projections.values():
         rows.sort(
@@ -1637,11 +2496,166 @@ def _project_account_facts(
     return dict(projections), exceptions
 
 
+def _complete_schwab_security_transfer_values(
+    flows: Sequence[dict[str, Any]],
+    schwab_catalog: Mapping[str, Any],
+    fidelity_catalog: Mapping[str, Any],
+    fidelity_generation_id: str,
+    required_account_ids: set[str],
+) -> None:
+    """Carry the recorded USD value across a unique, exact security delivery.
+
+    The receiver's blank amount and both native records remain in the proof.
+    This values the receipt; it does not infer prior contributed basis, move
+    an event date, or classify the two accounts as one product perimeter.
+    """
+    receipts = _objects(schwab_catalog.get("transactions"), "Schwab transactions")
+    deliveries = _objects(
+        fidelity_catalog.get("corporate_actions"), "Fidelity corporate actions"
+    )
+
+    def key(
+        row: Mapping[str, Any], *, delivery: bool
+    ) -> tuple[str, str, Decimal] | None:
+        if row.get("kind") != ("ASSET_TRANSFER" if delivery else "Security Transfer"):
+            return None
+        if not row.get("symbol") or row.get("quantity") is None:
+            return None
+        quantity = _decimal(row["quantity"], "security transfer quantity")
+        if (delivery and quantity >= 0) or (not delivery and quantity <= 0):
+            return None
+        return (
+            _day(row.get("event_date"), "security transfer date").isoformat(),
+            _text(row.get("symbol"), "security transfer symbol"),
+            quantity.copy_abs(),
+        )
+
+    receipt_index: dict[tuple[str, str, Decimal], list[dict[str, Any]]] = defaultdict(
+        list
+    )
+    delivery_index: dict[tuple[str, str, Decimal], list[dict[str, Any]]] = defaultdict(
+        list
+    )
+    for row in receipts:
+        identity = key(row, delivery=False)
+        if identity is not None:
+            receipt_index[identity].append(row)
+    for row in deliveries:
+        identity = key(row, delivery=True)
+        amount = row.get("amount")
+        if (
+            identity is not None
+            and isinstance(amount, dict)
+            and amount.get("currency") == "USD"
+            and amount.get("status") == "AVAILABLE"
+            and _decimal(amount.get("value"), "security delivery amount") < 0
+        ):
+            delivery_index[identity].append(row)
+    native_by_id = {row["record_id"]: row for row in receipts}
+    for flow in flows:
+        amount = flow.get("amount")
+        if (
+            flow.get("provider_id") != "schwab"
+            or flow.get("account_id") not in required_account_ids
+            or not isinstance(amount, dict)
+            or amount != {"currency": "USD", "status": "UNAVAILABLE", "value": None}
+        ):
+            continue
+        native = native_by_id.get(flow.get("source_record_id"))
+        if native is None:
+            continue
+        identity = key(native, delivery=False)
+        if (
+            identity is None
+            or len(receipt_index[identity]) != 1
+            or len(delivery_index.get(identity, [])) != 1
+        ):
+            continue
+        if any(
+            flow.get(field) != native.get(field)
+            for field in ("account_id", "event_date", "quantity", "amount")
+        ):
+            raise ProviderLedgerError(
+                "security receipt projection differs from native record"
+            )
+        delivery = delivery_index[identity][0]
+        recorded_value = _decimal(
+            delivery["amount"]["value"], "security delivery amount"
+        )
+        flow["recorded_amount"] = dict(amount)
+        flow["amount"] = {
+            "currency": "USD",
+            "status": "AVAILABLE",
+            "value": format(recorded_value.copy_negate(), "f"),
+        }
+        flow["transfer_valuation"] = {
+            "basis": "RECORDED_OPPOSITE_SECURITY_TRANSFER_VALUE",
+            "source_provider_id": "fidelity",
+            "source_generation_id": fidelity_generation_id,
+            "source_record_id": delivery["record_id"],
+            "source_record_sha256": hashlib.sha256(
+                canonical_json_bytes(delivery)
+            ).hexdigest(),
+            "receipt_record_sha256": hashlib.sha256(
+                canonical_json_bytes(native)
+            ).hexdigest(),
+            "event_date": identity[0],
+            "symbol": identity[1],
+            "quantity": format(identity[2], "f"),
+        }
+
+
+def _schwab_share_transfer(
+    row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """Value a provider share movement and identify its exact opposite leg."""
+    transfer: dict[str, Any] = {
+        "flow_type": "TRANSFER:INTERNAL:SECURITIES",
+        "mapping_basis": "PROVIDER_SECURITY_MOVEMENT",
+    }
+    if row.get("quantity") is None or row.get("execution_price") is None:
+        return transfer
+    quantity = _decimal(row["quantity"], "Schwab transfer quantity")
+    price = _decimal(row["execution_price"], "Schwab transfer price")
+    transfer.update(
+        amount={
+            "currency": "USD",
+            "status": "AVAILABLE",
+            "value": str(quantity * price),
+        },
+        value_basis="EVENT_TIME_MARKET_VALUE",
+    )
+    matches = [
+        other
+        for other in rows
+        if other.get("kind") == "Journaled Shares"
+        and other.get("account_id") != row.get("account_id")
+        and other.get("security_id") == row.get("security_id")
+        and (other.get("effective_date") or other.get("event_date"))
+        == (row.get("effective_date") or row.get("event_date"))
+        and other.get("quantity") is not None
+        and other.get("execution_price") is not None
+        and _decimal(other["quantity"], "Schwab transfer quantity") == -quantity
+        and _decimal(other["execution_price"], "Schwab transfer price") == price
+    ]
+    if len(matches) == 1 and row.get("security_id") and quantity != 0:
+        transfer.update(
+            flow_type="ACCOUNT_TRANSFER",
+            mapping_basis="EXACT_OPPOSITE_PROVIDER_SECURITY_MOVEMENT",
+            provider_activity_id_sha256=hashlib.sha256(
+                canonical_json_bytes(
+                    sorted((row["record_id"], matches[0]["record_id"]))
+                )
+            ).hexdigest(),
+        )
+    return transfer
+
+
 def _schwab_pinned_journal_external_flow(
     row: Mapping[str, Any],
     manifest: GenerationManifest | None,
 ) -> dict[str, str] | None:
-    """Classify only three retained, independently audited Schwab Journals."""
+    """Classify retained, independently audited Schwab Journal pairs."""
 
     if str(row.get("kind") or "").strip().upper() != "JOURNAL":
         return None
@@ -1935,6 +2949,7 @@ def _strategy_inputs(
             ),
         )
     normalized: list[dict[str, Any]] = []
+    selected_identity_rows: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str]] = set()
     for row in rows:
         strategy_id = names.get(row["series_id"])
@@ -1944,7 +2959,8 @@ def _strategy_inputs(
         if day > as_of:
             raise ProviderLedgerError("strategy return is newer than the ledger")
         provider_id, layer_override = provider_policies[strategy_id]
-        layer = layer_override or EvidenceLayer(row["evidence_layer"])
+        source_layer = EvidenceLayer(row["evidence_layer"])
+        layer = layer_override or source_layer
         identity = (strategy_id, day.isoformat(), layer.value)
         if identity in seen:
             raise ProviderLedgerError("strategy return identity is duplicated")
@@ -1997,6 +3013,15 @@ def _strategy_inputs(
                 ),
             }
         )
+        selected_identity_rows.append(
+            {
+                "date": day.isoformat(),
+                "evidence_layer": source_layer.value,
+                "provider_id": provider_id,
+                "return": format(_decimal(row["return"], "strategy return"), "f"),
+                "strategy_id": strategy_id,
+            }
+        )
         if layer is EvidenceLayer.ACCOUNT_LIVE and not normalized[-1].get(
             "component_account_ids"
         ):
@@ -2011,6 +3036,7 @@ def _strategy_inputs(
     }
     if not evidence_ids <= set(strategies):
         raise ProviderLedgerError("strategy evidence contains an unknown strategy")
+    _validate_selected_strategy_evidence(selected_identity_rows, evidence_rows)
     evidence_artifact = SourceArtifact(
         artifact_id="portfolio/strategy-provider-evidence.json",
         sha256=evidence_hash,
@@ -2020,6 +3046,64 @@ def _strategy_inputs(
         schema_version="1",
     )
     return normalized, evidence_rows, (returns_artifact, evidence_artifact)
+
+
+def _validate_selected_strategy_evidence(
+    rows: Sequence[Mapping[str, Any]],
+    evidence_rows: Sequence[Mapping[str, Any]],
+) -> None:
+    """Bind source receipts to the exact selected daily return observations."""
+
+    for evidence in evidence_rows:
+        account = evidence.get("account")
+        if not isinstance(account, Mapping):
+            continue
+        receipt = account.get("epoch_hpr_receipt")
+        if not isinstance(receipt, Mapping):
+            continue
+        if receipt.get("daily_return_series_schema") != "ordered-date-return/1":
+            raise ProviderLedgerError(
+                "selected returns differ from strategy evidence: receipt schema differs"
+            )
+        strategy_id = _text(
+            evidence.get("strategy_id"), "strategy evidence strategy_id"
+        )
+        provider_id = _text(
+            evidence.get("provider_id"), "strategy evidence provider_id"
+        )
+        evidence_layer = _text(
+            evidence.get("evidence_layer"), "strategy evidence evidence_layer"
+        )
+        selected = sorted(
+            (
+                {
+                    "date": _day(row.get("date"), "strategy return date").isoformat(),
+                    "return": format(
+                        _decimal(row.get("return"), "strategy return"), "f"
+                    ),
+                }
+                for row in rows
+                if row.get("strategy_id") == strategy_id
+                and row.get("provider_id") == provider_id
+                and row.get("evidence_layer") == evidence_layer
+            ),
+            key=lambda item: item["date"],
+        )
+        expected_count = receipt.get("daily_return_observations")
+        expected_start = receipt.get("observed_start")
+        expected_end = receipt.get("observed_end")
+        expected_sha256 = receipt.get("daily_return_series_sha256")
+        actual_sha256 = hashlib.sha256(canonical_json_bytes(selected)).hexdigest()
+        if (
+            not selected
+            or expected_count != len(selected)
+            or expected_start != selected[0]["date"]
+            or expected_end != selected[-1]["date"]
+            or expected_sha256 != actual_sha256
+        ):
+            raise ProviderLedgerError(
+                "selected returns differ from strategy evidence: daily path identity differs"
+            )
 
 
 def _observed_bounds(rows: Sequence[Mapping[str, Any]]) -> tuple[date, date]:
@@ -2880,6 +3964,11 @@ def _refresh_strategy_evidence(
                 ),
                 "provider_id": account_provider_id,
             }
+        else:
+            # A prior receipt may describe account-live evidence that is no
+            # longer admitted by the current source facts. Do not retain that
+            # stale account scope on a provider-only refreshed receipt.
+            refreshed_row.pop("account", None)
         if accepted_provider_rows or prior_provider:
             provider_generation = provider_generations.get(provider_provider_id)
             refreshed_row["provider"] = {
@@ -3006,6 +4095,7 @@ def _portfolio123_provider_returns(
                 "Portfolio123 equity curve has conflicting duplicate dates"
             )
         equity_observations[entity_id][observed] = equity_observation
+
     for row in performance_table.to_pylist():
         entity_id = str(row.get("_entity_id") or "")
         if entity_id not in selected:
@@ -3101,14 +4191,14 @@ def _portfolio123_provider_returns(
             raise ProviderLedgerError(
                 "Portfolio123 managed performance/equity overlap is insufficient"
             )
-        for previous, current in zip(parsed, parsed[1:], strict=False):
-            period_return = current[1] / previous[1] - Decimal(1)
+        for managed_previous, managed_current in zip(parsed, parsed[1:], strict=False):
+            period_return = managed_current[1] / managed_previous[1] - Decimal(1)
             if period_return <= -1:
                 raise ProviderLedgerError("Portfolio123 provider return is invalid")
             result.append(
                 {
                     "cost": None,
-                    "date": current[0].isoformat(),
+                    "date": managed_current[0].isoformat(),
                     "evidence_layer": "PROVIDER_LIVE",
                     "generation_id": manifest.generation_id,
                     "provider_id": "portfolio123",
@@ -3123,11 +4213,597 @@ def _portfolio123_provider_returns(
     return result
 
 
+def _quantbase_csv_cell(value: object) -> str:
+    """Match the retained HAR-to-CSV converter's scalar projection."""
+
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return str(value)
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, float):
+        return repr(value)
+    return str(value)
+
+
+def _quantbase_flow_coverage(
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    known_accounts: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Prove the account-activity CSV is the complete captured API response."""
+
+    artifact_ids = (
+        "source/csv/account_activity.csv",
+        "source/har/quantbase_20260902_171237.har",
+        ("source/har_output/responses/0274_qbapi3.com_200_application_json.json"),
+    )
+    declared_artifact_ids = {artifact.artifact_id for artifact in manifest.artifacts}
+    raw_capture_ids = set(artifact_ids[1:])
+    declared_raw_capture_ids = declared_artifact_ids & raw_capture_ids
+    if not declared_raw_capture_ids:
+        return {}
+    if declared_raw_capture_ids != raw_capture_ids:
+        raise ProviderLedgerError(
+            "Quantbase account activity capture artifact set is incomplete"
+        )
+
+    account_id = _CSV_FACT_ACCOUNT["quantbase"]
+    if known_accounts != {account_id}:
+        raise ProviderLedgerError("Quantbase account activity account scope differs")
+    run_id = _run_id(
+        _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
+            "run_id"
+        ),
+        "quantbase.legacy_lineage.run_id",
+    )
+    run_root = root / "source-runs" / run_id / "artifacts"
+    verified: dict[str, dict[str, Any]] = {}
+    contents: dict[str, bytes] = {}
+    for artifact_id in artifact_ids:
+        artifact = _find_manifest_artifact(
+            manifest, artifact_id, "Quantbase account activity capture"
+        )
+        relative = Path(artifact_id.removeprefix("source/"))
+        path = _exact_file(run_root, relative, "Quantbase account activity capture")
+        try:
+            content = path.read_bytes()
+        except OSError as exc:
+            raise ProviderLedgerError(
+                "Quantbase account activity capture is not readable"
+            ) from exc
+        if hashlib.sha256(content).hexdigest() != artifact.sha256:
+            raise ProviderLedgerError("Quantbase account activity capture hash differs")
+        contents[artifact_id] = content
+
+    har_id, response_id = artifact_ids[1], artifact_ids[2]
+    for artifact_id in (har_id, response_id):
+        try:
+            value = json.loads(contents[artifact_id].decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ProviderLedgerError(
+                "Quantbase account activity capture is not readable JSON"
+            ) from exc
+        if not isinstance(value, dict):
+            raise ProviderLedgerError(
+                "Quantbase account activity capture must be an object"
+            )
+        verified[artifact_id] = value
+
+    har = verified[har_id]
+    log = har.get("log")
+    if not isinstance(log, Mapping):
+        raise ProviderLedgerError("Quantbase account activity HAR shape differs")
+    entries = log.get("entries")
+    if not isinstance(entries, list):
+        raise ProviderLedgerError("Quantbase account activity HAR shape differs")
+    matches: list[Mapping[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, Mapping):
+            continue
+        request = entry.get("request")
+        response = entry.get("response")
+        if not isinstance(request, Mapping) or not isinstance(response, Mapping):
+            continue
+        raw_url = request.get("url")
+        if not isinstance(raw_url, str):
+            continue
+        parsed_url = urlsplit(raw_url)
+        if (
+            request.get("method") == "GET"
+            and parsed_url.scheme == "https"
+            and parsed_url.hostname == "qbapi3.com"
+            and re.fullmatch(r"/api/users/[^/]+/accounts/activity/", parsed_url.path)
+            and parsed_url.query == ""
+            and request.get("queryString") == []
+            and response.get("status") == 200
+        ):
+            matches.append(entry)
+    if len(matches) != 1:
+        raise ProviderLedgerError(
+            "Quantbase account activity HAR request is missing or ambiguous"
+        )
+    match = matches[0]
+    try:
+        capture_observed_at = datetime.fromisoformat(
+            _text(
+                match.get("startedDateTime"),
+                "Quantbase account activity startedDateTime",
+            ).replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise ProviderLedgerError(
+            "Quantbase account activity capture time is invalid"
+        ) from exc
+    if (
+        capture_observed_at.tzinfo is None
+        or capture_observed_at.utcoffset() is None
+        or capture_observed_at.date() != manifest.as_of_date
+    ):
+        raise ProviderLedgerError("Quantbase account activity capture date differs")
+
+    response = match["response"]
+    content = response.get("content")
+    if not isinstance(content, Mapping) or not isinstance(content.get("text"), str):
+        raise ProviderLedgerError("Quantbase account activity HAR response is missing")
+    response_text = content["text"]
+    if content.get("encoding") == "base64":
+        try:
+            response_text = base64.b64decode(response_text, validate=True).decode(
+                "utf-8"
+            )
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ProviderLedgerError(
+                "Quantbase account activity HAR response encoding differs"
+            ) from exc
+    elif content.get("encoding") not in {None, ""}:
+        raise ProviderLedgerError(
+            "Quantbase account activity HAR response encoding differs"
+        )
+    try:
+        har_response = json.loads(response_text)
+    except json.JSONDecodeError as exc:
+        raise ProviderLedgerError(
+            "Quantbase account activity HAR response is not JSON"
+        ) from exc
+    captured_response = verified[response_id]
+    if har_response != captured_response:
+        raise ProviderLedgerError(
+            "Quantbase account activity response differs from HAR"
+        )
+    if set(captured_response) != {"data"} or not isinstance(
+        captured_response["data"], list
+    ):
+        raise ProviderLedgerError("Quantbase account activity response shape differs")
+    response_rows = captured_response["data"]
+    if not response_rows:
+        raise ProviderLedgerError("Quantbase account activity response is empty")
+
+    normalized: list[tuple[str, Mapping[str, Any]]] = []
+    fields = {"activity_type"}
+    observed_times: list[datetime] = []
+    timestamp_fields = (
+        "time",
+        "date",
+        "completed_at",
+        "filled_at",
+        "created_at",
+        "submitted_at",
+        "updated_at",
+        "canceled_at",
+    )
+    for index, response_row in enumerate(response_rows):
+        if not isinstance(response_row, Mapping) or not isinstance(
+            response_row.get("type"), str
+        ):
+            raise ProviderLedgerError(
+                f"Quantbase account activity row {index} shape differs"
+            )
+        item = response_row.get("item")
+        if not isinstance(item, Mapping) or any(
+            not isinstance(field, str) for field in item
+        ):
+            raise ProviderLedgerError(
+                f"Quantbase account activity row {index} item differs"
+            )
+        fields.update(item)
+        for field in timestamp_fields:
+            raw_timestamp = item.get(field)
+            if raw_timestamp is None or raw_timestamp == "":
+                continue
+            if not isinstance(raw_timestamp, str):
+                raise ProviderLedgerError(
+                    "Quantbase account activity timestamp is invalid"
+                )
+            try:
+                parsed_timestamp = datetime.fromisoformat(
+                    raw_timestamp.replace("Z", "+00:00")
+                )
+            except ValueError as exc:
+                raise ProviderLedgerError(
+                    "Quantbase account activity timestamp is invalid"
+                ) from exc
+            if (
+                parsed_timestamp.tzinfo is None
+                or parsed_timestamp.utcoffset() is None
+                or parsed_timestamp > capture_observed_at
+            ):
+                raise ProviderLedgerError(
+                    "Quantbase account activity timestamp is invalid"
+                )
+            observed_times.append(parsed_timestamp)
+        normalized.append((response_row["type"], item))
+    if not observed_times:
+        raise ProviderLedgerError("Quantbase account activity date coverage is empty")
+
+    try:
+        csv_text = contents[artifact_ids[0]].decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise ProviderLedgerError(
+            "Quantbase account activity CSV is not readable UTF-8"
+        ) from exc
+    try:
+        csv_rows = list(csv.reader(io.StringIO(csv_text, newline=""), strict=True))
+    except csv.Error as exc:
+        raise ProviderLedgerError("Quantbase account activity CSV is invalid") from exc
+    if (
+        not csv_rows
+        or len(csv_rows[0]) != len(set(csv_rows[0]))
+        or set(csv_rows[0]) != fields
+    ):
+        raise ProviderLedgerError(
+            "Quantbase account activity CSV differs from captured response"
+        )
+    header = csv_rows[0]
+    expected_rows = [
+        [
+            _quantbase_csv_cell(
+                activity_type if field == "activity_type" else item.get(field)
+            )
+            for field in header
+        ]
+        for activity_type, item in normalized
+    ]
+    if csv_rows[1:] != expected_rows:
+        raise ProviderLedgerError(
+            "Quantbase account activity CSV differs from captured response"
+        )
+
+    return {
+        account_id: {
+            "capture_observed_at": capture_observed_at.isoformat(),
+            "effective_end": capture_observed_at.date().isoformat(),
+            "effective_start": min(observed_times).date().isoformat(),
+            "record_count": len(response_rows),
+            "source_artifact_ids": sorted(artifact_ids),
+        }
+    }
+
+
+def _matrixport_flow_coverage(
+    manifest: GenerationManifest,
+    catalog: Mapping[str, Any],
+    root: Path,
+    known_accounts: set[str],
+) -> dict[str, dict[str, Any]]:
+    """Prove the retained wallet history through its observed boundary."""
+
+    artifact_ids = (
+        "csv/coverage.csv",
+        "csv/wallet_currency_dispositions.csv",
+        "csv/wallet_deposits.csv",
+        "reports/request_manifest.jsonl",
+    )
+    declared_artifact_ids = {artifact.artifact_id for artifact in manifest.artifacts}
+    if artifact_ids[0] not in declared_artifact_ids:
+        return {}
+    if not set(artifact_ids).issubset(declared_artifact_ids):
+        raise ProviderLedgerError(
+            "Matrixport wallet history capture artifact set is incomplete"
+        )
+
+    account_id = _CSV_FACT_ACCOUNT["matrixport"]
+    if known_accounts != {account_id}:
+        raise ProviderLedgerError("Matrixport wallet history account scope differs")
+    source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
+    run_root = root / "output" / source_run_id
+    verified_paths: dict[str, Path] = {}
+    for artifact_id in artifact_ids:
+        artifact = _find_manifest_artifact(
+            manifest, artifact_id, "Matrixport wallet history capture"
+        )
+        path = _exact_file(
+            run_root, Path(artifact_id), "Matrixport wallet history capture"
+        )
+        _verify_hash(path, artifact.sha256, "Matrixport wallet history capture")
+        verified_paths[artifact_id] = path
+
+    coverage_rows = _read_csv_rows(
+        verified_paths[artifact_ids[0]],
+        {"details_json", "endpoint", "status", "terminal_reason", "updated_at_utc"},
+        "Matrixport wallet coverage",
+    )
+    endpoint_counts: dict[str, int | None] = {
+        "GET https://mapi.matrixport.com/mapi/v1/wallet/deposits": None,
+        "GET https://mapi.matrixport.com/mapi/v1/wallet/withdrawals": None,
+    }
+    capture_times: list[datetime] = []
+    for endpoint in endpoint_counts:
+        matches = [row for row in coverage_rows if row.get("endpoint") == endpoint]
+        if len(matches) != 1:
+            raise ProviderLedgerError(
+                "Matrixport wallet coverage endpoint is missing or ambiguous"
+            )
+        row = matches[0]
+        if (
+            row.get("status") != "complete_to_observed_boundary"
+            or row.get("terminal_reason")
+            != "structured_parameter_rejections_dispositioned"
+        ):
+            raise ProviderLedgerError(
+                "Matrixport wallet history coverage is incomplete"
+            )
+        try:
+            details = json.loads(row["details_json"])
+        except json.JSONDecodeError as exc:
+            raise ProviderLedgerError(
+                "Matrixport wallet coverage details are not JSON"
+            ) from exc
+        raw_rows = details.get("raw_rows") if isinstance(details, Mapping) else None
+        if not isinstance(raw_rows, int) or isinstance(raw_rows, bool) or raw_rows < 0:
+            raise ProviderLedgerError("Matrixport wallet coverage count is invalid")
+        endpoint_counts[endpoint] = raw_rows
+        try:
+            capture_time = datetime.fromisoformat(
+                _text(
+                    row.get("updated_at_utc"),
+                    "Matrixport wallet coverage updated_at_utc",
+                ).replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ProviderLedgerError(
+                "Matrixport wallet coverage time is invalid"
+            ) from exc
+        if (
+            capture_time.tzinfo is None
+            or capture_time.utcoffset() is None
+            or capture_time.utcoffset() != timedelta(0)
+        ):
+            raise ProviderLedgerError("Matrixport wallet coverage time is not UTC")
+        capture_times.append(capture_time)
+
+    wallet_rows = _read_csv_rows(
+        verified_paths[artifact_ids[2]],
+        {"created_at_utc", "state", "transaction_id"},
+        "Matrixport wallet deposits",
+    )
+    deposit_times: list[datetime] = []
+    for row in wallet_rows:
+        if str(row.get("state") or "").lower() not in {
+            "completed",
+            "confirmed",
+            "success",
+        }:
+            raise ProviderLedgerError(
+                "Matrixport wallet deposits contain a non-confirmed row"
+            )
+        _text(row.get("transaction_id"), "Matrixport wallet transaction_id")
+        try:
+            event_time = datetime.fromisoformat(
+                _text(
+                    row.get("created_at_utc"),
+                    "Matrixport wallet created_at_utc",
+                ).replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ProviderLedgerError(
+                "Matrixport wallet deposit time is invalid"
+            ) from exc
+        if (
+            event_time.tzinfo is None
+            or event_time.utcoffset() is None
+            or event_time.utcoffset() != timedelta(0)
+        ):
+            raise ProviderLedgerError("Matrixport wallet deposit time is not UTC")
+        deposit_times.append(event_time)
+
+    deposit_count = endpoint_counts[
+        "GET https://mapi.matrixport.com/mapi/v1/wallet/deposits"
+    ]
+    withdrawal_count = endpoint_counts[
+        "GET https://mapi.matrixport.com/mapi/v1/wallet/withdrawals"
+    ]
+    if deposit_count != len(wallet_rows) or withdrawal_count != 0:
+        raise ProviderLedgerError("Matrixport wallet history count differs")
+    if not deposit_times:
+        raise ProviderLedgerError("Matrixport wallet history date coverage is empty")
+
+    observed_boundary = _day(
+        catalog.get("observed_boundary_date"),
+        "matrixport observed_boundary_date",
+    )
+    capture_observed_at = max(capture_times)
+    if capture_observed_at.date() != observed_boundary:
+        raise ProviderLedgerError("Matrixport wallet coverage boundary differs")
+    if max(deposit_times) > capture_observed_at:
+        raise ProviderLedgerError("Matrixport wallet deposit postdates its capture")
+    return {
+        account_id: {
+            "capture_observed_at": capture_observed_at.isoformat(),
+            "effective_end": observed_boundary.isoformat(),
+            "effective_start": min(deposit_times).date().isoformat(),
+            "record_count": len(wallet_rows),
+            "source_artifact_ids": sorted(artifact_ids),
+        }
+    }
+
+
+def _ibkr_flow_coverage(
+    catalog: Mapping[str, Any], known_accounts: set[str]
+) -> dict[str, dict[str, Any]]:
+    matches = [
+        item
+        for item in _objects(catalog.get("fact_coverage"), "IBKR fact coverage")
+        if item.get("fact_type") == "FLEX_FINALIZED_HISTORY"
+    ]
+    if len(matches) != 1:
+        raise ProviderLedgerError("IBKR finalized history coverage is missing")
+    history = matches[0]
+    _strict(
+        history,
+        {"accounts", "calendar", "fact_type", "known_gaps", "status"},
+        "IBKR finalized history coverage",
+    )
+    if (
+        history["calendar"] != "WEEKDAY_SOURCE_CALENDAR"
+        or history["status"] != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+        or history["known_gaps"] != []
+    ):
+        raise ProviderLedgerError("IBKR finalized history coverage is incomplete")
+    result: dict[str, dict[str, Any]] = {}
+    for raw_account in _objects(history["accounts"], "IBKR coverage accounts"):
+        _strict(
+            raw_account,
+            {"account_id", "intervals", "statement_count"},
+            "IBKR coverage account",
+        )
+        account_id = _text(raw_account["account_id"], "IBKR coverage account_id")
+        if account_id not in known_accounts or account_id in result:
+            raise ProviderLedgerError("IBKR finalized history account scope differs")
+        statement_count = raw_account["statement_count"]
+        if (
+            not isinstance(statement_count, int)
+            or isinstance(statement_count, bool)
+            or statement_count < 1
+        ):
+            raise ProviderLedgerError("IBKR finalized history count is invalid")
+        intervals = _objects(raw_account["intervals"], "IBKR coverage intervals")
+        if len(intervals) != 1:
+            raise ProviderLedgerError("IBKR finalized history is not contiguous")
+        interval = intervals[0]
+        _strict(
+            interval,
+            {"effective_end", "effective_start", "source_artifact_ids"},
+            "IBKR coverage interval",
+        )
+        start = _day(interval["effective_start"], "IBKR flow coverage start")
+        end = _day(interval["effective_end"], "IBKR flow coverage end")
+        artifact_ids = interval["source_artifact_ids"]
+        if (
+            start > end
+            or not isinstance(artifact_ids, list)
+            or not artifact_ids
+            or any(not isinstance(item, str) or not item for item in artifact_ids)
+            or len(set(artifact_ids)) != len(artifact_ids)
+        ):
+            raise ProviderLedgerError("IBKR finalized history interval is invalid")
+        result[account_id] = {
+            "calendar": "WEEKDAY_SOURCE_CALENDAR",
+            "effective_end": end.isoformat(),
+            "effective_start": start.isoformat(),
+            "source_artifact_ids": list(artifact_ids),
+            "statement_count": statement_count,
+        }
+    if set(result) != known_accounts:
+        raise ProviderLedgerError("IBKR finalized history account scope differs")
+    return result
+
+
+def _schwab_flow_coverage(
+    catalog: Mapping[str, Any], known_accounts: set[str]
+) -> dict[str, dict[str, Any]]:
+    raw_coverage = catalog.get("coverage")
+    if raw_coverage is None:
+        return {}
+    coverage = _object(raw_coverage, "schwab coverage")
+    raw_history = coverage.get("transaction_history")
+    if raw_history is None:
+        return {}
+    history = _object(raw_history, "schwab transaction history coverage")
+    _strict(
+        history,
+        {
+            "accounts",
+            "complete_through",
+            "requested_interval",
+            "source_manifest_sha256",
+            "terminal_observed_at",
+        },
+        "schwab transaction history coverage",
+    )
+    if history["requested_interval"] != "ALL_AVAILABLE_HISTORY":
+        raise ProviderLedgerError("Schwab transaction history interval is unsupported")
+    manifest_sha256 = _run_id(
+        history["source_manifest_sha256"],
+        "Schwab transaction history manifest sha256",
+    )
+    complete_through = _day(
+        history["complete_through"], "Schwab transaction history complete_through"
+    )
+    try:
+        terminal_observed_at = datetime.fromisoformat(
+            _text(
+                history["terminal_observed_at"],
+                "Schwab transaction history observed_at",
+            )
+        )
+    except ValueError as exc:
+        raise ProviderLedgerError(
+            "Schwab transaction history observed_at is invalid"
+        ) from exc
+    if (
+        terminal_observed_at.tzinfo is None
+        or terminal_observed_at.utcoffset() is None
+        or terminal_observed_at.date() != complete_through
+    ):
+        raise ProviderLedgerError("Schwab transaction history terminal date differs")
+    raw_accounts = _object(history["accounts"], "Schwab transaction history accounts")
+    if not raw_accounts or not set(raw_accounts).issubset(known_accounts):
+        raise ProviderLedgerError("Schwab transaction history account scope differs")
+    result: dict[str, dict[str, Any]] = {}
+    for account_id, raw_claim in raw_accounts.items():
+        claim = _object(raw_claim, "Schwab transaction history account")
+        _strict(
+            claim,
+            {
+                "effective_end",
+                "effective_start",
+                "source_manifest_sha256",
+                "terminal_observed_at",
+                "transaction_count",
+            },
+            "Schwab transaction history account",
+        )
+        start = _day(claim["effective_start"], "Schwab flow coverage start")
+        end = _day(claim["effective_end"], "Schwab flow coverage end")
+        count = claim["transaction_count"]
+        if (
+            start > end
+            or end != complete_through
+            or claim["source_manifest_sha256"] != manifest_sha256
+            or claim["terminal_observed_at"] != history["terminal_observed_at"]
+            or not isinstance(count, int)
+            or isinstance(count, bool)
+            or count < 0
+        ):
+            raise ProviderLedgerError(
+                "Schwab transaction history account claim differs"
+            )
+        result[account_id] = dict(claim)
+    return result
+
+
 def _admissions(
     projections: Mapping[str, Sequence[Mapping[str, Any]]],
     evidence_rows: Sequence[Mapping[str, Any]],
     authoritative_provider_ids: set[str] | None = None,
     authoritative_strategy_ids: set[str] | None = None,
+    schwab_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
+    ibkr_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
+    quantbase_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
+    matrixport_flow_coverage: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[ProviderFactAdmission, ...]:
     provider_authority = (
         set(_PROVIDER_CATALOGS)
@@ -3140,6 +4816,13 @@ def _admissions(
         else authoritative_strategy_ids
     )
     admissions: list[ProviderFactAdmission] = []
+    provider_flow_coverage = {
+        "ibkr": dict(ibkr_flow_coverage or {}),
+        "matrixport": dict(matrixport_flow_coverage or {}),
+        "quantbase": dict(quantbase_flow_coverage or {}),
+        "schwab": dict(schwab_flow_coverage or {}),
+    }
+    covered_flow_accounts: set[tuple[str, str]] = set()
     by_provider_fact_account: dict[
         tuple[str, str, str, str], list[Mapping[str, Any]]
     ] = defaultdict(list)
@@ -3160,6 +4843,52 @@ def _admissions(
         mapping_status,
     ), rows in by_provider_fact_account.items():
         start, end = _observed_bounds(rows)
+        coverage_claim = (
+            provider_flow_coverage.get(provider_id, {}).get(account_id)
+            if fact_type == "flows"
+            else None
+        )
+        if coverage_claim is not None:
+            coverage_start = _day(
+                coverage_claim.get("effective_start"),
+                f"{provider_id} flow coverage start",
+            )
+            coverage_end = _day(
+                coverage_claim.get("effective_end"),
+                f"{provider_id} flow coverage end",
+            )
+            admitted_start, admitted_end = start, end
+            if provider_id == "ibkr":
+                # Flex completeness describes report dates. A cash event can
+                # precede its first statement; retain its original event date.
+                report_dates = [
+                    _day(
+                        row.get("nav_recognition_date") or row.get("event_date"),
+                        "IBKR flow report date",
+                    )
+                    for row in rows
+                ]
+                admitted_start, admitted_end = min(report_dates), max(report_dates)
+            if admitted_start < coverage_start or admitted_end > coverage_end:
+                messages = {
+                    "ibkr": "IBKR flow falls outside finalized history coverage",
+                    "matrixport": (
+                        "Matrixport flow falls outside terminal history coverage"
+                    ),
+                    "quantbase": (
+                        "Quantbase flow falls outside terminal history coverage"
+                    ),
+                    "schwab": "Schwab flow falls outside terminal history coverage",
+                }
+                raise ProviderLedgerError(messages[provider_id])
+            start, end = coverage_start, coverage_end
+            if mapping_status == "MAPPED":
+                covered_flow_accounts.add((provider_id, account_id))
+        coverage_key = (
+            "terminal_history_coverage"
+            if provider_id in {"matrixport", "quantbase", "schwab"}
+            else "finalized_history_coverage"
+        )
         admissions.append(
             ProviderFactAdmission(
                 provider_id=provider_id,
@@ -3190,11 +4919,63 @@ def _admissions(
                                     rows, key=lambda row: str(row["record_id"])
                                 )
                             ],
+                            **(
+                                {coverage_key: dict(coverage_claim)}
+                                if coverage_claim is not None
+                                else {}
+                            ),
                         }
                     )
                 ).hexdigest(),
             )
         )
+    for provider_id, coverage in provider_flow_coverage.items():
+        for account_id in sorted(
+            set(coverage)
+            - {
+                covered_account
+                for covered_provider, covered_account in covered_flow_accounts
+                if covered_provider == provider_id
+            }
+        ):
+            claim = coverage[account_id]
+            coverage_key = (
+                "terminal_history_coverage"
+                if provider_id in {"matrixport", "quantbase", "schwab"}
+                else "finalized_history_coverage"
+            )
+            admissions.append(
+                ProviderFactAdmission(
+                    provider_id=provider_id,
+                    fact_type="flows",
+                    evidence_layer=EvidenceLayer.ACCOUNT_LIVE,
+                    disposition=(
+                        AdmissionDisposition.AUTHORITATIVE
+                        if provider_id in provider_authority
+                        else AdmissionDisposition.REFERENCE_ONLY
+                    ),
+                    effective_start=_day(
+                        claim.get("effective_start"),
+                        f"{provider_id} flow coverage start",
+                    ),
+                    effective_end=_day(
+                        claim.get("effective_end"),
+                        f"{provider_id} flow coverage end",
+                    ),
+                    account_id=account_id,
+                    account_reconciliation_sha256=hashlib.sha256(
+                        canonical_json_bytes(
+                            {
+                                "account_id": account_id,
+                                "fact_type": "flows",
+                                "provider_id": provider_id,
+                                "records": [],
+                                coverage_key: dict(claim),
+                            }
+                        )
+                    ).hexdigest(),
+                )
+            )
     for item in evidence_rows:
         strategy_id = _text(item.get("strategy_id"), "strategy evidence strategy_id")
         if item.get("account") is not None:
@@ -3944,6 +5725,11 @@ def build_catalog(
     spec = _load_spec(spec_path)
     authority = _financial_mvp_authority(spec)
     as_of = _day(spec["as_of_date"], "spec.as_of_date")
+    fx_rates = (
+        _portfolio_fx_rates(spec["portfolio_fx_rates"], as_of)
+        if "portfolio_fx_rates" in spec
+        else None
+    )
     provenance, provenance_artifact = _provenance(spec)
     accounts, strategies, assignments = _assignment_index(
         provenance, _object(authority.get("contract"), "financial MVP contract")
@@ -3951,10 +5737,13 @@ def build_catalog(
     identities: list[ProviderGenerationIdentity] = []
     provider_coverage: list[dict[str, Any]] = []
     provider_artifacts: list[SourceArtifact] = []
+    if fx_rates is not None:
+        provider_artifacts.extend(fx_rates[2])
     combined: dict[str, list[dict[str, Any]]] = defaultdict(list)
     exceptions: list[dict[str, Any]] = []
     catalogs: dict[str, dict[str, Any]] = {}
     manifests: dict[str, GenerationManifest] = {}
+    provider_roots: dict[str, Path] = {}
     provider_facts: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for provider_id in sorted(_PROVIDER_CATALOGS):
         identity, manifest, provider_catalog, artifacts, root = _provider(
@@ -3963,6 +5752,7 @@ def build_catalog(
         identities.append(identity)
         catalogs[provider_id] = provider_catalog
         manifests[provider_id] = manifest
+        provider_roots[provider_id] = root
         provider_artifacts.extend(artifacts)
         provider_coverage.append(
             {
@@ -3984,12 +5774,33 @@ def build_catalog(
             assignments,
             manifest=manifest,
             root=root,
+            fx_rates=fx_rates if provider_id == "matrixport" else None,
         )
         provider_facts[provider_id] = facts
         for fact_type, rows in facts.items():
             combined[fact_type].extend(rows)
         exceptions.extend(findings)
 
+    authoritative_strategy_ids = {
+        str(row.get("strategy_id"))
+        for row in _objects(authority["contract"].get("strategies"), "strategies")
+        if row.get("product_requirement") == "REQUIRED"
+    }
+    _complete_schwab_security_transfer_values(
+        combined.get("flows", []),
+        catalogs["schwab"],
+        catalogs["fidelity"],
+        manifests["fidelity"].generation_id,
+        {
+            account_id
+            for account_id, account_assignments in assignments.items()
+            if any(
+                assignment.get("mapping_status") == "MAPPED"
+                and assignment.get("strategy_id") in authoritative_strategy_ids
+                for assignment in account_assignments
+            )
+        },
+    )
     _validate_current_census_provider_generations(authority, identities, manifests)
 
     strategy_return_rows, evidence_rows, strategy_artifacts = _strategy_inputs(
@@ -4109,16 +5920,31 @@ def build_catalog(
         {item.provider_id: item for item in identities},
         {provider_id: item.as_of_date for provider_id, item in manifests.items()},
     )
-    authoritative_strategy_ids = {
-        str(row.get("strategy_id"))
-        for row in _objects(authority["contract"].get("strategies"), "strategies")
-        if row.get("product_requirement") == "REQUIRED"
-    }
     admissions = _admissions(
         combined,
         evidence_rows,
         authoritative_provider_ids,
         authoritative_strategy_ids,
+        schwab_flow_coverage=_schwab_flow_coverage(catalogs["schwab"], accounts),
+        ibkr_flow_coverage=_ibkr_flow_coverage(
+            catalogs["ibkr"],
+            {
+                _text(item.get("account_id"), "IBKR account_id")
+                for item in _objects(catalogs["ibkr"].get("accounts"), "IBKR accounts")
+            },
+        ),
+        matrixport_flow_coverage=_matrixport_flow_coverage(
+            manifests["matrixport"],
+            catalogs["matrixport"],
+            provider_roots["matrixport"],
+            {_CSV_FACT_ACCOUNT["matrixport"]},
+        ),
+        quantbase_flow_coverage=_quantbase_flow_coverage(
+            manifests["quantbase"],
+            catalogs["quantbase"],
+            provider_roots["quantbase"],
+            {_CSV_FACT_ACCOUNT["quantbase"]},
+        ),
     )
     admit_or_declare, admit_or_declare_bytes = _admit_or_declare_receipt(
         authority,
@@ -4214,6 +6040,11 @@ def build_catalog(
         "strategy_returns": strategy_returns,
         "transactions": combined.get("transactions", []),
     }
+    if fx_rates is not None:
+        catalog["portfolio_fx_generation"] = {
+            "generation_id": fx_rates[0],
+            "selection": "OWNER_SELECTED_YAHOO_DAILY_CLOSE_FOR_MATRIXPORT",
+        }
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(
         artifact_id="normalized/provider-ledger.json",

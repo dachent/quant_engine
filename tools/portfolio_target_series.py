@@ -144,6 +144,7 @@ LAYERED_HISTORY_REPOSITORY_DEPENDENCIES: Final = (
     "packages/core/src/quant_engine/core/contracts.py",
     "schemas/portfolio/financial-mvp-source-contract.schema.json",
     "tools/portfolio_financial_mvp_contract.py",
+    "tools/provider_ledger.py",
 )
 CORE_GENERATION_ADAPTER_BY_SOURCE_SCHEMA: Final = {
     ("provider-ledger", "1"): "quant-engine-provider-ledger",
@@ -476,8 +477,18 @@ def _verify_artifact(
 
 def _csv_rows(path: Path, required: frozenset[str], name: str) -> list[dict[str, str]]:
     try:
-        text = path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeDecodeError) as exc:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise TargetSeriesError(f"{name} is not readable UTF-8 CSV") from exc
+    return _csv_source_rows(content, required, name)
+
+
+def _csv_source_rows(
+    content: bytes, required: frozenset[str], name: str
+) -> list[dict[str, str]]:
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
         raise TargetSeriesError(f"{name} is not readable UTF-8 CSV") from exc
     reader = csv.DictReader(io.StringIO(text, newline=""))
     fields = tuple(reader.fieldnames or ())
@@ -533,7 +544,7 @@ def _matrixport_declared_missing_dates(
         or coverage.get("known_gaps") != []
     ):
         raise TargetSeriesError("Matrixport declared-boundary coverage is invalid")
-    exclusions = coverage.get("declared_exclusions")
+    exclusions = coverage.get("declared_exclusions", [])
     if not isinstance(exclusions, list):
         raise TargetSeriesError("Matrixport declared exclusions are absent")
     dates_by_kind: dict[str, set[date]] = {kind: set() for kind in MATRIXPORT_GAP_KINDS}
@@ -589,7 +600,8 @@ def _matrixport_declared_missing_dates(
             expected_policy.get("provenance"),
             expected_policy.get("reason"),
         )
-        if accepted != expected_dates or authorities != {expected_authority}:
+        expected_authorities = {expected_authority} if expected_dates else set()
+        if accepted != expected_dates or authorities != expected_authorities:
             raise TargetSeriesError(
                 "Matrixport declared exclusions differ from product authority"
             )
@@ -1649,19 +1661,20 @@ def _overlap_reconciliation(
 def _portfolio123_snapshot(
     metadata_path: Path, account_entity_id: str
 ) -> dict[str, object]:
-    matches = []
+    fields = ("id", "lastFix", "netWorth", "netWorthPrevWithCashAdded", "isLive")
+    matches: dict[tuple[object, ...], dict[str, object]] = {}
     for row in _parquet_rows(
         metadata_path,
-        ("id", "lastFix", "netWorth", "netWorthPrevWithCashAdded", "isLive"),
+        fields,
         "Portfolio123 account metadata",
     ):
         if str(row.get("id") or "") == account_entity_id and row.get(
             "netWorth"
         ) not in (None, ""):
-            matches.append(row)
+            matches.setdefault(tuple(row.get(field) for field in fields), row)
     if len(matches) != 1:
         raise TargetSeriesError("Portfolio123 account snapshot is not unique")
-    row = matches[0]
+    row = next(iter(matches.values()))
     try:
         milliseconds = int(str(row.get("lastFix") or ""))
     except ValueError as exc:
@@ -1844,7 +1857,8 @@ def build_provider_ledger_targets(
     accepted_layers = {"ACCOUNT_LIVE", "PROVIDER_LIVE", "OFFICIAL_VEHICLE"}
     names_by_strategy: dict[str, str] = {}
     rows_by_series: dict[str, list[dict[str, str]]] = {}
-    identities: set[tuple[str, str]] = set()
+    identities: set[tuple[str, str, str]] = set()
+    strategy_ids_by_series: dict[str, set[str]] = {}
     for raw in raw_rows:
         if not isinstance(raw, dict):
             raise TargetSeriesError("provider-ledger strategy return is invalid")
@@ -1864,10 +1878,11 @@ def build_provider_ledger_targets(
             ) from exc
         if observed > accepted_as_of:
             raise TargetSeriesError("provider-ledger strategy return exceeds as-of")
-        identity = (series_id, observed.isoformat())
+        identity = (series_id, observed.isoformat(), layer)
         if identity in identities:
             raise TargetSeriesError("provider-ledger strategy return is duplicated")
         identities.add(identity)
+        strategy_ids_by_series.setdefault(series_id, set()).add(strategy_id)
         period_return = _decimal(raw.get("return"), "provider-ledger strategy return")
         if period_return <= -1:
             raise TargetSeriesError("provider-ledger strategy return is invalid")
@@ -1886,25 +1901,35 @@ def build_provider_ledger_targets(
     evidence_rows = catalog.get("strategy_evidence")
     if not isinstance(evidence_rows, list):
         raise TargetSeriesError("provider-ledger strategy evidence is unavailable")
-    evidence_by_name = {
-        str(item.get("strategy_name")): item
-        for item in evidence_rows
-        if isinstance(item, dict) and item.get("strategy_name")
-    }
+    evidence_by_name: dict[str, dict[str, object]] = {}
+    for item in evidence_rows:
+        if not isinstance(item, dict):
+            raise TargetSeriesError("provider-ledger strategy evidence is invalid")
+        series_id = str(item.get("strategy_name", "")).strip()
+        if not series_id:
+            raise TargetSeriesError("provider-ledger strategy evidence is invalid")
+        if series_id in evidence_by_name:
+            raise TargetSeriesError("provider-ledger strategy evidence is ambiguous")
+        evidence_by_name[series_id] = item
     contracts: list[dict[str, object]] = []
-    for series_id, series_rows in sorted(rows_by_series.items()):
-        series_rows.sort(key=lambda item: item["date"])
-        layers = {item["evidence_layer"] for item in series_rows}
-        if len(layers) != 1:
-            raise TargetSeriesError(
-                "one canonical strategy has conflicting live layers"
-            )
+    selected_rows_by_series: dict[str, list[dict[str, str]]] = {}
+    for series_id, available_rows in sorted(rows_by_series.items()):
         evidence = evidence_by_name.get(series_id)
         if evidence is None:
             raise TargetSeriesError("provider-ledger strategy evidence is incomplete")
-        layer = next(iter(layers))
-        if evidence.get("evidence_layer") != layer:
-            raise TargetSeriesError("provider-ledger return and evidence layers differ")
+        strategy_ids = strategy_ids_by_series[series_id]
+        if len(strategy_ids) != 1 or evidence.get("strategy_id") not in strategy_ids:
+            raise TargetSeriesError("provider-ledger strategy evidence mapping differs")
+        layer = str(evidence.get("evidence_layer", "")).strip()
+        if layer not in accepted_layers:
+            raise TargetSeriesError(
+                "provider-ledger strategy evidence selection is invalid"
+            )
+        series_rows = [row for row in available_rows if row["evidence_layer"] == layer]
+        if not series_rows:
+            raise TargetSeriesError("provider-ledger selected evidence layer is absent")
+        series_rows.sort(key=lambda item: item["date"])
+        selected_rows_by_series[series_id] = series_rows
         selected = evidence.get("account" if layer == "ACCOUNT_LIVE" else "provider")
         if not isinstance(selected, dict):
             raise TargetSeriesError("provider-ledger selected evidence path is absent")
@@ -1929,7 +1954,9 @@ def build_provider_ledger_targets(
         )
 
     ordered_rows = [
-        row for series_id in sorted(rows_by_series) for row in rows_by_series[series_id]
+        row
+        for series_id in sorted(selected_rows_by_series)
+        for row in selected_rows_by_series[series_id]
     ]
     buffer = io.StringIO(newline="")
     writer = csv.DictWriter(buffer, fieldnames=TARGET_FIELDS, lineterminator="\n")
@@ -2353,6 +2380,331 @@ def _matrixport_account_live_from_ledger(
     return selected
 
 
+def _matrixport_account_live_from_catalog(
+    catalog: Mapping[str, Any],
+    ledger_rows: Sequence[Mapping[str, str]],
+    product_rows: Sequence[Mapping[str, str]],
+    unavailable_return_dates: frozenset[date],
+    declared_nav_gap_dates: frozenset[date],
+    series_id: str,
+) -> list[dict[str, str]]:
+    """Expand an older projection only from the same admitted account facts."""
+
+    retained_dates = {row["date"] for row in ledger_rows}
+    missing_dates = {row["date"] for row in product_rows} - retained_dates
+    if not missing_dates:
+        return _matrixport_account_live_from_ledger(
+            ledger_rows, product_rows, unavailable_return_dates
+        )
+    nav_rows = catalog.get("nav_observations")
+    flow_rows = catalog.get("flows")
+    capital_anchors = catalog.get("capital_anchors", [])
+    if (
+        not isinstance(nav_rows, list)
+        or not nav_rows
+        or not isinstance(flow_rows, list)
+        or not isinstance(capital_anchors, list)
+        or any(
+            not isinstance(row, dict)
+            for rows in (nav_rows, flow_rows, capital_anchors)
+            for row in rows
+        )
+    ):
+        raise TargetSeriesError("Matrixport provider-ledger account facts are missing")
+
+    # This catalog has already been authenticated against the selected ledger
+    # manifest. Reuse its account calculation before the old contract's date
+    # projection, then prove the result against the current native/FX boundary.
+    producer_path = Path(__file__).with_name("provider_ledger.py")
+    spec = importlib.util.spec_from_file_location(
+        "_provider_ledger_for_matrixport_history", producer_path
+    )
+    if spec is None or spec.loader is None:
+        raise TargetSeriesError(
+            "Matrixport provider-ledger account producer is missing"
+        )
+    producer = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = producer
+    spec.loader.exec_module(producer)
+    try:
+        account_rows = producer._broker_strategy_returns(
+            nav_rows,
+            flow_rows,
+            {"matrixport"},
+            capital_anchors=capital_anchors,
+            declared_nav_gap_dates_by_provider={"matrixport": declared_nav_gap_dates},
+        )
+    except producer.ProviderLedgerError as exc:
+        raise TargetSeriesError(
+            "Matrixport provider-ledger account facts differ"
+        ) from exc
+    recalculated = [
+        {
+            "series_id": series_id,
+            "date": row["date"],
+            "return": row["return"],
+            "evidence_layer": row["evidence_layer"],
+            "return_basis": row["return_basis"],
+            "return_type": row["return_type"],
+            "cost": "",
+        }
+        for row in account_rows
+        if row["strategy_id"] == "robuxio-crypto" and row["provider_id"] == "matrixport"
+    ]
+    _matrixport_account_live_from_ledger(
+        recalculated, product_rows, unavailable_return_dates
+    )
+    retained_in_boundary = [
+        row
+        for row in ledger_rows
+        if product_rows[0]["date"] <= row["date"] <= product_rows[-1]["date"]
+    ]
+    if retained_in_boundary:
+        _matrixport_account_live_from_ledger(
+            recalculated, retained_in_boundary, unavailable_return_dates
+        )
+    # Retained observations remain byte-identical; only missing approved dates
+    # come from the account producer. Product returns are corroboration only.
+    expanded = [dict(row) for row in ledger_rows] + [
+        row for row in recalculated if row["date"] in missing_dates
+    ]
+    return _matrixport_account_live_from_ledger(
+        expanded, product_rows, unavailable_return_dates
+    )
+
+
+def _portfolio_fx_conversion_rates(
+    manifest_content: bytes,
+    rates_content: bytes,
+    provider_manifest: Mapping[str, Any],
+) -> dict[date, Decimal]:
+    """Read the exact daily FX preimage selected by the provider ledger."""
+
+    binding = _manifest_artifacts(provider_manifest.get("artifacts")).get(
+        "portfolio/fx-rates/generation.json"
+    )
+    if binding is None or (
+        binding.sha256 != hashlib.sha256(manifest_content).hexdigest()
+        or binding.size_bytes != len(manifest_content)
+    ):
+        raise TargetSeriesError(
+            "Matrixport FX manifest identity differs from provider ledger"
+        )
+    binding_schema = next(
+        item.get("schema")
+        for item in provider_manifest["artifacts"]
+        if item["artifact_id"] == "portfolio/fx-rates/generation.json"
+    )
+    if binding_schema != {"name": "generation-manifest", "version": "1"}:
+        raise TargetSeriesError("Matrixport FX manifest binding schema differs")
+    try:
+        manifest = GenerationManifest.from_json_bytes(manifest_content)
+    except ManifestValidationError as exc:
+        raise TargetSeriesError("Matrixport FX generation manifest is invalid") from exc
+    if (
+        manifest.to_json_bytes() != manifest_content
+        or manifest.verification is not VerificationStatus.VERIFIED
+        or (manifest.adapter.name, manifest.adapter.version)
+        != ("agent-market-data-terminal-yfinance", "1")
+        or manifest.coverage.status != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+        or manifest.coverage.fact_types != ("FX_RATE",)
+        or manifest.coverage.known_gaps
+        or manifest.as_of_date
+        > date.fromisoformat(str(provider_manifest["as_of_date"]))
+    ):
+        raise TargetSeriesError("Matrixport FX generation authority differs")
+    rates_artifact = next(
+        (item for item in manifest.artifacts if item.artifact_id == "rates.csv"), None
+    )
+    if rates_artifact is None or (
+        rates_artifact.schema_name,
+        rates_artifact.schema_version,
+    ) != ("portfolio-fx-daily-close-rates", "1"):
+        raise TargetSeriesError("Matrixport FX rates artifact schema differs")
+    if rates_artifact.sha256 != hashlib.sha256(
+        rates_content
+    ).hexdigest() or rates_artifact.size_bytes != len(rates_content):
+        raise TargetSeriesError("Matrixport FX rates identity differs")
+    fields = (
+        "date",
+        "currency",
+        "base_currency",
+        "rate",
+        "provider",
+        "ticker",
+        "field",
+        "timing",
+    )
+    rows = _csv_content_rows(rates_content, fields, "Matrixport FX rates")
+    rates: dict[tuple[str, date], Decimal] = {}
+    for row in rows:
+        try:
+            observed = date.fromisoformat(row["date"])
+        except ValueError as exc:
+            raise TargetSeriesError("Matrixport FX date is invalid") from exc
+        currency = row["currency"]
+        if (
+            observed.isoformat() != row["date"]
+            or currency not in {"USDC", "USDT"}
+            or row["base_currency"] != "USD"
+            or row["provider"] != "yahoo"
+            or row["ticker"] != f"{currency}-USD"
+            or row["field"] != "Close"
+            or row["timing"] != "UTC_DAILY_CLOSE"
+            or (currency, observed) in rates
+        ):
+            raise TargetSeriesError("Matrixport FX rate row differs")
+        rates[currency, observed] = _positive_decimal(row["rate"], "Matrixport FX rate")
+    start, end = manifest.coverage.observed_start, manifest.coverage.observed_end
+    if (
+        start is None
+        or end is None
+        or end < start
+        or set(rates)
+        != {
+            (currency, start + timedelta(days=offset))
+            for currency in ("USDC", "USDT")
+            for offset in range((end - start).days + 1)
+        }
+    ):
+        raise TargetSeriesError("Matrixport FX daily coverage differs")
+    return {
+        observed: value
+        for (currency, observed), value in rates.items()
+        if currency == "USDT"
+    }
+
+
+def _matrixport_usd_conversion(
+    proof: Mapping[str, Any],
+    *,
+    fx_manifest_content: bytes,
+    provider_manifest: Mapping[str, Any],
+    matrixport_manifest: Mapping[str, Any],
+    source_gap_policy: Mapping[str, Any],
+    account_live_start: date,
+    admission_cutoff: date,
+) -> tuple[list[dict[str, str]], list[dict[str, object]]]:
+    """Recompute one USD path from bound native NAV and daily FX preimages.
+
+    Native gap approval remains unchanged.  The restricted local proof retains
+    source CSV bytes so standalone verification does not trust derived returns
+    or read a provider path supplied by the artifact being verified.
+    """
+
+    _require_exact_keys(
+        proof,
+        frozenset(
+            {
+                "schema_version",
+                "native_currency",
+                "reporting_currency",
+                "transform",
+                "native_product_id",
+                "native_nav_csv",
+                "rates_csv",
+            }
+        ),
+        "Matrixport currency conversion proof",
+    )
+    if (
+        proof.get("schema_version") != 1
+        or proof.get("native_currency") != "USDT"
+        or proof.get("reporting_currency") != "USD"
+        or proof.get("transform") != "UNIT_NAV_RETURN_TIMES_ENDPOINT_FX_RATIO_V1"
+        or not isinstance(proof.get("native_product_id"), str)
+        or not proof["native_product_id"]
+        or not isinstance(proof.get("native_nav_csv"), str)
+        or not isinstance(proof.get("rates_csv"), str)
+    ):
+        raise TargetSeriesError("Matrixport currency conversion proof differs")
+    native_content = proof["native_nav_csv"].encode("utf-8")
+    native_artifact = _manifest_artifacts(matrixport_manifest.get("artifacts")).get(
+        "csv/nav_daily.csv"
+    )
+    if native_artifact is None or (
+        native_artifact.sha256 != hashlib.sha256(native_content).hexdigest()
+        or native_artifact.size_bytes != len(native_content)
+    ):
+        raise TargetSeriesError("Matrixport native NAV identity differs")
+    rates = _portfolio_fx_conversion_rates(
+        fx_manifest_content, proof["rates_csv"].encode("utf-8"), provider_manifest
+    )
+    observations: dict[date, Decimal] = {}
+    for row in _csv_source_rows(
+        native_content, MATRIXPORT_NAV_FIELDS, "Matrixport native NAV"
+    ):
+        if row["product_id"] != proof["native_product_id"]:
+            continue
+        observed = _utc_day(row["timestamp_utc"])
+        if observed > admission_cutoff:
+            continue
+        nav = _positive_decimal(row["nav"], "Matrixport native NAV")
+        if observed in observations and observations[observed] != nav:
+            raise TargetSeriesError(
+                "Matrixport native NAV has conflicting duplicate dates"
+            )
+        observations[observed] = nav
+    if account_live_start not in observations:
+        raise TargetSeriesError(
+            "Matrixport native NAV lacks the selected funding endpoint"
+        )
+    missing = frozenset(
+        date.fromisoformat(str(value))
+        for value in source_gap_policy["declared_missing_source_dates"]
+    )
+    ordered = sorted(
+        (day, value) for day, value in observations.items() if day >= account_live_start
+    )
+    omitted = _matrixport_gap_endpoints([day for day, _ in ordered], missing)
+    if {day.isoformat() for day in omitted} != set(
+        source_gap_policy["omitted_return_dates"]
+    ):
+        raise TargetSeriesError("Matrixport currency conversion gap dates differ")
+
+    def convert(native_return: Decimal, start: date, end: date) -> str:
+        if start not in rates or end not in rates:
+            raise TargetSeriesError("Matrixport FX lacks an exact return endpoint")
+        with localcontext() as context:
+            context.prec = 50
+            context.rounding = ROUND_HALF_EVEN
+            value = (Decimal(1) + native_return) * rates[end] / rates[start] - Decimal(
+                1
+            )
+            return format(value.normalize(), "f")
+
+    converted: list[dict[str, str]] = []
+    for (start, prior_nav), (end, nav) in zip(ordered, ordered[1:], strict=False):
+        if end in omitted:
+            continue
+        if (end - start).days != 1:
+            raise TargetSeriesError("Matrixport USD daily return spans a source gap")
+        with localcontext(MATRIXPORT_DECIMAL_CONTEXT):
+            native_return = nav / prior_nav - Decimal(1)
+        converted.append(
+            {"date": end.isoformat(), "return": convert(native_return, start, end)}
+        )
+    spans: list[dict[str, object]] = []
+    raw_spans = source_gap_policy.get("span_return_receipts")
+    if not isinstance(raw_spans, list) or any(
+        not isinstance(span, dict) for span in raw_spans
+    ):
+        raise TargetSeriesError("Matrixport native gap span receipts differ")
+    for span in raw_spans:
+        start = date.fromisoformat(str(span["span_start_date"]))
+        end = date.fromisoformat(str(span["span_end_date"]))
+        if start not in observations or end not in observations:
+            raise TargetSeriesError("Matrixport native gap span lacks exact endpoints")
+        with localcontext(MATRIXPORT_DECIMAL_CONTEXT):
+            native_return = observations[end] / observations[start] - Decimal(1)
+        if native_return != _decimal(span["return"], "Matrixport native span return"):
+            raise TargetSeriesError(
+                "Matrixport native gap span return differs from source authority"
+            )
+        spans.append({**span, "return": convert(native_return, start, end)})
+    return converted, spans
+
+
 def _quantbase_account_live_from_ledger(
     ledger_rows: Sequence[Mapping[str, str]],
     recalculated_rows: Sequence[Mapping[str, str]],
@@ -2480,6 +2832,71 @@ def _portfolio123_exact_model(
         },
     )
     return entity_ids, version
+
+
+def _portfolio123_provider_history_receipts(
+    correction: Mapping[str, Any], current_generation_id: str
+) -> dict[str, dict[str, Any]] | None:
+    """Select only the explicitly receipted EU historical source tuple."""
+    rows = correction.get("source_receipts")
+    if not isinstance(rows, list):
+        raise TargetSeriesError("Portfolio123 provider history receipts are absent")
+    performance = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and row.get("artifact_role") == "portfolio123-managed-performance"
+    ]
+    if len(performance) != 1:
+        raise TargetSeriesError(
+            "Portfolio123 provider history performance receipt differs"
+        )
+    generation_id = performance[0].get("generation_id")
+    if generation_id == current_generation_id:
+        return None
+    if not isinstance(generation_id, str) or len(generation_id) != 64:
+        raise TargetSeriesError("Portfolio123 provider history generation differs")
+    definitions = {
+        "manifest": ("GENERATION_MANIFEST", None, None),
+        "metadata": (
+            "GENERATION_ARTIFACT",
+            "portfolio123-managed-metadata",
+            "tables/har_managed_metadata.parquet",
+        ),
+        "performance": (
+            "GENERATION_ARTIFACT",
+            "portfolio123-managed-performance",
+            "tables/har_managed_performance.parquet",
+        ),
+        "equity": (
+            "GENERATION_ARTIFACT",
+            "portfolio123-equity-curve",
+            "tables/har_equity_curve.parquet",
+        ),
+    }
+    selected: dict[str, dict[str, Any]] = {}
+    for key, (locator, role, artifact_id) in definitions.items():
+        matches = [
+            row
+            for row in rows
+            if isinstance(row, dict)
+            and row.get("generation_id") == generation_id
+            and row.get("locator_kind") == locator
+            and (role is None or row.get("artifact_role") == role)
+        ]
+        selector = f"generations/{generation_id}/{artifact_id or 'generation.json'}"
+        if len(matches) != 1 or (
+            matches[0].get("authority_root") != "PORTFOLIO123"
+            or matches[0].get("manifest_artifact_id") != artifact_id
+            or matches[0].get("artifact_selector") != selector
+            or not isinstance(matches[0].get("sha256"), str)
+            or len(matches[0]["sha256"]) != 64
+        ):
+            raise TargetSeriesError(
+                f"Portfolio123 provider history receipt differs: {key}"
+            )
+        selected[key] = matches[0]
+    return selected
 
 
 def _portfolio123_provider_performance_returns(
@@ -2985,6 +3402,77 @@ def _history_output_identity(
     }
 
 
+def _matrixport_account_is_unadmitted(
+    sources: Mapping[str, Mapping[str, Any]],
+    catalog: Mapping[str, Any] | None = None,
+) -> bool:
+    """Identify the existing zero-admission authority for a missing USD segment.
+
+    The producer also checks the verified catalog bytes.  The reader binds that
+    catalog through its immutable manifest and the canonical source pins; it
+    does not have raw provider-ledger facts to inspect again.
+    """
+
+    admission = sources["matrixport-account-generation"].get("admission")
+    disposition = (
+        admission.get("dataset_disposition_policy")
+        if isinstance(admission, dict)
+        else None
+    )
+    if (
+        not isinstance(disposition, dict)
+        or disposition.get("policy_id") != "PROVIDER_ADMIT_OR_DECLARE_V1"
+        or type(disposition.get("admitted_item_count")) is not int
+        or disposition["admitted_item_count"] != 0
+        or disposition.get("exclusion_readiness_impact") != "REQUIRED_NOT_READY"
+    ):
+        if catalog is None:
+            return False
+        raise TargetSeriesError(
+            "Matrixport account absence lacks zero-admission authority"
+        )
+    if catalog is None:
+        return True
+    for fact_type in (
+        "nav_observations",
+        "flows",
+        "capital_anchors",
+        "strategy_returns",
+        "admissions",
+    ):
+        facts = catalog.get(fact_type)
+        if not isinstance(facts, list):
+            raise TargetSeriesError(
+                "Matrixport account absence catalog facts are invalid"
+            )
+        for fact in facts:
+            if not isinstance(fact, dict):
+                raise TargetSeriesError(
+                    "Matrixport account absence catalog fact is invalid"
+                )
+            if (
+                fact.get("provider_id") != "matrixport"
+                and fact.get("strategy_id") != "robuxio-crypto"
+            ):
+                continue
+            if (
+                fact_type in {"nav_observations", "flows", "capital_anchors"}
+                or fact.get("account_id") not in {None, ""}
+                or fact.get("evidence_layer") != "PROVIDER_LIVE"
+                or (
+                    fact_type == "admissions"
+                    and (
+                        fact.get("disposition") != "RECONCILIATION_ONLY"
+                        or fact.get("fact_type") != "strategy_returns"
+                    )
+                )
+            ):
+                raise TargetSeriesError(
+                    "Matrixport account absence contradicts catalog account facts or admission"
+                )
+    return True
+
+
 def build_layered_history_generation(
     *,
     contract_path: Path,
@@ -3014,13 +3502,14 @@ def build_layered_history_generation(
     portfolio123_relationships_path: Path,
     strategy_history_manifest_path: Path | None = None,
     strategy_history_returns_path: Path | None = None,
+    portfolio_fx_rates_manifest_path: Path | None = None,
     source_selection_mode: str = "CURRENT_POINTERS",
 ) -> tuple[dict[str, bytes], bytes]:
     """Build one deterministic, content-addressed current history generation.
 
-    Private provider identifiers are used only in memory.  The emitted receipt
-    contains hashes, redacted strategy identities, coverage states, and source
-    generation identities; it never contains roots or provider/account IDs.
+    Source locators are never emitted. Optional USD conversion retains the
+    manifest-bound native NAV preimage in the restricted local proof so its
+    source arithmetic remains independently replayable.
     """
 
     pointer_paths = {
@@ -3137,6 +3626,25 @@ def build_layered_history_generation(
             provider_ledger_manifest_path, provider_ledger_catalog_path
         )
     )
+    ledger_catalog_content = provider_ledger_catalog_path.read_bytes()
+    catalog_identity = _manifest_artifacts(ledger_manifest["artifacts"])[
+        "normalized/provider-ledger.json"
+    ]
+    if (
+        hashlib.sha256(ledger_catalog_content).hexdigest() != catalog_identity.sha256
+        or len(ledger_catalog_content) != catalog_identity.size_bytes
+    ):
+        raise TargetSeriesError(
+            "provider-ledger account absence catalog identity differs"
+        )
+    ledger_catalog = json.loads(ledger_catalog_content)
+    robuxio_account_absent = _matrixport_account_is_unadmitted(sources) or not any(
+        row.get("strategy_id") == "robuxio-crypto"
+        and row.get("evidence_layer") == "ACCOUNT_LIVE"
+        for row in ledger_catalog["strategy_returns"]
+    )
+    if robuxio_account_absent:
+        _matrixport_account_is_unadmitted(sources, ledger_catalog)
     ledger_proof = json.loads(ledger_proof_content)
     contracts = ledger_proof.get("series_contracts")
     if not isinstance(contracts, list):
@@ -3169,6 +3677,7 @@ def build_layered_history_generation(
     if any(
         series_by_strategy.get(strategy_id) != series_id
         for strategy_id, series_id in required_product_series_by_strategy.items()
+        if not (robuxio_account_absent and strategy_id == "robuxio-crypto")
     ) or any(
         product_series_by_strategy.get(strategy_id) != series_id
         for strategy_id, series_id in series_by_strategy.items()
@@ -3203,6 +3712,12 @@ def build_layered_history_generation(
         if mapped_strategy_id is None:
             raise TargetSeriesError("provider-ledger target lacks strategy mapping")
         if row["evidence_layer"] != "ACCOUNT_LIVE":
+            if (
+                robuxio_account_absent
+                and mapped_strategy_id == "robuxio-crypto"
+                and row["evidence_layer"] == "PROVIDER_LIVE"
+            ):
+                continue
             raise TargetSeriesError(
                 "provider-ledger selected target is not account-live"
             )
@@ -3316,17 +3831,24 @@ def build_layered_history_generation(
     robuxio_series = series_by_strategy.get("robuxio-crypto")
     if robuxio_series is None:
         raise TargetSeriesError("provider ledger lacks Robuxio mapping")
-    robuxio_live, robuxio_coverage = _matrixport_returns(
-        matrixport_nav_path,
-        matrixport_holdings_path,
-        matrixport_subscription_path,
-        matrixport_daily_holdings_path,
-        matrixport_product_id,
-        robuxio_series,
-        matrixport_missing_dates,
-        matrixport_gap_policy,
-        admission_cutoff=matrixport_admission_cutoff,
-    )
+    if robuxio_account_absent:
+        robuxio_live = []
+        robuxio_coverage = {
+            "account_live_start": robuxio_interval["effective_start"],
+            "source_gap_policy": matrixport_gap_policy,
+        }
+    else:
+        robuxio_live, robuxio_coverage = _matrixport_returns(
+            matrixport_nav_path,
+            matrixport_holdings_path,
+            matrixport_subscription_path,
+            matrixport_daily_holdings_path,
+            matrixport_product_id,
+            robuxio_series,
+            matrixport_missing_dates,
+            matrixport_gap_policy,
+            admission_cutoff=matrixport_admission_cutoff,
+        )
     raw_gap_policy = robuxio_coverage.get("source_gap_policy")
     if not isinstance(raw_gap_policy, dict):
         raise TargetSeriesError("Matrixport source gap policy is absent")
@@ -3336,7 +3858,9 @@ def build_layered_history_generation(
         raise TargetSeriesError(
             "Matrixport source gap policy differs from product authority"
         )
-    if not isinstance(robuxio_coverage.get("epoch_hpr_receipt"), dict):
+    if not robuxio_account_absent and not isinstance(
+        robuxio_coverage.get("epoch_hpr_receipt"), dict
+    ):
         raise TargetSeriesError("Matrixport epoch HPR receipt is absent")
     raw_span_receipts = raw_gap_policy.get("span_return_receipts")
     if not isinstance(raw_span_receipts, list) or any(
@@ -3347,7 +3871,7 @@ def build_layered_history_generation(
         date.fromisoformat(str(item))
         for item in raw_gap_policy.get("unavailable_return_dates", [])
     )
-    if (
+    if not robuxio_account_absent and (
         robuxio_live[0]["date"],
         robuxio_live[-1]["date"],
     ) != (
@@ -3369,20 +3893,62 @@ def build_layered_history_generation(
             "Robuxio provider-live interval is absent from contract"
         )
     _validate_robuxio_provider_interval(robuxio_provider, robuxio_provider_interval)
-    live_by_strategy["robuxio-crypto"] = _matrixport_account_live_from_ledger(
-        live_by_strategy["robuxio-crypto"],
-        robuxio_live,
-        matrixport_unavailable_return_dates,
+    robuxio_epoch_hpr_receipt = None
+    robuxio_currency_conversion = None
+    fx_manifest_content = None
+    fx_rates_path = None
+    fx_binding = _manifest_artifacts(ledger_manifest.get("artifacts")).get(
+        "portfolio/fx-rates/generation.json"
     )
-    robuxio_epoch_hpr_receipt = _matrixport_epoch_hpr_receipt(
-        returns=[
-            {"date": row["date"], "return": row["return"]}
-            for row in live_by_strategy["robuxio-crypto"]
-        ],
-        span_return_receipts=raw_span_receipts,
-        source_gap_policy=raw_gap_policy,
-        admission_cutoff=matrixport_admission_cutoff,
-    )
+    if (fx_binding is not None) != (portfolio_fx_rates_manifest_path is not None):
+        raise TargetSeriesError("Matrixport selected FX manifest input differs")
+    if not robuxio_account_absent:
+        expected_product_rows = robuxio_live
+        hpr_span_receipts = raw_span_receipts
+        if portfolio_fx_rates_manifest_path is not None:
+            fx_rates_path = portfolio_fx_rates_manifest_path.parent / "rates.csv"
+            fx_manifest_content = portfolio_fx_rates_manifest_path.read_bytes()
+            robuxio_currency_conversion = {
+                "schema_version": 1,
+                "native_currency": "USDT",
+                "reporting_currency": "USD",
+                "transform": "UNIT_NAV_RETURN_TIMES_ENDPOINT_FX_RATIO_V1",
+                "native_product_id": matrixport_product_id,
+                "native_nav_csv": matrixport_nav_path.read_bytes().decode("utf-8"),
+                "rates_csv": fx_rates_path.read_bytes().decode("utf-8"),
+            }
+            expected_product_rows, hpr_span_receipts = _matrixport_usd_conversion(
+                robuxio_currency_conversion,
+                fx_manifest_content=fx_manifest_content,
+                provider_manifest=ledger_manifest,
+                matrixport_manifest=matrixport_manifest,
+                source_gap_policy=raw_gap_policy,
+                account_live_start=date.fromisoformat(
+                    str(robuxio_coverage["account_live_start"])
+                ),
+                admission_cutoff=matrixport_admission_cutoff,
+            )
+        live_by_strategy["robuxio-crypto"] = _matrixport_account_live_from_catalog(
+            ledger_catalog,
+            live_by_strategy["robuxio-crypto"],
+            expected_product_rows,
+            matrixport_unavailable_return_dates,
+            matrixport_missing_dates,
+            robuxio_series,
+        )
+        robuxio_epoch_hpr_receipt = _matrixport_epoch_hpr_receipt(
+            returns=[
+                {"date": row["date"], "return": row["return"]}
+                for row in live_by_strategy["robuxio-crypto"]
+            ],
+            span_return_receipts=hpr_span_receipts,
+            source_gap_policy=raw_gap_policy,
+            admission_cutoff=matrixport_admission_cutoff,
+        )
+    elif portfolio_fx_rates_manifest_path is not None:
+        raise TargetSeriesError(
+            "Matrixport FX conversion lacks an admitted account return path"
+        )
 
     quantbase_artifacts = _manifest_artifacts(quantbase_manifest.get("artifacts"))
     _verify_artifact(
@@ -3440,21 +4006,88 @@ def build_layered_history_generation(
     )
 
     p123_artifacts = _manifest_artifacts(p123_manifest.get("artifacts"))
-    metadata_artifact = _verify_artifact(
-        portfolio123_metadata_path,
-        p123_artifacts,
-        "tables/har_managed_metadata.parquet",
+    p123_history_receipts = _portfolio123_provider_history_receipts(
+        corrections["p123-eu-provider-live"], p123_generation
     )
-    performance_artifact = _verify_artifact(
-        portfolio123_performance_path,
-        p123_artifacts,
-        "tables/har_managed_performance.parquet",
-    )
-    equity_artifact = _verify_artifact(
-        portfolio123_equity_path,
-        p123_artifacts,
-        "tables/har_equity_curve.parquet",
-    )
+    p123_history_manifest_path = portfolio123_manifest_path
+    p123_history_generation = p123_generation
+    p123_history_as_of = p123_as_of
+    p123_history_artifacts = p123_artifacts
+    if p123_history_receipts is not None:
+        history_receipt = p123_history_receipts["manifest"]
+        if (
+            portfolio123_manifest_path.name != "generation.json"
+            or portfolio123_manifest_path.parent.name != p123_generation
+            or portfolio123_manifest_path.parent.parent.name != "generations"
+        ):
+            raise TargetSeriesError(
+                "Portfolio123 provider history generation root differs"
+            )
+        p123_history_manifest_path = (
+            portfolio123_manifest_path.parent.parent
+            / history_receipt["generation_id"]
+            / "generation.json"
+        )
+        if (
+            p123_history_manifest_path.is_symlink()
+            or not p123_history_manifest_path.is_file()
+        ):
+            raise TargetSeriesError("Portfolio123 provider history manifest is absent")
+        historical_bytes = p123_history_manifest_path.read_bytes()
+        historical_manifest = _verified_core_generation_envelope(
+            historical_bytes,
+            sources["portfolio123-model-generation"],
+            "Portfolio123 provider history manifest differs",
+        )
+        if (
+            hashlib.sha256(historical_bytes).hexdigest() != history_receipt["sha256"]
+            or historical_manifest.generation_id != history_receipt["generation_id"]
+            or historical_manifest.as_of_date > accepted_as_of
+            or historical_bytes != historical_manifest.to_json_bytes()
+        ):
+            raise TargetSeriesError(
+                "Portfolio123 provider history manifest identity differs"
+            )
+        p123_history_generation = historical_manifest.generation_id
+        p123_history_as_of = historical_manifest.as_of_date.isoformat()
+        p123_history_artifacts = _manifest_artifacts(
+            _load_json(p123_history_manifest_path, "Portfolio123 provider history")[
+                "artifacts"
+            ]
+        )
+    try:
+        metadata_artifact = _verify_artifact(
+            portfolio123_metadata_path,
+            p123_history_artifacts,
+            "tables/har_managed_metadata.parquet",
+        )
+        performance_artifact = _verify_artifact(
+            portfolio123_performance_path,
+            p123_history_artifacts,
+            "tables/har_managed_performance.parquet",
+        )
+        equity_artifact = _verify_artifact(
+            portfolio123_equity_path,
+            p123_history_artifacts,
+            "tables/har_equity_curve.parquet",
+        )
+    except TargetSeriesError as exc:
+        if p123_history_receipts is None:
+            raise
+        raise TargetSeriesError(
+            f"Portfolio123 provider history artifact differs: {exc}"
+        ) from exc
+    if p123_history_receipts is not None and any(
+        artifact.sha256 != p123_history_receipts[key]["sha256"]
+        for key, artifact in (
+            ("metadata", metadata_artifact),
+            ("performance", performance_artifact),
+            ("equity", equity_artifact),
+        )
+    ):
+        raise TargetSeriesError(
+            "Portfolio123 provider history artifact receipt differs"
+        )
     p123_returns_artifact = _verify_artifact(
         portfolio123_returns_path, p123_artifacts, "tables/returns_daily.parquet"
     )
@@ -3471,7 +4104,7 @@ def build_layered_history_generation(
         metadata_path=portfolio123_metadata_path,
         performance_path=portfolio123_performance_path,
         equity_path=portfolio123_equity_path,
-        generation_id=p123_generation,
+        generation_id=p123_history_generation,
         series_id=p123_eu_series,
         accepted_version=p123_eu_version,
     )
@@ -3597,6 +4230,9 @@ def build_layered_history_generation(
     backtest_calendar, backtest_frequency = _source_temporal(
         sources["strategy-backtests"]
     )
+    p123_calendar, p123_frequency = _source_temporal(
+        sources["portfolio123-model-generation"]
+    )
     segment_rows: list[dict[str, str]] = []
     for strategy_id, rows in live_by_strategy.items():
         if strategy_id == "robuxio-crypto":
@@ -3650,10 +4286,21 @@ def build_layered_history_generation(
             }
             for row in rows
         ]
+        is_portfolio123_backtest = strategy_id == "p123-ai-factor"
         source_generation_id = (
             p123_generation
-            if strategy_id == "p123-ai-factor"
+            if is_portfolio123_backtest
             else str((history_proof or {}).get("bundle_id") or "NOT_CAPTURED")
+        )
+        source_id = (
+            "portfolio123-model-generation"
+            if is_portfolio123_backtest
+            else "strategy-backtests"
+        )
+        calendar, frequency = (
+            (p123_calendar, p123_frequency)
+            if is_portfolio123_backtest
+            else (backtest_calendar, backtest_frequency)
         )
         segment_rows.extend(
             _segment_rows(
@@ -3661,11 +4308,11 @@ def build_layered_history_generation(
                 strategy_id=strategy_id,
                 strategy_version=version_by_strategy[strategy_id],
                 segment_id=f"{strategy_id}:backtest",
-                source_id="strategy-backtests",
+                source_id=source_id,
                 source_generation_id=source_generation_id,
                 mode_admission="INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
-                calendar=backtest_calendar,
-                frequency=backtest_frequency,
+                calendar=calendar,
+                frequency=frequency,
             )
         )
     for strategy_id, rows in unadmitted_backtests.items():
@@ -3686,11 +4333,11 @@ def build_layered_history_generation(
                 strategy_id=strategy_id,
                 strategy_version=version_by_strategy[strategy_id],
                 segment_id=f"{strategy_id}:backtest-not-admitted",
-                source_id="strategy-backtests",
+                source_id="portfolio123-model-generation",
                 source_generation_id=p123_generation,
                 mode_admission="REQUIRED_NOT_READY_OVERLAP",
-                calendar=backtest_calendar,
-                frequency=backtest_frequency,
+                calendar=p123_calendar,
+                frequency=p123_frequency,
             )
         )
     segment_rows.sort(
@@ -3901,48 +4548,51 @@ def build_layered_history_generation(
                 },
             }
         )
+    correction_resolutions: dict[str, dict[str, Any]] = {
+        "echotrade-event-only-account-live-rejected": {
+            "canonicalization": echo_expected_identity["canonicalization"],
+            "observed_end": echo_interval["observed_end"],
+            "observed_start": echo_interval["observed_start"],
+            "return_observations": echo_expected_identity["return_observations"],
+            "sha256": echo_expected_identity["sha256"],
+            "source_generation_id": echo_capture["generation_id"],
+            "source_receipt_sha256": echo_expected_identity["source_receipt_sha256"],
+            "status": "REJECTED_EVENT_ONLY_RECONSTRUCTION_NOT_DAILY_NAV",
+        },
+        "p123-ai-backtest": {
+            **p123_ai_proof,
+            "status": p123_ai_disposition,
+        },
+        "p123-eu-provider-live": {
+            **p123_eu_proof,
+            "status": "DERIVED_NOT_ADMITTED_PENDING_303",
+        },
+        "robuxio-account-live-after-funding": {
+            "account_live_start": robuxio_coverage["account_live_start"],
+            "observed_end": robuxio_live[-1]["date"] if robuxio_live else None,
+            "observed_start": robuxio_live[0]["date"] if robuxio_live else None,
+            "source_gap_policy": raw_gap_policy,
+            "status": "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT"
+            if robuxio_account_absent
+            else "RESOLVED_BY_PIPE_HISTORY_001",
+        },
+        "volatis-account-live": {
+            "observed_end": volatis_live[-1]["date"],
+            "observed_start": volatis_live[0]["date"],
+            "source_first_positive_value_date": volatis_coverage[
+                "source_first_positive_value_date"
+            ],
+            "status": "RESOLVED_BY_PIPE_HISTORY_001",
+        },
+    }
     coverage = {
         "as_of_date": accepted_as_of.isoformat(),
         "builder": LAYERED_HISTORY_BUILDER,
         "builder_version": LAYERED_HISTORY_BUILDER_VERSION,
-        "correction_resolutions": {
-            "echotrade-event-only-account-live-rejected": {
-                "canonicalization": echo_expected_identity["canonicalization"],
-                "observed_end": echo_interval["observed_end"],
-                "observed_start": echo_interval["observed_start"],
-                "return_observations": echo_expected_identity["return_observations"],
-                "sha256": echo_expected_identity["sha256"],
-                "source_generation_id": echo_capture["generation_id"],
-                "source_receipt_sha256": echo_expected_identity[
-                    "source_receipt_sha256"
-                ],
-                "status": "REJECTED_EVENT_ONLY_RECONSTRUCTION_NOT_DAILY_NAV",
-            },
-            "p123-ai-backtest": {
-                **p123_ai_proof,
-                "status": p123_ai_disposition,
-            },
-            "p123-eu-provider-live": {
-                **p123_eu_proof,
-                "status": "DERIVED_NOT_ADMITTED_PENDING_303",
-            },
-            "robuxio-account-live-after-funding": {
-                "account_live_start": robuxio_coverage["account_live_start"],
-                "observed_end": robuxio_live[-1]["date"],
-                "observed_start": robuxio_live[0]["date"],
-                "source_gap_policy": raw_gap_policy,
-                "status": "RESOLVED_BY_PIPE_HISTORY_001",
-            },
-            "volatis-account-live": {
-                "observed_end": volatis_live[-1]["date"],
-                "observed_start": volatis_live[0]["date"],
-                "source_first_positive_value_date": volatis_coverage[
-                    "source_first_positive_value_date"
-                ],
-                "status": "RESOLVED_BY_PIPE_HISTORY_001",
-            },
-        },
-        "epoch_hpr_receipts": [
+        "correction_resolutions": correction_resolutions,
+        "epoch_hpr_receipts": []
+        if robuxio_account_absent
+        else [
             {
                 "evidence_layer": "ACCOUNT_LIVE",
                 "receipt": robuxio_epoch_hpr_receipt,
@@ -3956,6 +4606,10 @@ def build_layered_history_generation(
         "strategies": sorted(coverage_rows, key=lambda item: str(item["strategy_id"])),
         "verification": "VERIFIED_WITH_REQUIRED_NOT_READY_DISPOSITIONS",
     }
+    if robuxio_currency_conversion is not None:
+        correction_resolutions["robuxio-account-live-after-funding"][
+            "currency_conversion"
+        ] = robuxio_currency_conversion
     artifacts = {
         "segments.csv": _segment_view_bytes(segment_rows),
         # Deprecated Echo rows are validation-only rejected evidence.  The
@@ -4055,24 +4709,24 @@ def build_layered_history_generation(
             artifact_role="GENERATION_ARTIFACT",
             path=portfolio123_metadata_path,
             artifact_id=metadata_artifact.artifact_id,
-            generation_id=p123_generation,
-            as_of_date=p123_as_of,
+            generation_id=p123_history_generation,
+            as_of_date=p123_history_as_of,
         ),
         _artifact_identity(
             input_id="portfolio123-performance",
             artifact_role="GENERATION_ARTIFACT",
             path=portfolio123_performance_path,
             artifact_id=performance_artifact.artifact_id,
-            generation_id=p123_generation,
-            as_of_date=p123_as_of,
+            generation_id=p123_history_generation,
+            as_of_date=p123_history_as_of,
         ),
         _artifact_identity(
             input_id="portfolio123-equity",
             artifact_role="GENERATION_ARTIFACT",
             path=portfolio123_equity_path,
             artifact_id=equity_artifact.artifact_id,
-            generation_id=p123_generation,
-            as_of_date=p123_as_of,
+            generation_id=p123_history_generation,
+            as_of_date=p123_history_as_of,
         ),
         _artifact_identity(
             input_id="portfolio123-returns",
@@ -4150,6 +4804,40 @@ def build_layered_history_generation(
                 ),
             ]
         )
+    if p123_history_receipts is not None:
+        inputs.append(
+            _artifact_identity(
+                input_id="portfolio123-provider-history-manifest",
+                artifact_role="GENERATION_MANIFEST",
+                path=p123_history_manifest_path,
+                generation_id=p123_history_generation,
+                as_of_date=p123_history_as_of,
+            )
+        )
+    if fx_manifest_content is not None:
+        assert (
+            portfolio_fx_rates_manifest_path is not None and fx_rates_path is not None
+        )
+        fx_manifest = GenerationManifest.from_json_bytes(fx_manifest_content)
+        inputs.extend(
+            [
+                _artifact_identity(
+                    input_id="portfolio-fx-rates-manifest",
+                    artifact_role="GENERATION_MANIFEST",
+                    path=portfolio_fx_rates_manifest_path,
+                    generation_id=fx_manifest.generation_id,
+                    as_of_date=fx_manifest.as_of_date.isoformat(),
+                ),
+                _artifact_identity(
+                    input_id="portfolio-fx-rates",
+                    artifact_role="GENERATION_ARTIFACT",
+                    path=fx_rates_path,
+                    artifact_id="rates.csv",
+                    generation_id=fx_manifest.generation_id,
+                    as_of_date=fx_manifest.as_of_date.isoformat(),
+                ),
+            ]
+        )
     inputs.sort(key=lambda item: str(item["input_id"]))
     output_identities = {
         name: _history_output_identity(
@@ -4173,6 +4861,14 @@ def build_layered_history_generation(
         "provider-ledger": provider_ledger_manifest_path.read_text(encoding="utf-8"),
         "quantbase": quantbase_manifest_path.read_text(encoding="utf-8"),
     }
+    if fx_manifest_content is not None:
+        source_manifest_contents["portfolio-fx-rates"] = fx_manifest_content.decode(
+            "utf-8"
+        )
+    if p123_history_receipts is not None:
+        source_manifest_contents["portfolio123-provider-history"] = (
+            p123_history_manifest_path.read_text(encoding="utf-8")
+        )
     if strategy_history_manifest_path is not None:
         source_manifest_contents["strategy-history"] = (
             strategy_history_manifest_path.read_text(encoding="utf-8")
@@ -4461,6 +5157,14 @@ def validate_layered_history_generation(
     if input_rows != sorted(input_rows, key=lambda item: str(item["input_id"])):
         raise TargetSeriesError("layered history input ordering differs")
 
+    p123_history_receipts = _portfolio123_provider_history_receipts(
+        corrections["p123-eu-provider-live"],
+        str(
+            sources["portfolio123-model-generation"]["current_generation"][
+                "generation_id"
+            ]
+        ),
+    )
     expected_input_contracts: dict[str, tuple[str, str | None]] = {
         "financial-mvp-contract": ("PRODUCT_CONTRACT", None),
         "provider-ledger-manifest": ("GENERATION_MANIFEST", None),
@@ -4515,6 +5219,11 @@ def validate_layered_history_generation(
                 "portfolio123-current": ("CURRENT_POINTER", None),
             }
         )
+    if p123_history_receipts is not None:
+        expected_input_contracts["portfolio123-provider-history-manifest"] = (
+            "GENERATION_MANIFEST",
+            None,
+        )
     optional_input_ids = {"strategy-history-manifest", "strategy-history-returns"}
     if optional_input_ids & set(inputs):
         expected_input_contracts.update(
@@ -4524,6 +5233,13 @@ def validate_layered_history_generation(
                     "GENERATION_ARTIFACT",
                     "strategy-history/returns.csv",
                 ),
+            }
+        )
+    if {"portfolio-fx-rates-manifest", "portfolio-fx-rates"} & set(inputs):
+        expected_input_contracts.update(
+            {
+                "portfolio-fx-rates-manifest": ("GENERATION_MANIFEST", None),
+                "portfolio-fx-rates": ("GENERATION_ARTIFACT", "rates.csv"),
             }
         )
     if set(inputs) != set(expected_input_contracts):
@@ -4583,8 +5299,14 @@ def validate_layered_history_generation(
         "quantbase": "quantbase-manifest",
         "portfolio123": "portfolio123-manifest",
     }
+    if p123_history_receipts is not None:
+        source_manifest_input_ids["portfolio123-provider-history"] = (
+            "portfolio123-provider-history-manifest"
+        )
     if "strategy-history-manifest" in inputs:
         source_manifest_input_ids["strategy-history"] = "strategy-history-manifest"
+    if "portfolio-fx-rates-manifest" in inputs:
+        source_manifest_input_ids["portfolio-fx-rates"] = "portfolio-fx-rates-manifest"
     if not isinstance(raw_source_manifests, dict) or set(raw_source_manifests) != set(
         source_manifest_input_ids
     ):
@@ -4638,7 +5360,27 @@ def validate_layered_history_generation(
             raise TargetSeriesError(
                 f"layered history source manifest identity differs: {source_name}"
             )
+        if source_name == "portfolio123-provider-history":
+            assert p123_history_receipts is not None
+            historical = _verified_core_generation_envelope(
+                raw.encode("utf-8"),
+                sources["portfolio123-model-generation"],
+                "Portfolio123 provider history manifest differs",
+            )
+            expected_receipt = p123_history_receipts["manifest"]
+            if (
+                historical.generation_id != expected_receipt["generation_id"]
+                or source_input["sha256"] != expected_receipt["sha256"]
+            ):
+                raise TargetSeriesError(
+                    "Portfolio123 provider history manifest receipt differs"
+                )
         source_manifests[source_name] = parsed
+    provider_has_fx = "portfolio/fx-rates/generation.json" in _manifest_artifacts(
+        source_manifests["provider-ledger"].get("artifacts")
+    )
+    if provider_has_fx != ("portfolio-fx-rates" in source_manifests):
+        raise TargetSeriesError("Matrixport selected FX manifest input differs")
     input_source_names = {
         "provider-ledger-manifest": "provider-ledger",
         "provider-ledger-catalog": "provider-ledger",
@@ -4656,6 +5398,22 @@ def validate_layered_history_generation(
         "portfolio123-returns": "portfolio123",
         "portfolio123-relationships": "portfolio123",
     }
+    if p123_history_receipts is not None:
+        input_source_names["portfolio123-provider-history-manifest"] = (
+            "portfolio123-provider-history"
+        )
+        for key in ("metadata", "performance", "equity"):
+            input_id = f"portfolio123-{key}"
+            input_source_names[input_id] = "portfolio123-provider-history"
+            expected_receipt = p123_history_receipts[key]
+            if (
+                inputs[input_id]["sha256"] != expected_receipt["sha256"]
+                or inputs[input_id]["generation_id"]
+                != expected_receipt["generation_id"]
+            ):
+                raise TargetSeriesError(
+                    f"Portfolio123 provider history artifact receipt differs: {key}"
+                )
     if source_selection_mode == "CURRENT_POINTERS":
         input_source_names.update(
             {
@@ -4670,6 +5428,13 @@ def validate_layered_history_generation(
             {
                 "strategy-history-manifest": "strategy-history",
                 "strategy-history-returns": "strategy-history",
+            }
+        )
+    if "portfolio-fx-rates" in source_manifests:
+        input_source_names.update(
+            {
+                "portfolio-fx-rates-manifest": "portfolio-fx-rates",
+                "portfolio-fx-rates": "portfolio-fx-rates",
             }
         )
     if set(input_source_names) != set(inputs) - {"financial-mvp-contract"}:
@@ -4884,9 +5649,23 @@ def validate_layered_history_generation(
     if segments != canonical_segments:
         raise TargetSeriesError("layered history segment ordering differs")
     actual_segment_identities = _materialized_segment_identities(segments, sources)
-    if actual_segment_identities != contract["history_corrections"].get(
+    expected_segment_identities = contract["history_corrections"].get(
         "materialized_segment_identities"
-    ):
+    )
+    robuxio_account_absent = _matrixport_account_is_unadmitted(sources)
+    if robuxio_account_absent:
+        if any(
+            row["strategy_id"] == "robuxio-crypto"
+            and row["evidence_layer"] == "ACCOUNT_LIVE"
+            for row in segments
+        ):
+            raise TargetSeriesError("unadmitted Matrixport account history was emitted")
+        expected_segment_identities = [
+            identity
+            for identity in expected_segment_identities
+            if identity["segment_id"] != "robuxio-crypto:account-live"
+        ]
+    if actual_segment_identities != expected_segment_identities:
         raise TargetSeriesError(
             "layered history segment values differ from product authority"
         )
@@ -4972,14 +5751,14 @@ def validate_layered_history_generation(
         strategy_id = segment_row["strategy_id"]
         if strategy_id not in strategies:
             raise TargetSeriesError("layered history contains non-product strategy")
-        key = (
+        segment_key = (
             strategy_id,
             segment_row["segment_id"],
             segment_row["date"],
         )
-        if key in segment_keys:
+        if segment_key in segment_keys:
             raise TargetSeriesError("layered history contains duplicate segment date")
-        segment_keys.add(key)
+        segment_keys.add(segment_key)
         try:
             observed = date.fromisoformat(segment_row["date"])
         except ValueError as exc:
@@ -5278,7 +6057,11 @@ def validate_layered_history_generation(
                 f"{strategy_id}:backtest",
                 f"{strategy_id}:backtest-not-admitted",
             }:
-                source_id = "strategy-backtests"
+                source_id = (
+                    "portfolio123-model-generation"
+                    if strategy_id == "p123-ai-factor"
+                    else "strategy-backtests"
+                )
                 expected_layer = "BACKTEST"
                 expected_admission = (
                     "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
@@ -5290,11 +6073,7 @@ def validate_layered_history_generation(
                 raise TargetSeriesError("layered history segment is not authorized")
             calendar, frequency = _source_temporal(sources[source_id])
             if source_id == "strategy-backtests":
-                generation_input_id = (
-                    "portfolio123-manifest"
-                    if strategy_id == "p123-ai-factor"
-                    else "strategy-history-manifest"
-                )
+                generation_input_id = "strategy-history-manifest"
             else:
                 generation_input_id = source_generation_inputs[source_id]
             generation_input = inputs.get(generation_input_id)
@@ -5658,7 +6437,8 @@ def validate_layered_history_generation(
                 "source_gap_policy",
                 "status",
             }
-        ),
+        )
+        | (frozenset({"currency_conversion"}) if provider_has_fx else frozenset()),
         "Matrixport source gap resolution",
     )
     if robuxio_resolution.get("source_gap_policy") != expected_matrixport_gap_policy:
@@ -5768,65 +6548,103 @@ def validate_layered_history_generation(
     )
     funding_start = date.fromisoformat(str(robuxio_interval["effective_start"]))
     _validate_robuxio_provider_interval(robuxio_provider, robuxio_provider_interval)
-    if (
+    if any(
+        date.fromisoformat(row["date"]) >= funding_start for row in robuxio_provider
+    ):
+        raise TargetSeriesError("Robuxio provider history exceeds funding boundary")
+    if not robuxio_account_absent and (
         not robuxio_live
         or robuxio_live[0]["date"] != robuxio_interval["observed_start"]
         or robuxio_live[-1]["date"] != robuxio_interval["observed_end"]
         or any(date.fromisoformat(row["date"]) <= funding_start for row in robuxio_live)
-        or any(
-            date.fromisoformat(row["date"]) >= funding_start for row in robuxio_provider
-        )
     ):
         raise TargetSeriesError("Robuxio funding correction differs")
-    if robuxio_resolution != {
+    expected_robuxio_resolution = {
         "account_live_start": funding_start.isoformat(),
-        "observed_end": robuxio_live[-1]["date"],
-        "observed_start": robuxio_live[0]["date"],
+        "observed_end": robuxio_live[-1]["date"] if robuxio_live else None,
+        "observed_start": robuxio_live[0]["date"] if robuxio_live else None,
         "source_gap_policy": expected_matrixport_gap_policy,
-        "status": "RESOLVED_BY_PIPE_HISTORY_001",
-    }:
+        "status": "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT"
+        if robuxio_account_absent
+        else "RESOLVED_BY_PIPE_HISTORY_001",
+    }
+    converted_span_receipts = None
+    if provider_has_fx:
+        if robuxio_account_absent:
+            raise TargetSeriesError(
+                "Matrixport FX conversion lacks an admitted account return path"
+            )
+        conversion_proof = robuxio_resolution.get("currency_conversion")
+        if not isinstance(conversion_proof, dict):
+            raise TargetSeriesError("Matrixport currency conversion proof is absent")
+        expected_usd_rows, converted_span_receipts = _matrixport_usd_conversion(
+            conversion_proof,
+            fx_manifest_content=raw_source_manifests["portfolio-fx-rates"].encode(
+                "utf-8"
+            ),
+            provider_manifest=source_manifests["provider-ledger"],
+            matrixport_manifest=source_manifests["matrixport"],
+            source_gap_policy=expected_matrixport_gap_policy,
+            account_live_start=funding_start,
+            admission_cutoff=date.fromisoformat(str(robuxio_interval["observed_end"])),
+        )
+        _matrixport_account_live_from_ledger(
+            robuxio_live, expected_usd_rows, matrixport_unavailable_return_dates
+        )
+        expected_robuxio_resolution["currency_conversion"] = conversion_proof
+    if robuxio_resolution != expected_robuxio_resolution:
         raise TargetSeriesError("Robuxio source gap coverage differs")
-    if len(epoch_hpr_rows) != 1 or not isinstance(epoch_hpr_rows[0], dict):
-        raise TargetSeriesError("layered history epoch HPR receipt set differs")
-    epoch_hpr_row = epoch_hpr_rows[0]
-    _require_exact_keys(
-        epoch_hpr_row,
-        frozenset(
-            {
-                "evidence_layer",
-                "receipt",
-                "source_generation_id",
-                "source_id",
-                "strategy_id",
-            }
-        ),
-        "layered history epoch HPR receipt",
-    )
-    raw_span_receipts = expected_matrixport_gap_policy.get("span_return_receipts")
-    if not isinstance(raw_span_receipts, list) or any(
-        not isinstance(item, dict) for item in raw_span_receipts
-    ):
-        raise TargetSeriesError("Matrixport epoch HPR span receipts are invalid")
-    expected_epoch_hpr_receipt = _matrixport_epoch_hpr_receipt(
-        returns=[
-            {
-                "date": row["date"],
-                "return": row["return"],
-            }
-            for row in robuxio_live
-        ],
-        span_return_receipts=raw_span_receipts,
-        source_gap_policy=expected_matrixport_gap_policy,
-        admission_cutoff=date.fromisoformat(str(robuxio_interval["observed_end"])),
-    )
-    if epoch_hpr_row != {
-        "evidence_layer": "ACCOUNT_LIVE",
-        "receipt": expected_epoch_hpr_receipt,
-        "source_generation_id": source_manifests["matrixport"]["generation_id"],
-        "source_id": "matrixport-account-generation",
-        "strategy_id": "robuxio-crypto",
-    }:
-        raise TargetSeriesError("layered history epoch HPR receipt differs")
+    if robuxio_account_absent:
+        if robuxio_live or epoch_hpr_rows:
+            raise TargetSeriesError(
+                "unadmitted Matrixport account history has an HPR claim"
+            )
+    else:
+        if len(epoch_hpr_rows) != 1 or not isinstance(epoch_hpr_rows[0], dict):
+            raise TargetSeriesError("layered history epoch HPR receipt set differs")
+        epoch_hpr_row = epoch_hpr_rows[0]
+        _require_exact_keys(
+            epoch_hpr_row,
+            frozenset(
+                {
+                    "evidence_layer",
+                    "receipt",
+                    "source_generation_id",
+                    "source_id",
+                    "strategy_id",
+                }
+            ),
+            "layered history epoch HPR receipt",
+        )
+        raw_span_receipts = expected_matrixport_gap_policy.get("span_return_receipts")
+        if not isinstance(raw_span_receipts, list) or any(
+            not isinstance(item, dict) for item in raw_span_receipts
+        ):
+            raise TargetSeriesError("Matrixport epoch HPR span receipts are invalid")
+        expected_epoch_hpr_receipt = _matrixport_epoch_hpr_receipt(
+            returns=[
+                {
+                    "date": row["date"],
+                    "return": row["return"],
+                }
+                for row in robuxio_live
+            ],
+            span_return_receipts=(
+                converted_span_receipts
+                if converted_span_receipts is not None
+                else raw_span_receipts
+            ),
+            source_gap_policy=expected_matrixport_gap_policy,
+            admission_cutoff=date.fromisoformat(str(robuxio_interval["observed_end"])),
+        )
+        if epoch_hpr_row != {
+            "evidence_layer": "ACCOUNT_LIVE",
+            "receipt": expected_epoch_hpr_receipt,
+            "source_generation_id": source_manifests["matrixport"]["generation_id"],
+            "source_id": "matrixport-account-generation",
+            "strategy_id": "robuxio-crypto",
+        }:
+            raise TargetSeriesError("layered history epoch HPR receipt differs")
     for strategy_id, correction_id in (
         ("p123-eu", "p123-eu-account-live"),
         ("volatis-strategy", "volatis-account-live"),
@@ -5848,6 +6666,7 @@ def validate_layered_history_generation(
     if any(
         row["evidence_layer"] == "BACKTEST"
         and row["mode_admission"] == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+        and row["source_id"] != "strategy-backtests"
         for row in rows_by_strategy["volatis-strategy"]
     ):
         raise TargetSeriesError("Volatis provider path was relabeled as backtest")
@@ -6973,6 +7792,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio123-account-series-id")
     parser.add_argument("--strategy-history-manifest", type=Path)
     parser.add_argument("--strategy-history-returns", type=Path)
+    parser.add_argument("--portfolio-fx-rates-manifest", type=Path)
     parser.add_argument("--provider-ledger-manifest", type=Path)
     parser.add_argument("--provider-ledger-catalog", type=Path)
     parser.add_argument("--financial-mvp-contract", type=Path)
@@ -7100,6 +7920,7 @@ def main() -> int:
                 portfolio123_equity_path=args.portfolio123_equity,
                 portfolio123_returns_path=args.portfolio123_returns,
                 portfolio123_relationships_path=args.portfolio123_relationships,
+                portfolio_fx_rates_manifest_path=args.portfolio_fx_rates_manifest,
                 strategy_history_manifest_path=args.strategy_history_manifest,
                 strategy_history_returns_path=args.strategy_history_returns,
                 source_selection_mode=(

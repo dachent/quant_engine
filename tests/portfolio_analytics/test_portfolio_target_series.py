@@ -921,7 +921,14 @@ def test_portfolio123_provider_and_account_paths_remain_separate(
                     "netWorth": 48562.85,
                     "netWorthPrevWithCashAdded": 48562.85,
                     "isLive": True,
-                }
+                },
+                {
+                    "id": "account-synthetic",
+                    "lastFix": 1767484800000,
+                    "netWorth": 48562.85,
+                    "netWorthPrevWithCashAdded": 48562.85,
+                    "isLive": True,
+                },
             ]
         ),
         metadata,
@@ -995,6 +1002,60 @@ def test_portfolio123_provider_and_account_paths_remain_separate(
         "volatis-strategy",
         "p123-ai-factor",
     ]
+
+
+@pytest.mark.parametrize(
+    ("changed_field", "changed_value"),
+    [
+        ("lastFix", 1767571200000),
+        ("netWorth", 48563.85),
+        ("netWorthPrevWithCashAdded", 48561.85),
+        ("isLive", False),
+    ],
+)
+def test_portfolio123_snapshot_rejects_conflicting_duplicate_rows(
+    tmp_path: Path, changed_field: str, changed_value: object
+) -> None:
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    metadata = tmp_path / "metadata.parquet"
+    original = {
+        "id": "account-synthetic",
+        "lastFix": 1767484800000,
+        "netWorth": 48562.85,
+        "netWorthPrevWithCashAdded": 48562.85,
+        "isLive": True,
+    }
+    pq.write_table(
+        pa.Table.from_pylist([original, {**original, changed_field: changed_value}]),
+        metadata,
+    )
+
+    with pytest.raises(TargetSeriesError, match="snapshot is not unique"):
+        target_series._portfolio123_snapshot(metadata, "account-synthetic")
+
+
+def test_portfolio123_snapshot_rejects_absent_selected_account(tmp_path: Path) -> None:
+    pa = pytest.importorskip("pyarrow")
+    pq = pytest.importorskip("pyarrow.parquet")
+    metadata = tmp_path / "metadata.parquet"
+    pq.write_table(
+        pa.Table.from_pylist(
+            [
+                {
+                    "id": "different-account",
+                    "lastFix": 1767484800000,
+                    "netWorth": 48562.85,
+                    "netWorthPrevWithCashAdded": 48562.85,
+                    "isLive": True,
+                }
+            ]
+        ),
+        metadata,
+    )
+
+    with pytest.raises(TargetSeriesError, match="snapshot is not unique"):
+        target_series._portfolio123_snapshot(metadata, "account-synthetic")
 
 
 def test_layered_correlation_uses_generation_bound_live_sim_twin(
@@ -1408,14 +1469,7 @@ def test_provider_ledger_targets_preserve_one_canonical_series_contract(
     assert manifest_bytes == manifest.read_bytes()
 
 
-def test_provider_ledger_targets_reject_conflicting_live_layers(tmp_path: Path) -> None:
-    manifest, catalog = _provider_ledger_fixture(tmp_path)
-    value = json.loads(catalog.read_text(encoding="utf-8"))
-    value["strategy_returns"][1]["evidence_layer"] = "PROVIDER_LIVE"
-    catalog.write_text(
-        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
-        encoding="utf-8",
-    )
+def _refresh_provider_ledger_fixture_manifest(manifest: Path, catalog: Path) -> None:
     manifest_value = json.loads(manifest.read_text(encoding="utf-8"))
     manifest_value["artifacts"][0].update(
         {
@@ -1425,5 +1479,98 @@ def test_provider_ledger_targets_reject_conflicting_live_layers(tmp_path: Path) 
     )
     manifest.write_text(json.dumps(manifest_value), encoding="utf-8")
 
-    with pytest.raises(TargetSeriesError, match="conflicting live layers"):
+
+def test_provider_ledger_targets_select_declared_layer_from_mixed_returns(
+    tmp_path: Path,
+) -> None:
+    manifest, catalog = _provider_ledger_fixture(tmp_path)
+    value = json.loads(catalog.read_text(encoding="utf-8"))
+    provider_rows = []
+    for row in value["strategy_returns"]:
+        provider_row = dict(row)
+        provider_row["evidence_layer"] = "PROVIDER_LIVE"
+        provider_row["return"] = "0.50"
+        provider_rows.append(provider_row)
+    value["strategy_returns"].extend(provider_rows)
+    catalog.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    _refresh_provider_ledger_fixture_manifest(manifest, catalog)
+
+    targets, _evidence, proof, _manifest_bytes = build_provider_ledger_targets(
+        manifest, catalog
+    )
+
+    rows = list(csv.DictReader(io.StringIO(targets.decode("utf-8"))))
+    assert [row["return"] for row in rows] == ["0.01", "-0.02"]
+    assert {row["evidence_layer"] for row in rows} == {"ACCOUNT_LIVE"}
+    assert json.loads(proof)["series_contracts"][0]["return_observations"] == 2
+
+
+def test_provider_ledger_targets_reject_selected_layer_statistics_mismatch(
+    tmp_path: Path,
+) -> None:
+    manifest, catalog = _provider_ledger_fixture(tmp_path)
+    value = json.loads(catalog.read_text(encoding="utf-8"))
+    value["strategy_returns"][1]["evidence_layer"] = "PROVIDER_LIVE"
+    catalog.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    _refresh_provider_ledger_fixture_manifest(manifest, catalog)
+
+    with pytest.raises(TargetSeriesError, match="evidence statistics differ"):
+        build_provider_ledger_targets(manifest, catalog)
+
+
+def test_provider_ledger_targets_reject_duplicate_within_selected_layer(
+    tmp_path: Path,
+) -> None:
+    manifest, catalog = _provider_ledger_fixture(tmp_path)
+    value = json.loads(catalog.read_text(encoding="utf-8"))
+    value["strategy_returns"].append(dict(value["strategy_returns"][0]))
+    catalog.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    _refresh_provider_ledger_fixture_manifest(manifest, catalog)
+
+    with pytest.raises(TargetSeriesError, match="strategy return is duplicated"):
+        build_provider_ledger_targets(manifest, catalog)
+
+
+@pytest.mark.parametrize("selection", [None, "UNDECLARED_LAYER"])
+def test_provider_ledger_targets_reject_missing_or_invalid_layer_selection(
+    tmp_path: Path, selection: str | None
+) -> None:
+    manifest, catalog = _provider_ledger_fixture(tmp_path)
+    value = json.loads(catalog.read_text(encoding="utf-8"))
+    if selection is None:
+        value["strategy_evidence"][0].pop("evidence_layer")
+    else:
+        value["strategy_evidence"][0]["evidence_layer"] = selection
+    catalog.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    _refresh_provider_ledger_fixture_manifest(manifest, catalog)
+
+    with pytest.raises(TargetSeriesError, match="selection is invalid"):
+        build_provider_ledger_targets(manifest, catalog)
+
+
+def test_provider_ledger_targets_reject_ambiguous_layer_selection(
+    tmp_path: Path,
+) -> None:
+    manifest, catalog = _provider_ledger_fixture(tmp_path)
+    value = json.loads(catalog.read_text(encoding="utf-8"))
+    value["strategy_evidence"].append(dict(value["strategy_evidence"][0]))
+    catalog.write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    _refresh_provider_ledger_fixture_manifest(manifest, catalog)
+
+    with pytest.raises(TargetSeriesError, match="strategy evidence is ambiguous"):
         build_provider_ledger_targets(manifest, catalog)

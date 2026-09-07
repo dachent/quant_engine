@@ -1038,7 +1038,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # tails, native Quantbase receipts, and accepted method-scope plan while
     # retaining the distinct Matrixport, P123, and deprecated Echo boundaries.
     assert contract_tool.contract_digest(contract) == (
-        "eb48ebd389d9e48a9f819440efa14a1a8945acb8b1f474838792ad98bd814444"
+        "00a3b601ed0ed5fb2e8b842706b08f7ad85780ad56a7823fb6c6dcf23c6fd98c"
     )
 
 
@@ -4068,7 +4068,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "883809719ab0cb01db7dffa56ec6a440300745ffe338a6282c8c393ad006c810"
+        "c015bb9846333d3c03f97449cffa604fbcee5dd1e4cd89a84e8758a777f4b9c6"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4105,7 +4105,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "883809719ab0cb01db7dffa56ec6a440300745ffe338a6282c8c393ad006c810"
+        "c015bb9846333d3c03f97449cffa604fbcee5dd1e4cd89a84e8758a777f4b9c6"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
