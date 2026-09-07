@@ -74,6 +74,12 @@
     INDEPENDENT_EXACT_REBUILD: "Independent exact rebuild",
     VERIFIED_GENERATION_BUNDLE_EXACT_BYTES: "Report-attested static publication — verified generation bundle exact bytes",
   });
+  const EMBEDDED_DOWNLOAD_TYPES = Object.freeze({
+    "portfolio-report-data.json": Object.freeze({ mimeType: "application/json", payloadPrefix: "download-payload-report-json" }),
+    "portfolio-report.xlsx": Object.freeze({ mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", payloadPrefix: "download-payload-report-xlsx" }),
+  });
+  const EMBEDDED_DOWNLOAD_CHUNK_SIZE = 65536;
+  const EMBEDDED_DOWNLOAD_MAX_CHUNKS = 4096;
   const humanStatus = (status) => STATUS_LABELS[String(status)] || String(status || "Unknown").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
   const statusText = (status) => `<span class="status-text ${toneForStatus(status)}">${safe(humanStatus(status))}</span>`;
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;
@@ -345,6 +351,7 @@
       ["Positions", data.fact_status.positions, data.counts.positions ? `${integer.format(data.counts.positions)} accepted current rows` : "No accepted position source", data.counts.positions ? "warning" : "danger"],
     ]);
     renderAllocationTable();
+    renderInvestedCapital();
     const providers = Object.entries(data.provider_counts).sort((a, b) => b[1] - a[1]);
     const maxCount = Math.max(...providers.map(([, count]) => count), 1);
     $("#provider-bars").innerHTML = providers.map(([provider, count]) => `<div><div class="bar-label"><span>${safe(provider)}</span><strong>${integer.format(count)}</strong></div><div class="bar-track"><div class="bar-fill" style="width:${count / maxCount * 100}%"></div></div></div>`).join("");
@@ -356,6 +363,34 @@
     $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV and evidence coverage"], ["Cost"], ["Implementation gap"]], rows);
     renderLifecycleTable();
     renderPositionTable();
+  }
+
+  function renderInvestedCapital() {
+    const capital = data.invested_capital;
+    if (!capital) {
+      $("#invested-capital-status").textContent = "Not supplied";
+      renderKpis("#invested-capital-kpis", [["Current invested capital", "—", "A verified governed result was not supplied", "warning"]]);
+      $("#invested-capital-current-table").innerHTML = tableMarkup([["Strategy"], ["Invested capital", "numeric"]], [emptyRow(2)]);
+      $("#invested-capital-daily-table").innerHTML = tableMarkup([["Date"], ["Strategy"], ["Invested capital", "numeric"]], [emptyRow(3)]);
+      return;
+    }
+    $("#invested-capital-status").textContent = statusText(capital.status);
+    renderKpis("#invested-capital-kpis", [
+      ["Current invested capital", currency(capital.current_aggregate_usd), `Complete through ${formatDate(capital.complete_through)}`],
+      ["Daily history", integer.format(capital.daily_aggregate.length), "Verified portfolio-total observations"],
+      ["Authority", statusText(capital.authority_profile), `Policy ${safe(capital.policy_id)}`],
+    ]);
+    const currentRows = [
+      ...capital.current_by_strategy.map((row) => `<tr><td>${safe(row.strategy_id)}</td><td class="numeric">${currency(row.invested_capital_usd)}</td></tr>`),
+      `<tr><td><strong>Portfolio total</strong></td><td class="numeric"><strong>${currency(capital.current_aggregate_usd)}</strong></td></tr>`,
+    ];
+    $("#invested-capital-current-table").innerHTML = tableMarkup([["Strategy"], ["Invested capital", "numeric"]], currentRows);
+    const selectedRows = selectedContextStrategy === "ALL" ? [] : capital.daily_by_strategy.filter((row) => row.strategy_id === selectedContextStrategy);
+    const dailyRows = [
+      ...capital.daily_aggregate.map((row) => `<tr><td>${safe(formatDate(row.date))}</td><td>Portfolio total</td><td class="numeric">${currency(row.invested_capital_usd)}</td></tr>`),
+      ...selectedRows.map((row) => `<tr><td>${safe(formatDate(row.date))}</td><td>${safe(row.strategy_id)}</td><td class="numeric">${currency(row.invested_capital_usd)}</td></tr>`),
+    ];
+    $("#invested-capital-daily-table").innerHTML = tableMarkup([["Date"], ["Strategy"], ["Invested capital", "numeric"]], dailyRows);
   }
 
   function renderPerformanceComparison() {
@@ -578,8 +613,33 @@
   const activeFactorLenses = () => factorLensModes[selectedFactorEvidenceMode] || factorLensModes.LIVE_ONLY || [];
   const replicationRows = data.replication_analysis?.series || [];
   let selectedFactorLens = data.decomposition_lenses?.default_lens || activeFactorLenses()[0]?.lens_id;
+  let selectedFactorSurface = "STATIC";
+  let selectedFactorSource = null;
   let selectedFactorSeries = null;
-  const currentFactorAnalysis = () => activeFactorLenses().find((item) => item.lens_id === selectedFactorLens) || activeFactorLenses()[0];
+  const currentFactorLens = () => activeFactorLenses().find((item) => item.lens_id === selectedFactorLens) || activeFactorLenses()[0];
+  const currentFactorSurfaceAnalysis = () => {
+    const lens = currentFactorLens();
+    const surfaces = lens?.surfaces || {};
+    const defaultSurface = lens?.default_surface || "STATIC";
+    if (!surfaces[selectedFactorSurface]) selectedFactorSurface = surfaces[defaultSurface] ? defaultSurface : Object.keys(surfaces)[0] || defaultSurface;
+    return surfaces[selectedFactorSurface] || lens;
+  };
+  const currentFactorAnalysis = () => {
+    const analysis = currentFactorSurfaceAnalysis();
+    const sourceKeys = analysis?.available_source_keys || (analysis?.sources || []).map((item) => item.source_key).filter(Boolean);
+    if (!sourceKeys.includes(selectedFactorSource)) selectedFactorSource = analysis?.default_source_key || sourceKeys[0] || null;
+    if (!selectedFactorSource) return analysis;
+    const series = (analysis.series || []).filter((row) => !row.source_key || row.source_key === selectedFactorSource);
+    const sources = Array.isArray(analysis.sources) ? analysis.sources.filter((row) => row.source_key === selectedFactorSource) : analysis.sources;
+    return {
+      ...analysis,
+      available_count: series.filter((row) => row.status === "AVAILABLE").length,
+      diagnostic_count: series.filter((row) => row.status === "DIAGNOSTIC_ONLY").length,
+      series,
+      sources,
+      unavailable_count: series.filter((row) => row.status === "UNAVAILABLE").length,
+    };
+  };
   const lensSemantics = {
     ECONOMIC_FACTOR: {
       question: "Which systematic economic return drivers explain the strategy?",
@@ -650,7 +710,11 @@
       const causalBridge = returnAttribution?.bridge;
       const confirmedCauses = (implementationDetail?.root_causes || []).filter((item) => item.status === "CONFIRMED");
       const trade = implementationDetail?.trade_reconciliation;
-      const verifiedGapMarkup = verifiedMetrics
+      const comparisonPolicyUnavailable = verifiedMetrics?.status === "UNAVAILABLE_POLICY_NOT_ADMITTED";
+      const actualAccountReturns = implementationDetail?.account_live_return_summary;
+      const verifiedGapMarkup = comparisonPolicyUnavailable
+        ? `<span class="cell-primary">Model comparison unavailable under the current source policy</span>${actualAccountReturns ? `<span class="cell-secondary">Actual account return ${pct(actualAccountReturns.cumulative_return)} · ${formatDate(actualAccountReturns.observed_start)}–${formatDate(actualAccountReturns.observed_end)} · ${integer.format(actualAccountReturns.observations)} returns</span>` : ""}<span class="cell-secondary">Account and trade evidence is retained. No model return or comparison gap is inferred.</span>`
+        : verifiedMetrics
         ? `<span class="cell-primary">Verified model ${pct(verifiedMetrics.model_cumulative_return)} · account ${pct(verifiedMetrics.account_cumulative_return)} · gap ${pct(verifiedMetrics.account_minus_model_cumulative)}</span><span class="cell-secondary">${formatDate(verifiedMetrics.observed_start)}–${formatDate(verifiedMetrics.observed_end)} · ${integer.format(verifiedMetrics.observations)} exact common dates · β ${decimal(verifiedMetrics.beta_to_model)} · correlation ${decimal(verifiedMetrics.daily_return_correlation)} · tracking error ${pct(verifiedMetrics.annualized_tracking_error)}</span><span class="cell-secondary">Information ratio ${decimal(verifiedMetrics.information_ratio)} · up/down capture ${pct(verifiedMetrics.up_capture)}/${pct(verifiedMetrics.down_capture)} · relative drawdown ${pct(verifiedMetrics.relative_drawdown)}</span><span class="cell-secondary">Confirmed causes: ${safe(confirmedCauses.map((item) => humanStatus(item.cause)).join(" · ") || "none")}</span>${trade ? `<span class="cell-secondary">Model events ${integer.format(trade.model_event_count)} · matched ${integer.format((trade.matched_same_date_count || 0) + (trade.matched_delayed_count || 0))} · missed ${integer.format(trade.missed_model_event_count)} · unexplained broker events ${integer.format(trade.actual_unexplained_count)}</span>` : ""}<span class="cell-secondary">${safe(humanStatus(verifiedMetrics.status))}</span>`
         : "";
       const causalCategoryMarkup = (causalBridge?.categories || []).map((item) => {
@@ -661,7 +725,9 @@
       const causalMixMarkup = causalBridge?.effective_account_model_mix_return == null
         ? ""
         : `<span class="cell-secondary"><strong>Correct connected-model comparator:</strong> effective model mix ${pct(causalBridge.effective_account_model_mix_return)} · account-vs-mix gap ${decimal(causalBridge.effective_account_model_mix_gap_pp, 3)} pp. The primary AI model alone is not the whole-account benchmark.</span>`;
-      const causalGapMarkup = causalBridge
+      const causalGapMarkup = causalBridge?.status === "UNAVAILABLE_POLICY_NOT_ADMITTED"
+        ? `<span class="cell-secondary">Actual account return ${pct(causalBridge.account_return)} · ${formatDate(returnAttribution.observed_start)}–${formatDate(returnAttribution.observed_end)}. Trade P&amp;L attribution is retained; a model-gap waterfall is unavailable.</span>`
+        : causalBridge
         ? `<span class="cell-primary">Causal return waterfall · model ${pct(causalBridge.model_return)} · account ${pct(causalBridge.account_return)} · exact gap ${decimal(causalBridge.gap_pp, 3)} pp</span>${causalMixMarkup}${causalCategoryMarkup}<span class="cell-secondary">${formatDate(returnAttribution.observed_start)}–${formatDate(returnAttribution.observed_end)} · ${safe(humanStatus(causalBridge.status))} · ${safe(humanStatus(returnAttribution.verification))}</span>`
         : "";
       const legacyGapMarkup = gap.total_gap == null
@@ -776,7 +842,18 @@
         const reason = row.model_quality?.gate_reason || (row.unavailable_reasons || []).join(" · ");
         const diagnosticBetaRows = (row.exposures || []).map((item) => `<tr><td>${safe(item.factor_id)}</td><td class="numeric">${decimal(item.beta ?? item.exposure)}</td><td>${safe(item.standard_error == null ? "Coefficient SE unavailable" : `SE ${decimal(item.standard_error)}`)}</td></tr>`);
         const diagnosticBetas = diagnosticBetaRows.length ? `<div class="panel"><div class="panel-heading"><div><div class="eyebrow">Forensic diagnostic</div><h3>Computed beta / loading</h3></div><span class="badge badge-warning">NOT PM-ACCEPTED</span></div><div class="table-wrap"><table><caption>Diagnostic factor betas</caption>${tableMarkup([["Factor"], ["Beta", "numeric"], ["Uncertainty"]], diagnosticBetaRows)}</table></div></div>` : "";
-        $("#factor-detail").innerHTML = `${compositionMarkup}<div class="state-separation"><div><span class="eyebrow">Source state</span><strong>${safe(humanStatus(sourceState(row)))}</strong><p>${integer.format(aligned)} aligned observations are retained.</p></div><div><span class="eyebrow">Model state</span><strong>${safe(humanStatus(modelState(row)))}</strong><p>${safe(humanStatus(reason))}. Sealed-holdout predicted R²: ${pct(holdout?.predicted_r_squared)} across ${integer.format(holdout?.observation_count || 0)} observations.</p></div></div><div class="callout callout-warning">The computed alpha and betas remain visible for forensic review, but the sealed-holdout gate excludes them from portfolio-manager conclusions.</div>${diagnosticBetas}<div class="callout callout-neutral"><strong>Training design:</strong> n=${integer.format(design.design_observations || 0)} · rank ${safe(design.matrix_rank ?? "—")}/${safe(design.factor_count ?? "—")} · condition ${decimal(design.matrix_condition_number)} · max VIF ${decimal(maximumVif)} · ${statusText(design.unregularized_status || "UNAVAILABLE")}. <strong>Inference:</strong> ${statusText(inference.status || "UNAVAILABLE")}.</div>${dynamicAnalysisMarkup(row)}`;
+        const diagnosticAlpha = row.alpha || {};
+        const diagnosticAlphaMarkup = `<div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Diagnostic net alpha</div><div class="metric-value">${pct(diagnosticAlpha.net_annualized)}</div><div class="metric-note">${safe(diagnosticAlpha.net_status || "UNAVAILABLE")}</div></div><div class="metric-block"><div class="metric-label">Diagnostic gross alpha</div><div class="metric-value">${pct(diagnosticAlpha.gross_annualized)}</div><div class="metric-note">${safe(diagnosticAlpha.gross_status || "UNAVAILABLE")}</div></div><div class="metric-block"><div class="metric-label">Diagnostic periodic alpha</div><div class="metric-value">${pct(diagnosticAlpha.periodic_intercept, 3)}</div><div class="metric-note">${safe(diagnosticAlpha.confidence_status || "UNAVAILABLE")} · annualized SE ${pct(diagnosticAlpha.annualized_standard_error)}</div></div></div>`;
+        const diagnosticSummary = row.contribution_summary;
+        const diagnosticContributionRows = diagnosticSummary ? [
+          ...Object.entries(diagnosticSummary.factor_means).map(([factor, value]) => `<tr><td>${safe(factor)}</td><td>Factor contribution</td><td class="numeric">${pct(value, 3)}</td></tr>`),
+          `<tr><td>Alpha</td><td>Periodic intercept contribution</td><td class="numeric">${pct(diagnosticSummary.alpha_mean, 3)}</td></tr>`,
+          `<tr><td>Fitted</td><td>Factor plus alpha</td><td class="numeric">${pct(diagnosticSummary.fitted_mean, 3)}</td></tr>`,
+          `<tr><td>Residual</td><td>Realized minus fitted</td><td class="numeric">${pct(diagnosticSummary.residual_mean, 3)}</td></tr>`,
+          `<tr><td>Realized</td><td>Observed excess return</td><td class="numeric">${pct(diagnosticSummary.realized_mean, 3)}</td></tr>`,
+        ] : [];
+        const diagnosticContributions = diagnosticSummary ? `<div class="panel"><div class="panel-heading"><div><div class="eyebrow">Forensic diagnostic · holdout mean partition</div><h3>Realized = fitted + residual</h3></div><span class="badge badge-warning">NOT PM-ACCEPTED · n=${integer.format(diagnosticSummary.observations)}</span></div><p>Means use the dated model contribution rows, including changing dynamic betas. Maximum return identity error: ${safe(diagnosticSummary.maximum_reconciliation_error)}.</p><div class="table-wrap"><table><caption>Diagnostic holdout factor contributions and residuals</caption>${tableMarkup([["Component"], ["Role"], ["Mean", "numeric"]], diagnosticContributionRows)}</table></div></div>` : `<div class="callout callout-neutral">Diagnostic contribution and residual summary unavailable: no dated model contributions are supplied.</div>`;
+        $("#factor-detail").innerHTML = `${compositionMarkup}<div class="state-separation"><div><span class="eyebrow">Source state</span><strong>${safe(humanStatus(sourceState(row)))}</strong><p>${integer.format(aligned)} aligned observations are retained.</p></div><div><span class="eyebrow">Model state</span><strong>${safe(humanStatus(modelState(row)))}</strong><p>${safe(humanStatus(reason))}. Sealed-holdout predicted R²: ${pct(holdout?.predicted_r_squared)} across ${integer.format(holdout?.observation_count || 0)} observations.</p></div></div><div class="callout callout-warning">The computed alpha, betas, contributions, and residuals remain visible for forensic review, but the sealed-holdout gate excludes them from portfolio-manager conclusions.</div>${diagnosticAlphaMarkup}${diagnosticBetas}${diagnosticContributions}<div class="callout callout-neutral"><strong>Training design:</strong> n=${integer.format(design.design_observations || 0)} · rank ${safe(design.matrix_rank ?? "—")}/${safe(design.factor_count ?? "—")} · condition ${decimal(design.matrix_condition_number)} · max VIF ${decimal(maximumVif)} · ${statusText(design.unregularized_status || "UNAVAILABLE")}. <strong>Inference:</strong> ${statusText(inference.status || "UNAVAILABLE")}.</div>${dynamicAnalysisMarkup(row)}`;
         prepareScrollableTableRegions();
         return;
       }
@@ -831,6 +908,8 @@
         selectedFactorEvidenceMode = button.dataset.factorEvidenceMode;
         selectedFactorSeries = null;
         if (!activeFactorLenses().some((item) => item.lens_id === selectedFactorLens)) selectedFactorLens = activeFactorLenses()[0]?.lens_id;
+        selectedFactorSurface = currentFactorLens()?.default_surface || "STATIC";
+        selectedFactorSource = null;
         renderAttribution();
       };
     });
@@ -839,12 +918,21 @@
     if (!analysis.series.some((row) => row.series_id === selectedFactorSeries)) selectedFactorSeries = null;
     selectedFactorSeries ||= firstAvailable?.series_id || analysis.series[0]?.series_id;
     $("#factor-lens-selector").innerHTML = activeFactorLenses().map((item) => `<button type="button" class="segment ${item.lens_id === selectedFactorLens ? "is-active" : ""}" data-factor-lens="${safe(item.lens_id)}" aria-pressed="${item.lens_id === selectedFactorLens}">${safe(item.lens_label || item.lens_id)}</button>`).join("");
-    $$('[data-factor-lens]').forEach((button) => button.addEventListener("click", () => { selectedFactorLens = button.dataset.factorLens; selectedFactorSeries = null; renderAttribution(); }));
+    $$('[data-factor-lens]').forEach((button) => button.addEventListener("click", () => { selectedFactorLens = button.dataset.factorLens; selectedFactorSurface = currentFactorLens()?.default_surface || "STATIC"; selectedFactorSource = null; selectedFactorSeries = null; renderAttribution(); }));
+    const lensRecord = currentFactorLens();
+    const surfaces = lensRecord?.surfaces || { [lensRecord?.default_surface || "STATIC"]: lensRecord };
+    const surfaceLabels = { STATIC: "Static RBSA", DYNAMIC_FLS: "Dynamic FLS" };
+    $("#factor-surface-selector").innerHTML = Object.keys(surfaces).map((surface) => `<button type="button" class="segment ${surface === selectedFactorSurface ? "is-active" : ""}" data-factor-surface="${safe(surface)}" aria-pressed="${surface === selectedFactorSurface}">${safe(surfaceLabels[surface] || humanStatus(surface))}</button>`).join("");
+    $$('[data-factor-surface]').forEach((button) => button.addEventListener("click", () => { selectedFactorSurface = button.dataset.factorSurface; selectedFactorSource = null; selectedFactorSeries = null; renderAttribution(); }));
+    const surfaceAnalysis = currentFactorSurfaceAnalysis();
+    const sourceOptions = (surfaceAnalysis.sources || []).map((item) => ({ key: item.source_key, label: item.source_label || item.source_key }));
+    $("#factor-source-selector").innerHTML = sourceOptions.map((item) => `<button type="button" class="segment ${item.key === selectedFactorSource ? "is-active" : ""}" data-factor-source="${safe(item.key)}" aria-pressed="${item.key === selectedFactorSource}">${safe(item.label)}</button>`).join("");
+    $$('[data-factor-source]').forEach((button) => button.addEventListener("click", () => { selectedFactorSource = button.dataset.factorSource; selectedFactorSeries = null; renderAttribution(); }));
     const sourceRows = Array.isArray(analysis.sources) ? analysis.sources : [];
     const sourceSummary = sourceRows.map((item) => `${item.source_label || item.source_key} · through ${item.as_of_date}`).join(" · ") || "Single accepted historical proof generation";
     const proxyGovernance = analysis.proxy_governance || {};
     const semantics = lensSemantics[analysis.lens_id] || { question: "What return drivers explain the strategy?", method: "Returns-based decomposition.", beta: "Beta is fitted return sensitivity.", caveat: "No holdings inference is made." };
-    $("#factor-lens-boundary").innerHTML = `<strong>${safe(analysis.lens_label || analysis.lens_id)}</strong> · ${safe(analysis.return_basis || "CONFIGURED_RETURN_BASIS")} · ${safe(selectedFactorEvidenceMode)}<br><strong>Question:</strong> ${safe(semantics.question)} <strong>Method:</strong> ${safe(semantics.method)} <strong>Beta:</strong> ${safe(semantics.beta)} <strong>Boundary:</strong> ${safe(semantics.caveat)}<br><strong>Selection boundary:</strong> ${safe(humanStatus(proxyGovernance.selection_boundary || "UNAVAILABLE_NOT_DECLARED"))}. ${safe(sourceSummary)}. ${integer.format(proxyGovernance.candidate_count || 0)} governed candidates; ${safe(humanStatus(proxyGovernance.orthogonality_claim || "UNAVAILABLE"))}. Live only is authoritative; live + backtest uses only compatible pre-live history. Lenses remain separate and are never concatenated.`;
+    $("#factor-lens-boundary").innerHTML = `<strong>${safe(analysis.lens_label || analysis.lens_id)}</strong> · ${safe(analysis.return_basis || "CONFIGURED_RETURN_BASIS")} · ${safe(selectedFactorEvidenceMode)} · ${safe(surfaceLabels[selectedFactorSurface] || humanStatus(selectedFactorSurface))}<br><strong>Question:</strong> ${safe(semantics.question)} <strong>Method:</strong> ${safe(semantics.method)} <strong>Beta:</strong> ${safe(semantics.beta)} <strong>Boundary:</strong> ${safe(semantics.caveat)}<br><strong>Selection boundary:</strong> ${safe(humanStatus(proxyGovernance.selection_boundary || "UNAVAILABLE_NOT_DECLARED"))}. ${safe(sourceSummary)}. ${integer.format(proxyGovernance.candidate_count || 0)} governed candidates; ${safe(humanStatus(proxyGovernance.orthogonality_claim || "UNAVAILABLE"))}. Static and dynamic are separately planned, computed, and published surfaces. Live only is authoritative; live + backtest uses only compatible pre-live history. Lenses remain separate and are never concatenated.`;
     renderUnderwriting();
     renderKpis("#factor-kpis", [
       ["PM-usable models", `${analysis.available_count}/${analysis.series.length}`, "Positive sealed-holdout predicted R² required", analysis.available_count ? "positive" : "danger"],
@@ -1415,6 +1503,65 @@
     });
   }
 
+  function bindEmbeddedDownloads() {
+    $$('a[data-download-payload-prefix]').forEach((link) => link.addEventListener("click", (event) => {
+      event.preventDefault();
+      const filename = String(link.getAttribute("data-download-filename") || "");
+      const metadata = EMBEDDED_DOWNLOAD_TYPES[filename];
+      const mimeType = metadata?.mimeType;
+      const payloadPrefix = String(link.getAttribute("data-download-payload-prefix") || "");
+      const chunkCount = Number(link.getAttribute("data-download-chunk-count"));
+      if (!mimeType
+          || payloadPrefix !== metadata.payloadPrefix
+          || !Number.isInteger(chunkCount)
+          || chunkCount < 1
+          || chunkCount > EMBEDDED_DOWNLOAD_MAX_CHUNKS
+          || link.getAttribute("data-download-mime") !== mimeType
+          || link.getAttribute("href") !== `downloads/${filename}`
+          || link.getAttribute("download") !== filename) {
+        console.error("Embedded download metadata is invalid.");
+        return;
+      }
+      try {
+        const chunks = [];
+        for (let index = 0; index < chunkCount; index += 1) {
+          const payloadElement = document.getElementById(`${payloadPrefix}-${String(index).padStart(5, "0")}`);
+          const chunk = String(payloadElement?.textContent || "");
+          const validChunk = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(chunk);
+          if (!(payloadElement instanceof HTMLScriptElement)
+              || payloadElement.type !== "application/octet-stream"
+              || payloadElement.getAttribute("data-download-filename") !== filename
+              || payloadElement.getAttribute("data-download-chunk-index") !== String(index)
+              || !chunk
+              || chunk.length > EMBEDDED_DOWNLOAD_CHUNK_SIZE
+              || (index < chunkCount - 1 && chunk.length !== EMBEDDED_DOWNLOAD_CHUNK_SIZE)
+              || !validChunk) {
+            throw new Error("Embedded download chunk is invalid.");
+          }
+          chunks.push(chunk);
+        }
+        const payload = chunks.join("");
+        const binary = window.atob(payload);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+        const objectUrl = URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+        const trigger = document.createElement("a");
+        trigger.href = objectUrl;
+        trigger.download = filename;
+        trigger.hidden = true;
+        document.body.appendChild(trigger);
+        try {
+          trigger.click();
+        } finally {
+          trigger.remove();
+          window.setTimeout(() => URL.revokeObjectURL(objectUrl), 0);
+        }
+      } catch (error) {
+        console.error("Embedded download payload could not be decoded.", error);
+      }
+    }));
+  }
+
   function init() {
     try {
       if (!data || data.panel_schema_version !== 21) throw new Error("Embedded dashboard data is missing or unsupported");
@@ -1422,7 +1569,7 @@
       $("#freshness-as-of").textContent = formatDate(data.meta.freshness_evaluated_on);
       $("#coverage-status").textContent = `${pct(data.advisory.nav_coverage)} NAV`;
       populateContextControls();
-      renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderAttribution(); renderDependence(); renderWeekly(); renderCandidates(); renderData(); prepareScrollableTableRegions(); bindEvents();
+      renderCommand(); renderCapital(); renderRisk(); renderSignals(); renderAttribution(); renderDependence(); renderWeekly(); renderCandidates(); renderData(); prepareScrollableTableRegions(); bindEvents(); bindEmbeddedDownloads();
       $("#loading-state").hidden = true;
       $("#app").dataset.appState = "ready";
       const requested = location.hash.slice(1);

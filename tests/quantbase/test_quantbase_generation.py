@@ -69,6 +69,39 @@ def _plan(tmp_path: Path) -> tuple[Path, Path, Path]:
     return Path(str(result["plan_path"])), source, data
 
 
+def _native_evidence(tmp_path: Path) -> list[tuple[str, Path]]:
+    evidence = tmp_path / "native-evidence"
+    evidence.mkdir()
+    har = evidence / "quantbase_20260902_171237.har"
+    response = evidence / "0274_qbapi3.com_200_application_json.json"
+    synthetic_har_log_key = "log"
+    synthetic_har_entries_key = "entries"
+    har.write_text(
+        json.dumps(
+            {synthetic_har_log_key: {synthetic_har_entries_key: []}},
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    response.write_text('{"data":[]}\n', encoding="utf-8")
+    return [
+        ("har/quantbase_20260902_171237.har", har),
+        (
+            "har_output/responses/0274_qbapi3.com_200_application_json.json",
+            response,
+        ),
+    ]
+
+
+def _with_unexpected_native(
+    values: list[tuple[str, Path]],
+) -> list[tuple[str, Path]]:
+    unexpected = values[0][1].with_name("unexpected.har")
+    unexpected.write_bytes(values[0][1].read_bytes())
+    return [*values, ("har/unexpected.har", unexpected)]
+
+
 def test_generation_is_deterministic_and_planning_count_is_reconciled(
     tmp_path: Path,
 ) -> None:
@@ -93,6 +126,112 @@ def test_generation_is_deterministic_and_planning_count_is_reconciled(
     serialized = first_bytes.decode("utf-8")
     assert "LEGACY_UNKNOWN" in serialized
     assert '"api_fallback":false' in serialized
+
+
+def test_optional_native_pair_is_hash_bound_staged_and_manifested(
+    tmp_path: Path,
+) -> None:
+    source, data = _source(tmp_path)
+    result = generation.create_plan(
+        source,
+        data,
+        as_of_date=date(2026, 9, 2),
+        quarantine_plan_id="d" * 64,
+        expected_file_count=len(FILES),
+        expected_record_count=len(FILES),
+        planning_record_count=len(FILES) + 80,
+        native_artifacts=_native_evidence(tmp_path),
+    )
+    plan = Path(str(result["plan_path"]))
+
+    staged = generation.stage_candidate(plan)
+    document = json.loads(plan.read_text(encoding="utf-8"))
+    native = document["native_artifacts"]
+    assert [item["relative_path"] for item in native] == [
+        "har/quantbase_20260902_171237.har",
+        "har_output/responses/0274_qbapi3.com_200_application_json.json",
+    ]
+    staging = data / "source-runs" / document["run_id"] / ".staging"
+    assert (staging / native[0]["relative_path"]).read_bytes() == Path(
+        native[0]["source_path"]
+    ).read_bytes()
+    _, manifest, _ = generation.build_generation(plan, input_root=staging)
+    artifacts = {item.artifact_id: item for item in manifest.artifacts}
+    assert artifacts["source/har/quantbase_20260902_171237.har"].schema_name == (
+        "quantbase-native-har"
+    )
+    assert (
+        artifacts[
+            "source/har_output/responses/0274_qbapi3.com_200_application_json.json"
+        ].schema_name
+        == "quantbase-account-activity-response"
+    )
+    assert staged["generation_id"] == manifest.generation_id
+
+    response_destination = generation._io_path(
+        (staging / native[1]["relative_path"]).resolve()
+    )
+    original_response = response_destination.read_bytes()
+    response_destination.write_bytes(b'{"data":["conflict"]}\n')
+    with pytest.raises(
+        generation.QuantbaseGenerationError,
+        match="staging contains conflicting bytes",
+    ):
+        generation.stage_candidate(plan)
+    response_destination.write_bytes(original_response)
+
+    for item in native:
+        Path(item["source_path"]).unlink()
+    _, replayed_manifest, _ = generation.build_generation(plan, input_root=staging)
+    assert replayed_manifest.generation_id == manifest.generation_id
+
+    document["native_artifacts"] = []
+    with pytest.raises(
+        generation.QuantbaseGenerationError,
+        match="must contain the exact retained HAR and response pair",
+    ):
+        generation._verify_tree(staging, document, legacy=False)
+
+
+@pytest.mark.parametrize(
+    "native_artifacts,match",
+    [
+        (
+            lambda values: values[:1],
+            "must contain the exact retained HAR and response pair",
+        ),
+        (
+            lambda values: [values[0], values[0]],
+            "relative paths must be unique",
+        ),
+        (
+            lambda values: [("../capture.har", values[0][1]), values[1]],
+            "relative path is unsafe",
+        ),
+        (
+            _with_unexpected_native,
+            "must contain the exact retained HAR and response pair",
+        ),
+    ],
+)
+def test_optional_native_evidence_rejects_partial_duplicate_unsafe_or_unexpected(
+    tmp_path: Path,
+    native_artifacts: object,
+    match: str,
+) -> None:
+    source, data = _source(tmp_path)
+    values = _native_evidence(tmp_path)
+    with pytest.raises(generation.QuantbaseGenerationError, match=match):
+        generation.create_plan(
+            source,
+            data,
+            as_of_date=date(2026, 9, 2),
+            quarantine_plan_id="e" * 64,
+            expected_file_count=len(FILES),
+            expected_record_count=len(FILES),
+            planning_record_count=len(FILES) + 80,
+            native_artifacts=native_artifacts(values),
+        )
 
 
 def test_stage_publish_verify_and_single_authority_cutover(tmp_path: Path) -> None:

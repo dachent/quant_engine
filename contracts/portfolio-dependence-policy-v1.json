@@ -4,22 +4,40 @@
   "policy_id": "PORT-DEPENDENCE-1",
   "owner_issue": 336,
   "history_authority": {
-    "generation_id": "dd808ce24634da2cb74e7f381283f9b1e78654c921c308f52df98128c6ff39d7",
-    "receipt_sha256": "a2387638b91c44691c01411b98023b4b1f72626a13fe8b41f7c8dca067d9eddc",
+    "generation_id": "3088203ffa0cd3c3993bbbca352c247913cba17ac8b528e6ce617b09cad83e48",
+    "receipt_sha256": "92a549ed58c83f91ebbebb58843dd2c8a021a73fc30dd4b0d4bbfd665cb3d169",
     "outputs": {
-      "coverage.json": {"sha256": "76b025d8430f63cb6f67b7d615a799de3d7ce1c73e260ac0ba8dc3471e33fe8b", "size_bytes": 17606},
-      "excluded.csv": {"sha256": "8eee0f630ee66b2280884623c71acc414e72665c44869949cc203b20a5807360", "size_bytes": 67},
-      "live-only.csv": {"sha256": "db230a25740a02af55563daa01a07bfe8859855f837b1020262781a6c8d0894f", "size_bytes": 236560},
-      "live-plus-backtest.csv": {"sha256": "db230a25740a02af55563daa01a07bfe8859855f837b1020262781a6c8d0894f", "size_bytes": 236560},
-      "returns.csv": {"sha256": "db230a25740a02af55563daa01a07bfe8859855f837b1020262781a6c8d0894f", "size_bytes": 236560},
-      "segments.csv": {"sha256": "bc38258af9bff2ab02903796047829aabcb34117bb9b965973846846d825a5ca", "size_bytes": 680197}
+      "coverage.json": {
+        "sha256": "37d7095e0fe0a3baeeb9fd16b9971f2c1fb9b0aaa4dd5fc43681d2e3d1d26d0d",
+        "size_bytes": 208311
+      },
+      "excluded.csv": {
+        "sha256": "8eee0f630ee66b2280884623c71acc414e72665c44869949cc203b20a5807360",
+        "size_bytes": 67
+      },
+      "live-only.csv": {
+        "sha256": "b80145409b499fd81c3170b903f3045402751130bc631ee12a4337d85939ded9",
+        "size_bytes": 250702
+      },
+      "live-plus-backtest.csv": {
+        "sha256": "b80145409b499fd81c3170b903f3045402751130bc631ee12a4337d85939ded9",
+        "size_bytes": 250702
+      },
+      "returns.csv": {
+        "sha256": "b80145409b499fd81c3170b903f3045402751130bc631ee12a4337d85939ded9",
+        "size_bytes": 250702
+      },
+      "segments.csv": {
+        "sha256": "fbd04d9609bf3d35576b7f69725b6ac460a218f44b473ad2c3a4596575e6b405",
+        "size_bytes": 720940
+      }
     }
   },
   "allocation_authority": {
-    "generation_id": "20709bfd5f9a5846879854bf3166c11223a100cc62fcb13fe0b76040f881b542",
-    "manifest_sha256": "c5a1580b4a30480783b3ad54c8077687c2cf95bfe4c46ad1daf07c7d7f97ccf0",
-    "catalog_sha256": "0a9b5b243dc16786e41099dde6d02cd0c03431534bc50376352837f36d4734f4",
-    "as_of_date": "2026-08-16"
+    "generation_id": "0e71c90d127effa47cac82cbcef12e925a3cd771a9f6beb3edf6efc046f3489b",
+    "manifest_sha256": "1f108e8950fd16ba8744b65dcbbb77dc2607d762d85412f344052b2fb92f0e9d",
+    "catalog_sha256": "a4c125fab2eeba71166a15c0a31cef6b5bd7bc678ca402433e92fbf1b4075b26",
+    "as_of_date": "2026-09-04"
   },
   "series": [
     {"strategy_id": "p123-ai-factor", "series_id": "AI Factor [P123]", "allocation_weight": "0.12320999714360502", "adverse_loss_fraction": "0.216625"},

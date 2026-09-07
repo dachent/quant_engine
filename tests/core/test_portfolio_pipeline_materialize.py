@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, localcontext
 import hashlib
 import importlib.util
 import json
@@ -48,6 +49,25 @@ assert FIXTURE_SPEC is not None and FIXTURE_SPEC.loader is not None
 financial_fixture = importlib.util.module_from_spec(FIXTURE_SPEC)
 sys.modules[FIXTURE_SPEC.name] = financial_fixture
 FIXTURE_SPEC.loader.exec_module(financial_fixture)
+HWM_FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "hwm_governed_execution_fixture",
+    ROOT / "tests" / "portfolio_ledger" / "test_hwm_governed_execution.py",
+)
+assert HWM_FIXTURE_SPEC is not None and HWM_FIXTURE_SPEC.loader is not None
+hwm_fixture = importlib.util.module_from_spec(HWM_FIXTURE_SPEC)
+sys.modules[HWM_FIXTURE_SPEC.name] = hwm_fixture
+HWM_FIXTURE_SPEC.loader.exec_module(hwm_fixture)
+SELECTED_HWM_FIXTURE_SPEC = importlib.util.spec_from_file_location(
+    "selected_hwm_input_fixture",
+    ROOT / "tests" / "portfolio_ledger" / "test_hwm_selected_inputs.py",
+)
+assert (
+    SELECTED_HWM_FIXTURE_SPEC is not None
+    and SELECTED_HWM_FIXTURE_SPEC.loader is not None
+)
+selected_hwm_fixture = importlib.util.module_from_spec(SELECTED_HWM_FIXTURE_SPEC)
+sys.modules[SELECTED_HWM_FIXTURE_SPEC.name] = selected_hwm_fixture
+SELECTED_HWM_FIXTURE_SPEC.loader.exec_module(selected_hwm_fixture)
 
 AS_OF = date(2026, 8, 3)
 ROLES = ("ledger", "baseline", "report", "panel")
@@ -59,6 +79,297 @@ PREWIRE_MANIFEST_SHA256 = (
 PREWIRE_REPORT_SHA256 = (
     "eee8288e0f9ac185d75cf3c7d36947cf1521bf0561e39d178649ba69b865829e"
 )
+
+
+def _available_hwm_assessment_fixture(
+    tmp_path: Path,
+) -> tuple[dict[str, object], dict[str, Path], dict[str, object]]:
+    fixture = hwm_fixture._fixture(tmp_path, mode="committed")
+    result = hwm_fixture._run(fixture)
+    paths = {
+        "governed_result": tmp_path / "governed-hwm-result.json",
+        "input_generation": tmp_path / "governed-hwm-input-generation.json",
+        "calendar_authority": tmp_path / "governed-hwm-calendar.json",
+        "provider_admission_receipt": tmp_path / "admit-or-declare-receipt.json",
+    }
+    paths["governed_result"].write_bytes(
+        json.dumps(result, default=str, sort_keys=True, separators=(",", ":")).encode()
+    )
+    paths["input_generation"].write_bytes(canonical_json_bytes(fixture["generation"]))
+    paths["calendar_authority"].write_bytes(fixture["calendar_authority_bytes"])
+    paths["provider_admission_receipt"].write_bytes(fixture["input_receipt_bytes"])
+    repository_contract = ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+    placeholder = tmp_path / "placeholder.json"
+    placeholder.write_bytes(b"{}")
+    authority: dict[str, object] = {
+        "contract": materializer._file_definition(repository_contract),
+        "conformance": {
+            "census_sha256": "1" * 64,
+            "contract_semantic_sha256": hashlib.sha256(
+                canonical_json_bytes(json.loads(repository_contract.read_bytes()))
+            ).hexdigest(),
+            "outcomes": [
+                {
+                    "outcome_id": "AS_HELD_COMPOSITE_HWM",
+                    "readiness": "REQUIRED_NOT_READY",
+                }
+            ],
+            "provider_admission": {"product_readiness": "READY_FOR_COMPOSITION"},
+            "sources": [],
+            "strategies": [
+                {"product_requirement": "REQUIRED", "strategy_id": "a-daily"},
+                {"product_requirement": "REQUIRED", "strategy_id": "b-session"},
+            ],
+        },
+        "provider_generation": {
+            "catalog": materializer._file_definition(placeholder),
+            "generation_id": "a" * 64,
+            "manifest": materializer._file_definition(placeholder),
+            "receipt": materializer._file_definition(
+                paths["provider_admission_receipt"]
+            ),
+        },
+        "source_matrix": materializer._file_definition(placeholder),
+    }
+    return authority, paths, result
+
+
+def test_assessment_two_available_requires_real_selected_source_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_paths = selected_hwm_fixture._fixture(tmp_path / "selected", daily=True)
+    generation = selected_hwm_fixture._build(selected_paths)
+    calendar_bytes = selected_paths["calendar"].read_bytes()
+    calendar = json.loads(calendar_bytes)
+    calendar_root = calendar["authority_evidence_sha256"]
+    start = min(
+        date.fromisoformat(row["effective_start"]) for row in generation["memberships"]
+    )
+    complete = max(
+        date.fromisoformat(row["interval_end"])
+        for row in generation["component_periods"]
+    )
+    accepted_intervals = []
+    cursor = start
+    index = 0
+    while cursor < complete:
+        following = cursor + timedelta(days=1)
+        accepted_intervals.append(
+            {
+                "interval_id": f"selected-{index:04d}",
+                "interval_start": cursor.isoformat(),
+                "interval_end": following.isoformat(),
+                "interval_evidence_sha256": hashlib.sha256(
+                    f"{cursor.isoformat()}|{following.isoformat()}|{calendar_root}".encode()
+                ).hexdigest(),
+            }
+        )
+        cursor = following
+        index += 1
+    input_bytes = canonical_json_bytes(generation)
+    policy_bytes = selected_paths["policy"].read_bytes()
+    receipt_bytes = selected_paths["receipt"].read_bytes()
+    result = hwm_fixture.compute_governed_as_held_composite_hwm(
+        accepted_intervals,
+        generation["memberships"],
+        generation["component_periods"],
+        policy_bytes=policy_bytes,
+        product_contract_bytes=selected_paths["contract"].read_bytes(),
+        performance_policy_bytes=(
+            ROOT / "contracts" / "portfolio-performance-policy-v1.json"
+        ).read_bytes(),
+        legacy_policy_bytes=(
+            ROOT / "contracts" / "portfolio-hwm-policy-v3.json"
+        ).read_bytes(),
+        calendar_authority_bytes=calendar_bytes,
+        input_generation_bytes=input_bytes,
+        input_receipt_bytes=receipt_bytes,
+        calendar_accepted_sha256=calendar_root,
+        evaluated_on=(complete + timedelta(days=1)).isoformat(),
+        complete_through=complete.isoformat(),
+        maximum_age_days=30,
+        assurance_profile="WORKSTATION_QC",
+    )
+    # Independent oracle: add account NAV changes directly, without using the
+    # adapter's grouped returns, weights, observation factors or linked index.
+    ledger = json.loads(
+        (
+            selected_paths["provider_generation"].parent
+            / "normalized/provider-ledger.json"
+        ).read_bytes()
+    )
+    navs = {
+        (row["account_id"], row["as_of_date"]): Decimal(row["nav"]["value"])
+        for row in ledger["nav_observations"]
+    }
+    census = json.loads(selected_paths["contract"].read_bytes())["current_census"]
+    with localcontext() as context:
+        context.prec = 50
+        index_value = peak = Decimal("100")
+        worst = Decimal("0")
+        for period in result["periods"]:
+            left, right = period["interval_start"], period["interval_end"]
+            accounts = {
+                f"synthetic-account-{account_index:02d}"
+                for account_index, sleeve in enumerate(census["account_sleeves"])
+                for assignment in sleeve["assignments"]
+                if assignment["status"] in {"FUNDED_MEMBERSHIP", "ASSIGNMENT_ONLY"}
+                and assignment["effective_start"] <= left
+                and (
+                    assignment["effective_end"] is None
+                    or right <= assignment["effective_end"]
+                )
+            }
+            opening = sum(navs[(account, left)] for account in accounts)
+            closing = sum(navs[(account, right)] for account in accounts)
+            expected_return = closing / opening - 1
+            assert abs(period["composite_return"] - expected_return) < Decimal("1e-30")
+            index_value *= 1 + expected_return
+            peak = max(peak, index_value)
+            drawdown = index_value / peak - 1
+            worst = min(worst, drawdown)
+        for key, expected in {
+            "current_index": index_value,
+            "current_hwm": peak,
+            "current_drawdown": drawdown,
+            "maximum_drawdown": worst,
+        }.items():
+            assert abs(result[key] - expected) < Decimal("1e-27"), key
+        assert worst < 0
+    paths = {
+        "governed_result": tmp_path / "source-bound-hwm-result.json",
+        "input_generation": tmp_path / "source-bound-hwm-input.json",
+        "calendar_authority": selected_paths["calendar"],
+        "provider_admission_receipt": selected_paths["receipt"],
+    }
+    paths["governed_result"].write_bytes(
+        json.dumps(result, default=str, sort_keys=True, separators=(",", ":")).encode()
+    )
+    paths["input_generation"].write_bytes(input_bytes)
+    static_sources = {
+        "portfolio-calendars",
+        "portfolio-fx-rates",
+        "portfolio-security-master",
+    }
+    placeholder = tmp_path / "source-bound-placeholder.json"
+    placeholder.write_bytes(b"{}")
+    authority = {
+        "contract": materializer._file_definition(selected_paths["contract"]),
+        "conformance": {
+            "census_sha256": "1" * 64,
+            "contract_semantic_sha256": (
+                selected_hwm_fixture.financial_contract.contract_digest(
+                    json.loads(selected_paths["contract"].read_bytes())
+                )
+            ),
+            "outcomes": [
+                {
+                    "outcome_id": "AS_HELD_COMPOSITE_HWM",
+                    "readiness": "REQUIRED_NOT_READY",
+                }
+            ],
+            "provider_admission": {"product_readiness": "READY_FOR_COMPOSITION"},
+            "sources": [
+                {
+                    "source_id": source_id,
+                    "consumers": ["AS_HELD_COMPOSITE_HWM"],
+                    "current_generation": {"generation_id": None, "sha256": None},
+                }
+                for source_id in sorted(static_sources)
+            ],
+            "strategies": [
+                {
+                    "product_requirement": "REQUIRED",
+                    "strategy_id": row["strategy_id"],
+                }
+                for row in generation["memberships"]
+            ],
+        },
+        "provider_generation": {
+            "catalog": materializer._file_definition(placeholder),
+            "generation_id": selected_paths["provider_generation"].parent.name,
+            "manifest": materializer._file_definition(placeholder),
+            "receipt": materializer._file_definition(selected_paths["receipt"]),
+        },
+        "source_matrix": materializer._file_definition(placeholder),
+    }
+    source_paths = {
+        "account_manifest_generation_path": selected_paths["generation"],
+        "account_manifest_admission_policy_path": selected_paths["admission_policy"],
+        "account_manifest_flow_classification_policy_path": selected_paths[
+            "flow_classification_policy"
+        ],
+        "provider_ledger_generation_path": selected_paths["provider_generation"],
+        "baseline_generation_path": selected_paths["baseline_generation"],
+    }
+    import portfolio_pipeline_materialize as imported_materializer
+
+    monkeypatch.setattr(materializer, "HWM_GOVERNED_POLICY", selected_paths["policy"])
+    monkeypatch.setattr(
+        imported_materializer, "HWM_GOVERNED_POLICY", selected_paths["policy"]
+    )
+
+    assessment = materializer._hwm_input_authority_assessment(
+        authority,
+        hwm_bindings=paths,
+        hwm_source_paths=source_paths,
+    )
+
+    assert assessment["schema_version"] == 2
+    assert assessment["assessment_scope"] == "VERIFIED_GOVERNED_HWM_RESULT"
+    assert assessment["state"] == "AVAILABLE"
+    assert assessment["outcome_readiness"] == "REQUIRED_NOT_READY"
+    assert assessment["required_strategy_ids"] == sorted(
+        row["strategy_id"] for row in generation["memberships"]
+    )
+    assert assessment["blocking_reasons"] == []
+    assert assessment["unresolved_source_ids"] == []
+    assert (
+        assessment["result_sha256"]
+        == hashlib.sha256(paths["governed_result"].read_bytes()).hexdigest()
+    )
+    assert (
+        assessment["input_generation_sha256"]
+        == hashlib.sha256(paths["input_generation"].read_bytes()).hexdigest()
+    )
+    assert (
+        assessment["calendar_authority_sha256"]
+        == hashlib.sha256(paths["calendar_authority"].read_bytes()).hexdigest()
+    )
+    assert set(assessment["bindings"]) == set(paths)
+    tampered_policy = tmp_path / "tampered-flow-classification-policy.json"
+    tampered_policy.write_bytes(
+        selected_paths["flow_classification_policy"].read_bytes() + b"\n"
+    )
+    tampered_source_paths = dict(source_paths)
+    tampered_source_paths["account_manifest_flow_classification_policy_path"] = (
+        tampered_policy
+    )
+    with pytest.raises(
+        materializer.MaterializationError, match="selected HWM source replay"
+    ):
+        materializer._hwm_input_authority_assessment(
+            authority,
+            hwm_bindings=paths,
+            hwm_source_paths=tampered_source_paths,
+        )
+
+
+def test_assessment_two_rejects_result_self_reference(tmp_path: Path) -> None:
+    authority, paths, _result = _available_hwm_assessment_fixture(tmp_path)
+    product_path = tmp_path / "financial-mvp-product-conformance.json"
+    paths["governed_result"] = product_path.with_name(
+        "financial-mvp-hwm-input-authority.json"
+    )
+
+    with pytest.raises(materializer.MaterializationError, match="self-reference"):
+        materializer._product_gate_rows(
+            authority,
+            product_path,
+            hwm_bindings=paths,
+            hwm_source_paths={"synthetic": tmp_path},
+        )
 
 
 def _stage_prewire_generation(root: Path) -> tuple[GenerationManifest, object]:
@@ -1584,21 +1895,20 @@ def test_create_recipe_binds_financial_mvp_authority_and_admission_receipt(
         if gate["gate_id"] == "financial-mvp-hwm-input-authority"
     )
     assessment = json.loads(Path(hwm_gate["path"]).read_text(encoding="utf-8"))
-    assert assessment["schema_version"] == 1
-    assert assessment["assessment_scope"] == (
-        "CURRENT_PRODUCT_AND_PROVIDER_ADMISSION_ONLY"
-    )
+    assert assessment["schema_version"] == 2
+    assert assessment["assessment_scope"] == "PENDING_GOVERNED_HWM_RESULT"
     assert assessment["outcome_id"] == "AS_HELD_COMPOSITE_HWM"
     assert assessment["state"] == "REQUIRED_NOT_READY"
     assert assessment["input_generation_sha256"] is None
     assert assessment["calendar_authority_sha256"] is None
+    assert assessment["result_sha256"] is None
+    assert assessment["bindings"] == {}
     assert assessment["outcome_readiness"] == "NOT_DECLARED"
     assert assessment["required_strategy_ids"] == ["strategy-1"]
     assert assessment["unresolved_source_ids"] == []
     assert assessment["blocking_reasons"] == [
         "ACCEPTED_HWM_INPUT_GENERATION_ABSENT",
         "ACCEPTED_MIXED_CALENDAR_AUTHORITY_ABSENT",
-        "OUTCOME:AS_HELD_COMPOSITE_HWM",
     ]
     assert (
         assessment["authority_hashes"]["provider_receipt_sha256"]
@@ -1633,7 +1943,6 @@ def test_create_recipe_binds_financial_mvp_authority_and_admission_receipt(
     assert missing_source_assessment["blocking_reasons"] == [
         "ACCEPTED_HWM_INPUT_GENERATION_ABSENT",
         "ACCEPTED_MIXED_CALENDAR_AUTHORITY_ABSENT",
-        "OUTCOME:AS_HELD_COMPOSITE_HWM",
         f"SOURCE:{missing_source['source_id']}",
     ]
     orchestration = json.loads(
@@ -2310,6 +2619,64 @@ def test_correction_identity_invalidates_only_its_dag_closure(tmp_path: Path) ->
     )
 
 
+@pytest.mark.parametrize("actual_blocker", [None, "provider", "correction"])
+def test_candidate_eligibility_separates_frozen_readiness_from_admission(
+    tmp_path: Path, actual_blocker: str | None
+) -> None:
+    product = financial_fixture.build_financial_mvp_fixture(
+        tmp_path / "product", ready=True
+    )
+    registry = _runtime_registry(
+        tmp_path / "registry",
+        name="corrections",
+        semantic_sha256=hashlib.sha256(product.contract_path.read_bytes()).hexdigest(),
+        census_sha256=hashlib.sha256(
+            canonical_json_bytes(product.contract["current_census"])
+        ).hexdigest(),
+        records=[],
+    )
+    rederive = materializer._authority_registry(
+        None,
+        schema_name="portfolio-rederive-receipt-registry",
+        record_key="receipts",
+    )
+    conformance = _fixture_conformance(product, registry, rederive)
+    source = conformance["sources"][0]
+    source["product_requirement"] = "REQUIRED"
+    source["readiness"] = "REQUIRED_NOT_READY"
+    source["current_generation"] = None
+    frozen_blocker = f"SOURCE:{source['source_id']}"
+    conformance["blocking_reasons"] = [frozen_blocker]
+    if actual_blocker == "provider":
+        conformance["provider_admission"]["product_readiness"] = "REQUIRED_NOT_READY"
+    elif actual_blocker == "correction":
+        conformance["correction_authority"]["applicable_open_correction_ids"] = [
+            "restated-nav"
+        ]
+    summary = core_pipeline._financial_mvp_summary(
+        {
+            "conformance": conformance,
+            "hwm_input_authority": {
+                "schema_version": 2,
+                "state": "UNAVAILABLE",
+                "blocking_reasons": ["HWM_INPUTS_NOT_BUILT"],
+            },
+        }
+    )
+
+    assert summary is not None
+    assert summary["ready_for_execution"] is (actual_blocker is None)
+    expected = {
+        None: [],
+        "provider": ["PROVIDER_ADMISSION"],
+        "correction": ["OPEN_CORRECTION:restated-nav"],
+    }
+    assert summary["blocking_reasons"] == expected[actual_blocker]
+    assert frozen_blocker in summary["completion_blocking_reasons"]
+    assert "HWM_INPUTS_NOT_BUILT" in summary["completion_blocking_reasons"]
+    assert source["source_id"] in summary["required_not_ready_sources"]
+
+
 def test_applicable_correction_and_rederive_receipt_are_runtime_authorities(
     tmp_path: Path,
 ) -> None:
@@ -2495,9 +2862,111 @@ def test_panel_hybrid_authority_requires_every_consumed_generation() -> None:
         materializer._panel_hybrid_generation_ids(payload)
 
 
-def test_production_spec_binds_stable_twenty_root_authority(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def _current_lens_release_fixture(tmp_path: Path) -> tuple[dict, dict]:
+    contract = json.loads(
+        (ROOT / "contracts/portfolio-financial-mvp-source-v1.json").read_bytes()
+    )
+    plan = json.loads(materializer.CURRENT_STRATEGY_REGISTRY.read_bytes())
+    rows = []
+    modes = {}
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        surfaces = {}
+        for surface in ("STATIC", "DYNAMIC_FLS"):
+            sources = []
+            for source_key in plan["sources"]:
+                root = (
+                    tmp_path
+                    / "stages"
+                    / "analytics"
+                    / "decomposition-lenses"
+                    / mode
+                    / surface
+                    / source_key
+                )
+                spec_id = f"{mode}-{surface}-{source_key}"
+                generation = _generation(
+                    root, spec_id, {"decomposition.json": {"synthetic": spec_id}}
+                )
+                _write_json(root / "CURRENT.json", {"generation_id": generation.name})
+                rows.append(
+                    {
+                        "evidence_mode": mode,
+                        "surface": surface,
+                        "source_key": source_key,
+                        "spec_id": spec_id,
+                        "generation_id": generation.name,
+                        "root": str(root),
+                    }
+                )
+                sources.append(
+                    {"source_key": source_key, "generation_id": generation.name}
+                )
+            surfaces[surface] = {"sources": sources}
+        modes[mode] = [{"surfaces": surfaces}]
+    _write_json(
+        tmp_path / "stage-results" / "analytics.json",
+        {
+            "schema_version": 2,
+            "lens_generation_bindings": rows,
+        },
+    )
+    return contract, {"decomposition_lenses": {"modes": modes}}
+
+
+def test_current_lens_generations_share_existing_release_roots(tmp_path: Path) -> None:
+    if sys.platform == "win32":
+        tmp_path = Path("\\\\?\\" + str(tmp_path.resolve()))
+    contract, panel = _current_lens_release_fixture(tmp_path)
+    nodes = materializer._production_lens_nodes(tmp_path, contract)
+    assert len(nodes) == 24
+    assert len({row["root_id"] for row in nodes.values()}) == 12
+    assert {row["root_id"] for row in nodes.values()} <= set(
+        materializer.PRODUCTION_ROOTS
+    )
+    assert sum(row["release_target"] for row in nodes.values()) == 12
+    materializer._verify_panel_lens_nodes(panel, nodes)
+    for (mode, surface, source_key), row in nodes.items():
+        assert row["release_target"] is (surface == "STATIC")
+        assert row["root_id"] == (
+            f"hybrid-{source_key}" if mode == "LIVE_PLUS_BACKTEST" else source_key
+        )
+        assert row["files"] == inventory_generation(Path(row["source_dir"]))["files"]
+    panel["decomposition_lenses"]["modes"]["LIVE_ONLY"][0]["surfaces"]["DYNAMIC_FLS"][
+        "sources"
+    ][0]["generation_id"] = "0" * 64
+    with pytest.raises(materializer.MaterializationError, match="panel lens"):
+        materializer._verify_panel_lens_nodes(panel, nodes)
+
+
+@pytest.mark.parametrize("mutation", ["missing", "duplicate", "pointer", "root"])
+def test_current_lens_generation_bindings_reject_drift(
+    tmp_path: Path, mutation: str
 ) -> None:
+    if sys.platform == "win32":
+        tmp_path = Path("\\\\?\\" + str(tmp_path.resolve()))
+    contract, _panel = _current_lens_release_fixture(tmp_path)
+    path = tmp_path / "stage-results" / "analytics.json"
+    value = json.loads(path.read_bytes())
+    rows = value["lens_generation_bindings"]
+    if mutation == "missing":
+        rows.pop()
+    elif mutation == "duplicate":
+        rows.append(rows[0])
+    elif mutation == "pointer":
+        _write_json(Path(rows[0]["root"]) / "CURRENT.json", {"generation_id": "0" * 64})
+    else:
+        rows[0]["root"] = str(tmp_path / "wrong-root")
+    _write_json(path, value)
+    with pytest.raises(materializer.MaterializationError, match="lens"):
+        materializer._production_lens_nodes(tmp_path, contract)
+
+
+@pytest.mark.parametrize("current_surfaces", [False, True])
+def test_production_spec_binds_stable_twenty_root_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, current_surfaces: bool
+) -> None:
+    if sys.platform == "win32":
+        tmp_path = Path("\\\\?\\" + str(tmp_path.resolve()))
     short_stage_roots = dict(materializer.PRODUCTION_STAGE_ROOTS)
     analytics_root_ids = [
         root_id
@@ -2559,6 +3028,29 @@ def test_production_spec_binds_stable_twenty_root_authority(
         )
         _write_json(staged_root / "CURRENT.json", {"generation_id": generation.name})
         analytics_ids[root_id] = generation.name
+    current_nodes = {}
+    current_panel = {}
+    if current_surfaces:
+        lens_contract, current_panel = _current_lens_release_fixture(prepared_root)
+        current_nodes = materializer._production_lens_nodes(
+            prepared_root, lens_contract
+        )
+        # The older provider fixture has only a capital outcome. Keep this
+        # regression scoped to release routing; the lens helper still checks
+        # the real current contract and actual immutable fixture generations.
+        lens_node_builder = materializer._production_lens_nodes
+        monkeypatch.setattr(
+            materializer,
+            "_production_lens_nodes",
+            lambda root, _contract: lens_node_builder(root, lens_contract),
+        )
+        analytics_ids.update(
+            {
+                row["root_id"]: row["generation_id"]
+                for row in current_nodes.values()
+                if row["release_target"]
+            }
+        )
     panel = next((prepared_root / "stages" / "panel" / "generations").iterdir())
 
     def bind_panel_analytics(payload: dict[str, object]) -> None:
@@ -2571,7 +3063,11 @@ def test_production_spec_binds_stable_twenty_root_authority(
                 "weekly_returns_generation_id": analytics_ids["weekly-returns"],
             }
         )
-        payload["decomposition_lenses"] = _hybrid_panel_lenses(analytics_ids)
+        payload["decomposition_lenses"] = (
+            current_panel["decomposition_lenses"]
+            if current_surfaces
+            else _hybrid_panel_lenses(analytics_ids)
+        )
 
     _mutate_json(
         panel / "data" / "dashboard_data.json",
@@ -2594,6 +3090,46 @@ def test_production_spec_binds_stable_twenty_root_authority(
     production_root = tmp_path / "production"
     spec_path = tmp_path / "release" / "production-spec.json"
 
+    # This test isolates the established root/recovery mapping. Numerical
+    # completion is exercised without stubs by test_portfolio_mvp2_vertical.
+    import portfolio_financial_outcomes
+
+    monkeypatch.setattr(
+        portfolio_financial_outcomes,
+        "validate_financial_outcomes",
+        lambda _spec: {"status": "PASS"},
+    )
+    financial_artifacts = tmp_path / "financial-artifacts.json"
+    supplied_lenses = []
+    if current_surfaces:
+        for index, lens in enumerate(current_nodes.values()):
+            supplied = {
+                **lens,
+                "release_target": False,
+                "node_id": f"existing-lens-{index}",
+            }
+            supplied_lenses.append(supplied)
+            definition = _definition(Path(lens["source_dir"]) / "decomposition.json")
+            supplied_lenses.append(
+                {
+                    **definition,
+                    "kind": "ARTIFACT",
+                    "node_id": f"bound-lens-{index}",
+                    "depends_on": [supplied["node_id"]],
+                }
+            )
+    _write_json(
+        financial_artifacts,
+        [
+            {
+                **_definition(vertical_path),
+                "node_id": "root-mapping-fixture-source",
+                "depends_on": [],
+                "kind": "ARTIFACT",
+            },
+            *supplied_lenses,
+        ],
+    )
     result = materializer.build_production_spec(
         recipe_path,
         prepared_root,
@@ -2601,12 +3137,33 @@ def test_production_spec_binds_stable_twenty_root_authority(
         production_root,
         tmp_path / "production-state",
         spec_path,
+        financial_artifacts_path=financial_artifacts,
     )
 
     spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
     assert result["root_count"] == 20
     assert set(spec.roots) == set(materializer.PRODUCTION_ROOTS)
-    assert spec.coordination_root == production_root / "releases"
+    if current_surfaces:
+        selected = {node.node_id: node for node in spec.nodes}
+        assert len(spec.release_generations) == 20
+        for lens in current_nodes.values():
+            matches = [
+                node
+                for node in spec.nodes
+                if getattr(node, "generation_id", None) == lens["generation_id"]
+                and getattr(node, "root_id", None) == lens["root_id"]
+            ]
+            assert len(matches) == 1
+            node = matches[0]
+            assert node.generation_id == lens["generation_id"]
+            assert node.source_dir == Path(lens["source_dir"])
+            assert node.release_target == lens["release_target"]
+        for index, lens in enumerate(current_nodes.values()):
+            artifact = selected[f"bound-lens-{index}"]
+            assert artifact.depends_on == (
+                lens["node_id"] if lens["release_target"] else f"existing-lens-{index}",
+            )
+    assert spec.coordination_root == production_root / "releases-refresh-2026"
     assert (
         spec.release_generations["portfolio-panel"]
         == next((prepared_root / "stages" / "panel" / "generations").iterdir()).name
@@ -2639,10 +3196,10 @@ def test_production_spec_binds_stable_twenty_root_authority(
     )
     assert production_contract["schema_version"] == 2
     assert production_contract["product_authority_sha256"] == product_gate.sha256
-    production_plan = plan_pipeline(spec)
-    assert production_plan["node_count"] == 0
-    assert production_plan["commit_effects"] == []
-    assert production_plan["financial_mvp"]["ready_for_execution"] is False
+    # Structural binding cannot make this unfinished HWM fixture executable.
+    with pytest.raises(PipelineValidationError, match="available governed HWM"):
+        plan_pipeline(spec)
+    assert pipeline_status(spec)["financial_mvp"]["ready_for_execution"] is False
 
     pre_hwm = json.loads(spec_path.read_text(encoding="utf-8"))
     pre_hwm_product = dict(production_authority)
@@ -2899,6 +3456,29 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
     )
     production_root = tmp_path / "production"
     spec_path = tmp_path / "release" / "production-spec.json"
+
+    # This fixture proves epoch/root rebinding only. The complete production
+    # vertical supplies and verifies the actual four numerical outcomes.
+    import portfolio_financial_outcomes
+
+    monkeypatch.setattr(materializer, "_production_lens_nodes", lambda *_args: {})
+    monkeypatch.setattr(
+        portfolio_financial_outcomes,
+        "validate_financial_outcomes",
+        lambda _spec: {"status": "PASS"},
+    )
+    financial_artifacts = tmp_path / "epoch-rebind-source-artifacts.json"
+    _write_json(
+        financial_artifacts,
+        [
+            {
+                **_definition(vertical_path),
+                "node_id": "epoch-rebind-fixture-source",
+                "depends_on": [],
+                "kind": "ARTIFACT",
+            }
+        ],
+    )
     result = materializer.build_production_spec(
         recipe_path,
         prepared_root,
@@ -2906,6 +3486,7 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
         production_root,
         tmp_path / "production-state",
         spec_path,
+        financial_artifacts_path=financial_artifacts,
     )
 
     spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
@@ -2930,7 +3511,8 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
         "account_strategy_ledger",
         "account_strategy_ledger_identity",
     }
-    core_pipeline.plan_pipeline(spec)
+    with pytest.raises(PipelineValidationError, match="available governed HWM"):
+        core_pipeline.plan_pipeline(spec)
 
     forged = json.loads(spec_path.read_text(encoding="utf-8"))
     forged_contract = dict(production_contract)

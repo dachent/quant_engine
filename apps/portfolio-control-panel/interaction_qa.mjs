@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -107,6 +107,31 @@ await page.goto(pathToFileURL(html).href, { waitUntil: "load" });
 await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
 
 const checks = [];
+if (!epochOnly) {
+  await page.locator('[data-nav="data"]').click();
+  const downloads = [
+    "downloads/portfolio-report-data.json",
+    ...(dashboardData.invested_capital ? ["downloads/portfolio-report.xlsx"] : []),
+  ];
+  const downloadDirectory = path.join(path.dirname(output), "downloads");
+  await mkdir(downloadDirectory, { recursive: true });
+  for (const relative of downloads) {
+    const link = page.locator(`a[download][href="${relative}"]`);
+    const pendingDownload = page.waitForEvent("download");
+    await link.click();
+    const download = await pendingDownload;
+    const destination = path.join(downloadDirectory, path.basename(relative));
+    await download.saveAs(destination);
+    const downloaded = await readFile(destination);
+    const actualSha256 = createHash("sha256").update(downloaded).digest("hex");
+    checks.push(check(
+      `Download delivers the selected ${path.basename(relative)}`,
+      actualSha256 === candidateRecord.artifact_sha256[relative],
+      { relative_path: relative, sha256: actualSha256, size_bytes: downloaded.length },
+    ));
+  }
+  await page.locator('[data-nav="command"]').click();
+}
 if (externalManifestPath) {
   const payloadMatchesExternalManifest = JSON.stringify(dashboardData.account_manifest) === JSON.stringify(externalManifest);
   checks.push(check(

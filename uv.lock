@@ -22,6 +22,7 @@ members = [
     "quant-engine-portfolio123",
     "quant-engine-schwab",
     "quant-engine-schwab-trading-app",
+    "quant-engine-turingtrader",
     "quant-engine-web-contract-harvester",
     "quant-engine-workspace",
 ]
@@ -1272,6 +1273,11 @@ requires-dist = [
 ]
 
 [[package]]
+name = "quant-engine-turingtrader"
+version = "0.1.0"
+source = { editable = "packages/turingtrader" }
+
+[[package]]
 name = "quant-engine-web-contract-harvester"
 version = "0.1.0"
 source = { editable = "packages/web-contracts" }
@@ -1313,6 +1319,7 @@ dev = [
     { name = "quant-engine-portfolio-ledger" },
     { name = "quant-engine-portfolio123" },
     { name = "quant-engine-schwab" },
+    { name = "quant-engine-turingtrader" },
     { name = "quant-engine-web-contract-harvester" },
     { name = "ruff" },
     { name = "types-pyyaml" },
@@ -1343,6 +1350,7 @@ dev = [
     { name = "quant-engine-portfolio-ledger", editable = "packages/portfolio-ledger" },
     { name = "quant-engine-portfolio123", editable = "packages/portfolio123" },
     { name = "quant-engine-schwab", editable = "packages/schwab" },
+    { name = "quant-engine-turingtrader", editable = "packages/turingtrader" },
     { name = "quant-engine-web-contract-harvester", editable = "packages/web-contracts" },
     { name = "ruff", specifier = "==0.15.22" },
     { name = "types-pyyaml", specifier = ">=6.0.12,<7" },

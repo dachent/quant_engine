@@ -122,6 +122,99 @@ def test_authoritative_nav_providers_come_only_from_authoritative_admissions() -
     assert attribution._authoritative_nav_provider_ids(ledger) == {"schwab"}
 
 
+def test_tt_broker_returns_preserve_account_transitions_and_ignore_other_providers() -> (
+    None
+):
+    nav = [
+        {
+            "account_id": "tt-account",
+            "as_of_date": observed,
+            "mapping_status": "MAPPED",
+            "nav": value,
+            "provider_id": "schwab",
+            "record_id": f"tt-{observed}",
+            "strategy_id": strategy,
+        }
+        for observed, strategy, value in [
+            ("2026-01-01", "tt-portfolio", "100"),
+            ("2026-01-02", "other-strategy", "200"),
+            ("2026-01-03", "tt-portfolio", "300"),
+            ("2026-01-04", "tt-portfolio", "330"),
+            ("2026-01-05", "tt-portfolio", "0"),
+            ("2026-01-06", "tt-portfolio", "0"),
+            ("2026-01-07", "tt-portfolio", "100"),
+            ("2026-01-08", "tt-portfolio", "110"),
+            ("2026-01-09", "tt-portfolio", "900"),
+        ]
+    ]
+    flows = [
+        {
+            "account_id": "tt-account",
+            "amount": amount,
+            "event_date": observed,
+            "flow_type": "DEPOSIT_OR_WITHDRAWAL",
+            "mapping_status": "MAPPED",
+            "provider_id": "schwab",
+            "strategy_id": "historical-assignment",
+        }
+        for observed, amount in [
+            ("2026-01-05", "-330"),
+            ("2026-01-07", "100"),
+        ]
+    ]
+    ledger = {
+        "admissions": [
+            {
+                "provider_id": "schwab",
+                "fact_type": "nav_observations",
+                "disposition": "AUTHORITATIVE",
+            }
+        ],
+        "nav_observations": nav,
+        "flows": flows,
+    }
+    cutoff = date(2026, 1, 8)
+    expected = attribution.provider_ledger._broker_strategy_returns(
+        nav[:-1], flows, {"schwab"}
+    )
+    assert [(row["date"], Decimal(row["return"])) for row in expected] == [
+        ("2026-01-04", Decimal("0.1")),
+        ("2026-01-05", Decimal("0")),
+        ("2026-01-08", Decimal("0.1")),
+    ]
+    assert attribution._tt_broker_returns(ledger, accepted_as_of=cutoff) == expected
+
+    unrelated_nav = [
+        {
+            **nav[index],
+            "provider_id": "quantbase",
+            "strategy_id": "volatis-strategy",
+            "record_id": f"quantbase-{index}",
+        }
+        for index in (0, 1)
+    ]
+    with pytest.raises(
+        attribution.provider_ledger.ProviderLedgerError,
+        match="quantbase mapped NAV lacks exactly one opening capital anchor",
+    ):
+        attribution.provider_ledger._broker_strategy_returns(
+            nav[:-1] + unrelated_nav, flows, {"schwab", "quantbase"}
+        )
+    mixed = {
+        **ledger,
+        "admissions": ledger["admissions"]
+        + [
+            {
+                "provider_id": "quantbase",
+                "fact_type": "nav_observations",
+                "disposition": "AUTHORITATIVE",
+            }
+        ],
+        "nav_observations": nav + unrelated_nav,
+    }
+    assert attribution._tt_broker_returns(mixed, accepted_as_of=cutoff) == expected
+
+
 def test_grizzly_transaction_ledger_keeps_costs_and_income_separate() -> None:
     rows = [
         {
@@ -184,6 +277,7 @@ def test_build_attribution_threads_cutoff_to_each_strategy_and_is_invariant(
     signals = tmp_path / "signals.csv"
     grizzly_market = tmp_path / "grizzly.json"
     tt_workbook = tmp_path / "tt.xlsx"
+    tt_source_manifest = tmp_path / "tt-source-manifest.json"
     tt_market = tmp_path / "tt.json"
     for path, content in (
         (schwab_path, "{}"),
@@ -193,6 +287,7 @@ def test_build_attribution_threads_cutoff_to_each_strategy_and_is_invariant(
         (signals, "timestamp,state\n"),
         (grizzly_market, "{}"),
         (tt_workbook, "workbook"),
+        (tt_source_manifest, "{}"),
         (tt_market, "{}"),
     ):
         path.write_text(content, encoding="utf-8")
@@ -223,6 +318,11 @@ def test_build_attribution_threads_cutoff_to_each_strategy_and_is_invariant(
 
     monkeypatch.setattr(
         attribution, "ai_attribution", strategy_adapter("p123-ai-factor")
+    )
+    monkeypatch.setattr(
+        attribution.reconciliation,
+        "p123_provider_return_policy",
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         attribution, "grizzly_attribution", strategy_adapter("grizzlybears-vtma")
@@ -261,6 +361,7 @@ def test_build_attribution_threads_cutoff_to_each_strategy_and_is_invariant(
             grizzly_signals=signals,
             grizzly_market_data=grizzly_market,
             tt_workbook=tt_workbook,
+            tt_source_manifest=tt_source_manifest,
             tt_market_data=[tt_market],
             as_of_date=cutoff.isoformat(),
         )
@@ -451,23 +552,39 @@ def test_grizzly_account_uses_only_bounded_mapped_ledger_evidence() -> None:
 
 
 def test_tt_dated_sources_are_post_cutoff_invariant(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    tmp_path: Path,
 ) -> None:
     cutoff = date(2026, 1, 31)
-    workbook = tmp_path / "tt.xlsx"
     market = tmp_path / "tt-market.json"
 
     def select(post_weight: float, post_close: float):
-        monkeypatch.setattr(
-            attribution,
-            "_xlsx_rows",
-            lambda *_: [
-                ["component", "date", "symbol", "weight"],
-                ["A", "2026-01-30", "SPY", 1.0],
-                ["B", "2026-01-30", "QQQ", 0.4],
-                ["A", "2026-02-01", "SPY", post_weight],
+        source_manifest = {
+            "portfolio": {"live_inception": "2026-01-30"},
+            "selected_components": [
+                {
+                    "slug": "A",
+                    "portfolio_weight": 1.0,
+                    "dated_holdings": {
+                        "snapshots": [
+                            {"observed_date": "2026-01-30", "weights": {"SPY": 1.0}},
+                            {
+                                "observed_date": "2026-02-01",
+                                "weights": {"SPY": post_weight},
+                            },
+                        ]
+                    },
+                },
+                {
+                    "slug": "B",
+                    "portfolio_weight": 1.0,
+                    "dated_holdings": {
+                        "snapshots": [
+                            {"observed_date": "2026-01-30", "weights": {"QQQ": 0.4}},
+                        ]
+                    },
+                },
             ],
-        )
+        }
         market.write_text(
             json.dumps(
                 {
@@ -486,7 +603,9 @@ def test_tt_dated_sources_are_post_cutoff_invariant(
             encoding="utf-8",
         )
         return (
-            attribution._tt_target_snapshots(workbook, ["A"], accepted_as_of=cutoff),
+            attribution._tt_target_snapshots(
+                source_manifest, ["A"], accepted_as_of=cutoff
+            ),
             attribution._market_rows_many([market], accepted_as_of=cutoff),
         )
 
@@ -509,8 +628,9 @@ def test_tt_dated_sources_are_post_cutoff_invariant(
         attribution._market_rows_many([market], accepted_as_of=cutoff)
 
 
+@pytest.mark.parametrize("policy_not_admitted", [False, True])
 def test_real_ai_attribution_ignores_undated_current_and_post_cutoff_values(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, policy_not_admitted: bool
 ) -> None:
     cutoff = date(2026, 1, 31)
     pre_execution = "accepted-ai-execution"
@@ -575,7 +695,11 @@ def test_real_ai_attribution_ignores_undated_current_and_post_cutoff_values(
     }
 
     def real_ai_case(
-        *, current_market_value: str, current_position_count: str, post_value: str
+        *,
+        current_market_value: str,
+        current_position_count: str,
+        post_value: str,
+        har_copies: int,
     ) -> dict[str, object]:
         managed = [
             {
@@ -598,6 +722,11 @@ def test_real_ai_attribution_ignores_undated_current_and_post_cutoff_values(
                 "mktVal": current_market_value,
                 "posCnt": current_position_count,
             },
+        ]
+        managed = [
+            {**row, "_source_artifact": f"csv/capture-{copy}.csv"}
+            for row in managed
+            for copy in range(har_copies)
         ]
         transactions = [
             {
@@ -660,22 +789,48 @@ def test_real_ai_attribution_ignores_undated_current_and_post_cutoff_values(
             p123_root=p123_root,
             ibkr_catalog=catalog,
             xml_paths=[xml_path],
-            ledger=ledger,
+            ledger=(
+                {**ledger, "provider_strategy_returns": []}
+                if policy_not_admitted
+                else ledger
+            ),
             accepted_as_of=cutoff,
+            provider_return_policy=(
+                {"authority_issue": 303, "admitted_item_count": 0}
+                if policy_not_admitted
+                else None
+            ),
         )
 
     first = real_ai_case(
         current_market_value="1000",
         current_position_count="10",
         post_value="5000",
+        har_copies=1,
     )
     second = real_ai_case(
         current_market_value="9000",
         current_position_count="90",
         post_value="-5000",
+        har_copies=3,
     )
 
     assert first == second
+    if policy_not_admitted:
+        bridge = first["bridge"]
+        assert bridge["status"] == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+        assert bridge["model_return"] is None and bridge["gap_pp"] is None
+        assert bridge["categories"] == []
+        assert bridge["account_return"] == pytest.approx(1.008 * 1.015 - 1)
+        assert first["observed_start"] == "2026-01-05"
+        assert first["observed_end"] == "2026-01-20"
+        actual = first["actual_return_contribution_by_trade_provenance"]
+        assert sum(actual["contributions_pp"].values()) == pytest.approx(
+            bridge["account_return"] * 100
+        )
+        assert first["event_classification_counts"]
+        assert first["execution_shortfall"]["status"] == bridge["status"]
+        return
     perimeter = first["current_connected_model_perimeter"]
     assert isinstance(perimeter, dict)
     assert perimeter["status"] == "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT"

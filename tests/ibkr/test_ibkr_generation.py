@@ -1101,6 +1101,136 @@ def test_conflicting_flex_refresh_fails_closed(tmp_path: Path) -> None:
         build_generation(spec_path)
 
 
+def _multi_day_xml(account: str, days: list[tuple[date, str]]) -> str:
+    slices = []
+    for day, nav in days:
+        single = _xml(account, day, nav)
+        slices.append(
+            single[single.index("<FlexStatement ") : single.index("</FlexStatements>")]
+        )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        '<FlexQueryResponse type="AF" queryName="SYNTHETIC">'
+        f'<FlexStatements count="{len(slices)}">'
+        + "".join(slices)
+        + "</FlexStatements></FlexQueryResponse>"
+    )
+
+
+def _chained_refresh_spec(
+    tmp_path: Path, second_refresh_days: list[tuple[date, str]]
+) -> Path:
+    spec_path = _refreshed_spec(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    source_root = Path(spec["roots"]["legacy"])
+    path = source_root / "flex-refresh-second.xml"
+    path.write_text(
+        _multi_day_xml("SYNTH-RAW", second_refresh_days),
+        encoding="utf-8",
+    )
+    payload = path.read_bytes()
+    last_day = max(day for day, _ in second_refresh_days)
+    spec["sources"].append(
+        {
+            "artifact_id": "private/flex-refresh-second.xml",
+            "as_of_date": last_day.isoformat(),
+            "expected_sha256": hashlib.sha256(payload).hexdigest(),
+            "expected_size_bytes": len(payload),
+            "relative_path": path.name,
+            "role": "REFRESH_FLEX_ACTIVITY",
+            "root_id": "legacy",
+            "schema_name": "activity-flex",
+            "schema_version": "3",
+        }
+    )
+    spec["as_of_date"] = max(spec["as_of_date"], last_day.isoformat())
+    spec_path.write_bytes(canonical_json_bytes(spec))
+    return spec_path
+
+
+def test_chained_refresh_statements_with_overlap_build(tmp_path: Path) -> None:
+    spec_path = _chained_refresh_spec(
+        tmp_path,
+        [(date(2026, 1, 8), "107"), (date(2026, 1, 9), "108")],
+    )
+    catalog, manifest, catalog_bytes = build_generation(spec_path)
+    refresh = next(
+        item
+        for item in catalog["reconciliation_checks"]
+        if item["check_id"] == "flex-refresh-overlap"
+    )
+    assert refresh == {
+        "check_id": "flex-refresh-overlap",
+        "record_count": 2,
+        "status": "PASS",
+    }
+    assert max(
+        date.fromisoformat(row["as_of_date"]) for row in catalog["nav_observations"]
+    ) == date(2026, 1, 9)
+    rebuilt, rebuilt_manifest, rebuilt_bytes = build_generation(spec_path)
+    assert rebuilt_bytes == catalog_bytes
+    assert rebuilt_manifest.generation_id == manifest.generation_id
+    assert rebuilt == catalog
+
+
+def test_conflicting_second_refresh_still_fails_closed(tmp_path: Path) -> None:
+    spec_path = _chained_refresh_spec(
+        tmp_path,
+        [(date(2026, 1, 8), "999"), (date(2026, 1, 9), "108")],
+    )
+    with pytest.raises(IbkrGenerationError, match="refresh conflicts"):
+        build_generation(spec_path)
+
+
+def test_refresh_chain_calendar_hole_is_retained_in_coverage(tmp_path: Path) -> None:
+    spec_path = _chained_refresh_spec(tmp_path, [(date(2026, 1, 14), "114")])
+    catalog, manifest, _ = build_generation(spec_path)
+    coverage = next(
+        item
+        for item in catalog["fact_coverage"]
+        if item["fact_type"] == "FLEX_FINALIZED_HISTORY"
+    )
+    assert coverage["status"] == "PARTIAL"
+    assert coverage["known_gaps"] == [
+        "missing weekday statement for account-ibkr-synthetic: 2026-01-08 to 2026-01-14"
+    ]
+    assert len(coverage["accounts"][0]["intervals"]) == 2
+    assert manifest.coverage.status.value == "PARTIAL"
+
+
+def test_standalone_monday_wednesday_statements_do_not_cover_tuesday(
+    tmp_path: Path,
+) -> None:
+    monday_path = tmp_path / "monday.xml"
+    wednesday_path = tmp_path / "wednesday.xml"
+    monday_path.write_text(_xml("SYNTH-RAW", date(2026, 1, 5), "100"), encoding="utf-8")
+    wednesday_path.write_text(
+        _xml("SYNTH-RAW", date(2026, 1, 7), "101"), encoding="utf-8"
+    )
+    statements = [
+        parse_flex_file(monday_path, artifact_id="selected/monday.xml").statements[0],
+        parse_flex_file(
+            wednesday_path, artifact_id="selected/wednesday.xml"
+        ).statements[0],
+    ]
+    coverage = ibkr_generation._flex_history_coverage(
+        statements, {"SYNTH-RAW": "account-ibkr-synthetic"}
+    )
+    assert coverage["status"] == "PARTIAL"
+    assert [
+        (item["effective_start"], item["effective_end"])
+        for item in coverage["accounts"][0]["intervals"]
+    ] == [("2026-01-05", "2026-01-05"), ("2026-01-07", "2026-01-07")]
+
+
+def test_single_refresh_still_builds(tmp_path: Path) -> None:
+    spec_path = _refreshed_spec(tmp_path)
+    catalog, _, _ = build_generation(spec_path)
+    assert max(
+        date.fromisoformat(row["as_of_date"]) for row in catalog["nav_observations"]
+    ) == date(2026, 1, 8)
+
+
 def test_crosswalk_ambiguity_fails_closed(tmp_path: Path) -> None:
     spec_path = _spec(tmp_path)
     spec = json.loads(spec_path.read_text(encoding="utf-8"))

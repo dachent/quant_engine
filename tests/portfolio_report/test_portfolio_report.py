@@ -44,6 +44,342 @@ SPEC.loader.exec_module(reporter)
 DEFAULT_PRODUCT_CONTRACT = reporter._PORTABLE_HWM_PRODUCT_CONTRACT
 _SYNTHETIC_PRODUCT_CONTRACT_PATHS: set[Path] = set()
 
+
+def _policy_unavailable_appendices(tmp_path: Path) -> tuple[Path, Path, dict[str, Any]]:
+    proof = {
+        "provider_id": "portfolio123",
+        "data_class": "PROVIDER_LIVE_RETURN",
+        "disposition": "EXCLUDE",
+        "admitted_item_count": 0,
+        "authority_ref": "synthetic-policy-receipt",
+        "contract_raw_sha256": "a" * 64,
+    }
+    reconciliation_rows = []
+    attribution_rows = []
+    for strategy_id in ("grizzlybears-vtma", "p123-ai-factor", "tt-portfolio"):
+        metrics: dict[str, Any] = {
+            "status": "AVAILABLE",
+            "observations": 3,
+            "observed_start": "2026-01-01",
+            "observed_end": "2026-01-03",
+        }
+        bridge: dict[str, Any] = {
+            "model_return": 0.1,
+            "account_return": 0.2,
+            "gap_pp": 10.0,
+            "categories": [{"effect_pp": 10.0}],
+        }
+        row = {
+            "strategy_id": strategy_id,
+            "verification": "VERIFIED",
+            "return_reconciliation": metrics,
+            "root_causes": [{"cause": "synthetic"}],
+        }
+        if strategy_id == "p123-ai-factor":
+            metrics.clear()
+            metrics.update(
+                {
+                    "status": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+                    "observations": 0,
+                    "model_cumulative_return": None,
+                    "account_minus_model_cumulative": None,
+                    "policy_evidence": proof,
+                }
+            )
+            row["account_live_return_summary"] = {
+                "status": "AVAILABLE",
+                "observations": 3,
+                "observed_start": "2026-01-01",
+                "observed_end": "2026-01-03",
+                "cumulative_return": 0.2,
+            }
+            row["return_window_comparison"] = {
+                "status": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+                "expanded_exact_common_gap": None,
+                "expanded_minus_declared_gap": None,
+                "prior_declared_overlap": None,
+                "policy_evidence": proof,
+            }
+            bridge = {
+                "status": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+                "model_return": None,
+                "account_return": 0.2,
+                "gap_pp": None,
+                "categories": [],
+                "policy_evidence": proof,
+            }
+        reconciliation_rows.append(row)
+        attribution_rows.append(
+            {
+                "strategy_id": strategy_id,
+                "verification": "PARTIAL_EXACT_ACTUAL_PNL_PARTIAL_COUNTERFACTUAL_GAP",
+                "observed_start": "2026-01-01",
+                "observed_end": "2026-01-03",
+                "bridge": bridge,
+            }
+        )
+        if strategy_id == "p123-ai-factor":
+            for field in ("execution_shortfall", "effective_account_model_mix"):
+                attribution_rows[-1][field] = {
+                    "status": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+                    "policy_evidence": proof,
+                }
+            attribution_rows[-1]["actual_return_contribution_by_trade_provenance"] = {
+                "daily_observations": 3,
+                "contributions_pp": {"actual_activity": 20.0},
+            }
+    reconciliation_path = tmp_path / "reconciliation.json"
+    attribution_path = tmp_path / "attribution.json"
+    reconciliation_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "builder": "portfolio-implementation-reconciliation",
+                "verification": "VERIFIED",
+                "as_of_date": "2026-01-03",
+                "reconciliation_id": "synthetic",
+                "strategies": reconciliation_rows,
+            }
+        ),
+        encoding="utf-8",
+    )
+    attribution_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "builder": "portfolio-implementation-return-attribution",
+                "verification": "VERIFIED_WITH_DECLARED_PARTIAL_CAUSAL_BOUNDARIES",
+                "as_of_date": "2026-01-03",
+                "attribution_id": "synthetic",
+                "strategies": attribution_rows,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return reconciliation_path, attribution_path, proof
+
+
+@pytest.mark.parametrize("attribution", [False, True])
+@pytest.mark.parametrize(
+    "tamper", [None, "unbound", "source", "number", "status", "strategy"]
+)
+def test_policy_unavailable_comparison_requires_source_proof_without_invented_returns(
+    tmp_path: Path,
+    attribution: bool,
+    tamper: str | None,
+) -> None:
+    reconciliation_path, attribution_path, proof = _policy_unavailable_appendices(
+        tmp_path
+    )
+    path = attribution_path if attribution else reconciliation_path
+    validator = (
+        reporter._implementation_return_attribution_contract
+        if attribution
+        else reporter._implementation_reconciliation_contract
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    row = payload["strategies"][1]
+    comparison = row["bridge" if attribution else "return_reconciliation"]
+    if tamper == "source":
+        comparison["policy_evidence"]["contract_raw_sha256"] = "b" * 64
+    elif tamper == "number":
+        comparison["model_return" if attribution else "model_cumulative_return"] = 0.0
+    elif tamper == "status":
+        comparison["status"] = "AVAILABLE"
+    elif tamper == "strategy":
+        row["strategy_id"] = "tt-portfolio"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    if tamper is not None:
+        with pytest.raises(reporter.ReportValidationError):
+            validator(
+                path,
+                portfolio_as_of="2026-01-03",
+                expected_policy_evidence=None if tamper == "unbound" else proof,
+            )
+    else:
+        rows, reference = validator(
+            path, portfolio_as_of="2026-01-03", expected_policy_evidence=proof
+        )
+        assert len(rows) == reference["strategy_count"] == 3
+        assert (
+            rows["p123-ai-factor"]["bridge"]["account_return"] == 0.2
+            if attribution
+            else rows["p123-ai-factor"]["account_live_return_summary"][
+                "cumulative_return"
+            ]
+            == 0.2
+        )
+
+
+@pytest.mark.parametrize("tamper", ["missing", "amount", "count"])
+def test_policy_unavailable_retains_reconciled_actual_trade_attribution(
+    tmp_path: Path, tamper: str
+) -> None:
+    _, path, proof = _policy_unavailable_appendices(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    row = payload["strategies"][1]
+    if tamper == "missing":
+        del row["actual_return_contribution_by_trade_provenance"]
+    elif tamper == "amount":
+        row["actual_return_contribution_by_trade_provenance"]["contributions_pp"][
+            "actual_activity"
+        ] = 21.0
+    else:
+        row["actual_return_contribution_by_trade_provenance"]["daily_observations"] = 0
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(reporter.ReportValidationError):
+        reporter._implementation_return_attribution_contract(
+            path, portfolio_as_of="2026-01-03", expected_policy_evidence=proof
+        )
+
+
+def test_policy_unavailable_comparison_suppresses_historical_attribution_metrics(
+    tmp_path: Path,
+) -> None:
+    reconciliation_path, _, proof = _policy_unavailable_appendices(tmp_path)
+    rows, _ = reporter._implementation_reconciliation_contract(
+        reconciliation_path,
+        portfolio_as_of="2026-01-03",
+        expected_policy_evidence=proof,
+    )
+    strategy_id = "p123-ai-factor"
+    result = reporter._merge_attribution(
+        [
+            {
+                "strategy_id": strategy_id,
+                "implementation_reconciliation": rows[strategy_id],
+            }
+        ],
+        {
+            "benchmark_assignments": [{"strategy_id": strategy_id}],
+            "comparisons": [
+                {
+                    "strategy_id": strategy_id,
+                    "status": "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
+                    "metrics": {
+                        "model_return": 0.1,
+                        "cumulative_gap": -0.3,
+                        "reference_cumulative_return": 0.5,
+                        "observations": 200,
+                    },
+                }
+            ],
+            "costs": [{"strategy_id": strategy_id}],
+        },
+    )[0]
+    assert result["provider_comparison_status"] == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    assert result["provider_reference_cumulative_return"] is None
+    assert result["provider_cumulative_gap"] is None
+    assert result["provider_comparison_observations"] is None
+    assert (
+        result["implementation_reconciliation"]["account_live_return_summary"][
+            "cumulative_return"
+        ]
+        == 0.2
+    )
+
+
+@pytest.mark.parametrize(
+    ("change", "expected"),
+    [
+        ({}, 3),
+        ({"strategy_version": "other-version"}, 0),
+        ({"mode_admission": "EXCLUDE_COMPARISON_ONLY"}, 0),
+        ({"evidence_layer": "PROVIDER_LIVE"}, 0),
+        ({"observed_end": "2025-01-02"}, 0),
+        ({"observed_end": "2025-01-03"}, 0),
+    ],
+)
+def test_report_projects_only_accepted_exact_version_prehistory(
+    change: dict[str, Any], expected: int
+) -> None:
+    history = {
+        "segments": [
+            {
+                "evidence_layer": "ACCOUNT_LIVE",
+                "mode_admission": "INCLUDE_SELECTED_LIVE",
+                "observed_start": "2025-01-02",
+                "strategy_version": "synthetic-v1",
+            },
+            {
+                "evidence_layer": "BACKTEST",
+                "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+                "observed_end": "2024-12-31",
+                "return_observations": 3,
+                "strategy_version": "synthetic-v1",
+                **change,
+            },
+        ]
+    }
+    assert reporter._accepted_pre_live_observations(history, "synthetic-v1") == expected
+    assert (
+        reporter._accepted_pre_live_observations({"segments": []}, "synthetic-v1") == 0
+    )
+    history["segments"] = history["segments"][1:]
+    assert reporter._accepted_pre_live_observations(history, "synthetic-v1") == 0
+
+
+def test_report_history_requires_actual_packaged_coverage_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    namespace = runpy.run_path(
+        str(
+            REPOSITORY_ROOT
+            / "tests/portfolio_analytics/test_portfolio_current_dependence.py"
+        )
+    )
+    current = namespace["current"]
+    selected = namespace["_unmocked_fixture"](tmp_path, monkeypatch)
+    built = current.build_source(
+        contract_path=selected["contract_path"],
+        policy_path=selected["policy_path"],
+        history_generation_root=selected["history_root"],
+        allocation_generation_root=selected["allocation_root"],
+        evaluated_on=date(2026, 1, 3),
+    )
+    source = tmp_path / built["receipt"]["bundle_id"]
+    source.mkdir()
+    for name in (
+        "dependence-source.json",
+        "history-coverage.json",
+        "returns.csv",
+        "segments.csv",
+        "spec.json",
+    ):
+        (source / name).write_bytes(built[name])
+    monkeypatch.setattr(
+        reporter, "_PORTABLE_HWM_PRODUCT_CONTRACT", selected["contract_path"]
+    )
+    monkeypatch.setattr(reporter, "DEPENDENCE_POLICY", selected["policy_path"])
+    helpers = runpy.run_path(
+        str(REPOSITORY_ROOT / "tests/core/mvp2_consumers_fixture.py")
+    )
+    helpers["_install_dynamic_dependence_loader"](monkeypatch, reporter, current)
+    names = set(json.loads(built["spec.json"])["series_ids"])
+    rows, _identity = reporter._history_contract(
+        source / "dependence-source.json",
+        portfolio_as_of="2026-01-03",
+        strategy_names=names | {"Excluded synthetic strategy"},
+    )
+    assert all(rows[name]["backtest_observations"] == 0 for name in names)
+    assert all(
+        rows[name]["history_status"] == "UNAVAILABLE_NO_MATCHED_BACKTEST_PREHISTORY"
+        for name in names
+    )
+    # A new claim in the consumer-side coverage file cannot manufacture history.
+    coverage = json.loads((source / "history-coverage.json").read_bytes())
+    coverage["strategies"] = [{"series_id": next(iter(names)), "segments": []}]
+    (source / "history-coverage.json").write_bytes(canonical_json_bytes(coverage))
+    with pytest.raises(
+        reporter.ReportValidationError, match="history coverage differs"
+    ):
+        reporter._history_contract(
+            source / "dependence-source.json",
+            portfolio_as_of="2026-01-03",
+            strategy_names=names | {"Excluded synthetic strategy"},
+        )
+
+
 HWM_TEST_NAMESPACE = runpy.run_path(
     str(REPOSITORY_ROOT / "tests" / "portfolio_ledger" / "test_hwm.py")
 )
@@ -381,7 +717,11 @@ def _rewrite_xlsx_cell(
 ) -> None:
     """Mutate one OOXML cell while preserving every unrelated cached value."""
 
-    sheet_index = reporter.SHEET_NAMES.index(sheet_name) + 1
+    workbook = load_workbook(path, read_only=True, data_only=False)
+    try:
+        sheet_index = workbook.sheetnames.index(sheet_name) + 1
+    finally:
+        workbook.close()
     part_name = f"xl/worksheets/sheet{sheet_index}.xml"
     temporary = path.with_name(f".{path.name}.mutated")
     with (
@@ -2442,6 +2782,46 @@ def test_high_precision_performance_is_numeric_only_in_excel_presentation() -> N
     assert reporter._excel_value(exact, header="twr") == pytest.approx(
         0.0019325160644832707
     )
+
+
+def test_workbook_parity_round_trips_high_precision_summary_ratio(
+    tmp_path: Path,
+) -> None:
+    exact = "-0.0092359361880772460117548278757352"
+    baseline_root = _published_baseline(tmp_path)
+    report, _, _ = reporter.build_report_data(
+        baseline_root,
+        freshness_health_path=_hwm_freshness_file(tmp_path),
+    )
+    report["portfolio_summary"].append(
+        {
+            "metric": "High-precision ratio",
+            "status": "AVAILABLE",
+            "unit": "ratio",
+            "value": exact,
+        }
+    )
+    workbook_path = tmp_path / "high-precision-ratio.xlsx"
+    reporter._workbook(report, workbook_path)
+
+    parity = reporter._workbook_parity_receipt(
+        canonical_json_bytes(report), workbook_path.read_bytes()
+    )
+
+    assert parity["report_row_count"] == sum(
+        len(report[report_key]) for _, report_key, _, _ in reporter.WORKBOOK_TABLE_SPECS
+    )
+    workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        row = next(
+            values
+            for values in workbook["Portfolio Summary"].iter_rows(values_only=True)
+            if values[0] == "High-precision ratio"
+        )
+        assert isinstance(row[3], float)
+        assert row[3] == pytest.approx(float(Decimal(exact)))
+    finally:
+        workbook.close()
 
 
 def test_workbook_is_deterministic_structured_and_has_no_external_surface(
@@ -6093,3 +6473,379 @@ def test_hwm_valid_envelope_publishes_with_full_context(tmp_path: Path) -> None:
     assert hwm["hwm_numerical_status"] == "AVAILABLE"
     assert "hwm_numerical_reason" not in hwm
     assert "hwm_index" in hwm
+
+
+def test_invested_capital_is_visible_and_exact_in_native_workbook(
+    tmp_path: Path,
+) -> None:
+    baseline_root = _published_baseline(tmp_path / "baseline", _baseline_catalog())
+    report, _report_bytes, _baseline_path = reporter.build_report_data(baseline_root)
+    day = report["as_of_date"]
+    report["invested_capital"] = {
+        "daily_by_strategy": [
+            {
+                "date": day,
+                "strategy_id": "strategy-1",
+                "invested_capital_usd": "125",
+            }
+        ],
+        "daily_aggregate": [{"date": day, "invested_capital_usd": "125"}],
+        "current_by_strategy": [
+            {"strategy_id": "strategy-1", "invested_capital_usd": "125"}
+        ],
+        "current_aggregate_usd": "125",
+    }
+    workbook_path = tmp_path / "capital.xlsx"
+    reporter._workbook(report, workbook_path)
+
+    evidence = reporter.verify_workbook(workbook_path)
+    parity = reporter._workbook_parity_receipt(
+        canonical_json_bytes(report), workbook_path.read_bytes()
+    )
+    workbook = load_workbook(workbook_path, read_only=False, data_only=False)
+    try:
+        assert workbook.sheetnames[-2:] == list(reporter.CAPITAL_SHEET_NAMES)
+        assert (
+            workbook[reporter.CAPITAL_SHEET_NAMES[1]]["J4"].value
+            == reporter.CAPITAL_RECONCILIATION_FORMULA
+        )
+        assert workbook[reporter.CAPITAL_SHEET_NAMES[1]]["A6"].value == 125
+    finally:
+        workbook.close()
+    assert evidence["sheet_count"] == len(reporter.SHEET_NAMES) + 2
+    assert parity["table_count"] == len(reporter.TABLE_NAMES) + 2
+
+    wrong_cell = tmp_path / "wrong-capital-cell.xlsx"
+    shutil.copyfile(workbook_path, wrong_cell)
+    _rewrite_xlsx_cell(
+        wrong_cell,
+        sheet_name=reporter.CAPITAL_SHEET_NAMES[1],
+        cell_reference="A6",
+        value="126",
+    )
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="tblInvestedCapitalCurrent.*invested_capital_usd",
+    ):
+        reporter._workbook_parity_receipt(
+            canonical_json_bytes(report), wrong_cell.read_bytes()
+        )
+
+    wrong_formula = tmp_path / "wrong-capital-formula.xlsx"
+    shutil.copyfile(workbook_path, wrong_formula)
+    _rewrite_xlsx_cell(
+        wrong_formula,
+        sheet_name=reporter.CAPITAL_SHEET_NAMES[1],
+        cell_reference="J4",
+        formula="1+1",
+    )
+    with pytest.raises(
+        reporter.ReportValidationError, match="formula inventory differs"
+    ):
+        reporter._workbook_parity_receipt(
+            canonical_json_bytes(report), wrong_formula.read_bytes()
+        )
+
+
+def test_source_qualified_decomposition_is_visible_and_exact_in_native_workbook(
+    tmp_path: Path,
+) -> None:
+    baseline_root = _published_baseline(tmp_path / "baseline", _baseline_catalog())
+    report, _report_bytes, _baseline_path = reporter.build_report_data(baseline_root)
+    source_rows = []
+    series_rows = []
+    for index, source_key in enumerate(("us-equity-style", "multi-asset-style"), 1):
+        source_rows.append(
+            {
+                "analytics_hash": f"{index}" * 64,
+                "as_of_date": report["as_of_date"],
+                "generation_id": f"{index + 2}" * 64,
+                "plan_spec": {
+                    "sha256": f"{index + 4}" * 64,
+                    "spec_id": f"{source_key}:STATIC",
+                },
+                "source_key": source_key,
+                "source_label": source_key,
+                "source_sha256": f"{index + 6}" * 64,
+                "surface": "STATIC",
+            }
+        )
+        series_rows.append(
+            {
+                "alpha": {
+                    "periodic_intercept": "0.003",
+                    "net_annualized": "0.756",
+                    "net_status": "AVAILABLE_OBSERVED_BASIS",
+                },
+                "contribution_summary": {
+                    "factor_means": {"VALUE": f"0.0{index}"},
+                    "alpha_mean": "0.003",
+                    "residual_mean": "-0.001",
+                    "fitted_mean": "0.013" if index == 1 else "0.023",
+                    "realized_mean": "0.012" if index == 1 else "0.022",
+                },
+                "coverage": {
+                    "aligned_observations": 40,
+                    "observed_start": "2026-01-02",
+                    "observed_end": "2026-03-02",
+                },
+                "diagnostics": {
+                    "train": {"r_squared": "0.8"},
+                    "holdout": {
+                        "predicted_r_squared": "-0.2" if index == 1 else "0.7",
+                        "rmse": "0.001",
+                    },
+                },
+                "exposures": [{"beta": f"0.{index}", "factor_id": "VALUE"}],
+                "model_id": f"model-{index}",
+                "series_id": "Shared strategy",
+                "source_key": source_key,
+                "status": "DIAGNOSTIC_ONLY" if index == 1 else "AVAILABLE",
+            }
+        )
+    series_rows[0]["coverage"]["factor_missing_weekdays"] = 1
+    surface = {
+        "available_count": 2,
+        "available_source_keys": [row["source_key"] for row in source_rows],
+        "default_source_key": "us-equity-style",
+        "diagnostic_count": 0,
+        "series": series_rows,
+        "sources": source_rows,
+        "unavailable_count": 0,
+    }
+    lens = {
+        "default_surface": "STATIC",
+        "lens_id": "ETF_STYLE",
+        "surfaces": {"STATIC": surface},
+    }
+    report["decomposition_lenses"] = {
+        "default_evidence_mode": "LIVE_ONLY",
+        "default_lens": "ETF_STYLE",
+        "modes": {"LIVE_ONLY": [lens]},
+    }
+    workbook_path = tmp_path / "decomposition.xlsx"
+    reporter._workbook(report, workbook_path)
+
+    evidence = reporter.verify_workbook(workbook_path)
+    parity = reporter._workbook_parity_receipt(
+        canonical_json_bytes(report), workbook_path.read_bytes()
+    )
+    cells, factors = reporter._decomposition_workbook_rows(
+        report["decomposition_lenses"]
+    )
+    assert {(row["source_key"], row["series_id"]) for row in cells} == {
+        ("multi-asset-style", "Shared strategy"),
+        ("us-equity-style", "Shared strategy"),
+    }
+    assert {row["beta"] for row in factors} == {"0.1", "0.2"}
+    assert evidence["sheet_count"] == len(reporter.SHEET_NAMES) + 2
+    assert parity["table_count"] == len(reporter.TABLE_NAMES) + 2
+
+    # Read actual Excel cells independently of the export/parity projection.
+    workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+    try:
+        sheet_rows = list(
+            workbook[reporter.DECOMPOSITION_SHEET_NAMES[0]].iter_rows(
+                min_row=5, values_only=True
+            )
+        )
+        exported = {
+            row["Source Key"]: row
+            for values in sheet_rows[1:]
+            if (row := dict(zip(sheet_rows[0], values)))["Source Key"]
+        }
+        diagnostic = exported["us-equity-style"]
+        assert diagnostic["Status"] == "DIAGNOSTIC_ONLY"
+        assert diagnostic["Alpha Periodic Intercept"] == pytest.approx(0.003)
+        assert diagnostic["Contribution Residual Mean"] == pytest.approx(-0.001)
+        assert diagnostic["Contribution Fitted Mean"] == pytest.approx(0.013)
+        assert diagnostic["Contribution Realized Mean"] == pytest.approx(0.012)
+        assert diagnostic["Train R Squared"] == pytest.approx(0.8)
+        assert diagnostic["Holdout Predicted R Squared"] == pytest.approx(-0.2)
+        assert diagnostic["Coverage Aligned Observations"] == 40
+        assert diagnostic["Coverage Observed Start"] == "2026-01-02"
+        assert diagnostic["Coverage Factor Missing Weekdays"] == 1
+        assert diagnostic["Source Sha256"] == "7" * 64
+    finally:
+        workbook.close()
+
+    wrong_cell = tmp_path / "wrong-decomposition-cell.xlsx"
+    shutil.copyfile(workbook_path, wrong_cell)
+    _rewrite_xlsx_cell(
+        wrong_cell,
+        sheet_name=reporter.DECOMPOSITION_SHEET_NAMES[1],
+        cell_reference="A6",
+        value="0.9",
+    )
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="tblDecompositionFactors.*beta",
+    ):
+        reporter._workbook_parity_receipt(
+            canonical_json_bytes(report), wrong_cell.read_bytes()
+        )
+
+
+@pytest.mark.parametrize("command", ("build", "verify", "publish"))
+def test_report_cli_forwards_governed_hwm_bundle_for_build_verify_and_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    result_path = tmp_path / "hwm-result.json"
+    input_path = tmp_path / "hwm-input.json"
+    calendar_path = tmp_path / "hwm-calendar.json"
+    receipt_path = tmp_path / "hwm-receipt.json"
+    capital_result_path = tmp_path / "capital-result.json"
+    capital_input_path = tmp_path / "capital-input.json"
+    decomposition_root = tmp_path / "decomposition-lenses"
+    decomposition_plan = tmp_path / "decomposition-plan"
+    result_path.write_bytes(b'{"status":"AVAILABLE"}\n')
+    input_path.write_bytes(b'{"input":"bound"}\n')
+    calendar_path.write_bytes(b'{"calendar":"bound"}\n')
+    receipt_path.write_bytes(b'{"receipt":"bound"}\n')
+    capital_result_path.write_bytes(b'{"outcome_id":"INVESTED_CAPITAL"}\n')
+    capital_input_path.write_bytes(b'{"capital":"bound"}\n')
+    decomposition_root.mkdir()
+    decomposition_plan.mkdir()
+    observed: dict[str, object] = {}
+
+    def capture(*_args: object, **kwargs: object) -> dict[str, object]:
+        observed.update(kwargs)
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(
+        reporter,
+        f"{'build_candidate' if command == 'build' else 'verify_candidate' if command == 'verify' else 'publish_report'}",
+        capture,
+    )
+    argv = [command, "--baseline-root", str(tmp_path / "baseline")]
+    if command == "build":
+        argv += ["--output-root", str(tmp_path / "candidate-root")]
+    elif command == "verify":
+        argv += [
+            "--candidate-dir",
+            str(tmp_path / "candidate"),
+            "--excel-workbook",
+            str(tmp_path / "workbook.xlsx"),
+        ]
+    else:
+        argv += [
+            "--candidate-dir",
+            str(tmp_path / "candidate"),
+            "--excel-workbook",
+            str(tmp_path / "workbook.xlsx"),
+            "--xlsx-result",
+            str(tmp_path / "xlsx-result.json"),
+            "--validation-result",
+            str(tmp_path / "validation.json"),
+            "--workbook-evidence-binding",
+            str(tmp_path / "binding.json"),
+            "--output-root",
+            str(tmp_path / "report-stage"),
+        ]
+    argv += [
+        "--hwm-governed-result",
+        str(result_path),
+        "--hwm-governed-input-generation",
+        str(input_path),
+        "--hwm-governed-calendar-authority",
+        str(calendar_path),
+        "--hwm-governed-admission-receipt",
+        str(receipt_path),
+        "--invested-capital-result",
+        str(capital_result_path),
+        "--invested-capital-input-generation",
+        str(capital_input_path),
+        "--decomposition-lenses-root",
+        str(decomposition_root),
+        "--decomposition-plan-bundle",
+        str(decomposition_plan),
+    ]
+
+    assert reporter.main(argv) == 0
+    assert {
+        key: observed[key]
+        for key in (
+            "hwm_governed_calendar_bytes",
+            "hwm_governed_generation_bytes",
+            "hwm_governed_receipt_bytes",
+            "hwm_governed_result",
+            "invested_capital_input_generation_path",
+            "invested_capital_result",
+            "invested_capital_result_bytes",
+            "decomposition_lenses_root",
+            "decomposition_plan_bundle",
+        )
+    } == {
+        "hwm_governed_calendar_bytes": calendar_path.read_bytes(),
+        "hwm_governed_generation_bytes": input_path.read_bytes(),
+        "hwm_governed_receipt_bytes": receipt_path.read_bytes(),
+        "hwm_governed_result": {"status": "AVAILABLE"},
+        "invested_capital_input_generation_path": capital_input_path,
+        "invested_capital_result": {"outcome_id": "INVESTED_CAPITAL"},
+        "invested_capital_result_bytes": capital_result_path.read_bytes(),
+        "decomposition_lenses_root": decomposition_root,
+        "decomposition_plan_bundle": decomposition_plan,
+    }
+
+
+def test_governed_hwm_direct_publish_requires_private_stage_context_before_io(
+    tmp_path: Path,
+) -> None:
+    output_root = tmp_path / "report-output"
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="requires private stage context",
+    ):
+        reporter.publish_report(
+            tmp_path / "baseline",
+            tmp_path / "candidate",
+            tmp_path / "workbook.xlsx",
+            tmp_path / "xlsx-result.json",
+            tmp_path / "validation.json",
+            output_root,
+            hwm_governed_result={"status": "AVAILABLE"},
+            hwm_governed_generation_bytes=b"{}",
+            hwm_governed_calendar_bytes=b"{}",
+            hwm_governed_receipt_bytes=b"{}",
+        )
+
+    assert not output_root.exists()
+
+
+def test_financial_product_direct_publish_requires_private_stage_without_new_flags(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    strategy_ids = reporter.CURRENT_STRATEGY_CONTROL_IDS
+    catalog = {"strategies": [{"strategy_id": value} for value in sorted(strategy_ids)]}
+    controls = {value: {} for value in strategy_ids}
+    monkeypatch.setattr(
+        reporter, "_baseline", lambda *_args: (catalog, None, tmp_path / "catalog.json")
+    )
+    monkeypatch.setattr(
+        reporter, "_report_product_controls", lambda _catalog: (controls, None)
+    )
+    output_root = tmp_path / "report-output"
+    output_root.mkdir()
+    pointer = output_root / "CURRENT.json"
+    pointer.write_bytes(b"prior accepted pointer")
+    qa = tmp_path / "qa"
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="requires private stage context"
+    ):
+        reporter.publish_report(
+            tmp_path / "baseline",
+            tmp_path / "candidate",
+            tmp_path / "workbook.xlsx",
+            qa / "xlsx-result.json",
+            qa / "validation.json",
+            output_root,
+        )
+
+    assert pointer.read_bytes() == b"prior accepted pointer"
+    assert list(output_root.iterdir()) == [pointer]
+    assert not qa.exists()

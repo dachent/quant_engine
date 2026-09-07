@@ -13,9 +13,10 @@ from pathlib import Path
 from typing import Any, cast, Mapping, Sequence
 
 
-BUILDER_VERSION = "0.2.0"
+BUILDER_VERSION = "0.3.0"
 OUTPUT_NAME = "etf_style_returns_daily.csv"
 SECTOR_OUTPUT_NAME = "us_sector_returns_daily.csv"
+CRYPTO_TICKERS = frozenset({"BTC-USD", "ETH-USD"})
 YAHOO_COLUMNS = (
     "Ticker",
     "Ticker.Name",
@@ -225,7 +226,9 @@ def _format_decimal(value: Decimal) -> str:
 
 
 def _return_output(
-    source: Mapping[str, Any], tickers: Sequence[str]
+    source: Mapping[str, Any],
+    tickers: Sequence[str],
+    calendar_proxy: str | None = None,
 ) -> tuple[bytes, dict[str, object]]:
     rows = source.get("rows")
     if not isinstance(rows, list):
@@ -265,12 +268,16 @@ def _return_output(
             "return_start": min(values).isoformat(),
             "return_end": max(values).isoformat(),
         }
-    union = sorted(all_dates)
+    output_dates = (
+        sorted(daily[calendar_proxy])
+        if calendar_proxy is not None
+        else sorted(all_dates)
+    )
     stream = io.StringIO(newline="")
     writer = csv.writer(stream, lineterminator="\n")
     writer.writerow(("date", *tickers))
     missing_cells = 0
-    for observed in union:
+    for observed in output_dates:
         return_values: list[str] = []
         for ticker in tickers:
             value = daily[ticker].get(observed)
@@ -280,17 +287,24 @@ def _return_output(
             else:
                 return_values.append(_format_decimal(value))
         writer.writerow((observed.isoformat(), *return_values))
-    return stream.getvalue().encode(), {
-        "coverage": "PARTIAL_UNION_NO_FILL",
-        "first_date": union[0].isoformat(),
-        "last_date": union[-1].isoformat(),
-        "row_count": len(union),
+    result: dict[str, object] = {
+        "coverage": (
+            "PARTIAL_BIL_CALENDAR_NO_FILL"
+            if calendar_proxy is not None
+            else "PARTIAL_UNION_NO_FILL"
+        ),
+        "first_date": output_dates[0].isoformat(),
+        "last_date": output_dates[-1].isoformat(),
+        "row_count": len(output_dates),
         "ticker_count": len(tickers),
         "missing_cells": missing_cells,
         "per_ticker": coverage,
         "unit": "DECIMAL_DAILY_RETURN",
         "return_basis": "ADJUSTED_CLOSE_TOTAL_RETURN_PROXY",
     }
+    if calendar_proxy is not None:
+        result["calendar_proxy"] = calendar_proxy
+    return stream.getvalue().encode(), result
 
 
 def build_bundle(
@@ -308,7 +322,12 @@ def build_bundle(
         catalog, universe_ids
     )
     _verify_source(source, source_content, manifest, manifest_path, tickers)
-    output, coverage = _return_output(source, tickers)
+    contains_crypto = not CRYPTO_TICKERS.isdisjoint(tickers)
+    if contains_crypto and cash_proxy != "BIL":
+        raise StyleSourceError("crypto candidate normalization requires BIL calendar")
+    output, coverage = _return_output(
+        source, tickers, calendar_proxy="BIL" if contains_crypto else None
+    )
     per_ticker = cast(dict[str, dict[str, object]], coverage["per_ticker"])
     outputs = {output_name: output}
     result: dict[str, object] = {
@@ -345,12 +364,20 @@ def build_bundle(
             **{key: value for key, value in coverage.items() if key != "per_ticker"},
         },
         "policies": {
-            "calendar": "PROVIDER_OBSERVED_EXACT_DATE_NO_FILL",
+            "calendar": (
+                "BIL_OBSERVED_RETURN_DATE_INTERSECTION_NO_FILL"
+                if contains_crypto
+                else "PROVIDER_OBSERVED_EXACT_DATE_NO_FILL"
+            ),
             "daily_return": "CONSECUTIVE_ADJUSTED_CLOSE_RATIO_MINUS_ONE",
             "first_price": "DROPPED_NO_PREDECESSOR",
             "return_basis": "ADJUSTED_CLOSE_TOTAL_RETURN_PROXY_NOT_OFFICIAL_NAV",
         },
     }
+    if contains_crypto:
+        cast(dict[str, object], result["policies"])["raw_source_calendar"] = (
+            "PROVIDER_OBSERVED_EXACT_DATE_RETAINED"
+        )
     result["bundle_id"] = _sha256(_canonical_json(result))
     return outputs, result
 

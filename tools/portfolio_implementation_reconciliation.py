@@ -19,7 +19,7 @@ import math
 from pathlib import Path
 import re
 import statistics
-from typing import Any, Final, Iterable, Mapping, Sequence
+from typing import Any, Final, Iterable, Mapping, Sequence, cast
 from xml.etree import ElementTree
 
 import pyarrow.parquet as parquet  # type: ignore[import-untyped]
@@ -34,13 +34,17 @@ from portfolio_strategy_history import (
 
 
 SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.2.0"
+BUILDER_VERSION: Final = "1.3.0"
 TRADE_SIDES: Final = frozenset({"BUY", "SELL"})
 INSUFFICIENT_EXACT_COMMON_DATA: Final = (
     "accepted as_of leaves insufficient exact-common data"
 )
 UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT: Final = "UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT"
+UNAVAILABLE_POLICY_NOT_ADMITTED: Final = "UNAVAILABLE_POLICY_NOT_ADMITTED"
 _TICKER_ENTRY = re.compile(r"(?:^|\s)([^\s|]+):USA\|")
+_P123_HAR_PROVENANCE_FIELDS: Final = frozenset(
+    {"_entity_id", "_entity_type", "_source_artifact", "_source_row", "_transport"}
+)
 
 
 class ImplementationReconciliationError(ValueError):
@@ -285,6 +289,170 @@ def _verify_artifact(
         "filename": path.name,
         "sha256": digest,
         "size_bytes": size,
+    }
+
+
+def p123_provider_return_policy(
+    provider_ledger_generation: Path, *, accepted_as_of: date
+) -> dict[str, Any] | None:
+    """Prove the selected receipt's explicit zero P123 return admission.
+
+    This is a comparison disposition, not an exemption for missing broker
+    evidence. Its authority is the existing manifest-bound #303 receipt.
+    """
+    manifest_path = provider_ledger_generation / "generation.json"
+    manifest = _json(manifest_path, "provider-ledger manifest")
+    if manifest.get("verification") != "VERIFIED":
+        raise ImplementationReconciliationError("provider ledger is not verified")
+    ledger_path = provider_ledger_generation / "provider-ledger.json"
+    _verify_artifact(ledger_path, manifest, "normalized/provider-ledger.json")
+    ledger = _json(ledger_path, "provider ledger")
+    if _returns(
+        ledger.get("provider_strategy_returns", []),
+        strategy_id="p123-ai-factor",
+        accepted_as_of=accepted_as_of,
+    ):
+        return None
+    receipt_path = provider_ledger_generation / "admit-or-declare-receipt.json"
+    receipt_identity = _verify_artifact(
+        receipt_path, manifest, "normalized/admit-or-declare-receipt.json"
+    )
+    receipt = _json(receipt_path, "provider admission receipt")
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("receipt_type") != "PROVIDER_ADMIT_OR_DECLARE_V1"
+        or receipt.get("admission_gate_status") != "PASS"
+    ):
+        raise ImplementationReconciliationError(
+            "P123 comparison admission receipt differs"
+        )
+    all_dispositions = receipt.get("dispositions")
+    if not isinstance(all_dispositions, list) or hashlib.sha256(
+        canonical_json_bytes(all_dispositions)
+    ).hexdigest() != receipt.get("disposition_sha256"):
+        raise ImplementationReconciliationError(
+            "P123 comparison disposition digest differs"
+        )
+    dispositions = [
+        row
+        for row in all_dispositions
+        if isinstance(row, dict) and row.get("provider_id") == "portfolio123"
+    ]
+    if not dispositions or any(
+        row.get("action") != "EXCLUDE"
+        or row.get("materialized_record_count") != 0
+        or row.get("target_facts") != []
+        for row in dispositions
+    ):
+        raise ImplementationReconciliationError(
+            "P123 comparison lacks explicit zero admission"
+        )
+    selected = [
+        row
+        for row in receipt.get("provider_generations", [])
+        if isinstance(row, dict) and row.get("provider_id") == "portfolio123"
+    ]
+    catalog_selected = [
+        row
+        for row in ledger.get("provider_generations", [])
+        if isinstance(row, dict) and row.get("provider_id") == "portfolio123"
+    ]
+    if (
+        len(selected) != 1
+        or len(catalog_selected) != 1
+        or any(
+            selected[0].get(field) != catalog_selected[0].get(field)
+            for field in ("generation_id", "manifest_sha256", "catalog_sha256")
+        )
+    ):
+        raise ImplementationReconciliationError(
+            "P123 comparison selected generation differs"
+        )
+    provider = selected[0]
+    provider_artifact = _artifact(manifest, "providers/portfolio123/generation.json")
+    if provider.get("manifest_sha256") != provider_artifact.get("sha256"):
+        raise ImplementationReconciliationError(
+            "P123 comparison provider manifest differs"
+        )
+    contract_raw = receipt.get("contract_raw_sha256")
+    contract_semantic = receipt.get("contract_semantic_sha256")
+    source_segment_sha = provider.get("source_segment_sha256")
+    for digest in (
+        contract_raw,
+        contract_semantic,
+        source_segment_sha,
+        provider.get("generation_id"),
+        provider.get("manifest_sha256"),
+        manifest.get("generation_id"),
+    ):
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise ImplementationReconciliationError(
+                "P123 comparison authority identity differs"
+            )
+    expected_authority = f"contract:{contract_raw}#source_segments/portfolio123-model-generation;issue:303"
+    for disposition in dispositions:
+        if (
+            disposition.get("source_segment_id") != "portfolio123-model-generation"
+            or disposition.get("source_segment_sha256") != source_segment_sha
+            or disposition.get("policy_id") != "PROVIDER_ADMIT_OR_DECLARE_V1"
+            or disposition.get("policy_version") != "1"
+            or disposition.get("policy_owner") != "PRODUCT_OWNER_GOVERNING_ISSUE_303"
+            or disposition.get("authority_ref") != expected_authority
+        ):
+            raise ImplementationReconciliationError(
+                "P123 comparison policy authority differs"
+            )
+        try:
+            start = date.fromisoformat(str(disposition.get("policy_effective_start")))
+            raw_end = disposition.get("policy_effective_end")
+            end = date.fromisoformat(str(raw_end)) if raw_end is not None else None
+        except ValueError as exc:
+            raise ImplementationReconciliationError(
+                "P123 comparison policy interval differs"
+            ) from exc
+        if accepted_as_of < start or (end is not None and accepted_as_of > end):
+            raise ImplementationReconciliationError(
+                "P123 comparison policy is not current"
+            )
+    return_classes = [
+        row
+        for row in dispositions
+        if row.get("item_kind") == "PRODUCT_DATA_CLASS"
+        and row.get("data_class") == "PROVIDER_LIVE_RETURN"
+        and row.get("item_id") == "PROVIDER_LIVE_RETURN"
+    ]
+    if (
+        len(return_classes) != 1
+        or return_classes[0].get("reason") != "REQUIRED_DATA_CLASS_NOT_MATERIALIZED"
+    ):
+        raise ImplementationReconciliationError(
+            "P123 comparison lacks return-class exclusion"
+        )
+    return_class = return_classes[0]
+    return {
+        "provider_id": "portfolio123",
+        "source_segment_id": "portfolio123-model-generation",
+        "data_class": "PROVIDER_LIVE_RETURN",
+        "authority_issue": 303,
+        "policy_id": return_class["policy_id"],
+        "policy_version": return_class["policy_version"],
+        "policy_owner": return_class["policy_owner"],
+        "policy_effective_start": return_class["policy_effective_start"],
+        "policy_effective_end": return_class["policy_effective_end"],
+        "admitted_item_count": 0,
+        "disposition": return_class["action"],
+        "reason": return_class["reason"],
+        "materialized_record_count": return_class["materialized_record_count"],
+        "authority_ref": return_class["authority_ref"],
+        "contract_raw_sha256": contract_raw,
+        "contract_semantic_sha256": contract_semantic,
+        "source_segment_sha256": source_segment_sha,
+        "provider_generation_id": provider["generation_id"],
+        "provider_manifest_sha256": provider["manifest_sha256"],
+        "provider_ledger_generation_id": manifest["generation_id"],
+        "provider_ledger_manifest_sha256": _sha256(manifest_path)[0],
+        "provider_admission_receipt_sha256": receipt_identity["sha256"],
+        "provider_admission_receipt_size_bytes": receipt_identity["size_bytes"],
     }
 
 
@@ -616,9 +784,25 @@ def _ibkr_actual_trades(
     }
 
 
+def _p123_managed_rows(
+    managed: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    economic_rows: list[dict[str, Any]] = []
+    for row in managed:
+        economic = {
+            key: value
+            for key, value in row.items()
+            if key not in _P123_HAR_PROVENANCE_FIELDS
+        }
+        if economic not in economic_rows:
+            economic_rows.append(economic)
+    return economic_rows
+
+
 def _p123_book_ids(
     managed: Sequence[Mapping[str, Any]], registry: Sequence[Mapping[str, Any]]
 ) -> tuple[dict[str, dict[str, str]], Mapping[str, Any]]:
+    managed = _p123_managed_rows(managed)
     primary_rows = [
         row
         for row in managed
@@ -667,6 +851,10 @@ def _p123_book_ids(
         if (same_account or same_account_uid) and str(
             row.get("isAccountLive") or ""
         ).casefold() == "true":
+            if entity_id in current_by_id and current_by_id[entity_id] != row:
+                raise ImplementationReconciliationError(
+                    "Portfolio123 connected model metadata differs"
+                )
             current_by_id[entity_id] = row
 
     admitted_by_id: dict[str, tuple[str, str]] = {}
@@ -688,7 +876,7 @@ def _p123_book_ids(
         entity_id, name = matches[0]
         admitted_by_id[entity_id] = (role, name)
 
-    for entity_id, row in sorted(
+    for entity_id, connected_row in sorted(
         current_by_id.items(), key=lambda item: str(item[1].get("assetName") or "")
     ):
         admitted = admitted_by_id.get(entity_id)
@@ -700,7 +888,7 @@ def _p123_book_ids(
                 + re.sub(
                     r"[^A-Z0-9]+",
                     "_",
-                    str(row.get("assetName") or entity_id).upper(),
+                    str(connected_row.get("assetName") or entity_id).upper(),
                 ).strip("_")[:72]
             )
         )
@@ -711,7 +899,9 @@ def _p123_book_ids(
                 else "CURRENT_CONNECTED_TEMPORARY"
             ),
             "entity_id": entity_id,
-            "name": str(row.get("assetName") or (admitted[1] if admitted else role)),
+            "name": str(
+                connected_row.get("assetName") or (admitted[1] if admitted else role)
+            ),
         }
 
     for entity_id, (role, name) in admitted_by_id.items():
@@ -735,17 +925,17 @@ def _p123_trade_events(
     for row in rows:
         if str(row.get("_entity_id") or "") != entity_id:
             continue
-        side = str(row.get("Type") or row.get("TRADE") or "").upper().strip()
+        side = str(row.get("Type") or "").upper().strip()
         if side not in TRADE_SIDES:
             continue
         raw_date = str(row.get("Date") or "").strip()
         observed = _excel_date(raw_date, "Portfolio123 transaction date")
         if observed > accepted_as_of:
             continue
-        symbol = str(row.get("Symbol") or row.get("Ticker") or "").upper().strip()
+        symbol = str(row.get("Symbol") or "").upper().strip()
         quantity = _decimal(row.get("Shares"))
         price = _decimal(row.get("Price"))
-        fees = _decimal(row.get("TotFees") or row.get("Tot Fees"))
+        fees = _decimal(row.get("TotFees"))
         events.append(
             TradeEvent(
                 observed,
@@ -759,17 +949,253 @@ def _p123_trade_events(
     return _aggregate_events(events)
 
 
-def _model_account_cash(
-    primary: Mapping[str, Any],
-    account_metadata: Sequence[Mapping[str, Any]],
-    equity_rows: Sequence[Mapping[str, Any]],
-    *,
-    accepted_as_of: date,
-) -> dict[str, object]:
-    del primary, account_metadata, equity_rows, accepted_as_of
-    return {
-        "status": UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT,
+_P123_TRANSACTION_BASE_COLUMNS: Final = (
+    "Date",
+    "Price",
+    "Shares",
+    "_entity_id",
+)
+_P123_TRANSACTION_ALIASES: Final = {
+    "Type": ("Type", "TRADE"),
+    "Symbol": ("Symbol", "Ticker"),
+    "TotFees": ("TotFees", "Tot Fees"),
+}
+
+
+def _p123_alias_value(semantic: str, value: object) -> object | None:
+    if value is None or not str(value).strip():
+        return None
+    if semantic == "Type":
+        return str(value).strip().upper()
+    if semantic == "Symbol":
+        return str(value).strip().upper()
+    if semantic == "TotFees":
+        return _decimal(value)
+    return str(value).strip()
+
+
+def _read_p123_transactions(path: Path) -> list[dict[str, Any]]:
+    """Read one supported producer schema and bind aliases to canonical keys."""
+    names = tuple(str(name) for name in parquet.read_schema(path).names)
+
+    missing = [
+        column for column in _P123_TRANSACTION_BASE_COLUMNS if column not in names
+    ]
+    if missing:
+        raise ImplementationReconciliationError(
+            f"missing required P123 transaction columns: {', '.join(missing)}"
+        )
+    columns = list(_P123_TRANSACTION_BASE_COLUMNS)
+    for semantic, aliases in _P123_TRANSACTION_ALIASES.items():
+        present = [alias for alias in aliases if alias in names]
+        if not present:
+            label = "/".join(aliases)
+            raise ImplementationReconciliationError(
+                f"missing supported P123 transaction {semantic.casefold()} column "
+                f"({label})"
+            )
+        columns.extend(present)
+
+    rows = parquet.read_table(path, columns=columns).to_pylist()
+    normalized_rows: list[dict[str, Any]] = []
+    for row in rows:
+        normalized = dict(row)
+        for semantic, aliases in _P123_TRANSACTION_ALIASES.items():
+            populated = []
+            for alias in aliases:
+                if alias not in row:
+                    continue
+                value = _p123_alias_value(semantic, row.get(alias))
+                if value is not None:
+                    populated.append((alias, value))
+            values = {value for _, value in populated}
+            if len(values) > 1:
+                raise ImplementationReconciliationError(
+                    "conflicting populated P123 transaction "
+                    f"{semantic.casefold()} aliases"
+                )
+            normalized[semantic] = populated[0][1] if populated else None
+        normalized_rows.append(normalized)
+    return normalized_rows
+
+
+_TT_ENDPOINT_NAMES: Final = frozenset(
+    {
+        "holdings-history.json",
+        "last-rebalance.txt",
+        "last-update.txt",
+        "performance-chart.json",
+        "performance-table.json",
+        "portfolio-holdings.json",
     }
+)
+
+
+def _read_tt_source_manifest(
+    path: Path,
+    components: Sequence[str],
+    component_weights: Mapping[str, Decimal] | None = None,
+) -> dict[str, Any]:
+    def valid_identity(value: object) -> bool:
+        return (
+            isinstance(value, dict)
+            and isinstance(value.get("filename"), str)
+            and bool(value["filename"].strip())
+            and bool(re.fullmatch(r"[0-9a-f]{64}", str(value.get("sha256") or "")))
+            and isinstance(value.get("size_bytes"), int)
+            and value["size_bytes"] > 0
+        )
+
+    manifest = _json(path, "TuringTrader source manifest")
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("producer") != "turingtrader-retained-capture-source-manifest"
+        or manifest.get("verification") != "VERIFIED_RETAINED_CAPTURE_REPLAYABLE"
+    ):
+        raise ImplementationReconciliationError(
+            "TuringTrader source manifest authority differs"
+        )
+    claimed_id = str(manifest.get("source_manifest_id") or "")
+    unsigned = {
+        key: value for key, value in manifest.items() if key != "source_manifest_id"
+    }
+    actual_id = hashlib.sha256(
+        json.dumps(
+            unsigned,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if claimed_id != actual_id:
+        raise ImplementationReconciliationError(
+            "TuringTrader source manifest identity differs"
+        )
+    portfolio = manifest.get("portfolio")
+    if (
+        not isinstance(portfolio, dict)
+        or portfolio.get("portfolio_id") != "tt-portfolio"
+        or not str(portfolio.get("portfolio_version") or "").strip()
+        or not str(portfolio.get("live_inception") or "").strip()
+    ):
+        raise ImplementationReconciliationError(
+            "TuringTrader portfolio identity or version differs"
+        )
+    selected = manifest.get("selected_components")
+    if not isinstance(selected, list) or any(
+        not isinstance(row, dict) for row in selected
+    ):
+        raise ImplementationReconciliationError(
+            "TuringTrader selected components differ"
+        )
+    slugs = [str(row.get("slug") or "") for row in selected]
+    if slugs != list(components):
+        raise ImplementationReconciliationError(
+            "TuringTrader selected components differ"
+        )
+    for row in selected:
+        nav = row.get("nav")
+        dated = row.get("dated_holdings")
+        current = row.get("current_holdings")
+        performance = row.get("performance")
+        endpoint_hashes = row.get("endpoint_hashes")
+        if (
+            not isinstance(nav, dict)
+            or not str(nav.get("as_of_date") or "")
+            or _decimal(nav.get("value")) is None
+            or not isinstance(dated, dict)
+            or not str(dated.get("observed_start") or "")
+            or not str(dated.get("observed_end") or "")
+            or not isinstance(dated.get("snapshots"), list)
+            or not dated["snapshots"]
+            or not isinstance(performance, dict)
+            or not isinstance(performance.get("nav_history"), list)
+            or not performance["nav_history"]
+            or not isinstance(current, list)
+            or not current
+            or not str(row.get("last_update") or "")
+            or not str(row.get("last_rebalance") or "")
+            or not isinstance(endpoint_hashes, dict)
+            or set(endpoint_hashes) != _TT_ENDPOINT_NAMES
+            or _decimal(row.get("portfolio_weight")) is None
+        ):
+            raise ImplementationReconciliationError(
+                "TuringTrader selected component evidence differs"
+            )
+        for identity in endpoint_hashes.values():
+            if not valid_identity(identity):
+                raise ImplementationReconciliationError(
+                    "TuringTrader endpoint identity differs"
+                )
+    weights = {
+        str(row["slug"]): _decimal(row.get("portfolio_weight")) for row in selected
+    }
+    if any(weight is None or weight <= 0 for weight in weights.values()) or abs(
+        sum(
+            (weight for weight in weights.values() if weight is not None),
+            Decimal(0),
+        )
+        - Decimal(1)
+    ) > Decimal("0.000000000001"):
+        raise ImplementationReconciliationError(
+            "TuringTrader selected component weights differ"
+        )
+    if component_weights is not None and any(
+        abs(cast(Decimal, weights[slug]) - component_weights[slug])
+        > Decimal("0.000000000001")
+        for slug in components
+    ):
+        raise ImplementationReconciliationError(
+            "TuringTrader selected component weights differ"
+        )
+    history = manifest.get("versioned_history")
+    if (
+        not isinstance(history, dict)
+        or not str(history.get("component_nav_earliest_observed") or "")
+        or not str(history.get("live_target_weights_complete_from") or "")
+        or not isinstance(history.get("live_plus_backtest"), dict)
+        or history["live_plus_backtest"].get("status")
+        != "AVAILABLE_CURRENT_SPECIFICATION_BACKTEST"
+        or history["live_plus_backtest"].get("method")
+        != "DAILY_FIXED_WEIGHT_COMPONENT_RETURN_SUM"
+        or history["live_plus_backtest"].get("compatibility_basis")
+        != "CURRENT_SIX_COMPONENT_SLUGS_AND_PUBLISHED_EQUAL_WEIGHTS"
+        or history["live_plus_backtest"].get("interpretation")
+        != "CURRENT_SPECIFICATION_SIMULATION_NOT_HISTORICAL_COMPOSITION"
+        or not str(history["live_plus_backtest"].get("strategy_version") or "")
+        or not str(history["live_plus_backtest"].get("observed_start") or "")
+        or not str(history["live_plus_backtest"].get("observed_end") or "")
+    ):
+        raise ImplementationReconciliationError(
+            "TuringTrader versioned-history evidence differs"
+        )
+    vane = manifest.get("market_vane")
+    if (
+        not isinstance(vane, dict)
+        or vane.get("class_ids") != list(range(8))
+        or vane.get("current_class_id") not in range(8)
+        or not isinstance(vane.get("signals"), dict)
+        or not isinstance(vane.get("status_endpoint"), dict)
+    ):
+        raise ImplementationReconciliationError(
+            "TuringTrader market-vane evidence differs"
+        )
+    price_tape = manifest.get("price_tape")
+    if (
+        not isinstance(price_tape, dict)
+        or price_tape.get("dataset") != "history_adjusted"
+        or not valid_identity(price_tape.get("artifact"))
+        or not valid_identity(price_tape.get("source_run_manifest"))
+        or not str(price_tape.get("source_run_id") or "")
+        or not isinstance(price_tape.get("target"), dict)
+        or not price_tape["target"].get("symbols")
+        or not str(price_tape["target"].get("observed_start") or "")
+        or not str(price_tape["target"].get("observed_end") or "")
+    ):
+        raise ImplementationReconciliationError(
+            "TuringTrader adjusted price evidence differs"
+        )
+    return manifest
 
 
 def _ai_reconciliation(
@@ -779,58 +1205,16 @@ def _ai_reconciliation(
     ledger: Mapping[str, Any],
     *,
     accepted_as_of: date,
+    provider_return_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     tables = p123_root / "tables"
-    managed = parquet.read_table(
-        tables / "har_managed_metadata.parquet",
-        columns=[
-            "account",
-            "accountUid",
-            "assetName",
-            "assetUid",
-            "isAccountLive",
-            "posCnt",
-            "strategyTotalHoldCount",
-        ],
-    ).to_pylist()
+    managed = parquet.read_table(tables / "har_managed_metadata.parquet").to_pylist()
     registry = parquet.read_table(
         tables / "strategy_registry.parquet",
         columns=["canonical_name", "entity_id"],
     ).to_pylist()
-    transactions = parquet.read_table(
-        tables / "har_transactions.parquet",
-        columns=[
-            "Date",
-            "Price",
-            "Shares",
-            "Symbol",
-            "Ticker",
-            "Tot Fees",
-            "TotFees",
-            "TRADE",
-            "Type",
-            "_entity_id",
-        ],
-    ).to_pylist()
-    account_metadata = parquet.read_table(
-        tables / "har_account_metadata.parquet",
-        columns=[
-            "_entity_id",
-            "cash",
-            "id",
-            "label",
-            "name",
-            "netWorth",
-            "tickers",
-            "tradeCash",
-            "value",
-        ],
-    ).to_pylist()
-    equity = parquet.read_table(
-        tables / "har_equity_curve.parquet",
-        columns=["Cash", "Date", "Total Equity", "_entity_id"],
-    ).to_pylist()
-    book_inventory, primary = _p123_book_ids(managed, registry)
+    transactions = _read_p123_transactions(tables / "har_transactions.parquet")
+    book_inventory, _ = _p123_book_ids(managed, registry)
     actual, join = _ibkr_actual_trades(
         ibkr_catalog, ibkr_xml_paths, accepted_as_of=accepted_as_of
     )
@@ -885,21 +1269,64 @@ def _ai_reconciliation(
         evidence_layer="ACCOUNT_LIVE",
         accepted_as_of=accepted_as_of,
     )
-    metrics = relative_metrics(provider, account, accepted_as_of=accepted_as_of)
-    declared_rows = [
-        row
-        for row in ledger.get("strategy_evidence", [])
-        if isinstance(row, dict) and row.get("strategy_id") == "p123-ai-factor"
-    ]
-    if len(declared_rows) != 1 or not isinstance(declared_rows[0].get("overlap"), dict):
-        raise ImplementationReconciliationError(
-            "Portfolio123 declared model/account overlap is unavailable"
+    account_summary: dict[str, Any] = {}
+    metrics: dict[str, Any]
+    return_window: dict[str, Any]
+    if provider_return_policy is not None:
+        if provider or len(account) < 2:
+            raise ImplementationReconciliationError(
+                "P123 policy disposition requires no model returns and valid actual returns"
+            )
+        metrics = {
+            "status": UNAVAILABLE_POLICY_NOT_ADMITTED,
+            "observations": 0,
+            "model_cumulative_return": None,
+            "account_minus_model_cumulative": None,
+            "policy_evidence": dict(provider_return_policy),
+        }
+        return_window = {
+            "status": UNAVAILABLE_POLICY_NOT_ADMITTED,
+            "expanded_exact_common_gap": None,
+            "expanded_minus_declared_gap": None,
+            "prior_declared_overlap": None,
+            "policy_evidence": dict(provider_return_policy),
+        }
+        account_dates = sorted(account)
+        account_summary = {
+            "account_live_return_summary": {
+                "status": "AVAILABLE",
+                "observations": len(account_dates),
+                "observed_start": account_dates[0].isoformat(),
+                "observed_end": account_dates[-1].isoformat(),
+                "cumulative_return": _compound(account[day] for day in account_dates),
+            }
+        }
+    else:
+        metrics = relative_metrics(provider, account, accepted_as_of=accepted_as_of)
+        declared_rows = [
+            row
+            for row in ledger.get("strategy_evidence", [])
+            if isinstance(row, dict) and row.get("strategy_id") == "p123-ai-factor"
+        ]
+        if len(declared_rows) != 1 or not isinstance(
+            declared_rows[0].get("overlap"), dict
+        ):
+            raise ImplementationReconciliationError(
+                "Portfolio123 declared model/account overlap is unavailable"
+            )
+        declared_overlap = dict(declared_rows[0]["overlap"])
+        declared_gap = _float(
+            declared_overlap.get("account_minus_provider_cumulative"),
+            "Portfolio123 declared cumulative gap",
         )
-    declared_overlap = dict(declared_rows[0]["overlap"])
-    declared_gap = _float(
-        declared_overlap.get("account_minus_provider_cumulative"),
-        "Portfolio123 declared cumulative gap",
-    )
+        return_window = {
+            "expanded_exact_common_gap": metrics["account_minus_model_cumulative"],
+            "expanded_minus_declared_gap": (
+                float(metrics["account_minus_model_cumulative"]) - declared_gap
+            ),
+            "prior_declared_overlap": declared_overlap,
+            "status": "EXPANDED_BEYOND_PRIOR_DECLARED_OVERLAP",
+        }
     actual_fees = sum((row.fees or Decimal(0) for row in actual), Decimal(0))
     primary_model_fees = sum(
         (row.fees or Decimal(0) for row in books["PRIMARY_AI_FACTOR"]),
@@ -909,13 +1336,11 @@ def _ai_reconciliation(
         [event for role, rows in books.items() for event in rows], actual
     )
     return {
+        **account_summary,
         "broker_execution_join": join,
-        "connected_account_snapshot": _model_account_cash(
-            primary,
-            account_metadata,
-            equity,
-            accepted_as_of=accepted_as_of,
-        ),
+        "connected_account_snapshot": {
+            "status": UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT,
+        },
         "costs": {
             "account_commissions_and_taxes_usd": float(actual_fees),
             "primary_model_reported_fees_usd": float(primary_model_fees),
@@ -938,14 +1363,7 @@ def _ai_reconciliation(
             for role, item in sorted(book_inventory.items())
         ],
         "return_reconciliation": metrics,
-        "return_window_comparison": {
-            "expanded_exact_common_gap": metrics["account_minus_model_cumulative"],
-            "expanded_minus_declared_gap": (
-                float(metrics["account_minus_model_cumulative"]) - declared_gap
-            ),
-            "prior_declared_overlap": declared_overlap,
-            "status": "EXPANDED_BEYOND_PRIOR_DECLARED_OVERLAP",
-        },
+        "return_window_comparison": return_window,
         "root_causes": [
             {
                 "cause": "MULTI_MODEL_ACCOUNT_CONTAMINATION",
@@ -1014,18 +1432,37 @@ def _ai_reconciliation(
     }
 
 
-def _tt_components(workbook: Path) -> list[str]:
+def _tt_component_weights(workbook: Path) -> dict[str, Decimal]:
     rows = _xlsx_rows(workbook, "Index")
-    result = [
-        str(_cell(row, 4) or "").strip()
-        for row in rows[1:]
-        if _cell(row, 5) == 2 and _decimal(_cell(row, 6)) is not None
-    ]
-    if len(result) != 6 or len(set(result)) != 6:
+    periods: dict[int, dict[str, Decimal]] = {}
+    for period in (1, 2):
+        selected: dict[str, Decimal] = {}
+        for row in rows[1:]:
+            if _cell(row, 5) != period:
+                continue
+            slug = str(_cell(row, 4) or "").strip()
+            weight = _decimal(_cell(row, 6))
+            if not slug or weight is None or slug in selected:
+                raise ImplementationReconciliationError(
+                    "TT six-component definition differs"
+                )
+            selected[slug] = weight
+        if len(selected) != 6 or abs(
+            sum(selected.values(), Decimal(0)) - Decimal(1)
+        ) > Decimal("0.000000000001"):
+            raise ImplementationReconciliationError(
+                "TT six-component definition differs"
+            )
+        periods[period] = selected
+    if periods[1] != periods[2]:
         raise ImplementationReconciliationError(
-            "TT current six-component definition differs"
+            "TT period-one and period-two component definitions differ"
         )
-    return result
+    return periods[2]
+
+
+def _tt_components(workbook: Path) -> list[str]:
+    return list(_tt_component_weights(workbook))
 
 
 def _tt_model_returns(
@@ -1070,25 +1507,130 @@ def _tt_model_returns(
     return result
 
 
+def _tt_manifest_model_returns(
+    manifest: Mapping[str, Any],
+    components: Sequence[str],
+    *,
+    accepted_as_of: date,
+) -> dict[date, float]:
+    selected = {
+        str(row["slug"]): row
+        for row in manifest["selected_components"]
+        if isinstance(row, dict)
+    }
+    levels: dict[str, dict[date, Decimal]] = {}
+    weights: dict[str, Decimal] = {}
+    for component in components:
+        row = selected[component]
+        component_levels: dict[date, Decimal] = {}
+        for item in row["performance"]["nav_history"]:
+            if not isinstance(item, dict):
+                raise ImplementationReconciliationError(
+                    "TuringTrader component NAV history differs"
+                )
+            observed = date.fromisoformat(str(item.get("observed_date") or ""))
+            value = _decimal(item.get("value"))
+            if value is None or value <= 0 or observed in component_levels:
+                raise ImplementationReconciliationError(
+                    "TuringTrader component NAV history differs"
+                )
+            if observed <= accepted_as_of:
+                component_levels[observed] = value
+        levels[component] = component_levels
+        weight = _decimal(row.get("portfolio_weight"))
+        if weight is None:
+            raise ImplementationReconciliationError(
+                "TuringTrader selected component weights differ"
+            )
+        weights[component] = weight
+    common = sorted(set.intersection(*(set(levels[item]) for item in components)))
+    result: dict[date, float] = {}
+    previous: dict[str, Decimal] | None = None
+    for observed in common:
+        current = {component: levels[component][observed] for component in components}
+        if previous is not None:
+            result[observed] = float(
+                sum(
+                    weights[component]
+                    * (current[component] / previous[component] - Decimal(1))
+                    for component in components
+                )
+            )
+        previous = current
+    return result
+
+
+def _tt_workbook_return_parity(
+    workbook: Path,
+    manifest_returns: Mapping[date, float],
+    components: Sequence[str],
+    *,
+    accepted_as_of: date,
+) -> dict[str, object]:
+    workbook_returns = _tt_model_returns(
+        workbook, components, accepted_as_of=accepted_as_of
+    )
+    common = sorted(set(manifest_returns) & set(workbook_returns))
+    maximum_difference = max(
+        (abs(manifest_returns[item] - workbook_returns[item]) for item in common),
+        default=float("inf"),
+    )
+    if not common or maximum_difference > 0.0000001:
+        raise ImplementationReconciliationError(
+            "TT direct-source and workbook return parity differs"
+        )
+    return {
+        "observations": len(common),
+        "observed_end": common[-1].isoformat(),
+        "observed_start": common[0].isoformat(),
+        "maximum_absolute_daily_return_difference": maximum_difference,
+        "status": "MATCHED_DIRECT_SOURCE_TO_INDEPENDENT_WORKBOOK",
+    }
+
+
 def _tt_allocation_events(
-    workbook: Path, components: Sequence[str], *, accepted_as_of: date
+    source_manifest: Mapping[str, Any],
+    components: Sequence[str],
+    *,
+    accepted_as_of: date,
 ) -> tuple[list[TradeEvent], dict[str, dict[str, Decimal]]]:
-    rows = _xlsx_rows(workbook, "raw_tt_allochist")
-    if rows[0][:4] != ["strategy", "Date", "Ticker", "Weight"]:
-        raise ImplementationReconciliationError("TT allocation history headers differ")
     snapshots: dict[tuple[str, date], dict[str, Decimal]] = {}
-    for row in rows[1:]:
-        component = str(_cell(row, 0) or "").strip()
-        if component not in components:
-            continue
-        observed = _excel_date(_cell(row, 1), "TT allocation date")
-        if observed > accepted_as_of:
-            continue
-        symbol = str(_cell(row, 2) or "").upper().strip()
-        weight = _decimal(_cell(row, 3))
-        if not symbol or weight is None:
-            continue
-        snapshots.setdefault((component, observed), {})[symbol] = weight
+    selected = {
+        str(row["slug"]): row
+        for row in source_manifest["selected_components"]
+        if isinstance(row, dict)
+    }
+    component_weights: dict[str, Decimal] = {}
+    for component in components:
+        component_weight = _decimal(selected[component].get("portfolio_weight"))
+        if component_weight is None:
+            raise ImplementationReconciliationError(
+                "TuringTrader selected component weights differ"
+            )
+        component_weights[component] = component_weight
+        for row in selected[component]["dated_holdings"]["snapshots"]:
+            if not isinstance(row, dict) or not isinstance(row.get("weights"), dict):
+                raise ImplementationReconciliationError(
+                    "TT direct-source allocation history differs"
+                )
+            observed = date.fromisoformat(str(row.get("observed_date") or ""))
+            if observed > accepted_as_of:
+                continue
+            normalized = {
+                str(symbol).upper().strip(): _decimal(weight)
+                for symbol, weight in row["weights"].items()
+            }
+            if any(
+                not symbol or weight is None for symbol, weight in normalized.items()
+            ):
+                raise ImplementationReconciliationError(
+                    "TT direct-source allocation history differs"
+                )
+            snapshots[(component, observed)] = {
+                symbol: weight
+                for symbol, weight in normalized.items()
+                if weight is not None
+            }
     by_date: dict[date, list[tuple[str, dict[str, Decimal]]]] = {}
     for (component, observed), allocation in snapshots.items():
         by_date.setdefault(observed, []).append((component, allocation))
@@ -1096,6 +1638,9 @@ def _tt_allocation_events(
     previous: dict[str, Decimal] | None = None
     events: list[TradeEvent] = []
     latest: dict[str, dict[str, Decimal]] = {}
+    live_inception = date.fromisoformat(
+        str(source_manifest["portfolio"]["live_inception"])
+    )
     for observed in sorted(by_date):
         for component, allocation in by_date[observed]:
             state[component] = allocation
@@ -1105,10 +1650,11 @@ def _tt_allocation_events(
         composite: dict[str, Decimal] = {}
         for component in components:
             for symbol, weight in state[component].items():
-                composite[symbol] = composite.get(
-                    symbol, Decimal(0)
-                ) + weight / Decimal(len(components))
-        if previous is not None:
+                composite[symbol] = (
+                    composite.get(symbol, Decimal(0))
+                    + weight * component_weights[component]
+                )
+        if previous is not None and observed >= live_inception:
             for symbol in sorted(set(previous) | set(composite)):
                 delta = composite.get(symbol, Decimal(0)) - previous.get(
                     symbol, Decimal(0)
@@ -1215,14 +1761,25 @@ def _tt_current_weights(
 
 def _tt_reconciliation(
     workbook: Path,
+    source_manifest_path: Path,
     ledger: Mapping[str, Any],
     schwab: Mapping[str, Any],
     *,
     accepted_as_of: date,
 ) -> dict[str, object]:
-    components = _tt_components(workbook)
-    model_returns = _tt_model_returns(
-        workbook, components, accepted_as_of=accepted_as_of
+    component_weights = _tt_component_weights(workbook)
+    components = list(component_weights)
+    source_manifest = _read_tt_source_manifest(
+        source_manifest_path, components, component_weights
+    )
+    model_returns = _tt_manifest_model_returns(
+        source_manifest, components, accepted_as_of=accepted_as_of
+    )
+    workbook_parity = _tt_workbook_return_parity(
+        workbook,
+        model_returns,
+        components,
+        accepted_as_of=accepted_as_of,
     )
     account_returns = _returns(
         ledger.get("strategy_returns", []),
@@ -1231,7 +1788,7 @@ def _tt_reconciliation(
         accepted_as_of=accepted_as_of,
     )
     model_events, _ = _tt_allocation_events(
-        workbook, components, accepted_as_of=accepted_as_of
+        source_manifest, components, accepted_as_of=accepted_as_of
     )
     actual_events = _tt_actual_events(ledger, schwab, accepted_as_of=accepted_as_of)
     common_dates = sorted(set(model_returns) & set(account_returns))
@@ -1286,11 +1843,17 @@ def _tt_reconciliation(
         }
 
     first_allocation_date = min(row.observed for row in comparable_model)
-    before_allocation = segment(
-        common_dates[0],
-        first_allocation_date - timedelta(days=1),
-        accepted_as_of=accepted_as_of,
-    )
+    if common_dates[0] < first_allocation_date:
+        before_allocation = segment(
+            common_dates[0],
+            first_allocation_date - timedelta(days=1),
+            accepted_as_of=accepted_as_of,
+        )
+    else:
+        before_allocation = {
+            "observations": 0,
+            "status": "NOT_APPLICABLE_COMPLETE_TARGET_HISTORY_FROM_LIVE_INCEPTION",
+        }
     after_allocation = segment(
         first_allocation_date, common_dates[-1], accepted_as_of=accepted_as_of
     )
@@ -1325,11 +1888,17 @@ def _tt_reconciliation(
             accepted_as_of=accepted_as_of,
         ),
         "evidence_layers": [
+            "GOVERNED_DIRECT_SOURCE_MANIFEST",
             "CURRENT_SIX_COMPONENT_MODEL_HISTORY",
             "MODEL_ALLOCATION_CHANGES",
             "BROKER_ACTUAL_TRADES",
             "ACCOUNT_LIVE_RETURNS",
         ],
+        "model_source": {
+            "portfolio": source_manifest["portfolio"],
+            "source_manifest_id": source_manifest["source_manifest_id"],
+        },
+        "workbook_parity": workbook_parity,
         "return_reconciliation": relative_metrics(
             model_returns, account_returns, accepted_as_of=accepted_as_of
         ),
@@ -1785,6 +2354,7 @@ def build_reconciliation(
     schwab_catalog_path: Path,
     provider_ledger_root: Path,
     tt_workbook: Path,
+    tt_source_manifest: Path,
     grizzly_signals: Path,
     grizzly_blended_history: Path | None = None,
     spxl_market_data: Path,
@@ -1811,6 +2381,22 @@ def build_reconciliation(
     ]
     ledger = _json(ledger_path, "provider ledger")
     schwab = _json(schwab_catalog_path, "Schwab catalog")
+    provider_return_policy = p123_provider_return_policy(
+        provider_ledger_root, accepted_as_of=accepted_as_of
+    )
+    if provider_return_policy is not None:
+        sources.extend(
+            [
+                _source(
+                    provider_ledger_root / "generation.json", "provider-ledger-manifest"
+                ),
+                _verify_artifact(
+                    provider_ledger_root / "admit-or-declare-receipt.json",
+                    ledger_manifest,
+                    "normalized/admit-or-declare-receipt.json",
+                ),
+            ]
+        )
 
     p123_manifest_path = p123_generation_root / "generation.json"
     p123_manifest = _json(p123_manifest_path, "Portfolio123 generation manifest")
@@ -1826,8 +2412,6 @@ def build_reconciliation(
         )
     )
     for artifact_id in (
-        "tables/har_account_metadata.parquet",
-        "tables/har_equity_curve.parquet",
         "tables/har_managed_metadata.parquet",
         "tables/har_transactions.parquet",
         "tables/strategy_registry.parquet",
@@ -1881,6 +2465,7 @@ def build_reconciliation(
     sources.extend(
         [
             _source(tt_workbook, "turingtrader-current-api-workbook"),
+            _source(tt_source_manifest, "turingtrader-source-manifest"),
             _source(
                 grizzly_signals,
                 (
@@ -1922,9 +2507,16 @@ def build_reconciliation(
             xml_paths,
             ledger,
             accepted_as_of=accepted_as_of,
+            provider_return_policy=provider_return_policy,
         ),
         grizzly,
-        _tt_reconciliation(tt_workbook, ledger, schwab, accepted_as_of=accepted_as_of),
+        _tt_reconciliation(
+            tt_workbook,
+            tt_source_manifest,
+            ledger,
+            schwab,
+            accepted_as_of=accepted_as_of,
+        ),
     ]
     payload: dict[str, object] = {
         "as_of_date": accepted_as_of.isoformat(),
@@ -1965,6 +2557,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--schwab-catalog", type=Path, required=True)
     parser.add_argument("--provider-ledger-root", type=Path, required=True)
     parser.add_argument("--tt-workbook", type=Path, required=True)
+    parser.add_argument("--tt-source-manifest", type=Path, required=True)
     parser.add_argument("--grizzly-signals", type=Path, required=True)
     parser.add_argument("--grizzly-blended-history", type=Path)
     parser.add_argument("--spxl-market-data", type=Path, required=True)
@@ -1984,6 +2577,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             schwab_catalog_path=args.schwab_catalog,
             provider_ledger_root=args.provider_ledger_root,
             tt_workbook=args.tt_workbook,
+            tt_source_manifest=args.tt_source_manifest,
             grizzly_signals=args.grizzly_signals,
             grizzly_blended_history=args.grizzly_blended_history,
             spxl_market_data=args.spxl_market_data,

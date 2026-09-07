@@ -62,6 +62,37 @@ MARKET_CONTRACT_SOURCE_IDS = {
     "style_returns": "public-etf-style-sector-and-market-prices",
     "sector_returns": "public-etf-style-sector-and-market-prices",
 }
+METHOD_SCOPE_NON_APPLICABLE_SOURCES = {
+    "p123-ai-factor": frozenset(("europe-economic", "multi-asset-style")),
+    "p123-eu": frozenset(
+        (
+            "us-economic",
+            "us-equity-style",
+            "multi-asset-style",
+            "us-sector",
+            "us-industry",
+        )
+    ),
+    "qsi": frozenset(("europe-economic",)),
+    "tt-portfolio": frozenset(("europe-economic",)),
+    "volatis-strategy": frozenset(("europe-economic",)),
+    "grizzlybears-vtma": frozenset(("europe-economic",)),
+    "robuxio-crypto": frozenset(
+        (
+            "us-economic",
+            "europe-economic",
+            "us-equity-style",
+            "us-sector",
+            "us-industry",
+        )
+    ),
+}
+METHOD_SCOPE_NON_APPLICABLE_DISPOSITION = {
+    "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING",
+    "readiness": "NOT_APPLICABLE_METHOD_SCOPE",
+    "reason": "NOT_APPLICABLE_METHOD_SCOPE",
+    "requirement": "NOT_APPLICABLE_METHOD_SCOPE",
+}
 TARGET_HEADERS = (
     "series_id",
     "date",
@@ -434,7 +465,18 @@ def _layered_history_targets(
             )
         modes = _object(coverage_row.get("modes"), "layered strategy modes")
         mode = _object(modes.get(evidence_mode), f"layered mode {evidence_mode}")
-        if mode.get("status") != "AVAILABLE":
+        live_mode = _object(modes.get("LIVE_ONLY"), "layered mode LIVE_ONLY")
+        no_matched_prehistory = (
+            evidence_mode == "LIVE_PLUS_BACKTEST"
+            and mode.get("status") == "REQUIRED_NOT_READY"
+            and mode.get("reason")
+            in {
+                "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED",
+                "REQUIRED_EXACT_VERSION_BACKTEST_NOT_ADMITTED",
+            }
+            and live_mode.get("status") == "AVAILABLE"
+        )
+        if mode.get("status") != "AVAILABLE" and not no_matched_prehistory:
             reason = _text(mode.get("reason"), "layered history readiness reason")
             raise CurrentPlanError(
                 f"layered history {evidence_mode} is not ready for "
@@ -450,6 +492,14 @@ def _layered_history_targets(
         if not selected_summaries:
             raise CurrentPlanError(
                 f"layered history has no selected segment for {strategy_id}"
+            )
+        if no_matched_prehistory and any(
+            summary.get("evidence_layer") != "ACCOUNT_LIVE"
+            for summary in selected_summaries
+        ):
+            raise CurrentPlanError(
+                "unmatched prehistory fallback contains a non-live segment for "
+                f"{strategy_id}"
             )
         expected_observations = sum(
             _integer(summary.get("return_observations"), "segment observations", 1)
@@ -490,15 +540,6 @@ def _layered_history_targets(
                     "strategy_id": strategy_id,
                 }
             )
-            if (
-                assurance_profile == "RELEASE_QC"
-                and age["status"] == "WARN_COMPLETE_DATA_AGE"
-            ):
-                raise CurrentPlanError(
-                    "release QC requires a current layered history live source for "
-                    f"{strategy_id}: {source_id} "
-                    f"(age_days={age['age_days']}, max_age_days={max_age_days})"
-                )
         backtest_observations = sum(
             _integer(summary.get("return_observations"), "backtest observations", 1)
             for summary in selected_summaries
@@ -524,7 +565,11 @@ def _layered_history_targets(
             "status": (
                 "AVAILABLE_LIVE_ONLY"
                 if evidence_mode == "LIVE_ONLY"
-                else "AVAILABLE_LIVE_PLUS_BACKTEST"
+                else (
+                    "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+                    if no_matched_prehistory
+                    else "AVAILABLE_LIVE_PLUS_BACKTEST"
+                )
             ),
             "strategy_version": _text(
                 version.get("history_generation_ref"), "history strategy version"
@@ -549,6 +594,14 @@ def _layered_history_targets(
         selected_counts[row["series_id"]] += 1
         if row["evidence_layer"] not in allowed_layers:
             raise CurrentPlanError("layered history evidence layer differs from mode")
+        if (
+            composition[row["series_id"]]["status"]
+            == "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+            and row["evidence_layer"] != "ACCOUNT_LIVE"
+        ):
+            raise CurrentPlanError(
+                "unmatched prehistory fallback contains a non-live row"
+            )
         if _day(row["date"], "layered target date") > evaluated_on:
             raise CurrentPlanError(
                 "target observations extend beyond the evaluation date"
@@ -1079,6 +1132,15 @@ def _source_dispositions(
     return result
 
 
+def _is_accepted_method_scope_non_applicable(
+    strategy_id: str, source_key: str, cell: Mapping[str, str]
+) -> bool:
+    return (
+        source_key in METHOD_SCOPE_NON_APPLICABLE_SOURCES.get(strategy_id, frozenset())
+        and dict(cell) == METHOD_SCOPE_NON_APPLICABLE_DISPOSITION
+    )
+
+
 def _validate_plan_authority(
     plan: Mapping[str, Any],
     plan_content: bytes,
@@ -1238,6 +1300,15 @@ def _validate_strategy_perimeter(
         ):
             ready_sources: set[str] = set()
             for source_key, cell in cells.items():
+                if _is_accepted_method_scope_non_applicable(
+                    strategy_id, source_key, cell
+                ):
+                    if source_key in assignment_keys:
+                        raise CurrentPlanError(
+                            "method-scope non-applicable cell has an assignment: "
+                            f"{strategy_id}.{source_key}"
+                        )
+                    continue
                 if cell["requirement"] != "REQUIRED":
                     raise CurrentPlanError(
                         "required decomposition cell requirement differs: "
@@ -1794,16 +1865,6 @@ def build_bundle(
             market_source_ages[input_key] = factor_source_age
             if (
                 assurance_profile == "RELEASE_QC"
-                and factor_source_age["status"] == "WARN_COMPLETE_DATA_AGE"
-            ):
-                raise CurrentPlanError(
-                    "release QC requires a current market source for "
-                    f"{input_key}: {contract_source_id} "
-                    f"(age_days={factor_source_age['age_days']}, "
-                    f"max_age_days={source_max_age_days})"
-                )
-            if (
-                assurance_profile == "RELEASE_QC"
                 and contract_source.get("readiness") != "READY"
             ):
                 raise CurrentPlanError(
@@ -2173,7 +2234,7 @@ def build_bundle(
             },
             "publication": "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE",
             "strategy_evidence_mode": evidence_mode,
-            "data_age": "WARN_IN_DEVELOPMENT_AND_WORKSTATION; FAIL_REQUIRED_STALE_SOURCE_IN_RELEASE_QC",
+            "data_age": "WARN_WITH_COMPLETE_THROUGH_DATE_AGE_DAYS_THRESHOLD_AND_LIMITING_INPUTS",
         },
     }
     manifest["bundle_id"] = _sha256(_canonical_json(manifest))

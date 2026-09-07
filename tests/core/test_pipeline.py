@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,7 @@ from quant_engine.core import (
     PipelineUnknownOutcomeError,
     PipelineValidationError,
     ReleasePublicationUnavailableError,
+    ReleaseState,
     SourceArtifact,
     VerificationStatus,
     execute_pipeline,
@@ -32,6 +34,7 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core import pipeline as pipeline_module
 from quant_engine.core import release as release_module
 
 
@@ -160,6 +163,19 @@ def _spec_dict(
 
 def _parse(value: dict[str, object]) -> PipelineSpec:
     return PipelineSpec.from_json_bytes(json.dumps(value).encode())
+
+
+def _commit_authorization(tmp_path: Path, spec: PipelineSpec) -> Path:
+    path = tmp_path / f"{spec.pipeline_id}-commit-authorization.json"
+    path.write_bytes(
+        canonical_json_bytes(
+            {
+                "evidence_sha256": spec.spec_sha256,
+                "gate_id": "owner-publication-authorization",
+            }
+        )
+    )
+    return path
 
 
 def _freshness_gate(path: Path, evaluated_on: date) -> Path:
@@ -350,7 +366,9 @@ def test_execute_prepares_without_pointer_change_then_commits_atomically(
     assert (target / "generations" / proposed.generation_id).is_dir()
     assert not (target / "index.html").exists()
 
-    committed = execute_pipeline(spec, commit=True)
+    committed = execute_pipeline(
+        spec, commit=True, commit_authorization=_commit_authorization(tmp_path, spec)
+    )
 
     assert committed["release_id"] == prepared["release_id"]
     assert committed["release_state"] == "COMMITTED"
@@ -366,7 +384,9 @@ def test_pipeline_repairs_only_the_exact_bound_predecessor_inventory_drift(
 ) -> None:
     raw, _, accepted, target = _spec_dict(tmp_path)
     first = _parse(raw)
-    execute_pipeline(first, commit=True)
+    execute_pipeline(
+        first, commit=True, commit_authorization=_commit_authorization(tmp_path, first)
+    )
     drift = target / "generations" / accepted.generation_id / "drift.bin"
     drift.write_bytes(b"known predecessor drift\n")
 
@@ -468,7 +488,11 @@ def test_pipeline_repairs_only_the_exact_bound_predecessor_inventory_drift(
     assert json.loads((target / "CURRENT.json").read_bytes())["generation_id"] == (
         accepted.generation_id
     )
-    committed = execute_pipeline(repair, commit=True)
+    committed = execute_pipeline(
+        repair,
+        commit=True,
+        commit_authorization=_commit_authorization(tmp_path, repair),
+    )
     assert committed["release_state"] == "COMMITTED"
     assert read_current(target).generation_id == replacement.generation_id
     assert execute_pipeline(repair)["release_state"] == "COMMITTED"
@@ -768,13 +792,93 @@ def test_pipeline_stops_after_prepare_when_windows_publication_is_unavailable(
 
     monkeypatch.setattr(release_module, "_is_windows_platform", lambda: True)
     with pytest.raises(ReleasePublicationUnavailableError) as raised:
-        execute_pipeline(spec, commit=True)
+        execute_pipeline(
+            spec,
+            commit=True,
+            commit_authorization=_commit_authorization(tmp_path, spec),
+        )
 
     assert raised.value.operation == "commit_release"
     assert journal_path.read_bytes() == before_journal
     assert read_current(target).generation_id == previous.generation_id
     assert not (target / "index.html").exists()
     assert (target / "generations" / proposed.generation_id).is_dir()
+
+
+def test_windows_programmatic_commit_requires_exact_spec_authorization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    raw, previous, proposed, target = _spec_dict(tmp_path)
+    spec = _parse(raw)
+    authorization = tmp_path / "commit-authorization.json"
+    execute_pipeline(spec)
+
+    with pytest.raises(
+        PipelineValidationError, match="commit authorization is required"
+    ):
+        execute_pipeline(spec, commit=True)
+
+    authorization.write_bytes(
+        canonical_json_bytes(
+            {
+                "evidence_sha256": spec.spec_sha256,
+                "gate_id": "synthetic-rehearsal",
+            }
+        )
+    )
+    with pytest.raises(PipelineValidationError, match="owner publication"):
+        execute_pipeline(spec, commit=True, commit_authorization=authorization)
+
+    authorization.write_bytes(
+        canonical_json_bytes(
+            {
+                "evidence_sha256": spec.spec_sha256,
+                "gate_id": "owner-publication-authorization",
+            }
+        )
+    )
+
+    def commit(**_kwargs: object) -> SimpleNamespace:
+        publish_generation(target, proposed.generation_id)
+        return SimpleNamespace(state=ReleaseState.COMMITTED)
+
+    monkeypatch.setattr(pipeline_module, "commit_release", commit)
+    result = execute_pipeline(spec, commit=True, commit_authorization=authorization)
+
+    assert result["release_state"] == "COMMITTED"
+    assert read_current(target).generation_id == proposed.generation_id
+    assert previous.generation_id != proposed.generation_id
+
+
+def test_windows_resumed_commit_rechecks_exact_spec_authorization(
+    tmp_path: Path,
+) -> None:
+    raw, previous, _proposed, target = _spec_dict(tmp_path)
+    spec = _parse(raw)
+    authorization = tmp_path / "commit-authorization.json"
+    authorization.write_bytes(
+        canonical_json_bytes(
+            {
+                "evidence_sha256": spec.spec_sha256,
+                "gate_id": "owner-publication-authorization",
+            }
+        )
+    )
+    prepared = execute_pipeline(spec)
+    authorization.write_bytes(
+        canonical_json_bytes(
+            {
+                "evidence_sha256": "f" * 64,
+                "gate_id": "owner-publication-authorization",
+            }
+        )
+    )
+
+    with pytest.raises(PipelineValidationError, match="different pipeline spec"):
+        execute_pipeline(spec, commit=True, commit_authorization=authorization)
+
+    assert prepared["release_state"] == "PREPARED"
+    assert read_current(target).generation_id == previous.generation_id
 
 
 def test_external_read_requires_explicit_execution_authority(tmp_path: Path) -> None:

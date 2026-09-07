@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 import hashlib
 import json
@@ -320,13 +320,13 @@ def _sources(
                 "legacy spec cannot include current provider evidence"
             )
     elif (
-        len(refresh) != 1
-        or refresh[0][2].suffix.lower() != ".xml"
+        not refresh
+        or any(item[2].suffix.lower() != ".xml" for item in refresh)
         or len(snapshots) != 1
         or snapshots[0][2].suffix.lower() != ".json"
     ):
         raise IbkrGenerationError(
-            "refreshed spec requires one Flex refresh and one TWS snapshot"
+            "refreshed spec requires at least one Flex refresh and one TWS snapshot"
         )
     return resolved, tuple(artifacts)
 
@@ -414,6 +414,78 @@ def _statements(
         frozenset(refresh_accounts),
         overlap_count,
     )
+
+
+def _next_weekday(day: date) -> date:
+    candidate = day + timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
+
+
+def _flex_history_coverage(
+    statements: Sequence[FlexDailyStatement], crosswalk: Mapping[str, str]
+) -> dict[str, Any]:
+    """Project exact selected statement days under the account weekday calendar."""
+
+    by_account: dict[str, dict[date, set[str]]] = {}
+    for statement in statements:
+        account_id = crosswalk.get(statement.raw_account_id)
+        if account_id is None:
+            raise IbkrGenerationError("Flex coverage account is outside the crosswalk")
+        by_account.setdefault(account_id, {}).setdefault(
+            statement.report_date, set()
+        ).add(statement.artifact_id)
+    accounts: list[dict[str, Any]] = []
+    known_gaps: list[str] = []
+    for account_id in sorted(by_account):
+        dated_artifacts = by_account[account_id]
+        days = sorted(dated_artifacts)
+        intervals: list[dict[str, Any]] = []
+        interval_start = days[0]
+        interval_end = days[0]
+        interval_artifacts = set(dated_artifacts[days[0]])
+        for day in days[1:]:
+            if day not in {
+                interval_end + timedelta(days=1),
+                _next_weekday(interval_end),
+            }:
+                intervals.append(
+                    {
+                        "effective_end": interval_end.isoformat(),
+                        "effective_start": interval_start.isoformat(),
+                        "source_artifact_ids": sorted(interval_artifacts),
+                    }
+                )
+                known_gaps.append(
+                    f"missing weekday statement for {account_id}: "
+                    f"{interval_end.isoformat()} to {day.isoformat()}"
+                )
+                interval_start = day
+                interval_artifacts = set()
+            interval_end = day
+            interval_artifacts.update(dated_artifacts[day])
+        intervals.append(
+            {
+                "effective_end": interval_end.isoformat(),
+                "effective_start": interval_start.isoformat(),
+                "source_artifact_ids": sorted(interval_artifacts),
+            }
+        )
+        accounts.append(
+            {
+                "account_id": account_id,
+                "intervals": intervals,
+                "statement_count": len(days),
+            }
+        )
+    return {
+        "accounts": accounts,
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "fact_type": "FLEX_FINALIZED_HISTORY",
+        "known_gaps": known_gaps,
+        "status": ("PARTIAL" if known_gaps else "COMPLETE_WITHIN_DECLARED_BOUNDARY"),
+    }
 
 
 def _tws_source(
@@ -656,6 +728,7 @@ def _normalize(
     tws_source: tuple[TwsSnapshot, str] | None,
     *,
     declared_zero_activity_raw_ids: frozenset[str] = frozenset(),
+    flex_history_coverage: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     accounts_by_id = {
         _text(item.get("account_id"), "account.account_id"): item
@@ -1194,7 +1267,9 @@ def _normalize(
         "corporate_actions": _dedupe(corporate_actions, "corporate action"),
         "crosswalk_proof": list(proof),
         "fact_coverage": [
-            {
+            dict(flex_history_coverage)
+            if flex_history_coverage is not None
+            else {
                 "fact_type": "FLEX_FINALIZED_HISTORY",
                 "known_gaps": [],
                 "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
@@ -1311,6 +1386,7 @@ def build_generation(
         _integer(spec["minimum_crosswalk_overlap"], "minimum_crosswalk_overlap"),
         declared_zero_activity=declared_zero_activity,
     )
+    flex_history_coverage = _flex_history_coverage(statements, crosswalk)
     catalog = _normalize(
         statements,
         baseline,
@@ -1320,6 +1396,7 @@ def build_generation(
         flex_overlap_count,
         tws_source,
         declared_zero_activity_raw_ids=declared_zero_activity_raw_ids,
+        flex_history_coverage=flex_history_coverage,
     )
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(
@@ -1350,7 +1427,10 @@ def build_generation(
         for item in catalog["fact_coverage"]
         if item["fact_type"] == "TWS_CURRENT_STATE"
     )
-    raw_gaps: list[str] = list(tws_coverage["known_gaps"])
+    raw_gaps: list[str] = [
+        *flex_history_coverage["known_gaps"],
+        *tws_coverage["known_gaps"],
+    ]
     if account_scope_exceptions:
         raw_gaps.append(
             "Some activity rows have an ambiguous provider-reported account scope"

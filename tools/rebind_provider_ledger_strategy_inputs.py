@@ -153,6 +153,26 @@ def _declared_returns(
     return resolved_returns, actual_hash, len(content)
 
 
+def _declared_strategy_evidence(path: Path) -> tuple[Path, str, int]:
+    if path.is_symlink() or not path.is_file():
+        raise ProviderLedgerStrategyInputsRebindError(
+            "strategy evidence artifact is unreadable"
+        )
+    try:
+        resolved = path.resolve(strict=True)
+        content = path.read_bytes()
+        value = json.loads(content.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProviderLedgerStrategyInputsRebindError(
+            "strategy evidence artifact is unreadable"
+        ) from exc
+    if not isinstance(value, dict) or not isinstance(value.get("strategies"), list):
+        raise ProviderLedgerStrategyInputsRebindError(
+            "strategy evidence artifact is invalid"
+        )
+    return resolved, hashlib.sha256(content).hexdigest(), len(content)
+
+
 def _require_financial_mvp_contract_binding(
     template: Mapping[str, Any], financial_mvp_contract_path: Path
 ) -> None:
@@ -192,7 +212,11 @@ def _require_financial_mvp_contract_binding(
 
 
 def _candidate_payload(
-    template: Mapping[str, Any], returns_path: Path, returns_sha256: str
+    template: Mapping[str, Any],
+    returns_path: Path,
+    returns_sha256: str,
+    strategy_evidence_path: Path,
+    strategy_evidence_sha256: str,
 ) -> dict[str, Any]:
     strategy_inputs = template.get("strategy_inputs")
     if not isinstance(strategy_inputs, dict):
@@ -211,6 +235,8 @@ def _candidate_payload(
     rebound_inputs = dict(strategy_inputs)
     rebound_inputs["returns_path"] = str(returns_path)
     rebound_inputs["returns_sha256"] = returns_sha256
+    rebound_inputs["strategy_evidence_path"] = str(strategy_evidence_path)
+    rebound_inputs["strategy_evidence_sha256"] = strategy_evidence_sha256
     candidate["strategy_inputs"] = rebound_inputs
     return candidate
 
@@ -250,13 +276,19 @@ def rebind_provider_ledger_strategy_inputs(
     template_path: Path,
     layered_generation_dir: Path,
     financial_mvp_contract_path: Path,
+    strategy_evidence_path: Path,
     output_path: Path,
 ) -> dict[str, object]:
     """Create a new spec bound to one already-verified layered return artifact."""
 
     _reject_output_alias(
         output_path,
-        (template_path, layered_generation_dir, financial_mvp_contract_path),
+        (
+            template_path,
+            layered_generation_dir,
+            financial_mvp_contract_path,
+            strategy_evidence_path,
+        ),
     )
     template = _object_from_path(template_path, "provider-ledger template")
     _require_financial_mvp_contract_binding(template, financial_mvp_contract_path)
@@ -266,14 +298,27 @@ def rebind_provider_ledger_strategy_inputs(
     returns_path, returns_sha256, returns_size_bytes = _declared_returns(
         layered_generation_dir, verification
     )
-    _reject_output_alias(output_path, (returns_path,))
-    candidate = _candidate_payload(template, returns_path, returns_sha256)
+    (
+        resolved_strategy_evidence,
+        strategy_evidence_sha256,
+        strategy_evidence_size_bytes,
+    ) = _declared_strategy_evidence(strategy_evidence_path)
+    _reject_output_alias(output_path, (returns_path, resolved_strategy_evidence))
+    candidate = _candidate_payload(
+        template,
+        returns_path,
+        returns_sha256,
+        resolved_strategy_evidence,
+        strategy_evidence_sha256,
+    )
     _write_new(output_path, candidate)
     return {
         "layered_history_generation_id": str(verification["generation_id"]),
         "output_path": str(output_path),
         "returns_sha256": returns_sha256,
         "returns_size_bytes": returns_size_bytes,
+        "strategy_evidence_sha256": strategy_evidence_sha256,
+        "strategy_evidence_size_bytes": strategy_evidence_size_bytes,
     }
 
 
@@ -282,6 +327,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--template", type=Path, required=True)
     parser.add_argument("--layered-generation-dir", type=Path, required=True)
     parser.add_argument("--financial-mvp-contract", type=Path, required=True)
+    parser.add_argument("--strategy-evidence", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser
 
@@ -293,6 +339,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             template_path=args.template,
             layered_generation_dir=args.layered_generation_dir,
             financial_mvp_contract_path=args.financial_mvp_contract,
+            strategy_evidence_path=args.strategy_evidence,
             output_path=args.output,
         )
     except (OSError, ValueError) as exc:

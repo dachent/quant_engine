@@ -7,7 +7,7 @@ strategy-intelligence package.
 ## Boundaries
 
 - The private specification and generated catalog stay outside Git under the
-  configured portfolio-data boundary (`C:\Tools\quant-engine\data` on this workstation).
+  configured portfolio-data boundary (`../dataPortfolio` beside the canonical repository).
 - Source roots exist only in the private input specification. Generated output
   keeps root IDs and relative paths, never absolute workstation paths.
 - Every source file is listed explicitly. The builder never walks a directory,

@@ -152,6 +152,7 @@ def _verified_schema9_epoch_bundle(
     static_receipt_mutation: str | None = None,
     static_closed_epoch: bool = False,
     all_numeric_candidates: bool = False,
+    canonical_selected_policy: bool = False,
 ) -> tuple[Path, bytes, bytes, bytes, bytes]:
     epoch_root = tmp_path
     for index in range(1):
@@ -747,8 +748,16 @@ def _verified_schema9_epoch_bundle(
             },
         },
         "flow_classification_policy": {
-            "sha256": hashlib.sha256(flow_policy_bytes).hexdigest(),
-            "size_bytes": len(flow_policy_bytes),
+            "sha256": hashlib.sha256(
+                canonical_json_bytes(json.loads(flow_policy_bytes))
+                if canonical_selected_policy
+                else flow_policy_bytes
+            ).hexdigest(),
+            "size_bytes": len(
+                canonical_json_bytes(json.loads(flow_policy_bytes))
+                if canonical_selected_policy
+                else flow_policy_bytes
+            ),
         },
         "retrieval_receipts": [
             {
@@ -1283,6 +1292,15 @@ def test_epoch_history_rejects_self_consistent_static_receipt_crosswalk_mutation
         )
 
 
+def test_epoch_history_accepts_canonical_selected_policy_identity(
+    tmp_path: Path,
+) -> None:
+    root, source, manifest, crosswalk, _ = _verified_schema9_epoch_bundle(
+        tmp_path, canonical_selected_policy=True
+    )
+    reporter._epoch_history_snapshot_evidence(root, source, manifest, crosswalk)
+
+
 def test_epoch_history_rejects_selected_raw_policy_identity_mutation(
     tmp_path: Path,
 ) -> None:
@@ -1477,7 +1495,11 @@ def test_epoch_calculation_input_rejects_post_cutoff_nested_as_of_date(
 
 @pytest.mark.parametrize(
     ("manifest_cutoff", "calculation_cutoff"),
-    (("2026-08-12", "2026-08-13"), ("2026-08-13", "2026-08-12")),
+    (
+        ("2026-08-12", "2026-08-13"),
+        ("2026-08-13", "2026-08-12"),
+        ("2026-08-12", "2026-08-12"),
+    ),
 )
 def test_epoch_generation_rejects_any_cutoff_authority_mismatch(
     tmp_path: Path, manifest_cutoff: str, calculation_cutoff: str

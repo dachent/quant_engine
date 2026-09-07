@@ -598,7 +598,7 @@ def test_required_not_ready_financial_mvp_blocks_before_every_effect(
     assert not Path(raw["coordination_root"]).exists()
 
 
-def test_hwm_required_not_ready_blocks_ready_conformance_before_every_effect(
+def test_unfinished_hwm_assessment_allows_candidate_execution_with_ready_sources(
     tmp_path: Path,
 ) -> None:
     raw, outputs, _ = _portfolio_spec(tmp_path, financial_mvp_ready=True)
@@ -606,20 +606,15 @@ def test_hwm_required_not_ready_blocks_ready_conformance_before_every_effect(
     calls: list[str] = []
 
     plan = plan_pipeline(spec)
-    assert plan["node_count"] == 0
-    assert plan["commit_effects"] == []
-    assert plan["financial_mvp"]["ready_for_execution"] is False
+    executed = execute_pipeline(spec, command_runner=_runner(outputs, calls))
+
+    assert plan["node_count"] == len(raw["nodes"])
+    assert plan["financial_mvp"]["ready_for_execution"] is True
     assert plan["financial_mvp"]["hwm_input_authority"]["state"] == (
         "REQUIRED_NOT_READY"
     )
-    with pytest.raises(
-        PipelineExecutionError, match="ACCEPTED_HWM_INPUT_GENERATION_ABSENT"
-    ):
-        execute_pipeline(spec, command_runner=_runner(outputs, calls))
-
-    assert calls == []
-    assert not Path(raw["coordination_root"]).exists()
-    assert not Path(str(raw["state_root"])).exists()
+    assert executed["release_state"] == "PREPARED"
+    assert calls
 
 
 def test_pre_hwm_schema_two_product_is_status_readable_and_recovery_only(
@@ -700,7 +695,7 @@ def test_hwm_input_assessment_rejects_coherent_candidate_rehash(
     hwm_path.write_bytes(changed)
     hwm_gate["sha256"] = _sha(changed)
 
-    with pytest.raises(PipelineValidationError, match="HWM input authority differs"):
+    with pytest.raises(PipelineValidationError, match="HWM binding roles differ"):
         plan_pipeline(PipelineSpec.from_json_bytes(json.dumps(raw).encode()))
 
     assert not Path(raw["coordination_root"]).exists()

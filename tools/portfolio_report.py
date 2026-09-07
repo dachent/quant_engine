@@ -61,6 +61,13 @@ from quant_engine.portfolio_ledger import (
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
+from portfolio_private_stage import validate_private_stage_target
+from portfolio_invested_capital import (
+    CapitalValidationError,
+    governed_hwm_input_policy,
+    resolve_financial_input_authority,
+    verify_governed_capital_result,
+)
 
 
 REPORT_SCHEMA_VERSION: Final = 1
@@ -69,6 +76,8 @@ BUILDER_VERSION: Final = "1.5.0"
 POLICY_VERSION: Final = "PORT-PERF-1"
 WORKBOOK_NAME: Final = "portfolio-report.xlsx"
 REPORT_DATA_NAME: Final = "portfolio-report-data.json"
+INVESTED_CAPITAL_RESULT_NAME: Final = "invested-capital.json"
+INVESTED_CAPITAL_INPUT_NAME: Final = "capital-input-generation.json"
 REPORT_DELIVERY_NAME: Final = "report-delivery.json"
 REPORT_DELIVERY_SCHEMA_VERSION: Final = 1
 NON_AUTHORITY_HUMAN_DELIVERY: Final = "NON_AUTHORITY_HUMAN_DELIVERY"
@@ -121,6 +130,11 @@ _PORTABLE_HWM_PRODUCT_CONTRACT: Final = (
     / "contracts"
     / "portfolio-financial-mvp-source-v1.json"
 )
+DEPENDENCE_POLICY: Final = (
+    Path(__file__).resolve().parents[1]
+    / "contracts"
+    / "portfolio-dependence-policy-v1.json"
+)
 _HWM_POLICY_PRODUCT_AUTHORITY_CONTRACT: Final = (
     Path(__file__).resolve().parents[1]
     / "contracts"
@@ -166,6 +180,17 @@ TABLE_NAMES: Final = (
     "tblMethodology",
     "tblProvenance",
 )
+CAPITAL_SHEET_NAMES: Final = ("Invested Capital Daily", "Invested Capital Current")
+CAPITAL_TABLE_NAMES: Final = ("tblInvestedCapitalDaily", "tblInvestedCapitalCurrent")
+DECOMPOSITION_SHEET_NAMES: Final = ("Decomposition Cells", "Decomposition Factors")
+DECOMPOSITION_TABLE_NAMES: Final = ("tblDecompositionCells", "tblDecompositionFactors")
+CAPITAL_RECONCILIATION_FORMULA: Final = (
+    "=IF(ABS(SUMIFS(tblInvestedCapitalDaily[Invested Capital Usd],"
+    "tblInvestedCapitalDaily[Date],INDEX(tblInvestedCapitalDaily[Date],"
+    "ROWS(tblInvestedCapitalDaily[Date])),tblInvestedCapitalDaily[Strategy Id],"
+    '"TOTAL")-SUMIFS(tblInvestedCapitalCurrent[Invested Capital Usd],'
+    'tblInvestedCapitalCurrent[Strategy Id],"TOTAL"))<0.01,"PASS","FAIL")'
+)
 WORKBOOK_CANONICALIZATION_VERSION: Final = "1"
 XLSX_RESULT_CANONICALIZATION_VERSION: Final = "1"
 WORKBOOK_EVIDENCE_BINDING_VERSION: Final = 1
@@ -192,7 +217,7 @@ WORKBOOK_TOTAL_FORMULA: Final = (
     "-SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],"
     '"Total liquid"))<0.02,"PASS","FAIL")'
 )
-WORKBOOK_TABLE_SPECS: Final = (
+WORKBOOK_TABLE_SPECS: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] = (
     (
         "Portfolio Summary",
         "portfolio_summary",
@@ -767,6 +792,24 @@ def _merge_attribution(
         strategy_id = str(item["strategy_id"])
         benchmark = benchmarks[strategy_id]
         comparison = comparisons[strategy_id]
+        implementation = item.get("implementation_reconciliation")
+        if isinstance(implementation, Mapping):
+            implementation_metrics = implementation.get("return_reconciliation")
+            if (
+                isinstance(implementation_metrics, Mapping)
+                and implementation_metrics.get("status")
+                == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+            ):
+                _validate_policy_unavailable_comparison(
+                    implementation_metrics, strategy_id=strategy_id
+                )
+                comparison = {
+                    **comparison,
+                    "status": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+                    "disposition": "Current selected source policy excludes provider returns; actual account evidence is retained separately.",
+                    "version_compatibility_status": None,
+                    "metrics": None,
+                }
         benchmark_comparison = benchmark_comparisons.get(strategy_id, {})
         cost = costs[strategy_id]
         metrics_value = comparison.get("metrics")
@@ -2495,6 +2538,29 @@ def _strategy_provider_evidence(
     return rows
 
 
+def _accepted_pre_live_observations(
+    history: Mapping[str, Any], strategy_version: str
+) -> int:
+    """Count admitted prehistory in an already authenticated coverage row."""
+    segments = _objects(history.get("segments"), "history segments")
+    live_starts = [
+        segment["observed_start"]
+        for segment in segments
+        if segment.get("evidence_layer") == "ACCOUNT_LIVE"
+        and segment.get("mode_admission") == "INCLUDE_SELECTED_LIVE"
+        and segment.get("strategy_version") == strategy_version
+    ]
+    return sum(
+        segment["return_observations"]
+        for segment in segments
+        if live_starts
+        and segment.get("evidence_layer") == "BACKTEST"
+        and segment.get("mode_admission") == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+        and segment.get("strategy_version") == strategy_version
+        and segment["observed_end"] < min(live_starts)
+    )
+
+
 def _history_contract(
     path: Path,
     *,
@@ -2516,12 +2582,8 @@ def _history_contract(
             spec.loader.exec_module(module)
             verification = module.verify_packaged_source(
                 path.parent,
-                contract_path=Path(__file__).resolve().parents[1]
-                / "contracts"
-                / "portfolio-financial-mvp-source-v1.json",
-                policy_path=Path(__file__).resolve().parents[1]
-                / "contracts"
-                / "portfolio-dependence-policy-v1.json",
+                contract_path=_PORTABLE_HWM_PRODUCT_CONTRACT,
+                policy_path=DEPENDENCE_POLICY,
             )
         except Exception as exc:
             raise ReportValidationError(
@@ -2555,6 +2617,33 @@ def _history_contract(
             }
             for row in required_rows
         }
+        # The dependence projection deliberately uses account-live returns.
+        # Its authenticated history coverage can also admit exact-version
+        # prehistory used by the separate decomposition consumer. Preserve that
+        # history without claiming it contributed to dependence observations.
+        coverage = _load_json(path.parent / "history-coverage.json", "history coverage")
+        for history in _objects(coverage.get("strategies", []), "history strategies"):
+            name = history.get("series_id")
+            if name not in current_by_name:
+                continue
+            target = current_by_name[name]
+            observations = _accepted_pre_live_observations(
+                history, target["strategy_version"]
+            )
+            if observations > 0:
+                target.update(
+                    {
+                        "backtest_observations": observations,
+                        "compatibility_basis": (
+                            "HASH_BOUND_EXACT_VERSION_BACKTEST_STRICTLY_BEFORE_ACCOUNT_LIVE"
+                        ),
+                        "history_disposition_reason": (
+                            "Version-matched prehistory is admitted by verified history "
+                            "coverage; dependence retains its account-live projection."
+                        ),
+                        "history_status": "ACCEPTED_VERSION_COMPATIBLE_PREHISTORY",
+                    }
+                )
         for name in sorted(strategy_names - required_names):
             current_by_name[name] = {
                 "backtest_observations": 0,
@@ -2618,13 +2707,13 @@ def _history_contract(
             )
         history_status = _text(raw.get("history_status"), f"history status {name}")
         _text(raw.get("strategy_version"), f"history version {name}")
-        observations = raw.get("backtest_observations")
-        if not isinstance(observations, int) or observations < 0:
+        backtest_observations = raw.get("backtest_observations")
+        if not isinstance(backtest_observations, int) or backtest_observations < 0:
             raise ReportValidationError(
                 f"strategy history observations are invalid: {name}"
             )
         accepted = history_status.startswith("ACCEPTED_")
-        if accepted != (observations > 0):
+        if accepted != (backtest_observations > 0):
             raise ReportValidationError(
                 f"strategy history status and observations differ: {name}"
             )
@@ -2699,10 +2788,93 @@ def _validate_implementation_observed_intervals(
             )
 
 
+def _selected_implementation_policy_evidence(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+    *,
+    accepted_as_of: date,
+) -> dict[str, Any] | None:
+    import portfolio_implementation_reconciliation as implementation
+
+    identity = _baseline_provider_ledger_identity(catalog)
+    root = provider_ledger_root or baseline_root.parent / "provider-ledger"
+    candidates = [
+        path.parent
+        for path in (root / "generations").glob("*/generation.json")
+        if not path.is_symlink()
+        and hash_file(path)[0] == identity["generation-manifest"]
+    ]
+    if len(candidates) != 1:
+        raise ReportValidationError(
+            "implementation policy selected provider generation is ambiguous or absent"
+        )
+    generation = candidates[0]
+    observed = _provider_ledger_identity(root, generation.name)
+    if observed["catalog_sha256"] != identity["provider-ledger-catalog"]:
+        raise ReportValidationError("implementation policy provider catalog differs")
+    try:
+        return implementation.p123_provider_return_policy(
+            generation, accepted_as_of=accepted_as_of
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ReportValidationError(
+            "implementation policy source proof differs"
+        ) from exc
+
+
+def _validate_policy_unavailable_comparison(
+    value: Mapping[str, Any],
+    *,
+    strategy_id: str,
+    attribution: bool = False,
+    expected_policy_evidence: Mapping[str, Any] | None = None,
+) -> None:
+    status = "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    nullable_fields = (
+        {"model_return", "gap_pp"}
+        if attribution
+        else {"model_cumulative_return", "account_minus_model_cumulative"}
+    )
+    required = {"status", "policy_evidence", *nullable_fields}
+    required.update(
+        {"account_return", "categories"} if attribution else {"observations"}
+    )
+    proof = _object(value.get("policy_evidence"), "implementation policy evidence")
+    if (
+        strategy_id != "p123-ai-factor"
+        or value.get("status") != status
+        or set(value) != required
+        or any(value[field] is not None for field in nullable_fields)
+        or proof.get("provider_id") != "portfolio123"
+        or proof.get("data_class") != "PROVIDER_LIVE_RETURN"
+        or proof.get("disposition") != "EXCLUDE"
+        or type(proof.get("admitted_item_count")) is not int
+        or proof.get("admitted_item_count") != 0
+        or not proof.get("authority_ref")
+    ):
+        raise ReportValidationError(
+            "implementation policy unavailable comparison differs"
+        )
+    if attribution:
+        _finite_number(
+            value.get("account_return"), "implementation actual account return"
+        )
+        if value.get("categories") != []:
+            raise ReportValidationError("unavailable comparison has causal categories")
+    elif type(value.get("observations")) is not int or value.get("observations") != 0:
+        raise ReportValidationError("unavailable comparison has observations")
+    if expected_policy_evidence is not None and proof != dict(expected_policy_evidence):
+        raise ReportValidationError(
+            "implementation policy differs from selected source"
+        )
+
+
 def _implementation_reconciliation_contract(
     path: Path,
     *,
     portfolio_as_of: str,
+    expected_policy_evidence: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     payload = _load_json(path, "implementation reconciliation contract")
     if (
@@ -2744,13 +2916,53 @@ def _implementation_reconciliation_contract(
             row.get("return_reconciliation"),
             f"implementation return reconciliation {strategy_id}",
         )
-        observations = metrics.get("observations")
-        if not isinstance(observations, int) or observations < 2:
-            raise ReportValidationError(
-                "implementation reconciliation observations are invalid"
+        if metrics.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED":
+            if expected_policy_evidence is None:
+                raise ReportValidationError(
+                    "implementation policy source proof is required"
+                )
+            _validate_policy_unavailable_comparison(
+                metrics,
+                strategy_id=strategy_id,
+                expected_policy_evidence=expected_policy_evidence,
             )
-        _date(metrics.get("observed_start"), "implementation observed_start")
-        _date(metrics.get("observed_end"), "implementation observed_end")
+            actual = _object(
+                row.get("account_live_return_summary"), "actual account returns"
+            )
+            if (
+                actual.get("status") != "AVAILABLE"
+                or type(actual.get("observations")) is not int
+                or actual["observations"] < 2
+            ):
+                raise ReportValidationError(
+                    "implementation actual account returns are invalid"
+                )
+            _date(actual.get("observed_start"), "actual account observed_start")
+            _date(actual.get("observed_end"), "actual account observed_end")
+            _finite_number(
+                actual.get("cumulative_return"), "actual account cumulative return"
+            )
+            window = _object(
+                row.get("return_window_comparison"), "implementation return window"
+            )
+            if window != {
+                "status": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+                "expanded_exact_common_gap": None,
+                "expanded_minus_declared_gap": None,
+                "prior_declared_overlap": None,
+                "policy_evidence": dict(expected_policy_evidence),
+            }:
+                raise ReportValidationError(
+                    "unavailable implementation return window differs"
+                )
+        else:
+            observations = metrics.get("observations")
+            if not isinstance(observations, int) or observations < 2:
+                raise ReportValidationError(
+                    "implementation reconciliation observations are invalid"
+                )
+            _date(metrics.get("observed_start"), "implementation observed_start")
+            _date(metrics.get("observed_end"), "implementation observed_end")
         causes = _objects(row.get("root_causes"), "implementation root causes")
         if not causes:
             raise ReportValidationError(
@@ -2779,6 +2991,7 @@ def _implementation_return_attribution_contract(
     path: Path,
     *,
     portfolio_as_of: str,
+    expected_policy_evidence: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     payload = _load_json(path, "implementation return attribution contract")
     if (
@@ -2838,6 +3051,52 @@ def _implementation_return_attribution_contract(
         bridge = _object(
             row.get("bridge"), f"implementation return attribution bridge {strategy_id}"
         )
+        if bridge.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED":
+            if expected_policy_evidence is None:
+                raise ReportValidationError(
+                    "implementation policy source proof is required"
+                )
+            _validate_policy_unavailable_comparison(
+                bridge,
+                strategy_id=strategy_id,
+                attribution=True,
+                expected_policy_evidence=expected_policy_evidence,
+            )
+            for field in ("execution_shortfall", "effective_account_model_mix"):
+                if row.get(field) != {
+                    "status": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+                    "policy_evidence": dict(expected_policy_evidence),
+                }:
+                    raise ReportValidationError(
+                        "unavailable model counterfactual differs"
+                    )
+            actual = _object(
+                row.get("actual_return_contribution_by_trade_provenance"),
+                "implementation actual return attribution",
+            )
+            observations = actual.get("daily_observations")
+            contributions = _object(
+                actual.get("contributions_pp"), "actual return contributions"
+            )
+            if type(observations) is not int or observations < 2 or not contributions:
+                raise ReportValidationError(
+                    "implementation actual attribution is absent"
+                )
+            actual_total = sum(
+                _finite_number(value, "actual return contribution")
+                for value in contributions.values()
+            )
+            if not math.isclose(
+                actual_total,
+                _finite_number(bridge.get("account_return"), "actual account return")
+                * 100.0,
+                abs_tol=1e-8,
+            ):
+                raise ReportValidationError(
+                    "implementation actual attribution does not reconcile"
+                )
+            by_id[strategy_id] = dict(row)
+            continue
         model_return = _finite_number(
             bridge.get("model_return"),
             f"implementation return attribution model return {strategy_id}",
@@ -3320,7 +3579,10 @@ def _strategies(
                 )
                 if not implementation
                 else (
-                    "VERIFIED_CAUSAL_RETURN_ATTRIBUTION"
+                    "UNAVAILABLE_POLICY_NOT_ADMITTED"
+                    if implementation_return_attribution.get("bridge", {}).get("status")
+                    == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+                    else "VERIFIED_CAUSAL_RETURN_ATTRIBUTION"
                     if implementation_return_attribution
                     else "VERIFIED_TRADE_AND_RETURN_DECONSTRUCTION"
                 ),
@@ -4301,6 +4563,8 @@ def _report_governed_hwm_proof(
     input_generation_bytes: bytes,
     calendar_bytes: bytes,
     input_receipt_bytes: bytes,
+    *,
+    product_contract_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     """Verify a governed PORT-HWM-4 result and project it into report data.
 
@@ -4309,18 +4573,28 @@ def _report_governed_hwm_proof(
     own ``verify_governed_hwm_result`` — no reimplementation here.
     """
 
+    input_contract = (
+        _HWM_POLICY_PRODUCT_AUTHORITY_CONTRACT.read_bytes()
+        if product_contract_bytes is None
+        else product_contract_bytes
+    )
     try:
+        input_policy = governed_hwm_input_policy(
+            _PORTABLE_HWM_POLICY.read_bytes(),
+            input_contract,
+            result_receipt.get("policy_sha256", ""),
+        )
         accepted = verify_governed_hwm_result(
             result_receipt,
             input_generation_bytes,
             calendar_bytes=calendar_bytes,
             input_receipt_bytes=input_receipt_bytes,
-            policy_bytes=_PORTABLE_HWM_POLICY.read_bytes(),
-            product_contract_bytes=_HWM_POLICY_PRODUCT_AUTHORITY_CONTRACT.read_bytes(),
+            policy_bytes=input_policy,
+            product_contract_bytes=input_contract,
             performance_policy_bytes=_PORTABLE_HWM_PERFORMANCE_POLICY.read_bytes(),
             legacy_policy_bytes=HWM_POLICY.read_bytes(),
         )
-    except HwmCoverageError as exc:
+    except (HwmCoverageError, CapitalValidationError) as exc:
         raise ReportValidationError(f"governed HWM result is invalid: {exc}") from exc
     return {
         "schema_version": 1,
@@ -4640,6 +4914,8 @@ def build_report_data(
     hwm_governed_calendar_bytes: bytes | None = None,
     hwm_governed_receipt_bytes: bytes | None = None,
     *,
+    invested_capital_result: Mapping[str, Any] | None = None,
+    invested_capital_input_generation_path: Path | None = None,
     _hwm_policy_path: Path | None = None,
     epoch_manifest_path: Path | None = None,
     epoch_manifest_source_path: Path | None = None,
@@ -4647,6 +4923,9 @@ def build_report_data(
     epoch_manifest_generation_root: Path | None = None,
     baseline_generation_id: str | None = None,
     correlation_generation_dir: Path | None = None,
+    decomposition_lenses_root: Path | None = None,
+    decomposition_plan_bundle: Path | None = None,
+    hybrid_decomposition_plan_bundle: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -4825,6 +5104,26 @@ def build_report_data(
             )
     implementation_contract: dict[str, dict[str, Any]] | None = None
     implementation_contract_ref: dict[str, Any] | None = None
+    implementation_policy_evidence = None
+    for appendix_path, comparison_key in (
+        (implementation_reconciliation_path, "return_reconciliation"),
+        (implementation_return_attribution_path, "bridge"),
+    ):
+        if appendix_path is not None and any(
+            _object(row.get(comparison_key), "implementation comparison").get("status")
+            == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+            for row in _objects(
+                _load_json(appendix_path, "implementation appendix").get("strategies"),
+                "implementation strategies",
+            )
+        ):
+            implementation_policy_evidence = _selected_implementation_policy_evidence(
+                catalog,
+                baseline_root,
+                provider_ledger_root,
+                accepted_as_of=_date(catalog.get("as_of_date"), "portfolio as_of_date"),
+            )
+            break
     if implementation_reconciliation_path is not None:
         implementation_contract, implementation_contract_ref = (
             _implementation_reconciliation_contract(
@@ -4832,6 +5131,7 @@ def build_report_data(
                 portfolio_as_of=_text(
                     catalog.get("as_of_date"), "portfolio as_of_date"
                 ),
+                expected_policy_evidence=implementation_policy_evidence,
             )
         )
     implementation_return_attribution_contract: dict[str, dict[str, Any]] | None = None
@@ -4843,6 +5143,7 @@ def build_report_data(
         ) = _implementation_return_attribution_contract(
             implementation_return_attribution_path,
             portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
+            expected_policy_evidence=implementation_policy_evidence,
         )
     strategy_summary = _strategies(
         catalog,
@@ -4853,6 +5154,31 @@ def build_report_data(
         strategy_product_controls,
         strategy_provider_evidence,
     )
+    if (
+        hybrid_decomposition_plan_bundle is not None
+        and decomposition_plan_bundle is None
+    ):
+        raise ReportValidationError("hybrid decomposition requires a live plan bundle")
+    if (decomposition_lenses_root is None) != (decomposition_plan_bundle is None):
+        raise ReportValidationError(
+            "decomposition lens root and plan bundle must be supplied together"
+        )
+    decomposition_lenses: dict[str, Any] | None = None
+    if decomposition_lenses_root is not None and decomposition_plan_bundle is not None:
+        from portfolio_control_panel import _decomposition_lenses
+
+        strategy_name_map = {
+            _text(row.get("strategy_id"), "strategy_summary.strategy_id"): _text(
+                row.get("strategy_name"), "strategy_summary.strategy_name"
+            )
+            for row in strategy_summary
+        }
+        decomposition_lenses, _decomposition_bindings = _decomposition_lenses(
+            decomposition_lenses_root,
+            decomposition_plan_bundle,
+            strategy_name_map,
+            hybrid_plan_bundle=hybrid_decomposition_plan_bundle,
+        )
     attribution_catalog: dict[str, Any] | None = None
     attribution_ref: dict[str, str] | None = None
     if attribution_root is not None:
@@ -4960,14 +5286,43 @@ def build_report_data(
         raise ReportValidationError(
             "governed HWM result, generation, calendar, and receipt bytes must be supplied together"
         )
+    financial_input_contract_path = _PORTABLE_HWM_PRODUCT_CONTRACT
+    financial_input_contract_bytes = None
+    if invested_capital_input_generation_path is not None:
+        financial_input_contract_path, financial_input_contract_bytes = (
+            resolve_financial_input_authority(
+                invested_capital_input_generation_path,
+                _PORTABLE_HWM_PRODUCT_CONTRACT,
+                catalog,
+            )
+        )
     governed_hwm_proof = (
         _report_governed_hwm_proof(
             hwm_governed_result,
             hwm_governed_generation_bytes or b"",
             hwm_governed_calendar_bytes or b"",
             hwm_governed_receipt_bytes or b"",
+            product_contract_bytes=financial_input_contract_bytes,
         )
         if hwm_governed_result is not None
+        else None
+    )
+    if (invested_capital_result is None) != (
+        invested_capital_input_generation_path is None
+    ):
+        raise ReportValidationError(
+            "invested-capital result and input generation must be supplied together"
+        )
+    invested_capital = (
+        dict(
+            verify_governed_capital_result(
+                invested_capital_result,
+                invested_capital_input_generation_path,
+                financial_input_contract_path,
+            )
+        )
+        if invested_capital_result is not None
+        and invested_capital_input_generation_path is not None
         else None
     )
     hwm_policy_path = HWM_POLICY if _hwm_policy_path is None else _hwm_policy_path
@@ -5301,6 +5656,10 @@ def build_report_data(
             implementation_return_attribution_ref
         )
     report["hwm_summary"] = hwm_summary
+    if invested_capital is not None:
+        report["invested_capital"] = invested_capital
+    if decomposition_lenses is not None:
+        report["decomposition_lenses"] = decomposition_lenses
     if portable_hwm_proof is not None:
         report["hwm_portable_proof"] = portable_hwm_proof
     if governed_hwm_proof is not None:
@@ -5365,6 +5724,13 @@ def _excel_value(value: object, *, header: str | None = None) -> object:
             return float(parsed)
         return value
     return json.dumps(value, sort_keys=True, ensure_ascii=True)
+
+
+def _portfolio_summary_excel_value(row: Mapping[str, Any], *, header: str) -> object:
+    value = row.get(header)
+    if header == "value" and row.get("unit") in {"USD", "ratio"}:
+        return float(Decimal(str(value)))
+    return _excel_value(value, header=header)
 
 
 def _headers(rows: Sequence[Mapping[str, Any]], fallback: Sequence[str]) -> list[str]:
@@ -5446,6 +5812,126 @@ def _write_table(
         )
         worksheet.set_column(column, column, width, _source_format(header, formats))
     return len(data), len(headers)
+
+
+def _decomposition_workbook_rows(
+    value: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Project the canonical panel lenses into finite, source-qualified rows."""
+
+    cells: list[dict[str, Any]] = []
+    factors: list[dict[str, Any]] = []
+    modes = _object(value.get("modes"), "decomposition_lenses.modes")
+    for evidence_mode in sorted(modes):
+        lenses = _objects(modes[evidence_mode], "decomposition lens mode")
+        for lens in sorted(lenses, key=lambda row: str(row.get("lens_id", ""))):
+            lens_id = _text(lens.get("lens_id"), "decomposition lens_id")
+            surfaces = _object(lens.get("surfaces"), "decomposition surfaces")
+            for surface in sorted(surfaces):
+                analysis = _object(surfaces[surface], "decomposition surface")
+                source_specs = {
+                    _text(item.get("source_key"), "decomposition source_key"): item
+                    for item in _objects(
+                        analysis.get("sources"), "decomposition sources"
+                    )
+                }
+                for row in sorted(
+                    _objects(analysis.get("series"), "decomposition series"),
+                    key=lambda item: (
+                        str(item.get("source_key", "")),
+                        str(item.get("series_id", "")),
+                    ),
+                ):
+                    source_key = _text(
+                        row.get("source_key"), "decomposition row source_key"
+                    )
+                    series_id = _text(
+                        row.get("series_id"), "decomposition row series_id"
+                    )
+                    source = _object(
+                        source_specs.get(source_key), "decomposition source identity"
+                    )
+                    plan_spec = source.get("plan_spec")
+                    plan_spec = plan_spec if isinstance(plan_spec, Mapping) else {}
+                    cell = {
+                        "evidence_mode": evidence_mode,
+                        "generation_id": source.get("generation_id"),
+                        "lens_id": lens_id,
+                        "model_id": row.get("model_id"),
+                        "plan_spec_id": plan_spec.get("spec_id"),
+                        "plan_spec_sha256": plan_spec.get("sha256"),
+                        "series_id": series_id,
+                        "source_key": source_key,
+                        "status": row.get("status"),
+                        "surface": surface,
+                        "analytics_hash": source.get("analytics_hash"),
+                        "source_sha256": source.get("source_sha256"),
+                        "as_of_date": source.get("as_of_date"),
+                        "estimator": row.get("estimator"),
+                        "evidence_layer": row.get("evidence_layer"),
+                        "selection_status": row.get("selection_status"),
+                        "cost_coverage": row.get("cost_coverage"),
+                        "use_boundary": row.get("use_boundary"),
+                    }
+                    contribution = row.get("contribution_summary")
+                    diagnostics = row.get("diagnostics")
+                    diagnostics = (
+                        diagnostics if isinstance(diagnostics, Mapping) else {}
+                    )
+                    # These existing scalar result blocks supply the workbook's
+                    # financial values and interpretation, not just model IDs.
+                    for prefix, fields in (
+                        ("alpha", row.get("alpha")),
+                        ("contribution", contribution),
+                        ("coverage", row.get("coverage")),
+                        ("train", diagnostics.get("train")),
+                        ("holdout", diagnostics.get("holdout")),
+                        ("model_quality", row.get("model_quality")),
+                        ("history", row.get("series_composition")),
+                    ):
+                        if isinstance(fields, Mapping):
+                            cell.update(
+                                {
+                                    f"{prefix}_{name}": field
+                                    for name, field in fields.items()
+                                    if not isinstance(field, (Mapping, list, tuple))
+                                }
+                            )
+                    cells.append(cell)
+                    means = (
+                        contribution.get("factor_means", {})
+                        if isinstance(contribution, Mapping)
+                        else {}
+                    )
+                    for exposure in _objects(
+                        row.get("exposures", []), "decomposition exposures"
+                    ):
+                        factor_id = _text(
+                            exposure.get("factor_id"), "decomposition factor_id"
+                        )
+                        factors.append(
+                            {
+                                "beta": exposure.get("beta", exposure.get("exposure")),
+                                "evidence_mode": evidence_mode,
+                                "factor_id": factor_id,
+                                "holdout_mean_contribution": means.get(factor_id),
+                                "status": row.get("status"),
+                                "model_id": row.get("model_id"),
+                                "generation_id": source.get("generation_id"),
+                                "source_sha256": source.get("source_sha256"),
+                                "standard_error": exposure.get("standard_error"),
+                                "confidence_status": exposure.get("confidence_status"),
+                                "lens_id": lens_id,
+                                "series_id": series_id,
+                                "source_key": source_key,
+                                "surface": surface,
+                            }
+                        )
+    # Some valid diagnostics apply to only one surface. Keep their columns
+    # even when the first result has no value for that diagnostic.
+    columns = sorted({key for cell in cells for key in cell})
+    cells = [{key: cell.get(key) for key in columns} for cell in cells]
+    return cells, factors
 
 
 def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
@@ -5564,7 +6050,7 @@ def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
     summary_rows = list(report["portfolio_summary"])
     headers = _headers(summary_rows, WORKBOOK_TABLE_SPECS[0][3])
     data = [
-        [_excel_value(row[header], header=header) for header in headers]
+        [_portfolio_summary_excel_value(row, header=header) for header in headers]
         for row in summary_rows
     ]
     summary.add_table(
@@ -5588,17 +6074,32 @@ def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
         if row["unit"] == "USD":
             summary.set_row(row_index, None, formats["source"])
             summary.write_number(
-                row_index, 3, float(Decimal(str(row["value"]))), formats["currency"]
+                row_index,
+                3,
+                _portfolio_summary_excel_value(row, header="value"),
+                formats["currency"],
             )
         elif row["unit"] == "ratio":
             summary.write_number(
-                row_index, 3, float(Decimal(str(row["value"]))), formats["percent"]
+                row_index,
+                3,
+                _portfolio_summary_excel_value(row, header="value"),
+                formats["percent"],
             )
     # Keep navigation links below the summary table.  PORT-HWM-4 adds
     # development-proof rows, so a fixed row would overwrite accepted table
     # values in the workbook even though the canonical JSON remained intact.
     navigation_start_row = max(16, 8 + len(summary_rows))
-    for index, sheet_name in enumerate(SHEET_NAMES[1:], start=navigation_start_row):
+    capital = report.get("invested_capital")
+    capital_sheet_names = CAPITAL_SHEET_NAMES if isinstance(capital, Mapping) else ()
+    decomposition = report.get("decomposition_lenses")
+    decomposition_sheet_names = (
+        DECOMPOSITION_SHEET_NAMES if isinstance(decomposition, Mapping) else ()
+    )
+    for index, sheet_name in enumerate(
+        (*SHEET_NAMES[1:], *capital_sheet_names, *decomposition_sheet_names),
+        start=navigation_start_row,
+    ):
         summary.write_url(index, 0, f"internal:'{sheet_name}'!A1", string=sheet_name)
 
     for sheet_name, key, table_name, fallback in WORKBOOK_TABLE_SPECS[1:]:
@@ -5616,6 +6117,89 @@ def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
         worksheet.write_url(
             "H3", "internal:'Portfolio Summary'!A1", string="Back to summary"
         )
+
+    if isinstance(capital, Mapping):
+        daily_rows = [
+            *list(capital["daily_by_strategy"]),
+            *[{**row, "strategy_id": "TOTAL"} for row in capital["daily_aggregate"]],
+        ]
+        current_rows = [
+            *list(capital["current_by_strategy"]),
+            {
+                "strategy_id": "TOTAL",
+                "invested_capital_usd": capital["current_aggregate_usd"],
+            },
+        ]
+        for sheet_name, rows, table_name in (
+            (CAPITAL_SHEET_NAMES[0], daily_rows, CAPITAL_TABLE_NAMES[0]),
+            (CAPITAL_SHEET_NAMES[1], current_rows, CAPITAL_TABLE_NAMES[1]),
+        ):
+            worksheet = workbook.add_worksheet(sheet_name)
+            _write_table(
+                workbook,
+                worksheet,
+                title=sheet_name,
+                subtitle=(
+                    "Verified owner-contributed capital; gains, borrowing, and "
+                    "internal transfers do not create aggregate contributions."
+                ),
+                rows=rows,
+                table_name=table_name,
+                fallback_headers=("strategy_id", "invested_capital_usd"),
+                formats=formats,
+            )
+            worksheet.write_url(
+                "H3", "internal:'Portfolio Summary'!A1", string="Back to summary"
+            )
+        current_sheet = workbook.get_worksheet_by_name(CAPITAL_SHEET_NAMES[1])
+        current_sheet.write("J3", "Daily/current reconciliation", formats["kpi_label"])
+        current_sheet.write_formula(
+            "J4",
+            CAPITAL_RECONCILIATION_FORMULA,
+            formats["formula"],
+            "PASS",
+        )
+
+    if isinstance(decomposition, Mapping):
+        cell_rows, factor_rows = _decomposition_workbook_rows(decomposition)
+        for sheet_name, rows, table_name, fallback in (
+            (
+                DECOMPOSITION_SHEET_NAMES[0],
+                cell_rows,
+                DECOMPOSITION_TABLE_NAMES[0],
+                ("evidence_mode", "lens_id", "source_key", "surface", "series_id"),
+            ),
+            (
+                DECOMPOSITION_SHEET_NAMES[1],
+                factor_rows,
+                DECOMPOSITION_TABLE_NAMES[1],
+                (
+                    "evidence_mode",
+                    "lens_id",
+                    "source_key",
+                    "surface",
+                    "series_id",
+                    "factor_id",
+                ),
+            ),
+        ):
+            worksheet = workbook.add_worksheet(sheet_name)
+            _write_table(
+                workbook,
+                worksheet,
+                title=sheet_name,
+                subtitle=(
+                    "Plan-bound source, estimator surface, and evidence-mode "
+                    "decomposition; equal strategy names do not merge sources."
+                ),
+                rows=rows,
+                table_name=table_name,
+                fallback_headers=fallback,
+                formats=formats,
+            )
+            worksheet.write_url(
+                "H3", "internal:'Portfolio Summary'!A1", string="Back to summary"
+            )
 
     strategy_sheet = workbook.get_worksheet_by_name("Strategy Summary")
     strategy_rows = list(report["strategy_summary"])
@@ -5648,7 +6232,12 @@ def _workbook(report: Mapping[str, Any], path: Path) -> dict[str, Any]:
     chart.set_style(10)
     strategy_sheet.insert_chart("A17", chart, {"x_scale": 1.25, "y_scale": 1.15})
     workbook.close()
-    return {"formula_count_expected_min": 1, "sheet_count": len(SHEET_NAMES)}
+    return {
+        "formula_count_expected_min": 2 if capital_sheet_names else 1,
+        "sheet_count": (
+            len(SHEET_NAMES) + len(capital_sheet_names) + len(decomposition_sheet_names)
+        ),
+    }
 
 
 def _write_exact(path: Path, content: bytes) -> None:
@@ -5730,6 +6319,12 @@ def build_candidate(
     epoch_manifest_generation_root: Path | None = None,
     baseline_generation_id: str | None = None,
     correlation_generation_dir: Path | None = None,
+    invested_capital_result: Mapping[str, Any] | None = None,
+    invested_capital_input_generation_path: Path | None = None,
+    invested_capital_result_bytes: bytes | None = None,
+    decomposition_lenses_root: Path | None = None,
+    decomposition_plan_bundle: Path | None = None,
+    hybrid_decomposition_plan_bundle: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -5747,12 +6342,17 @@ def build_candidate(
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
+        invested_capital_result=invested_capital_result,
+        invested_capital_input_generation_path=(invested_capital_input_generation_path),
         epoch_manifest_path=epoch_manifest_path,
         epoch_manifest_source_path=epoch_manifest_source_path,
         epoch_crosswalk_path=epoch_crosswalk_path,
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         baseline_generation_id=baseline_generation_id,
         correlation_generation_dir=correlation_generation_dir,
+        decomposition_lenses_root=decomposition_lenses_root,
+        decomposition_plan_bundle=decomposition_plan_bundle,
+        hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -5761,6 +6361,29 @@ def build_candidate(
     excel_input_path = candidate / "excel-input" / WORKBOOK_NAME
     excel_path = candidate / "excel" / WORKBOOK_NAME
     _write_exact(data_path, report_bytes)
+    if invested_capital_result is not None:
+        assert invested_capital_input_generation_path is not None
+        capital_result_bytes = (
+            invested_capital_result_bytes
+            if invested_capital_result_bytes is not None
+            else canonical_json_bytes(dict(invested_capital_result))
+        )
+        try:
+            parsed_capital = json.loads(capital_result_bytes)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ReportValidationError(
+                "invested-capital result bytes are invalid"
+            ) from exc
+        if parsed_capital != invested_capital_result:
+            raise ReportValidationError("invested-capital result bytes differ")
+        _write_exact(candidate / INVESTED_CAPITAL_RESULT_NAME, capital_result_bytes)
+        _write_exact(
+            candidate / INVESTED_CAPITAL_INPUT_NAME,
+            _regular_file_bytes(
+                invested_capital_input_generation_path,
+                "invested-capital input generation",
+            ),
+        )
     workbook_evidence = _build_workbook_exact(report, workbook_path)
     # Excel is allowed to rewrite the file it opens. Keep the canonical initial
     # workbook immutable and reset only this explicit non-authority copy.
@@ -5777,10 +6400,44 @@ def build_candidate(
             "tblProvenance": 2,
             "tblStrategies": 7,
             "tblTwrMwr": 1,
+            **(
+                {
+                    "tblInvestedCapitalDaily": len(
+                        report["invested_capital"]["daily_by_strategy"]
+                    )
+                    + len(report["invested_capital"]["daily_aggregate"]),
+                    "tblInvestedCapitalCurrent": len(
+                        report["invested_capital"]["current_by_strategy"]
+                    )
+                    + 1,
+                }
+                if "invested_capital" in report
+                else {}
+            ),
+            **(
+                {
+                    "tblDecompositionCells": len(
+                        _decomposition_workbook_rows(report["decomposition_lenses"])[0]
+                    ),
+                    "tblDecompositionFactors": len(
+                        _decomposition_workbook_rows(report["decomposition_lenses"])[1]
+                    ),
+                }
+                if "decomposition_lenses" in report
+                else {}
+            ),
         },
         "prohibit_visible_errors": True,
-        "required_sheets": list(SHEET_NAMES),
-        "required_tables": list(TABLE_NAMES),
+        "required_sheets": [
+            *SHEET_NAMES,
+            *(CAPITAL_SHEET_NAMES if "invested_capital" in report else ()),
+            *(DECOMPOSITION_SHEET_NAMES if "decomposition_lenses" in report else ()),
+        ],
+        "required_tables": [
+            *TABLE_NAMES,
+            *(CAPITAL_TABLE_NAMES if "invested_capital" in report else ()),
+            *(DECOMPOSITION_TABLE_NAMES if "decomposition_lenses" in report else ()),
+        ],
         "sentinel_cells": [
             {
                 "cell": "B4",
@@ -5794,6 +6451,17 @@ def build_candidate(
             {"cell": "E4", "expected": "PASS", "sheet": "Portfolio Summary"},
             {"cell": "A6", "expected": "Policy", "sheet": "Methodology"},
             {"cell": "B6", "expected": POLICY_VERSION, "sheet": "Methodology"},
+            *(
+                [
+                    {
+                        "cell": "J4",
+                        "expected": "PASS",
+                        "sheet": CAPITAL_SHEET_NAMES[1],
+                    }
+                ]
+                if "invested_capital" in report
+                else []
+            ),
         ],
     }
     job = {
@@ -5868,8 +6536,21 @@ def verify_workbook(path: Path) -> dict[str, Any]:
                 for element in root.iter()
                 if _local_name(element.tag) == "sheet"
             ]
-            if sheets != list(SHEET_NAMES):
+            optional_sheet_sets = (
+                (),
+                CAPITAL_SHEET_NAMES,
+                DECOMPOSITION_SHEET_NAMES,
+                (*CAPITAL_SHEET_NAMES, *DECOMPOSITION_SHEET_NAMES),
+            )
+            if sheets not in [
+                list((*SHEET_NAMES, *optional_sheets))
+                for optional_sheets in optional_sheet_sets
+            ]:
                 raise ReportValidationError("workbook sheets differ")
+            has_capital = all(name in sheets for name in CAPITAL_SHEET_NAMES)
+            has_decomposition = all(
+                name in sheets for name in DECOMPOSITION_SHEET_NAMES
+            )
             formulas = 0
             for name in names:
                 if name.startswith("xl/worksheets/sheet") and name.endswith(".xml"):
@@ -5877,14 +6558,19 @@ def verify_workbook(path: Path) -> dict[str, Any]:
                     formulas += sum(
                         1 for item in sheet_root.iter() if _local_name(item.tag) == "f"
                     )
-            if formulas < 1:
+            if formulas < (2 if has_capital else 1):
                 raise ReportValidationError("workbook has no reconciliation formula")
             table_count = sum(
                 1
                 for name in names
                 if name.startswith("xl/tables/table") and name.endswith(".xml")
             )
-            if table_count != len(TABLE_NAMES):
+            expected_table_count = (
+                len(TABLE_NAMES)
+                + (len(CAPITAL_TABLE_NAMES) if has_capital else 0)
+                + (len(DECOMPOSITION_TABLE_NAMES) if has_decomposition else 0)
+            )
+            if table_count != expected_table_count:
                 raise ReportValidationError("workbook table count differs")
     except (zipfile.BadZipFile, KeyError, ET.ParseError, OSError) as exc:
         raise ReportValidationError("workbook is not valid OOXML") from exc
@@ -5903,6 +6589,32 @@ def verify_workbook(path: Path) -> dict[str, Any]:
 def _parity_cell_value(value: object, *, header: str) -> object:
     converted = _excel_value(value, header=header)
     return None if converted == "" else converted
+
+
+def _report_parity_cell_value(
+    row: Mapping[str, Any], *, report_key: str, header: str
+) -> object:
+    if report_key != "portfolio_summary":
+        return _parity_cell_value(row.get(header), header=header)
+    converted = _portfolio_summary_excel_value(row, header=header)
+    return None if converted == "" else converted
+
+
+def _parity_values_equal(actual: object, expected: object) -> bool:
+    """Compare numerics at Excel's 15-significant-digit storage boundary."""
+
+    numeric_types = (int, float)
+    if (
+        isinstance(actual, numeric_types)
+        and not isinstance(actual, bool)
+        and isinstance(expected, numeric_types)
+        and not isinstance(expected, bool)
+    ):
+        with localcontext() as context:
+            context.prec = 15
+            context.rounding = ROUND_HALF_EVEN
+            return +Decimal(str(actual)) == +Decimal(str(expected))
+    return actual == expected
 
 
 def _workbook_parity_receipt(
@@ -5932,7 +6644,18 @@ def _workbook_parity_receipt(
     except Exception as exc:
         raise ReportValidationError("workbook parity workbook is unreadable") from exc
     try:
-        if formula_workbook.sheetnames != list(SHEET_NAMES):
+        capital = report.get("invested_capital")
+        has_capital = isinstance(capital, dict)
+        decomposition = report.get("decomposition_lenses")
+        has_decomposition = isinstance(decomposition, dict)
+        expected_sheets = list(
+            (
+                *SHEET_NAMES,
+                *(CAPITAL_SHEET_NAMES if has_capital else ()),
+                *(DECOMPOSITION_SHEET_NAMES if has_decomposition else ()),
+            )
+        )
+        if formula_workbook.sheetnames != expected_sheets:
             raise ReportValidationError("workbook parity sheet order differs")
         formula_cells = [
             (worksheet.title, cell.coordinate, cell.value)
@@ -5942,10 +6665,24 @@ def _workbook_parity_receipt(
             if cell.data_type == "f"
             or (isinstance(cell.value, str) and cell.value.startswith("="))
         ]
-        if formula_cells != [("Portfolio Summary", "E4", WORKBOOK_TOTAL_FORMULA)]:
+        expected_formulas = [("Portfolio Summary", "E4", WORKBOOK_TOTAL_FORMULA)]
+        if has_capital:
+            expected_formulas.append(
+                (
+                    CAPITAL_SHEET_NAMES[1],
+                    "J4",
+                    CAPITAL_RECONCILIATION_FORMULA,
+                )
+            )
+        if formula_cells != expected_formulas:
             raise ReportValidationError("workbook parity formula inventory differs")
         if cached_workbook["Portfolio Summary"]["E4"].value != "PASS":
             raise ReportValidationError("workbook parity cached E4 value differs")
+        if (
+            has_capital
+            and cached_workbook[CAPITAL_SHEET_NAMES[1]]["J4"].value != "PASS"
+        ):
+            raise ReportValidationError("workbook parity cached capital value differs")
         readiness_rows = [
             row
             for row in report.get("portfolio_summary", [])
@@ -5973,7 +6710,79 @@ def _workbook_parity_receipt(
         header_cell_count = 0
         data_cell_count = 0
         canonical_data_cell_count = 0
-        for sheet_name, report_key, table_name, fallback in WORKBOOK_TABLE_SPECS:
+        table_specs = [
+            (sheet_name, report_key, table_name, fallback, report.get(report_key))
+            for sheet_name, report_key, table_name, fallback in WORKBOOK_TABLE_SPECS
+        ]
+        if has_capital:
+            assert isinstance(capital, dict)
+            daily_rows = [
+                *capital["daily_by_strategy"],
+                *[
+                    {**row, "strategy_id": "TOTAL"}
+                    for row in capital["daily_aggregate"]
+                ],
+            ]
+            current_rows = [
+                *capital["current_by_strategy"],
+                {
+                    "strategy_id": "TOTAL",
+                    "invested_capital_usd": capital["current_aggregate_usd"],
+                },
+            ]
+            table_specs.extend(
+                [
+                    (
+                        CAPITAL_SHEET_NAMES[0],
+                        "invested_capital.daily",
+                        CAPITAL_TABLE_NAMES[0],
+                        ("date", "strategy_id", "invested_capital_usd"),
+                        daily_rows,
+                    ),
+                    (
+                        CAPITAL_SHEET_NAMES[1],
+                        "invested_capital.current",
+                        CAPITAL_TABLE_NAMES[1],
+                        ("strategy_id", "invested_capital_usd"),
+                        current_rows,
+                    ),
+                ]
+            )
+        if has_decomposition:
+            assert isinstance(decomposition, dict)
+            cell_rows, factor_rows = _decomposition_workbook_rows(decomposition)
+            table_specs.extend(
+                [
+                    (
+                        DECOMPOSITION_SHEET_NAMES[0],
+                        "decomposition_lenses.cells",
+                        DECOMPOSITION_TABLE_NAMES[0],
+                        (
+                            "evidence_mode",
+                            "lens_id",
+                            "source_key",
+                            "surface",
+                            "series_id",
+                        ),
+                        cell_rows,
+                    ),
+                    (
+                        DECOMPOSITION_SHEET_NAMES[1],
+                        "decomposition_lenses.factors",
+                        DECOMPOSITION_TABLE_NAMES[1],
+                        (
+                            "evidence_mode",
+                            "lens_id",
+                            "source_key",
+                            "surface",
+                            "series_id",
+                            "factor_id",
+                        ),
+                        factor_rows,
+                    ),
+                ]
+            )
+        for sheet_name, report_key, table_name, fallback, raw_rows in table_specs:
             worksheet = formula_workbook[sheet_name]
             if table_name not in worksheet.tables or len(worksheet.tables) != 1:
                 raise ReportValidationError(
@@ -5982,7 +6791,6 @@ def _workbook_parity_receipt(
             table = worksheet.tables[table_name]
             observed_table_names.append(table.displayName)
             min_column, min_row, max_column, max_row = range_boundaries(table.ref)
-            raw_rows = report.get(report_key)
             if not isinstance(raw_rows, list) or not all(
                 isinstance(row, dict) for row in raw_rows
             ):
@@ -6011,7 +6819,7 @@ def _workbook_parity_receipt(
                 )
             expected_rows = [
                 [
-                    _parity_cell_value(row.get(header), header=header)
+                    _report_parity_cell_value(row, report_key=report_key, header=header)
                     for header in headers
                 ]
                 for row in rows
@@ -6023,13 +6831,16 @@ def _workbook_parity_receipt(
                     worksheet.cell(row=min_row + row_offset, column=column).value
                     for column in range(min_column, max_column + 1)
                 ]
-                if actual_row != expected_row:
+                if not all(
+                    _parity_values_equal(actual, expected)
+                    for actual, expected in zip(actual_row, expected_row, strict=True)
+                ):
                     mismatch = next(
                         index
                         for index, (actual, expected) in enumerate(
                             zip(actual_row, expected_row, strict=True)
                         )
-                        if actual != expected
+                        if not _parity_values_equal(actual, expected)
                     )
                     raise ReportValidationError(
                         "workbook parity values differ: "
@@ -6051,13 +6862,20 @@ def _workbook_parity_receipt(
                     "table": table_name,
                 }
             )
-        if observed_table_names != list(TABLE_NAMES):
+            expected_table_names = list(
+                (
+                    *TABLE_NAMES,
+                    *(CAPITAL_TABLE_NAMES if has_capital else ()),
+                    *(DECOMPOSITION_TABLE_NAMES if has_decomposition else ()),
+                )
+            )
+        if observed_table_names != expected_table_names:
             raise ReportValidationError("workbook parity table order differs")
     finally:
         formula_workbook.close()
         cached_workbook.close()
     return {
-        "cached_formula_value_count": 1,
+        "cached_formula_value_count": 2 if has_capital else 1,
         "canonical_data_cell_count": canonical_data_cell_count,
         "data_cell_count": data_cell_count,
         "formula_cell_count": len(formula_cells),
@@ -6067,8 +6885,8 @@ def _workbook_parity_receipt(
         "parity_schema_version": WORKBOOK_PARITY_VERSION,
         "report_row_count": report_row_count,
         "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
-        "sheet_count": len(SHEET_NAMES),
-        "table_count": len(TABLE_NAMES),
+        "sheet_count": len(expected_sheets),
+        "table_count": len(expected_table_names),
         "tables": table_receipts,
         "workbook_row_count": workbook_row_count,
         "workbook_sha256": hashlib.sha256(workbook_bytes).hexdigest(),
@@ -6574,6 +7392,12 @@ def _validate_epoch_manifest_input(
         current_account_ids=current_account_ids,
         crosswalk=crosswalk,
     )
+    if manifest.get("schema_version") == 9 and manifest.get(
+        "calculation_cutoff_date"
+    ) != crosswalk.get("calculation_cutoff_date"):
+        raise ReportValidationError(
+            "epoch manifest cutoff differs from selected crosswalk"
+        )
     source_crosswalk = source["crosswalk"]
     if source_crosswalk["sha256"] != hashlib.sha256(
         crosswalk_bytes
@@ -6617,11 +7441,8 @@ def _verified_epoch_authority_details(
         raise ReportValidationError(
             "epoch manifest schema-9 authority differs"
         ) from exc
-    cutoff = manifest.get("calculation_cutoff_date")
-    if (
-        manifest.get("schema_version") != 9
-        or cutoff != CURRENT_EPOCH_CROSSWALK_CUTOFF_DATE
-    ):
+    cutoff = cast(str, manifest.get("calculation_cutoff_date"))
+    if manifest.get("schema_version") != 9:
         raise ReportValidationError(
             "epoch generation requires schema-9 cutoff authority"
         )
@@ -6725,6 +7546,12 @@ def _verified_epoch_authority_details(
         if not isinstance(decoded, dict) or canonical_json_bytes(decoded) != payload:
             raise ReportValidationError("epoch verification subject payload differs")
         return decoded
+
+    crosswalk_authority = subject_object("authority/account-assignment-crosswalk.json")
+    if crosswalk_authority.get("calculation_cutoff_date") != cutoff:
+        raise ReportValidationError(
+            "epoch manifest cutoff differs from selected crosswalk"
+        )
 
     selected_identities = subject_object("authority/selected-input-identities.json")
     if verification.get("selected_source_identities") != selected_identities:
@@ -6971,7 +7798,7 @@ def _verified_epoch_authority_details(
                     or receipt.get("calculation_cutoff_date") != cutoff
                     or issuer.get("adapter_name") != "static-snapshot-coverage"
                     or issuer.get("adapter_version") != "1"
-                    or receipt.get("coverage_as_of_date") < cutoff
+                    or cast(str, receipt.get("coverage_as_of_date")) < cutoff
                     or staged_inputs != expected_staged_inputs
                     or receipt.get("observed_facts")
                     != {
@@ -7077,10 +7904,13 @@ def _verified_epoch_authority_details(
                 "code_sources": selected_code_sources,
             }
             and selected_policy_identity
-            == {
-                "sha256": hashlib.sha256(raw_policy_bytes).hexdigest(),
-                "size_bytes": len(raw_policy_bytes),
-            }
+            in (
+                {
+                    "sha256": hashlib.sha256(raw_policy_bytes).hexdigest(),
+                    "size_bytes": len(raw_policy_bytes),
+                },
+                expected_policy_identity,
+            )
             and raw_policy == flow_policy
             and classified_source["classification_policy"]
             == {
@@ -7631,17 +8461,15 @@ def _validate_current_epoch_crosswalk(
         or crosswalk.get("schema_version") != 1
     ):
         raise ReportValidationError("current epoch crosswalk schema differs")
-    if crosswalk.get("as_of_date") != CURRENT_EPOCH_CROSSWALK_AS_OF_DATE:
-        raise ReportValidationError("current epoch crosswalk as_of_date differs")
-    _date(crosswalk.get("as_of_date"), "current epoch crosswalk.as_of_date")
-    if crosswalk.get("calculation_cutoff_date") != CURRENT_EPOCH_CROSSWALK_CUTOFF_DATE:
-        raise ReportValidationError(
-            "current epoch crosswalk calculation cutoff differs"
-        )
-    _date(
+    as_of = _date(crosswalk.get("as_of_date"), "current epoch crosswalk.as_of_date")
+    cutoff = _date(
         crosswalk.get("calculation_cutoff_date"),
         "current epoch crosswalk.calculation_cutoff_date",
     )
+    if cutoff > as_of:
+        raise ReportValidationError(
+            "current epoch crosswalk calculation cutoff differs"
+        )
     rows = _objects(crosswalk.get("rows"), "current epoch crosswalk.rows")
     if len(rows) != 15:
         raise ReportValidationError("current epoch crosswalk must contain 15 rows")
@@ -7795,9 +8623,13 @@ def _validate_current_epoch_crosswalk(
         raise ReportValidationError(
             "current epoch crosswalk selected baseline fields differ"
         )
-    _date(
+    selected_as_of = _date(
         selected["as_of_date"], "current epoch crosswalk selected_baseline.as_of_date"
     )
+    if cutoff > selected_as_of or selected_as_of > as_of:
+        raise ReportValidationError(
+            "current epoch crosswalk selected baseline cutoff differs"
+        )
     if (
         baseline_catalog is not None
         and baseline_ref is not None
@@ -7934,6 +8766,16 @@ def bind_workbook_evidence(
         "xlsx_result_canonicalization": candidate_dir
         / "xlsx-result-canonicalization.json",
     }
+    capital_paths = {
+        "invested_capital_result": candidate_dir / INVESTED_CAPITAL_RESULT_NAME,
+        "invested_capital_input_generation": candidate_dir
+        / INVESTED_CAPITAL_INPUT_NAME,
+    }
+    capital_exists = [path.is_file() for path in capital_paths.values()]
+    if any(capital_exists) and not all(capital_exists):
+        raise ReportValidationError("candidate invested-capital artifacts differ")
+    if all(capital_exists):
+        paths.update(capital_paths)
     snapshots = {
         name: _regular_file_bytes(path, name.replace("_", " "))
         for name, path in paths.items()
@@ -8070,6 +8912,16 @@ def _validated_workbook_evidence_snapshots(
         / "xlsx-result-canonicalization.json",
         "workbook_parity": candidate_dir / "workbook-parity.json",
     }
+    capital_paths = {
+        "invested_capital_result": candidate_dir / INVESTED_CAPITAL_RESULT_NAME,
+        "invested_capital_input_generation": candidate_dir
+        / INVESTED_CAPITAL_INPUT_NAME,
+    }
+    capital_exists = [path.is_file() for path in capital_paths.values()]
+    if any(capital_exists) and not all(capital_exists):
+        raise ReportValidationError("candidate invested-capital artifacts differ")
+    if all(capital_exists):
+        paths.update(capital_paths)
     snapshots = {
         name: (path, _regular_file_bytes(path, name.replace("_", " ")))
         for name, path in paths.items()
@@ -8166,6 +9018,12 @@ def verify_candidate(
     epoch_manifest_generation_root: Path | None = None,
     baseline_generation_id: str | None = None,
     correlation_generation_dir: Path | None = None,
+    invested_capital_result: Mapping[str, Any] | None = None,
+    invested_capital_input_generation_path: Path | None = None,
+    invested_capital_result_bytes: bytes | None = None,
+    decomposition_lenses_root: Path | None = None,
+    decomposition_plan_bundle: Path | None = None,
+    hybrid_decomposition_plan_bundle: Path | None = None,
 ) -> dict[str, Any]:
     epoch_snapshots = _epoch_manifest_workbook_snapshots(
         candidate_dir,
@@ -8210,15 +9068,45 @@ def verify_candidate(
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
+        invested_capital_result=invested_capital_result,
+        invested_capital_input_generation_path=(invested_capital_input_generation_path),
         epoch_manifest_path=effective_epoch_manifest_path,
         epoch_manifest_source_path=effective_epoch_manifest_source_path,
         epoch_crosswalk_path=effective_epoch_crosswalk_path,
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         baseline_generation_id=baseline_generation_id,
         correlation_generation_dir=correlation_generation_dir,
+        decomposition_lenses_root=decomposition_lenses_root,
+        decomposition_plan_bundle=decomposition_plan_bundle,
+        hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
+    if invested_capital_result is not None:
+        assert invested_capital_input_generation_path is not None
+        expected_result_bytes = (
+            invested_capital_result_bytes
+            if invested_capital_result_bytes is not None
+            else canonical_json_bytes(dict(invested_capital_result))
+        )
+        if (
+            _regular_file_bytes(
+                candidate_dir / INVESTED_CAPITAL_RESULT_NAME,
+                "candidate invested-capital result",
+            )
+            != expected_result_bytes
+        ):
+            raise ReportValidationError("candidate invested-capital result differs")
+        if _regular_file_bytes(
+            candidate_dir / INVESTED_CAPITAL_INPUT_NAME,
+            "candidate invested-capital input generation",
+        ) != _regular_file_bytes(
+            invested_capital_input_generation_path,
+            "invested-capital input generation",
+        ):
+            raise ReportValidationError(
+                "candidate invested-capital input generation differs"
+            )
     workbook_bytes = _regular_file_bytes(excel_workbook, "Excel workbook")
     verification = _verification_from_snapshots(
         report,
@@ -8859,7 +9747,66 @@ def publish_report(
     epoch_crosswalk_path: Path | None = None,
     baseline_generation_id: str | None = None,
     correlation_generation_dir: Path | None = None,
+    hwm_governed_result: Mapping[str, Any] | None = None,
+    hwm_governed_generation_bytes: bytes | None = None,
+    hwm_governed_calendar_bytes: bytes | None = None,
+    hwm_governed_receipt_bytes: bytes | None = None,
+    invested_capital_result: Mapping[str, Any] | None = None,
+    invested_capital_input_generation_path: Path | None = None,
+    invested_capital_result_bytes: bytes | None = None,
+    decomposition_lenses_root: Path | None = None,
+    decomposition_plan_bundle: Path | None = None,
+    private_stage_root: Path | None = None,
+    portfolio_root: Path | None = None,
+    hybrid_decomposition_plan_bundle: Path | None = None,
 ) -> dict[str, Any]:
+    governed_hwm_supplied = any(
+        value is not None
+        for value in (
+            hwm_governed_result,
+            hwm_governed_generation_bytes,
+            hwm_governed_calendar_bytes,
+            hwm_governed_receipt_bytes,
+        )
+    )
+    financial_outcome_supplied = (
+        governed_hwm_supplied
+        or invested_capital_result is not None
+        or decomposition_lenses_root is not None
+        or decomposition_plan_bundle is not None
+        or hybrid_decomposition_plan_bundle is not None
+    )
+    if financial_outcome_supplied:
+        if private_stage_root is None or portfolio_root is None:
+            raise ReportValidationError(
+                "governed financial publication requires private stage context"
+            )
+        validate_private_stage_target(output_root, private_stage_root, portfolio_root)
+    if invested_capital_result is not None:
+        assert invested_capital_input_generation_path is not None
+        expected_capital_result_bytes = (
+            invested_capital_result_bytes
+            if invested_capital_result_bytes is not None
+            else canonical_json_bytes(dict(invested_capital_result))
+        )
+        if (
+            _regular_file_bytes(
+                candidate_dir / INVESTED_CAPITAL_RESULT_NAME,
+                "candidate invested-capital result",
+            )
+            != expected_capital_result_bytes
+        ):
+            raise ReportValidationError("candidate invested-capital result differs")
+        if _regular_file_bytes(
+            candidate_dir / INVESTED_CAPITAL_INPUT_NAME,
+            "candidate invested-capital input generation",
+        ) != _regular_file_bytes(
+            invested_capital_input_generation_path,
+            "invested-capital input generation",
+        ):
+            raise ReportValidationError(
+                "candidate invested-capital input generation differs"
+            )
     epoch_supplied = _require_epoch_manifest_triplet(
         epoch_manifest_path, epoch_manifest_source_path, epoch_crosswalk_path
     )
@@ -8868,10 +9815,19 @@ def publish_report(
         baseline_root, baseline_generation_id
     )
     controls, _ = _report_product_controls(catalog)
-    if _is_governed_financial_mvp2_path(catalog, controls) and not epoch_supplied:
-        raise ReportValidationError(
-            "financial MVP-2 publication requires manifest, source receipt, and current epoch crosswalk"
-        )
+    if _is_governed_financial_mvp2_path(catalog, controls):
+        if not financial_outcome_supplied:
+            if private_stage_root is None or portfolio_root is None:
+                raise ReportValidationError(
+                    "governed financial publication requires private stage context"
+                )
+            validate_private_stage_target(
+                output_root, private_stage_root, portfolio_root
+            )
+        if not epoch_supplied:
+            raise ReportValidationError(
+                "financial MVP-2 publication requires manifest, source receipt, and current epoch crosswalk"
+            )
     if epoch_supplied:
         if epoch_crosswalk_path is None:
             raise ReportValidationError(
@@ -9000,6 +9956,41 @@ def publish_report(
             inventories,
         )
         snapshot_history_path = history_snapshot_root / history_contract_path.name
+    snapshot_decomposition_lenses_root: Path | None = None
+    snapshot_decomposition_plan_bundle: Path | None = None
+    snapshot_hybrid_decomposition_plan_bundle: Path | None = None
+    if (
+        hybrid_decomposition_plan_bundle is not None
+        and decomposition_plan_bundle is None
+    ):
+        raise ReportValidationError("hybrid decomposition requires a live plan bundle")
+    if (decomposition_lenses_root is None) != (decomposition_plan_bundle is None):
+        raise ReportValidationError(
+            "decomposition lens root and plan bundle must be supplied together"
+        )
+    if decomposition_lenses_root is not None and decomposition_plan_bundle is not None:
+        snapshot_decomposition_lenses_root = _snapshot_tree(
+            decomposition_lenses_root,
+            snapshot_root / "decomposition-lenses",
+            originals,
+            inventories,
+        )
+        plan_snapshot_parent = _snapshot_tree_preserving_root_identity(
+            decomposition_plan_bundle,
+            snapshot_root / "decomposition-plan",
+            originals,
+            inventories,
+        )
+        snapshot_decomposition_plan_bundle = plan_snapshot_parent
+        if hybrid_decomposition_plan_bundle is not None:
+            snapshot_hybrid_decomposition_plan_bundle = (
+                _snapshot_tree_preserving_root_identity(
+                    hybrid_decomposition_plan_bundle,
+                    snapshot_root / "hybrid-decomposition-plan",
+                    originals,
+                    inventories,
+                )
+            )
     epoch_history_verification: tuple[Path, bytes, str, str] | None = None
     if "epoch_manifest" in evidence_snapshots:
         if epoch_manifest_generation_root is None:
@@ -9058,6 +10049,14 @@ def publish_report(
         snapshot_return_attribution_path,
         None,
         snapshot_correlation_root,
+        None,
+        None,
+        hwm_governed_result,
+        hwm_governed_generation_bytes,
+        hwm_governed_calendar_bytes,
+        hwm_governed_receipt_bytes,
+        invested_capital_result=invested_capital_result,
+        invested_capital_input_generation_path=(invested_capital_input_generation_path),
         _hwm_policy_path=snapshot_hwm_policy,
         epoch_manifest_path=effective_epoch_manifest_path,
         epoch_manifest_source_path=effective_epoch_manifest_source_path,
@@ -9065,6 +10064,9 @@ def publish_report(
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         baseline_generation_id=snapshot_baseline_generation_id,
         correlation_generation_dir=snapshot_correlation_generation_dir,
+        decomposition_lenses_root=snapshot_decomposition_lenses_root,
+        decomposition_plan_bundle=snapshot_decomposition_plan_bundle,
+        hybrid_decomposition_plan_bundle=snapshot_hybrid_decomposition_plan_bundle,
     )
     snapshot_workbook = snapshot_root / WORKBOOK_NAME
     _write_exact(snapshot_workbook, evidence_snapshots["workbook"][1])
@@ -9147,6 +10149,23 @@ def publish_report(
             str(WORKBOOK_PARITY_VERSION),
         ),
     ]
+    if "invested_capital_result" in evidence_snapshots:
+        artifact_specs.extend(
+            [
+                (
+                    evidence_snapshots["invested_capital_result"][0],
+                    INVESTED_CAPITAL_RESULT_NAME,
+                    "portfolio-invested-capital-result",
+                    "1",
+                ),
+                (
+                    evidence_snapshots["invested_capital_input_generation"][0],
+                    INVESTED_CAPITAL_INPUT_NAME,
+                    "portfolio-invested-capital-input-generation",
+                    "1",
+                ),
+            ]
+        )
     if "epoch_manifest" in evidence_snapshots:
         epoch_payload = json.loads(evidence_snapshots["epoch_manifest"][1])
         artifact_specs.extend(
@@ -9348,6 +10367,15 @@ def publish_report(
         generation_dir / "workbook-parity.json",
         evidence_snapshots["workbook_parity"][1],
     )
+    if "invested_capital_result" in evidence_snapshots:
+        _write_exact(
+            generation_dir / INVESTED_CAPITAL_RESULT_NAME,
+            evidence_snapshots["invested_capital_result"][1],
+        )
+        _write_exact(
+            generation_dir / INVESTED_CAPITAL_INPUT_NAME,
+            evidence_snapshots["invested_capital_input_generation"][1],
+        )
     if "epoch_manifest" in evidence_snapshots:
         _write_exact(
             generation_dir / EPOCH_MANIFEST_WORKBOOK_NAME,
@@ -9459,6 +10487,16 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--epoch-manifest-source", type=Path)
     verify.add_argument("--epoch-crosswalk", type=Path)
     verify.add_argument("--epoch-manifest-generation-root", type=Path)
+    for command in (build, verify):
+        command.add_argument("--hwm-governed-result", type=Path)
+        command.add_argument("--hwm-governed-input-generation", type=Path)
+        command.add_argument("--hwm-governed-calendar-authority", type=Path)
+        command.add_argument("--hwm-governed-admission-receipt", type=Path)
+        command.add_argument("--invested-capital-result", type=Path)
+        command.add_argument("--invested-capital-input-generation", type=Path)
+        command.add_argument("--decomposition-lenses-root", type=Path)
+        command.add_argument("--decomposition-plan-bundle", type=Path)
+        command.add_argument("--hybrid-decomposition-plan-bundle", type=Path)
     canonicalize = commands.add_parser("canonicalize")
     canonicalize.add_argument("--workbook", type=Path, required=True)
     canonicalize.add_argument("--evidence", type=Path, required=True)
@@ -9498,7 +10536,55 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--epoch-manifest-source", type=Path)
     publish.add_argument("--epoch-manifest-generation-root", type=Path)
     publish.add_argument("--epoch-crosswalk", type=Path)
+    publish.add_argument("--hwm-governed-result", type=Path)
+    publish.add_argument("--hwm-governed-input-generation", type=Path)
+    publish.add_argument("--hwm-governed-calendar-authority", type=Path)
+    publish.add_argument("--hwm-governed-admission-receipt", type=Path)
+    publish.add_argument("--invested-capital-result", type=Path)
+    publish.add_argument("--invested-capital-input-generation", type=Path)
+    publish.add_argument("--decomposition-lenses-root", type=Path)
+    publish.add_argument("--decomposition-plan-bundle", type=Path)
+    publish.add_argument("--hybrid-decomposition-plan-bundle", type=Path)
+    publish.add_argument("--private-stage-root", type=Path)
+    publish.add_argument("--portfolio-root", type=Path)
     return parser
+
+
+def _governed_hwm_cli_values(args: argparse.Namespace) -> dict[str, Any]:
+    paths = (
+        args.hwm_governed_result,
+        args.hwm_governed_input_generation,
+        args.hwm_governed_calendar_authority,
+        args.hwm_governed_admission_receipt,
+    )
+    if all(path is None for path in paths):
+        return {}
+    if any(path is None for path in paths):
+        raise ReportValidationError("governed HWM paths must be supplied together")
+    return {
+        "hwm_governed_result": _load_json(paths[0], "governed HWM result"),
+        "hwm_governed_generation_bytes": paths[1].read_bytes(),
+        "hwm_governed_calendar_bytes": paths[2].read_bytes(),
+        "hwm_governed_receipt_bytes": paths[3].read_bytes(),
+    }
+
+
+def _invested_capital_cli_values(args: argparse.Namespace) -> dict[str, Any]:
+    result_path = args.invested_capital_result
+    input_path = args.invested_capital_input_generation
+    if result_path is None and input_path is None:
+        return {}
+    if result_path is None or input_path is None:
+        raise ReportValidationError("invested-capital paths must be supplied together")
+    return {
+        "invested_capital_result": _load_json(
+            result_path, "governed invested-capital result"
+        ),
+        "invested_capital_result_bytes": _regular_file_bytes(
+            result_path, "governed invested-capital result"
+        ),
+        "invested_capital_input_generation_path": input_path,
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -9522,6 +10608,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 epoch_manifest_generation_root=args.epoch_manifest_generation_root,
                 baseline_generation_id=args.baseline_generation_id,
                 correlation_generation_dir=args.correlation_generation_dir,
+                decomposition_lenses_root=args.decomposition_lenses_root,
+                decomposition_plan_bundle=args.decomposition_plan_bundle,
+                hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                **_governed_hwm_cli_values(args),
+                **_invested_capital_cli_values(args),
             )
         elif args.command == "verify":
             result = verify_candidate(
@@ -9542,6 +10633,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 epoch_manifest_generation_root=args.epoch_manifest_generation_root,
                 baseline_generation_id=args.baseline_generation_id,
                 correlation_generation_dir=args.correlation_generation_dir,
+                decomposition_lenses_root=args.decomposition_lenses_root,
+                decomposition_plan_bundle=args.decomposition_plan_bundle,
+                hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                **_governed_hwm_cli_values(args),
+                **_invested_capital_cli_values(args),
             )
         elif args.command == "canonicalize":
             result = canonicalize_workbook(args.workbook, args.evidence)
@@ -9583,6 +10679,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.epoch_crosswalk,
                 args.baseline_generation_id,
                 args.correlation_generation_dir,
+                decomposition_lenses_root=args.decomposition_lenses_root,
+                decomposition_plan_bundle=args.decomposition_plan_bundle,
+                hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                **_governed_hwm_cli_values(args),
+                **_invested_capital_cli_values(args),
+                **(
+                    {
+                        "private_stage_root": args.private_stage_root,
+                        "portfolio_root": args.portfolio_root,
+                    }
+                    if args.private_stage_root is not None
+                    or args.portfolio_root is not None
+                    else {}
+                ),
             )
     except (OSError, ValueError, RuntimeError, zipfile.BadZipFile) as exc:
         print(f"portfolio-report: FAIL: {exc}", file=sys.stderr)

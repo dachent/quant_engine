@@ -29,6 +29,7 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--spec", type=Path, required=True)
         if name == "execute":
             command.add_argument("--commit", action="store_true")
+            command.add_argument("--commit-authorization", type=Path)
             command.add_argument("--allow-external-read", action="store_true")
         elif name == "recover":
             command.add_argument("--confirm-stale-lock", action="store_true")
@@ -56,6 +57,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = execute_pipeline(
                     spec,
                     commit=args.commit,
+                    commit_authorization=args.commit_authorization,
                     allow_external_read=args.allow_external_read,
                 )
     except (

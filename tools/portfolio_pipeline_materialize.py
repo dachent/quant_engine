@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 from quant_engine.core import (
     CoverageStatus,
@@ -23,7 +23,13 @@ from quant_engine.core import (
     runtime_environment_sha256,
 )
 from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.portfolio_ledger import validate_admit_or_declare_receipt
+from quant_engine.portfolio_ledger import (
+    HwmCoverageError,
+    validate_admit_or_declare_receipt,
+)
+from quant_engine.portfolio_ledger.hwm_governed_execution import (
+    verify_governed_hwm_result,
+)
 
 
 class MaterializationError(ValueError):
@@ -177,6 +183,91 @@ PRODUCTION_STAGE_ROOTS = {
     "weekly-returns": Path("stages/analytics/weekly-returns"),
 }
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+HWM_GOVERNED_POLICY = REPOSITORY_ROOT / "contracts" / "portfolio-hwm-policy-v4.json"
+HWM_PERFORMANCE_POLICY = (
+    REPOSITORY_ROOT / "contracts" / "portfolio-performance-policy-v1.json"
+)
+HWM_LEGACY_POLICY = REPOSITORY_ROOT / "contracts" / "portfolio-hwm-policy-v3.json"
+HWM_BINDING_KEYS = frozenset(
+    {
+        "governed_result",
+        "input_generation",
+        "calendar_authority",
+        "provider_admission_receipt",
+    }
+)
+
+
+def _hwm_binding_paths(
+    hwm_governed_result_path: Path | None,
+    hwm_governed_input_generation_path: Path | None,
+    hwm_governed_calendar_authority_path: Path | None,
+    hwm_governed_admission_receipt_path: Path | None,
+) -> dict[str, Path] | None:
+    values = {
+        "governed_result": hwm_governed_result_path,
+        "input_generation": hwm_governed_input_generation_path,
+        "calendar_authority": hwm_governed_calendar_authority_path,
+        "provider_admission_receipt": hwm_governed_admission_receipt_path,
+    }
+    if all(value is None for value in values.values()):
+        return None
+    if any(value is None for value in values.values()):
+        raise MaterializationError("governed HWM bindings must be supplied together")
+    return {key: Path(value).resolve() for key, value in values.items() if value}
+
+
+def _production_hwm_source_paths(
+    sources: Mapping[str, Path],
+    artifact_rows: Sequence[Mapping[str, Any]],
+    manifest_inputs: Mapping[str, Any] | None,
+) -> dict[str, Path]:
+    """Resolve the selected ledger authorities already present in the production spec."""
+
+    account_rows = [
+        row
+        for row in artifact_rows
+        if row.get("kind") == "ARTIFACT"
+        and row.get("node_id") == "financial-account-manifest-generation"
+    ]
+    if len(account_rows) != 1:
+        raise MaterializationError(
+            "selected HWM account-manifest generation is absent or ambiguous"
+        )
+    account_row = account_rows[0]
+    account_path = Path(_text(account_row.get("path"), "HWM account generation path"))
+    if account_path.name != "generation.json":
+        raise MaterializationError("selected HWM account generation binding differs")
+    account_definition = _file_definition(account_path)
+    if (
+        account_definition["sha256"] != account_row.get("sha256")
+        or account_definition["size_bytes"] != account_row.get("size_bytes")
+        or Path(cast(str, account_definition["path"])).resolve()
+        != account_path.resolve()
+    ):
+        raise MaterializationError("selected HWM account generation binding differs")
+    if not isinstance(manifest_inputs, Mapping):
+        raise MaterializationError("selected HWM admission policy binding is absent")
+    admission = manifest_inputs.get("account_strategy_admission_policy")
+    admission_path = _validate_file_definition(
+        admission, "account strategy admission policy"
+    )
+    try:
+        provider_path = sources["provider-ledger"] / "generation.json"
+        baseline_path = sources["portfolio-baseline"] / "generation.json"
+    except KeyError as exc:
+        raise MaterializationError("selected HWM generation source is absent") from exc
+    return {
+        "account_manifest_generation_path": account_path.resolve(),
+        "account_manifest_admission_policy_path": admission_path.resolve(),
+        "account_manifest_flow_classification_policy_path": (
+            ACCOUNT_STRATEGY_CLASSIFICATION_POLICY.resolve()
+        ),
+        "provider_ledger_generation_path": provider_path.resolve(),
+        "baseline_generation_path": baseline_path.resolve(),
+    }
+
+
 FINANCIAL_MVP_SCHEMA = (
     REPOSITORY_ROOT
     / "schemas"
@@ -471,7 +562,10 @@ def _financial_epoch_manifest_inputs(
 
     if vertical.get("schema_version") != 9:
         return None
-    if set(vertical) != SCHEMA_9_VERTICAL_RECIPE_KEYS:
+    if set(vertical) not in (
+        SCHEMA_9_VERTICAL_RECIPE_KEYS,
+        SCHEMA_9_VERTICAL_RECIPE_KEYS | {"hybrid_decomposition_plan_bundle"},
+    ):
         raise MaterializationError("financial epoch manifest schema-9 inputs differ")
     definitions: dict[str, dict[str, object]] = {}
     for key in EPOCH_MANIFEST_INPUTS:
@@ -1396,14 +1490,12 @@ def _product_gate_payload(authority: Mapping[str, Any]) -> dict[str, Any]:
 
 def _hwm_input_authority_assessment(
     authority: Mapping[str, Any],
+    *,
+    hwm_bindings: Mapping[str, Path] | None = None,
+    hwm_source_paths: Mapping[str, Path] | None = None,
+    assessment_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Project the accepted runtime authority that exists for PORT-HWM-4 inputs.
-
-    This is deliberately an assessment, not an input generation.  It binds the
-    current product/provider authority while naming the accepted authorities
-    that are still absent; it cannot promote portable inputs or call the HWM
-    calculator.
-    """
+    """Independently assess the actual governed PORT-HWM-4 result bundle."""
 
     conformance = authority.get("conformance")
     provider = authority.get("provider_generation")
@@ -1446,10 +1538,9 @@ def _hwm_input_authority_assessment(
     outcome_readiness = (
         str(hwm_outcomes[0].get("readiness")) if hwm_outcomes else "NOT_DECLARED"
     )
-    blockers = {
+    blockers: set[str] = {
         "ACCEPTED_HWM_INPUT_GENERATION_ABSENT",
         "ACCEPTED_MIXED_CALENDAR_AUTHORITY_ABSENT",
-        *({"OUTCOME:AS_HELD_COMPOSITE_HWM"} if outcome_readiness != "READY" else set()),
         *(f"SOURCE:{source_id}" for source_id in unresolved_source_ids),
     }
     provider_admission = conformance.get("provider_admission")
@@ -1458,8 +1549,8 @@ def _hwm_input_authority_assessment(
     if provider_admission.get("product_readiness") != "READY_FOR_COMPOSITION":
         blockers.add("PROVIDER_ADMISSION")
 
-    return {
-        "assessment_scope": "CURRENT_PRODUCT_AND_PROVIDER_ADMISSION_ONLY",
+    base = {
+        "assessment_scope": "PENDING_GOVERNED_HWM_RESULT",
         "authority_hashes": {
             "census_sha256": conformance["census_sha256"],
             "contract_raw_sha256": authority["contract"]["sha256"],
@@ -1469,20 +1560,106 @@ def _hwm_input_authority_assessment(
             "provider_receipt_sha256": provider["receipt"]["sha256"],
             "source_matrix_sha256": authority["source_matrix"]["sha256"],
         },
+        "bindings": {},
         "blocking_reasons": sorted(blockers),
         "calendar_authority_sha256": None,
         "input_generation_sha256": None,
         "outcome_id": "AS_HELD_COMPOSITE_HWM",
         "outcome_readiness": outcome_readiness,
         "required_strategy_ids": required_strategy_ids,
-        "schema_version": 1,
+        "result_sha256": None,
+        "schema_version": 2,
         "state": "REQUIRED_NOT_READY",
         "unresolved_source_ids": unresolved_source_ids,
+    }
+    if hwm_bindings is None:
+        return base
+    if hwm_source_paths is None:
+        raise MaterializationError("selected HWM source bindings are required")
+    if set(hwm_bindings) != HWM_BINDING_KEYS:
+        raise MaterializationError("governed HWM bindings must be supplied together")
+    paths = {key: Path(value).resolve() for key, value in hwm_bindings.items()}
+    if assessment_path is not None and any(
+        path == assessment_path.resolve() for path in paths.values()
+    ):
+        raise MaterializationError("governed HWM assessment self-reference")
+    definitions = {key: _file_definition(path) for key, path in paths.items()}
+    contract_path = _validate_file_definition(
+        authority.get("contract"), "financial MVP contract"
+    )
+    provider_receipt = provider.get("receipt")
+    if (
+        not isinstance(provider_receipt, Mapping)
+        or definitions["provider_admission_receipt"] != provider_receipt
+    ):
+        raise MaterializationError("governed HWM admission receipt binding differs")
+    try:
+        result = _load(paths["governed_result"], "governed HWM result")
+        accepted = verify_governed_hwm_result(
+            result,
+            paths["input_generation"].read_bytes(),
+            calendar_bytes=paths["calendar_authority"].read_bytes(),
+            input_receipt_bytes=paths["provider_admission_receipt"].read_bytes(),
+            policy_bytes=HWM_GOVERNED_POLICY.read_bytes(),
+            product_contract_bytes=contract_path.read_bytes(),
+            performance_policy_bytes=HWM_PERFORMANCE_POLICY.read_bytes(),
+            legacy_policy_bytes=HWM_LEGACY_POLICY.read_bytes(),
+        )
+    except (HwmCoverageError, OSError, TypeError, ValueError, KeyError) as exc:
+        raise MaterializationError("governed HWM result verification failed") from exc
+    memberships = accepted.get("input_evidence", {}).get("memberships")
+    verified_strategy_ids = (
+        sorted(
+            str(row.get("strategy_id"))
+            for row in memberships
+            if isinstance(row, Mapping) and row.get("strategy_id") is not None
+        )
+        if isinstance(memberships, list)
+        else []
+    )
+    if (
+        accepted.get("status") != "AVAILABLE"
+        or verified_strategy_ids != required_strategy_ids
+    ):
+        raise MaterializationError(
+            "governed HWM result does not cover required strategies"
+        )
+    try:
+        from portfolio_financial_outcomes import verify_selected_hwm_generation
+
+        resolved_source_ids = verify_selected_hwm_generation(
+            hwm_source_paths,
+            contract_path=contract_path,
+            bindings=paths,
+        )
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        raise MaterializationError(
+            "selected HWM source replay verification failed"
+        ) from exc
+    remaining_source_ids = sorted(set(unresolved_source_ids) - set(resolved_source_ids))
+    if remaining_source_ids or (
+        provider_admission.get("product_readiness") != "READY_FOR_COMPOSITION"
+    ):
+        raise MaterializationError("governed HWM required authority is absent")
+    return {
+        **base,
+        "assessment_scope": "VERIFIED_GOVERNED_HWM_RESULT",
+        "bindings": definitions,
+        "blocking_reasons": [],
+        "calendar_authority_sha256": definitions["calendar_authority"]["sha256"],
+        "input_generation_sha256": definitions["input_generation"]["sha256"],
+        "result_sha256": definitions["governed_result"]["sha256"],
+        "state": "AVAILABLE",
+        "unresolved_source_ids": remaining_source_ids,
     }
 
 
 def _product_gate_rows(
-    authority: Mapping[str, Any], product_path: Path
+    authority: Mapping[str, Any],
+    product_path: Path,
+    *,
+    hwm_bindings: Mapping[str, Path] | None = None,
+    hwm_source_paths: Mapping[str, Path] | None = None,
 ) -> list[dict[str, Any]]:
     payload = _product_gate_payload(authority)
     product_bytes = canonical_json_bytes(payload)
@@ -1504,7 +1681,14 @@ def _product_gate_rows(
         }
     ]
     hwm_path = product_path.with_name("financial-mvp-hwm-input-authority.json")
-    hwm_bytes = canonical_json_bytes(_hwm_input_authority_assessment(authority))
+    hwm_bytes = canonical_json_bytes(
+        _hwm_input_authority_assessment(
+            authority,
+            hwm_bindings=hwm_bindings,
+            hwm_source_paths=hwm_source_paths,
+            assessment_path=hwm_path,
+        )
+    )
     _write_exact(hwm_path, hwm_bytes)
     rows.append(
         {
@@ -1702,6 +1886,11 @@ def _vertical_source_paths(vertical_path: Path) -> list[Path]:
         "strategy_attribution_root",
         "decomposition_plan_bundle",
         "correlation_source_root",
+        *(
+            ("hybrid_decomposition_plan_bundle",)
+            if "hybrid_decomposition_plan_bundle" in vertical
+            else ()
+        ),
     ):
         value = vertical.get(key)
         if not isinstance(value, dict):
@@ -2359,6 +2548,7 @@ def _semantic_gate_payload(
     release_generations: Mapping[str, str] | None = None,
     *,
     epoch_manifest_proof: Mapping[str, Any] | None = None,
+    financial_outcomes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     checks = {
         "analytics_report_panel_equality": "PASS",
@@ -2370,6 +2560,12 @@ def _semantic_gate_payload(
     }
     if recipe.get("schema_version") == 3:
         checks["product_conformance"] = "PASS"
+    if financial_outcomes is not None:
+        if financial_outcomes.get("status") != "PASS":
+            raise MaterializationError(
+                "financial outcomes must pass actual verification"
+            )
+        checks["financial_outcomes"] = "PASS"
     manifest_inputs = recipe.get("financial_epoch_manifest_inputs")
     if manifest_inputs is not None:
         if epoch_manifest_proof is None:
@@ -2392,6 +2588,15 @@ def _semantic_gate_payload(
     return {
         "as_of_date": recipe["as_of_date"],
         "checks": checks,
+        **(
+            {
+                "financial_outcomes_sha256": hashlib.sha256(
+                    canonical_json_bytes(financial_outcomes)
+                ).hexdigest()
+            }
+            if financial_outcomes is not None
+            else {}
+        ),
         "financial_epoch_manifest_inputs_sha256": (
             hashlib.sha256(canonical_json_bytes(manifest_inputs)).hexdigest()
             if manifest_inputs is not None
@@ -2423,7 +2628,9 @@ def _semantic_gate_payload(
     }
 
 
-def semantic(recipe_path: Path, output_path: Path) -> dict[str, Any]:
+def semantic(
+    recipe_path: Path, output_path: Path, financial_spec_path: Path | None = None
+) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
     output_root = output_path.parent.parent
     checks: dict[str, dict[str, Any]] = {}
@@ -2788,10 +2995,21 @@ def semantic(recipe_path: Path, output_path: Path) -> dict[str, Any]:
         raise MaterializationError(
             f"semantic reconciliation failed: {', '.join(failed)}"
         )
+    financial_proof = None
+    if financial_spec_path is not None:
+        from quant_engine.core.pipeline import PipelineSpec
+        from portfolio_financial_outcomes import validate_financial_outcomes
+
+        financial_spec = PipelineSpec.from_json_bytes(financial_spec_path.read_bytes())
+        financial_proof = validate_financial_outcomes(financial_spec)
     _write_exact(
         output_path,
         canonical_json_bytes(
-            _semantic_gate_payload(recipe, epoch_manifest_proof=epoch_manifest_proof)
+            _semantic_gate_payload(
+                recipe,
+                epoch_manifest_proof=epoch_manifest_proof,
+                financial_outcomes=financial_proof,
+            )
         ),
     )
     return {"details": str(details_path), "state": "PASS"}
@@ -2861,7 +3079,15 @@ def _validate_output_path_budget(output_root: Path, recipe: Mapping[str, Any]) -
         )
 
 
-def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[str, Any]:
+def build_spec(
+    recipe_path: Path,
+    output_root: Path,
+    spec_path: Path,
+    hwm_governed_result_path: Path | None = None,
+    hwm_governed_input_generation_path: Path | None = None,
+    hwm_governed_calendar_authority_path: Path | None = None,
+    hwm_governed_admission_receipt_path: Path | None = None,
+) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
     if recipe.get("schema_version") != 3:
         raise MaterializationError(
@@ -3208,7 +3434,16 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
     contract_bytes = canonical_json_bytes(contract)
     _write_exact(contract_path, contract_bytes)
     product_path = spec_path.with_name("financial-mvp-product-conformance.json")
-    product_gates = _product_gate_rows(product_authority, product_path)
+    product_gates = _product_gate_rows(
+        product_authority,
+        product_path,
+        hwm_bindings=_hwm_binding_paths(
+            hwm_governed_result_path,
+            hwm_governed_input_generation_path,
+            hwm_governed_calendar_authority_path,
+            hwm_governed_admission_receipt_path,
+        ),
+    )
     manifest_gate_path = spec_path.with_name(
         "financial-epoch-manifest-input-authority.json"
     )
@@ -3276,6 +3511,112 @@ def build_spec(recipe_path: Path, output_root: Path, spec_path: Path) -> dict[st
     return {"contract": str(contract_path), "nodes": len(nodes), "spec": str(spec_path)}
 
 
+def _production_lens_nodes(
+    prepared_root: Path, contract: Mapping[str, Any]
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Bind both current surfaces to immutable generations in the existing roots."""
+    analytics = _load(
+        prepared_root / "stage-results" / "analytics.json", "prepared analytics"
+    )
+    bindings = analytics.get("lens_generation_bindings")
+    if analytics.get("schema_version") != 2 or not isinstance(bindings, list):
+        raise MaterializationError("current lens generation bindings are absent")
+    calculation = next(
+        row["calculation_contract"]
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "DECOMPOSITION"
+    )
+    plan = _load(CURRENT_STRATEGY_REGISTRY, "current decomposition plan")
+    expected = {
+        (mode, surface, source)
+        for mode in calculation["evidence_modes"]
+        for surface in calculation["surfaces"]
+        for source in plan["sources"]
+    }
+    nodes: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            raise MaterializationError("current lens generation binding differs")
+        key = (
+            _text(binding.get("evidence_mode"), "lens evidence_mode"),
+            _text(binding.get("surface"), "lens surface"),
+            _text(binding.get("source_key"), "lens source_key"),
+        )
+        if key not in expected or key in nodes:
+            raise MaterializationError("current lens generation key set differs")
+        mode, surface, source_key = key
+        root_id = f"hybrid-{source_key}" if mode == "LIVE_PLUS_BACKTEST" else source_key
+        if root_id not in PRODUCTION_ROOTS:
+            raise MaterializationError("current lens production root differs")
+        root = (
+            prepared_root
+            / "stages"
+            / "analytics"
+            / "decomposition-lenses"
+            / mode
+            / surface
+            / source_key
+        ).resolve()
+        if _absolute(binding.get("root"), "lens root") != root:
+            raise MaterializationError("current lens staging root differs")
+        generation_id, source = _current_generation(root)
+        if generation_id != binding.get("generation_id"):
+            raise MaterializationError("current lens pointer binding differs")
+        inventory = inventory_generation(source)
+        if inventory["generation_id"] != generation_id:
+            raise MaterializationError("current lens generation identity differs")
+        target = surface == "STATIC"
+        nodes[key] = {
+            "depends_on": [],
+            "files": inventory["files"],
+            "generation_id": generation_id,
+            "kind": "GENERATION",
+            "manifest_sha256": inventory["manifest_sha256"],
+            "node_id": f"publish-{root_id}" + ("" if target else "-dynamic-fls"),
+            "release_target": target,
+            "root_id": root_id,
+            "source_dir": str(source),
+        }
+    if set(nodes) != expected:
+        raise MaterializationError("current lens generation key set differs")
+    return nodes
+
+
+def _verify_panel_lens_nodes(
+    panel: Mapping[str, Any], nodes: Mapping[tuple[str, str, str], Mapping[str, Any]]
+) -> None:
+    """Require the panel to select every bound surface and evidence mode exactly."""
+    lenses = panel.get("decomposition_lenses")
+    modes = lenses.get("modes") if isinstance(lenses, dict) else None
+    selected: dict[tuple[object, object, object], object] = {}
+    if not isinstance(modes, dict):
+        raise MaterializationError("prepared panel lens authority differs")
+    for mode, groups in modes.items():
+        if not isinstance(groups, list):
+            raise MaterializationError("prepared panel lens authority differs")
+        for group in groups:
+            surfaces = group.get("surfaces") if isinstance(group, dict) else None
+            if not isinstance(surfaces, dict):
+                raise MaterializationError("prepared panel lens authority differs")
+            for surface, value in surfaces.items():
+                sources = value.get("sources") if isinstance(value, dict) else None
+                if not isinstance(sources, list):
+                    raise MaterializationError("prepared panel lens authority differs")
+                for source in sources:
+                    if not isinstance(source, dict):
+                        raise MaterializationError(
+                            "prepared panel lens authority differs"
+                        )
+                    key = (mode, surface, source.get("source_key"))
+                    if key in selected:
+                        raise MaterializationError(
+                            "prepared panel lens authority differs"
+                        )
+                    selected[key] = source.get("generation_id")
+    if selected != {key: node["generation_id"] for key, node in nodes.items()}:
+        raise MaterializationError("prepared panel lens authority differs")
+
+
 def build_production_spec(
     recipe_path: Path,
     prepared_root: Path,
@@ -3283,10 +3624,41 @@ def build_production_spec(
     portfolio_root: Path,
     state_root: Path,
     spec_path: Path,
+    hwm_governed_result_path: Path | None = None,
+    hwm_governed_input_generation_path: Path | None = None,
+    hwm_governed_calendar_authority_path: Path | None = None,
+    hwm_governed_admission_receipt_path: Path | None = None,
+    financial_artifacts_path: Path | None = None,
 ) -> dict[str, Any]:
     """Bind a verified private proof to the stable production root set."""
 
     recipe = _recipe(recipe_path)
+    if financial_artifacts_path is None:
+        raise MaterializationError(
+            "actual financial outcome ArtifactNodes are required"
+        )
+    artifact_rows = json.loads(financial_artifacts_path.read_bytes())
+    if (
+        not isinstance(artifact_rows, list)
+        or not artifact_rows
+        or any(
+            not isinstance(row, dict)
+            or row.get("kind") not in {"ARTIFACT", "GENERATION"}
+            or (
+                row.get("kind") == "GENERATION"
+                and (
+                    row.get("release_target") is not False
+                    or row.get("root_id") not in PRODUCTION_ROOTS
+                    or row.get("source_dir") is None
+                )
+            )
+            for row in artifact_rows
+        )
+    ):
+        raise MaterializationError(
+            "financial inventory requires ArtifactNodes or non-pointer "
+            "GenerationNodes under existing production roots"
+        )
     if recipe.get("schema_version") != 3:
         raise MaterializationError(
             "schema-2 recipe is recovery-only and cannot create a production specification"
@@ -3307,7 +3679,34 @@ def build_production_spec(
     sources: dict[str, Path] = {}
     generation_ids: dict[str, str] = {}
     nodes: list[dict[str, Any]] = []
+    analytics_result = prepared_root / "stage-results" / "analytics.json"
+    vertical = _load(Path(recipe["vertical_recipe"]["path"]), "vertical recipe")
+    current_lenses = (
+        _production_lens_nodes(
+            prepared_root,
+            _load(
+                Path(recipe["product_authority"]["contract"]["path"]),
+                "product contract",
+            ),
+        )
+        if vertical.get("schema_version") == 9
+        or (
+            analytics_result.is_file()
+            and "lens_generation_bindings"
+            in _load(analytics_result, "prepared analytics")
+        )
+        else {}
+    )
+    lens_targets = {
+        row["root_id"]: row for row in current_lenses.values() if row["release_target"]
+    }
     for root_id, relative in PRODUCTION_STAGE_ROOTS.items():
+        if root_id in lens_targets:
+            node = lens_targets[root_id]
+            sources[root_id] = Path(node["source_dir"])
+            generation_ids[root_id] = node["generation_id"]
+            nodes.append(node)
+            continue
         staged_root = prepared_root / relative
         if root_id in {
             "provider-ledger",
@@ -3380,7 +3779,44 @@ def build_production_spec(
         panel_meta.get(key) != value for key, value in expected_panel_analytics.items()
     ):
         raise MaterializationError("prepared panel analytics authority differs")
-    if _panel_hybrid_generation_ids(panel_payload) != {
+    if current_lenses:
+        _verify_panel_lens_nodes(panel_payload, current_lenses)
+        # Reuse financial inventory identities so its ArtifactNode dependencies
+        # remain exact, while preventing a duplicate immutable-generation copy.
+        for lens in current_lenses.values():
+            matches = [
+                row
+                for row in artifact_rows
+                if row.get("kind") == "GENERATION"
+                and row.get("root_id") == lens["root_id"]
+                and row.get("generation_id") == lens["generation_id"]
+            ]
+            if len(matches) > 1:
+                raise MaterializationError("duplicate financial lens generation")
+            if matches:
+                supplied = matches[0]
+                if any(
+                    supplied.get(field) != lens[field]
+                    for field in (
+                        "source_dir",
+                        "manifest_sha256",
+                        "files",
+                    )
+                ):
+                    raise MaterializationError(
+                        "financial lens generation binding differs"
+                    )
+                if lens["release_target"]:
+                    old_id = supplied["node_id"]
+                    for row in artifact_rows:
+                        row["depends_on"] = [
+                            lens["node_id"] if item == old_id else item
+                            for item in row.get("depends_on", [])
+                        ]
+                    artifact_rows.remove(supplied)
+            elif not lens["release_target"]:
+                nodes.append(lens)
+    elif _panel_hybrid_generation_ids(panel_payload) != {
         root_id: generation_ids[root_id] for root_id in HYBRID_PANEL_ROOT_IDS.values()
     }:
         raise MaterializationError("prepared panel hybrid analytics authority differs")
@@ -3412,7 +3848,6 @@ def build_production_spec(
     production_semantic_path = spec_path.with_name(
         "production-post-build-semantic.json"
     )
-    _write_exact(production_semantic_path, production_semantic)
     orchestration_path = prepared_root / "portfolio-orchestration-contract.json"
     orchestration_sha = _sha(orchestration_path)[0]
     orchestration = _load(orchestration_path, "prepared orchestration contract")
@@ -3487,9 +3922,27 @@ def build_production_spec(
     ).hexdigest()
     contract_path = spec_path.with_name("portfolio-production-rebind-contract.json")
     contract_bytes = canonical_json_bytes(contract)
-    _write_exact(contract_path, contract_bytes)
     product_path = spec_path.with_name("financial-mvp-product-conformance.json")
-    product_gates = _product_gate_rows(production_product_authority, product_path)
+    hwm_bindings = _hwm_binding_paths(
+        hwm_governed_result_path,
+        hwm_governed_input_generation_path,
+        hwm_governed_calendar_authority_path,
+        hwm_governed_admission_receipt_path,
+    )
+    product_gates = _product_gate_rows(
+        production_product_authority,
+        product_path,
+        hwm_bindings=hwm_bindings,
+        hwm_source_paths=(
+            _production_hwm_source_paths(
+                sources,
+                artifact_rows,
+                manifest_inputs,
+            )
+            if hwm_bindings is not None
+            else None
+        ),
+    )
     manifest_gates = _financial_epoch_manifest_gate_rows(
         manifest_inputs,
         prepared_epoch_proof,
@@ -3507,7 +3960,7 @@ def build_production_spec(
                 "source_path": str(launcher),
             }
         ],
-        "coordination_root": str(portfolio_root / "releases"),
+        "coordination_root": str(portfolio_root / "releases-refresh-2026"),
         "created_at": datetime.now(UTC).isoformat(),
         "gates": [
             {
@@ -3523,7 +3976,7 @@ def build_production_spec(
             *product_gates,
             *manifest_gates,
         ],
-        "nodes": nodes,
+        "nodes": [*nodes, *artifact_rows],
         "pipeline_id": f"{recipe['pipeline_id']}-production",
         "roots": {
             root_id: str(portfolio_root / relative)
@@ -3532,10 +3985,33 @@ def build_production_spec(
         "schema_version": 1,
         "state_root": str(state_root),
     }
+    # The initial create-only specification contains no guessed future hashes.
+    # Only this final specification binds already built numerical artifacts.
+    from quant_engine.core.pipeline import PipelineSpec
+    from portfolio_financial_outcomes import validate_financial_outcomes
+
+    completed_spec = PipelineSpec.from_json_bytes(canonical_json_bytes(spec))
+    proof = validate_financial_outcomes(completed_spec)
+    production_semantic = canonical_json_bytes(
+        _semantic_gate_payload(
+            recipe,
+            generation_ids,
+            epoch_manifest_proof=prepared_epoch_proof,
+            financial_outcomes=proof,
+        )
+    )
+    contract["production_semantic_gate_sha256"] = hashlib.sha256(
+        production_semantic
+    ).hexdigest()
+    contract_bytes = canonical_json_bytes(contract)
+    spec["gates"][0]["sha256"] = hashlib.sha256(contract_bytes).hexdigest()
+    spec["gates"][1]["sha256"] = hashlib.sha256(production_semantic).hexdigest()
+    _write_exact(production_semantic_path, production_semantic)
+    _write_exact(contract_path, contract_bytes)
     _write_exact(spec_path, canonical_json_bytes(spec))
     return {
         "contract": str(contract_path),
-        "nodes": len(nodes),
+        "nodes": len(spec["nodes"]),
         "root_count": len(PRODUCTION_ROOTS),
         "spec": str(spec_path),
     }
@@ -3554,6 +4030,7 @@ def _parser() -> argparse.ArgumentParser:
     semantic_cmd = commands.add_parser("semantic")
     semantic_cmd.add_argument("--recipe", type=Path, required=True)
     semantic_cmd.add_argument("--output", type=Path, required=True)
+    semantic_cmd.add_argument("--financial-spec", type=Path)
     recipe_cmd = commands.add_parser("recipe")
     recipe_cmd.add_argument("--vertical-recipe", type=Path, required=True)
     recipe_cmd.add_argument("--proof-root", type=Path, required=True)
@@ -3568,6 +4045,10 @@ def _parser() -> argparse.ArgumentParser:
     spec_cmd.add_argument("--recipe", type=Path, required=True)
     spec_cmd.add_argument("--output-root", type=Path, required=True)
     spec_cmd.add_argument("--spec", type=Path, required=True)
+    spec_cmd.add_argument("--hwm-governed-result", type=Path)
+    spec_cmd.add_argument("--hwm-governed-input-generation", type=Path)
+    spec_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
+    spec_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
     production_cmd = commands.add_parser("production-spec")
     production_cmd.add_argument("--recipe", type=Path, required=True)
     production_cmd.add_argument("--prepared-root", type=Path, required=True)
@@ -3575,6 +4056,16 @@ def _parser() -> argparse.ArgumentParser:
     production_cmd.add_argument("--portfolio-root", type=Path, required=True)
     production_cmd.add_argument("--state-root", type=Path, required=True)
     production_cmd.add_argument("--spec", type=Path, required=True)
+    production_cmd.add_argument("--hwm-governed-result", type=Path)
+    production_cmd.add_argument("--hwm-governed-input-generation", type=Path)
+    production_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
+    production_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
+    production_cmd.add_argument(
+        "--financial-artifacts",
+        type=Path,
+        required=True,
+        help="JSON array of existing ArtifactNode definitions for actual outcomes and their producer inputs",
+    )
     return parser
 
 
@@ -3586,7 +4077,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "authority":
             result = authority(args.recipe, args.source_run, args.output_dir)
         elif args.command == "semantic":
-            result = semantic(args.recipe, args.output)
+            result = semantic(args.recipe, args.output, args.financial_spec)
         elif args.command == "recipe":
             result = create_recipe(
                 args.vertical_recipe,
@@ -3600,7 +4091,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.rederive_receipt_registry,
             )
         elif args.command == "spec":
-            result = build_spec(args.recipe, args.output_root, args.spec)
+            result = build_spec(
+                args.recipe,
+                args.output_root,
+                args.spec,
+                args.hwm_governed_result,
+                args.hwm_governed_input_generation,
+                args.hwm_governed_calendar_authority,
+                args.hwm_governed_admission_receipt,
+            )
         else:
             result = build_production_spec(
                 args.recipe,
@@ -3609,6 +4108,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.portfolio_root,
                 args.state_root,
                 args.spec,
+                args.hwm_governed_result,
+                args.hwm_governed_input_generation,
+                args.hwm_governed_calendar_authority,
+                args.hwm_governed_admission_receipt,
+                args.financial_artifacts,
             )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"portfolio-pipeline: FAIL: {exc}", file=sys.stderr)

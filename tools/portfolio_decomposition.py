@@ -72,7 +72,7 @@ EVIDENCE_LAYERS: Final = {
     "BACKTEST",
     "CONCEPTUAL_STRESS",
 }
-RETURN_BASES: Final = {"GROSS", "NET"}
+RETURN_BASES: Final = {"GROSS", "MODEL", "NET"}
 RETURN_TYPES: Final = {"EXCESS", "TOTAL"}
 CONSTRAINTS: Final = {"UNCONSTRAINED", "LONG_ONLY_SUM_TO_ONE"}
 COST_COVERAGE: Final = {"COMPLETE", "INCOMPLETE"}
@@ -639,7 +639,6 @@ def _read_targets(
             )
         grouped: dict[str, list[TargetRow]] = {}
         seen: set[tuple[str, date]] = set()
-        metadata: dict[str, tuple[str, str]] = {}
         layers: dict[str, set[str]] = {}
         for line_number, raw in enumerate(reader, start=2):
             series_id = _text(raw["series_id"], f"target line {line_number} series_id")
@@ -668,12 +667,6 @@ def _read_targets(
             if key in seen:
                 raise DecompositionError("target series contains a duplicate date")
             seen.add(key)
-            signature = (basis, return_type)
-            if series_id in metadata and metadata[series_id] != signature:
-                raise DecompositionError(
-                    "one target series cannot mix return semantics"
-                )
-            metadata[series_id] = signature
             layers.setdefault(series_id, set()).add(layer)
             raw_cost = raw["cost"].strip()
             cost = (
@@ -697,6 +690,20 @@ def _read_targets(
     for series_id, rows in grouped.items():
         observed_layers = layers[series_id]
         live_layers = observed_layers - {"BACKTEST"}
+        return_types = {row.return_type for row in rows}
+        live_bases = {
+            row.return_basis for row in rows if row.evidence_layer != "BACKTEST"
+        }
+        backtest_bases = {
+            row.return_basis for row in rows if row.evidence_layer == "BACKTEST"
+        }
+        if (
+            len(return_types) != 1
+            or len(live_bases) != 1
+            or "MODEL" in live_bases
+            or not backtest_bases.issubset({*live_bases, "MODEL"})
+        ):
+            raise DecompositionError("one target series cannot mix return semantics")
         if evidence_mode == "LIVE_ONLY":
             if "BACKTEST" in observed_layers or len(live_layers) != 1:
                 raise DecompositionError(
@@ -818,12 +825,15 @@ def _apply_model_quality_gate(
     """
 
     result["computational_status"] = "AVAILABLE"
+    published_holdout = _number(holdout_predicted_r_squared)
     result["model_quality"] = {
         "decision_rule": "SEALED_HOLDOUT_PREDICTED_R2_GT_ZERO",
-        "holdout_predicted_r_squared": _number(holdout_predicted_r_squared),
+        "holdout_predicted_r_squared": published_holdout,
     }
     quality = cast(dict[str, object], result["model_quality"])
-    if holdout_predicted_r_squared is not None and holdout_predicted_r_squared > 0:
+    # Consumers verify the canonical result bytes. A positive floating-point
+    # residue that serializes as zero cannot establish a positive holdout.
+    if published_holdout is not None and float(published_holdout) > 0:
         quality.update(
             {
                 "decision_status": "PM_VALID",
@@ -1743,12 +1753,16 @@ def _dynamic_model_result(
         else float(np.mean([cast(float, item[0].cost) for item in train]))
     )
     observed_basis = target_rows[0].return_basis
+    has_model_basis = any(row.return_basis == "MODEL" for row in target_rows)
     gross_alpha = None
     net_alpha = None
     gross_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     net_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     annualized_observed = train_fit.intercept * model.periods_per_year
-    if observed_basis == "GROSS":
+    if has_model_basis:
+        gross_status = "UNAVAILABLE_MODEL_RETURN_BASIS"
+        net_status = "UNAVAILABLE_MODEL_RETURN_BASIS"
+    elif observed_basis == "GROSS":
         gross_alpha = annualized_observed
         gross_status = "AVAILABLE_OBSERVED_BASIS"
         if periodic_cost is not None:
@@ -2266,12 +2280,16 @@ def _model_result(
         else float(np.mean([cast(float, item[0].cost) for item in train]))
     )
     observed_basis = target_rows[0].return_basis
+    has_model_basis = any(row.return_basis == "MODEL" for row in target_rows)
     gross_alpha = None
     net_alpha = None
     gross_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     net_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     annualized_observed = fit.intercept * model.periods_per_year
-    if observed_basis == "GROSS":
+    if has_model_basis:
+        gross_status = "UNAVAILABLE_MODEL_RETURN_BASIS"
+        net_status = "UNAVAILABLE_MODEL_RETURN_BASIS"
+    elif observed_basis == "GROSS":
         gross_alpha = annualized_observed
         gross_status = "AVAILABLE_OBSERVED_BASIS"
         if periodic_cost is not None:

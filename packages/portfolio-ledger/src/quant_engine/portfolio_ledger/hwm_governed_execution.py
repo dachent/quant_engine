@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from datetime import date, timedelta
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
@@ -51,6 +52,9 @@ Row = dict[str, Any]
 
 _GOVERNED_INPUT_AUTHORITY: Final = "ACCEPTED_GOVERNED"
 _GOVERNED_PROOF_STATUS: Final = "AVAILABLE"
+_DECIMAL_TEXT: Final = re.compile(
+    r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][+-]?[0-9]+)?"
+)
 _PERIOD_KEYS: Final = {
     "strategy_id",
     "interval_start",
@@ -69,6 +73,40 @@ _PERIOD_KEYS: Final = {
 
 def _canonical_bytes(value: Mapping[str, Any]) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def _equivalent_result_value(presented: Any, recomputed: Any) -> bool:
+    """Accept scale variance only where recomputation produced a Decimal."""
+
+    if isinstance(recomputed, Decimal):
+        if isinstance(presented, Decimal):
+            return presented == recomputed
+        return bool(
+            isinstance(presented, str)
+            and _DECIMAL_TEXT.fullmatch(presented)
+            and Decimal(presented) == recomputed
+        )
+    if isinstance(recomputed, Mapping):
+        return bool(
+            isinstance(presented, Mapping)
+            and set(presented) == set(recomputed)
+            and all(
+                _equivalent_result_value(presented[key], recomputed[key])
+                for key in presented
+            )
+        )
+    if isinstance(recomputed, list):
+        return bool(
+            isinstance(presented, list)
+            and len(presented) == len(recomputed)
+            and all(
+                _equivalent_result_value(presented_item, recomputed_item)
+                for presented_item, recomputed_item in zip(
+                    presented, recomputed, strict=True
+                )
+            )
+        )
+    return type(presented) is type(recomputed) and bool(presented == recomputed)
 
 
 def _authority_dispositions(
@@ -645,13 +683,11 @@ def verify_governed_hwm_result(
         input_generation_bytes, "input_generation_bytes"
     )
     # Verification contract: recompute from evidence and require the
-    # presented numbers to equal the recomputation field-for-field (after
-    # _json_safe normalization, since Decimal text forms may differ while
-    # values agree). Any divergence — including an altered number or a
-    # mismatched receipt hash — fails closed.
-    normalized_presented = _json_safe(
-        json.loads(json.dumps(result_receipt, default=str))
-    )
+    # presented values to equal the recomputation field-for-field. Only a
+    # Decimal produced by recomputation may be represented as equivalent
+    # persisted decimal text with a different trailing-zero scale. Metadata,
+    # counts, labels, hashes, and their types remain exact. Any divergence —
+    # including an altered number or mismatched receipt hash — fails closed.
     recomputed = compute_governed_as_held_composite_hwm(
         result_receipt["input_evidence"]["accepted_intervals"],
         generation["memberships"],
@@ -669,15 +705,17 @@ def verify_governed_hwm_result(
         maximum_age_days=result_receipt["maximum_age_days"],
         assurance_profile=result_receipt["assurance_profile"],
     )
-    normalized_recomputed = _json_safe(json.loads(json.dumps(recomputed, default=str)))
     # Field-for-field equality between presented and recomputed documents
     # (excluding the receipt hash, which is bound separately below).
     differing = sorted(
         key
-        for key in set(normalized_presented) | set(normalized_recomputed)
+        for key in set(result_receipt) | set(recomputed)
         if key != "receipt_sha256"
-        and json.dumps(normalized_presented.get(key), sort_keys=True)
-        != json.dumps(normalized_recomputed.get(key), sort_keys=True)
+        and (
+            key not in result_receipt
+            or key not in recomputed
+            or not _equivalent_result_value(result_receipt[key], recomputed[key])
+        )
     )
     if differing:
         raise HwmCoverageError(
@@ -696,13 +734,12 @@ def verify_governed_hwm_result(
         _canonical_date(row["interval_start"], "generation period start")
         for row in generation["component_periods"]
     ]
-    period_ends = [
-        _canonical_date(row["interval_end"], "generation period end")
-        for row in generation["component_periods"]
-    ]
+    complete_through = _canonical_date(
+        result_receipt["complete_through"], "presented complete_through"
+    ).isoformat()
     if (
         presented_intervals[0]["interval_start"] != min(period_starts).isoformat()
-        or presented_intervals[-1]["interval_end"] != max(period_ends).isoformat()
+        or presented_intervals[-1]["interval_end"] != complete_through
     ):
         raise HwmCoverageError(
             "presented accepted interval grid differs from generation coverage"

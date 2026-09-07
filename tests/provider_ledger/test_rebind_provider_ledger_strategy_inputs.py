@@ -16,6 +16,7 @@ from quant_engine.core.contracts import canonical_json_bytes
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER_PATH = ROOT / "tools" / "rebind_provider_ledger_strategy_inputs.py"
+LEDGER_PATH = ROOT / "tools" / "provider_ledger.py"
 
 
 def _load_runner() -> Any:
@@ -27,6 +28,30 @@ def _load_runner() -> Any:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
+
+
+def _load_ledger() -> Any:
+    spec = importlib.util.spec_from_file_location("provider_ledger", LEDGER_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _write_strategy_evidence(tmp_path: Path) -> Path:
+    path = tmp_path / "strategy-evidence.json"
+    path.write_text(
+        json.dumps(
+            {
+                "as_of_date": "2026-08-13",
+                "schema_version": 1,
+                "strategies": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return path
 
 
 def _write_raw_generation(tmp_path: Path) -> tuple[Path, Path, bytes]:
@@ -110,6 +135,7 @@ def test_rebinds_only_declared_returns_identity_from_a_raw_generation(
     template_path = tmp_path / "provider-ledger-spec.json"
     template_path.write_text(json.dumps(template), encoding="utf-8")
     output = tmp_path / "provider-ledger-spec-rebound.json"
+    strategy_evidence = _write_strategy_evidence(tmp_path)
     monkeypatch.setattr(
         runner, "_verify_layered_history_generation", _accepted_verifier
     )
@@ -118,6 +144,7 @@ def test_rebinds_only_declared_returns_identity_from_a_raw_generation(
         template_path=template_path,
         layered_generation_dir=generation,
         financial_mvp_contract_path=contract,
+        strategy_evidence_path=strategy_evidence,
         output_path=output,
     )
 
@@ -127,13 +154,19 @@ def test_rebinds_only_declared_returns_identity_from_a_raw_generation(
         "output_path": str(output),
         "returns_sha256": hashlib.sha256(returns).hexdigest(),
         "returns_size_bytes": len(returns),
+        "strategy_evidence_sha256": hashlib.sha256(
+            strategy_evidence.read_bytes()
+        ).hexdigest(),
+        "strategy_evidence_size_bytes": strategy_evidence.stat().st_size,
     }
     expected = json.loads(json.dumps(template))
     expected["strategy_inputs"] = {
         "returns_path": str(returns_path.resolve()),
         "returns_sha256": hashlib.sha256(returns).hexdigest(),
-        "strategy_evidence_path": "unchanged/evidence.json",
-        "strategy_evidence_sha256": "1" * 64,
+        "strategy_evidence_path": str(strategy_evidence.resolve()),
+        "strategy_evidence_sha256": hashlib.sha256(
+            strategy_evidence.read_bytes()
+        ).hexdigest(),
     }
     assert rebound == expected
     assert output.read_bytes() == canonical_json_bytes(rebound)
@@ -154,6 +187,7 @@ def test_rejects_a_mutated_declared_returns_artifact_after_verification(
     monkeypatch.setattr(
         runner, "_verify_layered_history_generation", _accepted_verifier
     )
+    strategy_evidence = _write_strategy_evidence(tmp_path)
 
     with pytest.raises(
         runner.ProviderLedgerStrategyInputsRebindError, match="identity differs"
@@ -162,6 +196,7 @@ def test_rejects_a_mutated_declared_returns_artifact_after_verification(
             template_path=template_path,
             layered_generation_dir=generation,
             financial_mvp_contract_path=contract,
+            strategy_evidence_path=strategy_evidence,
             output_path=tmp_path / "provider-ledger-spec-rebound.json",
         )
 
@@ -180,6 +215,7 @@ def test_rejects_an_output_path_that_aliases_the_template(
     monkeypatch.setattr(
         runner, "_verify_layered_history_generation", _accepted_verifier
     )
+    strategy_evidence = _write_strategy_evidence(tmp_path)
 
     with pytest.raises(
         runner.ProviderLedgerStrategyInputsRebindError, match="aliases an input"
@@ -188,6 +224,7 @@ def test_rejects_an_output_path_that_aliases_the_template(
             template_path=template_path,
             layered_generation_dir=generation,
             financial_mvp_contract_path=contract,
+            strategy_evidence_path=strategy_evidence,
             output_path=template_path,
         )
 
@@ -206,6 +243,7 @@ def test_rejects_an_output_path_that_aliases_declared_returns(
     monkeypatch.setattr(
         runner, "_verify_layered_history_generation", _accepted_verifier
     )
+    strategy_evidence = _write_strategy_evidence(tmp_path)
 
     with pytest.raises(
         runner.ProviderLedgerStrategyInputsRebindError, match="aliases an input"
@@ -214,6 +252,7 @@ def test_rejects_an_output_path_that_aliases_declared_returns(
             template_path=template_path,
             layered_generation_dir=generation,
             financial_mvp_contract_path=contract,
+            strategy_evidence_path=strategy_evidence,
             output_path=returns_path,
         )
 
@@ -232,6 +271,7 @@ def test_rejects_an_output_path_inside_the_source_generation(
     monkeypatch.setattr(
         runner, "_verify_layered_history_generation", _accepted_verifier
     )
+    strategy_evidence = _write_strategy_evidence(tmp_path)
 
     with pytest.raises(
         runner.ProviderLedgerStrategyInputsRebindError, match="aliases an input"
@@ -240,6 +280,7 @@ def test_rejects_an_output_path_inside_the_source_generation(
             template_path=template_path,
             layered_generation_dir=generation,
             financial_mvp_contract_path=contract,
+            strategy_evidence_path=strategy_evidence,
             output_path=generation / "candidate.json",
         )
 
@@ -260,6 +301,7 @@ def test_rejects_a_different_contract_than_the_template_binding(
     monkeypatch.setattr(
         runner, "_verify_layered_history_generation", _accepted_verifier
     )
+    strategy_evidence = _write_strategy_evidence(tmp_path)
 
     with pytest.raises(
         runner.ProviderLedgerStrategyInputsRebindError,
@@ -269,5 +311,53 @@ def test_rejects_a_different_contract_than_the_template_binding(
             template_path=template_path,
             layered_generation_dir=generation,
             financial_mvp_contract_path=other_contract,
+            strategy_evidence_path=strategy_evidence,
             output_path=tmp_path / "provider-ledger-spec-rebound.json",
         )
+
+
+def test_rejects_fresh_matrixport_evidence_paired_with_stale_selected_returns() -> None:
+    """A refreshed source receipt cannot attest a stale selected return series."""
+
+    ledger = _load_ledger()
+    fresh_daily_rows = [
+        {"date": "2026-01-02", "return": "0.01"},
+        {"date": "2026-01-03", "return": "0.02"},
+    ]
+    evidence_rows = [
+        {
+            "account": {
+                "epoch_hpr_receipt": {
+                    "daily_return_observations": 2,
+                    "daily_return_series_schema": "ordered-date-return/1",
+                    "daily_return_series_sha256": hashlib.sha256(
+                        canonical_json_bytes(fresh_daily_rows)
+                    ).hexdigest(),
+                    "observed_end": "2026-01-03",
+                    "observed_start": "2026-01-02",
+                },
+                "observed_end": "2026-01-03",
+                "observed_start": "2026-01-02",
+                "return_observations": 2,
+            },
+            "evidence_layer": "ACCOUNT_LIVE",
+            "generation_id": "a" * 64,
+            "provider_id": "matrixport",
+            "strategy_id": "robuxio-crypto",
+        }
+    ]
+    stale_rows = [
+        {
+            "date": "2026-01-02",
+            "evidence_layer": "ACCOUNT_LIVE",
+            "provider_id": "matrixport",
+            "return": "0.01",
+            "strategy_id": "robuxio-crypto",
+        }
+    ]
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="selected returns differ from strategy evidence",
+    ):
+        ledger._validate_selected_strategy_evidence(stale_rows, evidence_rows)

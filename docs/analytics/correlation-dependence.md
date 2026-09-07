@@ -152,7 +152,8 @@ called calendar days.
 ## Build, stage, publish, and recover
 
 ```powershell
-$portfolioRoot = 'C:\Tools\quant-engine\data'
+# Canonical repo example; use the explicit configured root in an isolated checkout.
+$portfolioRoot = [IO.Path]::GetFullPath((Join-Path $PWD '../dataPortfolio'))
 
 uv run --frozen --no-sync python tools/portfolio_correlation.py build `
   --spec "<spec.json>" --source-root "<input-root>"

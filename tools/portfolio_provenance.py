@@ -32,6 +32,7 @@ from quant_engine.core import (
     publish_generation,
     stage_generation,
 )
+from quant_engine.core.contracts import canonical_json_bytes
 
 
 SPEC_SCHEMA_VERSION: Final = 2
@@ -115,6 +116,16 @@ _OPEN_GAP_FIELDS = (
     "raw_data_last_active_date",
     "note",
 )
+_TARGET_FIELDS = (
+    "series_id",
+    "date",
+    "return",
+    "evidence_layer",
+    "return_basis",
+    "return_type",
+    "cost",
+)
+_ACCEPTED_LIVE_VERSION_PREFIX = "accepted-live-path:"
 
 
 class ProvenanceValidationError(ValueError):
@@ -938,6 +949,118 @@ def _validate_strategy_version_catalog(
     }
 
 
+def _validate_accepted_live_path_versions(
+    targets_path: Path,
+    strategies: Sequence[Mapping[str, Any]],
+    version_catalog: Mapping[str, Any],
+) -> None:
+    """Recompute accepted live identities from the canonical in-window rows."""
+
+    if targets_path.is_symlink() or not targets_path.is_file():
+        raise ProvenanceValidationError("canonical strategy targets are unavailable")
+    try:
+        content = targets_path.read_bytes()
+        text = content.decode("utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ProvenanceValidationError(
+            "canonical strategy targets are unavailable"
+        ) from exc
+    reader = csv.DictReader(io.StringIO(text, newline=""))
+    if tuple(reader.fieldnames or ()) != _TARGET_FIELDS:
+        raise ProvenanceValidationError("canonical strategy target header differs")
+    target_rows: list[dict[str, str]] = []
+    for row in reader:
+        if None in row or any(row.get(field) is None for field in _TARGET_FIELDS):
+            raise ProvenanceValidationError(
+                "canonical strategy target row is malformed"
+            )
+        target_rows.append({field: str(row[field]) for field in _TARGET_FIELDS})
+
+    versions = {
+        str(item.get("strategy_id")): item
+        for item in _objects(version_catalog.get("strategies"), "strategy versions")
+    }
+    for strategy in strategies:
+        version_ref = strategy.get("version_ref")
+        if not isinstance(version_ref, str) or not version_ref.startswith(
+            _ACCEPTED_LIVE_VERSION_PREFIX
+        ):
+            continue
+        strategy_id = _identifier(strategy.get("strategy_id"), "strategy.strategy_id")
+        series_id = _text(strategy.get("name"), "strategy.name")
+        try:
+            version = versions[strategy_id]
+        except KeyError as exc:
+            raise ProvenanceValidationError(
+                f"accepted live version is absent from catalog: {strategy_id}"
+            ) from exc
+        live_boundary = _object(
+            version.get("live_boundary"),
+            f"strategy version live boundary: {strategy_id}",
+        )
+        observed_start = _date(
+            live_boundary.get("observed_start"), "live_boundary.observed_start"
+        ).isoformat()
+        observed_end = _date(
+            live_boundary.get("observed_end"), "live_boundary.observed_end"
+        ).isoformat()
+        evidence_layer = _text(
+            live_boundary.get("evidence_layer"), "live_boundary.evidence_layer"
+        )
+        selected = sorted(
+            (
+                row
+                for row in target_rows
+                if row["series_id"] == series_id
+                and observed_start <= row["date"] <= observed_end
+                and row["evidence_layer"] == evidence_layer
+            ),
+            key=lambda row: row["date"],
+        )
+        if (
+            not selected
+            or selected[0]["date"] != observed_start
+            or selected[-1]["date"] != observed_end
+            or len({row["date"] for row in selected}) != len(selected)
+        ):
+            raise ProvenanceValidationError(
+                f"accepted live version canonical window differs: {strategy_id}"
+            )
+        computed = (
+            _ACCEPTED_LIVE_VERSION_PREFIX
+            + hashlib.sha256(
+                canonical_json_bytes({"rows": selected, "series_id": series_id})
+            ).hexdigest()
+        )
+        if version_ref != computed or live_boundary.get("version_ref") != computed:
+            raise ProvenanceValidationError(
+                "accepted live version differs from canonical target rows: "
+                f"{strategy_id}"
+            )
+
+
+def _accepted_live_target_path(
+    source_groups: object, roots: Mapping[str, Path]
+) -> Path:
+    matches: list[Path] = []
+    for group in _objects(source_groups, "source_groups"):
+        if group.get("source_id") != "strategy-decomposition-evidence":
+            continue
+        root_id = _identifier(group.get("root_id"), "source_group.root_id")
+        if root_id not in roots:
+            raise ProvenanceValidationError(
+                "strategy decomposition source root is unavailable"
+            )
+        relative_paths = _strings(group.get("relative_paths"), "relative_paths")
+        if "targets.csv" in relative_paths:
+            matches.append(_source_path(roots[root_id], "targets.csv"))
+    if len(matches) != 1:
+        raise ProvenanceValidationError(
+            "accepted live versions require one canonical strategy target artifact"
+        )
+    return matches[0]
+
+
 def _import_ref(
     value: object,
     field_name: str,
@@ -1309,6 +1432,16 @@ def build_catalog(
         source_hashes=source_hashes,
         strategies=strategies,
     )
+    if any(
+        isinstance(item.get("version_ref"), str)
+        and str(item["version_ref"]).startswith(_ACCEPTED_LIVE_VERSION_PREFIX)
+        for item in strategies
+    ):
+        _validate_accepted_live_path_versions(
+            _accepted_live_target_path(spec["source_groups"], roots),
+            strategies,
+            strategy_version_catalog,
+        )
     versions_by_strategy = {
         str(item["strategy_id"]): item
         for item in _objects(

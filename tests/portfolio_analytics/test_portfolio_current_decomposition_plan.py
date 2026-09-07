@@ -821,16 +821,105 @@ def test_required_decomposition_perimeter_cannot_be_dropped_or_omitted() -> None
     source_keys = tuple(plan["sources"])
     planner._validate_strategy_perimeter(strategies, contract, source_keys)
     by_id = {row["strategy_id"]: row for row in strategies}
+    expected_method_scope_non_applicable = {
+        ("p123-ai-factor", "europe-economic"),
+        ("p123-ai-factor", "multi-asset-style"),
+        ("p123-eu", "us-economic"),
+        ("p123-eu", "us-equity-style"),
+        ("p123-eu", "multi-asset-style"),
+        ("p123-eu", "us-sector"),
+        ("p123-eu", "us-industry"),
+        ("qsi", "europe-economic"),
+        ("tt-portfolio", "europe-economic"),
+        ("volatis-strategy", "europe-economic"),
+        ("grizzlybears-vtma", "europe-economic"),
+        ("robuxio-crypto", "us-economic"),
+        ("robuxio-crypto", "europe-economic"),
+        ("robuxio-crypto", "us-equity-style"),
+        ("robuxio-crypto", "us-sector"),
+        ("robuxio-crypto", "us-industry"),
+    }
+    actual_method_scope_non_applicable = {
+        (strategy_id, source_key)
+        for strategy_id, strategy in by_id.items()
+        for source_key, cell in strategy["source_dispositions"].items()
+        if cell["requirement"] == "NOT_APPLICABLE_METHOD_SCOPE"
+    }
+    assert actual_method_scope_non_applicable == expected_method_scope_non_applicable
+    for strategy_id, source_key in expected_method_scope_non_applicable:
+        cell = by_id[strategy_id]["source_dispositions"][source_key]
+        assert cell == {
+            "authority": "ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING",
+            "readiness": "NOT_APPLICABLE_METHOD_SCOPE",
+            "reason": "NOT_APPLICABLE_METHOD_SCOPE",
+            "requirement": "NOT_APPLICABLE_METHOD_SCOPE",
+        }
+    assert (
+        sum(
+            cell["readiness"] == "READY_TO_MODEL"
+            for strategy in by_id.values()
+            for cell in strategy["source_dispositions"].values()
+        )
+        == 26
+    )
+    assert by_id["robuxio-crypto"]["source_dispositions"]["multi-asset-style"] == {
+        "authority": "ISSUE_328_REPOSITORY_REVIEWED_CURRENT_PLAN",
+        "readiness": "READY_TO_MODEL",
+        "reason": "APPLICABLE_CURRENT_PLAN_ASSIGNMENT",
+        "requirement": "REQUIRED",
+    }
+    crypto_assignment = by_id["robuxio-crypto"]["assignments"]
+    assert len(crypto_assignment) == 1
+    assert crypto_assignment[0]["source_key"] == "multi-asset-style"
+    assert crypto_assignment[0]["constraint"] == "LONG_ONLY_SUM_TO_ONE"
+    assert crypto_assignment[0]["factor_sets"] == [
+        ["BTC-USD"],
+        ["ETH-USD"],
+        ["BTC-USD", "ETH-USD"],
+    ]
+    source_catalog = json.loads(
+        (
+            REPOSITORY_ROOT / "docs" / "analytics" / "decomposition-source-catalog.json"
+        ).read_text(encoding="utf-8")
+    )
+    universes = {row["universe_id"]: row for row in source_catalog["universes"]}
+    joint_lens_bounds = {
+        "us-sector": {"set_count": 5, "minimum": 2, "maximum": 4},
+        "us-industry": {"set_count": 10, "minimum": 4, "maximum": 6},
+    }
+    for strategy_id in ("p123-ai-factor", "qsi"):
+        assignments = {
+            row["source_key"]: row for row in by_id[strategy_id]["assignments"]
+        }
+        for source_key, bounds in joint_lens_bounds.items():
+            assignment = assignments[source_key]
+            universe_id = plan["sources"][source_key]["universe_id"]
+            candidates = planner._candidates(universes[universe_id], universe_id)
+            factor_sets = planner._factor_sets(
+                assignment, candidates, f"{strategy_id}.{source_key}"
+            )
+            assert "model_policy" not in assignment
+            assert len(factor_sets) == bounds["set_count"]
+            assert all(
+                bounds["minimum"] <= len(factors) <= bounds["maximum"]
+                for factors in factor_sets
+            )
+            modeled = [factor for factors in factor_sets for factor in factors]
+            assert set(modeled) == set(candidates)
+            assert assignment.get("screened_out_candidates", []) == []
+            if source_key == "us-industry":
+                assert len(modeled) == len(candidates)
     for strategy_id in ("composer-holy-grail", "echotrade-growth-pivots"):
         cells = by_id[strategy_id]["source_dispositions"]
         assert {cell["reason"] for cell in cells.values()} == {
             "NOT_APPLICABLE_OWNER_APPROVED"
         }
-    for strategy_id, reason in (
-        ("robuxio-crypto", "REQUIRED_NOT_READY_MISSING_ACCEPTED_CRYPTO_CANDIDATE"),
-    ):
-        cells = by_id[strategy_id]["source_dispositions"]
-        assert {cell["reason"] for cell in cells.values()} == {reason}
+    robuxio_required = {
+        source_key: cell
+        for source_key, cell in by_id["robuxio-crypto"]["source_dispositions"].items()
+        if cell["requirement"] == "REQUIRED"
+    }
+    assert set(robuxio_required) == {"multi-asset-style"}
 
     dropped = json.loads(json.dumps(plan))
     dropped_row = next(
@@ -900,9 +989,10 @@ def test_full_build_rejects_assignment_and_cell_authority_rewrites(
     )
     cell = qsi["source_dispositions"]["style"]
     cell.update(
-        requirement="NOT_APPLICABLE_OWNER_APPROVED",
-        readiness="NOT_APPLICABLE_OWNER_APPROVED",
-        reason="NOT_APPLICABLE_OWNER_APPROVED",
+        requirement="NOT_APPLICABLE_METHOD_SCOPE",
+        readiness="NOT_APPLICABLE_METHOD_SCOPE",
+        reason="NOT_APPLICABLE_METHOD_SCOPE",
+        authority="ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING",
     )
     _write_json(inputs["plan_path"], unauthorized_nonapp)
     with pytest.raises(
@@ -1419,22 +1509,77 @@ def test_layered_history_tampering_and_uncontrolled_contract_fail_closed(
         )
 
 
-def test_live_plus_backtest_requires_exact_available_mode(tmp_path: Path) -> None:
+def test_live_plus_backtest_preserves_live_without_matched_prehistory(
+    tmp_path: Path,
+) -> None:
     inputs = _fixture(tmp_path)
-    with pytest.raises(
-        planner.CurrentPlanError,
-        match=(
-            "LIVE_PLUS_BACKTEST is not ready for qsi: "
-            "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED"
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    live_outputs, _ = planner.build_bundle(evidence_mode="LIVE_ONLY", **kwargs)
+    outputs, manifest = planner.build_bundle(
+        evidence_mode="LIVE_PLUS_BACKTEST", **kwargs
+    )
+    assert (
+        outputs["inputs/history/selected-targets.csv"]
+        == (live_outputs["inputs/history/selected-targets.csv"])
+    )
+    assert manifest["layered_history"]["mode"] == "LIVE_PLUS_BACKTEST"
+    compositions = {
+        series: composition
+        for spec in manifest["specs"]
+        for series, composition in json.loads(outputs[spec["path"]])[
+            "series_composition"
+        ].items()
+    }
+    assert set(compositions) == {"QSI", "TT Portfolio"}
+    for series in ("QSI", "TT Portfolio"):
+        composition = compositions[series]
+        assert composition["status"] == (
+            "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+        )
+        assert composition["backtest_observations_used"] == 0
+        assert composition["live_observations"] > 0
+
+
+@pytest.mark.parametrize(
+    ("hybrid_reason", "live_status"),
+    [
+        ("REQUIRED_NOT_READY_LIVE_HISTORY_GAP", "AVAILABLE"),
+        (
+            "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED",
+            "REQUIRED_NOT_READY",
         ),
-    ):
+    ],
+)
+def test_hybrid_fallback_rejects_unavailable_live_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    hybrid_reason: str,
+    live_status: str,
+) -> None:
+    inputs = _fixture(tmp_path)
+    original_load = planner._load_json
+
+    def unavailable_coverage(path: Path, name: str) -> tuple[dict[str, Any], bytes]:
+        value, content = original_load(path, name)
+        if name == "layered coverage":
+            qsi = next(
+                row for row in value["strategies"] if row["strategy_id"] == "qsi"
+            )
+            qsi["modes"]["LIVE_PLUS_BACKTEST"]["reason"] = hybrid_reason
+            qsi["modes"]["LIVE_ONLY"]["status"] = live_status
+        return value, content
+
+    # Isolate the planner's readiness decision; immutable-input tamper rejection
+    # is proved separately by the generation-verifier tests above.
+    monkeypatch.setattr(planner, "_load_json", unavailable_coverage)
+    with pytest.raises(planner.CurrentPlanError, match="is not ready for qsi"):
         planner.build_bundle(
             evidence_mode="LIVE_PLUS_BACKTEST",
             **{key: value for key, value in inputs.items() if key != "plan_document"},
         )
 
 
-def test_layered_history_age_warns_in_development_and_fails_release_qc(
+def test_layered_history_age_warns_but_release_qc_requires_current_receipt(
     tmp_path: Path,
 ) -> None:
     inputs = _fixture(tmp_path)
@@ -1501,6 +1646,55 @@ def test_layered_history_age_warns_in_development_and_fails_release_qc(
             evaluated_on=stale_date,
             assurance_profile="RELEASE_QC",
         )
+
+
+@pytest.mark.parametrize("assurance_profile", planner.ASSURANCE_PROFILES)
+def test_layered_history_current_receipt_discloses_old_complete_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, assurance_profile: str
+) -> None:
+    inputs = _fixture(tmp_path)
+    evaluated_on = date.fromisoformat(inputs["evaluation_date"])
+    original_load = planner._load_json
+
+    def current_receipt(path: Path, name: str) -> tuple[dict[str, Any], bytes]:
+        value, content = original_load(path, name)
+        if name == "layered generation":
+            value["as_of_date"] = evaluated_on.isoformat()
+            content = _canonical(value)
+        return value, content
+
+    # Isolate the age decision after the real fixture's immutable verification.
+    # Prior receipt rejection is covered separately; observation rows are unchanged.
+    monkeypatch.setattr(planner, "_load_json", current_receipt)
+    result = planner._layered_history_targets(
+        generation_root=inputs["layered_history_generation_path"],
+        contract_path=inputs["financial_mvp_contract_path"],
+        strategies=planner._resolved_strategies(inputs["plan_document"]),
+        evidence_mode="LIVE_ONLY",
+        evaluated_on=evaluated_on,
+        assurance_profile=assurance_profile,
+    )
+    identity = result["identity"]
+    assert identity["assurance_profile"] == assurance_profile
+    assert identity["generation_as_of_date"] == evaluated_on.isoformat()
+    qsi_age = next(
+        row
+        for row in identity["source_age_dispositions"]
+        if row["strategy_id"] == "qsi"
+    )
+    complete_through = max(
+        row["date"] for row in result["rows"] if row["series_id"] == "QSI"
+    )
+    assert qsi_age["complete_through"] == complete_through
+    assert qsi_age["evaluated_on"] == evaluated_on.isoformat()
+    assert (
+        qsi_age["age_days"]
+        == (evaluated_on - date.fromisoformat(complete_through)).days
+    )
+    assert qsi_age["age_days"] > qsi_age["warning_after_days"]
+    assert qsi_age["limiting_inputs"] == ["qsi:owner-account-live-history"]
+    assert qsi_age["status"] == "WARN_COMPLETE_DATA_AGE"
+    assert identity["calculation_boundary"]["status"] == "WARN_COMPLETE_DATA_AGE"
 
 
 def test_release_qc_rejects_prior_layered_receipt_even_within_age_limit(
@@ -2321,7 +2515,7 @@ def test_public_manifest_reuse_warns_in_development_and_fails_release_qc(
         )
 
 
-def test_market_source_age_warns_in_development_and_fails_release_qc(
+def test_market_source_age_warns_in_development_and_release_qc(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     inputs = _fixture(tmp_path)
@@ -2340,11 +2534,18 @@ def test_market_source_age_warns_in_development_and_fails_release_qc(
     assert all(row["warning_after_days"] == 10 for row in ages.values())
     assert all(row["status"] == "WARN_COMPLETE_DATA_AGE" for row in ages.values())
 
-    with pytest.raises(planner.CurrentPlanError, match="current market source"):
-        planner.build_bundle(
-            assurance_profile="RELEASE_QC",
-            **{key: value for key, value in inputs.items() if key != "plan_document"},
-        )
+    _release_outputs, release_manifest = planner.build_bundle(
+        assurance_profile="RELEASE_QC",
+        **{key: value for key, value in inputs.items() if key != "plan_document"},
+    )
+    assert release_manifest["data_age"] == manifest["data_age"]
+    assert release_manifest["assurance_profile"] == "RELEASE_QC"
+    assert (
+        release_manifest["release_qc_eligibility"] == "REQUIRES_DOWNSTREAM_RELEASE_QC"
+    )
+    assert release_manifest["policies"]["data_age"] == (
+        "WARN_WITH_COMPLETE_THROUGH_DATE_AGE_DAYS_THRESHOLD_AND_LIMITING_INPUTS"
+    )
 
 
 def test_style_and_sector_may_have_different_pre_history(
