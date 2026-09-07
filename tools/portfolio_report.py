@@ -1818,10 +1818,20 @@ def _epoch_hpr_receipts(
         cutoff = receipt.get("admission_cutoff")
         if cutoff is not None and _date(cutoff, "epoch HPR admission_cutoff") != end:
             raise ReportValidationError("epoch HPR receipt cutoff differs")
+        out_of_window = False
         if calculation_cutoff_date is not None and cutoff != calculation_cutoff_date:
-            raise ReportValidationError("epoch HPR receipt cutoff differs")
+            # The calculation runs through the latest date common to every required
+            # series.  A receipt may legitimately describe evidence past that date
+            # (a ragged perimeter); that evidence is not used.  A receipt that stops
+            # BEFORE the window still means the epoch is short and remains an error.
+            if _date(cutoff, "epoch HPR admission_cutoff") < _date(
+                calculation_cutoff_date, "calculation cutoff date"
+            ):
+                raise ReportValidationError("epoch HPR receipt cutoff differs")
+            out_of_window = True
         _decimal(receipt.get("daily_cumulative_return"), "epoch HPR daily return")
         _decimal(receipt.get("epoch_cumulative_return"), "epoch HPR return")
+        receipt = {**receipt, "_out_of_window": out_of_window}
         spans = _objects(receipt.get("span_return_receipts"), "epoch HPR spans")
         prior_end: date | None = None
         for span in spans:
@@ -1909,7 +1919,8 @@ def _account_live_return_series(
             spans_by_start: dict[str, list[dict[str, Any]]] = defaultdict(list)
             path_dependent_metrics_available = True
             if epoch_receipt is not None:
-                if (
+                out_of_window = bool(epoch_receipt.get("_out_of_window"))
+                if not out_of_window and (
                     epoch_receipt["daily_return_observations"] != len(rows)
                     or epoch_receipt["observed_start"] != dates[0]
                     or epoch_receipt["observed_end"] != dates[-1]
@@ -1922,7 +1933,9 @@ def _account_live_return_series(
                     daily_wealth *= Decimal(1) + _decimal(
                         item["return"], "canonical strategy return"
                     )
-                if decimal_text(daily_wealth - Decimal(1)) != decimal_text(
+                if not out_of_window and decimal_text(
+                    daily_wealth - Decimal(1)
+                ) != decimal_text(
                     _decimal(
                         epoch_receipt["daily_cumulative_return"],
                         "epoch HPR daily return",
@@ -1932,9 +1945,11 @@ def _account_live_return_series(
                 for span in _objects(
                     epoch_receipt["span_return_receipts"], "epoch HPR spans"
                 ):
+                    if out_of_window and str(span["span_end_date"]) > dates[-1]:
+                        continue
                     spans_by_start[str(span["span_start_date"])].append(span)
                 path_dependent_metrics_available = not bool(spans_by_start)
-                if any(
+                if not out_of_window and any(
                     start not in dates
                     or any(
                         start < observed <= str(span["span_end_date"])
@@ -1962,10 +1977,15 @@ def _account_live_return_series(
                 if path_dependent_metrics_available
                 else None
             )
-            if epoch_receipt is not None and decimal_text(
-                cumulative_return
-            ) != decimal_text(
-                _decimal(epoch_receipt["epoch_cumulative_return"], "epoch HPR return")
+            if (
+                epoch_receipt is not None
+                and not epoch_receipt.get("_out_of_window")
+                and decimal_text(cumulative_return)
+                != decimal_text(
+                    _decimal(
+                        epoch_receipt["epoch_cumulative_return"], "epoch HPR return"
+                    )
+                )
             ):
                 raise ReportValidationError("epoch HPR return differs")
         result[strategy_id] = {

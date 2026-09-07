@@ -4852,6 +4852,135 @@ def test_account_live_epoch_hpr_receipt_qualifies_wealth_and_blocks_path_metrics
     )
 
 
+def test_epoch_hpr_receipt_beyond_calculation_cutoff_is_not_used() -> None:
+    """A ragged perimeter admits evidence past the common date; it is not used.
+
+    The calculation runs through the latest date common to every required series.
+    A receipt may legitimately describe evidence past that date, so it must not be
+    rejected -- but its endpoint bindings cannot be replayed against the truncated
+    series, and any gap it discloses inside the window must still suppress
+    path-dependent metrics.
+    """
+
+    full_rows = [
+        {"date": "2026-01-01", "return": "0"},
+        {"date": "2026-01-04", "return": "0"},
+        {"date": "2026-01-05", "return": "0"},
+    ]
+    # the catalog has already been truncated to the common date (2026-01-04)
+    windowed_rows = full_rows[:2]
+    catalog = {
+        "strategy_returns": [
+            {
+                "date": row["date"],
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "matrixport",
+                "return": row["return"],
+                "strategy_id": "robuxio-crypto",
+            }
+            for row in windowed_rows
+        ],
+        "epoch_hpr_receipts": [
+            {
+                "evidence_layer": "ACCOUNT_LIVE",
+                "receipt": {
+                    "admission_cutoff": "2026-01-05",
+                    "daily_cumulative_return": "0",
+                    "daily_return_observations": 3,
+                    "daily_return_series_schema": "ordered-date-return/1",
+                    "daily_return_series_sha256": hashlib.sha256(
+                        canonical_json_bytes(full_rows)
+                    ).hexdigest(),
+                    "epoch_cumulative_return": "-0.0123875290080184841010757599",
+                    "epoch_holding_period_link_observations": 4,
+                    "observed_end": "2026-01-05",
+                    "observed_start": "2026-01-01",
+                    "source_gap_policy_sha256": "a" * 64,
+                    "span_return_receipts": [
+                        {
+                            "end_endpoint_sha256": "b" * 64,
+                            "missing_source_date": "2026-01-02",
+                            "return": "-0.0123875290080184841010757599",
+                            "span_days": 2,
+                            "span_end_date": "2026-01-03",
+                            "span_start_date": "2026-01-01",
+                            "start_endpoint_sha256": "c" * 64,
+                            "subscription_events_in_span": 0,
+                        }
+                    ],
+                },
+                "source_generation_id": "d" * 64,
+                "source_id": "matrixport-account-generation",
+                "strategy_id": "robuxio-crypto",
+            }
+        ],
+    }
+
+    canonical = reporter._account_live_return_series(
+        catalog, calculation_cutoff_date="2026-01-04"
+    )
+
+    robuxio = canonical["robuxio-crypto"]
+    # the truncated window is what was used
+    assert robuxio["return_observations"] == 2
+    assert (
+        robuxio["return_series_sha256"]
+        == hashlib.sha256(canonical_json_bytes(windowed_rows)).hexdigest()
+    )
+    # the in-window gap is still disclosed, so no peak may be inferred
+    assert robuxio["path_dependent_metrics_status"] == "UNAVAILABLE"
+    assert robuxio["path_dependent_metrics_reason"] == "MISSING_DAILY_POINT_CAN_HIDE_PEAK"
+    assert robuxio["current_drawdown"] is None
+    assert robuxio["maximum_drawdown"] is None
+
+
+def test_epoch_hpr_receipt_ending_before_the_cutoff_is_rejected() -> None:
+    """Evidence that stops short of the calculation window is still an error."""
+
+    rows = [{"date": "2026-01-01", "return": "0"}]
+    catalog = {
+        "strategy_returns": [
+            {
+                "date": rows[0]["date"],
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "matrixport",
+                "return": rows[0]["return"],
+                "strategy_id": "robuxio-crypto",
+            }
+        ],
+        "epoch_hpr_receipts": [
+            {
+                "evidence_layer": "ACCOUNT_LIVE",
+                "receipt": {
+                    "admission_cutoff": "2026-01-01",
+                    "daily_cumulative_return": "0",
+                    "daily_return_observations": 1,
+                    "daily_return_series_schema": "ordered-date-return/1",
+                    "daily_return_series_sha256": hashlib.sha256(
+                        canonical_json_bytes(rows)
+                    ).hexdigest(),
+                    "epoch_cumulative_return": "0",
+                    "epoch_holding_period_link_observations": 1,
+                    "observed_end": "2026-01-01",
+                    "observed_start": "2026-01-01",
+                    "source_gap_policy_sha256": "a" * 64,
+                    "span_return_receipts": [],
+                },
+                "source_generation_id": "d" * 64,
+                "source_id": "matrixport-account-generation",
+                "strategy_id": "robuxio-crypto",
+            }
+        ],
+    }
+
+    with pytest.raises(
+        reporter.ReportValidationError, match="epoch HPR receipt cutoff differs"
+    ):
+        reporter._account_live_return_series(
+            catalog, calculation_cutoff_date="2026-01-04"
+        )
+
+
 def test_epoch_hpr_span_makes_governed_portfolio_hwm_unavailable() -> None:
     """A hash-bound endpoint receipt cannot establish an intra-gap HWM peak."""
 
