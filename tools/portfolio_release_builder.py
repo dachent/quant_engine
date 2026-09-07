@@ -1080,7 +1080,10 @@ def _inspect_report_delivery(
     }
     workbook = receipt.get("workbook")
     if (
-        set(receipt)
+        # `epoch_crosswalk` is optional and is validated by portfolio_report's own
+        # delivery check; a schema-10 receipt carries it, so the reader must not
+        # reject the key the writer is entitled to emit
+        set(receipt) - {"epoch_crosswalk"}
         != {
             "authority",
             "delivery_classification",
