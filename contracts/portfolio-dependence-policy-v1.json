@@ -4,8 +4,8 @@
   "policy_id": "PORT-DEPENDENCE-1",
   "owner_issue": 336,
   "history_authority": {
-    "generation_id": "3088203ffa0cd3c3993bbbca352c247913cba17ac8b528e6ce617b09cad83e48",
-    "receipt_sha256": "92a549ed58c83f91ebbebb58843dd2c8a021a73fc30dd4b0d4bbfd665cb3d169",
+    "generation_id": "6c656d3d91d35be638a3932874037fd41bc865c5a6b2c2e28dbbdaee7442bfc0",
+    "receipt_sha256": "8f5372c0b196b5b4411e50a3e9d1b4d6ac725da3b868472693a68d7a5b1de357",
     "outputs": {
       "coverage.json": {
         "sha256": "37d7095e0fe0a3baeeb9fd16b9971f2c1fb9b0aaa4dd5fc43681d2e3d1d26d0d",
