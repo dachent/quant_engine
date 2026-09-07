@@ -4929,7 +4929,9 @@ def test_epoch_hpr_receipt_beyond_calculation_cutoff_is_not_used() -> None:
     )
     # the in-window gap is still disclosed, so no peak may be inferred
     assert robuxio["path_dependent_metrics_status"] == "UNAVAILABLE"
-    assert robuxio["path_dependent_metrics_reason"] == "MISSING_DAILY_POINT_CAN_HIDE_PEAK"
+    assert (
+        robuxio["path_dependent_metrics_reason"] == "MISSING_DAILY_POINT_CAN_HIDE_PEAK"
+    )
     assert robuxio["current_drawdown"] is None
     assert robuxio["maximum_drawdown"] is None
 
