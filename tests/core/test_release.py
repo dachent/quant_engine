@@ -25,7 +25,6 @@ from quant_engine.core import (
     ReleaseCommitError,
     ReleaseConflictError,
     ReleaseManifest,
-    ReleasePublicationUnavailableError,
     ReleaseState,
     ReleaseTarget,
     ReleaseValidationError,
@@ -40,22 +39,11 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.core import release as release_module
 from quant_engine.core.release import _DirectoryLease, read_current_release
 
 
 AS_OF = date(2026, 8, 2)
 COMMIT = "b" * 40
-
-
-@pytest.fixture(autouse=True)
-def _skip_posix_release_behavior_on_windows(request: pytest.FixtureRequest) -> None:
-    if (
-        os.name == "nt"
-        and not request.node.name.startswith("test_windows_")
-        and "schema" not in request.node.name
-    ):
-        pytest.skip("POSIX coordinated-release behavior is verified on POSIX")
 
 
 def _manifest(label: str) -> GenerationManifest:
@@ -107,53 +95,6 @@ def _legacy_migration_gates() -> tuple[GateEvidence, ...]:
             hashlib.sha256(b"legacy inventory reviewed\n").hexdigest(),
         ),
     )
-
-
-@pytest.mark.parametrize(
-    ("operation", "invoke"),
-    (
-        (
-            "commit_release",
-            lambda: commit_release(
-                coordination_root=Path("unread-coordination"),
-                release_id="a" * 64,
-                roots={},
-            ),
-        ),
-        (
-            "recover_release",
-            lambda: recover_release(
-                coordination_root=Path("unread-coordination"),
-                release_id="a" * 64,
-                roots={},
-            ),
-        ),
-        (
-            "rollback_release",
-            lambda: release_module.rollback_release(
-                coordination_root=Path("unread-coordination"),
-                manifest=object(),  # type: ignore[arg-type]
-                journal=object(),  # type: ignore[arg-type]
-                roots={},
-            ),
-        ),
-    ),
-)
-def test_windows_coordinated_publication_fails_before_any_release_read(
-    monkeypatch: pytest.MonkeyPatch, operation: str, invoke: object
-) -> None:
-    def forbidden_read(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("release state must not be read on Windows")
-
-    monkeypatch.setattr(release_module, "_is_windows_platform", lambda: True)
-    monkeypatch.setattr(release_module, "read_release", forbidden_read)
-
-    with pytest.raises(ReleasePublicationUnavailableError) as raised:
-        assert callable(invoke)
-        invoke()
-
-    assert raised.value.code == "WINDOWS_NAMESPACE_UNTRUSTED"
-    assert raised.value.operation == operation
 
 
 def _link_directory(link: Path, target: Path) -> None:

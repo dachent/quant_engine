@@ -73,27 +73,6 @@ class ReleaseValidationError(ValueError):
     """A release manifest, journal, or root mapping is invalid."""
 
 
-class ReleasePublicationUnavailableError(RuntimeError):
-    """The coordinated publication namespace is not trustworthy."""
-
-    code: Final = "WINDOWS_NAMESPACE_UNTRUSTED"
-
-    def __init__(self, operation: str) -> None:
-        if operation not in {"commit_release", "recover_release", "rollback_release"}:
-            raise ValueError("unsupported coordinated publication operation")
-        self.operation = operation
-        super().__init__(f"{self.code}: {operation}")
-
-
-def _require_trusted_coordinated_namespace(operation: str) -> None:
-    if _is_windows_platform():
-        raise ReleasePublicationUnavailableError(operation)
-
-
-def _is_windows_platform() -> bool:
-    return os.name == "nt"
-
-
 class ReleaseConflictError(RuntimeError):
     """The current global state differs from the prepared release."""
 
@@ -1523,7 +1502,6 @@ def rollback_release(
 ) -> ReleaseJournal:
     """Idempotently restore every recorded release intent in reverse order."""
 
-    _require_trusted_coordinated_namespace("rollback_release")
     _validate_root_identities(manifest, roots)
     directory_leases = _acquire_directory_leases(
         _release_lease_expectations(manifest, roots)
@@ -1715,7 +1693,6 @@ def recover_release(
     confirm its removal, and its contents must name this exact release.
     """
 
-    _require_trusted_coordinated_namespace("recover_release")
     manifest, journal = read_release(coordination_root, release_id)
     normalized_roots = _normalize_roots(roots)
     if set(normalized_roots) != {item.root_id for item in manifest.targets}:
@@ -1810,7 +1787,6 @@ def commit_release(
 ) -> ReleaseJournal:
     """Commit every pointer and companion or restore the prepared predecessor graph."""
 
-    _require_trusted_coordinated_namespace("commit_release")
     manifest, journal = read_release(coordination_root, release_id)
     normalized_roots = _normalize_roots(roots)
     coordination_root = coordination_root.resolve()

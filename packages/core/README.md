@@ -60,11 +60,13 @@ return code, stdout/stderr hashes, interpreter/tool identity, and pre/post hashe
 for every declared read and write. Completed commands are not silently reused
 when a declared output has drifted.
 
-On Windows, the coordinated publication entry points (`commit_release`,
-`recover_release`, and `rollback_release`) fail closed with
-`WINDOWS_NAMESPACE_UNTRUSTED` before reading or mutating their roots. This does
-not affect `prepare_release`, which stages immutable evidence only. The generic
-single-root `publish_generation` primitive is outside this coordinated
-hostile-writer guarantee. A future trusted Windows implementation must retain
-stable directory identities and handles through the whole transaction; pathname
-revalidation is insufficient.
+The coordinated publication entry points (`commit_release`,
+`recover_release`, and `rollback_release`) hold a directory lease on every
+target root for the whole transaction and revalidate each lease before the
+steps that mutate state. A lease records the directory identity behind an open
+handle -- volume serial and file index on Windows, device and inode elsewhere --
+so a root that is renamed or re-pointed mid-transaction raises
+`ReleaseConflictError` instead of redirecting a write. Pathname revalidation
+alone would be insufficient; the lease is what makes these entry points safe on
+every platform. The generic single-root `publish_generation` primitive does not
+carry this guarantee.

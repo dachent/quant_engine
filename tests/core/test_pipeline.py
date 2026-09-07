@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 import hashlib
 import json
-import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -21,7 +20,6 @@ from quant_engine.core import (
     PipelineSpec,
     PipelineUnknownOutcomeError,
     PipelineValidationError,
-    ReleasePublicationUnavailableError,
     ReleaseState,
     SourceArtifact,
     VerificationStatus,
@@ -35,21 +33,10 @@ from quant_engine.core import (
 )
 from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.core import pipeline as pipeline_module
-from quant_engine.core import release as release_module
 
 
 AS_OF = date(2026, 8, 2)
 COMMIT = "d" * 40
-
-
-@pytest.fixture(autouse=True)
-def _skip_posix_pipeline_behavior_on_windows(request: pytest.FixtureRequest) -> None:
-    if (
-        os.name == "nt"
-        and "windows" not in request.node.name
-        and "default_runner_child" not in request.node.name
-    ):
-        pytest.skip("POSIX coordinated pipeline behavior is verified on POSIX")
 
 
 def _manifest(label: str) -> GenerationManifest:
@@ -774,35 +761,6 @@ def test_default_runner_child_observes_unknown_in_flight_receipt_before_spawn(
     receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     assert receipt["state"] == "COMPLETED"
     assert receipt["command_evidence"]["attempts"][-1]["outcome"] == "COMPLETED"
-
-
-def test_pipeline_stops_after_prepare_when_windows_publication_is_unavailable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    raw, previous, proposed, target = _spec_dict(tmp_path)
-    spec = _parse(raw)
-    prepared = execute_pipeline(spec)
-    journal_path = (
-        spec.coordination_root
-        / "releases"
-        / str(prepared["release_id"])
-        / "journal.json"
-    )
-    before_journal = journal_path.read_bytes()
-
-    monkeypatch.setattr(release_module, "_is_windows_platform", lambda: True)
-    with pytest.raises(ReleasePublicationUnavailableError) as raised:
-        execute_pipeline(
-            spec,
-            commit=True,
-            commit_authorization=_commit_authorization(tmp_path, spec),
-        )
-
-    assert raised.value.operation == "commit_release"
-    assert journal_path.read_bytes() == before_journal
-    assert read_current(target).generation_id == previous.generation_id
-    assert not (target / "index.html").exists()
-    assert (target / "generations" / proposed.generation_id).is_dir()
 
 
 def test_windows_programmatic_commit_requires_exact_spec_authorization(

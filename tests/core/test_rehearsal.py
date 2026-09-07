@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 import hashlib
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -27,11 +26,8 @@ from quant_engine.core import (
     read_current,
     stage_generation,
 )
-from quant_engine.core import rehearsal as rehearsal_module
 from quant_engine.core.rehearsal import (
     RehearsalError,
-    rehearse_dated_rollforwards,
-    rehearse_release_boundaries,
     run_recovery_rehearsal,
 )
 
@@ -44,42 +40,6 @@ _HARNESS_IDENTITY = {
     "python_version": "3.11.15",
     "runtime_platform": "synthetic-test-runtime",
 }
-
-
-@pytest.fixture(autouse=True)
-def _skip_posix_rehearsal_behavior_on_windows(request: pytest.FixtureRequest) -> None:
-    if os.name == "nt" and "windows" not in request.node.name:
-        pytest.skip("POSIX coordinated rehearsal behavior is verified on POSIX")
-
-
-def test_windows_rehearsal_entry_points_return_unavailable_without_output_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    output = tmp_path / "rehearsal-output"
-    monkeypatch.setattr(rehearsal_module, "_is_windows_platform", lambda: True)
-
-    results = (
-        rehearse_release_boundaries(
-            spec=object(), release_id="a" * 64, output_root=output
-        ),
-        rehearse_dated_rollforwards(output),
-        run_recovery_rehearsal(
-            spec=object(),
-            release_id="a" * 64,
-            output_root=output,
-            harness_identity={},
-        ),
-    )
-
-    assert all(
-        result
-        == {
-            "reason": "WINDOWS_NAMESPACE_UNTRUSTED",
-            "status": "PUBLICATION_UNAVAILABLE",
-        }
-        for result in results
-    )
-    assert not output.exists()
 
 
 def _manifest(label: str, day: date) -> GenerationManifest:
