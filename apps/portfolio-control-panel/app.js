@@ -626,7 +626,7 @@
   };
   const currentFactorAnalysis = () => {
     const analysis = currentFactorSurfaceAnalysis();
-    const sourceKeys = analysis?.available_source_keys || (analysis?.sources || []).map((item) => item.source_key).filter(Boolean);
+    const sourceKeys = analysis?.available_source_keys || (Array.isArray(analysis?.sources) ? analysis.sources : []).map((item) => item.source_key).filter(Boolean);
     if (!sourceKeys.includes(selectedFactorSource)) selectedFactorSource = analysis?.default_source_key || sourceKeys[0] || null;
     if (!selectedFactorSource) return analysis;
     const series = (analysis.series || []).filter((row) => !row.source_key || row.source_key === selectedFactorSource);
@@ -925,7 +925,7 @@
     $("#factor-surface-selector").innerHTML = Object.keys(surfaces).map((surface) => `<button type="button" class="segment ${surface === selectedFactorSurface ? "is-active" : ""}" data-factor-surface="${safe(surface)}" aria-pressed="${surface === selectedFactorSurface}">${safe(surfaceLabels[surface] || humanStatus(surface))}</button>`).join("");
     $$('[data-factor-surface]').forEach((button) => button.addEventListener("click", () => { selectedFactorSurface = button.dataset.factorSurface; selectedFactorSource = null; selectedFactorSeries = null; renderAttribution(); }));
     const surfaceAnalysis = currentFactorSurfaceAnalysis();
-    const sourceOptions = (surfaceAnalysis.sources || []).map((item) => ({ key: item.source_key, label: item.source_label || item.source_key }));
+    const sourceOptions = (Array.isArray(surfaceAnalysis.sources) ? surfaceAnalysis.sources : []).map((item) => ({ key: item.source_key, label: item.source_label || item.source_key }));
     $("#factor-source-selector").innerHTML = sourceOptions.map((item) => `<button type="button" class="segment ${item.key === selectedFactorSource ? "is-active" : ""}" data-factor-source="${safe(item.key)}" aria-pressed="${item.key === selectedFactorSource}">${safe(item.label)}</button>`).join("");
     $$('[data-factor-source]').forEach((button) => button.addEventListener("click", () => { selectedFactorSource = button.dataset.factorSource; selectedFactorSeries = null; renderAttribution(); }));
     const sourceRows = Array.isArray(analysis.sources) ? analysis.sources : [];
