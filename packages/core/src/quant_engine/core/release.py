@@ -212,6 +212,61 @@ class _WindowsFileInformation(ctypes.Structure):
     ]
 
 
+def _path_identity(path: Path) -> str:
+    """Derive a directory identity the same way `_DirectoryLease.acquire` does."""
+
+    if os.name == "nt":
+        kernel32 = _windows_kernel32(ctypes)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        raw_handle = cast(
+            int | None,
+            create_file(
+                str(path),
+                _FILE_READ_ATTRIBUTES,
+                _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+                None,
+                _OPEN_EXISTING,
+                _FILE_FLAG_BACKUP_SEMANTICS,
+                None,
+            ),
+        )
+        handle = raw_handle if raw_handle is not None else 0
+        if handle == int(ctypes.c_void_p(-1).value or -1):
+            raise ReleaseConflictError(
+                f"security directory lease identity failed: {path.name}"
+            )
+        try:
+            information = _WindowsFileInformation()
+            get_information = kernel32.GetFileInformationByHandle
+            get_information.argtypes = (
+                wintypes.HANDLE,
+                ctypes.POINTER(_WindowsFileInformation),
+            )
+            get_information.restype = wintypes.BOOL
+            if not get_information(wintypes.HANDLE(handle), ctypes.byref(information)):
+                raise ReleaseConflictError(
+                    f"security directory lease identity failed: {path.name}"
+                )
+            inode = (int(information.nFileIndexHigh) << 32) | int(
+                information.nFileIndexLow
+            )
+            return _identity_digest(path, int(information.dwVolumeSerialNumber), inode)
+        finally:
+            kernel32.CloseHandle(wintypes.HANDLE(handle))
+    metadata = path.stat(follow_symlinks=False)
+    return _identity_digest(path, metadata.st_dev, metadata.st_ino)
+
+
 @dataclass
 class _DirectoryLease:
     path: Path
@@ -296,8 +351,12 @@ class _DirectoryLease:
             raise ReleaseConflictError(
                 f"security directory lease path changed: {self.path.name}"
             )
-        metadata = self.path.stat(follow_symlinks=False)
-        observed = _identity_digest(self.path, metadata.st_dev, metadata.st_ino)
+        # The identity must be re-derived exactly as `acquire` derived it.  On
+        # Windows `acquire` uses GetFileInformationByHandle, whose volume serial
+        # and 64-bit file index are not the same quantities `Path.stat()` reports,
+        # so comparing the two always differed and no coordinated release could
+        # ever commit on Windows.
+        observed = _path_identity(self.path)
         if observed != self.identity:
             raise ReleaseConflictError(
                 f"security directory lease identity changed: {self.path.name}"

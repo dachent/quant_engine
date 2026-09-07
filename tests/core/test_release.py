@@ -39,7 +39,11 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
-from quant_engine.core.release import _DirectoryLease, read_current_release
+from quant_engine.core.release import (
+    _DirectoryLease,
+    _path_identity,
+    read_current_release,
+)
 
 
 AS_OF = date(2026, 8, 2)
@@ -1454,3 +1458,22 @@ def test_explicit_legacy_pointer_migration_preserves_governed_rollback(
     assert (root / "CURRENT.json").read_bytes() == legacy.to_json_bytes()
     with pytest.raises(PointerIntegrityError, match="legacy pointer schema"):
         read_current(root)
+
+
+def test_directory_lease_verifies_the_identity_it_acquired(tmp_path) -> None:
+    """`verify` must re-derive identity exactly as `acquire` did.
+
+    On Windows `acquire` reads the volume serial and 64-bit file index through
+    GetFileInformationByHandle.  Re-deriving from `Path.stat()` yields different
+    quantities, so every coordinated release failed to commit on Windows with
+    "security directory lease identity changed".
+    """
+
+    target = tmp_path / "target"
+    target.mkdir()
+    lease = _DirectoryLease.acquire(target)
+    try:
+        lease.verify()
+        assert lease.identity == _path_identity(target)
+    finally:
+        lease.close()
