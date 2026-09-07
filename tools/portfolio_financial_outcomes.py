@@ -845,6 +845,7 @@ def _verify_consumers(
         hwm_bytes["input_generation"],
         hwm_bytes["calendar_authority"],
         hwm_bytes["provider_admission_receipt"],
+        product_contract_bytes=contract_path.read_bytes(),
     )
     if (
         report.get("hwm_governed_proof") != projected_hwm
@@ -919,6 +920,9 @@ def _verify_consumers(
         raise FinancialOutcomeError(
             "report dependence values differ from verified result"
         )
+    correlation = panel_producer._current_product_correlation_projection(
+        correlation, series, include_hybrid=True
+    )
     for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
         projection = panel_producer._dependence_analysis(
             correlation,
