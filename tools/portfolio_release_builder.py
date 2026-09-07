@@ -4294,6 +4294,10 @@ def build_workbook(
         str(result_path),
         "--validation-result",
         str(validation_path),
+        # an epoch triplet is only bindable against the baseline it was selected
+        # from; portfolio_report requires the root whenever the triplet is present
+        "--baseline-root",
+        str(baseline_root),
         *epoch_arguments,
         "--evidence",
         str(binding_path),
