@@ -290,5 +290,7 @@ def test_one_source_set_reaches_all_172_outcomes_and_both_consumers(
         outcomes.FinancialOutcomeError, match="missing required financial outcome"
     ):
         outcomes.verify_outcome_inventory(
-            missing, json.loads(decomposition.contract_path.read_bytes())
+            missing,
+            json.loads(decomposition.contract_path.read_bytes()),
+            plan=json.loads(decomposition.inputs["plan_path"].read_bytes()),
         )
