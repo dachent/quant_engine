@@ -6630,16 +6630,24 @@ def _parity_values_equal(actual: object, expected: object) -> bool:
         and isinstance(expected, numeric_types)
         and not isinstance(expected, bool)
     ):
+        # Agreement to 15 significant digits, as a relative difference on the
+        # exact binary values.  Rounding both operands to 15 digits and
+        # requiring equality cannot express this: two doubles one ULP apart --
+        # all an Excel round-trip guarantees, since Excel stores 15 significant
+        # digits -- straddle a rounding boundary whenever one rounds down and
+        # its neighbour rounds up, and then compare unequal at exactly the
+        # boundary this is meant to absorb.  Observed on both
+        # tblStrategies.systematic_weight and tblInvestedCapitalDaily.
+        exact_actual = Decimal(actual)
+        exact_expected = Decimal(expected)
+        if exact_actual == exact_expected:
+            return True
+        scale = max(abs(exact_actual), abs(exact_expected))
+        if not scale:
+            return False
         with localcontext() as context:
-            context.prec = 15
-            context.rounding = ROUND_HALF_EVEN
-            # Round the exact binary values, not str(): repr gives the shortest
-            # round-tripping decimal, so one operand can present as 16 digits
-            # ending in 5 and take banker's rounding at the 15-digit boundary
-            # while its neighbour presents 17 digits and rounds up.  Two doubles
-            # one ULP apart -- which is all Excel's own round-trip guarantees --
-            # then compare unequal at the very boundary this is meant to absorb.
-            return +Decimal(actual) == +Decimal(expected)
+            context.prec = 34
+            return abs(exact_actual - exact_expected) <= scale * Decimal(10) ** -15
     return actual == expected
 
 
