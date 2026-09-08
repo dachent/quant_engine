@@ -3457,7 +3457,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "24f77dcf8c81b5c4906f66013568c2ec205e46752117c9bad56aba2e65d3b98e",
      "product_data_class_count": 5,
-     "product_data_class_set_sha256": "b2f4ef84187290f8d85041e67ae339981b4a269a9728e5562535a61aa2672724",
+     "product_data_class_set_sha256": "e9caeb93ca23707bdc1d9b261c847fd72e42a07f2b3b962085585b738ac72837",
      "admitted_item_count": 3,
      "admitted_item_set_sha256": "c2679e27fa63835000cf9ce77aac9cfcbb4ac32bf4c96a4a86555068eeebd15c",
      "allowed_exclusion_reasons": [
