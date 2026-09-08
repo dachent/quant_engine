@@ -1034,11 +1034,16 @@ def test_authoritative_contract_schema_and_views_exist() -> None:
 
 def test_contract_is_valid_and_has_stable_identity() -> None:
     contract = contract_tool.load_contract(CONTRACT_PATH, REGISTRY_PATH)
-    # Digest binds the verified current ledger, six reconciled account-history
+    # Digest binds the verified current ledger, seven reconciled account-history
     # tails, native Quantbase receipts, and accepted method-scope plan while
     # retaining the distinct Matrixport, P123, and deprecated Echo boundaries.
+    # Moved when the matrixport segment was completed for the owner-approved FX
+    # admission: the two segment-10 dataset-disposition digests were recomputed
+    # from the segment the contract now states, and the provider-ledger lineage
+    # was rebound to the generation built from the canonical account-input
+    # contract, which admits robuxio-crypto through 2026-09-03.
     assert contract_tool.contract_digest(contract) == (
-        "00a3b601ed0ed5fb2e8b842706b08f7ad85780ad56a7823fb6c6dcf23c6fd98c"
+        "2a5efb154ad05faff330bb7dce910b0e710a10465df6e91a6ade45a442e8052e"
     )
 
 
@@ -1095,9 +1100,13 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             ),
         },
         "matrixport-account-generation": {
+            # Recomputed with the owner-approved FX admission: the admitted set
+            # covers each disposition's materialized record count, sha and
+            # observed range, and robuxio's admitted window moved from
+            # 2026-08-13 to 2026-09-03.  The admitted item count is unchanged.
             "admitted_item_count": 3,
             "admitted_item_set_sha256": (
-                "c2679e27fa63835000cf9ce77aac9cfcbb4ac32bf4c96a4a86555068eeebd15c"
+                "5e537ece23c3cc9d79cf41a5b3f499f1228bf77264ea97b5a5dd0c9acf4ee141"
             ),
         },
         "quantbase-account-generation": {
@@ -1823,9 +1832,9 @@ def test_accepted_provider_ledger_history_identity_cannot_be_coherently_relabell
     """History lineage is a fixed receipt, not a replaceable generation label."""
 
     replacements = {
-        "314cb445ff0f83c1a6c5e7ac26bb93405fe123c3d37dc742069755cc0c50dca8": ("a" * 64),
-        "d44ac9484e4cbcb43626dcc669ff22f5eef5d8eed9569a0a0a547918648bfa20": ("b" * 64),
-        "f52199b936414af2e38e65264731a272f42c7d58493167708f9ebbe929682390": ("c" * 64),
+        "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056": ("a" * 64),
+        "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668": ("b" * 64),
+        "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829": ("c" * 64),
     }
 
     def replace_lineage(value: object) -> object:
@@ -1990,10 +1999,10 @@ def test_two_vintage_history_accepts_current_active_and_retains_07c590_echo() ->
     """Active owner history advances without relabelling deprecated Echo evidence."""
 
     active_generation = (
-        "314cb445ff0f83c1a6c5e7ac26bb93405fe123c3d37dc742069755cc0c50dca8"
+        "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056"
     )
-    active_manifest = "d44ac9484e4cbcb43626dcc669ff22f5eef5d8eed9569a0a0a547918648bfa20"
-    active_catalog = "f52199b936414af2e38e65264731a272f42c7d58493167708f9ebbe929682390"
+    active_manifest = "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
+    active_catalog = "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -2142,9 +2151,9 @@ def test_deprecated_history_receipt_is_independent_of_current_source_as_of(
 def test_owner_account_history_rebinds_to_current_ledger_generation() -> None:
     """The active owner-history lineage follows the corrected governed ledger."""
 
-    generation_id = "314cb445ff0f83c1a6c5e7ac26bb93405fe123c3d37dc742069755cc0c50dca8"
-    manifest_sha256 = "d44ac9484e4cbcb43626dcc669ff22f5eef5d8eed9569a0a0a547918648bfa20"
-    catalog_sha256 = "f52199b936414af2e38e65264731a272f42c7d58493167708f9ebbe929682390"
+    generation_id = "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056"
+    manifest_sha256 = "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
+    catalog_sha256 = "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829"
     contract = _contract()
     owner_source = _source(contract, "owner-account-live-history")
     assert owner_source["current_generation"] == {
@@ -2183,9 +2192,9 @@ def test_two_vintage_history_rejects_legacy_rollbacks_and_rewrites() -> None:
     """The deprecated event-only class cannot authorize active-lineage changes."""
 
     active_generation = (
-        "314cb445ff0f83c1a6c5e7ac26bb93405fe123c3d37dc742069755cc0c50dca8"
+        "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056"
     )
-    active_manifest = "d44ac9484e4cbcb43626dcc669ff22f5eef5d8eed9569a0a0a547918648bfa20"
+    active_manifest = "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -4067,8 +4076,10 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         ).encode("utf-8")
         + b"\n"
     )
+    # Moved with the matrixport segment completion and the provider-ledger
+    # lineage rebind; both edit source_segments, which this proof hashes.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "c015bb9846333d3c03f97449cffa604fbcee5dd1e4cd89a84e8758a777f4b9c6"
+        "d31b3e82123d9ab1068f20f0e6eafa16318f2ab0bd88b52b59669339fb372c95"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4105,7 +4116,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "c015bb9846333d3c03f97449cffa604fbcee5dd1e4cd89a84e8758a777f4b9c6"
+        "d31b3e82123d9ab1068f20f0e6eafa16318f2ab0bd88b52b59669339fb372c95"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
