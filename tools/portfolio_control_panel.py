@@ -9222,7 +9222,13 @@ def _epoch_manifest_report_attestation(
     )
     expected_verifier = {
         "artifact_id": "tools/verify_account_manifest_generation.py",
-        "as_of_date": data_as_of.isoformat(),
+        # The verifier is a code artifact dated by the inputs it read, not by the
+        # calculation boundary.  portfolio_report.py:7597 binds it to the same
+        # `selected_source_identities.as_of_date`; the two must agree.
+        "as_of_date": _text(
+            selected_identities.get("as_of_date"),
+            "account-manifest selected identities as_of_date",
+        ),
         "schema": {
             "name": "independent-account-manifest-verifier",
             "version": "1",
