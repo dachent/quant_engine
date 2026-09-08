@@ -165,7 +165,7 @@ _CENSUS_TT_CONTINUITY_INTERVAL: Final = (date(2026, 7, 14), date(2026, 7, 30))
 # It remains valid for replay of those immutable account inputs; changed copies
 # receive the current pins and cannot claim this retained-source authority.
 _RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST: Final = (
-    "08b7d2061c2cc9be0c6bb1103d202a5145d432c38d16b1db6c2a209abae88b18"
+    "7cdf800f9819c1ea441ed08900d7f7d15806d0e4196401fe135b867a41646820"
 )
 
 _MATRIXPORT_OWNER_EPOCH: Final = {
@@ -213,10 +213,10 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
         "315471b602bb4ce61cd854195162708ab188f6e08d6597deb9b9da11ca5bce44"
     ),
     "current_generation_id": (
-        "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356"
+        "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056"
     ),
     "current_manifest_sha256": (
-        "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069"
+        "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
     ),
     "current_catalog_sha256": (
         "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829"
@@ -1235,9 +1235,9 @@ def _verify_strategy_version_history_evidence(
             }
         )
         segment_projections["robuxio-crypto:account-live"] = {
-            "observed_end": "2026-08-13",
-            "return_observations": 246,
-            "sha256": "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+            "observed_end": "2026-09-03",
+            "return_observations": 267,
+            "sha256": "1ea12119e24f31fc6820593af890f80026955d7de05676433db18a5d0025a529",
         }
 
     try:
@@ -5338,8 +5338,6 @@ def _validate_robuxio_owner_funded_boundary(contract: Mapping[str, Any]) -> None
     """Pin the owner-held epoch apart from the earlier provider launch history."""
 
     owner_epoch = dict(_MATRIXPORT_OWNER_EPOCH)
-    if contract_digest(contract) == _RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST:
-        owner_epoch["observed_end"] = "2026-08-13"
     sources = {
         _text(row.get("source_id"), "source segment id"): row
         for row in _objects(contract.get("source_segments"), "source segments")

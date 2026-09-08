@@ -585,8 +585,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
-    "generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-    "receipt_sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069"
+    "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+    "receipt_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -626,8 +626,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
-    "generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-    "receipt_sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069"
+    "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+    "receipt_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -667,8 +667,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:de46b08ec45f4096ae5bf501b39e6efa71ae51ae825bee63161aa804422067b3",
-    "generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-    "receipt_sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069"
+    "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+    "receipt_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -708,8 +708,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:4235428716b167f3c21e2843a7e16dd8ea50d8e542cd465e0cf6887b89072435",
-    "generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-    "receipt_sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069"
+    "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+    "receipt_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -790,8 +790,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:a7271e772c6d21ee4b3b2ed76149ddd9639d10c5c8be371550203fc2d67c9b61",
-    "generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-    "receipt_sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069"
+    "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+    "receipt_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -955,8 +955,8 @@
     "return_type": "TOTAL",
     "segment_id": "grizzlybears-vtma:account-live",
     "sha256": "a7271e772c6d21ee4b3b2ed76149ddd9639d10c5c8be371550203fc2d67c9b61",
-    "source_generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-    "source_generation_sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069",
+    "source_generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+    "source_generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
     "source_id": "owner-account-live-history",
     "strategy_id": "grizzlybears-vtma",
     "strategy_version": "UNRESOLVED"
@@ -974,8 +974,8 @@
     "return_type": "TOTAL",
     "segment_id": "p123-ai-factor:account-live",
     "sha256": "7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
-    "source_generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-    "source_generation_sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069",
+    "source_generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+    "source_generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
     "source_id": "owner-account-live-history",
     "strategy_id": "p123-ai-factor",
     "strategy_version": "UNRESOLVED"
@@ -993,8 +993,8 @@
     "return_type": "TOTAL",
     "segment_id": "p123-eu:account-live",
     "sha256": "63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
-    "source_generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-    "source_generation_sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069",
+    "source_generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+    "source_generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
     "source_id": "owner-account-live-history",
     "strategy_id": "p123-eu",
     "strategy_version": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"
@@ -1012,8 +1012,8 @@
     "return_type": "TOTAL",
     "segment_id": "qsi:account-live",
     "sha256": "de46b08ec45f4096ae5bf501b39e6efa71ae51ae825bee63161aa804422067b3",
-    "source_generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-    "source_generation_sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069",
+    "source_generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+    "source_generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
     "source_id": "owner-account-live-history",
     "strategy_id": "qsi",
     "strategy_version": "UNRESOLVED"
@@ -1069,8 +1069,8 @@
     "return_type": "TOTAL",
     "segment_id": "tt-portfolio:account-live",
     "sha256": "4235428716b167f3c21e2843a7e16dd8ea50d8e542cd465e0cf6887b89072435",
-    "source_generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-    "source_generation_sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069",
+    "source_generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+    "source_generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
     "source_id": "owner-account-live-history",
     "strategy_id": "tt-portfolio",
     "strategy_version": "UNRESOLVED"
@@ -1544,8 +1544,8 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-     "generation_sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069",
+     "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+     "generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
      "as_of": "2026-09-04"
     },
     "strategy_version": {
@@ -1574,18 +1574,18 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356/generation.json",
+      "artifact_selector": "generations/fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
+      "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069"
+      "sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
      },
      {
       "artifact_role": "provider-ledger-catalog",
-      "artifact_selector": "generations/f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356/provider-ledger.json",
+      "artifact_selector": "generations/fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056/provider-ledger.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
+      "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "normalized/provider-ledger.json",
       "sha256": "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829"
@@ -1745,8 +1745,8 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-     "generation_sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069",
+     "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+     "generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
      "as_of": "2026-09-04"
     },
     "strategy_version": {
@@ -1775,12 +1775,12 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356/generation.json",
+      "artifact_selector": "generations/fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
+      "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069"
+      "sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
      },
      {
       "artifact_role": "quantbase-account-activity",
@@ -3025,8 +3025,8 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356",
-    "sha256": "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069",
+    "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+    "sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
     "as_of": "2026-09-04"
    },
    "existence_status": "EXISTS",
