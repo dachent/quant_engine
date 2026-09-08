@@ -4507,7 +4507,6 @@ def build_report(
             "hwm_governed_admission_receipt_path": (
                 hwm_governed_admission_receipt_path
             ),
-            "portfolio_root": portfolio_root,
         }
         if _governed_hwm_arguments(
             result=hwm_governed_result_path,
@@ -4530,6 +4529,15 @@ def build_report(
         )
         else {}
     )
+    # The private-stage overlap check is not exclusive to governed HWM and
+    # capital publication: the report-candidate and workbook builders also
+    # treat a run carrying a decomposition-lenses root as a financial
+    # publication and require the portfolio root for it.  Forward whatever
+    # the caller supplied instead of only forwarding it alongside those two
+    # argument families.
+    portfolio_paths = (
+        {"portfolio_root": portfolio_root} if portfolio_root is not None else {}
+    )
     candidate = build_report_candidate(
         baseline_root,
         provider_ledger_root,
@@ -4546,6 +4554,7 @@ def build_report(
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         epoch_manifest_generation_id=epoch_manifest_generation_id,
         **hwm_paths,
+        **portfolio_paths,
         **capital_paths,
     )
     return build_workbook(
@@ -4565,6 +4574,7 @@ def build_report(
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         epoch_manifest_generation_id=epoch_manifest_generation_id,
         **hwm_paths,
+        **portfolio_paths,
         **capital_paths,
     )
 
@@ -5078,10 +5088,6 @@ def publish_panel(
         result=invested_capital_result_path,
         input_generation=invested_capital_input_generation_path,
     )
-    if hwm_arguments or capital_arguments:
-        if portfolio_root is None:
-            raise VerticalBuildError("financial publication requires portfolio root")
-        validate_private_stage_target(output_root, output_root, portfolio_root)
     recipe = _recipe(recipe_path)
     legacy_panel = _path(recipe["legacy_panel"]["path"], "legacy panel")
     # _history_contract_path verifies the dependence source and returns it, or
@@ -5109,6 +5115,18 @@ def publish_panel(
         account_strategy_manifest,
     )
     epoch_arguments = _verified_epoch_manifest_panel_arguments(epoch_identity)
+    # portfolio_control_panel.py:11963 requires private stage context for a
+    # governed financial publication, a financial-mode panel and a verified
+    # account-manifest bundle alike, not only when governed HWM or capital
+    # outcomes are supplied, and every schema-10 build carries the bundle.
+    # Rather than restate that rule here -- where it would pre-empt the epoch
+    # identity checks the panel performs -- forward the context whenever the
+    # caller knows it and let the panel enforce its own requirement.
+    if hwm_arguments or capital_arguments:
+        if portfolio_root is None:
+            raise VerticalBuildError("financial publication requires portfolio root")
+    if portfolio_root is not None:
+        validate_private_stage_target(output_root, output_root, portfolio_root)
     hybrid_arguments = (
         (
             "--hybrid-decomposition-plan-bundle",
@@ -5247,7 +5265,7 @@ def publish_panel(
                 "--portfolio-root",
                 str(portfolio_root),
             )
-            if (hwm_arguments or capital_arguments) and portfolio_root is not None
+            if portfolio_root is not None
             else ()
         ),
         timeout=7200,
@@ -5563,7 +5581,6 @@ def build_stage(
             "hwm_governed_admission_receipt_path": (
                 hwm_governed_admission_receipt_path
             ),
-            "portfolio_root": portfolio_root,
         }
         if hwm_arguments
         else {}
@@ -5577,6 +5594,15 @@ def build_stage(
         }
         if capital_arguments
         else {}
+    )
+    # The private-stage overlap check is not exclusive to governed HWM and
+    # capital publication: the report-candidate and workbook builders also
+    # treat a run carrying a decomposition-lenses root as a financial
+    # publication and require the portfolio root for it.  Forward whatever
+    # the caller supplied instead of only forwarding it alongside those two
+    # argument families.
+    portfolio_paths = (
+        {"portfolio_root": portfolio_root} if portfolio_root is not None else {}
     )
     stages = output_root / "stages"
     recipe = _recipe(recipe_path)
@@ -5653,6 +5679,7 @@ def build_stage(
             ),
             hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
             **hwm_paths,
+            **portfolio_paths,
             **capital_paths,
         )
     elif role == "workbook":
@@ -5686,6 +5713,7 @@ def build_stage(
             ),
             hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
             **hwm_paths,
+            **portfolio_paths,
             **capital_paths,
         )
     elif role in {"panel-candidate", "panel"}:
@@ -5707,6 +5735,7 @@ def build_stage(
                 stages / "panel",
                 hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
                 **hwm_paths,
+                **portfolio_paths,
                 **capital_paths,
             )
         )
@@ -5782,6 +5811,7 @@ def build_stage(
                 ),
                 hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
                 **hwm_paths,
+                **portfolio_paths,
                 **capital_paths,
             )
         else:
@@ -5829,7 +5859,6 @@ def build_all(
             "hwm_governed_admission_receipt_path": (
                 hwm_governed_admission_receipt_path
             ),
-            "portfolio_root": portfolio_root,
         }
         if hwm_arguments
         else {}
@@ -5843,6 +5872,15 @@ def build_all(
         }
         if capital_arguments
         else {}
+    )
+    # The private-stage overlap check is not exclusive to governed HWM and
+    # capital publication: the report-candidate and workbook builders also
+    # treat a run carrying a decomposition-lenses root as a financial
+    # publication and require the portfolio root for it.  Forward whatever
+    # the caller supplied instead of only forwarding it alongside those two
+    # argument families.
+    portfolio_paths = (
+        {"portfolio_root": portfolio_root} if portfolio_root is not None else {}
     )
     recipe = _recipe(recipe_path)
     inputs = _financial_epoch_inputs(recipe)
@@ -5858,10 +5896,20 @@ def build_all(
         else {}
     )
     ledger = build_stage(
-        recipe_path, output_root, "ledger", **financial_arguments, **hwm_paths
+        recipe_path,
+        output_root,
+        "ledger",
+        **financial_arguments,
+        **hwm_paths,
+        **portfolio_paths,
     )
     baseline = build_stage(
-        recipe_path, output_root, "baseline", **financial_arguments, **hwm_paths
+        recipe_path,
+        output_root,
+        "baseline",
+        **financial_arguments,
+        **hwm_paths,
+        **portfolio_paths,
     )
     attribution = build_stage(
         recipe_path,
@@ -5869,6 +5917,7 @@ def build_all(
         "attribution",
         **financial_arguments,
         **hwm_paths,
+        **portfolio_paths,
     )
     analytics = build_stage(
         recipe_path,
@@ -5876,6 +5925,7 @@ def build_all(
         "analytics",
         **financial_arguments,
         **hwm_paths,
+        **portfolio_paths,
     )
     report_candidate = build_stage(
         recipe_path,
@@ -5883,6 +5933,7 @@ def build_all(
         "report",
         **financial_arguments,
         **hwm_paths,
+        **portfolio_paths,
         **capital_paths,
     )
     report = build_stage(
@@ -5891,6 +5942,7 @@ def build_all(
         "workbook",
         **financial_arguments,
         **hwm_paths,
+        **portfolio_paths,
         **capital_paths,
     )
     panel = build_stage(
@@ -5899,6 +5951,7 @@ def build_all(
         "panel-candidate",
         **financial_arguments,
         **hwm_paths,
+        **portfolio_paths,
         **capital_paths,
     )
     result = {
