@@ -88,6 +88,11 @@ const candidateRecordSha256 = createHash("sha256").update(candidateRecordBytes).
 const dashboardData = JSON.parse(await readFile(path.join(path.dirname(html), "data", "dashboard_data.json"), "utf8"));
 const expectedFactorSeries = dashboardData.dependence_analysis.series_ids.length;
 const expectedCurrentStrategies = dashboardData.strategies.length;
+// The account selector lists every account the panel scopes to, plus the
+// "all accounts" entry.  Bind that to the census the panel actually carries
+// rather than to a literal: the current-product perimeter decides how many
+// accounts appear, and a fixed count silently encodes one perimeter vintage.
+const expectedAccountOptions = dashboardData.account_summary.length + 1;
 const expectedReserveAssignments = dashboardData.performance.filter((row) => row.strategy_mapping_disposition === "RESERVE_NOT_APPLICABLE").length;
 const performanceLineageMismatch = dashboardData.meta?.performance_lineage?.status === "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH";
 const includeCandidates = options["exclude-candidates"] !== "true";
@@ -761,8 +766,8 @@ const persistentAccount = await page.locator("#context-account").inputValue();
 const riskAccountRows = await page.locator("#performance-table tbody tr[data-account-id], #historical-gap-table tbody tr[data-account-id]").evaluateAll((nodes) => nodes.map((node) => ({ account: node.dataset.accountId, label: node.cells[0]?.textContent?.trim() })));
 checks.push(check(
   "Privacy-safe account context filters lifecycle, positions, and performance",
-  accountOptions.length === 20
-    && new Set(accountOptions.map((item) => item.label)).size === 20
+  accountOptions.length === expectedAccountOptions
+    && new Set(accountOptions.map((item) => item.label)).size === expectedAccountOptions
     && firstPositionAccount
     && persistentAccount === firstPositionAccount
     && selectedAccountLabel
@@ -775,6 +780,7 @@ checks.push(check(
     && [...lifecycleAccountRows, ...positionAccountRows, ...riskAccountRows].every((row) => row.account === firstPositionAccount && row.label === selectedAccountLabel),
   {
     account_options: accountOptions.length,
+    account_options_expected: expectedAccountOptions,
     filtered_positions: filteredPositionRows,
     lifecycle_rows: lifecycleAccountRows.length,
     performance_rows: riskAccountRows.length,
