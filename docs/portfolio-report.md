@@ -4,8 +4,9 @@
 baseline into a coverage-aware report dataset and an independent unified Excel
 workbook. It does not edit or refresh any legacy workbook. Real financial data,
 account identifiers, generated workbooks, and validation evidence remain under
-the configured portfolio-data boundary and outside Git. The current durable
-root is `C:\Tools\quant-engine\data`.
+the configured portfolio-data boundary and outside Git. The canonical workspace
+root is `../dataPortfolio`, beside the repository. Use the explicit configured
+root from an isolated checkout and retain existing data and release targets.
 
 ## What the report proves
 
@@ -43,7 +44,8 @@ or broker credential.
 From the repository root, with the private roots supplied explicitly:
 
 ```powershell
-$portfolioRoot = 'C:\Tools\quant-engine\data'
+# Canonical repo example; use the explicit configured root in an isolated checkout.
+$portfolioRoot = [IO.Path]::GetFullPath((Join-Path $PWD '../dataPortfolio'))
 
 uv run --frozen --no-sync python tools/portfolio_report.py build `
   --baseline-root (Join-Path $portfolioRoot 'baseline') `

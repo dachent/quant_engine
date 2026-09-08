@@ -29,14 +29,15 @@ meaning and provenance.
 
 The repository worktree contains code, contracts, schemas, runbooks, and
 synthetic/redacted test fixtures. Source specifications and real provider data
-remain governed folders outside Git. Provider roots remain siblings of the
-worktree; the coordinated portfolio authority lives at the durable local path
-`C:\Tools\quant-engine\data`:
+remain governed folders outside Git and CI. Provider roots and the coordinated
+portfolio root remain siblings of the canonical worktree (`../dataPortfolio`
+for the portfolio root):
 
 ```text
 _quant_engine/
   repo/                        # this repository
   xBin/                        # source specifications
+  dataPortfolio/               # governed portfolio data and existing release roots
   dataPortfolio123/
   dataMatrixport/
   dataQuantbase/
@@ -44,10 +45,12 @@ _quant_engine/
   dataIBKR/
   dataFidelity/
   dataAlpaca/
-
-C:\Tools\quant-engine\
-  data\
 ```
+
+An isolated checkout receives the existing governed roots explicitly; its
+sibling folders do not establish new data authority. Retained data stays in
+place, including existing issue-bound release roots. Synced workspace storage
+is allowed; real data remains outside Git and CI.
 
 Packages receive these locations through configuration. They must not embed
 user-specific or provider-specific absolute paths; an approved non-user-specific

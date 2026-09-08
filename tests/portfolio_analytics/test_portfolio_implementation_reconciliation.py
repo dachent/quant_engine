@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -98,6 +99,7 @@ def _ai_result(
     post_return: str,
     post_price: str,
     accepted_as_of: date,
+    provider_return_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     xml_path = tmp_path / "ai-flex.xml"
     execution_ids = _write_ai_xml(xml_path, post_price=post_price)
@@ -181,11 +183,16 @@ def _ai_result(
         ],
     }
 
-    def read_table(path: Path, *, columns: list[str]) -> _SyntheticTable:
+    def read_table(path: Path, *, columns: list[str] | None = None) -> _SyntheticTable:
         del columns
         return _SyntheticTable(tables[path.name])
 
     monkeypatch.setattr(reconciliation.parquet, "read_table", read_table)
+    monkeypatch.setattr(
+        reconciliation.parquet,
+        "read_schema",
+        lambda path: SimpleNamespace(names=list(tables[path.name][0])),
+    )
     ledger = {
         "provider_strategy_returns": [
             {
@@ -231,6 +238,8 @@ def _ai_result(
             }
         ],
     }
+    if provider_return_policy is not None:
+        ledger["provider_strategy_returns"] = []
     ibkr_catalog = {
         "transactions": [
             {
@@ -247,10 +256,122 @@ def _ai_result(
         [xml_path],
         ledger,
         accepted_as_of=accepted_as_of,
+        provider_return_policy=provider_return_policy,
     )
 
 
+def _write_tt_source_manifest(tmp_path: Path, components: list[str]) -> Path:
+    weight = "0.1666666666666666666666666666666667"
+    nav_history = [
+        {"observed_date": observed, "value": value}
+        for observed, value in (
+            ("2026-03-30", "100"),
+            ("2026-03-31", "101"),
+            ("2026-04-01", "99"),
+            ("2026-04-02", "102"),
+        )
+    ]
+    endpoint_names = (
+        "holdings-history.json",
+        "last-rebalance.txt",
+        "last-update.txt",
+        "performance-chart.json",
+        "performance-table.json",
+        "portfolio-holdings.json",
+    )
+    selected_components = []
+    for index, component in enumerate(components):
+        snapshots = [{"observed_date": "2026-03-30", "weights": {"SPY": "1"}}]
+        if index == 0:
+            snapshots.append({"observed_date": "2026-04-01", "weights": {"QQQ": "1"}})
+        selected_components.append(
+            {
+                "current_holdings": [{"symbol": "SPY", "weight": "1"}],
+                "dated_holdings": {
+                    "observed_end": snapshots[-1]["observed_date"],
+                    "observed_start": "2026-03-30",
+                    "snapshots": snapshots,
+                },
+                "endpoint_hashes": {
+                    name: {
+                        "filename": f"{component}-{name}",
+                        "sha256": hashlib.sha256(
+                            f"{component}-{name}".encode()
+                        ).hexdigest(),
+                        "size_bytes": 1,
+                    }
+                    for name in endpoint_names
+                },
+                "last_rebalance": "2026-04-01",
+                "last_update": "2026-04-02T00:00:00Z",
+                "nav": {"as_of_date": "2026-04-02", "value": "102"},
+                "performance": {"nav_history": nav_history},
+                "portfolio_weight": weight,
+                "slug": component,
+            }
+        )
+    identity = {
+        "filename": "synthetic-source.json",
+        "sha256": hashlib.sha256(b"synthetic-source").hexdigest(),
+        "size_bytes": 1,
+    }
+    manifest = {
+        "market_vane": {
+            "class_ids": list(range(8)),
+            "current_class_id": 1,
+            "signals": {},
+            "status_endpoint": {},
+        },
+        "portfolio": {
+            "live_inception": "2026-03-30",
+            "portfolio_id": "tt-portfolio",
+            "portfolio_version": "synthetic-six-component-v1",
+        },
+        "price_tape": {
+            "artifact": identity,
+            "dataset": "history_adjusted",
+            "source_run_id": "synthetic-source-run",
+            "source_run_manifest": identity,
+            "target": {
+                "observed_end": "2026-04-02",
+                "observed_start": "2026-03-30",
+                "symbols": ["QQQ", "SPY"],
+            },
+        },
+        "producer": "turingtrader-retained-capture-source-manifest",
+        "schema_version": 1,
+        "selected_components": selected_components,
+        "verification": "VERIFIED_RETAINED_CAPTURE_REPLAYABLE",
+        "versioned_history": {
+            "component_nav_earliest_observed": "2026-03-30",
+            "live_plus_backtest": {
+                "compatibility_basis": (
+                    "CURRENT_SIX_COMPONENT_SLUGS_AND_PUBLISHED_EQUAL_WEIGHTS"
+                ),
+                "interpretation": (
+                    "CURRENT_SPECIFICATION_SIMULATION_NOT_HISTORICAL_COMPOSITION"
+                ),
+                "method": "DAILY_FIXED_WEIGHT_COMPONENT_RETURN_SUM",
+                "observed_end": "2026-04-02",
+                "observed_start": "2026-03-30",
+                "status": "AVAILABLE_CURRENT_SPECIFICATION_BACKTEST",
+                "strategy_version": "synthetic-six-component-v1",
+            },
+            "live_target_weights_complete_from": "2026-03-30",
+        },
+    }
+    manifest["source_manifest_id"] = hashlib.sha256(
+        json.dumps(
+            manifest, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
+    path = tmp_path / "tt-source-manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return path
+
+
 def _tt_result(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
     post_return: str,
@@ -258,8 +379,11 @@ def _tt_result(
     accepted_as_of: date,
 ) -> dict[str, Any]:
     components = [f"component-{index}" for index in range(1, 7)]
+    weight = "0.1666666666666666666666666666666667"
     index_rows = [[None, None, None, None, "name", "kind", "weight"]] + [
-        [None, None, None, None, component, 2, "1"] for component in components
+        [None, None, None, None, component, period, weight]
+        for period in (1, 2)
+        for component in components
     ]
     return_rows = [["Date", *(f"Total ({item})" for item in components)]]
     for observed, level in (
@@ -391,6 +515,7 @@ def _tt_result(
     }
     return reconciliation._tt_reconciliation(
         Path("synthetic-tt.xlsx"),
+        _write_tt_source_manifest(tmp_path, components),
         ledger,
         schwab,
         accepted_as_of=accepted_as_of,
@@ -596,7 +721,10 @@ def test_event_coverage_does_not_reuse_one_actual_event() -> None:
     assert result["model_event_coverage"] == pytest.approx(0.5)
 
 
-def test_p123_book_inventory_derives_all_current_connected_models() -> None:
+@pytest.mark.parametrize("har_copies", [1, 3])
+def test_p123_book_inventory_derives_all_current_connected_models(
+    har_copies: int,
+) -> None:
     managed = [
         {
             "account": "account-a",
@@ -630,6 +758,19 @@ def test_p123_book_inventory_derives_all_current_connected_models() -> None:
         },
     ]
 
+    managed = [
+        {
+            **row,
+            "_entity_id": f"capture-{copy}",
+            "_entity_type": "strategy" if copy else "unknown",
+            "_source_artifact": f"csv/capture-{copy}.csv",
+            "_source_row": str(copy + 1),
+            "_transport": "har_derived" if copy else "har",
+        }
+        for row in managed
+        for copy in range(har_copies)
+    ]
+
     inventory, _ = reconciliation._p123_book_ids(managed, registry)
 
     connected = [
@@ -641,6 +782,73 @@ def test_p123_book_inventory_derives_all_current_connected_models() -> None:
     assert inventory["TEMP_AI_BIG_CAPS"]["connection_status"] == (
         "HISTORICAL_ADMITTED_NOT_CURRENTLY_CONNECTED"
     )
+
+
+@pytest.mark.parametrize(
+    ("field", "changed"),
+    [
+        ("assetUid", "another-model"),
+        ("account", "another-account"),
+        ("accountUid", "another-account-uid"),
+        ("mktVal", "101"),
+        ("quantity", "11"),
+        ("_unrecognized_economic_field", "changed"),
+    ],
+)
+def test_p123_book_inventory_rejects_conflicting_primary_har_copies(
+    field: str,
+    changed: str,
+) -> None:
+    primary = {
+        "account": "account-a",
+        "accountUid": "account-uid-a",
+        "assetName": "AI Factor Small and Micro Cap Index 125 Stocks",
+        "assetUid": "primary",
+        "isAccountLive": "True",
+        "mktVal": "100",
+        "quantity": "10",
+    }
+    managed = [
+        {**primary, "_source_artifact": "csv/capture-one.csv"},
+        {**primary, "_source_artifact": "csv/capture-two.csv", field: changed},
+    ]
+
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="primary AI connected model is not unique",
+    ):
+        reconciliation._p123_book_ids(managed, [])
+
+
+@pytest.mark.parametrize("field", ["mktVal", "quantity"])
+def test_p123_book_inventory_rejects_conflicting_connected_har_copies(
+    field: str,
+) -> None:
+    primary = {
+        "account": "account-a",
+        "assetName": "AI Factor Small and Micro Cap Index 125 Stocks",
+        "assetUid": "primary",
+        "isAccountLive": "True",
+    }
+    connected = {
+        "account": "account-a",
+        "assetName": "Additional connected model",
+        "assetUid": "connected",
+        "isAccountLive": "True",
+        "mktVal": "100",
+        "quantity": "10",
+    }
+    managed = [
+        primary,
+        {**connected, "_source_artifact": "csv/capture-one.csv"},
+        {**connected, "_source_artifact": "csv/capture-two.csv", field: "99"},
+    ]
+
+    with pytest.raises(
+        reconciliation.ImplementationReconciliationError,
+        match="connected model metadata differs",
+    ):
+        reconciliation._p123_book_ids(managed, [])
 
 
 def test_grizzly_mixed_timestamp_formats_build_one_governed_state_path(
@@ -809,15 +1017,18 @@ def test_grizzly_reconciliation_fails_closed_when_cutoff_has_one_common_date(
 
 
 def test_tt_reconciliation_is_bounded_and_post_cutoff_invariant(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first = _tt_result(
+        tmp_path,
         monkeypatch,
         post_return="0.75",
         post_level="999",
         accepted_as_of=TT_ACCEPTED_AS_OF,
     )
     second = _tt_result(
+        tmp_path,
         monkeypatch,
         post_return="0.95",
         post_level="777",
@@ -842,6 +1053,7 @@ def test_tt_reconciliation_is_bounded_and_post_cutoff_invariant(
 
 
 def test_tt_reconciliation_fails_closed_when_cutoff_has_one_common_date(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with pytest.raises(
@@ -849,6 +1061,7 @@ def test_tt_reconciliation_fails_closed_when_cutoff_has_one_common_date(
         match=f"^{INSUFFICIENT_EXACT_COMMON_DATA}$",
     ):
         _tt_result(
+            tmp_path,
             monkeypatch,
             post_return="0.75",
             post_level="999",
@@ -916,6 +1129,9 @@ def _top_level_grizzly_history_result(
 
     monkeypatch.setattr(reconciliation, "_json", fake_json)
     monkeypatch.setattr(
+        reconciliation, "p123_provider_return_policy", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
         reconciliation,
         "_verify_artifact",
         lambda _path, _manifest, artifact_id: {"artifact_id": artifact_id},
@@ -949,6 +1165,9 @@ def _top_level_grizzly_history_result(
         schwab_catalog_path=tmp_path / "schwab.json",
         provider_ledger_root=tmp_path / "ledger",
         tt_workbook=tmp_path / "tt.xlsx",
+        tt_source_manifest=_write_tt_source_manifest(
+            tmp_path, [f"component-{index}" for index in range(1, 7)]
+        ),
         grizzly_signals=live,
         grizzly_blended_history=blended,
         spxl_market_data=tmp_path / "spxl.json",
@@ -995,3 +1214,165 @@ def test_optional_grizzly_history_fails_closed_when_cutoff_is_insufficient(
             post_day=date(2020, 5, 1),
             accepted_as_of=date(2020, 4, 8),
         )
+
+
+def _p123_policy_generation(tmp_path: Path, mutation: str | None = None) -> Path:
+    root = tmp_path / "provider-generation"
+    root.mkdir()
+    provider = {
+        "provider_id": "portfolio123",
+        "generation_id": "a" * 64,
+        "manifest_sha256": "b" * 64,
+        "catalog_sha256": "c" * 64,
+    }
+    contract, source_segment = "d" * 64, "e" * 64
+    disposition = {
+        "provider_id": "portfolio123",
+        "source_segment_id": "portfolio123-model-generation",
+        "source_segment_sha256": source_segment,
+        "item_id": "PROVIDER_LIVE_RETURN",
+        "item_kind": "PRODUCT_DATA_CLASS",
+        "data_class": "PROVIDER_LIVE_RETURN",
+        "action": "EXCLUDE",
+        "materialized_record_count": 0,
+        "target_facts": [],
+        "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
+        "policy_version": "1",
+        "policy_owner": "PRODUCT_OWNER_GOVERNING_ISSUE_303",
+        "policy_effective_start": "2026-01-01",
+        "policy_effective_end": None,
+        "reason": "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
+        "authority_ref": f"contract:{contract}#source_segments/portfolio123-model-generation;issue:303",
+    }
+    if mutation == "admitted":
+        disposition["action"] = "ADMIT"
+    elif mutation == "materialized":
+        disposition["materialized_record_count"] = 1
+    elif mutation == "expired":
+        disposition["policy_effective_end"] = "2026-01-24"
+    elif mutation == "different_authority":
+        disposition["policy_owner"] = "UNRELATED_AUTHORITY"
+    receipt = {
+        "schema_version": 1,
+        "receipt_type": "PROVIDER_ADMIT_OR_DECLARE_V1",
+        "admission_gate_status": "PASS",
+        "contract_raw_sha256": contract,
+        "contract_semantic_sha256": contract,
+        "provider_generations": [
+            {
+                **provider,
+                "source_segment_id": "portfolio123-model-generation",
+                "source_segment_sha256": source_segment,
+            }
+        ],
+        "dispositions": [disposition],
+    }
+    if mutation == "wrong_generation":
+        receipt["provider_generations"][0]["generation_id"] = "f" * 64
+    receipt["disposition_sha256"] = hashlib.sha256(
+        reconciliation.canonical_json_bytes(receipt["dispositions"])
+    ).hexdigest()
+    ledger = {"provider_strategy_returns": [], "provider_generations": [provider]}
+    artifacts = []
+    for name, document, artifact_id in (
+        ("provider-ledger.json", ledger, "normalized/provider-ledger.json"),
+        (
+            "admit-or-declare-receipt.json",
+            receipt,
+            "normalized/admit-or-declare-receipt.json",
+        ),
+    ):
+        payload = reconciliation.canonical_json_bytes(document)
+        (root / name).write_bytes(payload)
+        artifacts.append(
+            {
+                "artifact_id": artifact_id,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "size_bytes": len(payload),
+            }
+        )
+    artifacts.append(
+        {
+            "artifact_id": "providers/portfolio123/generation.json",
+            "sha256": "b" * 64,
+            "size_bytes": 1,
+        }
+    )
+    (root / "generation.json").write_bytes(
+        reconciliation.canonical_json_bytes(
+            {
+                "verification": "VERIFIED",
+                "generation_id": "1" * 64,
+                "artifacts": artifacts,
+            }
+        )
+    )
+    if mutation == "tampered_receipt":
+        (root / "admit-or-declare-receipt.json").write_bytes(b"{}")
+    return root
+
+
+def test_p123_explicit_zero_admission_is_bound_to_selected_receipt(
+    tmp_path: Path,
+) -> None:
+    root = _p123_policy_generation(tmp_path)
+    result = reconciliation.p123_provider_return_policy(
+        root, accepted_as_of=ACCEPTED_AS_OF
+    )
+    assert result["admitted_item_count"] == 0
+    assert result["authority_issue"] == 303
+    assert result["provider_generation_id"] == "a" * 64
+    assert (
+        result["provider_admission_receipt_sha256"]
+        == hashlib.sha256(
+            (root / "admit-or-declare-receipt.json").read_bytes()
+        ).hexdigest()
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "admitted",
+        "materialized",
+        "expired",
+        "different_authority",
+        "wrong_generation",
+        "tampered_receipt",
+    ],
+)
+def test_p123_unavailable_comparison_does_not_accept_invalid_policy(
+    tmp_path: Path, mutation: str
+) -> None:
+    root = _p123_policy_generation(tmp_path, mutation)
+    with pytest.raises(reconciliation.ImplementationReconciliationError):
+        reconciliation.p123_provider_return_policy(root, accepted_as_of=ACCEPTED_AS_OF)
+
+
+def test_ai_policy_unavailable_comparison_preserves_actual_reconciliation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _ai_result(
+        tmp_path,
+        monkeypatch,
+        post_return="0.99",
+        post_price="9000",
+        accepted_as_of=ACCEPTED_AS_OF,
+        provider_return_policy={"authority_issue": 303, "admitted_item_count": 0},
+    )
+    metrics = result["return_reconciliation"]
+    assert metrics["status"] == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    assert metrics["observations"] == 0
+    assert metrics["model_cumulative_return"] is None
+    assert metrics["account_minus_model_cumulative"] is None
+    assert "observed_start" not in metrics and "observed_end" not in metrics
+    actual = result["account_live_return_summary"]
+    assert actual["observations"] == 2
+    assert actual["observed_start"] == "2026-01-05"
+    assert actual["observed_end"] == "2026-01-20"
+    assert actual["cumulative_return"] == pytest.approx(1.008 * 0.99 - 1)
+    assert (
+        result["broker_execution_join"]["status"]
+        == "PASS_ALL_ACCEPTED_EXECUTIONS_JOINED_TO_RAW_DETAIL"
+    )
+    assert result["trade_reconciliation_by_book"]["PRIMARY_AI_FACTOR"]

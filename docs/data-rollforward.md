@@ -29,15 +29,19 @@ declarative commit field from standing in for the code that actually ran.
 
 ## Operator commands
 
-The canonical portfolio root on the governed Windows workstation is
-`C:\Tools\quant-engine\data`. It must not resolve below OneDrive or the Git
-worktree. Set it once and derive every current-cycle proof, QA, recipe, state,
-coordination, generation, and release root from it:
+The canonical workspace keeps `dataPortfolio/` beside `repo/`
+(`../dataPortfolio` from the canonical repository). Set `$portfolioRoot` to
+that existing configured root; an isolated checkout must use its explicit
+path. Synced storage is allowed; real portfolio data remains outside Git and
+CI. Derive current-cycle paths from that root and retain the existing
+issue-bound release targets. These examples do not move retained data or
+redefine release authority:
 
 ```powershell
-$portfolioRoot = [IO.Path]::GetFullPath('C:\Tools\quant-engine\data')
-if ($portfolioRoot -like '*\OneDrive -*' -or $portfolioRoot -like '*\repo\*') {
-  throw 'Portfolio authority must remain outside synced storage and Git.'
+# Canonical repo example; use the explicit configured root in an isolated checkout.
+$portfolioRoot = [IO.Path]::GetFullPath((Join-Path $PWD '../dataPortfolio'))
+if ($portfolioRoot -like '*\repo\*') {
+  throw 'Portfolio authority must remain outside Git.'
 }
 $cycleRoot = Join-Path $portfolioRoot 'rollforward\<yyyy-mm-dd-cycle-id>'
 $proofRoot = Join-Path $cycleRoot 'proof'
@@ -184,9 +188,9 @@ the selected freshness file and current provider-ledger generation to the exact
 `data/freshness-health.json` bytes and candidate record in that staged panel.
 
 ```powershell
-python tools/portfolio_freshness.py --provider-ledger-root 'C:\Tools\quant-engine\data\provider-ledger' --provider-ledger-generation-id <current-id> --evaluation-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'freshness-health.json')
-python tools/portfolio_control_recompute.py --correlation-root 'C:\Tools\quant-engine\data\analytics\correlation' --report-root <accepted-report-root> --panel-candidate <staged-panel-candidate> --freshness (Join-Path $cycleRoot 'freshness-health.json') --provider-ledger-root 'C:\Tools\quant-engine\data\provider-ledger' --provider-ledger-generation-id <current-id> --evaluation-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'control-recomputation.json')
-python tools/portfolio_rollforward_cycle.py --provider-ledger-root 'C:\Tools\quant-engine\data\provider-ledger' --provider-ledger-generation-id <current-id> --freshness (Join-Path $cycleRoot 'freshness-health.json') --recomputation (Join-Path $cycleRoot 'control-recomputation.json') --evaluation-date <yyyy-mm-dd> --previous-cycle-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'cycle-receipt.json')
+python tools/portfolio_freshness.py --provider-ledger-root (Join-Path $portfolioRoot 'provider-ledger') --provider-ledger-generation-id <current-id> --evaluation-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'freshness-health.json')
+python tools/portfolio_control_recompute.py --correlation-root (Join-Path $portfolioRoot 'analytics\correlation') --report-root <accepted-report-root> --panel-candidate <staged-panel-candidate> --freshness (Join-Path $cycleRoot 'freshness-health.json') --provider-ledger-root (Join-Path $portfolioRoot 'provider-ledger') --provider-ledger-generation-id <current-id> --evaluation-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'control-recomputation.json')
+python tools/portfolio_rollforward_cycle.py --provider-ledger-root (Join-Path $portfolioRoot 'provider-ledger') --provider-ledger-generation-id <current-id> --freshness (Join-Path $cycleRoot 'freshness-health.json') --recomputation (Join-Path $cycleRoot 'control-recomputation.json') --evaluation-date <yyyy-mm-dd> --previous-cycle-date <yyyy-mm-dd> --output (Join-Path $cycleRoot 'cycle-receipt.json')
 ```
 
 The cycle receipt is deliberately not a provider execution receipt. Every

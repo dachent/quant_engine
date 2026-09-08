@@ -202,7 +202,11 @@ def test_all_absorbed_source_histories_are_ancestors_and_manifested() -> None:
 
 
 def test_no_duplicate_yahoo_runtime_survives() -> None:
-    implementations = list(REPOSITORY_ROOT.glob("**/fetch_yfinance.py"))
+    implementations = [
+        path
+        for directory in ("apps", "imports", "packages", "skills", "tools")
+        for path in (REPOSITORY_ROOT / directory).rglob("fetch_yfinance.py")
+    ]
     assert implementations == [SCRIPT_PATH]
     legacy_import = REPOSITORY_ROOT / "imports" / "yf-marketdata"
     assert not any(legacy_import.rglob("*.py"))

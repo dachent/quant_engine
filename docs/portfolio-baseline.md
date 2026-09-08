@@ -1,7 +1,7 @@
 # Portfolio baseline runbook
 
 `tools/portfolio_baseline.py` builds a dated generation under the configured
-private portfolio-data root (`C:\Tools\quant-engine\data` on this workstation).
+private portfolio-data root (`../dataPortfolio` beside the canonical repository).
 It is a narrow intake and normalization tool, not a provider
 adapter, performance engine, strategy service, or broker surface.
 

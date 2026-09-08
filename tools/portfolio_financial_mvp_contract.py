@@ -161,10 +161,17 @@ _CENSUS_OWNER_NON_DECISIONS: Final = (
     "POINTER_OR_PUBLICATION",
 )
 _CENSUS_TT_CONTINUITY_INTERVAL: Final = (date(2026, 7, 14), date(2026, 7, 30))
+# The selected V4 provider receipt binds this exact pre-approval contract.
+# It remains valid for replay of those immutable account inputs; changed copies
+# receive the current pins and cannot claim this retained-source authority.
+_RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST: Final = (
+    "7cdf800f9819c1ea441ed08900d7f7d15806d0e4196401fe135b867a41646820"
+)
+
 _MATRIXPORT_OWNER_EPOCH: Final = {
     "effective_start": "2025-12-06",
     "observed_start": "2025-12-07",
-    "observed_end": "2026-08-13",
+    "observed_end": "2026-09-03",
 }
 _MATRIXPORT_GAP_SPAN_RECEIPTS: Final = (
     {
@@ -206,13 +213,13 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
         "315471b602bb4ce61cd854195162708ab188f6e08d6597deb9b9da11ca5bce44"
     ),
     "current_generation_id": (
-        "2961ab627b6dccc444d1d4ae73c0d38b455b4e2149a5246efaa383800d847d62"
+        "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056"
     ),
     "current_manifest_sha256": (
-        "fdd17e8459501c39d71a99d6042b4351092cd5f236c5ce3222868019755d5ed2"
+        "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
     ),
     "current_catalog_sha256": (
-        "78e812e76c38bf08a9b66a533020dbffeb6cb8e1f3b4b780269399d20c52d9e1"
+        "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829"
     ),
     "legacy_generation_id": (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
@@ -223,14 +230,14 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
     "legacy_catalog_sha256": (
         "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
     ),
+    "legacy_as_of": "2026-08-16",
 }
 # Issue #374 Phase C: the direct Matrixport/Portfolio123/Quantbase lanes
 # re-pin to the refreshed provider generations.  Every re-pointed history
 # receipt is enumerated as ``accepted identity -> refreshed identity``; the
-# current contract must carry the refreshed identity, the accepted authority
-# is projected forward, and receipts outside this table (including the
-# retained Portfolio123 managed-performance artifact, which the refreshed
-# generation no longer carries) remain frozen to the accepted bytes.
+# current contract must carry the refreshed identity and the accepted authority
+# is projected forward.  The exact Portfolio123 EU provider-live correction
+# remains frozen to its complete accepted evidence vintage.
 _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
     "MATRIXPORT": {
         (
@@ -322,36 +329,6 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             ),
             "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc",
         ),
-        (
-            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
-            (
-                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
-                "de384ad4a3182af1/tables/har_managed_metadata.parquet"
-            ),
-            "bf40e5b0502c2b8f4795279da6279a70e0062b7d26af308697bf6f6c6a583329",
-        ): (
-            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
-            (
-                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
-                "1e24af6dd0ec6d45/tables/har_managed_metadata.parquet"
-            ),
-            "b9d69e97b25afcdbc7dc319a67618900a82bfef5ee635334b037a920d374e52b",
-        ),
-        (
-            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
-            (
-                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
-                "de384ad4a3182af1/tables/har_equity_curve.parquet"
-            ),
-            "b87f760a1cd369bfd40ebc5e8db6b44e3626f9b4c53950e3d1e8c7ea0abf2b4e",
-        ): (
-            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
-            (
-                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
-                "1e24af6dd0ec6d45/tables/har_equity_curve.parquet"
-            ),
-            "39cabac6c6088c4ec100e7883d17713d952f4768fa4ff8888333b139264d311c",
-        ),
     },
     "QUANTBASE": {
         (
@@ -359,9 +336,9 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             "CURRENT.json",
             "10ea84966c0a20fd5520690a58c67e0e098490e4030b77e270225fd1fc4fd6b3",
         ): (
-            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
             "CURRENT.json",
-            "6a9d0ba89762a64f5a8cbcbca06c79c0a040879394509ffcd9458c694d548f15",
+            "1caffa0848f7da8659adc6c2206ae19dde23d497a56b192ee6febc24ded17d38",
         ),
         (
             "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
@@ -371,12 +348,11 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             ),
             "fa5a8cf49572ebb66632909662f707f0072134234425f4fa1ceee049cefdf87f",
         ): (
-            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
             (
-                "generations/948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5"
-                "d96df874263c4d39/generation.json"
+                "generations/d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe/generation.json"
             ),
-            "4d575a4155e2cede745e16c324be7023cec09a29ab038e9a658a81359a3d8828",
+            "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c",
         ),
         (
             "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
@@ -386,10 +362,9 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             ),
             "c03f1ae7a8363386a388670bf66699135727be5eeeeeea9508bc83b42ac501c4",
         ): (
-            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
             (
-                "source-runs/legacy-20260902-7b9f89c26ecc/artifacts/csv/"
-                "dashboard_Volatis_Strategy_pricehistory.csv"
+                "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv"
             ),
             "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e",
         ),
@@ -401,10 +376,9 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             ),
             "140301858179cbb4ca56539931c3d7701c190334aafd0d4e7bde30a621186772",
         ): (
-            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
             (
-                "source-runs/legacy-20260902-7b9f89c26ecc/artifacts/csv/"
-                "ssg_Volatis_Strategy_pricehistory.csv"
+                "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/ssg_Volatis_Strategy_pricehistory.csv"
             ),
             "83bab8b0828bee2d8abb51f26b6cbbf44fa5f4bab98e69a80097f5cba9b80fa2",
         ),
@@ -416,10 +390,9 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             ),
             "b4c5a7b23f24636a17090003b0203ee40b91703e6f0c8b3236d5884d6d1e62e0",
         ): (
-            "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
+            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
             (
-                "source-runs/legacy-20260902-7b9f89c26ecc/artifacts/csv/"
-                "account_activity.csv"
+                "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/account_activity.csv"
             ),
             "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0",
         ),
@@ -439,8 +412,8 @@ _HISTORY_PROVIDER_SOURCE_REBINDS: Final = {
     "quantbase-account-generation": (
         "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
         "fa5a8cf49572ebb66632909662f707f0072134234425f4fa1ceee049cefdf87f",
-        "948e7c23b35f009265fdad4c362e8963a2d20a926f40c5b5d96df874263c4d39",
-        "4d575a4155e2cede745e16c324be7023cec09a29ab038e9a658a81359a3d8828",
+        "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
+        "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c",
     ),
 }
 _HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
@@ -468,13 +441,40 @@ _HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
     ),
 }
 _HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final = {
-    # Matrixport daily observations stop at the financial-MVP cutoff.  Its two
-    # declared two-day holding-period links are retained in coverage only and
-    # must not be folded into this daily materialized segment identity.
     "robuxio-crypto:account-live": {
-        "observed_end": "2026-08-13",
-        "return_observations": 246,
-        "sha256": "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+        "observed_end": "2026-09-03",
+        "return_observations": 267,
+        "sha256": "1ea12119e24f31fc6820593af890f80026955d7de05676433db18a5d0025a529",
+    },
+    "grizzlybears-vtma:account-live": {
+        "observed_end": "2026-09-02",
+        "return_observations": 243,
+        "sha256": "a7271e772c6d21ee4b3b2ed76149ddd9639d10c5c8be371550203fc2d67c9b61",
+    },
+    "p123-ai-factor:account-live": {
+        "observed_end": "2026-09-02",
+        "return_observations": 160,
+        "sha256": "7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
+    },
+    "p123-eu:account-live": {
+        "observed_end": "2026-09-02",
+        "return_observations": 204,
+        "sha256": "63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
+    },
+    "qsi:account-live": {
+        "observed_end": "2026-09-02",
+        "return_observations": 241,
+        "sha256": "de46b08ec45f4096ae5bf501b39e6efa71ae51ae825bee63161aa804422067b3",
+    },
+    "tt-portfolio:account-live": {
+        "observed_end": "2026-09-02",
+        "return_observations": 282,
+        "sha256": "4235428716b167f3c21e2843a7e16dd8ea50d8e542cd465e0cf6887b89072435",
+    },
+    "volatis-strategy:account-live": {
+        "observed_end": "2026-09-02",
+        "return_observations": 687,
+        "sha256": "e8b3b66a38b6edfa027318496129a1e8f56bc6c29e3176e9d4c44215f01a66b4",
     },
 }
 EPOCH_MANIFEST_ARTIFACT_PATH: Final = "outputs/account-strategy-manifest.json"
@@ -1224,6 +1224,22 @@ def _verify_strategy_version_history_evidence(
     against governed bytes by :func:`verify_history_evidence`.
     """
 
+    ledger_transition = dict(_HISTORY_PROVIDER_LEDGER_TRANSITION)
+    segment_projections = dict(_HISTORY_SEGMENT_PROJECTION_OVERRIDES)
+    if contract_digest(contract) == _RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST:
+        ledger_transition.update(
+            {
+                "current_generation_id": "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c",
+                "current_manifest_sha256": "018105dbc99eea27c1bcd1a7b860809a5023baccd9b0c6af89809a1a4965ab34",
+                "current_catalog_sha256": "495179faf7d6fcfb707db8682517871151eb335468263c1c8723ed30b3c87dcb",
+            }
+        )
+        segment_projections["robuxio-crypto:account-live"] = {
+            "observed_end": "2026-09-03",
+            "return_observations": 267,
+            "sha256": "1ea12119e24f31fc6820593af890f80026955d7de05676433db18a5d0025a529",
+        }
+
     try:
         result = subprocess.run(  # noqa: S603
             [
@@ -1329,6 +1345,7 @@ def _verify_strategy_version_history_evidence(
         *,
         accepted_authority: bool,
         deprecated_event_only: bool,
+        retain_accepted_receipt: bool,
     ) -> dict[str, object]:
         receipt_keys = (
             "artifact_role",
@@ -1341,6 +1358,8 @@ def _verify_strategy_version_history_evidence(
         )
         projected = {key: receipt.get(key) for key in receipt_keys}
         if projected["authority_root"] != "PROVIDER_LEDGER":
+            if retain_accepted_receipt:
+                return projected
             lane_rebinds = _HISTORY_PROVIDER_RECEIPT_REBINDS.get(
                 str(projected["authority_root"])
             )
@@ -1402,10 +1421,8 @@ def _verify_strategy_version_history_evidence(
         if not accepted_authority and deprecated_event_only:
             expected_sha_key = legacy_sha_key
         if (
-            generation_id
-            != _HISTORY_PROVIDER_LEDGER_TRANSITION[expected_generation_key]
-            or projected["sha256"]
-            != _HISTORY_PROVIDER_LEDGER_TRANSITION[expected_sha_key]
+            generation_id != ledger_transition[expected_generation_key]
+            or projected["sha256"] != ledger_transition[expected_sha_key]
         ):
             raise FinancialMvpContractError(
                 "provider-ledger history lineage differs from the admitted transition"
@@ -1419,24 +1436,22 @@ def _verify_strategy_version_history_evidence(
             target_sha_key = (
                 legacy_sha_key if deprecated_event_only else current_sha_key
             )
-            current_generation = _HISTORY_PROVIDER_LEDGER_TRANSITION[
-                target_generation_key
-            ]
+            current_generation = ledger_transition[target_generation_key]
             projected["generation_id"] = current_generation
             projected["artifact_selector"] = (
                 f"generations/{current_generation}/{suffix}"
             )
-            projected["sha256"] = _HISTORY_PROVIDER_LEDGER_TRANSITION[target_sha_key]
+            projected["sha256"] = ledger_transition[target_sha_key]
         return projected
 
     def correction_projection(
         row: Mapping[str, Any], *, accepted_authority: bool
     ) -> dict[str, object]:
         strategy_id = _text(row.get("strategy_id"), "history correction strategy_id")
+        correction_id = _text(row.get("correction_id"), "history correction_id")
+        retain_accepted_p123_eu = correction_id == "p123-eu-provider-live"
         semantic_row = (
-            current_corrections_by_id.get(
-                _text(row.get("correction_id"), "history correction_id"), row
-            )
+            current_corrections_by_id.get(correction_id, row)
             if accepted_authority
             else row
         )
@@ -1453,24 +1468,27 @@ def _verify_strategy_version_history_evidence(
                 receipt,
                 accepted_authority=accepted_authority,
                 deprecated_event_only=deprecated_event_only,
+                retain_accepted_receipt=retain_accepted_p123_eu,
             )
             for receipt in _objects(
                 row.get("source_receipts"), "history correction source_receipts"
             )
         ]
         receipts.sort(key=canonical_json_bytes)
-        return {
+        capture = _object(row.get("capture"), "history correction capture")
+        projected = {
             "strategy_id": strategy_id,
             "evidence_layer": row.get("evidence_layer"),
             "source_id": row.get("source_id"),
-            "capture_status": _object(
-                row.get("capture"), "history correction capture"
-            ).get("status"),
+            "capture_status": capture.get("status"),
             "strategy_version": _object(
                 row.get("strategy_version"), "history correction strategy_version"
             ),
             "source_receipts": receipts,
         }
+        if retain_accepted_p123_eu:
+            projected["accepted_capture"] = dict(capture)
+        return projected
 
     accepted_history = _object(
         accepted.get("history_corrections"), "accepted history corrections"
@@ -1520,20 +1538,20 @@ def _verify_strategy_version_history_evidence(
             )
             if (
                 projected.get("source_generation_id")
-                != _HISTORY_PROVIDER_LEDGER_TRANSITION[generation_key]
+                != ledger_transition[generation_key]
                 or projected.get("source_generation_sha256")
-                != _HISTORY_PROVIDER_LEDGER_TRANSITION[manifest_key]
+                != ledger_transition[manifest_key]
             ):
                 raise FinancialMvpContractError(
                     "provider-ledger history lineage differs from the admitted transition"
                 )
             if accepted_authority:
-                projected["source_generation_id"] = _HISTORY_PROVIDER_LEDGER_TRANSITION[
+                projected["source_generation_id"] = ledger_transition[
                     "current_generation_id"
                 ]
-                projected["source_generation_sha256"] = (
-                    _HISTORY_PROVIDER_LEDGER_TRANSITION["current_manifest_sha256"]
-                )
+                projected["source_generation_sha256"] = ledger_transition[
+                    "current_manifest_sha256"
+                ]
         else:
             source_rebind = _HISTORY_PROVIDER_SOURCE_REBINDS.get(
                 str(projected.get("source_id"))
@@ -1589,7 +1607,7 @@ def _verify_strategy_version_history_evidence(
                 f"accepted history correction authority differs: {segment_id}"
             )
         accepted_segment["sha256"] = corrected_sha256
-    for segment_id, projection in _HISTORY_SEGMENT_PROJECTION_OVERRIDES.items():
+    for segment_id, projection in segment_projections.items():
         accepted_segment = accepted_segments.get(segment_id)
         if accepted_segment is None:
             raise FinancialMvpContractError(
@@ -4136,13 +4154,14 @@ def _validate_history_corrections(
                     != _HISTORY_PROVIDER_LEDGER_TRANSITION["legacy_generation_id"]
                     or generation_sha
                     != _HISTORY_PROVIDER_LEDGER_TRANSITION["legacy_manifest_sha256"]
-                    or capture["as_of"] != source_generation["as_of"]
+                    or capture["as_of"]
+                    != _HISTORY_PROVIDER_LEDGER_TRANSITION["legacy_as_of"]
                 ):
                     raise FinancialMvpContractError(
                         "deprecated event-only history must retain its legacy receipt: "
                         f"{correction_id}"
                     )
-            elif (
+            elif correction_id != "p123-eu-provider-live" and (
                 source_generation["generation_id"] != generation_id
                 or source_generation["sha256"] != generation_sha
                 or source_generation["as_of"] != capture["as_of"]
@@ -5318,6 +5337,7 @@ def _validate_matrixport_gap_policy(row: Mapping[str, Any], source_id: str) -> N
 def _validate_robuxio_owner_funded_boundary(contract: Mapping[str, Any]) -> None:
     """Pin the owner-held epoch apart from the earlier provider launch history."""
 
+    owner_epoch = dict(_MATRIXPORT_OWNER_EPOCH)
     sources = {
         _text(row.get("source_id"), "source segment id"): row
         for row in _objects(contract.get("source_segments"), "source segments")
@@ -5365,7 +5385,7 @@ def _validate_robuxio_owner_funded_boundary(contract: Mapping[str, Any]) -> None
     )
     if (
         any(
-            value != _MATRIXPORT_OWNER_EPOCH["effective_start"]
+            value != owner_epoch["effective_start"]
             for value in (
                 source_interval.get("effective_start"),
                 correction_interval.get("effective_start"),
@@ -5376,14 +5396,14 @@ def _validate_robuxio_owner_funded_boundary(contract: Mapping[str, Any]) -> None
             )
         )
         or any(
-            value != _MATRIXPORT_OWNER_EPOCH["observed_start"]
+            value != owner_epoch["observed_start"]
             for value in (
                 source_interval.get("observed_start"),
                 correction_interval.get("observed_start"),
             )
         )
         or any(
-            value != _MATRIXPORT_OWNER_EPOCH["observed_end"]
+            value != owner_epoch["observed_end"]
             for value in (
                 source_interval.get("observed_end"),
                 correction_interval.get("observed_end"),

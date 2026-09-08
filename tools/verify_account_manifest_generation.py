@@ -86,6 +86,9 @@ _CROSSWALK_DISPOSITIONS: Final[frozenset[str]] = frozenset(
 _CANONICAL_CENT = re.compile(r"^-?(0|[1-9][0-9]*)(?:\.[0-9]{1,2})?$")
 _CANONICAL_NUMERIC = re.compile(r"^-?(0|[1-9][0-9]*)(?:\.[0-9]+)?$")
 _COUNTERPARTY_RULE = "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+_SOURCE_IDENTITY_COUNTERPARTY_RULE = (
+    "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT_WITH_SOURCE_IDENTITY_V1"
+)
 _OUTPUT_FORBIDDEN_NUMERIC_FIELDS: Final[frozenset[str]] = frozenset(
     {
         "start",
@@ -468,6 +471,27 @@ class IndependentVerifierInputs:
         """Return the later date from the two selected catalog snapshots."""
 
         return max(_selected_date(self.provider_ledger), _selected_date(self.baseline))
+
+    @property
+    def verified_data_as_of_date(self) -> date:
+        """Return the boundary through which this verification actually applies.
+
+        A current-product manifest is computed through the crosswalk's
+        `calculation_cutoff_date`, which may be earlier than either catalog
+        snapshot when the required series end on different days.  The report
+        must be dated by what it verified, not by the newest input it read.
+        """
+
+        if self.current_epoch_crosswalk is None:
+            return self.generation_as_of_date
+        payload = self.current_epoch_crosswalk.json_object("current epoch crosswalk")
+        cutoff = payload.get("calculation_cutoff_date")
+        if not isinstance(cutoff, str):
+            _fail()
+        try:
+            return date.fromisoformat(cutoff)
+        except ValueError:
+            _fail()
 
     @property
     def _is_mixed(self) -> bool:
@@ -1236,7 +1260,7 @@ def _derive_first_available_nav_epoch(
             _fail()
         if opening_anchor is not None and (
             opening_anchor.nav_recognition_date != first.as_of_date
-            or opening_anchor.event_date >= first.as_of_date
+            or opening_anchor.event_date > first.as_of_date
         ):
             _fail()
 
@@ -1306,7 +1330,7 @@ def _derive_first_available_nav_epoch(
         max_drawdown = Decimal(0)
         links: list[dict[str, object]] = []
         prior = first
-        if opening_anchor is not None:
+        if opening_anchor is not None and opening_anchor.event_date < first.as_of_date:
             initial_flow = interval_flow(opening_anchor.event_date, first.as_of_date)
             factor = Decimal(1) + (first.value - opening - initial_flow) / opening
             if factor <= 0:
@@ -2073,6 +2097,9 @@ def _report_source_metadata(
     if type(selected) is not IndependentVerifierInputs:
         _fail()
     try:
+        # The verifier is a code artifact: it is dated by the selected inputs it
+        # read, matching `selected_source_identities.as_of_date`.  Only the
+        # report's own as_of_date follows the calculation boundary.
         generated_date = selected.generation_as_of_date.isoformat()
         verifier_artifact = _subject_artifact(
             selected.independent_verifier_source.contents,
@@ -2766,7 +2793,14 @@ def _classification_rules(
         }:
             _fail()
         if disposition == "INTERNAL":
-            if row.get("counterparty_rule") != _COUNTERPARTY_RULE:
+            counterparty_rule = row.get("counterparty_rule")
+            if counterparty_rule not in {
+                _COUNTERPARTY_RULE,
+                _SOURCE_IDENTITY_COUNTERPARTY_RULE,
+            } or (
+                counterparty_rule == _SOURCE_IDENTITY_COUNTERPARTY_RULE
+                and flow_type != "ACCOUNT_TRANSFER"
+            ):
                 _fail()
             if (
                 "unpaired_disposition" in row
@@ -2843,7 +2877,12 @@ def _normalize_provider_navs(
     seen_ids: set[str] = set()
     available_currencies: set[str] = set()
 
-    def normalize_money(value: object, *, allow_reason: bool) -> dict[str, object]:
+    def normalize_money(
+        value: object,
+        *,
+        allow_reason: bool,
+        allow_asset_currency: bool = False,
+    ) -> dict[str, object]:
         if not isinstance(value, dict):
             _fail()
         base_keys = {"currency", "status", "value"}
@@ -2856,7 +2895,11 @@ def _normalize_provider_navs(
         currency = value.get("currency")
         status = value.get("status")
         amount = value.get("value")
-        if not isinstance(currency, str) or re.fullmatch(r"[A-Z]{3}", currency) is None:
+        currency_pattern = r"[A-Z]{3,12}" if allow_asset_currency else r"[A-Z]{3}"
+        if (
+            not isinstance(currency, str)
+            or re.fullmatch(currency_pattern, currency) is None
+        ):
             _fail()
         if status == "UNAVAILABLE":
             if amount is not None:
@@ -2915,7 +2958,11 @@ def _normalize_provider_navs(
         event_date = _date_value(flow.get("event_date"))
         _date_value(flow.get("nav_recognition_date", flow.get("event_date")))
         _reject_provider_fact_after_ledger_date(event_date, ledger_as_of_date)
-        amount = normalize_money(flow.get("amount"), allow_reason=False)
+        amount = normalize_money(
+            flow.get("amount"),
+            allow_reason=False,
+            allow_asset_currency=not enforce_global_accounting_currency,
+        )
         if (
             enforce_global_accounting_currency
             and amount["status"] == "AVAILABLE"
@@ -3944,6 +3991,13 @@ def _verify_mixed_authority_and_coverage_many(
                         kind != "capital_anchors"
                         or row.get("strategy_id") == strategy_id
                     )
+                    and not (
+                        kind == "flows"
+                        and row.get("provider_account_scope") == "ACCOUNT_ONLY"
+                        and row.get("mapping_status") == "UNMAPPED"
+                        and "strategy_id" in row
+                        and row["strategy_id"] is None
+                    )
                     and requested_start.isoformat()
                     <= static_fact_date(row, kind)
                     <= requested_end.isoformat()
@@ -4229,6 +4283,24 @@ def _verify_mixed_authority_and_coverage_many(
     }
 
 
+def _retained_flow_scope_metadata(raw: Mapping[str, object]) -> dict[str, object]:
+    """Independently validate provider mapping fields used for flow admission."""
+
+    metadata: dict[str, object] = {}
+    if "provider_account_scope" in raw:
+        metadata["provider_account_scope"] = _fact_text(
+            raw.get("provider_account_scope")
+        )
+    if "mapping_status" in raw:
+        mapping_status = raw.get("mapping_status")
+        if mapping_status not in {"MAPPED", "UNMAPPED"}:
+            _fail()
+        metadata["mapping_status"] = mapping_status
+    if "strategy_id" in raw:
+        metadata["strategy_id"] = _internal_id(raw.get("strategy_id"), nullable=True)
+    return metadata
+
+
 def _mixed_normalized_facts(
     selected: IndependentVerifierInputs,
 ) -> tuple[
@@ -4264,7 +4336,7 @@ def _mixed_normalized_facts(
             or not isinstance(amount, dict)
             or set(amount) != {"currency", "status", "value"}
             or not isinstance(amount.get("currency"), str)
-            or re.fullmatch(r"[A-Z]{3}", amount["currency"]) is None
+            or re.fullmatch(r"[A-Z]{3,12}", amount["currency"]) is None
         ):
             _fail()
         seen.add(record_id)
@@ -4278,18 +4350,41 @@ def _mixed_normalized_facts(
         flow_type = raw.get("flow_type")
         if not isinstance(flow_type, str) or not flow_type:
             _fail()
-        flows.append(
-            {
-                "record_id": record_id,
-                "account_id": _internal_id(raw.get("account_id")),
-                "event_date": _date_value(raw.get("event_date")).isoformat(),
-                "nav_recognition_date": _date_value(
-                    raw.get("nav_recognition_date", raw.get("event_date"))
-                ).isoformat(),
-                "flow_type": flow_type,
-                "amount": dict(amount),
-            }
-        )
+        normalized_flow: dict[str, object] = {
+            "record_id": record_id,
+            "account_id": _internal_id(raw.get("account_id")),
+            "event_date": _date_value(raw.get("event_date")).isoformat(),
+            "nav_recognition_date": _date_value(
+                raw.get("nav_recognition_date", raw.get("event_date"))
+            ).isoformat(),
+            "flow_type": flow_type,
+            "amount": dict(amount),
+        }
+        normalized_flow.update(_retained_flow_scope_metadata(raw))
+        provider_id = raw.get("provider_id")
+        if provider_id is not None:
+            if not isinstance(provider_id, str) or not provider_id.strip():
+                _fail()
+            normalized_flow["provider_id"] = provider_id.strip()
+        generation_id = raw.get("generation_id")
+        if generation_id is not None:
+            if (
+                not isinstance(generation_id, str)
+                or _SHA256.fullmatch(generation_id) is None
+            ):
+                _fail()
+            normalized_flow["generation_id"] = generation_id
+        activity_id = raw.get("provider_activity_id_sha256")
+        if activity_id is not None:
+            if (
+                not isinstance(activity_id, str)
+                or _SHA256.fullmatch(activity_id) is None
+                or "provider_id" not in normalized_flow
+                or "generation_id" not in normalized_flow
+            ):
+                _fail()
+            normalized_flow["provider_activity_id_sha256"] = activity_id
+        flows.append(normalized_flow)
     anchors: list[dict[str, object]] = []
     anchor_ids: set[str] = set()
     common_anchor_fields = {
@@ -4461,10 +4556,20 @@ def _mixed_admitted_fact_projection(
             for route in funded_routes
         )
 
+    excluded_account_only_source_ids = {
+        str(flow["record_id"])
+        for flow in flows
+        if flow.get("provider_account_scope") == "ACCOUNT_ONLY"
+        and flow.get("mapping_status") == "UNMAPPED"
+        and "strategy_id" in flow
+        and flow["strategy_id"] is None
+    }
     root_events = [
         event
         for event in events
-        if isinstance(event, dict) and in_funded_epoch(event, "nav_recognition_date")
+        if isinstance(event, dict)
+        and in_funded_epoch(event, "nav_recognition_date")
+        and str(event.get("source_record_id")) not in excluded_account_only_source_ids
     ]
     if any(event.get("classification_status") != "CLASSIFIED" for event in root_events):
         _fail()
@@ -6320,7 +6425,7 @@ def _assemble_mixed_report(
     return {
         "schema_version": 3,
         "artifact_id": _REPORT_PATH,
-        "as_of_date": selected.generation_as_of_date.isoformat(),
+        "as_of_date": selected.verified_data_as_of_date.isoformat(),
         "status": "VERIFIED",
         "verifier": verifier_artifact,
         "selected_source_identities": selected_source_identities,
@@ -6418,7 +6523,12 @@ def _verify_c4b2_policy_and_flows(
             _fail()
         currency = amount.get("currency")
         status = amount.get("status")
-        if not isinstance(currency, str) or not re.fullmatch(r"[A-Z]{3}", currency):
+        currency_pattern = (
+            r"[A-Z]{3}" if enforce_global_accounting_currency else r"[A-Z]{3,12}"
+        )
+        if not isinstance(currency, str) or not re.fullmatch(
+            currency_pattern, currency
+        ):
             _fail()
         if status == "AVAILABLE":
             value = amount.get("value")
@@ -6440,6 +6550,33 @@ def _verify_c4b2_policy_and_flows(
             "amount": dict(amount),
             "decimal_value": decimal_value,
         }
+        raw_by_id[record_id].update(_retained_flow_scope_metadata(flow))
+        provider_id = flow.get("provider_id")
+        if provider_id is not None:
+            if not isinstance(provider_id, str) or not provider_id.strip():
+                _fail()
+            raw_by_id[record_id]["provider_id"] = provider_id.strip()
+        generation_id = flow.get("generation_id")
+        if generation_id is not None:
+            if (
+                not isinstance(generation_id, str)
+                or _SHA256.fullmatch(generation_id) is None
+            ):
+                _fail()
+            raw_by_id[record_id]["generation_id"] = generation_id
+        activity_id = flow.get("provider_activity_id_sha256")
+        if activity_id is not None:
+            if (
+                not isinstance(activity_id, str)
+                or _SHA256.fullmatch(activity_id) is None
+            ):
+                _fail()
+            if (
+                "provider_id" not in raw_by_id[record_id]
+                or "generation_id" not in raw_by_id[record_id]
+            ):
+                _fail()
+            raw_by_id[record_id]["provider_activity_id_sha256"] = activity_id
 
     def select_rule(flow_type: str) -> dict[str, str] | None:
         rule = exact.get(flow_type)
@@ -6458,6 +6595,30 @@ def _verify_c4b2_policy_and_flows(
         record_id: select_rule(str(flow["flow_type"]))
         for record_id, flow in raw_by_id.items()
     }
+
+    def identity_compatible(
+        flow: Mapping[str, object], other: Mapping[str, object]
+    ) -> bool:
+        rule = selected_rules[str(flow["record_id"])]
+        if (
+            rule is None
+            or rule.get("counterparty_rule") != _SOURCE_IDENTITY_COUNTERPARTY_RULE
+        ):
+            return True
+        activity_id = flow.get("provider_activity_id_sha256")
+        other_activity_id = other.get("provider_activity_id_sha256")
+        if activity_id is None and other_activity_id is None:
+            return True
+        return activity_id is not None and (
+            flow.get("provider_id"),
+            flow.get("generation_id"),
+            activity_id,
+        ) == (
+            other.get("provider_id"),
+            other.get("generation_id"),
+            other_activity_id,
+        )
+
     physical_candidates: dict[str, list[str]] = {}
     for record_id, flow in raw_by_id.items():
         if flow["amount"]["status"] != "AVAILABLE":
@@ -6472,6 +6633,7 @@ def _verify_c4b2_policy_and_flows(
             and other["amount"]["status"] == "AVAILABLE"
             and other["amount"]["currency"] == flow["amount"]["currency"]
             and other["decimal_value"] == -flow["decimal_value"]
+            and identity_compatible(flow, other)
         ]
 
     base_expected_events: list[dict[str, object]] = []
@@ -6567,7 +6729,8 @@ def _verify_c4b2_policy_and_flows(
                     counterpart["classification_status"] == "CLASSIFIED"
                     and counterpart["disposition"] == "INTERNAL"
                     and counterpart_rule is not None
-                    and counterpart_rule.get("counterparty_rule") == _COUNTERPARTY_RULE
+                    and counterpart_rule.get("counterparty_rule")
+                    == selected_rules[record_id].get("counterparty_rule")
                     and physical_candidates[counterparty_id] == [record_id]
                 ):
                     blocker_code = "INTERNAL_COUNTERPARTY_CLASSIFICATION_BLOCKED"

@@ -40,6 +40,45 @@ and hand off the blocker.
 
 ## Execution rules
 
+<!-- RCCA_SCOPE_POLICY BEGIN -->
+### Complete the accepted outcome with necessary work
+
+Complete the user's accepted outcome and its required evidence. Do not silently
+narrow it to a smaller deliverable. Before adding a prerequisite, financial
+rule, interface, schema, dependency, workflow, test, or repeated check, identify
+the accepted requirement it protects and why existing mechanisms are
+insufficient. A new test enforcing an invented prerequisite is not authority
+for that prerequisite.
+
+Search the relevant existing implementation and trace its real inputs and
+consumers before adding machinery. Use a bounded investigation when needed to
+determine whether a defect or evidence gap exists; a literal failing
+reproduction is unnecessary when the contract or source arithmetic settles the
+question. Adjudicate reviewer suggestions against the same authority before
+implementing or delegating them. Preserve valid financial, security, recovery,
+and publication controls.
+
+Reuse still-valid evidence; rerun when relevant code, data, selection,
+environment, or acceptance assumptions change. Address necessary late
+discoveries regardless of the round in which they appear. When an unchanged
+action fails without producing new evidence, stop repeating that action,
+reassess the cause, and continue other necessary work. This does not authorize
+abandoning the task. A skill's round limit or preferred test-artifact size does
+not reduce the accepted outcome or required verification.
+
+Carry these constraints into every worker assignment. Skills assist this
+policy; they do not introduce approval ceremonies or redefine completion.
+Direct user exceptions, higher-priority runtime instructions, real authority
+boundaries, and platform limits still apply. This policy governs how the agent
+works; it adds no financial validity or publication prerequisite.
+
+Adapted from MSW's contract/necessity/proof principle and Ponytail's reuse and
+producer-to-consumer tracing guidance. The project corrections above control
+their overlapping workflow defaults. References:
+https://github.com/transcendr/slopware-skills/tree/14e5c9dc27c48c7ef84a4647086f7f75a0e01bc1/plugins/msw
+https://github.com/DietrichGebert/ponytail/blob/974d940a1c5344210874150b98ff0d2c861fab6a/skills/ponytail/SKILL.md
+<!-- RCCA_SCOPE_POLICY END -->
+
 - Make the smallest coherent, preferably reversible change within the approved
   issue scope. Do not weaken acceptance criteria to obtain a pass.
 - This repository is private and GitHub currently enforces protected `main`,

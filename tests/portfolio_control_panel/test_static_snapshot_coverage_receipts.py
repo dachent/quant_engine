@@ -201,6 +201,113 @@ def test_static_snapshot_receipt_binds_exact_observed_facts(
     )
 
 
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "account_wallet",
+        "missing_strategy_key",
+        "statement_account",
+        "mapped",
+        "strategy_named",
+    ],
+)
+def test_static_receipt_derives_epoch_flows_from_original_account_scope(
+    receipts_module: object, tmp_path: Path, variant: str
+) -> None:
+    ledger_path, manifest_path, baseline_path, crosswalk_path = _snapshot_payload(
+        tmp_path
+    )
+    ledger = json.loads(ledger_path.read_bytes())
+    wallet = {
+        "record_id": "account-wallet-flow",
+        "account_id": "account-one",
+        "event_date": "2026-03-01",
+        "nav_recognition_date": "2026-03-01",
+        "provider_account_scope": "ACCOUNT_ONLY",
+        "mapping_status": "UNMAPPED",
+        "strategy_id": None,
+    }
+    if variant == "missing_strategy_key":
+        wallet.pop("strategy_id")
+    elif variant == "statement_account":
+        wallet["provider_account_scope"] = "STATEMENT_ACCOUNT"
+    elif variant == "mapped":
+        wallet["mapping_status"] = "MAPPED"
+    elif variant == "strategy_named":
+        wallet["strategy_id"] = "strategy-one"
+    ledger["flows"].append(wallet)
+    ledger_path.write_bytes(_canonical_bytes(ledger))
+    manifest = json.loads(manifest_path.read_bytes())
+    artifact = manifest["artifacts"][0]
+    artifact["sha256"] = hashlib.sha256(ledger_path.read_bytes()).hexdigest()
+    artifact["size_bytes"] = len(ledger_path.read_bytes())
+    manifest_path.write_bytes(_canonical_bytes(manifest))
+    source_bytes = {
+        path: path.read_bytes()
+        for path in (ledger_path, manifest_path, baseline_path, crosswalk_path)
+    }
+    authority, receipts = receipts_module.issue_static_snapshot_receipts(
+        ledger_path=ledger_path,
+        provider_ledger_manifest_path=manifest_path,
+        baseline_path=baseline_path,
+        crosswalk_path=crosswalk_path,
+        issuer_code_path=MODULE_PATH,
+    )
+    receipt_id, receipt = next(iter(receipts.items()))
+    excluded_wallet = variant == "account_wallet"
+    assert receipt["observed_facts"]["flows"] == {
+        "row_count": 1 if excluded_wallet else 2,
+        "first_date": "2026-02-01",
+        "last_date": "2026-02-01" if excluded_wallet else "2026-03-01",
+    }
+    assert (
+        receipt["staged_inputs"]["provider_ledger_artifact"]["sha256"]
+        == hashlib.sha256(source_bytes[ledger_path]).hexdigest()
+    )
+    receipts_module.verify_static_snapshot_receipt(
+        receipt,
+        ledger_path=ledger_path,
+        provider_ledger_manifest_path=manifest_path,
+        baseline_path=baseline_path,
+        crosswalk_path=crosswalk_path,
+    )
+    # Independently supplied calculation facts retain the ordinary flow; only
+    # the explicitly unassigned account-wallet activity is outside this epoch.
+    calculation_ledger = json.loads(source_bytes[ledger_path])
+    if excluded_wallet:
+        calculation_ledger["flows"] = calculation_ledger["flows"][:1]
+    manifest_module = _load_module(
+        ROOT / "tools/account_strategy_manifest.py", "static_scope_manifest_predicate"
+    )
+    manifest_module._validate_static_snapshot_receipt(
+        receipt,
+        receipt_id,
+        "account-one",
+        "2026-01-01",
+        "2026-08-13",
+        "2026-08-13",
+        authority["receipts"][0]["contract"],
+        calculation_ledger,
+    )
+    forged = json.loads(json.dumps(receipt))
+    forged["observed_facts"]["flows"] = {
+        "row_count": 0,
+        "first_date": None,
+        "last_date": None,
+    }
+    with pytest.raises(
+        receipts_module.StaticSnapshotReceiptError, match="facts differ"
+    ):
+        receipts_module.verify_static_snapshot_receipt(
+            forged,
+            ledger_path=ledger_path,
+            provider_ledger_manifest_path=manifest_path,
+            baseline_path=baseline_path,
+            crosswalk_path=crosswalk_path,
+        )
+    assert {path: path.read_bytes() for path in source_bytes} == source_bytes
+
+
 def test_ibkr_flow_after_nav_recognition_cutoff_is_not_admitted(
     receipts_module: object, tmp_path: Path
 ) -> None:
@@ -343,8 +450,15 @@ def test_public_manifest_predicate_rejects_rebound_static_fact_count(
         )
 
 
+@pytest.mark.parametrize(
+    ("nav_ends_before_receipt", "policy_after_data"),
+    [(False, False), (True, False), (True, True)],
+)
 def test_static_receipts_pass_the_public_producer_and_independent_verifier(
-    receipts_module: object, tmp_path: Path
+    receipts_module: object,
+    tmp_path: Path,
+    nav_ends_before_receipt: bool,
+    policy_after_data: bool,
 ) -> None:
     """Static receipt facts are recomputed across the actual candidate boundary.
 
@@ -367,17 +481,44 @@ def test_static_receipts_pass_the_public_producer_and_independent_verifier(
     # The event is dated on the selected cutoff, but IBKR does not recognise it
     # in NAV until the following EOD.  It must remain raw evidence only, never
     # enter the cutoff calculation projection.
-    ledger["as_of_date"] = "2026-02-02"
+    data_date = "2026-09-04" if policy_after_data else "2026-02-02"
+    cutoff_date = "2026-09-04" if policy_after_data else "2026-02-01"
+    policy_date = "2026-09-06" if policy_after_data else data_date
+    ledger["as_of_date"] = data_date
     ledger["flows"][0].update(
         {"event_date": "2026-02-01", "nav_recognition_date": "2026-02-02"}
     )
+    # This same-account wallet transfer is inside the receipt interval but is
+    # explicitly unassigned to the funded strategy.  Every receipt comparison
+    # must use the existing calculation scope while retaining the raw ledger.
+    wallet_flow = {
+        **ledger["flows"][0],
+        "record_id": "static-wallet-only",
+        "event_date": "2026-01-31",
+        "nav_recognition_date": "2026-01-31",
+        "provider_account_scope": "ACCOUNT_ONLY",
+        "mapping_status": "UNMAPPED",
+        "strategy_id": None,
+    }
+    ledger["flows"].append(wallet_flow)
+    if nav_ends_before_receipt:
+        # The unchanged receipt covers through Feb 1.  This case has a final
+        # observed NAV on Jan 31 and no funded flows after that observation.
+        for row, observed in zip(
+            ledger["nav_observations"],
+            ("2026-01-29", "2026-01-30", "2026-01-31"),
+            strict=True,
+        ):
+            row["as_of_date"] = observed
+        ledger["capital_anchors"][0]["nav_recognition_date"] = "2026-01-29"
+        ledger["flows"] = [wallet_flow]
     ledger_snapshot = fixture.InputSnapshot.from_bytes(
         "static mixed ledger", fixture.canonical_json_bytes(ledger)
     )
     flow_policy = selected.flow_classification_policy.json_object()
-    flow_policy["as_of_date"] = "2026-02-02"
+    flow_policy["as_of_date"] = policy_date
     admission_policy = selected.admission_policy.json_object()
-    admission_policy["as_of_date"] = "2026-02-02"
+    admission_policy["as_of_date"] = data_date
     values = fixture._selected_input_kwargs(selected)
     values.update(
         {
@@ -387,7 +528,7 @@ def test_static_receipts_pass_the_public_producer_and_independent_verifier(
                 catalog_artifact_id="normalized/provider-ledger.json",
                 catalog_schema_name="provider-ledger-catalog",
                 catalog_schema_version="1",
-                as_of_date="2026-02-02",
+                as_of_date=data_date,
             ),
             "flow_classification_policy": fixture.InputSnapshot.from_bytes(
                 "static mixed policy", fixture.canonical_json_bytes(flow_policy)
@@ -399,6 +540,31 @@ def test_static_receipts_pass_the_public_producer_and_independent_verifier(
             "manifest_schema": selected.manifest_schema,
         }
     )
+    if policy_after_data:
+        baseline = selected.baseline.json_object()
+        baseline["as_of_date"] = data_date
+        baseline_snapshot = fixture.InputSnapshot.from_bytes(
+            "static mixed baseline", fixture.canonical_json_bytes(baseline)
+        )
+        baseline_manifest = fixture._generation_manifest_snapshot(
+            catalog=baseline_snapshot,
+            catalog_artifact_id="normalized/portfolio-baseline.json",
+            catalog_schema_name="portfolio-baseline-catalog",
+            catalog_schema_version=str(baseline["baseline_schema_version"]),
+            as_of_date=data_date,
+        )
+        values.update(baseline=baseline_snapshot, baseline_manifest=baseline_manifest)
+        crosswalk = selected.current_epoch_crosswalk.json_object()
+        crosswalk.update(as_of_date=data_date, calculation_cutoff_date=cutoff_date)
+        crosswalk["selected_baseline"].update(
+            generation_id=baseline_manifest.json_object()["generation_id"],
+            sha256=baseline_snapshot.sha256,
+            size_bytes=baseline_snapshot.size_bytes,
+            as_of_date=data_date,
+        )
+        values["current_epoch_crosswalk"] = fixture.InputSnapshot.from_bytes(
+            "static mixed current crosswalk", fixture.canonical_json_bytes(crosswalk)
+        )
     selected = producer.AccountManifestSelectedInputs(**values)
 
     ledger_path = tmp_path / "provider-ledger.json"
@@ -449,7 +615,22 @@ def test_static_receipts_pass_the_public_producer_and_independent_verifier(
     }
     calculation = json.loads(payloads["authority/calculation-inputs.json"])
     assert calculation["calculation_ledger"]["flows"] == []
+    assert wallet_flow in static_selected.provider_ledger.json_object()["flows"]
     assert report["status"] == "VERIFIED"
+    if nav_ends_before_receipt:
+        output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+        numeric_rows = [row for row in output["rows"] if row["status"] == "OK"]
+        assert len(numeric_rows) == 1
+        assert numeric_rows[0]["end"] == "2026-01-31"
+        assert numeric_rows[0]["current_value"] == "70"
+        assert len(output["rows"]) == 13
+        assert any(
+            receipt["requested_end"] == cutoff_date for receipt in receipts.values()
+        )
+    if policy_after_data:
+        assert output["calculation_cutoff_date"] == data_date
+        assert calculation["as_of_date"] == data_date
+        assert static_selected.generation_as_of_date.isoformat() == data_date
 
     # Exercise the public staging boundary as well: receipt artifacts have no
     # legacy ``covered_end``, so successful staging proves their date lineage is
@@ -478,3 +659,26 @@ def test_static_receipts_pass_the_public_producer_and_independent_verifier(
         staged_selected, tmp_path / "generation-root"
     )
     assert len(bundle.manifest.artifacts) == len(payloads) + 1
+    assert bundle.manifest.as_of_date.isoformat() == policy_date
+    assert bundle.manifest.coverage.observed_end.isoformat() == data_date
+    artifact_dates = {
+        artifact.artifact_id: artifact.as_of_date.isoformat()
+        for artifact in bundle.manifest.artifacts
+    }
+    assert artifact_dates["authority/flow-classification-policy.json"] == policy_date
+    assert artifact_dates["outputs/account-strategy-manifest.json"] == data_date
+    assert bundle.payloads["authority/flow-classification-policy.json"] == (
+        static_selected.flow_classification_policy.contents
+    )
+    staged_report = json.loads(
+        bundle.payloads["verification/independent-verification.json"]
+    )
+    assert staged_report["status"] == "VERIFIED"
+    # The staged manifest is schema 9, and portfolio_control_panel.py:9031 takes
+    # a schema-9 bundle's data date from `calculation_cutoff_date` and requires
+    # the bundled report artifact to carry it.  A current-product manifest is
+    # computed through the crosswalk cutoff, which is earlier than either
+    # catalog snapshot whenever the required series end on different days, so
+    # the report is dated by the boundary it verified rather than by the newest
+    # input it read.
+    assert staged_report["as_of_date"] == cutoff_date

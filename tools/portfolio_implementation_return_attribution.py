@@ -27,12 +27,11 @@ import pyarrow.parquet as parquet  # type: ignore[import-untyped]
 from quant_engine.core.contracts import canonical_json_bytes
 
 import portfolio_implementation_reconciliation as reconciliation
-from portfolio_strategy_history import _cell, _excel_date, _xlsx_rows
 import provider_ledger
 
 
 SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.1.0"
+BUILDER_VERSION: Final = "1.2.0"
 UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT: Final = (
     reconciliation.UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT
 )
@@ -64,6 +63,19 @@ def _sha256(path: Path) -> dict[str, object]:
     return {"filename": path.name, "sha256": digest.hexdigest(), "size_bytes": size}
 
 
+def _read_tt_source_manifest(
+    path: Path,
+    components: Sequence[str],
+    component_weights: Mapping[str, Decimal] | None = None,
+) -> dict[str, Any]:
+    try:
+        return reconciliation._read_tt_source_manifest(
+            path, components, component_weights
+        )
+    except reconciliation.ImplementationReconciliationError as exc:
+        raise ReturnAttributionError(str(exc)) from exc
+
+
 def _compound(values: Iterable[float]) -> float:
     value = 1.0
     for item in values:
@@ -77,7 +89,10 @@ def _market_rows(
     path: Path, *, accepted_as_of: date
 ) -> dict[str, dict[date, dict[str, float]]]:
     payload = _json(path, "market-data artifact")
-    if payload.get("provider") != "yahoo" or payload.get("dataset") != "history":
+    if payload.get("provider") != "yahoo" or payload.get("dataset") not in {
+        "history",
+        "history_adjusted",
+    }:
         raise ReturnAttributionError("market-data authority differs")
     result: dict[str, dict[date, dict[str, float]]] = defaultdict(dict)
     aliases = {"BRK-B": "BRK.B"}
@@ -343,7 +358,9 @@ def _p123_ai_books(
     dict[str, date],
 ]:
     tables = p123_root / "tables"
-    managed = parquet.read_table(tables / "har_managed_metadata.parquet").to_pylist()
+    managed = reconciliation._p123_managed_rows(
+        parquet.read_table(tables / "har_managed_metadata.parquet").to_pylist()
+    )
     registry = parquet.read_table(tables / "strategy_registry.parquet").to_pylist()
     transactions = parquet.read_table(tables / "har_transactions.parquet").to_pylist()
     inventory, primary = reconciliation._p123_book_ids(managed, registry)
@@ -847,6 +864,7 @@ def ai_attribution(
     xml_paths: Sequence[Path],
     ledger: Mapping[str, Any],
     accepted_as_of: date,
+    provider_return_policy: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     (
         _,
@@ -872,7 +890,13 @@ def ai_attribution(
         evidence_layer="ACCOUNT_LIVE",
         accepted_as_of=accepted_as_of,
     )
-    common = sorted(set(model_returns) & set(account_returns) & set(nav))
+    if provider_return_policy is not None and model_returns:
+        raise ReturnAttributionError("P123 non-admission conflicts with model returns")
+    common = sorted(
+        set(account_returns) & set(nav)
+        if provider_return_policy is not None
+        else set(model_returns) & set(account_returns) & set(nav)
+    )
     if not common:
         raise ReturnAttributionError("AI exact-common-date return path is unavailable")
     start, end = common[0], common[-1]
@@ -888,6 +912,42 @@ def ai_attribution(
         start=start,
         end=end,
     )
+    if provider_return_policy is not None:
+        exact_actual = _compound(account_returns[day] for day in common)
+        policy_class_counts: dict[str, int] = defaultdict(int)
+        for category in classifications.values():
+            policy_class_counts[category] += 1
+        unavailable = {
+            "status": reconciliation.UNAVAILABLE_POLICY_NOT_ADMITTED,
+            "policy_evidence": dict(provider_return_policy),
+        }
+        return {
+            "actual_return_contribution_by_trade_provenance": {
+                "contributions_pp": {
+                    category: value * 100.0
+                    for category, value in sorted(linked.items())
+                },
+                **lot_status,
+            },
+            "bridge": {
+                **unavailable,
+                "account_return": exact_actual,
+                "model_return": None,
+                "gap_pp": None,
+                "categories": [],
+            },
+            "current_connected_model_perimeter": {
+                "models": current_perimeter,
+                "status": UNAVAILABLE_UNDATED_CURRENT_SNAPSHOT,
+            },
+            "event_classification_counts": dict(sorted(policy_class_counts.items())),
+            "execution_shortfall": dict(unavailable),
+            "effective_account_model_mix": dict(unavailable),
+            "observed_end": end.isoformat(),
+            "observed_start": start.isoformat(),
+            "strategy_id": "p123-ai-factor",
+            "verification": "PARTIAL_EXACT_ACTUAL_PNL_PARTIAL_COUNTERFACTUAL_GAP",
+        }
     model_mix, scale_schedules = _ai_model_mix(
         pairs_by_book=pairs_by_book,
         equity_by_role=equity_by_role,
@@ -1326,38 +1386,70 @@ def grizzly_attribution(
 
 
 def _tt_target_snapshots(
-    workbook: Path, components: Sequence[str], *, accepted_as_of: date
+    source_manifest: Mapping[str, Any],
+    components: Sequence[str],
+    *,
+    accepted_as_of: date,
 ) -> dict[date, dict[str, float]]:
-    rows = _xlsx_rows(workbook, "raw_tt_allochist")
     component_snapshots: dict[tuple[str, date], dict[str, Decimal]] = {}
-    for row in rows[1:]:
-        component = str(_cell(row, 0) or "").strip()
-        if component not in components:
-            continue
-        observed = _excel_date(_cell(row, 1), "TT allocation date")
-        if observed > accepted_as_of:
-            continue
-        symbol = _canonical_symbol(str(_cell(row, 2) or "").strip())
-        weight = reconciliation._decimal(_cell(row, 3))
-        if symbol and weight is not None:
-            component_snapshots.setdefault((component, observed), {})[symbol] = weight
+    selected = {
+        str(row["slug"]): row
+        for row in source_manifest["selected_components"]
+        if isinstance(row, dict)
+    }
+    component_weights: dict[str, Decimal] = {}
+    for component in components:
+        component_weight = reconciliation._decimal(
+            selected[component].get("portfolio_weight")
+        )
+        if component_weight is None:
+            raise ReturnAttributionError(
+                "TuringTrader selected component weights differ"
+            )
+        component_weights[component] = component_weight
+        for row in selected[component]["dated_holdings"]["snapshots"]:
+            if not isinstance(row, dict) or not isinstance(row.get("weights"), dict):
+                raise ReturnAttributionError(
+                    "TT direct-source allocation history differs"
+                )
+            observed = date.fromisoformat(str(row.get("observed_date") or ""))
+            if observed > accepted_as_of:
+                continue
+            component_snapshots[(component, observed)] = {
+                _canonical_symbol(str(symbol)): weight
+                for symbol, raw_weight in row["weights"].items()
+                if (weight := reconciliation._decimal(raw_weight)) is not None
+            }
     by_date: dict[date, list[tuple[str, dict[str, Decimal]]]] = defaultdict(list)
     for (component, observed), allocation in component_snapshots.items():
         by_date[observed].append((component, allocation))
     state: dict[str, dict[str, Decimal]] = {}
     result: dict[date, dict[str, float]] = {}
-    for observed in sorted(by_date):
-        for component, allocation in by_date[observed]:
-            state[component] = allocation
-        if set(state) != set(components):
-            continue
-        composite: dict[str, Decimal] = defaultdict(Decimal)
+    live_inception = date.fromisoformat(
+        str(source_manifest["portfolio"]["live_inception"])
+    )
+
+    def composite() -> dict[str, float]:
+        combined: dict[str, Decimal] = defaultdict(Decimal)
         for component in components:
             for symbol, weight in state[component].items():
-                composite[symbol] += weight / Decimal(len(components))
-        result[observed] = {
-            symbol: float(weight) for symbol, weight in composite.items()
-        }
+                combined[symbol] += weight * component_weights[component]
+        return {symbol: float(weight) for symbol, weight in combined.items()}
+
+    for observed in sorted(by_date):
+        if (
+            observed > live_inception
+            and live_inception not in result
+            and set(state) == set(components)
+        ):
+            result[live_inception] = composite()
+        for component, allocation in by_date[observed]:
+            state[component] = allocation
+        if set(state) != set(components) or observed < live_inception:
+            continue
+        result[observed] = composite()
+    if live_inception not in result and set(state) == set(components):
+        result[live_inception] = composite()
     return result
 
 
@@ -1658,17 +1750,66 @@ def _authoritative_nav_provider_ids(ledger: Mapping[str, Any]) -> set[str]:
     return result
 
 
+def _tt_broker_returns(
+    ledger: Mapping[str, Any], *, accepted_as_of: date
+) -> list[dict[str, Any]]:
+    bounded_nav = [
+        row
+        for row in ledger.get("nav_observations", [])
+        if isinstance(row, dict)
+        and date.fromisoformat(str(row.get("as_of_date") or "")) <= accepted_as_of
+    ]
+    accounts = {
+        (row.get("provider_id"), row.get("account_id"))
+        for row in bounded_nav
+        if row.get("strategy_id") == "tt-portfolio"
+        and row.get("mapping_status") == "MAPPED"
+    }
+    bounded_nav = [
+        row
+        for row in bounded_nav
+        if (row.get("provider_id"), row.get("account_id")) in accounts
+    ]
+    bounded_flows = [
+        row
+        for row in ledger.get("flows", [])
+        if isinstance(row, dict)
+        and (row.get("provider_id"), row.get("account_id")) in accounts
+        and date.fromisoformat(str(row.get("event_date") or "")) <= accepted_as_of
+    ]
+    providers = _authoritative_nav_provider_ids(ledger) & {
+        str(provider) for provider, _ in accounts
+    }
+    return [
+        row
+        for row in provider_ledger._broker_strategy_returns(
+            bounded_nav, bounded_flows, providers
+        )
+        if row.get("strategy_id") == "tt-portfolio"
+    ]
+
+
 def tt_attribution(
     *,
     workbook: Path,
+    source_manifest_path: Path,
     market_data: Sequence[Path],
     schwab: Mapping[str, Any],
     ledger: Mapping[str, Any],
     accepted_as_of: date,
 ) -> dict[str, Any]:
-    components = reconciliation._tt_components(workbook)
+    component_weights = reconciliation._tt_component_weights(workbook)
+    components = list(component_weights)
+    source_manifest = _read_tt_source_manifest(
+        source_manifest_path, components, component_weights
+    )
+    price_binding = source_manifest["price_tape"]["artifact"]
+    if len(market_data) != 1 or _sha256(market_data[0]) != price_binding:
+        raise ReturnAttributionError(
+            "TT adjusted price tape differs from the governed source manifest"
+        )
     snapshots = _tt_target_snapshots(
-        workbook, components, accepted_as_of=accepted_as_of
+        source_manifest, components, accepted_as_of=accepted_as_of
     )
     prices = _market_rows_many(market_data, accepted_as_of=accepted_as_of)
     model_events = _tt_weighted_events(snapshots, accepted_as_of=accepted_as_of)
@@ -1682,27 +1823,7 @@ def tt_attribution(
         evidence_layer="ACCOUNT_LIVE",
         accepted_as_of=accepted_as_of,
     )
-    bounded_nav = [
-        row
-        for row in ledger.get("nav_observations", [])
-        if isinstance(row, dict)
-        and date.fromisoformat(str(row.get("as_of_date") or "")) <= accepted_as_of
-    ]
-    bounded_flows = [
-        row
-        for row in ledger.get("flows", [])
-        if isinstance(row, dict)
-        and date.fromisoformat(str(row.get("event_date") or "")) <= accepted_as_of
-    ]
-    broker_rows = [
-        row
-        for row in provider_ledger._broker_strategy_returns(
-            bounded_nav,
-            bounded_flows,
-            _authoritative_nav_provider_ids(ledger),
-        )
-        if row.get("strategy_id") == "tt-portfolio"
-    ]
+    broker_rows = _tt_broker_returns(ledger, accepted_as_of=accepted_as_of)
     account_returns = reconciliation._returns(
         broker_rows,
         strategy_id="tt-portfolio",
@@ -1713,8 +1834,8 @@ def tt_attribution(
         raise ReturnAttributionError(
             "TT broker-authoritative account path is unavailable"
         )
-    model_returns = reconciliation._tt_model_returns(
-        workbook, components, accepted_as_of=accepted_as_of
+    model_returns = reconciliation._tt_manifest_model_returns(
+        source_manifest, components, accepted_as_of=accepted_as_of
     )
     exact_common = sorted(set(model_returns) & set(account_returns))
     eligible_start = [item for item in exact_common if item > target_boundary]
@@ -2028,6 +2149,10 @@ def tt_attribution(
             "difference_pp": (ideal_proxy - exact_model) * 100.0,
             "status": "INDEPENDENT_PUBLIC_PRICE_RECOMPUTATION",
         },
+        "model_source": {
+            "portfolio": source_manifest["portfolio"],
+            "source_manifest_id": source_manifest["source_manifest_id"],
+        },
         "retained_cash_events": cash_effect,
         "actual_position_proxy": {
             **holdings_evidence,
@@ -2064,11 +2189,15 @@ def build_attribution(
     grizzly_signals: Path,
     grizzly_market_data: Path,
     tt_workbook: Path,
+    tt_source_manifest: Path,
     tt_market_data: Sequence[Path],
     as_of_date: str,
 ) -> bytes:
     accepted_as_of = date.fromisoformat(as_of_date)
     ledger = _json(provider_ledger_root / "provider-ledger.json", "provider ledger")
+    provider_return_policy = reconciliation.p123_provider_return_policy(
+        provider_ledger_root, accepted_as_of=accepted_as_of
+    )
     schwab = _json(schwab_catalog, "Schwab catalog")
     ibkr_catalog_path = ibkr_generation_root / "ibkr-catalog.json"
     ibkr_catalog = _json(ibkr_catalog_path, "IBKR catalog")
@@ -2082,6 +2211,7 @@ def build_attribution(
             xml_paths=xml_paths,
             ledger=ledger,
             accepted_as_of=accepted_as_of,
+            provider_return_policy=provider_return_policy,
         ),
         grizzly_attribution(
             signals=grizzly_signals,
@@ -2092,6 +2222,7 @@ def build_attribution(
         ),
         tt_attribution(
             workbook=tt_workbook,
+            source_manifest_path=tt_source_manifest,
             market_data=tt_market_data,
             schwab=schwab,
             ledger=ledger,
@@ -2163,10 +2294,27 @@ def build_attribution(
             {**_sha256(grizzly_signals), "source_id": "grizzly-signals"},
             {**_sha256(grizzly_market_data), "source_id": "grizzly-market-data"},
             {**_sha256(tt_workbook), "source_id": "tt-workbook"},
+            {
+                **_sha256(tt_source_manifest),
+                "source_id": "turingtrader-source-manifest",
+            },
         ],
         "strategies": strategies,
         "verification": "VERIFIED_WITH_DECLARED_PARTIAL_CAUSAL_BOUNDARIES",
     }
+    if provider_return_policy is not None:
+        payload["source_artifacts"].extend(
+            [
+                {
+                    **_sha256(provider_ledger_root / "generation.json"),
+                    "source_id": "provider-ledger-manifest",
+                },
+                {
+                    **_sha256(provider_ledger_root / "admit-or-declare-receipt.json"),
+                    "source_id": "provider-admission-receipt",
+                },
+            ]
+        )
     payload["source_artifacts"].extend(
         {**_sha256(path), "source_id": "ibkr-activity-flex"} for path in xml_paths
     )
@@ -2190,6 +2338,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--grizzly-signals", type=Path, required=True)
     parser.add_argument("--grizzly-market-data", type=Path, required=True)
     parser.add_argument("--tt-workbook", type=Path, required=True)
+    parser.add_argument("--tt-source-manifest", type=Path, required=True)
     parser.add_argument("--tt-market-data", type=Path, action="append", required=True)
     parser.add_argument("--as-of-date", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -2208,6 +2357,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         grizzly_signals=args.grizzly_signals,
         grizzly_market_data=args.grizzly_market_data,
         tt_workbook=args.tt_workbook,
+        tt_source_manifest=args.tt_source_manifest,
         tt_market_data=args.tt_market_data,
         as_of_date=args.as_of_date,
     )

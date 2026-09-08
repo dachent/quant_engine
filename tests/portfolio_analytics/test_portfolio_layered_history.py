@@ -15,6 +15,7 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from jsonschema import Draft202012Validator
 
 from quant_engine.core.contracts import (
     AdapterIdentity,
@@ -1514,6 +1515,11 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         for row in contract["source_segments"]
         if row["source_id"] == "matrixport-account-generation"
     )
+    # This fixture supplies owner-account facts; partial-current fixtures below
+    # explicitly replace them with the canonical zero-admission disposition.
+    matrixport_source["admission"]["dataset_disposition_policy"][
+        "admitted_item_count"
+    ] = 1
     matrixport_source["declared_gap_policy"] = _matrixport_gap_policy(
         "2025-12-09",
         nav_path=matrix_nav,
@@ -1715,6 +1721,498 @@ def test_layered_history_immutable_generations_builds_without_current_pointers(
     )
     destination = write_layered_history_generation(
         tmp_path / "immutable-generation", artifacts, manifest_content
+    )
+    assert (
+        verify_layered_history_generation(destination, fixture["contract_path"])
+        == result
+    )
+
+
+def _matrixport_unadmitted_account_fixture(
+    tmp_path: Path, contradiction: str | None = None, *, missing_target: bool = False
+) -> dict[str, Any]:
+    """Retain native product returns with no admitted owner-account USD facts."""
+
+    fixture = _history_fixture(tmp_path)
+    catalog_path = fixture["provider_ledger_catalog_path"]
+    catalog = json.loads(catalog_path.read_bytes())
+    for row in catalog["strategy_returns"]:
+        if row["strategy_id"] == "robuxio-crypto":
+            row["provider_id"] = "matrixport"
+            row["evidence_layer"] = "PROVIDER_LIVE"
+    evidence = next(
+        row
+        for row in catalog["strategy_evidence"]
+        if row["strategy_id"] == "robuxio-crypto"
+    )
+    evidence["provider_id"] = "matrixport"
+    evidence["evidence_layer"] = "PROVIDER_LIVE"
+    evidence["provider"] = evidence.pop("account")
+    if missing_target:
+        catalog["strategy_returns"] = [
+            row
+            for row in catalog["strategy_returns"]
+            if row["strategy_id"] != "robuxio-crypto"
+        ]
+    for name in ("nav_observations", "flows", "capital_anchors"):
+        catalog[name] = []
+    catalog["admissions"] = [
+        {
+            "account_id": None,
+            "provider_id": "matrixport",
+            "strategy_id": "robuxio-crypto",
+            "fact_type": "strategy_returns",
+            "evidence_layer": "PROVIDER_LIVE",
+            "disposition": "RECONCILIATION_ONLY",
+        }
+    ]
+    if contradiction in {"nav_observations", "flows", "capital_anchors"}:
+        catalog[contradiction].append(
+            {
+                "account_id": "synthetic-matrixport-account",
+                "provider_id": "matrixport",
+                "strategy_id": "robuxio-crypto",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "mapping_status": "MAPPED",
+            }
+        )
+    elif contradiction == "admission":
+        catalog["admissions"].append(
+            {
+                "account_id": "synthetic-matrixport-account",
+                "provider_id": "matrixport",
+                "strategy_id": "robuxio-crypto",
+                "fact_type": "nav_observations",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "disposition": "AUTHORITATIVE",
+            }
+        )
+    elif contradiction == "account_return":
+        for row in catalog["strategy_returns"]:
+            if row["strategy_id"] == "robuxio-crypto":
+                row["evidence_layer"] = "ACCOUNT_LIVE"
+        evidence["evidence_layer"] = "ACCOUNT_LIVE"
+        evidence["account"] = evidence.pop("provider")
+    _write_json(catalog_path, catalog)
+    manifest_path = fixture["provider_ledger_manifest_path"]
+    _core_generation_manifest(
+        manifest_path,
+        "quant-engine-provider-ledger",
+        fixture["as_of_date"],
+        [_artifact(catalog_path, "normalized/provider-ledger.json")],
+    )
+    contract_path = fixture["contract_path"]
+    contract = json.loads(contract_path.read_bytes())
+    _update_source_generation(
+        contract, "owner-account-live-history", manifest_path, fixture["as_of_date"]
+    )
+    _update_correction_generations(
+        contract,
+        "owner-account-live-history",
+        manifest_path,
+        fixture["as_of_date"],
+        "PROVIDER_LEDGER",
+    )
+    _restore_retained_echo_correction(contract)
+    sources = {row["source_id"]: row for row in contract["source_segments"]}
+    matrixport = sources["matrixport-account-generation"]
+    disposition = matrixport["admission"]["dataset_disposition_policy"]
+    disposition["admitted_item_count"] = 1 if contradiction == "policy" else 0
+    disposition["exclusion_readiness_impact"] = "REQUIRED_NOT_READY"
+    for identity in contract["history_corrections"]["materialized_segment_identities"]:
+        if identity["source_id"] == "owner-account-live-history":
+            generation = sources[identity["source_id"]]["current_generation"]
+            identity["source_generation_id"] = generation["generation_id"]
+            identity["source_generation_sha256"] = generation["sha256"]
+    _refresh_live_implementation_identities(contract)
+    _write_json(contract_path, contract)
+    return fixture
+
+
+@pytest.mark.parametrize(
+    "contradiction",
+    [
+        None,
+        "nav_observations",
+        "flows",
+        "capital_anchors",
+        "admission",
+        "policy",
+        "account_return",
+    ],
+)
+def test_layered_history_retains_admitted_strategies_without_matrixport_account_usd(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+    contradiction: str | None,
+) -> None:
+    fixture = _matrixport_unadmitted_account_fixture(tmp_path, contradiction)
+    if contradiction is not None:
+        with pytest.raises(TargetSeriesError, match="Matrixport.*(account|admission)"):
+            _build_immutable(fixture)
+        return
+    artifacts, manifest_bytes = _build_immutable(fixture)
+    coverage = json.loads(artifacts["coverage.json"])
+    by_strategy = {row["strategy_id"]: row for row in coverage["strategies"]}
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(
+        (ROOT / "schemas/portfolio/layered-history-generation.schema.json").read_text()
+    )
+    Draft202012Validator(schema).validate(json.loads(manifest_bytes))
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        assert by_strategy["robuxio-crypto"]["modes"][mode] == {
+            "status": "REQUIRED_NOT_READY",
+            "reason": "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT",
+        }
+    assert coverage["epoch_hpr_receipts"] == []
+    assert (
+        coverage["correction_resolutions"]["robuxio-account-live-after-funding"][
+            "status"
+        ]
+        == "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT"
+    )
+    segments = list(csv.DictReader(io.StringIO(artifacts["segments.csv"].decode())))
+    assert {
+        row["strategy_id"]
+        for row in segments
+        if row["evidence_layer"] == "ACCOUNT_LIVE"
+    } == {
+        "p123-ai-factor",
+        "p123-eu",
+        "qsi",
+        "tt-portfolio",
+        "volatis-strategy",
+        "grizzlybears-vtma",
+    }
+    native = [row for row in segments if row["strategy_id"] == "robuxio-crypto"]
+    assert native and {row["evidence_layer"] for row in native} == {"PROVIDER_LIVE"}
+    assert {row["mode_admission"] for row in native} == {"EXCLUDE_COMPARISON_ONLY"}
+    destination = write_layered_history_generation(
+        tmp_path / "partial", artifacts, manifest_bytes
+    )
+    assert (
+        verify_layered_history_generation(destination, fixture["contract_path"])[
+            "verification"
+        ]
+        == "VALID"
+    )
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        with pytest.raises(
+            TargetSeriesError, match="required history mode is not ready"
+        ):
+            verify_layered_history_generation(
+                destination, fixture["contract_path"], require_mode=mode
+            )
+
+
+def test_layered_history_missing_matrixport_target_is_explicitly_not_ready(
+    tmp_path: Path, synthetic_history_authority: None
+) -> None:
+    fixture = _matrixport_unadmitted_account_fixture(tmp_path, missing_target=True)
+    artifacts, manifest_bytes = _build_immutable(fixture)
+    result = validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=manifest_bytes,
+        contract_path=fixture["contract_path"],
+    )
+    assert result["verification"] == "VALID"
+    coverage = json.loads(artifacts["coverage.json"])
+    robuxio = next(
+        row for row in coverage["strategies"] if row["strategy_id"] == "robuxio-crypto"
+    )
+    assert (
+        robuxio["modes"]["LIVE_ONLY"]["reason"]
+        == "REQUIRED_ACCOUNT_LIVE_SEGMENT_ABSENT"
+    )
+
+
+def test_layered_history_reader_rejects_complete_matrixport_history_under_zero_admission(
+    tmp_path: Path, synthetic_history_authority: None
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    artifacts, manifest_bytes = _build_immutable(fixture)
+    contract = json.loads(fixture["contract_path"].read_bytes())
+    matrixport = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "matrixport-account-generation"
+    )
+    matrixport["admission"]["dataset_disposition_policy"]["admitted_item_count"] = 0
+    _write_json(fixture["contract_path"], contract)
+    manifest = json.loads(manifest_bytes)
+    contract_bytes = fixture["contract_path"].read_bytes()
+    contract_sha = hashlib.sha256(contract_bytes).hexdigest()
+    contract_input = next(
+        row for row in manifest["inputs"] if row["input_id"] == "financial-mvp-contract"
+    )
+    contract_input["sha256"] = contract_sha
+    contract_input["size_bytes"] = len(contract_bytes)
+    manifest["product"]["contract_sha256"] = contract_sha
+    manifest.pop("generation_id")
+    manifest["generation_id"] = hashlib.sha256(
+        canonical_json_bytes(manifest)
+    ).hexdigest()
+    with pytest.raises(
+        TargetSeriesError, match="unadmitted Matrixport account history was emitted"
+    ):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=canonical_json_bytes(manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+
+@pytest.mark.parametrize(
+    "tamper", ["catalog_sha", "coherent_manifest", "other_return", "hpr", "available"]
+)
+def test_partial_matrixport_history_reader_rejects_forged_source_or_completion(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+    tamper: str,
+) -> None:
+    fixture = _matrixport_unadmitted_account_fixture(tmp_path)
+    artifacts, manifest_bytes = _build_immutable(fixture)
+    manifest = json.loads(manifest_bytes)
+    inputs = {row["input_id"]: row for row in manifest["inputs"]}
+    if tamper in {"catalog_sha", "coherent_manifest"}:
+        inputs["provider-ledger-catalog"]["sha256"] = "f" * 64
+        if tamper == "coherent_manifest":
+            source_manifest = json.loads(
+                manifest["source_manifests"]["provider-ledger"]
+            )
+            next(
+                row
+                for row in source_manifest["artifacts"]
+                if row["artifact_id"] == "normalized/provider-ledger.json"
+            )["sha256"] = "f" * 64
+            source_manifest.pop("generation_id")
+            source_manifest["generation_id"] = hashlib.sha256(
+                canonical_json_bytes(source_manifest)
+            ).hexdigest()
+            source_bytes = canonical_json_bytes(source_manifest)
+            manifest["source_manifests"]["provider-ledger"] = source_bytes.decode()
+            for key in ("provider-ledger-manifest", "provider-ledger-catalog"):
+                inputs[key]["generation_id"] = source_manifest["generation_id"]
+            inputs["provider-ledger-manifest"]["sha256"] = hashlib.sha256(
+                source_bytes
+            ).hexdigest()
+            inputs["provider-ledger-manifest"]["size_bytes"] = len(source_bytes)
+    elif tamper == "other_return":
+        rows = list(csv.DictReader(io.StringIO(artifacts["segments.csv"].decode())))
+        next(row for row in rows if row["strategy_id"] == "qsi")["return"] = "0.012345"
+        artifacts["segments.csv"] = target_series._segment_view_bytes(rows)
+    else:
+        coverage = json.loads(artifacts["coverage.json"])
+        if tamper == "hpr":
+            coverage["epoch_hpr_receipts"] = [{"strategy_id": "robuxio-crypto"}]
+        else:
+            row = next(
+                row
+                for row in coverage["strategies"]
+                if row["strategy_id"] == "robuxio-crypto"
+            )
+            row["modes"]["LIVE_ONLY"] = {"status": "AVAILABLE", "reason": None}
+        artifacts["coverage.json"] = canonical_json_bytes(coverage)
+    for name, content in artifacts.items():
+        manifest["outputs"][name]["sha256"] = hashlib.sha256(content).hexdigest()
+        manifest["outputs"][name]["size_bytes"] = len(content)
+    manifest.pop("generation_id")
+    manifest["generation_id"] = hashlib.sha256(
+        canonical_json_bytes(manifest)
+    ).hexdigest()
+    with pytest.raises(TargetSeriesError):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=canonical_json_bytes(manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+
+def _p123_two_vintage_fixture(tmp_path: Path) -> tuple[dict[str, Any], Path]:
+    fixture = _history_fixture(tmp_path)
+    historical_bytes = fixture["portfolio123_manifest_path"].read_bytes()
+    historical = json.loads(historical_bytes)
+    historical_id = historical["generation_id"]
+    generations = tmp_path / "p123-vintages" / "generations"
+    historical_root = generations / historical_id
+    historical_root.mkdir(parents=True)
+    historical_manifest = historical_root / "generation.json"
+    historical_manifest.write_bytes(historical_bytes)
+    tuple_inputs = (
+        ("metadata", "portfolio123-managed-metadata", "har_managed_metadata.parquet"),
+        (
+            "performance",
+            "portfolio123-managed-performance",
+            "har_managed_performance.parquet",
+        ),
+        ("equity", "portfolio123-equity-curve", "har_equity_curve.parquet"),
+    )
+    receipts = [
+        {
+            "artifact_role": "portfolio123-generation-manifest",
+            "artifact_selector": f"generations/{historical_id}/generation.json",
+            "authority_root": "PORTFOLIO123",
+            "generation_id": historical_id,
+            "locator_kind": "GENERATION_MANIFEST",
+            "manifest_artifact_id": None,
+            "sha256": hashlib.sha256(historical_bytes).hexdigest(),
+        }
+    ]
+    for key, role, filename in tuple_inputs:
+        path = historical_root / "tables" / filename
+        path.parent.mkdir(exist_ok=True)
+        path.write_bytes(fixture[f"portfolio123_{key}_path"].read_bytes())
+        fixture[f"portfolio123_{key}_path"] = path
+        receipts.append(
+            {
+                "artifact_role": role,
+                "artifact_selector": f"generations/{historical_id}/tables/{filename}",
+                "authority_root": "PORTFOLIO123",
+                "generation_id": historical_id,
+                "locator_kind": "GENERATION_ARTIFACT",
+                "manifest_artifact_id": f"tables/{filename}",
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            }
+        )
+    current_manifest = tmp_path / "current-p123-generation.json"
+    current_id = _core_generation_manifest(
+        current_manifest,
+        "quant-engine-portfolio123",
+        historical["as_of_date"],
+        [
+            item
+            for item in historical["artifacts"]
+            if item["artifact_id"]
+            in {"tables/returns_daily.parquet", "tables/strategy_relationships.parquet"}
+        ],
+    )
+    current_root = generations / current_id
+    current_root.mkdir()
+    (current_root / "generation.json").write_bytes(current_manifest.read_bytes())
+    fixture["portfolio123_manifest_path"] = current_root / "generation.json"
+    contract = json.loads(fixture["contract_path"].read_bytes())
+    source = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "portfolio123-model-generation"
+    )
+    source["current_generation"] = {
+        "as_of": historical["as_of_date"],
+        "generation_id": current_id,
+        "sha256": hashlib.sha256(current_manifest.read_bytes()).hexdigest(),
+    }
+    for segment in contract["history_corrections"]["materialized_segment_identities"]:
+        if segment["source_id"] == "portfolio123-model-generation":
+            segment["source_generation_id"] = current_id
+            segment["source_generation_sha256"] = hashlib.sha256(
+                current_manifest.read_bytes()
+            ).hexdigest()
+    correction = next(
+        row
+        for row in contract["history_corrections"]["corrections"]
+        if row["correction_id"] == "p123-eu-provider-live"
+    )
+    correction["source_receipts"] = receipts
+    _write_json(fixture["contract_path"], contract)
+    return fixture, historical_manifest
+
+
+@pytest.mark.parametrize(
+    "tamper", [None, "manifest", "metadata", "receipt", "readback"]
+)
+def test_layered_history_p123_two_vintages_remain_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    synthetic_history_authority: None,
+    tamper: str | None,
+) -> None:
+    monkeypatch.setattr(
+        target_series, "_require_trusted_layered_history_dependencies", lambda: None
+    )
+    fixture, historical_manifest = _p123_two_vintage_fixture(tmp_path)
+    if tamper == "manifest":
+        historical_manifest.write_bytes(historical_manifest.read_bytes() + b" ")
+    elif tamper == "metadata":
+        fixture["portfolio123_metadata_path"] = fixture["portfolio123_returns_path"]
+    elif tamper == "receipt":
+        contract = json.loads(fixture["contract_path"].read_bytes())
+        correction = next(
+            row
+            for row in contract["history_corrections"]["corrections"]
+            if row["correction_id"] == "p123-eu-provider-live"
+        )
+        correction["source_receipts"][1]["sha256"] = "f" * 64
+        _write_json(fixture["contract_path"], contract)
+    if tamper in {"manifest", "metadata", "receipt"}:
+        with pytest.raises(TargetSeriesError, match="Portfolio123.*history"):
+            _build_immutable(fixture)
+        return
+    artifacts, manifest_bytes = _build_immutable(fixture)
+    manifest = json.loads(manifest_bytes)
+    inputs = {row["input_id"]: row for row in manifest["inputs"]}
+    current_id = json.loads(fixture["portfolio123_manifest_path"].read_bytes())[
+        "generation_id"
+    ]
+    historical_id = json.loads(historical_manifest.read_bytes())["generation_id"]
+    assert current_id != historical_id
+    assert inputs["portfolio123-returns"]["generation_id"] == current_id
+    assert inputs["portfolio123-relationships"]["generation_id"] == current_id
+    for key in ("metadata", "performance", "equity"):
+        assert inputs[f"portfolio123-{key}"]["generation_id"] == historical_id
+    assert (
+        manifest["source_manifests"]["portfolio123-provider-history"]
+        == historical_manifest.read_text()
+    )
+    from jsonschema import Draft202012Validator, ValidationError
+
+    schema = json.loads(
+        (ROOT / "schemas/portfolio/layered-history-generation.schema.json").read_text()
+    )
+    Draft202012Validator(schema).validate(manifest)
+    if tamper is None:
+        pointers = {
+            key: fixture[f"{argument}_pointer_path"].read_text()
+            for key, argument in (
+                ("provider-ledger", "provider_ledger"),
+                ("matrixport", "matrixport"),
+                ("quantbase", "quantbase"),
+                ("portfolio123", "portfolio123"),
+            )
+        }
+        immutable_with_pointers = {**manifest, "source_pointers": pointers}
+        with pytest.raises(ValidationError):
+            Draft202012Validator(schema).validate(immutable_with_pointers)
+        for mode in ("CURRENT_POINTERS", None):
+            pointer_manifest = {**manifest, "source_pointers": pointers}
+            if mode is None:
+                pointer_manifest.pop("source_selection_mode")
+            else:
+                pointer_manifest["source_selection_mode"] = mode
+            Draft202012Validator(schema).validate(pointer_manifest)
+            pointer_manifest.pop("source_pointers")
+            with pytest.raises(ValidationError):
+                Draft202012Validator(schema).validate(pointer_manifest)
+    if tamper == "readback":
+        inputs["portfolio123-metadata"]["generation_id"] = current_id
+        manifest.pop("generation_id")
+        manifest["generation_id"] = hashlib.sha256(
+            canonical_json_bytes(manifest)
+        ).hexdigest()
+        with pytest.raises(TargetSeriesError, match="history.*(receipt|authority)"):
+            validate_layered_history_generation(
+                artifacts=artifacts,
+                manifest_content=canonical_json_bytes(manifest),
+                contract_path=fixture["contract_path"],
+            )
+        return
+    result = validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=manifest_bytes,
+        contract_path=fixture["contract_path"],
+    )
+    destination = write_layered_history_generation(
+        tmp_path / "two-vintage-history", artifacts, manifest_bytes
     )
     assert (
         verify_layered_history_generation(destination, fixture["contract_path"])
@@ -2290,6 +2788,432 @@ def _replace_output(
         manifest["outputs"][name]["row_count"] = max(
             content.decode("utf-8").count("\n") - 1, 0
         )
+
+
+def _matrixport_fx_fixture(
+    tmp_path: Path, *, convert_ledger: bool = True
+) -> dict[str, Any]:
+    fixture = _history_fixture(tmp_path)
+    fx_root = tmp_path / "fx"
+    rates_path = fx_root / "rates.csv"
+    rates = {
+        date(2025, 12, day): Decimal("0.98") + Decimal(day) / Decimal("1000")
+        for day in range(1, 12)
+    }
+    _write_csv(
+        rates_path,
+        [
+            "date",
+            "currency",
+            "base_currency",
+            "rate",
+            "provider",
+            "ticker",
+            "field",
+            "timing",
+        ],
+        [
+            {
+                "date": day.isoformat(),
+                "currency": currency,
+                "base_currency": "USD",
+                "rate": str(rate if currency == "USDT" else Decimal("1.0001")),
+                "provider": "yahoo",
+                "ticker": f"{currency}-USD",
+                "field": "Close",
+                "timing": "UTC_DAILY_CLOSE",
+            }
+            for currency in ("USDC", "USDT")
+            for day, rate in rates.items()
+        ],
+    )
+    rates_bytes = rates_path.read_bytes()
+    fx_manifest = GenerationManifest.build(
+        as_of_date=date(2025, 12, 11),
+        adapter=AdapterIdentity("agent-market-data-terminal-yfinance", "1"),
+        coverage=CoverageClaim.from_dict(
+            {
+                "boundary": "synthetic USD daily close proof",
+                "fact_types": ["FX_RATE"],
+                "known_gaps": [],
+                "observed_start": "2025-12-01",
+                "observed_end": "2025-12-11",
+                "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+            }
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="rates.csv",
+                sha256=hashlib.sha256(rates_bytes).hexdigest(),
+                size_bytes=len(rates_bytes),
+                as_of_date=date(2025, 12, 11),
+                schema_name="portfolio-fx-daily-close-rates",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    fx_manifest_path = fx_root / "generation.json"
+    fx_manifest_path.write_bytes(fx_manifest.to_json_bytes())
+    fixture["portfolio_fx_rates_manifest_path"] = fx_manifest_path
+
+    catalog_path = fixture["provider_ledger_catalog_path"]
+    catalog = json.loads(catalog_path.read_bytes())
+    if convert_ledger:
+        with localcontext() as context:
+            context.prec = 50
+            for row in catalog["strategy_returns"]:
+                if row["strategy_id"] != "robuxio-crypto" or row["date"] not in {
+                    "2025-12-07",
+                    "2025-12-08",
+                    "2025-12-11",
+                }:
+                    continue
+                day = date.fromisoformat(row["date"])
+                previous = day - timedelta(days=1)
+                prior_usd_nav = Decimal(100 + previous.day - 1) * rates[previous]
+                usd_nav = Decimal(100 + day.day - 1) * rates[day]
+                row["return"] = format(usd_nav / prior_usd_nav - Decimal(1), "f")
+    _write_json(catalog_path, catalog)
+    ledger_manifest_path = fixture["provider_ledger_manifest_path"]
+    fx_identity = _artifact(fx_manifest_path, "portfolio/fx-rates/generation.json")
+    fx_identity["schema"] = {"name": "generation-manifest", "version": "1"}
+    fx_identity["as_of_date"] = "2025-12-11"
+    ledger_generation_id = _core_generation_manifest(
+        ledger_manifest_path,
+        "quant-engine-provider-ledger",
+        fixture["as_of_date"],
+        [_artifact(catalog_path, "normalized/provider-ledger.json"), fx_identity],
+    )
+    _pointer(
+        fixture["provider_ledger_pointer_path"],
+        ledger_generation_id,
+        ledger_manifest_path,
+    )
+    contract_path = fixture["contract_path"]
+    contract = json.loads(contract_path.read_bytes())
+    _update_source_generation(
+        contract,
+        "owner-account-live-history",
+        ledger_manifest_path,
+        fixture["as_of_date"],
+    )
+    _update_correction_generations(
+        contract,
+        "owner-account-live-history",
+        ledger_manifest_path,
+        fixture["as_of_date"],
+        "PROVIDER_LEDGER",
+    )
+    _restore_retained_echo_correction(contract)
+    _write_json(contract_path, contract)
+    _refresh_materialized_segment_identities(fixture)
+    return fixture
+
+
+def _matrixport_truncated_projection_fixture(tmp_path: Path) -> dict[str, Any]:
+    """Retain complete USD account facts under an older return projection."""
+
+    fixture = _matrixport_fx_fixture(tmp_path)
+    catalog_path = fixture["provider_ledger_catalog_path"]
+    catalog = json.loads(catalog_path.read_bytes())
+    catalog["nav_observations"] = [
+        {
+            "provider_id": "matrixport",
+            "account_id": "synthetic-matrixport-account",
+            "strategy_id": "robuxio-crypto",
+            "mapping_status": "MAPPED",
+            "as_of_date": f"2025-12-{day:02d}",
+            "record_id": f"synthetic-nav-{day}",
+            "nav": str(
+                Decimal(100 + day - 1)
+                * (Decimal("0.98") + Decimal(day) / Decimal("1000"))
+            ),
+        }
+        for day in (6, 7, 8, 10, 11)
+    ]
+    catalog["flows"] = []
+    catalog["capital_anchors"] = []
+    catalog["strategy_returns"] = [
+        row
+        for row in catalog["strategy_returns"]
+        if row["strategy_id"] != "robuxio-crypto" or row["date"] <= "2025-12-08"
+    ]
+    account_evidence = next(
+        row["account"]
+        for row in catalog["strategy_evidence"]
+        if row["strategy_id"] == "robuxio-crypto"
+    )
+    account_evidence.update(observed_end="2025-12-08", return_observations=2)
+    _write_json(catalog_path, catalog)
+    return fixture
+
+
+def _rebind_matrixport_catalog(fixture: dict[str, Any]) -> None:
+    catalog_path = fixture["provider_ledger_catalog_path"]
+    ledger_manifest_path = fixture["provider_ledger_manifest_path"]
+    prior_manifest = json.loads(ledger_manifest_path.read_bytes())
+    retained_artifacts = [
+        row
+        for row in prior_manifest["artifacts"]
+        if row["artifact_id"] != "normalized/provider-ledger.json"
+    ]
+    generation_id = _core_generation_manifest(
+        ledger_manifest_path,
+        "quant-engine-provider-ledger",
+        fixture["as_of_date"],
+        [
+            _artifact(catalog_path, "normalized/provider-ledger.json"),
+            *retained_artifacts,
+        ],
+    )
+    _pointer(
+        fixture["provider_ledger_pointer_path"], generation_id, ledger_manifest_path
+    )
+    contract = json.loads(fixture["contract_path"].read_bytes())
+    _update_source_generation(
+        contract,
+        "owner-account-live-history",
+        ledger_manifest_path,
+        fixture["as_of_date"],
+    )
+    _update_correction_generations(
+        contract,
+        "owner-account-live-history",
+        ledger_manifest_path,
+        fixture["as_of_date"],
+        "PROVIDER_LEDGER",
+    )
+    _restore_retained_echo_correction(contract)
+    _write_json(fixture["contract_path"], contract)
+
+
+def test_matrixport_expands_stale_projection_from_retained_account_facts(
+    tmp_path: Path, synthetic_history_authority: None
+) -> None:
+    fixture = _matrixport_truncated_projection_fixture(tmp_path)
+    catalog = json.loads(fixture["provider_ledger_catalog_path"].read_bytes())
+    retained = {
+        row["date"]: row["return"]
+        for row in catalog["strategy_returns"]
+        if row["strategy_id"] == "robuxio-crypto"
+    }
+    _rebind_matrixport_catalog(fixture)
+    _refresh_materialized_segment_identities(fixture)
+    artifacts, manifest = _build(fixture)
+    selected = {
+        row["date"]: row["return"]
+        for row in csv.DictReader(io.StringIO(artifacts["segments.csv"].decode()))
+        if row["strategy_id"] == "robuxio-crypto"
+        and row["evidence_layer"] == "ACCOUNT_LIVE"
+    }
+    assert set(selected) == {"2025-12-07", "2025-12-08", "2025-12-11"}
+    assert {day: selected[day] for day in retained} == retained
+    with localcontext() as context:
+        context.prec = 28
+        expected = Decimal("109.010") / Decimal("107.910") - 1
+    assert Decimal(selected["2025-12-11"]) == expected
+    validate_layered_history_generation(
+        artifacts=artifacts,
+        manifest_content=manifest,
+        contract_path=fixture["contract_path"],
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation", ["missing_nav", "missing_flows", "changed_overlap"]
+)
+def test_matrixport_projection_expansion_rejects_unproven_account_facts(
+    tmp_path: Path, synthetic_history_authority: None, mutation: str
+) -> None:
+    fixture = _matrixport_truncated_projection_fixture(tmp_path)
+    catalog_path = fixture["provider_ledger_catalog_path"]
+    catalog = json.loads(catalog_path.read_bytes())
+    if mutation == "missing_nav":
+        catalog["nav_observations"] = catalog["nav_observations"][:-1]
+    elif mutation == "missing_flows":
+        del catalog["flows"]
+    else:
+        next(
+            row
+            for row in catalog["strategy_returns"]
+            if row["strategy_id"] == "robuxio-crypto"
+        )["return"] = "0.25"
+    _write_json(catalog_path, catalog)
+    _rebind_matrixport_catalog(fixture)
+    with pytest.raises(TargetSeriesError, match="Matrixport.*(missing|differs)"):
+        _build(fixture)
+
+
+def test_matrixport_usd_history_replays_daily_and_gap_conversion_offline(
+    tmp_path: Path, synthetic_history_authority: None
+) -> None:
+    fixture = _matrixport_fx_fixture(tmp_path)
+    artifacts, manifest_content = _build(fixture)
+    schema = json.loads(
+        (ROOT / "schemas/portfolio/layered-history-generation.schema.json").read_bytes()
+    )
+    Draft202012Validator(schema).validate(json.loads(manifest_content))
+    coverage = json.loads(artifacts["coverage.json"])
+    resolution = coverage["correction_resolutions"][
+        "robuxio-account-live-after-funding"
+    ]
+    proof = resolution["currency_conversion"]
+    native_policy = resolution["source_gap_policy"]
+    source = next(
+        row
+        for row in json.loads(fixture["contract_path"].read_bytes())["source_segments"]
+        if row["source_id"] == "matrixport-account-generation"
+    )
+    assert native_policy == source["declared_gap_policy"]
+    assert (
+        proof["native_nav_csv"].encode("utf-8")
+        == fixture["matrixport_nav_path"].read_bytes()
+    )
+    assert (
+        proof["rates_csv"].encode("utf-8")
+        == (
+            fixture["portfolio_fx_rates_manifest_path"].parent / "rates.csv"
+        ).read_bytes()
+    )
+    receipt = coverage["epoch_hpr_receipts"][0]["receipt"]
+    assert "currency_conversion" not in receipt
+    assert receipt["daily_return_observations"] == 3
+    assert receipt["epoch_holding_period_link_observations"] == 4
+    native_span = native_policy["span_return_receipts"][0]
+    usd_span = receipt["span_return_receipts"][0]
+    assert {key: value for key, value in usd_span.items() if key != "return"} == {
+        key: value for key, value in native_span.items() if key != "return"
+    }
+    with localcontext() as context:
+        context.prec = 50
+        expected_span = (Decimal(1) + Decimal(native_span["return"])) * Decimal(
+            "0.990"
+        ) / Decimal("0.988") - Decimal(1)
+    assert Decimal(usd_span["return"]) == expected_span
+    assert usd_span["return"] != native_span["return"]
+    rows = list(csv.DictReader(io.StringIO(artifacts["live-only.csv"].decode("utf-8"))))
+    assert len({row["series_id"] for row in rows}) == 7
+    robuxio = [row for row in rows if "Robuxio" in row["series_id"]]
+    assert [row["date"] for row in robuxio] == [
+        "2025-12-07",
+        "2025-12-08",
+        "2025-12-11",
+    ]
+    with localcontext() as context:
+        context.prec = 28
+        native_first = Decimal(106) / Decimal(105) - Decimal(1)
+    assert Decimal(robuxio[0]["return"]) != native_first
+
+    generation = write_layered_history_generation(
+        tmp_path / "verified-fx", artifacts, manifest_content
+    )
+    fixture["matrixport_nav_path"].unlink()
+    (fixture["portfolio_fx_rates_manifest_path"].parent / "rates.csv").unlink()
+    fixture["portfolio_fx_rates_manifest_path"].unlink()
+    verified = verify_layered_history_generation(generation, fixture["contract_path"])
+    assert verified["verification"] == "VALID"
+
+
+@pytest.mark.parametrize("field", ["rates_csv", "native_nav_csv"])
+def test_matrixport_usd_history_rejects_rehashed_source_preimage_tampering(
+    tmp_path: Path, synthetic_history_authority: None, field: str
+) -> None:
+    fixture = _matrixport_fx_fixture(tmp_path)
+    artifacts, manifest_content = _build(fixture)
+    manifest = json.loads(manifest_content)
+    coverage = json.loads(artifacts["coverage.json"])
+    proof = coverage["correction_resolutions"]["robuxio-account-live-after-funding"][
+        "currency_conversion"
+    ]
+    proof[field] += "\n"
+    _replace_output(
+        artifacts, manifest, "coverage.json", canonical_json_bytes(coverage)
+    )
+    with pytest.raises(TargetSeriesError, match="FX.*identity|native NAV.*identity"):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+
+def test_matrixport_usd_history_keeps_same_basis_reconciliation_required(
+    tmp_path: Path, synthetic_history_authority: None
+) -> None:
+    with pytest.raises(TargetSeriesError, match="account-live return differs"):
+        _matrixport_fx_fixture(tmp_path, convert_ledger=False)
+
+
+def test_matrixport_usd_history_rejects_substituted_fx_manifest_even_when_rehashed(
+    tmp_path: Path, synthetic_history_authority: None
+) -> None:
+    fixture = _matrixport_fx_fixture(tmp_path)
+    artifacts, manifest_content = _build(fixture)
+    manifest = json.loads(manifest_content)
+    prior = GenerationManifest.from_json_bytes(
+        manifest["source_manifests"]["portfolio-fx-rates"].encode("utf-8")
+    )
+    replacement = GenerationManifest.build(
+        as_of_date=prior.as_of_date,
+        adapter=prior.adapter,
+        coverage=CoverageClaim.from_dict(
+            {**prior.coverage.to_dict(), "boundary": "substituted FX generation"}
+        ),
+        artifacts=prior.artifacts,
+        verification=prior.verification,
+    )
+    replacement_bytes = replacement.to_json_bytes()
+    manifest["source_manifests"]["portfolio-fx-rates"] = replacement_bytes.decode(
+        "utf-8"
+    )
+    for item in manifest["inputs"]:
+        if item["input_id"] in {"portfolio-fx-rates-manifest", "portfolio-fx-rates"}:
+            item["generation_id"] = replacement.generation_id
+        if item["input_id"] == "portfolio-fx-rates-manifest":
+            item["sha256"] = hashlib.sha256(replacement_bytes).hexdigest()
+            item["size_bytes"] = len(replacement_bytes)
+    with pytest.raises(
+        TargetSeriesError, match="FX manifest identity differs from provider ledger"
+    ):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+
+def test_matrixport_usd_history_rejects_native_gap_return_in_usd_receipt(
+    tmp_path: Path, synthetic_history_authority: None
+) -> None:
+    fixture = _matrixport_fx_fixture(tmp_path)
+    artifacts, manifest_content = _build(fixture)
+    manifest = json.loads(manifest_content)
+    coverage = json.loads(artifacts["coverage.json"])
+    native_span = coverage["correction_resolutions"][
+        "robuxio-account-live-after-funding"
+    ]["source_gap_policy"]["span_return_receipts"][0]
+    coverage["epoch_hpr_receipts"][0]["receipt"]["span_return_receipts"][0][
+        "return"
+    ] = native_span["return"]
+    _replace_output(
+        artifacts, manifest, "coverage.json", canonical_json_bytes(coverage)
+    )
+    with pytest.raises(TargetSeriesError, match="epoch HPR receipt differs"):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+
+def test_matrixport_usd_history_requires_selected_fx_input(
+    tmp_path: Path, synthetic_history_authority: None
+) -> None:
+    fixture = _matrixport_fx_fixture(tmp_path)
+    fixture.pop("portfolio_fx_rates_manifest_path")
+    with pytest.raises(TargetSeriesError, match="selected FX manifest input differs"):
+        _build(fixture)
 
 
 def test_layered_history_code_identity_ignores_inherited_git_selection(
@@ -3359,16 +4283,22 @@ def test_layered_history_verification_applies_assurance_profile_after_validation
         "status": "CURRENT_RELEASE_RECEIPT",
     }
 
-    with pytest.raises(
-        TargetSeriesError,
-        match="release QC requires a layered history receipt for the evaluation date",
-    ):
-        verify_layered_history_generation(
-            destination,
-            fixture["contract_path"],
-            assurance_profile="RELEASE_QC",
-            evaluated_on=receipt_as_of + timedelta(days=1),
-        )
+    older = verify_layered_history_generation(
+        destination,
+        fixture["contract_path"],
+        assurance_profile="RELEASE_QC",
+        evaluated_on=receipt_as_of + timedelta(days=1),
+    )
+    assert older["assurance"] == {
+        "evaluated_on": (receipt_as_of + timedelta(days=1)).isoformat(),
+        "profile": "RELEASE_QC",
+        "profile_policy": (
+            "CURRENT_RELEASE_RECEIPTS_REQUIRED_WITH_CALCULATION_AGE_DISCLOSED"
+        ),
+        "receipt_age_days": 1,
+        "receipt_as_of": receipt_as_of.isoformat(),
+        "status": "WARN_VERIFIED_IMMUTABLE_RECEIPT_REUSE",
+    }
     with pytest.raises(
         TargetSeriesError,
         match="receipt exceeds the assurance evaluation date",
@@ -4802,6 +5732,67 @@ def test_layered_history_rejects_relabel_and_admitted_overlap(
         )
 
 
+def test_materialized_backtests_bind_each_actual_source_generation() -> None:
+    """Portfolio123 and external history may coexist with distinct receipts."""
+
+    common = {
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "date": "2024-01-02",
+        "evidence_layer": "BACKTEST",
+        "frequency": "DAILY",
+        "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+        "return": "0.01",
+        "return_basis": "MODEL",
+        "return_type": "TOTAL",
+    }
+    rows = [
+        {
+            **common,
+            "segment_id": "p123-ai-factor:backtest",
+            "series_id": "AI Factor [P123]",
+            "source_generation_id": "1" * 64,
+            "source_id": "portfolio123-model-generation",
+            "strategy_id": "p123-ai-factor",
+            "strategy_version": "ai:v1",
+        },
+        {
+            **common,
+            "segment_id": "qsi:backtest",
+            "series_id": "QSI",
+            "source_generation_id": "2" * 64,
+            "source_id": "strategy-backtests",
+            "strategy_id": "qsi",
+            "strategy_version": "qsi:v1",
+        },
+    ]
+    sources = {
+        "portfolio123-model-generation": {
+            "current_generation": {"generation_id": "1" * 64, "sha256": "a" * 64}
+        },
+        "strategy-backtests": {
+            "current_generation": {"generation_id": "2" * 64, "sha256": "b" * 64}
+        },
+    }
+
+    identities = target_series._materialized_segment_identities(rows, sources)
+    assert {
+        (row["segment_id"], row["source_id"], row["source_generation_id"])
+        for row in identities
+    } == {
+        (
+            "p123-ai-factor:backtest",
+            "portfolio123-model-generation",
+            "1" * 64,
+        ),
+        ("qsi:backtest", "strategy-backtests", "2" * 64),
+    }
+
+    forged = [dict(row) for row in rows]
+    forged[0]["source_generation_id"] = "3" * 64
+    with pytest.raises(TargetSeriesError, match="source receipt differs"):
+        target_series._materialized_segment_identities(forged, sources)
+
+
 def test_layered_history_cli_builds_verifies_and_requires_modes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4913,11 +5904,18 @@ def test_layered_history_cli_builds_verifies_and_requires_modes(
             "2026-01-11",
         ],
     )
-    assert target_series.main() == 2
-    assert (
-        "release QC requires a layered history receipt for the evaluation date"
-        in capsys.readouterr().err
-    )
+    assert target_series.main() == 0
+    release_result = json.loads(capsys.readouterr().out)
+    assert release_result["assurance"] == {
+        "evaluated_on": "2026-01-11",
+        "profile": "RELEASE_QC",
+        "profile_policy": (
+            "CURRENT_RELEASE_RECEIPTS_REQUIRED_WITH_CALCULATION_AGE_DISCLOSED"
+        ),
+        "receipt_age_days": 1,
+        "receipt_as_of": "2026-01-10",
+        "status": "WARN_VERIFIED_IMMUTABLE_RECEIPT_REUSE",
+    }
 
     monkeypatch.setattr(
         sys,

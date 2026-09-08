@@ -14473,7 +14473,7 @@ def test_c4d1a_core_contract_objects_are_identical_and_pinned(
         ),
         "quant_engine.core.contracts": (
             "packages/core/src/quant_engine/core/contracts.py",
-            "82d64873d6e74c53b3421fd9aad0dc09b551a3c9ea5219fb33fa6121e144009f",
+            "38bcfa8593a1c168674cd94e6f2b22f21b98748ecc178343e0f8726940ae0ac5",
         ),
         "quant_engine.core.strict_json": (
             "packages/core/src/quant_engine/core/strict_json.py",
@@ -14858,7 +14858,7 @@ def _c4d1b_parent_core_table() -> tuple[dict[str, object], set[bytes]]:
 
     expected_pins = {
         "quant_engine.core.snapshots": "ba9e0ee78c84a0c3ec38cab2e778284bcf02335c5958266f0823a04072e4e653",
-        "quant_engine.core.contracts": "82d64873d6e74c53b3421fd9aad0dc09b551a3c9ea5219fb33fa6121e144009f",
+        "quant_engine.core.contracts": "38bcfa8593a1c168674cd94e6f2b22f21b98748ecc178343e0f8726940ae0ac5",
         "quant_engine.core.strict_json": "9f86b89862fd6510f607a25d2ec88e1ab5577614d36fe42ca1234c41f547f1e1",
     }
     modules = {
@@ -22432,8 +22432,6 @@ def test_gate1_selected_assignment_key_mutations_cannot_emit_a_candidate(
 ) -> None:
     """The generic consumer accepts only the exact crosswalk-derived key set."""
 
-    from tools import account_strategy_manifest
-
     selected = _mixed_crosswalk_selected_inputs(perimeter_module)
     selected_rows, _ = perimeter_module._c3_mapped_assignments(selected)
     keys = [
@@ -22468,11 +22466,20 @@ def test_gate1_selected_assignment_key_mutations_cannot_emit_a_candidate(
     monkeypatch.setattr(
         perimeter_module, "ManifestCandidateSnapshots", forged_candidate
     )
+    # Other test modules can replace the imported module. Match the exception
+    # class used by this producer's captured builder and coverage validator.
+    captured_builder = perimeter_module.build_manifest_candidate_from_snapshots
+    manifest_error = captured_builder.__globals__["ManifestError"]
     with pytest.raises(
         (
-            account_strategy_manifest.ManifestError,
+            manifest_error,
             perimeter_module.AccountAssignmentPerimeterError,
-        )
+        ),
+        match=(
+            "^selected_assignment_keys differ from baseline mapped assignments$"
+            if mutation == "unknown"
+            else "^flow coverage mapped assignment identity differs$"
+        ),
     ):
         perimeter_module.build_account_manifest_payloads(selected)
 
@@ -24496,7 +24503,7 @@ def test_mixed_admitted_projection_ignores_foreign_currency_blocked_evidence(
             "account_id": "synthetic-account-02",
             "event_date": "2026-01-31",
             "flow_type": "UNRESOLVED_BLOCKED_ACCOUNT",
-            "amount": {"currency": "EUR", "status": "AVAILABLE", "value": "5"},
+            "amount": {"currency": "USDC", "status": "AVAILABLE", "value": "5"},
         }
     )
     selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
@@ -24516,7 +24523,7 @@ def test_mixed_admitted_projection_ignores_foreign_currency_blocked_evidence(
         event for event in classified if event["source_record_id"] == "blocked-eur-flow"
     )
     assert blocked_flow["amount"] == {
-        "currency": "EUR",
+        "currency": "USDC",
         "status": "AVAILABLE",
         "value": "5",
     }
@@ -24570,6 +24577,110 @@ def _mixed_internal_selected(
         }
     )
     return _mixed_selected_with_ledger(perimeter_module, selected, ledger, policy)
+
+
+def _mixed_source_identity_pairs_selected(perimeter_module: Any) -> object:
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    generation_id = "c" * 64
+    flows = [
+        {
+            "record_id": "identity-pair-a-in",
+            "account_id": "synthetic-account-01",
+            "event_date": "2026-01-31",
+            "nav_recognition_date": "2026-01-31",
+            "flow_type": "ACCOUNT_TRANSFER",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "10"},
+            "provider_id": "synthetic",
+            "generation_id": generation_id,
+            "provider_activity_id_sha256": "a" * 64,
+        },
+        {
+            "record_id": "identity-pair-a-out",
+            "account_id": "synthetic-account-02",
+            "event_date": "2026-01-31",
+            "nav_recognition_date": "2026-01-31",
+            "flow_type": "ACCOUNT_TRANSFER",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-10"},
+            "provider_id": "synthetic",
+            "generation_id": generation_id,
+            "provider_activity_id_sha256": "a" * 64,
+        },
+        {
+            "record_id": "identity-pair-b-in",
+            "account_id": "synthetic-account-03",
+            "event_date": "2026-01-31",
+            "nav_recognition_date": "2026-01-31",
+            "flow_type": "ACCOUNT_TRANSFER",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "10"},
+            "provider_id": "synthetic",
+            "generation_id": generation_id,
+            "provider_activity_id_sha256": "b" * 64,
+        },
+        {
+            "record_id": "identity-pair-b-out",
+            "account_id": "synthetic-account-04",
+            "event_date": "2026-01-31",
+            "nav_recognition_date": "2026-01-31",
+            "flow_type": "ACCOUNT_TRANSFER",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-10"},
+            "provider_id": "synthetic",
+            "generation_id": generation_id,
+            "provider_activity_id_sha256": "b" * 64,
+        },
+    ]
+    ledger["flows"] = flows
+    policy = selected.flow_classification_policy.json_object()
+    policy["as_of_date"] = "2026-09-06"
+    policy["policy_version"] = "2"
+    policy["event_dispositions"]["exact"].append(
+        {
+            "flow_type": "ACCOUNT_TRANSFER",
+            "disposition": "INTERNAL",
+            "amount_sign": "NONZERO",
+            "counterparty_rule": (
+                "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT_WITH_SOURCE_IDENTITY_V1"
+            ),
+        }
+    )
+    return _mixed_selected_with_ledger(perimeter_module, selected, ledger, policy)
+
+
+def test_source_identity_pairs_flow_through_producer_and_independent_verifier(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    selected = _mixed_source_identity_pairs_selected(perimeter_module)
+
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+
+    classified = json.loads(payloads["authority/classified-flows.json"])
+    events = {row["source_record_id"]: row for row in classified["events"]}
+    assert {
+        record_id: events[record_id]["counterparty_source_record_id"]
+        for record_id in events
+    } == {
+        "identity-pair-a-in": "identity-pair-a-out",
+        "identity-pair-a-out": "identity-pair-a-in",
+        "identity-pair-b-in": "identity-pair-b-out",
+        "identity-pair-b-out": "identity-pair-b-in",
+    }
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    retained_flows = calculation["calculation_ledger"]["flows"]
+    assert {
+        (
+            row["provider_id"],
+            row["generation_id"],
+            row["provider_activity_id_sha256"],
+        )
+        for row in retained_flows
+    } == {("synthetic", "c" * 64, "a" * 64)}
+
+    report = json.loads(
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), payloads
+        )
+    )
+    assert report["status"] == "VERIFIED"
 
 
 @pytest.mark.parametrize("selected_edge", ("unresolved", "unavailable"))
@@ -24740,6 +24851,118 @@ def test_legacy_blocked_manifest_still_rejects_mixed_available_currency(
         perimeter_module.build_blocked_account_manifest_payloads(invalid)
 
 
+def _mixed_with_flow_scope(
+    perimeter_module: Any,
+    *,
+    provider_account_scope: str,
+    mapping_status: str = "UNMAPPED",
+    strategy_id: str | None = None,
+) -> object:
+    """Bind the mixed flow to an explicit provider account/mapping scope."""
+
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["flows"][0].update(
+        {
+            "provider_account_scope": provider_account_scope,
+            "mapping_status": mapping_status,
+            "strategy_id": strategy_id,
+        }
+    )
+    return _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+
+def test_account_only_unmapped_flow_remains_evidence_but_not_fund_return_capital(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """Wallet cash stays observed without entering the mapped strategy epoch."""
+
+    selected = _mixed_with_flow_scope(
+        perimeter_module, provider_account_scope="ACCOUNT_ONLY"
+    )
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    source_flow = selected.provider_ledger.json_object()["flows"][0]
+    assert {
+        key: source_flow[key]
+        for key in ("provider_account_scope", "mapping_status", "strategy_id")
+    } == {
+        "provider_account_scope": "ACCOUNT_ONLY",
+        "mapping_status": "UNMAPPED",
+        "strategy_id": None,
+    }
+
+    outer = json.loads(payloads["authority/classified-flows.json"])
+    assert {event["source_record_id"] for event in outer["events"]} == {"mixed-flow-1"}
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    assert calculation["calculation_ledger"]["flows"] == []
+    assert calculation["calculation_classified_flows"]["events"] == []
+    assert all(
+        row["classified_flows"] == []
+        for row in calculation["rows"]
+        if row["epoch"]["account_id"] == "synthetic-account-01"
+    )
+
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(item for item in output["rows"] if item["status"] == "OK")
+    assert {
+        key: row[key]
+        for key in (
+            "opening_capital",
+            "deposits",
+            "invested",
+            "net_capital",
+            "current_value",
+            "gain",
+        )
+    } == {
+        "opening_capital": "50",
+        "deposits": "0",
+        "invested": "50",
+        "net_capital": "50",
+        "current_value": "70",
+        "gain": "20",
+    }
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+
+def test_unmapped_statement_account_flow_remains_fund_return_capital(
+    perimeter_module: Any, verifier_module: Any
+) -> None:
+    """UNMAPPED alone does not discard statement-account cash evidence."""
+
+    selected = _mixed_with_flow_scope(
+        perimeter_module, provider_account_scope="STATEMENT_ACCOUNT"
+    )
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+    flow = calculation["calculation_ledger"]["flows"][0]
+    assert {
+        key: flow[key]
+        for key in ("provider_account_scope", "mapping_status", "strategy_id")
+    } == {
+        "provider_account_scope": "STATEMENT_ACCOUNT",
+        "mapping_status": "UNMAPPED",
+        "strategy_id": None,
+    }
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    row = next(item for item in output["rows"] if item["status"] == "OK")
+    assert {
+        key: row[key]
+        for key in ("deposits", "invested", "net_capital", "current_value", "gain")
+    } == {
+        "deposits": "10",
+        "invested": "60",
+        "net_capital": "60",
+        "current_value": "70",
+        "gain": "10",
+    }
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+
 def test_mixed_admitted_projection_rejects_duplicate_global_raw_record_id(
     perimeter_module: Any, verifier_module: Any
 ) -> None:
@@ -24784,6 +25007,72 @@ def _refresh_mixed_calculation_projection_lineage(
     classified_artifact["sha256"] = hashlib.sha256(classified_bytes).hexdigest()
     classified_artifact["size_bytes"] = len(classified_bytes)
     calculation["calculation_flow_coverage"]["ledger_identity"] = ledger_identity
+
+
+@pytest.mark.parametrize("mutation", ("reinsert_wallet_flow", "tamper_retained_scope"))
+def test_wallet_flow_projection_mutation_is_independently_rejected(
+    perimeter_module: Any,
+    verifier_module: Any,
+    mutation: str,
+) -> None:
+    """Rebound hashes cannot admit wallet cash or alter retained flow scope."""
+
+    source_scope = (
+        "ACCOUNT_ONLY" if mutation == "reinsert_wallet_flow" else ("STATEMENT_ACCOUNT")
+    )
+    selected = _mixed_with_flow_scope(
+        perimeter_module, provider_account_scope=source_scope
+    )
+    payloads = dict(perimeter_module.build_account_manifest_payloads(selected))
+    verifier_inputs = _mixed_verifier_inputs(verifier_module, selected)
+    verifier = verifier_module.IndependentAccountManifestVerifier()
+    verifier.verify(verifier_inputs, payloads)
+    calculation = json.loads(payloads["authority/calculation-inputs.json"])
+
+    if mutation == "reinsert_wallet_flow":
+        source_flow = deepcopy(selected.provider_ledger.json_object()["flows"][0])
+        calculation["calculation_ledger"]["flows"].append(source_flow)
+        outer_event = next(
+            event
+            for event in json.loads(payloads["authority/classified-flows.json"])[
+                "events"
+            ]
+            if event["source_record_id"] == "mixed-flow-1"
+        )
+        calculation["calculation_classified_flows"]["events"].append(
+            {
+                "event_id": outer_event["event_id"],
+                "source_record_id": outer_event["source_record_id"],
+                "account_id": outer_event["account_id"],
+                "event_date": outer_event["event_date"],
+                "nav_recognition_date": outer_event["nav_recognition_date"],
+                "amount": outer_event["amount"]["value"],
+                "disposition": outer_event["disposition"],
+            }
+        )
+        next(
+            row
+            for row in calculation["rows"]
+            if row["epoch"]["account_id"] == "synthetic-account-01"
+        )["classified_flows"].append(deepcopy(outer_event))
+    else:
+        calculation["calculation_ledger"]["flows"][0]["provider_account_scope"] = (
+            "ACCOUNT_ONLY"
+        )
+
+    _refresh_mixed_calculation_projection_lineage(calculation)
+    mutated = dict(payloads)
+    mutated["authority/calculation-inputs.json"] = canonical_json_bytes(calculation)
+    output = json.loads(mutated["outputs/account-strategy-manifest.json"])
+    calculation_source = output["source_identities"]["calculation_inputs"]
+    calculation_source["sha256"] = hashlib.sha256(
+        mutated["authority/calculation-inputs.json"]
+    ).hexdigest()
+    calculation_source["size_bytes"] = len(mutated["authority/calculation-inputs.json"])
+    mutated["outputs/account-strategy-manifest.json"] = canonical_json_bytes(output)
+
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier.verify(verifier_inputs, mutated)
 
 
 @pytest.mark.parametrize("projection_edge", ("counterpart", "descriptor"))
@@ -25736,7 +26025,13 @@ def test_independent_verifier_accepts_later_baseline_receipt_capped_at_ledger_da
     report = verifier_module.IndependentAccountManifestVerifier().verify(
         _mixed_verifier_inputs(verifier_module, selected), payloads
     )
-    assert json.loads(report)["as_of_date"] == "2026-02-03"
+    # The manifest is schema 9 and is computed through the provider boundary,
+    # 2026-02-01, even though the later baseline snapshot carries 2026-02-03.
+    # portfolio_control_panel.py:9031 takes a schema-9 bundle's data date from
+    # `calculation_cutoff_date` and requires the bundled report to carry it, so
+    # the report is dated by the boundary it verified -- which is the boundary
+    # this test's own name states.
+    assert json.loads(report)["as_of_date"] == "2026-02-01"
     coverage = json.loads(payloads["authority/account-flow-coverage.json"])
     assert {
         row["requested_end"]

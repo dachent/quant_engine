@@ -515,6 +515,10 @@ def _interaction_evidence(
     candidate: Path, runtime: tuple[str, str, str], output: Path, *, epoch_only: bool
 ) -> dict[str, object]:
     node, module, executable = runtime
+    dashboard = json.loads(
+        (candidate / "data/dashboard_data.json").read_text(encoding="utf-8")
+    )
+    cutoff = dashboard["account_manifest"]["calculation_cutoff_date"]
     env = dict(
         os.environ, PLAYWRIGHT_MODULE=module, PLAYWRIGHT_EXECUTABLE_PATH=executable
     )
@@ -529,7 +533,7 @@ def _interaction_evidence(
             "--exclude-candidates",
             "true",
             "--expected-calculation-cutoff",
-            "2026-08-13",
+            cutoff,
             *(["--epoch-only", "true"] if epoch_only else []),
         ],
         capture_output=True,
@@ -550,9 +554,16 @@ def test_browser_withholds_adversarial_report_performance_on_lineage_mismatch(
     runtime = _browser_runtime()
     if runtime is None:
         pytest.skip("Node, Playwright module, or Chromium runtime is unavailable")
-    assert CURRENT_FIXTURE.is_dir(), "current 13-row browser fixture is required"
+    selected_fixture = os.environ.get("PORTFOLIO_BROWSER_FIXTURE")
+    fixture = Path(selected_fixture).resolve() if selected_fixture else CURRENT_FIXTURE
+    if selected_fixture is None and not fixture.is_dir():
+        pytest.skip(
+            "Retained financial browser fixture is unavailable; "
+            "set PORTFOLIO_BROWSER_FIXTURE for financial integration QA"
+        )
+    assert fixture.is_dir(), "selected 13-row browser fixture is required"
     candidate = tmp_path / "current-dashboard"
-    shutil.copytree(CURRENT_FIXTURE, candidate)
+    shutil.copytree(fixture, candidate)
     shutil.copy2(PANEL_ROOT / "app.js", candidate / "app.js")
     data = json.loads(
         (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")

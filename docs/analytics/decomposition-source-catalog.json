@@ -7,7 +7,11 @@
     "factor_file_sha256": "de0c726ef63e83317ed952cad47787394b8d6467bb79adc1f24f3976dee60b3f",
     "derived_from_sha256": "9e4489a15ad4dae114afd0fe1f9b504eb36b1c1b3f2b981a34fa4bf5fd76cd0a",
     "selection_basis": "FROZEN_AUDIT_REUSE_NOT_FACTOR_SEARCH",
-    "fitted_factors": ["SPY_XS", "IWM_XS", "HYG_XS"],
+    "fitted_factors": [
+      "SPY_XS",
+      "IWM_XS",
+      "HYG_XS"
+    ],
     "risk_free_proxy": "BIL"
   },
   "selection_policy": {
@@ -128,150 +132,649 @@
     {
       "universe_id": "us-equity-economic-factors",
       "lens": "ECONOMIC_FACTOR",
-      "regions": ["US"],
-      "strategy_archetypes": ["US_EQUITY", "US_SMALL_MICROCAP_EQUITY"],
+      "regions": [
+        "US"
+      ],
+      "strategy_archetypes": [
+        "US_EQUITY",
+        "US_SMALL_MICROCAP_EQUITY"
+      ],
       "model_constraint": "UNCONSTRAINED",
       "selection_method": "HIERARCHICAL_NESTED_TIME_SERIES",
       "candidates": [
-        {"candidate_id": "MKT_RF", "source_id": "ff-us-5-daily", "economic_family": "MARKET", "raw_orthogonal": false},
-        {"candidate_id": "SMB", "source_id": "ff-us-5-daily", "economic_family": "SIZE", "raw_orthogonal": false},
-        {"candidate_id": "HML", "source_id": "ff-us-5-daily", "economic_family": "VALUE", "raw_orthogonal": false},
-        {"candidate_id": "RMW", "source_id": "ff-us-5-daily", "economic_family": "PROFITABILITY", "raw_orthogonal": false},
-        {"candidate_id": "CMA", "source_id": "ff-us-5-daily", "economic_family": "INVESTMENT", "raw_orthogonal": false},
-        {"candidate_id": "MOM", "source_id": "ff-us-momentum-daily", "economic_family": "MOMENTUM", "raw_orthogonal": false}
+        {
+          "candidate_id": "MKT_RF",
+          "source_id": "ff-us-5-daily",
+          "economic_family": "MARKET",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "SMB",
+          "source_id": "ff-us-5-daily",
+          "economic_family": "SIZE",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "HML",
+          "source_id": "ff-us-5-daily",
+          "economic_family": "VALUE",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "RMW",
+          "source_id": "ff-us-5-daily",
+          "economic_family": "PROFITABILITY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "CMA",
+          "source_id": "ff-us-5-daily",
+          "economic_family": "INVESTMENT",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "MOM",
+          "source_id": "ff-us-momentum-daily",
+          "economic_family": "MOMENTUM",
+          "raw_orthogonal": false
+        }
       ]
     },
     {
       "universe_id": "europe-equity-economic-factors",
       "lens": "ECONOMIC_FACTOR",
-      "regions": ["EUROPE"],
-      "strategy_archetypes": ["EUROPE_EQUITY"],
+      "regions": [
+        "EUROPE"
+      ],
+      "strategy_archetypes": [
+        "EUROPE_EQUITY"
+      ],
       "model_constraint": "UNCONSTRAINED",
       "selection_method": "HIERARCHICAL_NESTED_TIME_SERIES",
       "candidates": [
-        {"candidate_id": "EU_MKT_RF", "source_id": "ff-europe-5-daily", "economic_family": "MARKET", "raw_orthogonal": false},
-        {"candidate_id": "EU_SMB", "source_id": "ff-europe-5-daily", "economic_family": "SIZE", "raw_orthogonal": false},
-        {"candidate_id": "EU_HML", "source_id": "ff-europe-5-daily", "economic_family": "VALUE", "raw_orthogonal": false},
-        {"candidate_id": "EU_RMW", "source_id": "ff-europe-5-daily", "economic_family": "PROFITABILITY", "raw_orthogonal": false},
-        {"candidate_id": "EU_CMA", "source_id": "ff-europe-5-daily", "economic_family": "INVESTMENT", "raw_orthogonal": false},
-        {"candidate_id": "EU_MOM", "source_id": "ff-europe-momentum-daily", "economic_family": "MOMENTUM", "raw_orthogonal": false}
+        {
+          "candidate_id": "EU_MKT_RF",
+          "source_id": "ff-europe-5-daily",
+          "economic_family": "MARKET",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "EU_SMB",
+          "source_id": "ff-europe-5-daily",
+          "economic_family": "SIZE",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "EU_HML",
+          "source_id": "ff-europe-5-daily",
+          "economic_family": "VALUE",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "EU_RMW",
+          "source_id": "ff-europe-5-daily",
+          "economic_family": "PROFITABILITY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "EU_CMA",
+          "source_id": "ff-europe-5-daily",
+          "economic_family": "INVESTMENT",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "EU_MOM",
+          "source_id": "ff-europe-momentum-daily",
+          "economic_family": "MOMENTUM",
+          "raw_orthogonal": false
+        }
       ]
     },
     {
       "universe_id": "us-equity-six-cell-style",
       "lens": "ETF_STYLE",
-      "regions": ["US"],
-      "strategy_archetypes": ["US_EQUITY", "US_SMALL_MICROCAP_EQUITY"],
+      "regions": [
+        "US"
+      ],
+      "strategy_archetypes": [
+        "US_EQUITY",
+        "US_SMALL_MICROCAP_EQUITY"
+      ],
       "model_constraint": "SIMPLEX_LONG_ONLY",
       "selection_method": "COVERAGE_RANK_THEN_NESTED_TIME_SERIES",
       "candidates": [
-        {"candidate_id": "IWX", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "TOP_200_VALUE", "raw_orthogonal": false},
-        {"candidate_id": "IWY", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "TOP_200_GROWTH", "raw_orthogonal": false},
-        {"candidate_id": "IWS", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "MID_CAP_VALUE", "raw_orthogonal": false},
-        {"candidate_id": "IWP", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "MID_CAP_GROWTH", "raw_orthogonal": false},
-        {"candidate_id": "IWN", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "SMALL_CAP_VALUE", "raw_orthogonal": false},
-        {"candidate_id": "IWO", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "SMALL_CAP_GROWTH", "raw_orthogonal": false}
+        {
+          "candidate_id": "IWX",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "TOP_200_VALUE",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "IWY",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "TOP_200_GROWTH",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "IWS",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "MID_CAP_VALUE",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "IWP",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "MID_CAP_GROWTH",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "IWN",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "SMALL_CAP_VALUE",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "IWO",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "SMALL_CAP_GROWTH",
+          "raw_orthogonal": false
+        }
       ]
     },
     {
       "universe_id": "multi-asset-etf-style",
       "lens": "ETF_STYLE",
-      "regions": ["MULTI"],
-      "strategy_archetypes": ["TACTICAL_MULTI_ASSET", "TACTICAL_VOLATILITY"],
+      "regions": [
+        "MULTI"
+      ],
+      "strategy_archetypes": [
+        "TACTICAL_MULTI_ASSET",
+        "TACTICAL_VOLATILITY",
+        "CRYPTO_TACTICAL"
+      ],
       "model_constraint": "SIMPLEX_LONG_ONLY",
       "selection_method": "TRAIN_ONLY_CLUSTER_RANK_THEN_NESTED_TIME_SERIES",
       "candidates": [
-        {"candidate_id": "ITOT", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "US_TOTAL_EQUITY", "raw_orthogonal": false},
-        {"candidate_id": "IEFA", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "DEVELOPED_EX_US_EQUITY", "raw_orthogonal": false},
-        {"candidate_id": "IEMG", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "EMERGING_EQUITY", "raw_orthogonal": false},
-        {"candidate_id": "IEF", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "INTERMEDIATE_TREASURY", "raw_orthogonal": false},
-        {"candidate_id": "TLT", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "LONG_TREASURY", "raw_orthogonal": false},
-        {"candidate_id": "LQD", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "INVESTMENT_GRADE_CREDIT", "raw_orthogonal": false},
-        {"candidate_id": "HYG", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "HIGH_YIELD_CREDIT", "raw_orthogonal": false},
-        {"candidate_id": "VNQ", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "REAL_ESTATE", "raw_orthogonal": false},
-        {"candidate_id": "GLD", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "GOLD", "raw_orthogonal": false},
-        {"candidate_id": "DBC", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "BROAD_COMMODITIES", "raw_orthogonal": false},
-        {"candidate_id": "UUP", "source_id": "yahoo-adjusted-etf-daily", "economic_family": "US_DOLLAR", "raw_orthogonal": false}
+        {
+          "candidate_id": "ITOT",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "US_TOTAL_EQUITY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "IEFA",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "DEVELOPED_EX_US_EQUITY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "IEMG",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "EMERGING_EQUITY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "IEF",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "INTERMEDIATE_TREASURY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "TLT",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "LONG_TREASURY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "LQD",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "INVESTMENT_GRADE_CREDIT",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "HYG",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "HIGH_YIELD_CREDIT",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "VNQ",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "REAL_ESTATE",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "GLD",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "GOLD",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "DBC",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "BROAD_COMMODITIES",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "UUP",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "US_DOLLAR",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "BTC-USD",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "BITCOIN",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "ETH-USD",
+          "source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "ETHEREUM",
+          "raw_orthogonal": false
+        }
       ]
     },
     {
       "universe_id": "us-sector-return",
       "lens": "RETURN_SECTOR",
-      "regions": ["US_LARGE_CAP"],
-      "strategy_archetypes": ["US_EQUITY", "US_SMALL_MICROCAP_EQUITY", "TACTICAL_MULTI_ASSET"],
+      "regions": [
+        "US_LARGE_CAP"
+      ],
+      "strategy_archetypes": [
+        "US_EQUITY",
+        "US_SMALL_MICROCAP_EQUITY",
+        "TACTICAL_MULTI_ASSET"
+      ],
       "model_constraint": "SPARSE_UNCONSTRAINED",
       "selection_method": "TRAIN_ONLY_FORWARD_NESTED_TIME_SERIES",
       "candidates": [
-        {"candidate_id": "XLC", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "COMMUNICATION_SERVICES", "raw_orthogonal": false},
-        {"candidate_id": "XLY", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "CONSUMER_DISCRETIONARY", "raw_orthogonal": false},
-        {"candidate_id": "XLP", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "CONSUMER_STAPLES", "raw_orthogonal": false},
-        {"candidate_id": "XLE", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "ENERGY", "raw_orthogonal": false},
-        {"candidate_id": "XLF", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "FINANCIALS", "raw_orthogonal": false},
-        {"candidate_id": "XLV", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "HEALTH_CARE", "raw_orthogonal": false},
-        {"candidate_id": "XLI", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "INDUSTRIALS", "raw_orthogonal": false},
-        {"candidate_id": "XLB", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "MATERIALS", "raw_orthogonal": false},
-        {"candidate_id": "XLRE", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "REAL_ESTATE", "raw_orthogonal": false},
-        {"candidate_id": "XLK", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "INFORMATION_TECHNOLOGY", "raw_orthogonal": false},
-        {"candidate_id": "XLU", "source_id": "ssga-select-sector", "return_source_id": "yahoo-adjusted-etf-daily", "economic_family": "UTILITIES", "raw_orthogonal": false}
+        {
+          "candidate_id": "XLC",
+          "source_id": "ssga-select-sector",
+          "return_source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "COMMUNICATION_SERVICES",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "XLY",
+          "source_id": "ssga-select-sector",
+          "return_source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "CONSUMER_DISCRETIONARY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "XLP",
+          "source_id": "ssga-select-sector",
+          "return_source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "CONSUMER_STAPLES",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "XLE",
+          "source_id": "ssga-select-sector",
+          "return_source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "ENERGY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "XLF",
+          "source_id": "ssga-select-sector",
+          "return_source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "FINANCIALS",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "XLV",
+          "source_id": "ssga-select-sector",
+          "return_source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "HEALTH_CARE",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "XLI",
+          "source_id": "ssga-select-sector",
+          "return_source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "INDUSTRIALS",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "XLB",
+          "source_id": "ssga-select-sector",
+          "return_source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "MATERIALS",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "XLRE",
+          "source_id": "ssga-select-sector",
+          "return_source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "REAL_ESTATE",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "XLK",
+          "source_id": "ssga-select-sector",
+          "return_source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "INFORMATION_TECHNOLOGY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "XLU",
+          "source_id": "ssga-select-sector",
+          "return_source_id": "yahoo-adjusted-etf-daily",
+          "economic_family": "UTILITIES",
+          "raw_orthogonal": false
+        }
       ]
     },
     {
       "universe_id": "us-49-industry-return",
       "lens": "RETURN_INDUSTRY",
-      "regions": ["US"],
-      "strategy_archetypes": ["US_EQUITY", "US_SMALL_MICROCAP_EQUITY"],
+      "regions": [
+        "US"
+      ],
+      "strategy_archetypes": [
+        "US_EQUITY",
+        "US_SMALL_MICROCAP_EQUITY"
+      ],
       "model_constraint": "SPARSE_UNCONSTRAINED",
       "selection_method": "TRAIN_ONLY_FORWARD_NESTED_TIME_SERIES",
       "candidates": [
-        {"candidate_id": "Agric", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Food", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Soda", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Beer", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Smoke", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Toys", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Fun", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Books", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Hshld", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Clths", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Hlth", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "MedEq", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Drugs", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Chems", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Rubbr", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Txtls", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "BldMt", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Cnstr", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Steel", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "FabPr", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Mach", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "ElcEq", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Autos", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Aero", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Ships", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Guns", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Gold", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Mines", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Coal", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Oil", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Util", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Telcm", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "PerSv", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "BusSv", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Hardw", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Softw", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Chips", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "LabEq", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Paper", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Boxes", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Trans", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Whlsl", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Rtail", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Meals", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Banks", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Insur", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "RlEst", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Fin", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false},
-        {"candidate_id": "Other", "source_id": "ff-us-49-industry-daily", "economic_family": "INDUSTRY", "raw_orthogonal": false}
+        {
+          "candidate_id": "Agric",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Food",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Soda",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Beer",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Smoke",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Toys",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Fun",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Books",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Hshld",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Clths",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Hlth",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "MedEq",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Drugs",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Chems",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Rubbr",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Txtls",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "BldMt",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Cnstr",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Steel",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "FabPr",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Mach",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "ElcEq",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Autos",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Aero",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Ships",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Guns",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Gold",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Mines",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Coal",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Oil",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Util",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Telcm",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "PerSv",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "BusSv",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Hardw",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Softw",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Chips",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "LabEq",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Paper",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Boxes",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Trans",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Whlsl",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Rtail",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Meals",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Banks",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Insur",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "RlEst",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Fin",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        },
+        {
+          "candidate_id": "Other",
+          "source_id": "ff-us-49-industry-daily",
+          "economic_family": "INDUSTRY",
+          "raw_orthogonal": false
+        }
       ]
     }
   ]

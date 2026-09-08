@@ -128,6 +128,7 @@
         "weekly_returns_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] }
       }
     },
+    "invested_capital": { "$ref": "#/$defs/invested_capital" },
     "capital": {
       "type": "object",
       "additionalProperties": false,
@@ -343,6 +344,7 @@
         "analytics_schema_version": { "enum": [1, 2] },
         "as_of_date": { "type": "string", "format": "date" },
         "available_count": { "type": "integer", "minimum": 0 },
+        "available_source_keys": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
         "diagnostic_count": { "type": "integer", "minimum": 0 },
         "dynamic_available_count": { "type": "integer", "minimum": 0 },
         "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
@@ -793,6 +795,9 @@
         "analytics_schema_version": { "enum": [1, 2] },
         "as_of_date": { "type": "string", "format": "date" },
         "available_count": { "type": "integer", "minimum": 0 },
+        "available_surfaces": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["STATIC", "DYNAMIC_FLS"] } },
+        "default_surface": { "const": "STATIC" },
+        "default_source_key": { "type": "string", "minLength": 1 },
         "diagnostic_count": { "type": "integer", "minimum": 0 },
         "dynamic_available_count": { "type": "integer", "minimum": 0 },
         "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
@@ -808,10 +813,114 @@
         "series": { "type": "array" },
         "source_sha256": { "$ref": "#/$defs/hash" },
         "sources": { "anyOf": [{ "type": "array", "minItems": 1 }, { "type": "object", "minProperties": 1 }] },
+        "surfaces": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["STATIC"],
+          "properties": {
+            "STATIC": { "$ref": "#/$defs/decomposition_surface" },
+            "DYNAMIC_FLS": { "$ref": "#/$defs/decomposition_surface" }
+          }
+        },
+        "unavailable_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "decomposition_surface": {
+      "type": "object",
+      "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "available_source_keys", "default_source_key", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "lens_id", "lens_label", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "return_basis", "series", "source_sha256", "sources", "surface", "unavailable_count"],
+      "properties": {
+        "analytics_hash": { "$ref": "#/$defs/hash" },
+        "analytics_schema_version": { "enum": [1, 2] },
+        "as_of_date": { "type": "string", "format": "date" },
+        "available_count": { "type": "integer", "minimum": 0 },
+        "available_source_keys": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "default_source_key": { "type": "string", "minLength": 1 },
+        "diagnostic_count": { "type": "integer", "minimum": 0 },
+        "dynamic_available_count": { "type": "integer", "minimum": 0 },
+        "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
+        "generation_id": { "$ref": "#/$defs/hash" },
+        "lens_id": { "type": "string", "minLength": 1 },
+        "lens_label": { "type": "string", "minLength": 1 },
+        "method_label": { "const": "MPI_INFORMED_NON_EQUIVALENT" },
+        "methodology_manifest_sha256": { "$ref": "#/$defs/hash" },
+        "methodology_version": { "type": "string", "minLength": 1 },
+        "plan_bundle_id": { "$ref": "#/$defs/hash" },
+        "proxy_governance": { "type": "object" },
+        "return_basis": { "type": "string", "minLength": 1 },
+        "series": { "type": "array" },
+        "source_sha256": { "$ref": "#/$defs/hash" },
+        "sources": { "type": "array", "minItems": 1 },
+        "surface": { "enum": ["STATIC", "DYNAMIC_FLS"] },
         "unavailable_count": { "type": "integer", "minimum": 0 }
       }
     },
     "decimal": { "type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" },
+    "invested_capital": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "outcome_id", "status", "evaluation_date", "complete_through", "period_start", "currency", "age_days", "policy_id", "policy_sha256", "policy_readiness_provenance", "required_epochs", "required_strategy_ids", "source_bindings", "flow_coverage", "correction_bindings", "events", "daily_by_epoch", "daily_by_strategy", "daily_aggregate", "current_by_strategy", "current_aggregate_usd", "missing_inputs", "authority_profile", "input_generation", "product_contract_sha256", "product_contract_semantic_sha256", "result_id"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "outcome_id": { "const": "INVESTED_CAPITAL" },
+        "status": { "const": "AVAILABLE" },
+        "evaluation_date": { "type": "string", "format": "date" },
+        "complete_through": { "type": "string", "format": "date" },
+        "period_start": { "type": "string", "format": "date" },
+        "currency": { "const": "USD" },
+        "age_days": { "type": "integer", "minimum": 0 },
+        "policy_id": { "type": "string", "minLength": 1 },
+        "policy_sha256": { "$ref": "#/$defs/hash" },
+        "policy_readiness_provenance": { "type": "string", "minLength": 1 },
+        "required_epochs": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+        "supporting_epochs": { "type": "array", "items": { "type": "object" } },
+        "required_strategy_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "source_bindings": { "type": "object", "minProperties": 1, "additionalProperties": { "$ref": "#/$defs/file_binding" } },
+        "flow_coverage": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+        "correction_bindings": { "type": "array", "items": { "type": "object" } },
+        "events": { "type": "array", "items": { "type": "object" } },
+        "daily_by_epoch": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/capital_daily_epoch" } },
+        "daily_by_strategy": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/capital_daily_strategy" } },
+        "daily_aggregate": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/capital_daily_aggregate" } },
+        "current_by_strategy": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/capital_current_strategy" } },
+        "current_aggregate_usd": { "$ref": "#/$defs/decimal" },
+        "missing_inputs": { "type": "array", "maxItems": 0 },
+        "authority_profile": { "enum": ["ACCEPTED_GOVERNED", "SYNTHETIC"] },
+        "input_generation": { "$ref": "#/$defs/file_binding" },
+        "product_contract_sha256": { "$ref": "#/$defs/hash" },
+        "product_contract_semantic_sha256": { "$ref": "#/$defs/hash" },
+        "result_id": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "file_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/hash" },
+        "size_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "capital_daily_epoch": {
+      "type": "object", "additionalProperties": false,
+      "required": ["date", "epoch_id", "invested_capital_usd"],
+      "properties": { "date": { "type": "string", "format": "date" }, "epoch_id": { "type": "string", "minLength": 1 }, "invested_capital_usd": { "$ref": "#/$defs/decimal" } }
+    },
+    "capital_daily_strategy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["date", "strategy_id", "invested_capital_usd"],
+      "properties": { "date": { "type": "string", "format": "date" }, "strategy_id": { "type": "string", "minLength": 1 }, "invested_capital_usd": { "$ref": "#/$defs/decimal" } }
+    },
+    "capital_daily_aggregate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["date", "invested_capital_usd"],
+      "properties": { "date": { "type": "string", "format": "date" }, "invested_capital_usd": { "$ref": "#/$defs/decimal" } }
+    },
+    "capital_current_strategy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["strategy_id", "invested_capital_usd"],
+      "properties": { "strategy_id": { "type": "string", "minLength": 1 }, "invested_capital_usd": { "$ref": "#/$defs/decimal" } }
+    },
     "account_manifest_v7": {
       "$ref": "https://github.com/dachent/quant_engine/schemas/portfolio/account-strategy-manifest.schema.json"
     },

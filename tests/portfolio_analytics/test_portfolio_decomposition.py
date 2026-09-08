@@ -867,6 +867,39 @@ def test_dynamic_selection_and_training_path_do_not_consume_holdout(
     assert changed_model["model_quality"]["decision_status"] == "DIAGNOSTIC_ONLY"
 
 
+def test_live_plus_backtest_accepts_declared_model_return_basis(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "hybrid-model-basis"
+    target_path, days = _write_sources(source)
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    for row in rows[1:21]:
+        row[3] = "BACKTEST"
+        row[4] = "MODEL"
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source, target_path, days)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    spec_path.write_text(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    result, _manifest, _content = decomposition.build_decomposition(
+        spec_path,
+        source,
+    )
+    model = _available(result)
+
+    assert model["evidence_layer"] == "BACKTEST"
+    assert model["alpha"]["periodic_intercept"] is not None
+    assert model["alpha"]["gross_annualized"] is None
+    assert model["alpha"]["net_annualized"] is None
+    assert model["alpha"]["gross_status"] == "UNAVAILABLE_MODEL_RETURN_BASIS"
+    assert model["alpha"]["net_status"] == "UNAVAILABLE_MODEL_RETURN_BASIS"
+
+
 def test_canonical_live_series_digest_has_a_literal_live_series_oracle(
     tmp_path: Path,
 ) -> None:
@@ -929,3 +962,32 @@ def test_canonical_live_series_digest_has_a_literal_live_series_oracle(
         decomposition._canonical_live_series_sha256(changed_live_rows)
         != expected_digest
     )
+
+
+@pytest.mark.parametrize(
+    ("holdout", "expected_status", "canonical"),
+    [
+        (2.220446049250313e-16, "DIAGNOSTIC_ONLY", "0"),
+        (-2.220446049250313e-16, "DIAGNOSTIC_ONLY", "0"),
+        (1e-12, "AVAILABLE", "1e-12"),
+    ],
+)
+def test_model_quality_gate_uses_the_published_holdout_value(
+    holdout: float, expected_status: str, canonical: str
+) -> None:
+    # A real source-built STATIC model produced this positive machine epsilon
+    # while the bound diagnostic serialized zero. Consumers correctly require
+    # positive published holdout evidence before using alpha or exposures.
+    result = decomposition._apply_model_quality_gate(
+        {
+            "alpha": {"periodic_intercept": "0.001"},
+            "exposures": [{"factor_id": "SYNTH"}],
+        },
+        holdout,
+    )
+    assert result["model_quality"]["holdout_predicted_r_squared"] == canonical
+    assert result["status"] == expected_status
+    if expected_status == "DIAGNOSTIC_ONLY":
+        assert result["exposures"] == []
+        assert result["alpha"]["periodic_intercept"] is None
+        assert result["diagnostic_outputs"]["alpha"]["periodic_intercept"] == "0.001"

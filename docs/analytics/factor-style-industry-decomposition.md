@@ -83,6 +83,21 @@ the reported beta is the marginal return sensitivity to that proxy conditional
 on the other selected proxies. It is not a holdings weight, and a one-proxy
 correlation or R-squared is only a separately labeled similarity diagnostic.
 
+The current product predeclares the same candidate subsets for the AI factor
+strategy and QSI before any target returns are fitted. Sector uses five bounded
+economic sets spanning all 11 proxies, including one balanced cross-family set;
+industry uses ten economic-family sets that partition all 49 portfolios. Every
+candidate belongs to a declared model set; none is screened out by this plan.
+Nested validation may choose only among these declared sets and their ridge
+penalties.
+
+Each reported coefficient is therefore conditional only on the other proxies
+in its selected set, not on all 49 industry portfolios or on observed holdings.
+The 20 training observations required per factor, duplicate-column screening,
+variance-inflation screening, and condition-number screening remain fail-closed:
+a set that fails them is named unavailable rather than pruned or replaced by a
+target-fitted subset search.
+
 The ETF-style lens is intentionally different: its long-only simplex constraint
 makes fitted betas behave like non-negative replicating-portfolio weights that
 sum to one. Economic-factor, sector, and industry betas are unconstrained

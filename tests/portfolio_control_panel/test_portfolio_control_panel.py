@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from collections.abc import Sequence
 from datetime import date
 from decimal import ROUND_HALF_EVEN, Decimal, localcontext
@@ -44,6 +45,50 @@ if SPEC is None or SPEC.loader is None:
 panel = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = panel
 SPEC.loader.exec_module(panel)
+
+
+@pytest.mark.parametrize("missing", [None, "DYNAMIC_FLS", "series", "surfaces"])
+def test_hybrid_lens_gate_requires_actual_grouped_dynamic_surface(
+    missing: str | None,
+) -> None:
+    lens_ids = {"ECONOMIC_FACTOR", "ETF_STYLE", "RETURN_INDUSTRY", "RETURN_SECTOR"}
+    rows = [
+        {
+            "lens_id": lens_id,
+            "available_surfaces": ["STATIC", "DYNAMIC_FLS"],
+            "surfaces": {
+                surface: {"surface": surface, "series": [{"series_id": "synthetic"}]}
+                for surface in ("STATIC", "DYNAMIC_FLS")
+            },
+        }
+        for lens_id in sorted(lens_ids)
+    ]
+    if missing == "DYNAMIC_FLS":
+        del rows[0]["surfaces"]["DYNAMIC_FLS"]
+    elif missing == "series":
+        rows[0]["surfaces"]["DYNAMIC_FLS"]["series"] = []
+    elif missing == "surfaces":
+        del rows[0]["surfaces"]
+    if missing is None:
+        panel._validate_hybrid_decomposition_lenses(rows, lens_ids)
+    else:
+        with pytest.raises(
+            panel.ControlPanelValidationError, match="mode lens set differs"
+        ):
+            panel._validate_hybrid_decomposition_lenses(rows, lens_ids)
+
+
+def test_hybrid_lens_gate_preserves_the_separate_legacy_dynamic_lens() -> None:
+    lens_ids = {"ECONOMIC_FACTOR", "ETF_STYLE", "RETURN_INDUSTRY", "RETURN_SECTOR"}
+    rows = [{"lens_id": lens_id} for lens_id in sorted(lens_ids)]
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="mode lens set differs"
+    ):
+        panel._validate_hybrid_decomposition_lenses(rows, lens_ids)
+    panel._validate_hybrid_decomposition_lenses(
+        [*rows, {"lens_id": "DYNAMIC_STYLE"}], lens_ids
+    )
+
 
 HWM_TEST_NAMESPACE = runpy.run_path(
     str(REPOSITORY_ROOT / "tests" / "portfolio_ledger" / "test_hwm.py")
@@ -114,6 +159,53 @@ ALL_STRATEGY_NAMES_BY_ID = {
     "composer-holy-grail": STRATEGY_NAMES[7],
     "echotrade-growth-pivots": STRATEGY_NAMES[8],
 }
+
+
+def _financial_contract_at_schema(version: int) -> bytes:
+    contract = json.loads(panel.FINANCIAL_MVP_CONTRACT.read_bytes())
+    contract["contract_schema_version"] = version
+    return canonical_json_bytes(contract)
+
+
+def test_dependence_strategy_names_accepts_supported_contract_schemas() -> None:
+    expected = panel._dependence_strategy_names(
+        ALL_STRATEGY_NAMES_BY_ID, _financial_contract_at_schema(6)
+    )
+
+    assert (
+        panel._dependence_strategy_names(
+            ALL_STRATEGY_NAMES_BY_ID, _financial_contract_at_schema(7)
+        )
+        == expected
+    )
+
+
+def test_financial_product_controls_accept_supported_contract_schemas() -> None:
+    expected = panel._financial_mvp_product_controls(_financial_contract_at_schema(6))
+
+    assert (
+        panel._financial_mvp_product_controls(_financial_contract_at_schema(7))
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "parser",
+    (
+        lambda payload: panel._dependence_strategy_names(
+            ALL_STRATEGY_NAMES_BY_ID, payload
+        ),
+        panel._financial_mvp_product_controls,
+    ),
+)
+def test_financial_contract_parsers_reject_unsupported_schema(parser) -> None:
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="financial MVP contract identity differs",
+    ):
+        parser(_financial_contract_at_schema(8))
+
+
 # These three independently declared tables deliberately repeat the 13
 # current-epoch identities.  The composed lineage proof must not construct its
 # manifest/crosswalk expectation from the report surface it is validating.
@@ -187,6 +279,34 @@ def test_json_snapshot_reads_an_ordinary_file_beyond_legacy_windows_max_path(
     assert payload == {"schema_version": 3}
     assert content == expected
     assert sha256 == hashlib.sha256(expected).hexdigest()
+
+
+def test_frontend_allowlist_keeps_download_beyond_legacy_windows_max_path(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path
+    while len(str((candidate / panel.REPORT_DOWNLOAD).absolute())) <= 270:
+        candidate /= "long-panel-component"
+    storage = (
+        Path(f"\\\\?\\{candidate.absolute()}") if sys.platform == "win32" else candidate
+    )
+    storage.mkdir(parents=True)
+    html = "\n".join(
+        f'<{tag} {attribute}="{value}"></{tag}>'
+        for tag, attribute, value in (
+            *panel._ALLOWED_FRONTEND_REFERENCES,
+            ("a", "href", panel.REPORT_DOWNLOAD),
+        )
+    )
+    (storage / "index.html").write_text(html, encoding="utf-8")
+    (storage / "styles.css").write_text("", encoding="utf-8")
+    (storage / "analytics.css").write_text("", encoding="utf-8")
+    download = storage / panel.REPORT_DOWNLOAD
+    download.parent.mkdir()
+    download.write_bytes(b"{}")
+
+    accepted, details = panel._closed_frontend_resources(candidate)
+    assert accepted, details
 
 
 def test_weekly_parser_accepts_seven_source_bound_current_strategies() -> None:
@@ -893,6 +1013,78 @@ def _decomposition() -> dict[str, object]:
             "target": {"artifact_id": "synthetic-target", "sha256": "a" * 64},
         },
     }
+
+
+@pytest.mark.parametrize("broken_identity", [False, True])
+def test_diagnostic_dynamic_contributions_use_changing_beta_rows(
+    broken_identity: bool,
+) -> None:
+    decomposition = _decomposition()
+    model = next(
+        row
+        for row in decomposition["model_results"]
+        if row["status"] == "DIAGNOSTIC_ONLY"
+    )
+    model["estimator"] = "DYNAMIC_FLS"
+    model["diagnostic_outputs"] = {
+        "alpha": model["alpha"],
+        "exposures": [
+            {
+                "factor_id": "SPY_XS",
+                "beta": "0.8",
+                "holdout_mean_period_contribution": "0.008",
+                "standard_error": None,
+            }
+        ],
+    }
+    model["contributions"] = [
+        {
+            "date": "2026-07-29",
+            "partition": "TEST",
+            "factor_exposures": {"SPY_XS": "0.2"},
+            "factor_contributions": {"SPY_XS": "0.002"},
+            "alpha_contribution": "0.001",
+            "fitted_excess_return": "0.003",
+            "actual_excess_return": "0.004",
+            "residual": "0.001",
+        },
+        {
+            "date": "2026-07-30",
+            "partition": "TEST",
+            "factor_exposures": {"SPY_XS": "0.8"},
+            "factor_contributions": {"SPY_XS": "0.008"},
+            "alpha_contribution": "0.001",
+            "fitted_excess_return": "0.009",
+            "actual_excess_return": "0.010",
+            "residual": "0.002" if broken_identity else "0.001",
+        },
+    ]
+    identity = {"generation_id": "a" * 64, "sha256": "b" * 64}
+    if broken_identity:
+        with pytest.raises(panel.ControlPanelValidationError, match="do not reconcile"):
+            panel._factor_analysis(decomposition, identity, set(STRATEGY_NAMES))
+        return
+    output = panel._factor_analysis(decomposition, identity, set(STRATEGY_NAMES))
+    row = next(
+        item for item in output["series"] if item["series_id"] == model["series_id"]
+    )
+    assert row["status"] == "DIAGNOSTIC_ONLY"
+    assert row["use_boundary"] == "FORENSIC_DIAGNOSTIC_NOT_PM_ACCEPTED"
+    assert row["alpha"] == model["diagnostic_outputs"]["alpha"]
+    assert row["contribution_summary"] == {
+        "alpha_mean": "0.001",
+        "factor_means": {"SPY_XS": "0.005"},
+        "fitted_mean": "0.006",
+        "maximum_reconciliation_error": "0",
+        "observations": 2,
+        "realized_mean": "0.007",
+        "residual_mean": "0.001",
+    }
+    # Latest beta times mean factor return is 0.008, not the actual path mean.
+    assert (
+        row["contribution_summary"]["factor_means"]["SPY_XS"]
+        != row["exposures"][0]["holdout_mean_period_contribution"]
+    )
 
 
 def _correlation() -> dict[str, object]:
@@ -1742,7 +1934,14 @@ def test_current_product_correlation_projection_rejects_nonexact_series(
         )
 
 
-def _publish_analytics(root: Path, filename: str, value: object, adapter: str) -> None:
+def _publish_analytics(
+    root: Path,
+    filename: str,
+    value: object,
+    adapter: str,
+    *,
+    plan_spec_path: Path | None = None,
+) -> None:
     source = root.parent / f"{adapter}.json"
     _write_json(source, value)
     manifest = GenerationManifest.build(
@@ -1762,6 +1961,19 @@ def _publish_analytics(root: Path, filename: str, value: object, adapter: str) -
                 as_of_date=date(2026, 7, 30),
                 schema_name=adapter,
                 schema_version="1",
+            ),
+            *(
+                (
+                    SourceArtifact.from_path(
+                        plan_spec_path,
+                        artifact_id="spec/decomposition-spec.json",
+                        as_of_date=date(2026, 7, 30),
+                        schema_name="portfolio-decomposition-spec",
+                        schema_version="1",
+                    ),
+                )
+                if plan_spec_path is not None
+                else ()
             ),
         ),
         verification=VerificationStatus.VERIFIED,
@@ -2152,6 +2364,11 @@ def inputs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
         panel, "_PORTABLE_HWM_PRODUCT_CONTRACT", financial_contract_path
     )
     monkeypatch.setattr(panel, "_PORTABLE_HWM_POLICY", portable_hwm_policy_path)
+    flow_policy = json.loads(panel.FLOW_CLASSIFICATION_POLICY.read_bytes())
+    flow_policy["as_of_date"] = "2026-01-01"
+    flow_policy_path = tmp_path / "synthetic-flow-classification-policy.json"
+    flow_policy_path.write_bytes(canonical_json_bytes(flow_policy))
+    monkeypatch.setattr(panel, "FLOW_CLASSIFICATION_POLICY", flow_policy_path)
     source_report = tmp_path / "synthetic-portfolio-report-data.json"
     decomposition_root = tmp_path / "analytics" / "decomposition"
     correlation_root = tmp_path / "analytics" / "correlation"
@@ -3110,6 +3327,75 @@ def test_underwriting_gap_signatures_are_diagnostic_not_fabricated() -> None:
         )
 
 
+def test_underwriting_policy_exclusion_cannot_resurface_legacy_model_gap() -> None:
+    policy = json.loads(
+        Path("contracts/portfolio-strategy-underwriting-v1.json").read_text(
+            encoding="utf-8"
+        )
+    )["model_account_gap"]
+    proof = {
+        "provider_id": "portfolio123",
+        "data_class": "PROVIDER_LIVE_RETURN",
+        "disposition": "EXCLUDE",
+        "admitted_item_count": 0,
+        "authority_ref": "synthetic-source-receipt",
+    }
+    actual = {
+        "status": "AVAILABLE",
+        "cumulative_return": 0.2,
+        "observations": 160,
+        "observed_start": "2026-01-22",
+        "observed_end": "2026-09-02",
+    }
+    result = panel._model_account_gap_underwriting(
+        {
+            "strategy_id": "p123-ai-factor",
+            "strategy_name": "AI Factor [P123]",
+            "provider_comparison_status": "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED",
+            "provider_cumulative_gap": "-0.16",
+            "provider_reference_cumulative_return": "0.17",
+            "provider_account_cumulative_return": "0.01",
+            "provider_beta": "0.98",
+            "provider_correlation": "0.82",
+            "provider_tracking_error_annualized": "0.11",
+            "provider_comparison_observed_start": "2025-01-01",
+            "provider_comparison_observed_end": "2025-12-31",
+            "provider_comparison_observations": 250,
+            "implementation_reconciliation": {
+                "return_reconciliation": {
+                    "status": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+                    "observations": 0,
+                    "model_cumulative_return": None,
+                    "account_minus_model_cumulative": None,
+                    "policy_evidence": proof,
+                },
+                "account_live_return_summary": actual,
+            },
+        },
+        policy,
+    )
+    assert (
+        result["status"]
+        == result["comparison_status"]
+        == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+    )
+    assert result["observations"] == 0
+    assert all(
+        result[key] is None
+        for key in (
+            "total_gap",
+            "observed_start",
+            "observed_end",
+            "reference_cumulative_return",
+            "account_cumulative_return",
+            "beta",
+            "correlation",
+            "tracking_error_annualized",
+        )
+    )
+    assert result["account_live_return_summary"] == actual
+
+
 def test_renderer_exposes_underwriting_and_all_orphaned_evidence_sections() -> None:
     renderer = Path("apps/portfolio-control-panel/app.js").read_text(encoding="utf-8")
     template = Path("apps/portfolio-control-panel/index.html").read_text(
@@ -3350,31 +3636,86 @@ def _current_surface_lens_inputs(base: Path) -> tuple[Path, Path]:
     lens_root = base / "l" / "decomposition-lenses"
     assignments = {
         "europe-economic": ("ECONOMIC_FACTOR", {STRATEGY_NAMES[1]}),
+        "multi-asset-style": ("ETF_STYLE", {STRATEGY_NAMES[2]}),
         "us-economic": ("ECONOMIC_FACTOR", {STRATEGY_NAMES[0]}),
         "us-equity-style": ("ETF_STYLE", {STRATEGY_NAMES[2]}),
         "us-industry": ("RETURN_INDUSTRY", {STRATEGY_NAMES[3]}),
         "us-sector": ("RETURN_SECTOR", {STRATEGY_NAMES[4]}),
     }
+    plan_bundle = base / ("a" * 64)
+    spec_rows = []
     for source_key, (analysis_lens, selected_names) in assignments.items():
-        value = _decomposition()
-        value["analysis_lens"] = analysis_lens
-        value["model_selections"] = [
-            row
-            for row in value["model_selections"]
-            if row["series_id"] in selected_names
-        ]
-        value["model_results"] = [
-            row for row in value["model_results"] if row["series_id"] in selected_names
-        ]
         for surface in ("STATIC", "DYNAMIC_FLS"):
+            value = _decomposition()
+            value["analysis_lens"] = analysis_lens
+            value["model_selections"] = [
+                row
+                for row in value["model_selections"]
+                if row["series_id"] in selected_names
+            ]
+            value["model_results"] = [
+                row
+                for row in value["model_results"]
+                if row["series_id"] in selected_names
+            ]
+            estimator = "STATIC_RBSA" if surface == "STATIC" else "DYNAMIC_FLS"
+            suffix = surface.lower().replace("_", "-")
+            remapped_ids = {}
+            for row in value["model_results"]:
+                model_id = f"{row['model_id']}-{suffix}"
+                remapped_ids[row["model_id"]] = model_id
+                row["model_id"] = model_id
+                row["estimator"] = estimator
+            for row in value["model_selections"]:
+                if row["model_id"] is not None:
+                    row["model_id"] = remapped_ids[row["model_id"]]
+            value["analytics_hash"] = hashlib.sha256(
+                canonical_json_bytes(
+                    {
+                        key: item
+                        for key, item in value.items()
+                        if key != "analytics_hash"
+                    }
+                )
+            ).hexdigest()
+            spec_relative = (
+                f"specs/{source_key}.json"
+                if surface == "STATIC"
+                else f"specs/{source_key}-dynamic-fls.json"
+            )
+            spec_path = plan_bundle / Path(spec_relative)
+            _write_json(
+                spec_path,
+                {
+                    "analysis_lens": analysis_lens,
+                    "evidence_mode": "LIVE_ONLY",
+                    "models": [
+                        {"estimator": estimator, "model_id": row["model_id"]}
+                        for row in value["model_results"]
+                    ],
+                    "schema_version": 1,
+                },
+            )
+            spec_rows.append(
+                {
+                    "analysis_lens": analysis_lens,
+                    "model_count": len(value["model_results"]),
+                    "path": spec_relative,
+                    "sha256": _sha(spec_path),
+                    "size_bytes": spec_path.stat().st_size,
+                    "source_key": source_key,
+                    "spec_id": f"{source_key}:{surface}",
+                    "surface": surface,
+                }
+            )
             _publish_analytics(
                 lens_root / "LIVE_ONLY" / surface / source_key,
                 "decomposition.json",
                 value,
                 f"synthetic-{source_key}-{surface.lower()}",
+                plan_spec_path=spec_path,
             )
 
-    plan_bundle = base / ("a" * 64)
     plan_path = (
         plan_bundle
         / "inputs"
@@ -3412,7 +3753,7 @@ def _current_surface_lens_inputs(base: Path) -> tuple[Path, Path]:
     _write_json(plan_path, plan)
     _write_json(
         dispositions_path,
-        {"candidate_dispositions": [], "policy": "synthetic", "schema_version": 1},
+        {"candidate_dispositions": [], "policy": "synthetic", "schema_version": 2},
     )
     manifest = {
         "assurance_profile": "DEVELOPMENT",
@@ -3430,12 +3771,97 @@ def _current_surface_lens_inputs(base: Path) -> tuple[Path, Path]:
             {
                 "path": "candidate-dispositions.json",
                 "sha256": _sha(dispositions_path),
-            }
+            },
+            *[
+                {
+                    "path": row["path"],
+                    "sha256": row["sha256"],
+                    "size_bytes": row["size_bytes"],
+                }
+                for row in spec_rows
+            ],
         ],
         "schema_version": 2,
+        "specs": spec_rows,
     }
     _write_json(plan_bundle / "plan-manifest.json", manifest)
     return lens_root, plan_bundle
+
+
+def test_current_plan_preserves_excluded_placeholder_names(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> None:
+    base = tmp_path_factory.getbasetemp() / "x"
+    lens_root, plan_bundle = _current_surface_lens_inputs(base)
+    plan_path = (
+        plan_bundle
+        / "inputs"
+        / "governance"
+        / "current-strategy-decomposition-plan.json"
+    )
+    manifest_path = plan_bundle / "plan-manifest.json"
+    plan = json.loads(plan_path.read_bytes())
+    excluded_dispositions = {
+        source_key: {
+            "authority": "OWNER_302_SYNTHETIC_FIXTURE_BINDING",
+            "readiness": "NOT_APPLICABLE_OWNER_APPROVED",
+            "reason": "NOT_APPLICABLE_OWNER_APPROVED",
+            "requirement": "NOT_APPLICABLE_OWNER_APPROVED",
+        }
+        for source_key in (
+            "europe-economic",
+            "multi-asset-style",
+            "us-economic",
+            "us-equity-style",
+            "us-industry",
+            "us-sector",
+        )
+    }
+    plan["strategies"].extend(
+        (
+            {
+                "assignments": [],
+                "series_id": "Growth at Market Pivot Points [EchoTrade]",
+                "source_dispositions": excluded_dispositions,
+                "strategy_id": "echotrade-growth-pivots",
+            },
+            {
+                "assignments": [],
+                "series_id": "UNRESOLVED::composer-holy-grail",
+                "source_dispositions": excluded_dispositions,
+                "strategy_id": "composer-holy-grail",
+            },
+        )
+    )
+    _write_json(plan_path, plan)
+    manifest = json.loads(manifest_path.read_bytes())
+    manifest["inputs"][0]["sha256"] = _sha(plan_path)
+    _write_json(manifest_path, manifest)
+
+    lenses, _bindings = panel._decomposition_lenses_for_mode(
+        lens_root,
+        plan_bundle,
+        ALL_STRATEGY_NAMES_BY_ID,
+        set(ACTIVE_STRATEGY_NAMES),
+        "LIVE_ONLY",
+    )
+    assert lenses["plan_bundle_id"] == plan_bundle.name
+
+    plan["strategies"][0]["series_id"] = "wrong required strategy name"
+    _write_json(plan_path, plan)
+    manifest["inputs"][0]["sha256"] = _sha(plan_path)
+    _write_json(manifest_path, manifest)
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="decomposition plan series differs: p123-ai-factor",
+    ):
+        panel._decomposition_lenses_for_mode(
+            lens_root,
+            plan_bundle,
+            ALL_STRATEGY_NAMES_BY_ID,
+            set(ACTIVE_STRATEGY_NAMES),
+            "LIVE_ONLY",
+        )
 
 
 def test_panel_consumes_current_surface_lens_generations(
@@ -3468,13 +3894,34 @@ def test_panel_consumes_current_surface_lens_generations(
         "RETURN_INDUSTRY",
         "RETURN_SECTOR",
     }
-    assert all(len(row["series"]) == 7 for row in lenses.values())
+    assert len(lenses["ECONOMIC_FACTOR"]["series"]) == 14
+    assert len(lenses["ETF_STYLE"]["series"]) == 14
+    assert len(lenses["RETURN_INDUSTRY"]["series"]) == 7
+    assert len(lenses["RETURN_SECTOR"]["series"]) == 7
     economic = lenses["ECONOMIC_FACTOR"]
     us_economic_rows = [
         row for row in economic["series"] if row["series_id"] == STRATEGY_NAMES[0]
     ]
-    assert len(us_economic_rows) == 1
-    assert us_economic_rows[0]["status"] == "AVAILABLE"
+    assert {row["source_key"] for row in us_economic_rows} == {
+        "europe-economic",
+        "us-economic",
+    }
+    assert [
+        row["status"] for row in us_economic_rows if row["source_key"] == "us-economic"
+    ] == ["AVAILABLE"]
+    style_rows = [
+        row
+        for row in lenses["ETF_STYLE"]["series"]
+        if row["series_id"] == STRATEGY_NAMES[2]
+    ]
+    assert {row["source_key"] for row in style_rows} == {
+        "multi-asset-style",
+        "us-equity-style",
+    }
+    assert all(row["status"] == "AVAILABLE" for row in style_rows)
+    assert 'id="factor-source-selector"' in (
+        Path(result["candidate_dir"]) / "index.html"
+    ).read_text(encoding="utf-8")
 
     # A schema-2 bundle over a legacy FLAT lens tree must be rejected (the
     # generations are not where the current-plan contract requires them);
@@ -3495,40 +3942,122 @@ def test_panel_consumes_current_surface_lens_generations(
         )
 
 
-def test_current_surface_lens_rejects_static_dynamic_divergence(
+def test_panel_consumes_distinct_plan_bound_current_surfaces(
     inputs: dict[str, Path], tmp_path_factory: pytest.TempPathFactory
 ) -> None:
-    base = tmp_path_factory.getbasetemp() / "s2diverge"
+    base = tmp_path_factory.getbasetemp() / "d"
     lens_root, plan_bundle = _current_surface_lens_inputs(base)
-    static_root = lens_root / "LIVE_ONLY" / "STATIC" / "us-economic"
-    static_pointer = read_current(static_root)
-    static_path = (
-        static_root
-        / "generations"
-        / static_pointer.generation_id
-        / "decomposition.json"
+    result = panel.build_candidate(
+        inputs["report"],
+        inputs["legacy"],
+        inputs["output"],
+        decomposition_lenses_root=lens_root,
+        decomposition_plan_bundle=plan_bundle,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
     )
-    divergent = json.loads(static_path.read_text(encoding="utf-8"))
-    divergent["analytics_hash"] = "divergent-static-dynamic-surface"
-    _publish_analytics(
-        lens_root / "LIVE_ONLY" / "DYNAMIC_FLS" / "us-economic",
-        "decomposition.json",
-        divergent,
-        "synthetic-us-economic-dynamic-divergent",
+    data = json.loads(
+        (Path(result["candidate_dir"]) / "data" / "dashboard_data.json").read_bytes()
+    )
+    economic = next(
+        row
+        for row in data["decomposition_lenses"]["lenses"]
+        if row["lens_id"] == "ECONOMIC_FACTOR"
     )
 
+    assert economic["default_surface"] == "STATIC"
+    assert set(economic["surfaces"]) == {"STATIC", "DYNAMIC_FLS"}
+    assert economic["series"] == economic["surfaces"]["STATIC"]["series"]
+    assert {
+        row["estimator"]
+        for row in economic["surfaces"]["STATIC"]["series"]
+        if row["status"] == "AVAILABLE"
+    } == {"STATIC_RBSA"}
+    assert {
+        row["estimator"]
+        for row in economic["surfaces"]["DYNAMIC_FLS"]["series"]
+        if row["status"] == "AVAILABLE"
+    } == {"DYNAMIC_FLS"}
+    assert (
+        economic["surfaces"]["STATIC"]["generation_id"]
+        != economic["surfaces"]["DYNAMIC_FLS"]["generation_id"]
+    )
+
+    dynamic_spec_path = plan_bundle / "specs" / "us-economic-dynamic-fls.json"
+    dynamic_spec = json.loads(dynamic_spec_path.read_text(encoding="utf-8"))
+    dynamic_spec["models"][0]["estimator"] = "STATIC_RBSA"
+    _write_json(dynamic_spec_path, dynamic_spec)
     with pytest.raises(
-        panel.ControlPanelValidationError,
-        match="STATIC and DYNAMIC_FLS surfaces differ",
+        panel.ControlPanelValidationError, match="plan spec bytes differ"
     ):
         panel.build_candidate(
             inputs["report"],
             inputs["legacy"],
-            inputs["output"],
+            base / "invalid-output",
             decomposition_lenses_root=lens_root,
             decomposition_plan_bundle=plan_bundle,
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
+        )
+
+
+def test_panel_requires_exact_report_decomposition_projection(
+    inputs: dict[str, Path], tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    # Keep the nested generation fixture below Windows MAX_PATH.
+    base = tmp_path_factory.getbasetemp() / "r"
+    lens_root, plan_bundle = _current_surface_lens_inputs(base)
+    strategy_names = dict(zip(ACTIVE_STRATEGY_IDS[:7], STRATEGY_NAMES[:7], strict=True))
+    lens_payload, _bindings = panel._decomposition_lenses(
+        lens_root, plan_bundle, strategy_names
+    )
+    report = _with_hwm_summary(
+        _report_with_baseline(inputs), inputs["freshness"], _panel_baseline_catalog()
+    )
+    report["decomposition_lenses"] = lens_payload
+    report_root = base / "report"
+    _publish_report(report_root, base / "report.json", report)
+
+    result = panel.build_candidate(
+        report_root,
+        inputs["legacy"],
+        base / "panel",
+        decomposition_root=inputs["decomposition"],
+        correlation_root=inputs["correlation"],
+        decomposition_lenses_root=lens_root,
+        decomposition_plan_bundle=plan_bundle,
+        freshness_health_path=inputs["freshness"],
+        baseline_root=inputs["baseline"],
+        weekly_returns_root=inputs["weekly"],
+    )
+    assert Path(result["candidate_dir"]).is_dir()
+
+    changed = json.loads(json.dumps(report))
+    changed_cell = changed["decomposition_lenses"]["modes"]["LIVE_ONLY"][0]["surfaces"][
+        "STATIC"
+    ]["series"][0]
+    changed_cell["status"] = (
+        "AVAILABLE"
+        if changed_cell["status"] == "DIAGNOSTIC_ONLY"
+        else "DIAGNOSTIC_ONLY"
+    )
+    changed_root = base / "changed-report"
+    _publish_report(changed_root, base / "changed-report.json", changed)
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="projection differs from report authority",
+    ):
+        panel.build_candidate(
+            changed_root,
+            inputs["legacy"],
+            base / "changed-panel",
+            decomposition_root=inputs["decomposition"],
+            correlation_root=inputs["correlation"],
+            decomposition_lenses_root=lens_root,
+            decomposition_plan_bundle=plan_bundle,
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            weekly_returns_root=inputs["weekly"],
         )
 
 
@@ -4481,6 +5010,8 @@ def test_browser_qa_and_publication(inputs: dict[str, Path], tmp_path: Path) -> 
         candidate,
         qa,
         inputs["output"],
+        private_stage_root=inputs["output"],
+        portfolio_root=tmp_path / "production",
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         coordinated_release_receipt=receipt,
@@ -4538,6 +5069,8 @@ def test_stable_launcher_browser_qa_proves_redirect(
         candidate,
         qa,
         inputs["output"],
+        private_stage_root=inputs["output"],
+        portfolio_root=tmp_path / "production",
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         coordinated_release_receipt=receipt,
@@ -4599,6 +5132,8 @@ def test_stable_launcher_browser_qa_rejects_lost_view_fragment(
         candidate,
         qa,
         inputs["output"],
+        private_stage_root=inputs["output"],
+        portfolio_root=tmp_path / "production",
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         coordinated_release_receipt=receipt,
@@ -4660,6 +5195,8 @@ def test_publication_manifest_uses_later_operational_freshness_date(
         candidate,
         qa,
         inputs["output"],
+        private_stage_root=inputs["output"],
+        portfolio_root=tmp_path / "production",
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         coordinated_release_receipt=receipt,
@@ -4736,6 +5273,8 @@ def test_launcher_failure_restores_prior_pointer_and_launcher(
             candidate,
             qa,
             inputs["output"],
+            private_stage_root=inputs["output"],
+            portfolio_root=tmp_path / "production",
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             coordinated_release_receipt=receipt,
@@ -5196,13 +5735,113 @@ def test_candidate_driver_map_requires_fixed_cardinality_and_no_authority(
         panel._candidate_driver_map(path)
 
 
-def test_published_panel_files_include_optional_driver_map() -> None:
-    without_driver_map = panel._published_panel_files(None)
-    with_driver_map = panel._published_panel_files(Path("driver-map.json"))
+def test_report_download_preserves_selected_bytes_and_rejects_drift(
+    tmp_path: Path,
+) -> None:
+    report_path = tmp_path / "portfolio-report-data.json"
+    content = b'{"report_schema_version":1}\n'
+    report_path.write_bytes(content)
+    identity = {
+        "generation_id": "candidate",
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+    files, bindings = panel._report_downloads(
+        report_path, identity, None, require_workbook=False
+    )
+    assert files == {panel.REPORT_DOWNLOAD: content}
+    assert bindings == {}
+    report_path.write_bytes(content + b" ")
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="changed after selection"
+    ):
+        panel._report_downloads(report_path, identity, None, require_workbook=False)
 
-    assert panel.DRIVER_MAP_PANEL_FILE not in without_driver_map
-    assert panel.DRIVER_MAP_PANEL_FILE in with_driver_map
-    assert with_driver_map[-1] == "candidate.json"
+
+@pytest.mark.parametrize(
+    ("relative_path", "label", "content", "filename", "mime_type", "payload_id"),
+    [
+        (
+            panel.REPORT_DOWNLOAD,
+            "Download report data",
+            b'{"report_schema_version":1}\n',
+            "portfolio-report-data.json",
+            "application/json",
+            "download-payload-report-json",
+        ),
+        (
+            panel.WORKBOOK_DOWNLOAD,
+            "Download Excel workbook",
+            b"PK\x03\x04\x00\xffsynthetic-workbook" + (b"x" * 70_000),
+            "portfolio-report.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "download-payload-report-xlsx",
+        ),
+    ],
+    ids=("json", "xlsx-large"),
+)
+def test_report_download_link_embeds_exact_bytes_for_local_file_blob_download(
+    relative_path: str,
+    label: str,
+    content: bytes,
+    filename: str,
+    mime_type: str,
+    payload_id: str,
+) -> None:
+    link = panel._report_download_link(relative_path, label, content)
+
+    assert f'href="{relative_path}"' in link
+    assert f'download="{filename}"' in link
+    assert f'data-download-filename="{filename}"' in link
+    assert f'data-download-mime="{mime_type}"' in link
+    payload = base64.b64encode(content).decode("ascii")
+    chunks = [
+        payload[index : index + panel._DOWNLOAD_BASE64_CHUNK_SIZE]
+        for index in range(0, len(payload), panel._DOWNLOAD_BASE64_CHUNK_SIZE)
+    ]
+    assert f'data-download-payload-prefix="{payload_id}"' in link
+    assert f'data-download-chunk-count="{len(chunks)}"' in link
+    for index, chunk in enumerate(chunks):
+        assert (
+            f'<script type="application/octet-stream" '
+            f'id="{payload_id}-{index:05d}" data-download-filename="{filename}" '
+            f'data-download-chunk-index="{index}">{chunk}</script>' in link
+        )
+    assert "data-download-base64=" not in link
+    assert content.decode("latin-1", errors="ignore") not in link
+
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    assert 'getAttribute("data-download-payload-prefix")' in renderer
+    assert 'getAttribute("data-download-chunk-count")' in renderer
+    assert ".textContent" in renderer
+    assert "URL.createObjectURL" in renderer
+    assert "URL.revokeObjectURL" in renderer
+
+
+def test_report_download_link_rejects_unfixed_or_empty_payload() -> None:
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="report download link input differs"
+    ):
+        panel._report_download_link("downloads/unexpected.bin", "Download", b"value")
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="report download link input differs"
+    ):
+        panel._report_download_link(panel.REPORT_DOWNLOAD, "Download report data", b"")
+
+
+def test_financial_download_requires_actual_workbook(tmp_path: Path) -> None:
+    report_path = tmp_path / "portfolio-report-data.json"
+    content = b'{"report_schema_version":1}\n'
+    report_path.write_bytes(content)
+    with pytest.raises(panel.ControlPanelValidationError, match="workbook download"):
+        panel._report_downloads(
+            report_path,
+            {
+                "generation_id": "candidate",
+                "sha256": hashlib.sha256(content).hexdigest(),
+            },
+            None,
+            require_workbook=True,
+        )
 
 
 def test_renderer_discloses_operational_freshness_and_provider_authority() -> None:
@@ -5492,25 +6131,32 @@ def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> Non
     assert "Missing Strategy ($UNKNOWN; UNQUALIFIED" in exception["known_gap"]
 
 
-def test_mvp_exposes_seven_primary_surfaces_and_keeps_appendices_separate() -> None:
+def test_mvp_exposes_all_nine_accepted_views() -> None:
     template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
 
-    assert template.count('class="nav-item') == 7
+    # Nine views exist, but only eight are primary navigation.  The frozen
+    # candidate catalog is dated research context that cannot change current
+    # strategies, readiness or allocation, so it is reachable only through the
+    # appendix link: interaction_qa.mjs:878 requires zero [data-nav="candidates"]
+    # elements anywhere in the document, and the last published generation
+    # (41f41362) shipped none.
+    assert template.count('class="nav-item') == 8
     for view in (
         "command",
         "capital",
         "risk",
+        "signals",
         "attribution",
         "dependence",
         "weekly",
         "data",
     ):
         assert f'data-nav="{view}"' in template
-    assert 'data-nav="signals"' not in template
     assert 'data-nav="candidates"' not in template
     assert 'data-view="signals"' in template
     assert 'data-view="candidates"' in template
     assert 'id="candidate-appendix-button"' in template
+    assert 'data-open-view="candidates"' in template
 
 
 def test_allocation_target_and_drift_fail_closed_without_admitted_target() -> None:
@@ -7684,6 +8330,7 @@ def _stage_panel_bundle(
     independent_report: bytes = _PANEL_EPOCH_FAKE_REPORT,
     report_schema_name: str = "account-manifest-independent-verification",
     report_schema_version: str | None = None,
+    generation_as_of: date | None = None,
 ) -> GenerationManifest:
     as_of = date(2026, 2, 1)
     manifest_payload = json.loads(payload)
@@ -7728,7 +8375,7 @@ def _stage_panel_bundle(
         for artifact_id, contents in sorted(bundle_payloads.items())
     )
     manifest = GenerationManifest.build(
-        as_of_date=as_of,
+        as_of_date=generation_as_of or as_of,
         adapter=AdapterIdentity("synthetic-panel-epoch", "1"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
@@ -7747,6 +8394,24 @@ def _stage_panel_bundle(
         bundle_payloads,
     )
     return manifest
+
+
+def test_verified_bundle_panel_uses_data_cutoff_when_generation_is_later(
+    tmp_path: Path,
+) -> None:
+    subjects, verification = _panel_verified_payloads()
+    payload = subjects[_PANEL_EPOCH_ARTIFACT]
+    root = tmp_path / "bundle"
+    manifest = _stage_panel_bundle(
+        root,
+        payload,
+        subject_payloads=subjects,
+        independent_report=verification,
+        generation_as_of=date(2026, 2, 2),
+    )
+    staged = tmp_path / "account-strategy-manifest.json"
+    staged.write_bytes(payload)
+    panel._verified_bundle_account_manifest(staged, root, manifest.generation_id)
 
 
 def test_verified_bundle_panel_manifest_reads_binds_and_preserves_literal_values(
@@ -8840,7 +9505,7 @@ def test_financial_mode_rebuild_rejects_independent_authority_drift(
         _write_json(baseline_path, payload)
     elif drifted_authority == "classified_flows":
         payload = json.loads(authority["flows"].read_text(encoding="utf-8"))
-        payload["classification_policy"]["policy_version"] = "2"
+        payload["classification_policy"]["policy_version"] += "-DRIFTED"
         _write_json(authority["flows"], payload)
     elif drifted_authority == "classification_policy":
         payload = json.loads(
@@ -9074,10 +9739,22 @@ def test_render_snapshots_core_inputs_once_and_binds_emitted_bytes(
     for name in ("index.html", "analytics.css", "app.js"):
         path = panel.DEFAULT_TEMPLATE_ROOT / name
         assert counts[path.resolve()] == 1
-        assert files[name] == expected_template_bytes[name]
         assert (
             bound_inputs[f"template:{name}"][1] == expected_template_source_hashes[name]
         )
+    expected_links = " ".join(
+        panel._report_download_link(relative, label, files[relative])
+        for relative, label in (
+            (panel.REPORT_DOWNLOAD, "Download report data"),
+            (panel.WORKBOOK_DOWNLOAD, "Download Excel workbook"),
+        )
+        if relative in files
+    ).encode("utf-8")
+    assert files["index.html"] == expected_template_bytes["index.html"].replace(
+        panel._DOWNLOAD_PLACEHOLDER, expected_links
+    )
+    for name in ("analytics.css", "app.js"):
+        assert files[name] == expected_template_bytes[name]
     assert files["styles.css"] == expected_styles
     assert files["data/freshness-health.json"] == expected_freshness
 
@@ -10078,6 +10755,8 @@ def test_publish_requires_coordinated_receipt_after_immutable_staging(
             candidate,
             qa,
             inputs["output"],
+            private_stage_root=inputs["output"],
+            portfolio_root=tmp_path / "production",
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             **financial,
@@ -10252,6 +10931,8 @@ def test_publish_rejects_every_authorization_receipt_mutation_before_pointer_wri
             candidate,
             qa,
             inputs["output"],
+            private_stage_root=inputs["output"],
+            portfolio_root=tmp_path / "production",
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             coordinated_release_receipt=receipt_path,
@@ -10302,6 +10983,8 @@ def test_publish_rejects_post_receipt_tree_mutation_before_pointer_write(
             candidate,
             qa,
             inputs["output"],
+            private_stage_root=inputs["output"],
+            portfolio_root=tmp_path / "production",
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             coordinated_release_receipt=receipt_path,
@@ -10418,6 +11101,13 @@ def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_recei
     }
     monkeypatch.setattr(builder, "_recipe", lambda _path: recipe)
     monkeypatch.setattr(builder, "_panel_financial_arguments", lambda *_args: [])
+    # Resolving the verified dependence source needs a real correlation source
+    # root, which create_recipe requires of every recipe it validates but this
+    # synthetic seam recipe does not carry.
+    dependence_source = tmp_path / "correlation" / "dependence-source.json"
+    monkeypatch.setattr(
+        builder, "_history_contract_path", lambda _recipe: dependence_source
+    )
     panel_result: dict[str, Any] = {}
 
     def real_panel_tool(*args: object, **_kwargs: object) -> dict[str, Any]:
@@ -10436,6 +11126,9 @@ def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_recei
         if command == "qa":
             return panel.validate_qa(candidate, qa)
         assert command == "publish"
+        assert args[args.index("--strategy-history-contract") + 1] == str(
+            dependence_source
+        )
         receipt_path = Path(str(args[args.index("--coordinated-release-receipt") + 1]))
         receipt_bytes = receipt_path.read_bytes()
         assert receipt_bytes == canonical_json_bytes(json.loads(receipt_bytes))
@@ -10445,6 +11138,8 @@ def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_recei
             candidate,
             qa,
             inputs["output"],
+            private_stage_root=inputs["output"],
+            portfolio_root=tmp_path / "production",
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             coordinated_release_receipt=receipt_path,
@@ -10554,12 +11249,40 @@ def test_account_manifest_producer_to_publish_blocked_seam(
         "manifest_admission_policy_path": authority["policy"],
     }
     receipt = _frozen_financial_receipt(tmp_path, inputs, candidate, qa, financial)
+    qa_before = {
+        path.relative_to(qa): path.read_bytes()
+        for path in qa.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(
+        panel.ControlPanelValidationError, match="requires private stage context"
+    ):
+        panel.publish_panel(
+            inputs["report"],
+            inputs["legacy"],
+            candidate,
+            qa,
+            inputs["output"],
+            freshness_health_path=inputs["freshness"],
+            baseline_root=inputs["baseline"],
+            coordinated_release_receipt=receipt,
+            **financial,
+        )
+    assert not (inputs["output"] / "CURRENT.json").exists()
+    assert not (inputs["output"] / "index.html").exists()
+    assert qa_before == {
+        path.relative_to(qa): path.read_bytes()
+        for path in qa.rglob("*")
+        if path.is_file()
+    }
     published = panel.publish_panel(
         inputs["report"],
         inputs["legacy"],
         candidate,
         qa,
         inputs["output"],
+        private_stage_root=inputs["output"],
+        portfolio_root=tmp_path / "production",
         freshness_health_path=inputs["freshness"],
         baseline_root=inputs["baseline"],
         account_manifest_path=manifest_path,
@@ -10633,6 +11356,8 @@ def test_financial_publish_rejects_manifest_change_after_verification(
             candidate,
             qa,
             inputs["output"],
+            private_stage_root=inputs["output"],
+            portfolio_root=tmp_path / "production",
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             **financial,
@@ -10741,6 +11466,8 @@ def test_financial_publish_rejects_input_change_after_final_render(
             candidate,
             qa,
             inputs["output"],
+            private_stage_root=inputs["output"],
+            portfolio_root=tmp_path / "production",
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             **financial,
@@ -10786,6 +11513,8 @@ def test_financial_publish_revalidates_private_qa_snapshot_after_final_render(
             candidate,
             qa,
             inputs["output"],
+            private_stage_root=inputs["output"],
+            portfolio_root=tmp_path / "production",
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             **financial,
@@ -10840,8 +11569,148 @@ def test_financial_publish_rejects_coherent_candidate_and_qa_swap(
             candidate,
             qa,
             inputs["output"],
+            private_stage_root=inputs["output"],
+            portfolio_root=tmp_path / "production",
             freshness_health_path=inputs["freshness"],
             baseline_root=inputs["baseline"],
             **financial,
         )
     assert not (inputs["output"] / "CURRENT.json").exists()
+
+
+@pytest.mark.parametrize("command", ("build", "verify", "publish"))
+def test_panel_cli_forwards_governed_hwm_bundle_for_build_verify_and_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    result_path = tmp_path / "hwm-result.json"
+    input_path = tmp_path / "hwm-input.json"
+    calendar_path = tmp_path / "hwm-calendar.json"
+    receipt_path = tmp_path / "hwm-receipt.json"
+    capital_result_path = tmp_path / "capital-result.json"
+    capital_input_path = tmp_path / "capital-input.json"
+    result_path.write_bytes(b'{"status":"AVAILABLE"}\n')
+    input_path.write_bytes(b'{"input":"bound"}\n')
+    calendar_path.write_bytes(b'{"calendar":"bound"}\n')
+    receipt_path.write_bytes(b'{"receipt":"bound"}\n')
+    capital_result_path.write_bytes(b'{"outcome_id":"INVESTED_CAPITAL"}\n')
+    capital_input_path.write_bytes(b'{"capital":"bound"}\n')
+    observed: dict[str, object] = {}
+
+    def capture(*_args: object, **kwargs: object) -> dict[str, object]:
+        observed.update(kwargs)
+        return {"status": "PASS"}
+
+    target = {
+        "build": "build_candidate",
+        "verify": "verify_candidate",
+        "publish": "publish_panel",
+    }[command]
+    monkeypatch.setattr(panel, target, capture)
+    argv = [
+        command,
+        "--report-root",
+        str(tmp_path / "report"),
+        "--legacy-panel",
+        str(tmp_path / "legacy"),
+        "--freshness-health",
+        str(tmp_path / "freshness.json"),
+        "--baseline-root",
+        str(tmp_path / "baseline"),
+    ]
+    if command != "verify":
+        argv += ["--output-root", str(tmp_path / "panel-stage")]
+    if command != "build":
+        argv += ["--candidate-dir", str(tmp_path / "candidate")]
+    if command == "publish":
+        argv += [
+            "--qa-dir",
+            str(tmp_path / "qa"),
+            "--coordinated-release-receipt",
+            str(tmp_path / "coordinated.json"),
+        ]
+    argv += [
+        "--hwm-governed-result",
+        str(result_path),
+        "--hwm-governed-input-generation",
+        str(input_path),
+        "--hwm-governed-calendar-authority",
+        str(calendar_path),
+        "--hwm-governed-admission-receipt",
+        str(receipt_path),
+        "--invested-capital-result",
+        str(capital_result_path),
+        "--invested-capital-input-generation",
+        str(capital_input_path),
+    ]
+
+    assert panel.main(argv) == 0
+    assert observed["hwm_governed_result"] == {"status": "AVAILABLE"}
+    assert observed["hwm_governed_generation_bytes"] == input_path.read_bytes()
+    assert observed["hwm_governed_calendar_bytes"] == calendar_path.read_bytes()
+    assert observed["hwm_governed_receipt_bytes"] == receipt_path.read_bytes()
+    assert observed["invested_capital_result"] == {"outcome_id": "INVESTED_CAPITAL"}
+    assert observed["invested_capital_input_generation_path"] == capital_input_path
+
+
+def test_control_panel_contract_and_renderer_expose_invested_capital() -> None:
+    schema = json.loads(panel.PANEL_DATA_SCHEMA.read_text(encoding="utf-8"))
+    template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+
+    assert schema["properties"]["invested_capital"] == {
+        "$ref": "#/$defs/invested_capital"
+    }
+    assert "invested-capital-current-table" in template
+    assert "invested-capital-daily-table" in template
+    assert "function renderInvestedCapital()" in renderer
+    assert "capital.current_aggregate_usd" in renderer
+    assert "capital.daily_aggregate" in renderer
+
+
+@pytest.mark.parametrize("epochs", [[], [{"epoch_id": "synthetic-predecessor"}]])
+def test_capital_schema_retains_supporting_epoch_objects(epochs: list[Any]) -> None:
+    from jsonschema import Draft202012Validator
+
+    schema = json.loads(panel.PANEL_DATA_SCHEMA.read_bytes())
+    capital = schema["$defs"]["invested_capital"]
+    assert capital["additionalProperties"] is False
+    supporting = capital["properties"]["supporting_epochs"]
+    assert supporting["items"] == capital["properties"]["required_epochs"]["items"]
+    validator = Draft202012Validator(supporting)
+    assert list(validator.iter_errors(epochs)) == []
+    assert list(validator.iter_errors(["not-an-epoch-object"]))
+    assert list(validator.iter_errors({"epoch_id": "not-an-array"}))
+
+
+@pytest.mark.parametrize("authority", ("hwm", "financial-mode", "manifest-generation"))
+def test_governed_hwm_direct_publish_requires_private_stage_context_before_io(
+    tmp_path: Path,
+    authority: str,
+) -> None:
+    output_root = tmp_path / "panel-output"
+    financial: dict[str, Any] = {}
+    if authority == "hwm":
+        financial["hwm_governed_result"] = {"status": "AVAILABLE"}
+    elif authority == "financial-mode":
+        financial["financial_mode"] = True
+    else:
+        financial["account_manifest_generation_root"] = tmp_path / "manifest"
+        financial["account_manifest_generation_id"] = "exact-generation"
+
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="requires private stage context",
+    ):
+        panel.publish_panel(
+            tmp_path / "report",
+            tmp_path / "legacy",
+            tmp_path / "candidate",
+            tmp_path / "qa",
+            output_root,
+            **financial,
+        )
+
+    assert not output_root.exists()
+    assert not (tmp_path / "qa").exists()

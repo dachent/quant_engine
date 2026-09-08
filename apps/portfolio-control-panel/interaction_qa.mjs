@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -88,6 +88,11 @@ const candidateRecordSha256 = createHash("sha256").update(candidateRecordBytes).
 const dashboardData = JSON.parse(await readFile(path.join(path.dirname(html), "data", "dashboard_data.json"), "utf8"));
 const expectedFactorSeries = dashboardData.dependence_analysis.series_ids.length;
 const expectedCurrentStrategies = dashboardData.strategies.length;
+// The account selector lists every account the panel scopes to, plus the
+// "all accounts" entry.  Bind that to the census the panel actually carries
+// rather than to a literal: the current-product perimeter decides how many
+// accounts appear, and a fixed count silently encodes one perimeter vintage.
+const expectedAccountOptions = dashboardData.account_summary.length + 1;
 const expectedReserveAssignments = dashboardData.performance.filter((row) => row.strategy_mapping_disposition === "RESERVE_NOT_APPLICABLE").length;
 const performanceLineageMismatch = dashboardData.meta?.performance_lineage?.status === "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH";
 const includeCandidates = options["exclude-candidates"] !== "true";
@@ -107,6 +112,45 @@ await page.goto(pathToFileURL(html).href, { waitUntil: "load" });
 await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
 
 const checks = [];
+if (!epochOnly) {
+  await page.keyboard.press("Tab");
+  const firstKeyboardTarget = await page.evaluate(() => ({
+    className: document.activeElement?.className,
+    text: document.activeElement?.textContent?.trim(),
+  }));
+  await page.keyboard.press("Enter");
+  const skipTarget = await page.evaluate(() => document.activeElement?.id);
+  checks.push(check(
+    "Keyboard skip link reaches the dashboard main region",
+    String(firstKeyboardTarget.className).includes("skip-link")
+      && firstKeyboardTarget.text === "Skip to dashboard"
+      && skipTarget === "main-content",
+    { first_keyboard_target: firstKeyboardTarget, skip_target: skipTarget },
+  ));
+  await page.locator('[data-nav="data"]').click();
+  const downloads = [
+    "downloads/portfolio-report-data.json",
+    ...(dashboardData.invested_capital ? ["downloads/portfolio-report.xlsx"] : []),
+  ];
+  const downloadDirectory = path.join(path.dirname(output), "downloads");
+  await mkdir(downloadDirectory, { recursive: true });
+  for (const relative of downloads) {
+    const link = page.locator(`a[download][href="${relative}"]`);
+    const pendingDownload = page.waitForEvent("download");
+    await link.click();
+    const download = await pendingDownload;
+    const destination = path.join(downloadDirectory, path.basename(relative));
+    await download.saveAs(destination);
+    const downloaded = await readFile(destination);
+    const actualSha256 = createHash("sha256").update(downloaded).digest("hex");
+    checks.push(check(
+      `Download delivers the selected ${path.basename(relative)}`,
+      actualSha256 === candidateRecord.artifact_sha256[relative],
+      { relative_path: relative, sha256: actualSha256, size_bytes: downloaded.length },
+    ));
+  }
+  await page.locator('[data-nav="command"]').click();
+}
 if (externalManifestPath) {
   const payloadMatchesExternalManifest = JSON.stringify(dashboardData.account_manifest) === JSON.stringify(externalManifest);
   checks.push(check(
@@ -386,23 +430,6 @@ if (epochOnly) {
   if (!result.all_passed) process.exitCode = 1;
   process.exit();
 }
-await page.evaluate(() => {
-  if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
-});
-await page.keyboard.press("Tab");
-const firstKeyboardTarget = await page.evaluate(() => ({
-  className: document.activeElement?.className,
-  text: document.activeElement?.textContent?.trim(),
-}));
-await page.keyboard.press("Enter");
-const skipTarget = await page.evaluate(() => document.activeElement?.id);
-checks.push(check(
-  "Keyboard skip link reaches the dashboard main region",
-  String(firstKeyboardTarget.className).includes("skip-link")
-    && firstKeyboardTarget.text === "Skip to dashboard"
-    && skipTarget === "main-content",
-  { first_keyboard_target: firstKeyboardTarget, skip_target: skipTarget },
-));
 const views = ["command", "capital", "risk", "attribution", "dependence", "weekly", "data"];
 const requiredFactorLenses = [
   "ECONOMIC_FACTOR",
@@ -739,8 +766,8 @@ const persistentAccount = await page.locator("#context-account").inputValue();
 const riskAccountRows = await page.locator("#performance-table tbody tr[data-account-id], #historical-gap-table tbody tr[data-account-id]").evaluateAll((nodes) => nodes.map((node) => ({ account: node.dataset.accountId, label: node.cells[0]?.textContent?.trim() })));
 checks.push(check(
   "Privacy-safe account context filters lifecycle, positions, and performance",
-  accountOptions.length === 20
-    && new Set(accountOptions.map((item) => item.label)).size === 20
+  accountOptions.length === expectedAccountOptions
+    && new Set(accountOptions.map((item) => item.label)).size === expectedAccountOptions
     && firstPositionAccount
     && persistentAccount === firstPositionAccount
     && selectedAccountLabel
@@ -753,6 +780,7 @@ checks.push(check(
     && [...lifecycleAccountRows, ...positionAccountRows, ...riskAccountRows].every((row) => row.account === firstPositionAccount && row.label === selectedAccountLabel),
   {
     account_options: accountOptions.length,
+    account_options_expected: expectedAccountOptions,
     filtered_positions: filteredPositionRows,
     lifecycle_rows: lifecycleAccountRows.length,
     performance_rows: riskAccountRows.length,

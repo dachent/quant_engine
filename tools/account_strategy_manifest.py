@@ -81,6 +81,10 @@ class ManifestError(RuntimeError):
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_COUNTERPARTY_RULE = "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+_SOURCE_IDENTITY_COUNTERPARTY_RULE = (
+    "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT_WITH_SOURCE_IDENTITY_V1"
+)
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
 _MANIFEST_SCHEMA_VERSION = 7
 _FLOW_CLASSES_SCHEMA_VERSION = 3
@@ -360,7 +364,6 @@ def load_flow_classification_policy(
         raise ManifestError("flow classification policy rules must be lists")
 
     exact: dict[str, dict[str, str]] = {}
-    counterparty_rule = "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
     for index, value in enumerate(dispositions["exact"]):
         if not isinstance(value, dict):
             raise ManifestError(
@@ -405,9 +408,15 @@ def load_flow_classification_policy(
             )
         selected_rule = {"disposition": disposition, "amount_sign": amount_sign}
         if "counterparty_rule" in value:
+            counterparty_rule = value["counterparty_rule"]
             if (
                 disposition != "INTERNAL"
-                or value["counterparty_rule"] != counterparty_rule
+                or counterparty_rule
+                not in {_COUNTERPARTY_RULE, _SOURCE_IDENTITY_COUNTERPARTY_RULE}
+                or (
+                    counterparty_rule == _SOURCE_IDENTITY_COUNTERPARTY_RULE
+                    and flow_type != "ACCOUNT_TRANSFER"
+                )
             ):
                 raise ManifestError(
                     f"flow classification exact rule {index}.counterparty_rule is invalid"
@@ -477,12 +486,12 @@ def load_flow_classification_policy(
         if "counterparty_rule" in value:
             if (
                 disposition != "INTERNAL"
-                or value["counterparty_rule"] != counterparty_rule
+                or value["counterparty_rule"] != _COUNTERPARTY_RULE
             ):
                 raise ManifestError(
                     f"flow classification prefix rule {index}.counterparty_rule is invalid"
                 )
-            selected_prefix["counterparty_rule"] = counterparty_rule
+            selected_prefix["counterparty_rule"] = _COUNTERPARTY_RULE
         if "unpaired_disposition" in value:
             if disposition != "INTERNAL" or value["unpaired_disposition"] != "EXTERNAL":
                 raise ManifestError(
@@ -831,7 +840,9 @@ def _make_coverage_loader(receipt_predicate: Any) -> Any:
                 row["account_id"] == account_id
                 and row["status"] == "COMPLETE"
                 and str(row["effective_start"]) == effective_start
-                and str(row["effective_end"]) == effective_end
+                # The receipt can extend past the last observed NAV without
+                # extending the calculation beyond its proven interval.
+                and effective_start <= effective_end <= str(row["effective_end"])
                 for row in self._rows
             )
 
@@ -1879,7 +1890,7 @@ def _raw_flow_records(ledger: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
         amount = _amount_value(row, f"raw flow {record_id}.amount")
         if amount is None:
             raise ManifestError(f"raw flow {record_id}.amount is missing")
-        raw[record_id] = {
+        normalized = {
             "record_id": record_id,
             "account_id": _require_nonempty_text(
                 row.get("account_id"), f"raw flow {record_id}.account_id"
@@ -1896,6 +1907,31 @@ def _raw_flow_records(ledger: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
             ),
             "amount": amount,
         }
+        provider_id = row.get("provider_id")
+        if provider_id is not None:
+            normalized["provider_id"] = _require_nonempty_text(
+                provider_id, f"raw flow {record_id}.provider_id"
+            )
+        generation_id = row.get("generation_id")
+        if generation_id is not None:
+            normalized["generation_id"] = _generation_id(
+                generation_id, f"raw flow {record_id}.generation_id"
+            )
+        activity_id = row.get("provider_activity_id_sha256")
+        if activity_id is not None:
+            if (
+                not isinstance(activity_id, str)
+                or _SHA256.fullmatch(activity_id) is None
+            ):
+                raise ManifestError(
+                    f"raw flow {record_id}.provider_activity_id_sha256 is invalid"
+                )
+            if "provider_id" not in normalized or "generation_id" not in normalized:
+                raise ManifestError(
+                    f"raw flow {record_id} source identity is incomplete"
+                )
+            normalized["provider_activity_id_sha256"] = activity_id
+        raw[record_id] = normalized
     return raw
 
 
@@ -1952,6 +1988,26 @@ def _expected_flow_dispositions(
 
     dispositions: dict[str, str] = {}
     counterparties: dict[str, str] = {}
+
+    def identity_compatible(
+        record: Mapping[str, Any], other: Mapping[str, Any], rule: Mapping[str, Any]
+    ) -> bool:
+        if rule.get("counterparty_rule") != _SOURCE_IDENTITY_COUNTERPARTY_RULE:
+            return True
+        activity_id = record.get("provider_activity_id_sha256")
+        other_activity_id = other.get("provider_activity_id_sha256")
+        if activity_id is None and other_activity_id is None:
+            return True
+        return activity_id is not None and (
+            record.get("provider_id"),
+            record.get("generation_id"),
+            activity_id,
+        ) == (
+            other.get("provider_id"),
+            other.get("generation_id"),
+            other_activity_id,
+        )
+
     for record_id, record in raw.items():
         selected_rule = selected_rules[record_id]
         disposition = selected_rule.get("disposition")
@@ -1964,6 +2020,7 @@ def _expected_flow_dispositions(
                 if other["record_id"] != record_id
                 and other["account_id"] != record["account_id"]
                 and other["amount"] == -record["amount"]
+                and identity_compatible(record, other, selected_rule)
             ]
             if (
                 not candidates
@@ -3888,9 +3945,12 @@ def _validate_manifest_semantics(
         if not isinstance(trace, Mapping) or not isinstance(trace.get("links"), list):
             raise ManifestError(f"row {index} observation trace is invalid")
         links = trace["links"]
-        expected_link_count = int(row["nav_observations"]) - (
-            1 if opening_basis == "FIRST_AVAILABLE_NAV" else 0
+        # A provider purchase recognized on its event date is already the first
+        # NAV; the producer correctly emits no zero-duration opening interval.
+        opening_is_first_nav = opening_basis == "FIRST_AVAILABLE_NAV" or (
+            opening_basis == "PROVIDER_CAPITAL_ANCHOR" and annualization_start == start
         )
+        expected_link_count = int(row["nav_observations"]) - int(opening_is_first_nav)
         if len(links) != expected_link_count:
             raise ManifestError(f"row {index} observation trace link count is invalid")
 
@@ -3916,14 +3976,19 @@ def _validate_manifest_semantics(
             ):
                 raise ManifestError(f"row {index} observation trace dates are invalid")
             if link_index == 0:
-                if opening_basis == "FIRST_AVAILABLE_NAV" and start_date != start:
+                if opening_is_first_nav and start_date != start:
                     raise ManifestError(
                         f"row {index} observation trace opening is invalid"
                     )
-                if opening_basis in {
-                    "PREDECESSOR_CLOSING_NAV",
-                    "PROVIDER_CAPITAL_ANCHOR",
-                } and (start_date >= start or end_date != start):
+                if (
+                    opening_basis
+                    in {
+                        "PREDECESSOR_CLOSING_NAV",
+                        "PROVIDER_CAPITAL_ANCHOR",
+                    }
+                    and not opening_is_first_nav
+                    and (start_date >= start or end_date != start)
+                ):
                     raise ManifestError(
                         f"row {index} observation trace predecessor is invalid"
                     )

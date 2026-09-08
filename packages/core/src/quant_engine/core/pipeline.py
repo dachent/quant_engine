@@ -51,6 +51,7 @@ _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _PORTFOLIO_CONTRACT_GATE: Final = "portfolio-orchestration-contract"
 _FINANCIAL_MVP_PRODUCT_GATE: Final = "financial-mvp-product-conformance"
 _FINANCIAL_MVP_HWM_INPUT_AUTHORITY_GATE: Final = "financial-mvp-hwm-input-authority"
+_OWNER_PUBLICATION_AUTHORIZATION_GATE: Final = "owner-publication-authorization"
 _FINANCIAL_EPOCH_MANIFEST_GATE: Final = "financial-epoch-manifest-input-authority"
 _FINANCIAL_EPOCH_MANIFEST_INPUTS: Final = {
     "account_strategy_admission_policy",
@@ -125,6 +126,12 @@ _POST_BUILD_CHECKS: Final = {
     "generation_invariants",
     "ledger_bridges",
     "mappings",
+}
+_HWM_BINDING_KEYS: Final = {
+    "calendar_authority",
+    "governed_result",
+    "input_generation",
+    "provider_admission_receipt",
 }
 
 
@@ -1194,6 +1201,77 @@ def _provider_admission_validator() -> Callable[..., None]:
             sys.modules[module_name] = previous
 
 
+def _verify_financial_outcomes(spec: PipelineSpec) -> dict[str, Any]:
+    """Run the repository's single product completion verifier at this boundary."""
+    tools_root = Path(__file__).resolve().parents[5] / "tools"
+    path = tools_root / "portfolio_financial_outcomes.py"
+    if path.is_symlink() or not path.is_file():
+        raise PipelineValidationError("financial outcome verifier is unavailable")
+    module_spec = importlib.util.spec_from_file_location(
+        "quant_engine_pipeline_financial_outcomes", path
+    )
+    if module_spec is None or module_spec.loader is None:
+        raise PipelineValidationError("financial outcome verifier is unavailable")
+    module = importlib.util.module_from_spec(module_spec)
+    previous_path = list(sys.path)
+    try:
+        sys.path.insert(0, str(tools_root))
+        module_spec.loader.exec_module(module)
+        proof = module.validate_financial_outcomes(spec)
+        if not isinstance(proof, dict) or proof.get("status") != "PASS":
+            raise PipelineValidationError("financial outcomes did not pass")
+        return cast(dict[str, Any], proof)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise PipelineValidationError(f"financial outcomes failed: {exc}") from exc
+    finally:
+        sys.path[:] = previous_path
+
+
+def _verify_selected_hwm_sources(
+    spec: PipelineSpec,
+    *,
+    contract_path: Path,
+    bindings: Mapping[str, Path],
+) -> set[str]:
+    """Replay the selected account-ledger HWM inputs through the product verifier."""
+
+    tools_root = Path(__file__).resolve().parents[5] / "tools"
+    path = tools_root / "portfolio_financial_outcomes.py"
+    if path.is_symlink() or not path.is_file():
+        raise PipelineValidationError("financial outcome verifier is unavailable")
+    module_spec = importlib.util.spec_from_file_location(
+        "quant_engine_pipeline_financial_outcomes_hwm", path
+    )
+    if module_spec is None or module_spec.loader is None:
+        raise PipelineValidationError("financial outcome verifier is unavailable")
+    module = importlib.util.module_from_spec(module_spec)
+    previous_path = list(sys.path)
+    try:
+        sys.path.insert(0, str(tools_root))
+        module_spec.loader.exec_module(module)
+        source_paths = module.selected_hwm_source_paths(spec)
+        resolved = module.verify_selected_hwm_generation(
+            source_paths,
+            contract_path=contract_path,
+            bindings=bindings,
+        )
+        if not isinstance(resolved, set) or any(
+            not isinstance(source_id, str) for source_id in resolved
+        ):
+            raise PipelineValidationError(
+                "financial HWM selected-source result is invalid"
+            )
+        return cast(set[str], resolved)
+    except PipelineValidationError:
+        raise
+    except (ImportError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise PipelineValidationError(
+            f"financial HWM selected-source replay failed: {exc}"
+        ) from exc
+    finally:
+        sys.path[:] = previous_path
+
+
 def _semantic_route(output_role: object) -> dict[str, Any]:
     role = _identifier(str(output_role).lower().replace("_", "-"), "semantic output")
     canonical_role = role.upper().replace("-", "_")
@@ -1394,8 +1472,10 @@ def _validate_financial_mvp_production_binding(
 def _expected_hwm_input_authority(
     conformance: Mapping[str, Any],
     authority_hashes: Mapping[str, Any],
+    assessment: Mapping[str, Any],
+    spec: PipelineSpec,
 ) -> dict[str, Any]:
-    """Independently rederive the fail-closed PORT-HWM-4 input assessment."""
+    """Independently rederive and verify the staged PORT-HWM-4 assessment."""
 
     sources = _objects(conformance.get("sources"), "financial MVP HWM sources")
     outcomes = _objects(conformance.get("outcomes"), "financial MVP HWM outcomes")
@@ -1424,7 +1504,7 @@ def _expected_hwm_input_authority(
     outcome_readiness = (
         str(hwm_outcomes[0].get("readiness")) if hwm_outcomes else "NOT_DECLARED"
     )
-    blockers = {
+    legacy_blockers = {
         "ACCEPTED_HWM_INPUT_GENERATION_ABSENT",
         "ACCEPTED_MIXED_CALENDAR_AUTHORITY_ABSENT",
         *({"OUTCOME:AS_HELD_COMPOSITE_HWM"} if outcome_readiness != "READY" else set()),
@@ -1434,19 +1514,20 @@ def _expected_hwm_input_authority(
         conformance.get("provider_admission"), "financial MVP HWM provider authority"
     )
     if provider_admission.get("product_readiness") != "READY_FOR_COMPOSITION":
-        blockers.add("PROVIDER_ADMISSION")
-    return {
+        legacy_blockers.add("PROVIDER_ADMISSION")
+    expected_authority_hashes = {
+        "census_sha256": conformance["census_sha256"],
+        "contract_raw_sha256": authority_hashes["contract_raw_sha256"],
+        "contract_semantic_sha256": conformance["contract_semantic_sha256"],
+        "provider_catalog_sha256": authority_hashes["provider_catalog_sha256"],
+        "provider_manifest_sha256": authority_hashes["provider_manifest_sha256"],
+        "provider_receipt_sha256": authority_hashes["provider_receipt_sha256"],
+        "source_matrix_sha256": authority_hashes["source_matrix_sha256"],
+    }
+    legacy = {
         "assessment_scope": "CURRENT_PRODUCT_AND_PROVIDER_ADMISSION_ONLY",
-        "authority_hashes": {
-            "census_sha256": conformance["census_sha256"],
-            "contract_raw_sha256": authority_hashes["contract_raw_sha256"],
-            "contract_semantic_sha256": conformance["contract_semantic_sha256"],
-            "provider_catalog_sha256": authority_hashes["provider_catalog_sha256"],
-            "provider_manifest_sha256": authority_hashes["provider_manifest_sha256"],
-            "provider_receipt_sha256": authority_hashes["provider_receipt_sha256"],
-            "source_matrix_sha256": authority_hashes["source_matrix_sha256"],
-        },
-        "blocking_reasons": sorted(blockers),
+        "authority_hashes": expected_authority_hashes,
+        "blocking_reasons": sorted(legacy_blockers),
         "calendar_authority_sha256": None,
         "input_generation_sha256": None,
         "outcome_id": "AS_HELD_COMPOSITE_HWM",
@@ -1455,6 +1536,153 @@ def _expected_hwm_input_authority(
         "schema_version": 1,
         "state": "REQUIRED_NOT_READY",
         "unresolved_source_ids": unresolved_source_ids,
+    }
+    if assessment.get("schema_version") == 1:
+        return legacy
+    if assessment.get("schema_version") != 2:
+        raise PipelineValidationError("financial MVP HWM assessment is unsupported")
+    _strict(
+        assessment,
+        {
+            "assessment_scope",
+            "authority_hashes",
+            "bindings",
+            "blocking_reasons",
+            "calendar_authority_sha256",
+            "input_generation_sha256",
+            "outcome_id",
+            "outcome_readiness",
+            "required_strategy_ids",
+            "result_sha256",
+            "schema_version",
+            "state",
+            "unresolved_source_ids",
+        },
+        "financial MVP HWM assessment",
+    )
+    pending_blockers = {
+        "ACCEPTED_HWM_INPUT_GENERATION_ABSENT",
+        "ACCEPTED_MIXED_CALENDAR_AUTHORITY_ABSENT",
+        *(f"SOURCE:{source_id}" for source_id in unresolved_source_ids),
+    }
+    if provider_admission.get("product_readiness") != "READY_FOR_COMPOSITION":
+        pending_blockers.add("PROVIDER_ADMISSION")
+    pending = {
+        "assessment_scope": "PENDING_GOVERNED_HWM_RESULT",
+        "authority_hashes": expected_authority_hashes,
+        "bindings": {},
+        "blocking_reasons": sorted(pending_blockers),
+        "calendar_authority_sha256": None,
+        "input_generation_sha256": None,
+        "outcome_id": "AS_HELD_COMPOSITE_HWM",
+        "outcome_readiness": outcome_readiness,
+        "required_strategy_ids": required_strategy_ids,
+        "result_sha256": None,
+        "schema_version": 2,
+        "state": "REQUIRED_NOT_READY",
+        "unresolved_source_ids": unresolved_source_ids,
+    }
+    if assessment.get("state") == "REQUIRED_NOT_READY":
+        return pending
+    if assessment.get("state") != "AVAILABLE":
+        raise PipelineValidationError("financial MVP HWM assessment state differs")
+    bindings = _object(assessment["bindings"], "financial MVP HWM bindings")
+    if set(bindings) != _HWM_BINDING_KEYS:
+        raise PipelineValidationError("financial MVP HWM binding roles differ")
+    resolved: dict[str, tuple[Path, str, int]] = {
+        key: _file_definition_value(bindings[key], f"financial MVP HWM {key}")
+        for key in sorted(_HWM_BINDING_KEYS)
+    }
+    assessment_gate = _single_gate(spec, _FINANCIAL_MVP_HWM_INPUT_AUTHORITY_GATE)
+    if any(
+        _same_path(path, assessment_gate.path)
+        for path, _digest, _size in resolved.values()
+    ):
+        raise PipelineValidationError("financial MVP HWM assessment self-reference")
+    provider_gate = _single_gate(
+        spec, _FINANCIAL_MVP_AUTHORITY_GATES["provider_receipt"]
+    )
+    provider_identity = _file_hash(provider_gate.path)
+    provider_path, provider_sha256, provider_size = resolved[
+        "provider_admission_receipt"
+    ]
+    if (
+        not _same_path(provider_path, provider_gate.path)
+        or (provider_sha256, provider_size) != provider_identity
+    ):
+        raise PipelineValidationError("financial MVP HWM admission receipt differs")
+    for field, role in (
+        ("calendar_authority_sha256", "calendar_authority"),
+        ("input_generation_sha256", "input_generation"),
+        ("result_sha256", "governed_result"),
+    ):
+        if assessment[field] != resolved[role][1]:
+            raise PipelineValidationError(f"financial MVP HWM {field} differs")
+    result_path = resolved["governed_result"][0]
+    input_path = resolved["input_generation"][0]
+    calendar_path = resolved["calendar_authority"][0]
+    contract_gate = _single_gate(spec, _FINANCIAL_MVP_AUTHORITY_GATES["contract"])
+    repository_root = Path(__file__).resolve().parents[5]
+    try:
+        result = _object(
+            json.loads(result_path.read_text(encoding="utf-8")),
+            "governed HWM result",
+        )
+        from quant_engine.portfolio_ledger.hwm_governed_execution import (
+            verify_governed_hwm_result,
+        )
+
+        verified = verify_governed_hwm_result(
+            result,
+            input_path.read_bytes(),
+            calendar_bytes=calendar_path.read_bytes(),
+            input_receipt_bytes=provider_path.read_bytes(),
+            policy_bytes=(
+                repository_root / "contracts" / "portfolio-hwm-policy-v4.json"
+            ).read_bytes(),
+            product_contract_bytes=contract_gate.path.read_bytes(),
+            performance_policy_bytes=(
+                repository_root / "contracts" / "portfolio-performance-policy-v1.json"
+            ).read_bytes(),
+            legacy_policy_bytes=(
+                repository_root / "contracts" / "portfolio-hwm-policy-v3.json"
+            ).read_bytes(),
+        )
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        raise PipelineValidationError(
+            "financial MVP governed HWM result verification failed"
+        ) from exc
+    memberships = _object(
+        verified.get("input_evidence"), "governed HWM input evidence"
+    ).get("memberships")
+    verified_strategy_ids = sorted(
+        str(row["strategy_id"])
+        for row in _objects(memberships, "governed HWM memberships")
+    )
+    if verified.get("status") != "AVAILABLE" or verified_strategy_ids != (
+        required_strategy_ids
+    ):
+        raise PipelineValidationError("financial MVP governed HWM coverage differs")
+    resolved_source_ids = _verify_selected_hwm_sources(
+        spec,
+        contract_path=contract_gate.path,
+        bindings={key: value[0] for key, value in resolved.items()},
+    )
+    remaining_source_ids = sorted(set(unresolved_source_ids) - set(resolved_source_ids))
+    if remaining_source_ids or provider_admission.get("product_readiness") != (
+        "READY_FOR_COMPOSITION"
+    ):
+        raise PipelineValidationError("financial MVP HWM required authority is absent")
+    return {
+        **pending,
+        "assessment_scope": "VERIFIED_GOVERNED_HWM_RESULT",
+        "bindings": dict(bindings),
+        "blocking_reasons": [],
+        "calendar_authority_sha256": resolved["calendar_authority"][1],
+        "input_generation_sha256": resolved["input_generation"][1],
+        "result_sha256": resolved["governed_result"][1],
+        "state": "AVAILABLE",
+        "unresolved_source_ids": remaining_source_ids,
     }
 
 
@@ -2036,7 +2264,7 @@ def _financial_mvp_product_authority(spec: PipelineSpec) -> dict[str, Any] | Non
             spec, _FINANCIAL_MVP_HWM_INPUT_AUTHORITY_GATE
         )
         expected_hwm_input_authority = _expected_hwm_input_authority(
-            conformance, expected_hashes
+            conformance, expected_hashes, hwm_input_authority, spec
         )
         if hwm_input_authority != expected_hwm_input_authority:
             raise PipelineValidationError("financial MVP HWM input authority differs")
@@ -2636,10 +2864,25 @@ def _verify_post_build_semantic_gate(spec: PipelineSpec, path: Path) -> None:
                 "financial_epoch_manifest_proof_sha256",
             }
         )
+    financial_check = "financial_outcomes_sha256" in payload
+    if financial_check:
+        expected_payload_keys.add("financial_outcomes_sha256")
+    elif _requires_production_product(spec):
+        raise PipelineValidationError("production financial outcomes check is missing")
     _strict(payload, expected_payload_keys, "post-build semantic gate")
     checks = _object(payload["checks"], "post-build semantic checks")
     product_authority = _financial_mvp_product_authority(spec)
     expected_checks = set(_POST_BUILD_CHECKS)
+    if financial_check:
+        expected_checks.add("financial_outcomes")
+        proof = _verify_financial_outcomes(spec)
+        if (
+            payload["financial_outcomes_sha256"]
+            != hashlib.sha256(canonical_json_bytes(proof)).hexdigest()
+        ):
+            raise PipelineValidationError(
+                "financial outcomes semantic identity differs"
+            )
     if product_authority is not None:
         expected_checks.add("product_conformance")
     if epoch_gates:
@@ -3314,11 +3557,40 @@ def _financial_mvp_summary(
         if hwm_input_authority is not None
         else ("HWM_INPUT_AUTHORITY_REQUIRED",)
     )
-    blocking_reasons = sorted({*conformance_blocking_reasons, *hwm_blocking_reasons})
+    correction_authority = _object(
+        conformance["correction_authority"], "financial MVP correction authority"
+    )
+    # Frozen source and outcome readiness describes the accepted execution
+    # baseline. The candidate must be built before its financial outputs can
+    # satisfy that baseline. Actual admission and applicable corrections gate
+    # construction; canonical output verification gates production below.
+    candidate_blockers = {
+        *(
+            ("PROVIDER_ADMISSION",)
+            if admission.get("product_readiness") != "READY_FOR_COMPOSITION"
+            else ()
+        ),
+        *(
+            ("CORRECTION_AUTHORITY_REQUIRED",)
+            if correction_authority.get("authority_state") != "PROVIDED"
+            else ()
+        ),
+        *(
+            f"OPEN_CORRECTION:{value}"
+            for value in _strings(
+                correction_authority.get("applicable_open_correction_ids"),
+                "applicable open correction IDs",
+            )
+        ),
+    }
+    blocking_reasons = sorted(candidate_blockers)
+    completion_blocking_reasons = sorted(
+        {*conformance_blocking_reasons, *hwm_blocking_reasons}
+    )
     ready_for_execution = (
-        conformance["readiness"] == "READY_FOR_EXECUTION"
+        not blocking_reasons
         and hwm_input_authority is not None
-        and hwm_input_authority.get("state") == "AVAILABLE"
+        and hwm_input_authority.get("schema_version") == 2
     )
     receipt = _object(admission["receipt"], "provider admission receipt")
     provider_rows = _objects(
@@ -3422,6 +3694,7 @@ def _financial_mvp_summary(
         "candidate_artifacts": candidate_artifacts,
         "census_sha256": conformance["census_sha256"],
         "composition_digest": composition_digest,
+        "completion_blocking_reasons": completion_blocking_reasons,
         "contract_semantic_sha256": conformance["contract_semantic_sha256"],
         "correction_authority": conformance["correction_authority"],
         "current_member_strategy_ids": current_member_strategy_ids,
@@ -3466,7 +3739,13 @@ def _current_product_authority(authority: Mapping[str, Any] | None) -> bool:
     if authority is None:
         return False
     raw = authority.get("raw")
-    return isinstance(raw, Mapping) and raw.get("schema_version") == 3
+    hwm = authority.get("hwm_input_authority")
+    return (
+        isinstance(raw, Mapping)
+        and raw.get("schema_version") == 3
+        and isinstance(hwm, Mapping)
+        and hwm.get("schema_version") == 2
+    )
 
 
 def _requires_current_product(spec: PipelineSpec) -> bool:
@@ -3480,6 +3759,13 @@ def _requires_production_product(spec: PipelineSpec) -> bool:
     return any(gate.gate_id == _PORTFOLIO_PRODUCTION_REBIND_GATE for gate in spec.gates)
 
 
+def _production_hwm_available(authority: Mapping[str, Any] | None) -> bool:
+    if authority is None:
+        return False
+    hwm = authority.get("hwm_input_authority")
+    return isinstance(hwm, Mapping) and hwm.get("state") == "AVAILABLE"
+
+
 def plan_pipeline(spec: PipelineSpec) -> dict[str, object]:
     """Return the exact non-mutating execution and release plan."""
 
@@ -3491,6 +3777,12 @@ def plan_pipeline(spec: PipelineSpec) -> dict[str, object]:
     ):
         raise PipelineValidationError(
             "legacy portfolio specification is recovery-only and cannot be planned"
+        )
+    if _requires_production_product(spec) and not _production_hwm_available(
+        product_authority
+    ):
+        raise PipelineValidationError(
+            "financial MVP production requires available governed HWM assessment"
         )
     product_summary = _financial_mvp_summary(product_authority, spec)
     if product_summary is not None and not product_summary["ready_for_execution"]:
@@ -3953,18 +4245,7 @@ def _read_prepared(spec: PipelineSpec) -> str | None:
     return _hash(prepared.get("release_id"), "prepared.release_id")
 
 
-def execute_pipeline(
-    spec: PipelineSpec,
-    *,
-    commit: bool = False,
-    allow_external_read: bool = False,
-    command_runner: CommandRunner = _default_command_runner,
-    fault_hook: Callable[[str, str], None] | None = None,
-    evaluation_date: date | None = None,
-) -> dict[str, object]:
-    """Build, verify, prepare, and optionally commit one explicit-ID DAG."""
-
-    _validate_portfolio_orchestration(spec, verify_runtime=True)
+def _require_executable_product(spec: PipelineSpec) -> dict[str, object] | None:
     product_authority = _financial_mvp_product_authority(spec)
     if (_requires_current_product(spec) and product_authority is None) or (
         product_authority is not None
@@ -3972,6 +4253,12 @@ def execute_pipeline(
     ):
         raise PipelineValidationError(
             "legacy portfolio specification is recovery-only and cannot execute"
+        )
+    if _requires_production_product(spec) and not _production_hwm_available(
+        product_authority
+    ):
+        raise PipelineValidationError(
+            "financial MVP production requires available governed HWM assessment"
         )
     product_summary = _financial_mvp_summary(product_authority, spec)
     if product_summary is not None and not product_summary["ready_for_execution"]:
@@ -3982,6 +4269,50 @@ def execute_pipeline(
             "financial MVP is required-not-ready: "
             + ",".join(str(item) for item in blocking_reasons)
         )
+    if _requires_production_product(spec):
+        _verify_financial_outcomes(spec)
+    return product_summary
+
+
+def _validate_commit_authorization(
+    path: Path | None, spec: PipelineSpec
+) -> GateEvidence:
+    if path is None:
+        raise PipelineValidationError("commit authorization is required")
+    try:
+        if path.is_symlink() or not path.is_file():
+            raise PipelineValidationError("commit authorization is not a regular file")
+        decoded = json.loads(path.read_bytes().decode("utf-8"))
+        if not isinstance(decoded, Mapping):
+            raise PipelineValidationError("commit authorization root must be an object")
+        authorization = GateEvidence.from_dict(decoded)
+    except PipelineValidationError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise PipelineValidationError("commit authorization is invalid") from exc
+    if authorization.gate_id != _OWNER_PUBLICATION_AUTHORIZATION_GATE:
+        raise PipelineValidationError("owner publication authorization is required")
+    if authorization.evidence_sha256 != spec.spec_sha256:
+        raise PipelineValidationError(
+            "commit authorization covers a different pipeline spec"
+        )
+    return authorization
+
+
+def execute_pipeline(
+    spec: PipelineSpec,
+    *,
+    commit: bool = False,
+    commit_authorization: Path | None = None,
+    allow_external_read: bool = False,
+    command_runner: CommandRunner = _default_command_runner,
+    fault_hook: Callable[[str, str], None] | None = None,
+    evaluation_date: date | None = None,
+) -> dict[str, object]:
+    """Build, verify, prepare, and optionally commit one explicit-ID DAG."""
+
+    _validate_portfolio_orchestration(spec, verify_runtime=True)
+    _require_executable_product(spec)
     existing_release = _read_prepared(spec)
     existing_state = None
     if existing_release is not None:
@@ -4049,6 +4380,9 @@ def execute_pipeline(
         companion_contents = {
             item.companion_id: item.source_path.read_bytes() for item in spec.companions
         }
+        _validate_portfolio_orchestration(spec, verify_runtime=True)
+        _require_executable_product(spec)
+        _validate_commit_authorization(commit_authorization, spec)
         journal = commit_release(
             coordination_root=spec.coordination_root,
             release_id=release_id,

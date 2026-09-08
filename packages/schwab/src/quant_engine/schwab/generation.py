@@ -193,6 +193,8 @@ def _load_spec(path: Path) -> dict[str, Any]:
     keys = {"as_of_date", "baseline", "crosswalk", "roots", "schema_version", "sources"}
     if version == SPEC_SCHEMA_VERSION:
         keys.add("current_snapshot")
+        if "transaction_history_manifest" in spec:
+            keys.add("transaction_history_manifest")
     _strict(spec, keys, "spec")
     return spec
 
@@ -248,7 +250,11 @@ def _crosswalk(value: object) -> tuple[dict[str, str], tuple[str, ...]]:
 
 
 def _sources(
-    value: object, roots: Mapping[str, Path], generation_as_of: date
+    value: object,
+    roots: Mapping[str, Path],
+    generation_as_of: date,
+    *,
+    snapshot_schema_version: str | None = None,
 ) -> tuple[dict[str, list[tuple[str | None, Path]]], tuple[SourceArtifact, ...]]:
     grouped: dict[str, list[tuple[str | None, Path]]] = {role: [] for role in _ROLES}
     artifacts: list[SourceArtifact] = []
@@ -369,7 +375,7 @@ def _sources(
         raise SchwabGenerationError(
             "cannot use both per-account and aggregate manual NAV roles"
         )
-    if not has_nav_per and not has_nav_all:
+    if not has_nav_per and not has_nav_all and snapshot_schema_version != "1":
         raise SchwabGenerationError(
             "a manual NAV role (per-account or aggregate) is required"
         )
@@ -378,15 +384,16 @@ def _sources(
     chosen_txn_role = (
         "MANUAL_TRANSACTION_JSON_ALL" if has_txn_all else "MANUAL_TRANSACTION_JSON"
     )
-    chosen_nav_role = "MANUAL_NAV_CSV_ALL" if has_nav_all else "MANUAL_NAV_CSV"
-    for role in (
+    counted_roles = [
         chosen_txn_role,
-        chosen_nav_role,
         "MANUAL_POSITION_CSV",
         "WORKBOOK_REFERENCE",
         "WCH_NAV_CSV",
         "WCH_TRANSACTION_JSON",
-    ):
+    ]
+    if has_nav_per or has_nav_all:
+        counted_roles.append("MANUAL_NAV_CSV_ALL" if has_nav_all else "MANUAL_NAV_CSV")
+    for role in counted_roles:
         if actual_counts.get(role) != expected[role]:
             raise SchwabGenerationError(f"role {role} has wrong count")
     account_scoped_roles = {
@@ -677,6 +684,232 @@ def _current_snapshot(
         current_position_account_count,
         artifact,
     )
+
+
+def _terminal_transaction_history_coverage(
+    value: object,
+    *,
+    roots: Mapping[str, Path],
+    generation_as_of: date,
+    account_ids: set[str],
+    transaction_sources: Sequence[tuple[str | None, Path]],
+) -> dict[str, object]:
+    """Bind terminal all-history capture without stretching row observation dates."""
+
+    source = _object(value, "transaction_history_manifest")
+    _strict(
+        source,
+        {
+            "expected_sha256",
+            "expected_size_bytes",
+            "relative_path",
+            "root_id",
+        },
+        "transaction_history_manifest",
+    )
+    root_id = _text(source["root_id"], "transaction_history_manifest.root_id")
+    if root_id not in roots:
+        raise SchwabGenerationError("transaction history manifest root is unknown")
+    root = roots[root_id]
+    path = _source_path(
+        root,
+        _relative(
+            source["relative_path"], "transaction_history_manifest.relative_path"
+        ),
+    )
+    actual_hash, actual_size = hash_file(path)
+    expected_hash = _text(
+        source["expected_sha256"], "transaction_history_manifest.expected_sha256"
+    )
+    if _SHA256.fullmatch(expected_hash) is None or actual_hash != expected_hash:
+        raise SchwabGenerationError("transaction history manifest hash differs")
+    if actual_size != _integer(
+        source["expected_size_bytes"],
+        "transaction_history_manifest.expected_size_bytes",
+    ):
+        raise SchwabGenerationError("transaction history manifest size differs")
+
+    manifest = _object(_json(path), "transaction history manifest")
+    _strict(
+        manifest,
+        {
+            "accounts",
+            "artifacts",
+            "context_mode",
+            "finished_at",
+            "run_id",
+            "started_at",
+        },
+        "transaction history manifest",
+    )
+    started_at = datetime.fromisoformat(
+        _text(manifest["started_at"], "transaction history started_at")
+    )
+    finished_at = datetime.fromisoformat(
+        _text(manifest["finished_at"], "transaction history finished_at")
+    )
+    if (
+        started_at.tzinfo is None
+        or finished_at.tzinfo is None
+        or started_at > finished_at
+        or finished_at.date() > generation_as_of
+    ):
+        raise SchwabGenerationError("transaction history capture interval is invalid")
+    _text(manifest["run_id"], "transaction history run_id")
+    _text(manifest["context_mode"], "transaction history context_mode")
+
+    captured_accounts = _object(manifest["accounts"], "transaction history accounts")
+    if set(captured_accounts) != account_ids:
+        raise SchwabGenerationError(
+            "transaction history terminal account coverage differs from crosswalk"
+        )
+    source_paths = {
+        account_id: selected_path
+        for account_id, selected_path in transaction_sources
+        if account_id is not None
+    }
+    if set(source_paths) != account_ids:
+        raise SchwabGenerationError(
+            "transaction history selected account coverage differs from crosswalk"
+        )
+
+    artifact_index: dict[str, tuple[str, int]] = {}
+    for artifact in _objects(manifest["artifacts"], "transaction history artifacts"):
+        _strict(artifact, {"path", "sha256", "size_bytes"}, "history artifact")
+        relative = _relative(artifact["path"], "history artifact path")
+        sha256 = _text(artifact["sha256"], "history artifact sha256")
+        size = _integer(artifact["size_bytes"], "history artifact size_bytes")
+        if _SHA256.fullmatch(sha256) is None or relative in artifact_index:
+            raise SchwabGenerationError(
+                "transaction history artifact identity is invalid"
+            )
+        artifact_index[relative] = (sha256, size)
+
+    coverage_accounts: dict[str, dict[str, object]] = {}
+    for account_id in sorted(account_ids):
+        account = _object(captured_accounts[account_id], "transaction history account")
+        _strict(
+            account,
+            {"page_count", "status", "terminal", "transaction_count"},
+            "transaction history account",
+        )
+        page_count = _integer(account["page_count"], "transaction history page_count")
+        transaction_count = _integer(
+            account["transaction_count"], "transaction history transaction_count"
+        )
+        if (
+            page_count < 1
+            or transaction_count < 0
+            or account["status"] != "TERMINAL"
+            or account["terminal"] is not True
+        ):
+            raise SchwabGenerationError(
+                "transaction history account capture is not terminal"
+            )
+
+        captured_rows: list[object] = []
+        requested_start: date | None = None
+        requested_end: date | None = None
+        for page_index in range(page_count):
+            base = f"pages/{account_id}/{page_index:04d}"
+            response_relative = f"{base}.json"
+            request_relative = f"{base}.request.json"
+            for relative in (response_relative, request_relative):
+                expected = artifact_index.get(relative)
+                if expected is None:
+                    raise SchwabGenerationError(
+                        "transaction history page artifact is absent from manifest"
+                    )
+                artifact_path = _source_path(root, relative)
+                observed = hash_file(artifact_path)
+                if observed != expected:
+                    raise SchwabGenerationError(
+                        "transaction history page artifact differs from manifest"
+                    )
+            request = _object(
+                _json(_source_path(root, request_relative)),
+                "transaction history request",
+            )
+            if (
+                request.get("timeFrame") != "All"
+                or request.get("shouldPaginate") is not True
+            ):
+                raise SchwabGenerationError(
+                    "transaction history request is not all-history paginated"
+                )
+            response = _object(
+                _json(_source_path(root, response_relative)),
+                "transaction history response",
+            )
+            rows = response.get("brokerageTransactions")
+            if not isinstance(rows, list):
+                raise SchwabGenerationError(
+                    "transaction history response rows are invalid"
+                )
+            page_start = _observed_date(
+                response.get("fromDate"), "transaction history fromDate"
+            )
+            page_end = _observed_date(
+                response.get("toDate"), "transaction history toDate"
+            )
+            if page_start > page_end:
+                raise SchwabGenerationError(
+                    "transaction history requested interval is reversed"
+                )
+            if requested_start is None:
+                requested_start, requested_end = page_start, page_end
+            elif (page_start, page_end) != (requested_start, requested_end):
+                raise SchwabGenerationError(
+                    "transaction history requested interval changes across pages"
+                )
+            captured_rows.extend(rows)
+            if page_index == page_count - 1 and (
+                "bookmark" not in response or response["bookmark"] is not None
+            ):
+                raise SchwabGenerationError(
+                    "final transaction page lacks terminal bookmark"
+                )
+
+        selected_rows = _json(source_paths[account_id])
+        if not isinstance(selected_rows, list) or selected_rows != captured_rows:
+            raise SchwabGenerationError(
+                "selected transaction history differs from terminal capture"
+            )
+        if len(selected_rows) != transaction_count:
+            raise SchwabGenerationError(
+                "selected transaction count differs from terminal capture"
+            )
+        assert requested_start is not None and requested_end is not None
+        if requested_end != finished_at.date():
+            raise SchwabGenerationError(
+                "transaction history terminal date differs from requested interval"
+            )
+        observed_dates = [
+            _observed_date(
+                _object(row, "selected transaction").get("transactionDate"),
+                "transactionDate",
+                allow_restatement_suffix=True,
+            )
+            for row in selected_rows
+        ]
+        if any(day < requested_start or day > requested_end for day in observed_dates):
+            raise SchwabGenerationError(
+                "selected transaction falls outside requested history interval"
+            )
+        coverage_accounts[account_id] = {
+            "effective_end": requested_end.isoformat(),
+            "effective_start": requested_start.isoformat(),
+            "source_manifest_sha256": actual_hash,
+            "terminal_observed_at": finished_at.isoformat(),
+            "transaction_count": transaction_count,
+        }
+    return {
+        "accounts": coverage_accounts,
+        "complete_through": finished_at.date().isoformat(),
+        "requested_interval": "ALL_AVAILABLE_HISTORY",
+        "source_manifest_sha256": actual_hash,
+        "terminal_observed_at": finished_at.isoformat(),
+    }
 
 
 def _current_position_reconciliation(
@@ -1270,6 +1503,72 @@ def _nav_all(
     return normalized, per_account_findings
 
 
+def _nav_api(
+    wch: Sequence[tuple[str | None, Path]],
+    *,
+    snapshot_account_ids: set[str],
+    snapshot_observed_at: datetime,
+    source_artifact_ids: Mapping[str, str],
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Anchor historical WCH NAV to a later developer-API account snapshot."""
+
+    wch_by_account: dict[str, dict[date, Decimal]] = {}
+    for account_id, path in wch:
+        assert account_id is not None
+        wch_by_account[account_id] = _nav_rows(path, manual=False)
+    wch_accounts = set(wch_by_account)
+    if wch_accounts != snapshot_account_ids:
+        raise SchwabGenerationError(
+            "current snapshot account coverage differs from the WCH NAV series: "
+            f"missing_from_snapshot={sorted(wch_accounts - snapshot_account_ids)}, "
+            f"missing_from_wch={sorted(snapshot_account_ids - wch_accounts)}"
+        )
+    series_max = max(
+        (day for rows in wch_by_account.values() for day in rows), default=None
+    )
+    if series_max is None:
+        raise SchwabGenerationError("WCH NAV series is empty")
+    snapshot_date = snapshot_observed_at.date()
+    if snapshot_date <= series_max:
+        raise SchwabGenerationError(
+            f"stale current snapshot: observed date {snapshot_date.isoformat()} is "
+            f"not later than the WCH NAV series end {series_max.isoformat()}"
+        )
+
+    normalized: list[dict[str, object]] = []
+    for account_id, rows in wch_by_account.items():
+        for observed_date, amount in sorted(rows.items()):
+            identity = {
+                "account_id": account_id,
+                "as_of_date": observed_date.isoformat(),
+                "value_basis": "ACCOUNT_VALUE",
+            }
+            payload = NavObservation(
+                record_id=_record_id("nav", identity),
+                account_id=account_id,
+                as_of_date=observed_date,
+                nav=ObservedAmount.available(amount, "USD"),
+            ).to_dict()
+            payload["evidence_class"] = "WCH_HISTORICAL"
+            payload["source_artifact_id"] = _text(
+                source_artifact_ids.get(account_id), "WCH_NAV_CSV.artifact_id"
+            )
+            payload["value_basis"] = "ACCOUNT_VALUE"
+            normalized.append(payload)
+
+    reconciliation: list[dict[str, object]] = [
+        {
+            "account_id": None,
+            "fact_type": "NAV",
+            "snapshot_observed_at": snapshot_observed_at.isoformat(),
+            "status": "PASS_WITH_LATER_API_SNAPSHOT",
+            "wch_nav_max_date": series_max.isoformat(),
+        }
+    ]
+    normalized.sort(key=lambda item: (str(item["account_id"]), str(item["as_of_date"])))
+    return normalized, reconciliation
+
+
 def _positions(
     path: Path, suffix_to_internal: Mapping[str, str]
 ) -> tuple[list[dict[str, object]], str, int]:
@@ -1408,10 +1707,48 @@ def build_generation(
     }
     if tuple(sorted(suffix_to_internal)) != suffixes:
         raise SchwabGenerationError("crosswalk suffix derivation differs")
-    sources, artifacts = _sources(spec["sources"], roots, generation_as_of)
+    snapshot_schema_version: str | None = None
+    if spec["schema_version"] == SPEC_SCHEMA_VERSION:
+        snapshot_schema_version = _text(
+            _object(spec["current_snapshot"], "current_snapshot").get("schema_version"),
+            "current_snapshot.schema_version",
+        )
+    sources, artifacts = _sources(
+        spec["sources"],
+        roots,
+        generation_as_of,
+        snapshot_schema_version=snapshot_schema_version,
+    )
     nav_source_artifact_ids = _account_source_artifact_ids(
         spec["sources"], "WCH_NAV_CSV"
     )
+    current_accounts: list[dict[str, object]] | None = None
+    current_observed_at: datetime | None = None
+    snapshot_positions: list[dict[str, object]] = []
+    current_reconciliation: list[dict[str, object]] = []
+    sweep_vehicle_count: int | None = None
+    current_transport: str | None = None
+    current_balance_available_count = 0
+    current_position_account_count = 0
+    if spec["schema_version"] == SPEC_SCHEMA_VERSION:
+        (
+            current_accounts,
+            snapshot_positions,
+            current_observed_at,
+            sweep_vehicle_count,
+            current_transport,
+            current_balance_available_count,
+            current_position_account_count,
+            current_artifact,
+        ) = _current_snapshot(
+            spec["current_snapshot"],
+            roots=roots,
+            generation_as_of=generation_as_of,
+            account_ids=set(crosswalk.values()),
+        )
+        artifacts = tuple(
+            sorted((*artifacts, current_artifact), key=lambda item: item.artifact_id)
+        )
     txn_partial_gap: dict[str, object] | None = None
     expected_export_record_count: int | None = None
     if sources.get("MANUAL_TRANSACTION_JSON_ALL"):
@@ -1443,6 +1780,18 @@ def build_generation(
         transactions, transaction_reconciliation = _transactions(
             sources["WCH_TRANSACTION_JSON"], sources["MANUAL_TRANSACTION_JSON"]
         )
+    transaction_history_coverage: dict[str, object] | None = None
+    if spec.get("transaction_history_manifest") is not None:
+        transaction_history_coverage = _terminal_transaction_history_coverage(
+            spec["transaction_history_manifest"],
+            roots=roots,
+            generation_as_of=generation_as_of,
+            account_ids=set(crosswalk.values()),
+            transaction_sources=sources["WCH_TRANSACTION_JSON"],
+        )
+    manual_nav_anchored = bool(
+        sources.get("MANUAL_NAV_CSV") or sources.get("MANUAL_NAV_CSV_ALL")
+    )
     if sources.get("MANUAL_NAV_CSV_ALL"):
         nav, nav_reconciliation = _nav_all(
             sources["WCH_NAV_CSV"],
@@ -1450,43 +1799,37 @@ def build_generation(
             suffix_to_internal=suffix_to_internal,
             source_artifact_ids=nav_source_artifact_ids,
         )
-    else:
+    elif sources.get("MANUAL_NAV_CSV"):
         nav, nav_reconciliation = _nav(
             sources["WCH_NAV_CSV"],
             sources["MANUAL_NAV_CSV"],
             nav_source_artifact_ids,
         )
+    else:
+        if (
+            current_accounts is None
+            or current_observed_at is None
+            or current_transport != "DEVELOPER_API"
+        ):
+            raise SchwabGenerationError(
+                "a developer-API current snapshot is required "
+                "when no manual NAV role is present"
+            )
+        nav, nav_reconciliation = _nav_api(
+            sources["WCH_NAV_CSV"],
+            snapshot_account_ids={str(item["account_id"]) for item in current_accounts},
+            snapshot_observed_at=current_observed_at,
+            source_artifact_ids=nav_source_artifact_ids,
+        )
     manual_positions, manual_position_as_of, unavailable_position_quantity = _positions(
         sources["MANUAL_POSITION_CSV"][0][1], suffix_to_internal
     )
-    current_accounts: list[dict[str, object]] | None = None
     positions = manual_positions
     position_as_of: object = manual_position_as_of
-    current_reconciliation: list[dict[str, object]] = []
-    sweep_vehicle_count: int | None = None
-    current_transport: str | None = None
-    current_balance_available_count = 0
-    current_position_account_count = 0
-    if spec["schema_version"] == SPEC_SCHEMA_VERSION:
-        (
-            current_accounts,
-            positions,
-            current_observed_at,
-            sweep_vehicle_count,
-            current_transport,
-            current_balance_available_count,
-            current_position_account_count,
-            current_artifact,
-        ) = _current_snapshot(
-            spec["current_snapshot"],
-            roots=roots,
-            generation_as_of=generation_as_of,
-            account_ids=set(crosswalk.values()),
-        )
+    if current_accounts is not None:
+        assert current_observed_at is not None
+        positions = snapshot_positions
         position_as_of = current_observed_at.isoformat()
-        artifacts = tuple(
-            sorted((*artifacts, current_artifact), key=lambda item: item.artifact_id)
-        )
         current_reconciliation.append(
             _current_position_reconciliation(positions, manual_positions)
         )
@@ -1521,7 +1864,11 @@ def build_generation(
             and current_position_account_count < len(crosswalk)
             else ()
         ),
-        "historical NAV has one later manual date per brokerage account",
+        *(
+            ("historical NAV has one later manual date per brokerage account",)
+            if manual_nav_anchored
+            else ()
+        ),
         "two account histories contain documented intraday restatements",
         "Investor Checking is outside the accepted brokerage boundary",
         *(
@@ -1553,6 +1900,11 @@ def build_generation(
         "coverage": {
             "known_gaps": list(known_gaps),
             "status": "PARTIAL",
+            **(
+                {"transaction_history": transaction_history_coverage}
+                if transaction_history_coverage is not None
+                else {}
+            ),
         },
         "nav_observations": nav,
         "positions": positions,

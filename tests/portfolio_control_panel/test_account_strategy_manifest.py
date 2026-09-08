@@ -1360,6 +1360,26 @@ def test_flow_coverage_accepts_exact_complete_interval_for_no_row_date(
     assert rows[0]["status"] == "COMPLETE"
 
 
+def test_flow_coverage_accepts_observed_prefix_without_extending_receipt(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    inputs = _write_valid_inputs(tmp_path / "inputs")
+    coverage, _artifact = _load_flow_coverage(
+        manifest_module,
+        tmp_path,
+        inputs,
+        [_coverage_row("2026-01-01", "2026-01-03")],
+    )
+
+    assert coverage.is_complete("synthetic-account", "2026-01-01", "2026-01-02")
+    assert coverage.is_complete("synthetic-account", "2026-01-01", "2026-01-03")
+    assert not coverage.is_complete("synthetic-account", "2026-01-01", "2026-01-04")
+    assert not coverage.is_complete("synthetic-account", "2025-12-31", "2026-01-02")
+    assert not coverage.is_complete("synthetic-account", "2026-01-02", "2026-01-02")
+    assert not coverage.is_complete("synthetic-account", "2026-01-01", "2025-12-31")
+    assert not coverage.is_complete("other-account", "2026-01-01", "2026-01-02")
+
+
 def test_flow_coverage_rejects_broad_provider_metadata(
     manifest_module: Any, tmp_path: Path
 ) -> None:
@@ -1683,6 +1703,62 @@ def test_flow_classification_policy_accepts_internal_prefix_without_optional_unp
                 malformed_path, "malformed flow classification policy"
             ),
         )
+
+
+def test_flow_classification_policy_scopes_source_identity_pairing_to_account_transfer(
+    manifest_module: Any, tmp_path: Path
+) -> None:
+    source_identity_rule = (
+        "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT_WITH_SOURCE_IDENTITY_V1"
+    )
+    policy = _flow_classification_policy("2026-01-06")
+    policy["as_of_date"] = "2026-09-06"
+    policy["policy_version"] = "2"
+    account_transfer = next(
+        rule
+        for rule in policy["event_dispositions"]["exact"]
+        if rule["flow_type"] == "ACCOUNT_TRANSFER"
+    )
+    account_transfer["counterparty_rule"] = source_identity_rule
+    policy_path = tmp_path / "source-identity-flow-classification-policy.json"
+    _write_json(policy_path, policy)
+
+    rules, _identity = manifest_module.load_flow_classification_policy(
+        policy,
+        InputSnapshot.capture(
+            policy_path, "source identity flow classification policy"
+        ),
+    )
+
+    assert rules["exact"]["ACCOUNT_TRANSFER"]["counterparty_rule"] == (
+        source_identity_rule
+    )
+    assert _identity["policy_version"] == "2"
+    assert _identity["artifact"]["as_of_date"] == "2026-09-06"
+    for location in ("other_exact", "prefix"):
+        malformed = json.loads(json.dumps(policy))
+        if location == "other_exact":
+            account_transfer = next(
+                rule
+                for rule in malformed["event_dispositions"]["exact"]
+                if rule["flow_type"] == "ACCOUNT_TRANSFER"
+            )
+            account_transfer["flow_type"] = "OTHER_INTERNAL_TRANSFER"
+        else:
+            malformed["event_dispositions"]["prefix"][0]["counterparty_rule"] = (
+                source_identity_rule
+            )
+        malformed_path = tmp_path / f"malformed-source-identity-{location}.json"
+        _write_json(malformed_path, malformed)
+        with pytest.raises(
+            manifest_module.ManifestError, match="counterparty_rule is invalid"
+        ):
+            manifest_module.load_flow_classification_policy(
+                malformed,
+                InputSnapshot.capture(
+                    malformed_path, "malformed source identity flow policy"
+                ),
+            )
 
 
 def test_loaded_coverage_rows_cannot_be_directly_mutated_into_complete(
@@ -4788,6 +4864,226 @@ def test_classified_event_reconciliation_rejects_ambiguous_transfer(
     with pytest.raises(manifest_module.ManifestError, match="unpaired or ambiguous"):
         manifest_module.validate_classified_flow_coverage(
             ledger, [], _flow_classification_rules()
+        )
+
+
+def _source_identity_transfer_rules() -> dict[str, Any]:
+    rules = _flow_classification_rules()
+    rules["exact"]["ACCOUNT_TRANSFER"]["counterparty_rule"] = (
+        "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT_WITH_SOURCE_IDENTITY_V1"
+    )
+    return rules
+
+
+def _source_identity_transfer_flow(
+    record_id: str,
+    account_id: str,
+    amount: str,
+    activity: str | None,
+    *,
+    provider_id: str = "schwab",
+    generation_id: str = "c" * 64,
+) -> dict[str, Any]:
+    flow: dict[str, Any] = {
+        "record_id": record_id,
+        "account_id": account_id,
+        "event_date": "2026-01-02",
+        "flow_type": "ACCOUNT_TRANSFER",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": amount},
+        "provider_id": provider_id,
+        "generation_id": generation_id,
+    }
+    if activity is not None:
+        flow["provider_activity_id_sha256"] = activity
+    return flow
+
+
+def _source_identity_transfer_event(
+    flow: dict[str, Any], counterparty: str
+) -> dict[str, Any]:
+    return {
+        "event_id": f"classified-{flow['record_id']}",
+        "source_record_id": flow["record_id"],
+        "account_id": flow["account_id"],
+        "event_date": flow["event_date"],
+        "amount": flow["amount"]["value"],
+        "disposition": "INTERNAL",
+        "counterparty_source_record_id": counterparty,
+    }
+
+
+def test_source_identity_pairing_disambiguates_equal_same_day_transfer_pairs(
+    manifest_module: Any,
+) -> None:
+    first_activity, second_activity = "a" * 64, "b" * 64
+    flows = [
+        _source_identity_transfer_flow(
+            "pair-a-in", "account-a", "7000", first_activity
+        ),
+        _source_identity_transfer_flow(
+            "pair-a-out", "account-b", "-7000", first_activity
+        ),
+        _source_identity_transfer_flow(
+            "pair-b-in", "account-c", "7000", second_activity
+        ),
+        _source_identity_transfer_flow(
+            "pair-b-out", "account-d", "-7000", second_activity
+        ),
+    ]
+    counterparties = {
+        "pair-a-in": "pair-a-out",
+        "pair-a-out": "pair-a-in",
+        "pair-b-in": "pair-b-out",
+        "pair-b-out": "pair-b-in",
+    }
+
+    validated = manifest_module.validate_classified_flow_coverage(
+        {
+            "accounting_currency": "USD",
+            "nav_observations": [],
+            "flows": flows,
+        },
+        [
+            _source_identity_transfer_event(flow, counterparties[flow["record_id"]])
+            for flow in flows
+        ],
+        _source_identity_transfer_rules(),
+    )
+
+    assert {
+        row["source_record_id"]: row["counterparty_source_record_id"]
+        for row in validated
+    } == counterparties
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("provider_activity_id_sha256", None),
+        ("provider_activity_id_sha256", "b" * 64),
+        ("provider_id", "other-provider"),
+        ("generation_id", "d" * 64),
+    ],
+)
+def test_source_identity_pairing_rejects_one_sided_or_mismatched_identity(
+    manifest_module: Any, field: str, replacement: str | None
+) -> None:
+    inbound = _source_identity_transfer_flow("inbound", "account-a", "10", "a" * 64)
+    outbound = _source_identity_transfer_flow("outbound", "account-b", "-10", "a" * 64)
+    if replacement is None:
+        outbound.pop(field)
+    else:
+        outbound[field] = replacement
+
+    with pytest.raises(manifest_module.ManifestError, match="unpaired or ambiguous"):
+        manifest_module.validate_classified_flow_coverage(
+            {
+                "accounting_currency": "USD",
+                "nav_observations": [],
+                "flows": [inbound, outbound],
+            },
+            [],
+            _source_identity_transfer_rules(),
+        )
+
+
+def test_source_identity_pairing_rejects_malformed_activity_identity(
+    manifest_module: Any,
+) -> None:
+    with pytest.raises(
+        manifest_module.ManifestError,
+        match="provider_activity_id_sha256 is invalid",
+    ):
+        manifest_module.validate_classified_flow_coverage(
+            {
+                "accounting_currency": "USD",
+                "nav_observations": [],
+                "flows": [
+                    _source_identity_transfer_flow(
+                        "inbound", "account-a", "10", "not-a-sha256"
+                    ),
+                    _source_identity_transfer_flow(
+                        "outbound", "account-b", "-10", "not-a-sha256"
+                    ),
+                ],
+            },
+            [],
+            _source_identity_transfer_rules(),
+        )
+
+
+def test_source_identity_pairing_retains_amount_match_when_both_activities_absent(
+    manifest_module: Any,
+) -> None:
+    inbound = _source_identity_transfer_flow("inbound", "account-a", "10", None)
+    outbound = _source_identity_transfer_flow("outbound", "account-b", "-10", None)
+
+    validated = manifest_module.validate_classified_flow_coverage(
+        {
+            "accounting_currency": "USD",
+            "nav_observations": [],
+            "flows": [inbound, outbound],
+        },
+        [
+            _source_identity_transfer_event(inbound, "outbound"),
+            _source_identity_transfer_event(outbound, "inbound"),
+        ],
+        _source_identity_transfer_rules(),
+    )
+
+    assert [row["counterparty_source_record_id"] for row in validated] == [
+        "outbound",
+        "inbound",
+    ]
+
+
+def test_source_identity_pairing_keeps_duplicate_identity_ambiguous(
+    manifest_module: Any,
+) -> None:
+    with pytest.raises(manifest_module.ManifestError, match="unpaired or ambiguous"):
+        manifest_module.validate_classified_flow_coverage(
+            {
+                "accounting_currency": "USD",
+                "nav_observations": [],
+                "flows": [
+                    _source_identity_transfer_flow(
+                        "inbound", "account-a", "10", "a" * 64
+                    ),
+                    _source_identity_transfer_flow(
+                        "outbound-a", "account-b", "-10", "a" * 64
+                    ),
+                    _source_identity_transfer_flow(
+                        "outbound-b", "account-c", "-10", "a" * 64
+                    ),
+                ],
+            },
+            [],
+            _source_identity_transfer_rules(),
+        )
+
+
+@pytest.mark.parametrize("physical_mismatch", ("date", "amount", "account"))
+def test_source_identity_never_overrides_physical_counterparty_requirements(
+    manifest_module: Any, physical_mismatch: str
+) -> None:
+    inbound = _source_identity_transfer_flow("inbound", "account-a", "10", "a" * 64)
+    outbound = _source_identity_transfer_flow("outbound", "account-b", "-10", "a" * 64)
+    if physical_mismatch == "date":
+        outbound["event_date"] = "2026-01-03"
+    elif physical_mismatch == "amount":
+        outbound["amount"]["value"] = "-11"
+    else:
+        outbound["account_id"] = "account-a"
+
+    with pytest.raises(manifest_module.ManifestError, match="unpaired or ambiguous"):
+        manifest_module.validate_classified_flow_coverage(
+            {
+                "accounting_currency": "USD",
+                "nav_observations": [],
+                "flows": [inbound, outbound],
+            },
+            [],
+            _source_identity_transfer_rules(),
         )
 
 

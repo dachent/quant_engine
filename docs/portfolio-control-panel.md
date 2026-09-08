@@ -148,7 +148,8 @@ locked legacy stylesheet without modifying it or adding a framework.
 From the repository root, set local paths without committing them:
 
 ```powershell
-$portfolioRoot = 'C:\Tools\quant-engine\data'
+# Canonical repo example; use the explicit configured root in an isolated checkout.
+$portfolioRoot = [IO.Path]::GetFullPath((Join-Path $PWD '../dataPortfolio'))
 $engine = Split-Path -Parent $PWD
 $report = Join-Path $portfolioRoot 'reporting'
 $baseline = Join-Path $portfolioRoot 'baseline'

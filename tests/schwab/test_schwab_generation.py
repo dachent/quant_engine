@@ -341,6 +341,79 @@ def _spec_with_current(tmp_path: Path) -> Path:
     return path
 
 
+def _spec_with_terminal_transaction_history(tmp_path: Path) -> Path:
+    path = _spec_with_current(tmp_path)
+    spec = json.loads(path.read_text(encoding="utf-8"))
+    source_root = Path(spec["roots"]["source"])
+    accounts: dict[str, dict[str, object]] = {}
+    artifacts: list[dict[str, object]] = []
+    for item in spec["crosswalk"]:
+        account_id = item["internal_account_id"]
+        selected = next(
+            source
+            for source in spec["sources"]
+            if source["role"] == "WCH_TRANSACTION_JSON"
+            and source["account_id"] == account_id
+        )
+        rows = json.loads(
+            (source_root / selected["relative_path"]).read_text(encoding="utf-8")
+        )
+        page_root = source_root / "pages" / account_id
+        page_root.mkdir(parents=True)
+        response_path = page_root / "0000.json"
+        response_path.write_bytes(
+            canonical_json_bytes(
+                {
+                    "bookmark": None,
+                    "brokerageTransactions": rows,
+                    "fromDate": "07/01/2026",
+                    "toDate": "07/31/2026",
+                }
+            )
+        )
+        request_path = page_root / "0000.request.json"
+        request_path.write_bytes(
+            canonical_json_bytes({"shouldPaginate": True, "timeFrame": "All"})
+        )
+        for artifact_path in (response_path, request_path):
+            payload = artifact_path.read_bytes()
+            artifacts.append(
+                {
+                    "path": artifact_path.relative_to(source_root).as_posix(),
+                    "sha256": hashlib.sha256(payload).hexdigest(),
+                    "size_bytes": len(payload),
+                }
+            )
+        accounts[account_id] = {
+            "page_count": 1,
+            "status": "TERMINAL",
+            "terminal": True,
+            "transaction_count": len(rows),
+        }
+    manifest_path = source_root / "transaction-source-run-manifest.json"
+    manifest_path.write_bytes(
+        canonical_json_bytes(
+            {
+                "accounts": accounts,
+                "artifacts": artifacts,
+                "context_mode": "test",
+                "finished_at": "2026-07-31T20:00:00+00:00",
+                "run_id": "schwab-test-terminal-history",
+                "started_at": "2026-07-31T19:59:00+00:00",
+            }
+        )
+    )
+    payload = manifest_path.read_bytes()
+    spec["transaction_history_manifest"] = {
+        "expected_sha256": hashlib.sha256(payload).hexdigest(),
+        "expected_size_bytes": len(payload),
+        "relative_path": manifest_path.relative_to(source_root).as_posix(),
+        "root_id": "source",
+    }
+    path.write_text(json.dumps(spec), encoding="utf-8")
+    return path
+
+
 def test_build_is_deterministic_partial_and_reconciled(tmp_path: Path) -> None:
     spec = _spec(tmp_path)
     first, first_manifest, first_bytes = build_generation(spec)
@@ -433,6 +506,91 @@ def test_current_snapshot_supersedes_manual_current_reference(tmp_path: Path) ->
     assert "current_balances" in manifest.coverage.fact_types
 
 
+def test_complete_api_snapshot_can_reconcile_wch_nav_without_manual_nav(
+    tmp_path: Path,
+) -> None:
+    spec = _spec_with_current(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    document["sources"] = [
+        item
+        for item in document["sources"]
+        if item["role"] not in {"MANUAL_NAV_CSV", "MANUAL_NAV_CSV_ALL"}
+    ]
+    spec.write_text(json.dumps(document), encoding="utf-8")
+
+    catalog, _, _ = build_generation(spec)
+
+    nav_reconciliation = [
+        item for item in catalog["reconciliation"] if item.get("fact_type") == "NAV"
+    ]
+    assert nav_reconciliation == [
+        {
+            "account_id": None,
+            "fact_type": "NAV",
+            "snapshot_observed_at": "2026-07-31T20:00:00+00:00",
+            "status": "PASS_WITH_LATER_API_SNAPSHOT",
+            "wch_nav_max_date": "2026-07-30",
+        }
+    ]
+
+
+def test_api_snapshot_nav_anchor_rejects_stale_snapshot(tmp_path: Path) -> None:
+    spec = _spec_with_current(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    document["sources"] = [
+        item
+        for item in document["sources"]
+        if item["role"] not in {"MANUAL_NAV_CSV", "MANUAL_NAV_CSV_ALL"}
+    ]
+    nav_source = next(
+        item for item in document["sources"] if item["role"] == "WCH_NAV_CSV"
+    )
+    nav_path = Path(document["roots"]["source"]) / nav_source["relative_path"]
+    with nav_path.open("a", encoding="utf-8", newline="") as handle:
+        handle.write("SYNTHETIC-001,SYNTHETIC,07/31/2026,102\r\n")
+    payload = nav_path.read_bytes()
+    nav_source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+    nav_source["expected_size_bytes"] = len(payload)
+    document["baseline"]["nav_count"] = 17
+    spec.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(SchwabGenerationError, match="stale current snapshot"):
+        build_generation(spec)
+
+
+def test_web_contract_snapshot_still_requires_manual_nav(tmp_path: Path) -> None:
+    spec = _spec_with_current(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    document["sources"] = [
+        item
+        for item in document["sources"]
+        if item["role"] not in {"MANUAL_NAV_CSV", "MANUAL_NAV_CSV_ALL"}
+    ]
+    snapshot_path = (
+        Path(document["roots"]["source"])
+        / document["current_snapshot"]["relative_path"]
+    )
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    snapshot["schema_version"] = 2
+    snapshot["transport"] = "WEB_CONTRACT"
+    for position in snapshot["positions"]:
+        position["evidence_class"] = "WCH_CURRENT"
+    snapshot_path.write_bytes(canonical_json_bytes(snapshot))
+    payload = snapshot_path.read_bytes()
+    document["current_snapshot"]["expected_sha256"] = hashlib.sha256(
+        payload
+    ).hexdigest()
+    document["current_snapshot"]["expected_size_bytes"] = len(payload)
+    document["current_snapshot"]["schema_version"] = "2"
+    spec.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(
+        SchwabGenerationError,
+        match="a manual NAV role \\(per-account or aggregate\\) is required",
+    ):
+        build_generation(spec)
+
+
 def test_current_snapshot_cannot_claim_wch_nav_schema(tmp_path: Path) -> None:
     spec = _spec_with_current(tmp_path)
     document = json.loads(spec.read_text(encoding="utf-8"))
@@ -487,6 +645,80 @@ def test_current_snapshot_hash_and_scope_fail_closed(tmp_path: Path) -> None:
     document["current_snapshot"]["expected_size_bytes"] = len(payload)
     spec.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(SchwabGenerationError, match="scope differs from crosswalk"):
+        build_generation(spec)
+
+
+def test_terminal_transaction_history_covers_no_movement_days(tmp_path: Path) -> None:
+    spec = _spec_with_terminal_transaction_history(tmp_path)
+
+    catalog, _, _ = build_generation(spec)
+
+    history = catalog["coverage"]["transaction_history"]
+    assert history["complete_through"] == "2026-07-31"
+    assert history["requested_interval"] == "ALL_AVAILABLE_HISTORY"
+    assert len(history["accounts"]) == 8
+    assert {
+        (item["effective_start"], item["effective_end"], item["transaction_count"])
+        for item in history["accounts"].values()
+    } == {("2026-07-01", "2026-07-31", 1)}
+
+
+def test_transaction_history_requires_explicit_terminal_cursor(tmp_path: Path) -> None:
+    spec = _spec_with_terminal_transaction_history(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    source_root = Path(document["roots"]["source"])
+    manifest_path = (
+        source_root / document["transaction_history_manifest"]["relative_path"]
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    account_id = sorted(manifest["accounts"])[0]
+    response_path = source_root / "pages" / account_id / "0000.json"
+    response = json.loads(response_path.read_text(encoding="utf-8"))
+    del response["bookmark"]
+    response_path.write_bytes(canonical_json_bytes(response))
+    response_artifact = next(
+        item
+        for item in manifest["artifacts"]
+        if item["path"] == response_path.relative_to(source_root).as_posix()
+    )
+    response_payload = response_path.read_bytes()
+    response_artifact["sha256"] = hashlib.sha256(response_payload).hexdigest()
+    response_artifact["size_bytes"] = len(response_payload)
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    manifest_payload = manifest_path.read_bytes()
+    document["transaction_history_manifest"]["expected_sha256"] = hashlib.sha256(
+        manifest_payload
+    ).hexdigest()
+    document["transaction_history_manifest"]["expected_size_bytes"] = len(
+        manifest_payload
+    )
+    spec.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(
+        SchwabGenerationError, match="final transaction page lacks terminal bookmark"
+    ):
+        build_generation(spec)
+
+
+def test_transaction_history_rejects_incomplete_account_capture(tmp_path: Path) -> None:
+    spec = _spec_with_terminal_transaction_history(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    source_root = Path(document["roots"]["source"])
+    manifest_path = (
+        source_root / document["transaction_history_manifest"]["relative_path"]
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    account = manifest["accounts"][sorted(manifest["accounts"])[0]]
+    account.update({"status": "INCOMPLETE", "terminal": False})
+    manifest_path.write_bytes(canonical_json_bytes(manifest))
+    payload = manifest_path.read_bytes()
+    document["transaction_history_manifest"]["expected_sha256"] = hashlib.sha256(
+        payload
+    ).hexdigest()
+    document["transaction_history_manifest"]["expected_size_bytes"] = len(payload)
+    spec.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(SchwabGenerationError, match="account capture is not terminal"):
         build_generation(spec)
 
 

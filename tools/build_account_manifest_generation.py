@@ -62,6 +62,9 @@ _DISPOSITIONS = (
     "RESERVE_NOT_APPLICABLE",
 )
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_SOURCE_IDENTITY_COUNTERPARTY_RULE = (
+    "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT_WITH_SOURCE_IDENTITY_V1"
+)
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
 _INTERNAL_ACCOUNT_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _CROSSWALK_DISPOSITIONS = frozenset(
@@ -1459,10 +1462,39 @@ def _c3_account_id(value: object, field_name: str) -> str:
     return account_id
 
 
+def _c3_flow_scope_metadata(
+    row: Mapping[str, object], record_id: str
+) -> dict[str, object]:
+    """Retain the provider mapping fields that bound calculation eligibility."""
+
+    metadata: dict[str, object] = {}
+    if "provider_account_scope" in row:
+        metadata["provider_account_scope"] = _nonempty_text(
+            row.get("provider_account_scope"),
+            f"flow {record_id} provider_account_scope",
+        )
+    if "mapping_status" in row:
+        mapping_status = row.get("mapping_status")
+        if mapping_status not in {"MAPPED", "UNMAPPED"}:
+            raise AccountAssignmentPerimeterError(
+                f"flow {record_id} mapping_status is invalid"
+            )
+        metadata["mapping_status"] = mapping_status
+    if "strategy_id" in row:
+        strategy_id = row.get("strategy_id")
+        metadata["strategy_id"] = (
+            None
+            if strategy_id is None
+            else _c3_account_id(strategy_id, f"flow {record_id} strategy_id")
+        )
+    return metadata
+
+
 def _c3_ledger(
     selected_inputs: AccountManifestSelectedInputs,
     *,
     enforce_global_accounting_currency: bool = True,
+    allow_asset_flow_currency: bool = False,
 ) -> tuple[
     dict[str, object],
     list[dict[str, object]],
@@ -1558,7 +1590,11 @@ def _c3_ledger(
             row.get("nav_recognition_date", event_date), "flow nav_recognition_date"
         )
         flow_type = _nonempty_text(row.get("flow_type"), "flow type")
-        amount = _c3_money(row.get("amount"), f"flow {index}")
+        amount = _c3_money(
+            row.get("amount"),
+            f"flow {index}",
+            allow_asset_currency=allow_asset_flow_currency,
+        )
         if (
             enforce_global_accounting_currency
             and amount["status"] == "AVAILABLE"
@@ -1567,16 +1603,48 @@ def _c3_ledger(
             raise AccountAssignmentPerimeterError(
                 "AVAILABLE flow currency differs from accounting currency"
             )
-        normalized_flows.append(
-            {
-                "record_id": record_id,
-                "account_id": account_id,
-                "event_date": event_date,
-                "nav_recognition_date": nav_recognition_date,
-                "flow_type": flow_type,
-                "amount": amount,
-            }
-        )
+        normalized_flow: dict[str, object] = {
+            "record_id": record_id,
+            "account_id": account_id,
+            "event_date": event_date,
+            "nav_recognition_date": nav_recognition_date,
+            "flow_type": flow_type,
+            "amount": amount,
+        }
+        normalized_flow.update(_c3_flow_scope_metadata(row, record_id))
+        provider_id = row.get("provider_id")
+        if provider_id is not None:
+            normalized_flow["provider_id"] = _nonempty_text(
+                provider_id, f"flow {record_id} provider_id"
+            )
+        generation_id = row.get("generation_id")
+        if generation_id is not None:
+            if (
+                not isinstance(generation_id, str)
+                or _SHA256.fullmatch(generation_id) is None
+            ):
+                raise AccountAssignmentPerimeterError(
+                    f"flow {record_id} generation_id is invalid"
+                )
+            normalized_flow["generation_id"] = generation_id
+        activity_id = row.get("provider_activity_id_sha256")
+        if activity_id is not None:
+            if (
+                not isinstance(activity_id, str)
+                or _SHA256.fullmatch(activity_id) is None
+            ):
+                raise AccountAssignmentPerimeterError(
+                    f"flow {record_id} provider_activity_id_sha256 is invalid"
+                )
+            if (
+                "provider_id" not in normalized_flow
+                or "generation_id" not in normalized_flow
+            ):
+                raise AccountAssignmentPerimeterError(
+                    f"flow {record_id} source identity is incomplete"
+                )
+            normalized_flow["provider_activity_id_sha256"] = activity_id
+        normalized_flows.append(normalized_flow)
     normalized_anchors: list[dict[str, object]] = []
     anchor_ids: set[str] = set()
     required_anchor_fields = {
@@ -1866,6 +1934,30 @@ def _c3_classified_flows(
         str(flow["record_id"]): _c3_rule(rules, str(flow["flow_type"]))
         for flow in flows
     }
+
+    def identity_compatible(
+        flow: Mapping[str, object], item: Mapping[str, object]
+    ) -> bool:
+        rule = selected_rules[str(flow["record_id"])]
+        if (
+            rule is None
+            or rule.get("counterparty_rule") != _SOURCE_IDENTITY_COUNTERPARTY_RULE
+        ):
+            return True
+        activity_id = flow.get("provider_activity_id_sha256")
+        other_activity_id = item.get("provider_activity_id_sha256")
+        if activity_id is None and other_activity_id is None:
+            return True
+        return activity_id is not None and (
+            flow.get("provider_id"),
+            flow.get("generation_id"),
+            activity_id,
+        ) == (
+            item.get("provider_id"),
+            item.get("generation_id"),
+            other_activity_id,
+        )
+
     physical_candidates: dict[str, list[str]] = {}
     for flow in flows:
         record_id = str(flow["record_id"])
@@ -1885,6 +1977,7 @@ def _c3_classified_flows(
             and item["amount"].get("status") == "AVAILABLE"
             and item["amount"].get("currency") == amount["currency"]
             and Decimal(str(item["amount"].get("value"))) == -value
+            and identity_compatible(flow, item)
         ]
     base_events: list[dict[str, object]] = []
     for flow in flows:
@@ -1984,7 +2077,7 @@ def _c3_classified_flows(
                     and counterpart["disposition"] == "INTERNAL"
                     and counterpart_rule is not None
                     and counterpart_rule.get("counterparty_rule")
-                    == "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+                    == selected_rules[record_id].get("counterparty_rule")
                     and physical_candidates[counterparty_id] == [record_id]
                 ):
                     blocker_code = "INTERNAL_COUNTERPARTY_CLASSIFICATION_BLOCKED"
@@ -2713,6 +2806,13 @@ def _validate_mixed_receipt_provider_evidence(
                     kind != "capital_anchors"
                     or row.get("strategy_id") == receipt.get("strategy_id")
                 )
+                and not (
+                    kind == "flows"
+                    and row.get("provider_account_scope") == "ACCOUNT_ONLY"
+                    and row.get("mapping_status") == "UNMAPPED"
+                    and "strategy_id" in row
+                    and row["strategy_id"] is None
+                )
                 and start <= fact_date(row, kind) <= end
             ]
             dates = sorted(fact_date(row, kind) for row in rows)
@@ -2837,8 +2937,19 @@ def _mixed_admitted_fact_projection(
             for route in funded_routes
         )
 
+    excluded_account_only_source_ids = {
+        str(flow["record_id"])
+        for flow in flows
+        if flow.get("provider_account_scope") == "ACCOUNT_ONLY"
+        and flow.get("mapping_status") == "UNMAPPED"
+        and "strategy_id" in flow
+        and flow["strategy_id"] is None
+    }
     root_events = [
-        event for event in events if in_funded_epoch(event, "nav_recognition_date")
+        event
+        for event in events
+        if in_funded_epoch(event, "nav_recognition_date")
+        and str(event.get("source_record_id")) not in excluded_account_only_source_ids
     ]
     if any(event.get("classification_status") != "CLASSIFIED" for event in root_events):
         raise AccountAssignmentPerimeterError(
@@ -2984,7 +3095,9 @@ def _build_mixed_account_manifest_payloads(
     assert selected_inputs.admission_policy is not None
     assert selected_inputs.manifest_schema is not None
     normalized_ledger, navs, flows, _ = _c3_ledger(
-        selected_inputs, enforce_global_accounting_currency=False
+        selected_inputs,
+        enforce_global_accounting_currency=False,
+        allow_asset_flow_currency=True,
     )
     anchors = normalized_ledger["capital_anchors"]
     assert isinstance(anchors, list)
@@ -4058,7 +4171,10 @@ def stage_account_manifest_generation(
         for artifact_id in artifact_paths
     )
     manifest = GenerationManifest.build(
-        as_of_date=selected_inputs.generation_as_of_date,
+        # Retained authority can be newer than the financial source snapshots.
+        # Date the bundle by its latest artifact without advancing those
+        # snapshots, calculation cutoff, or coverage observations.
+        as_of_date=max(artifact.as_of_date for artifact in artifacts),
         adapter=_GENERATION_ADAPTER,
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,

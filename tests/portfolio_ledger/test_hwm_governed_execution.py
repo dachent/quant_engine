@@ -492,6 +492,158 @@ def test_verify_governed_hwm_result_accepts_and_rejects(tmp_path):
         )
 
 
+def test_verifier_decimal_equivalence_keeps_metadata_and_types_exact():
+    """Only recomputed Decimal leaves permit persisted scale variance."""
+    from quant_engine.portfolio_ledger.hwm_governed_execution import (
+        _equivalent_result_value,
+    )
+
+    assert _equivalent_result_value("1", Decimal("1.00"))
+    assert _equivalent_result_value("0E-29", Decimal("0E-29"))
+    assert not _equivalent_result_value("2", Decimal("1.00"))
+    assert not _equivalent_result_value("NaN", Decimal("0"))
+    assert not _equivalent_result_value("1_0", Decimal("10"))
+    assert not _equivalent_result_value(False, 0)
+    assert not _equivalent_result_value("1", "1.0")
+
+
+def test_verifier_rejects_bool_for_zero_integer_metadata(tmp_path):
+    """JSON bool cannot impersonate the recomputed integer age count."""
+    fx = _fixture(tmp_path)
+    result = _run(fx)
+    assert result["calculation_age_days"] == 0
+    forged = json.loads(json.dumps(result, default=str))
+    forged["calculation_age_days"] = False
+
+    with pytest.raises(HwmCoverageError, match="diverges from recomputation"):
+        verify_governed_hwm_result(
+            forged,
+            input_generation_bytes=json.dumps(
+                fx["generation"], sort_keys=True
+            ).encode(),
+            calendar_bytes=fx["calendar_authority_bytes"],
+            input_receipt_bytes=fx["input_receipt_bytes"],
+            policy_bytes=fx["policy_bytes"],
+            product_contract_bytes=fx["product_contract_bytes"],
+            performance_policy_bytes=fx["performance_policy_bytes"],
+            legacy_policy_bytes=fx["legacy_policy_bytes"],
+        )
+
+
+def test_verifier_accepts_persisted_equivalent_decimal_text(tmp_path, monkeypatch):
+    """JSON readback remains valid when recomputation has trailing zeros."""
+    import quant_engine.portfolio_ledger.hwm_governed_execution as governed
+    from quant_engine.portfolio_ledger.hwm import _json_safe
+
+    original_policy_bytes = _policy_bytes
+
+    def bound_policy_bytes(*args, **kwargs):
+        policy = json.loads(original_policy_bytes(*args, **kwargs))
+        policy["product_authority"]["raw_sha256"] = hashlib.sha256(
+            PRODUCT_CONTRACT_BYTES
+        ).hexdigest()
+        policy["product_authority"]["semantic_digest"] = hashlib.sha256(
+            _canonical_json_bytes(json.loads(PRODUCT_CONTRACT_BYTES))
+        ).hexdigest()
+        return json.dumps(policy, indent=2, sort_keys=True).encode()
+
+    monkeypatch.setitem(globals(), "_policy_bytes", bound_policy_bytes)
+    fx = _fixture(tmp_path)
+    result = _run(fx)
+    persisted = json.loads(json.dumps(_json_safe(result)))
+    original_compute = governed.compute_governed_as_held_composite_hwm
+
+    def recompute_with_equivalent_decimal_text(*args, **kwargs):
+        recomputed = original_compute(*args, **kwargs)
+        recomputed["current_index"] = Decimal(f"{recomputed['current_index']}0")
+        return recomputed
+
+    monkeypatch.setattr(
+        governed,
+        "compute_governed_as_held_composite_hwm",
+        recompute_with_equivalent_decimal_text,
+    )
+
+    verified = governed.verify_governed_hwm_result(
+        persisted,
+        input_generation_bytes=json.dumps(fx["generation"], sort_keys=True).encode(),
+        calendar_bytes=fx["calendar_authority_bytes"],
+        input_receipt_bytes=fx["input_receipt_bytes"],
+        policy_bytes=fx["policy_bytes"],
+        product_contract_bytes=fx["product_contract_bytes"],
+        performance_policy_bytes=fx["performance_policy_bytes"],
+        legacy_policy_bytes=fx["legacy_policy_bytes"],
+    )
+    assert _json_safe(verified)["current_index"] == persisted["current_index"]
+
+    changed = json.loads(json.dumps(persisted))
+    changed["current_index"] = "999"
+    with pytest.raises(HwmCoverageError, match="diverges from recomputation"):
+        governed.verify_governed_hwm_result(
+            changed,
+            input_generation_bytes=json.dumps(
+                fx["generation"], sort_keys=True
+            ).encode(),
+            calendar_bytes=fx["calendar_authority_bytes"],
+            input_receipt_bytes=fx["input_receipt_bytes"],
+            policy_bytes=fx["policy_bytes"],
+            product_contract_bytes=fx["product_contract_bytes"],
+            performance_policy_bytes=fx["performance_policy_bytes"],
+            legacy_policy_bytes=fx["legacy_policy_bytes"],
+        )
+
+
+def test_verifier_accepts_member_coverage_beyond_common_complete_boundary(
+    tmp_path, monkeypatch
+):
+    """A longer member tail does not move the accepted common boundary."""
+    from quant_engine.portfolio_ledger.hwm import _json_safe
+
+    original_policy_bytes = _policy_bytes
+
+    def bound_policy_bytes(*args, **kwargs):
+        policy = json.loads(original_policy_bytes(*args, **kwargs))
+        policy["product_authority"]["raw_sha256"] = hashlib.sha256(
+            PRODUCT_CONTRACT_BYTES
+        ).hexdigest()
+        policy["product_authority"]["semantic_digest"] = hashlib.sha256(
+            _canonical_json_bytes(json.loads(PRODUCT_CONTRACT_BYTES))
+        ).hexdigest()
+        return json.dumps(policy, indent=2, sort_keys=True).encode()
+
+    monkeypatch.setitem(globals(), "_policy_bytes", bound_policy_bytes)
+    fx = _fixture(tmp_path)
+    tail = _period("a-daily", "2026-01-07", "2026-01-08", "0.01", "64")
+    fx["component_periods"].append(tail)
+    fx["generation"]["component_periods"].append(tail)
+    canonical = json.dumps(
+        {
+            key: value
+            for key, value in fx["generation"].items()
+            if key != "generation_evidence_sha256"
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    fx["generation"]["generation_evidence_sha256"] = hashlib.sha256(
+        canonical
+    ).hexdigest()
+
+    result = _run(fx)
+    persisted = json.loads(json.dumps(_json_safe(result)))
+    verified = verify_governed_hwm_result(
+        persisted,
+        input_generation_bytes=json.dumps(fx["generation"], sort_keys=True).encode(),
+        calendar_bytes=fx["calendar_authority_bytes"],
+        input_receipt_bytes=fx["input_receipt_bytes"],
+        policy_bytes=fx["policy_bytes"],
+        product_contract_bytes=fx["product_contract_bytes"],
+        performance_policy_bytes=fx["performance_policy_bytes"],
+        legacy_policy_bytes=fx["legacy_policy_bytes"],
+    )
+    assert verified["complete_through"] == "2026-01-07"
+
+
 def test_verifier_rejects_truncated_presented_grid(tmp_path):
     """P1-B: dropping a grid suffix (with recomputed hash) fails because the
     presented grid must agree with the generation's period coverage."""

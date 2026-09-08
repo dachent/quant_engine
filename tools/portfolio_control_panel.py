@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 from collections import Counter, defaultdict
 import copy
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 import hashlib
+from html import escape as html_escape
 from html.parser import HTMLParser
 from importlib import import_module
 import json
@@ -40,6 +42,13 @@ from quant_engine.core import (
     stage_generation,
 )
 from quant_engine.core.contracts import canonical_json_bytes
+from portfolio_private_stage import validate_private_stage_target
+from portfolio_invested_capital import (
+    CapitalValidationError,
+    governed_hwm_input_policy,
+    resolve_financial_input_authority,
+    verify_governed_capital_result,
+)
 from quant_engine.portfolio_ledger import (
     HWM_STATUS_CODE_VERSION,
     HWM_STATUS_SEMANTICS,
@@ -180,6 +189,22 @@ PANEL_FILES: Final = (
     "data/dashboard_data.js",
     "data/freshness-health.json",
 )
+REPORT_DOWNLOAD: Final = "downloads/portfolio-report-data.json"
+WORKBOOK_DOWNLOAD: Final = "downloads/portfolio-report.xlsx"
+_DOWNLOAD_METADATA: Final = {
+    REPORT_DOWNLOAD: (
+        "portfolio-report-data.json",
+        "application/json",
+        "download-payload-report-json",
+    ),
+    WORKBOOK_DOWNLOAD: (
+        "portfolio-report.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "download-payload-report-xlsx",
+    ),
+}
+_DOWNLOAD_BASE64_CHUNK_SIZE: Final = 65_536
+_DOWNLOAD_PLACEHOLDER: Final = b"<!-- REPORT_DOWNLOADS -->"
 _ALLOWED_FRONTEND_REFERENCES: Final = (
     ("link", "href", "styles.css"),
     ("link", "href", "analytics.css"),
@@ -234,6 +259,7 @@ LINT_CAPTURES: Final = tuple(
 )
 DECOMPOSITION_LENS_SOURCES: Final = {
     "europe-economic": ("ECONOMIC_FACTOR", "European economic factors"),
+    "multi-asset-style": ("ETF_STYLE", "Multi-asset style"),
     "us-economic": ("ECONOMIC_FACTOR", "U.S. economic factors"),
     "us-equity-style": ("ETF_STYLE", "U.S. equity style"),
     "us-industry": ("RETURN_INDUSTRY", "U.S. 49-industry returns"),
@@ -249,7 +275,7 @@ DECOMPOSITION_LENS_GROUPS: Final = (
     (
         "ETF_STYLE",
         "ETF style",
-        ("us-equity-style",),
+        ("us-equity-style", "multi-asset-style"),
         "TOTAL_RETURN_ETF_PROXY",
     ),
     (
@@ -300,7 +326,7 @@ class _FrontendReferenceParser(HTMLParser):
 def _closed_frontend_resources(candidate_dir: Path) -> tuple[bool, object]:
     try:
         paths = {
-            name: candidate_dir / name
+            name: _filesystem_path(candidate_dir / name)
             for name in ("index.html", "styles.css", "analytics.css")
         }
         if any(path.is_symlink() or not path.is_file() for path in paths.values()):
@@ -316,6 +342,9 @@ def _closed_frontend_resources(candidate_dir: Path) -> tuple[bool, object]:
     parser.feed(html)
     actual = Counter(parser.references)
     expected = Counter(_ALLOWED_FRONTEND_REFERENCES)
+    for relative in (REPORT_DOWNLOAD, WORKBOOK_DOWNLOAD):
+        if _filesystem_path(candidate_dir / relative).is_file():
+            expected[("a", "href", relative)] += 1
     css_has_dynamic_resource = _css_has_dynamic_resource(styles)
     is_closed = (
         actual == expected
@@ -324,7 +353,7 @@ def _closed_frontend_resources(candidate_dir: Path) -> tuple[bool, object]:
     )
     return is_closed, {
         "actual_references": sorted(parser.references),
-        "allowed_references": sorted(_ALLOWED_FRONTEND_REFERENCES),
+        "allowed_references": sorted(expected.elements()),
         "css_dynamic_resource": css_has_dynamic_resource,
         "inline_style_url": parser.inline_style_url,
     }
@@ -1040,6 +1069,79 @@ def _report_candidate(
         },
         report_path,
     )
+
+
+def _report_downloads(
+    report_path: Path,
+    report_identity: Mapping[str, str | None],
+    report_root: Path | None,
+    *,
+    require_workbook: bool,
+) -> tuple[dict[str, bytes], dict[str, tuple[Path, str]]]:
+    """Deliver the selected report and its existing, report-bound workbook."""
+    report_bytes, report_sha256 = _read_snapshot(report_path, "report download")
+    if report_sha256 != report_identity["sha256"]:
+        raise ControlPanelValidationError("report download changed after selection")
+    files = {REPORT_DOWNLOAD: report_bytes}
+    bindings: dict[str, tuple[Path, str]] = {}
+    workbook_dir = (
+        report_root / "deliveries" / str(report_identity["generation_id"])
+        if report_root is not None
+        else report_path.parent
+    )
+    workbook_path = workbook_dir / "portfolio-report.xlsx"
+    if report_root is None and (workbook_dir / "excel" / workbook_path.name).exists():
+        workbook_path = workbook_dir / "excel" / workbook_path.name
+    if not workbook_path.exists() and not require_workbook:
+        return files, bindings
+    report_producer = import_module("portfolio_report")
+    workbook_bytes, workbook_sha256 = _read_snapshot(workbook_path, "workbook download")
+    if report_root is not None:
+        delivery_path = workbook_dir / report_producer.REPORT_DELIVERY_NAME
+        receipt_bytes, receipt_sha256 = _read_snapshot(delivery_path, "report delivery")
+        delivery = report_producer.inspect_report_delivery(
+            report_root, str(report_identity["generation_id"]), workbook_dir
+        )
+        if (
+            delivery["workbook_status"] != "EXACT_NON_AUTHORITY"
+            or delivery["actual_workbook_sha256"] != workbook_sha256
+            or delivery["report_data_sha256"] != report_sha256
+            or _read_snapshot(delivery_path, "report delivery")[0] != receipt_bytes
+        ):
+            raise ControlPanelValidationError(
+                "workbook delivery differs from selected report"
+            )
+        bindings["report_delivery"] = (delivery_path, receipt_sha256)
+    report_producer._workbook_parity_receipt(report_bytes, workbook_bytes)
+    files[WORKBOOK_DOWNLOAD] = workbook_bytes
+    bindings["report_workbook"] = (workbook_path, workbook_sha256)
+    return files, bindings
+
+
+def _report_download_link(relative_path: str, label: str, content: bytes) -> str:
+    """Render one fixed local-file-safe download with its exact selected bytes."""
+    metadata = _DOWNLOAD_METADATA.get(relative_path)
+    if metadata is None or not isinstance(content, bytes) or not content:
+        raise ControlPanelValidationError("report download link input differs")
+    filename, mime_type, payload_prefix = metadata
+    payload = base64.b64encode(content).decode("ascii")
+    chunks = [
+        payload[index : index + _DOWNLOAD_BASE64_CHUNK_SIZE]
+        for index in range(0, len(payload), _DOWNLOAD_BASE64_CHUNK_SIZE)
+    ]
+    link = (
+        f'<a class="ghost-button" href="{relative_path}" download="{filename}" '
+        f'data-download-filename="{filename}" data-download-mime="{mime_type}" '
+        f'data-download-payload-prefix="{payload_prefix}" '
+        f'data-download-chunk-count="{len(chunks)}">{html_escape(label)}</a>'
+    )
+    payload_elements = "".join(
+        f'<script type="application/octet-stream" '
+        f'id="{payload_prefix}-{index:05d}" data-download-filename="{filename}" '
+        f'data-download-chunk-index="{index}">{chunk}</script>'
+        for index, chunk in enumerate(chunks)
+    )
+    return link + payload_elements
 
 
 def _verified_strategy_history_contract(
@@ -1837,10 +1939,9 @@ def _dependence_strategy_names(
         else _load_json(FINANCIAL_MVP_CONTRACT, "financial MVP contract")
     )
     product = _object(contract.get("product"), "financial MVP product")
-    if (
-        product.get("product_id") != "FINANCIAL_MVP"
-        or contract.get("contract_schema_version") != 6
-    ):
+    if product.get("product_id") != "FINANCIAL_MVP" or contract.get(
+        "contract_schema_version"
+    ) not in {6, 7}:
         raise ControlPanelValidationError("financial MVP contract identity differs")
     required_ids = {
         _text(row.get("strategy_id"), "financial MVP strategy_id")
@@ -1873,10 +1974,9 @@ def _financial_mvp_product_controls(
         else _load_json(FINANCIAL_MVP_CONTRACT, "financial MVP contract")
     )
     product = _object(contract.get("product"), "financial MVP product")
-    if (
-        product.get("product_id") != "FINANCIAL_MVP"
-        or contract.get("contract_schema_version") != 6
-    ):
+    if product.get("product_id") != "FINANCIAL_MVP" or contract.get(
+        "contract_schema_version"
+    ) not in {6, 7}:
         raise ControlPanelValidationError("financial MVP contract identity differs")
     controls: dict[str, dict[str, Any]] = {}
     strategy_rows = _objects(contract.get("strategies"), "financial MVP strategies")
@@ -3681,6 +3781,92 @@ def _reconcile_hwm_coverage(
     return normalized
 
 
+def _factor_contribution_summary(model: Mapping[str, Any]) -> dict[str, Any]:
+    """Project the producer's reconciled holdout contribution rows."""
+    contributions = _objects(model.get("contributions"), "model.contributions")
+    if not contributions:
+        raise ControlPanelValidationError("selected factor model has no contributions")
+    factor_ids = tuple(
+        _text(item, "model.factor_ids[]") for item in model.get("factor_ids", [])
+    )
+    if not factor_ids:
+        raise ControlPanelValidationError("selected factor model has no factors")
+    maximum_error = 0.0
+    test_rows: list[dict[str, Any]] = []
+    for contribution in contributions:
+        factor_values = _object(
+            contribution.get("factor_contributions"),
+            "contribution.factor_contributions",
+        )
+        if set(factor_values) != set(factor_ids):
+            raise ControlPanelValidationError(
+                "factor contribution columns differ from selected factors"
+            )
+        factor_total = sum(
+            _finite_float(value, f"contribution.{factor_id}")
+            for factor_id, value in factor_values.items()
+        )
+        alpha_value = _finite_float(
+            contribution.get("alpha_contribution"),
+            "contribution.alpha_contribution",
+        )
+        fitted = _finite_float(
+            contribution.get("fitted_excess_return"),
+            "contribution.fitted_excess_return",
+        )
+        actual = _finite_float(
+            contribution.get("actual_excess_return"),
+            "contribution.actual_excess_return",
+        )
+        residual = _finite_float(contribution.get("residual"), "contribution.residual")
+        maximum_error = max(
+            maximum_error,
+            abs(fitted - alpha_value - factor_total),
+            abs(actual - fitted - residual),
+        )
+        if contribution.get("partition") == "TEST":
+            test_rows.append(contribution)
+    if maximum_error > 1e-9 or not test_rows:
+        raise ControlPanelValidationError(
+            "factor contributions do not reconcile or lack holdout evidence"
+        )
+
+    def mean(field: str) -> str:
+        return _number_text(
+            sum(
+                _finite_float(row.get(field), f"contribution.{field}")
+                for row in test_rows
+            )
+            / len(test_rows)
+        )
+
+    factor_means = {
+        factor_id: _number_text(
+            sum(
+                _finite_float(
+                    _object(
+                        row.get("factor_contributions"),
+                        "contribution.factor_contributions",
+                    ).get(factor_id),
+                    f"contribution.{factor_id}",
+                )
+                for row in test_rows
+            )
+            / len(test_rows)
+        )
+        for factor_id in factor_ids
+    }
+    return {
+        "alpha_mean": mean("alpha_contribution"),
+        "factor_means": factor_means,
+        "fitted_mean": mean("fitted_excess_return"),
+        "maximum_reconciliation_error": _number_text(maximum_error),
+        "observations": len(test_rows),
+        "realized_mean": mean("actual_excess_return"),
+        "residual_mean": mean("residual"),
+    }
+
+
 def _factor_analysis(
     decomposition: Mapping[str, Any],
     identity: Mapping[str, str],
@@ -3852,7 +4038,11 @@ def _factor_analysis(
             rows.append(
                 {
                     "alpha": diagnostic_alpha,
-                    "contribution_summary": None,
+                    "contribution_summary": (
+                        _factor_contribution_summary(model)
+                        if model.get("contributions")
+                        else None
+                    ),
                     "cost_coverage": _text(
                         model.get("cost_coverage"), "model.cost_coverage"
                     ),
@@ -3891,95 +4081,10 @@ def _factor_analysis(
             raise ControlPanelValidationError(
                 f"selected factor model is not PM-valid: {series_id}"
             )
-        contributions = _objects(model.get("contributions"), "model.contributions")
-        if not contributions:
-            raise ControlPanelValidationError(
-                "selected factor model has no contributions"
-            )
-        factor_ids = tuple(
-            _text(item, "model.factor_ids[]") for item in model.get("factor_ids", [])
-        )
-        if not factor_ids:
-            raise ControlPanelValidationError("selected factor model has no factors")
-        maximum_error = 0.0
-        test_rows: list[dict[str, Any]] = []
-        for contribution in contributions:
-            factor_values = _object(
-                contribution.get("factor_contributions"),
-                "contribution.factor_contributions",
-            )
-            if set(factor_values) != set(factor_ids):
-                raise ControlPanelValidationError(
-                    "factor contribution columns differ from selected factors"
-                )
-            factor_total = sum(
-                _finite_float(value, f"contribution.{factor_id}")
-                for factor_id, value in factor_values.items()
-            )
-            alpha_value = _finite_float(
-                contribution.get("alpha_contribution"),
-                "contribution.alpha_contribution",
-            )
-            fitted = _finite_float(
-                contribution.get("fitted_excess_return"),
-                "contribution.fitted_excess_return",
-            )
-            actual = _finite_float(
-                contribution.get("actual_excess_return"),
-                "contribution.actual_excess_return",
-            )
-            residual = _finite_float(
-                contribution.get("residual"), "contribution.residual"
-            )
-            maximum_error = max(
-                maximum_error,
-                abs(fitted - alpha_value - factor_total),
-                abs(actual - fitted - residual),
-            )
-            if contribution.get("partition") == "TEST":
-                test_rows.append(contribution)
-        if maximum_error > 1e-9 or not test_rows:
-            raise ControlPanelValidationError(
-                "factor contributions do not reconcile or lack holdout evidence"
-            )
-
-        def mean(field: str) -> str:
-            return _number_text(
-                sum(
-                    _finite_float(row.get(field), f"contribution.{field}")
-                    for row in test_rows
-                )
-                / len(test_rows)
-            )
-
-        factor_means = {
-            factor_id: _number_text(
-                sum(
-                    _finite_float(
-                        _object(
-                            row.get("factor_contributions"),
-                            "contribution.factor_contributions",
-                        ).get(factor_id),
-                        f"contribution.{factor_id}",
-                    )
-                    for row in test_rows
-                )
-                / len(test_rows)
-            )
-            for factor_id in factor_ids
-        }
         rows.append(
             {
                 "alpha": _object(model.get("alpha"), "model.alpha"),
-                "contribution_summary": {
-                    "alpha_mean": mean("alpha_contribution"),
-                    "factor_means": factor_means,
-                    "fitted_mean": mean("fitted_excess_return"),
-                    "maximum_reconciliation_error": _number_text(maximum_error),
-                    "observations": len(test_rows),
-                    "realized_mean": mean("actual_excess_return"),
-                    "residual_mean": mean("residual"),
-                },
+                "contribution_summary": _factor_contribution_summary(model),
                 "cost_coverage": _text(
                     model.get("cost_coverage"), "model.cost_coverage"
                 ),
@@ -4144,6 +4249,316 @@ def _current_primary_factor_analyses(
     )
 
 
+def verify_decomposition_surface_against_plan(
+    plan_bundle: Path,
+    source_key: str,
+    surface: str,
+    evidence_mode: str,
+    decomposition: Mapping[str, Any],
+    generation_manifest_path: Path,
+) -> dict[str, Any]:
+    """Bind one accepted decomposition generation to its exact planned surface."""
+
+    if surface not in {"STATIC", "DYNAMIC_FLS"}:
+        raise ControlPanelValidationError("decomposition surface is unsupported")
+    manifest, _content, _sha256 = _json_snapshot(
+        plan_bundle / "plan-manifest.json", "decomposition plan manifest"
+    )
+    if (
+        manifest.get("builder") != "portfolio-current-decomposition-plan"
+        or manifest.get("builder_version") != "0.17.0"
+        or manifest.get("schema_version") != 2
+        or manifest.get("bundle_id") != plan_bundle.name
+    ):
+        raise ControlPanelValidationError("current decomposition plan identity differs")
+    spec_rows = [
+        row
+        for row in _objects(manifest.get("specs"), "decomposition plan specs")
+        if row.get("source_key") == source_key and row.get("surface") == surface
+    ]
+    if len(spec_rows) != 1:
+        raise ControlPanelValidationError(
+            f"decomposition plan requires one {source_key}:{surface} spec"
+        )
+    spec_row = spec_rows[0]
+    expected_estimator = "STATIC_RBSA" if surface == "STATIC" else "DYNAMIC_FLS"
+    expected_spec_id = f"{source_key}:{surface}"
+    if spec_row.get("spec_id") != expected_spec_id:
+        raise ControlPanelValidationError("decomposition plan spec identity differs")
+    relative = _text(spec_row.get("path"), "decomposition plan spec path")
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or ".." in relative_path.parts:
+        raise ControlPanelValidationError("decomposition plan spec path is unsafe")
+    spec_path = plan_bundle / relative_path
+    spec, spec_content, spec_sha256 = _json_snapshot(
+        spec_path, f"{source_key} {surface} decomposition plan spec"
+    )
+    expected_sha256 = _text(spec_row.get("sha256"), "decomposition plan spec sha256")
+    expected_size = spec_row.get("size_bytes")
+    if not isinstance(expected_size, int) or expected_size <= 0:
+        raise ControlPanelValidationError("decomposition plan spec size is invalid")
+    manifest_outputs = {
+        _text(row.get("path"), "decomposition plan output path"): row
+        for row in _objects(manifest.get("outputs"), "decomposition plan outputs")
+    }
+    declared_output = manifest_outputs.get(relative)
+    if (
+        spec_sha256 != expected_sha256
+        or len(spec_content) != expected_size
+        or declared_output is None
+        or declared_output.get("sha256") != expected_sha256
+        or declared_output.get("size_bytes") != expected_size
+    ):
+        raise ControlPanelValidationError("decomposition plan spec bytes differ")
+    if (
+        spec.get("schema_version") != 1
+        or spec.get("analysis_lens") != spec_row.get("analysis_lens")
+        or spec.get("analysis_lens") != decomposition.get("analysis_lens")
+        or spec.get("evidence_mode") != evidence_mode
+        or decomposition.get("evidence_mode", "LIVE_ONLY") != evidence_mode
+    ):
+        raise ControlPanelValidationError("decomposition plan spec boundary differs")
+    spec_models = _objects(spec.get("models"), "decomposition plan spec models")
+    model_ids = [
+        _text(row.get("model_id"), "decomposition spec model_id") for row in spec_models
+    ]
+    if (
+        not model_ids
+        or len(model_ids) != len(set(model_ids))
+        or spec_row.get("model_count") != len(model_ids)
+        or {
+            _text(row.get("estimator"), "decomposition spec estimator")
+            for row in spec_models
+        }
+        != {expected_estimator}
+    ):
+        raise ControlPanelValidationError("decomposition plan surface models differ")
+    result_models = _objects(
+        decomposition.get("model_results"), "decomposition surface model_results"
+    )
+    result_model_ids = {
+        _text(row.get("model_id"), "decomposition result model_id")
+        for row in result_models
+    }
+    selected_model_ids = {
+        _text(row.get("model_id"), "decomposition selection model_id")
+        for row in _objects(
+            decomposition.get("model_selections"),
+            "decomposition surface model_selections",
+        )
+        if row.get("model_id") is not None
+    }
+    if (
+        result_model_ids != set(model_ids)
+        or not selected_model_ids <= result_model_ids
+        or {
+            _text(row.get("estimator", "STATIC_RBSA"), "decomposition estimator")
+            for row in result_models
+        }
+        != {expected_estimator}
+    ):
+        raise ControlPanelValidationError("decomposition result surface models differ")
+    try:
+        generation_manifest_content, _generation_sha256 = _read_snapshot(
+            generation_manifest_path, "decomposition generation manifest"
+        )
+        generation_manifest = GenerationManifest.from_json_bytes(
+            generation_manifest_content
+        )
+    except (ManifestValidationError, OSError, ValueError, RuntimeError) as exc:
+        raise ControlPanelValidationError(
+            "decomposition generation manifest is invalid"
+        ) from exc
+    bound_spec = next(
+        (
+            artifact
+            for artifact in generation_manifest.artifacts
+            if artifact.artifact_id == "spec/decomposition-spec.json"
+        ),
+        None,
+    )
+    if bound_spec is None or (
+        bound_spec.sha256 != spec_sha256 or bound_spec.size_bytes != len(spec_content)
+    ):
+        raise ControlPanelValidationError(
+            "decomposition generation is not bound to the planned surface spec"
+        )
+    return {
+        "evidence_mode": evidence_mode,
+        "model_count": len(model_ids),
+        "sha256": spec_sha256,
+        "size_bytes": len(spec_content),
+        "source_key": source_key,
+        "spec_id": expected_spec_id,
+        # bundle-relative: publish snapshots the plan bundle to a temporary root
+        # and rebuilds the report, so an absolute path here would make the report
+        # identity depend on where the bundle happens to be staged
+        "spec_path": relative_path.as_posix(),
+        "surface": surface,
+    }
+
+
+def _group_decomposition_lens_sources(
+    *,
+    lens_id: str,
+    label: str,
+    source_keys: Sequence[str],
+    return_basis: str,
+    source_analyses: Mapping[str, Mapping[str, Any]],
+    analysis_strategy_names: set[str],
+    series_to_reason: Mapping[str, str],
+    disposition_reasons: Mapping[str, Mapping[str, str]],
+    current_plan: bool,
+    plan_bundle_id: str,
+    evidence_mode: str,
+    surface: str,
+) -> dict[str, Any]:
+    analyses = [source_analyses[source_key] for source_key in source_keys]
+    rows: list[dict[str, Any]] = []
+    if current_plan:
+        # A current product cell is source-qualified.  The same strategy may be
+        # selected in both regional economic sources or both style sources;
+        # preserve each result instead of collapsing by series_id.
+        for source_key, analysis in zip(source_keys, analyses, strict=True):
+            source_label = _text(analysis.get("source_label"), "source label")
+            rows_by_series = {
+                _text(row.get("series_id"), "lens series_id"): dict(row)
+                for row in _objects(analysis.get("series"), "decomposition lens series")
+            }
+            if len(rows_by_series) != len(
+                _objects(analysis.get("series"), "decomposition lens series")
+            ):
+                raise ControlPanelValidationError(
+                    f"decomposition source duplicates a series: {source_key}"
+                )
+            for series_id in sorted(analysis_strategy_names):
+                row = rows_by_series.get(series_id)
+                if row is None:
+                    row = _unavailable_factor_row(
+                        series_id,
+                        disposition_reasons.get(series_id, {}).get(
+                            source_key, series_to_reason[series_id]
+                        ),
+                    )
+                row.update(
+                    {
+                        "source_key": source_key,
+                        "source_label": source_label,
+                        "surface": surface,
+                    }
+                )
+                rows.append(row)
+    else:
+        combined_rows_by_series: dict[str, dict[str, Any]] = {}
+        for analysis in analyses:
+            for row in _objects(analysis.get("series"), "decomposition lens series"):
+                series_id = _text(row.get("series_id"), "lens series_id")
+                if series_id in combined_rows_by_series:
+                    raise ControlPanelValidationError(
+                        f"decomposition lens duplicates {series_id}: {lens_id}"
+                    )
+                combined_rows_by_series[series_id] = dict(row)
+        for series_id in analysis_strategy_names:
+            combined_rows_by_series.setdefault(
+                series_id,
+                _unavailable_factor_row(series_id, series_to_reason[series_id]),
+            )
+        rows = [
+            combined_rows_by_series[name] for name in sorted(combined_rows_by_series)
+        ]
+    for row in rows:
+        if (
+            row["status"] == "UNAVAILABLE"
+            and not row["unavailable_reasons"]
+            and current_plan
+        ):
+            reason = next(
+                (
+                    disposition_reasons.get(row["series_id"], {}).get(source_key)
+                    for source_key in source_keys
+                    if disposition_reasons.get(row["series_id"], {}).get(source_key)
+                ),
+                None,
+            )
+            if reason:
+                row["unavailable_reasons"] = [reason]
+                row["selection_status"] = reason
+    source_identity = [
+        {
+            "analytics_hash": item["analytics_hash"],
+            "as_of_date": item["as_of_date"],
+            "generation_id": item["generation_id"],
+            "plan_spec": item.get("plan_spec"),
+            "source_key": item["source_key"],
+            "source_label": item["source_label"],
+            "source_sha256": item["source_sha256"],
+            "surface": surface,
+        }
+        for item in analyses
+    ]
+    identity_payload = {
+        "lens_id": lens_id,
+        "plan_bundle_id": plan_bundle_id,
+        "sources": source_identity,
+        "surface": surface,
+    }
+    composite_hash = hashlib.sha256(canonical_json_bytes(identity_payload)).hexdigest()
+    available_count = sum(row["status"] == "AVAILABLE" for row in rows)
+    governed_proxies = [
+        {
+            **proxy,
+            "source_key": analysis["source_key"],
+            "source_label": analysis["source_label"],
+        }
+        for analysis in analyses
+        for proxy in _objects(
+            _object(analysis.get("proxy_governance"), "analysis.proxy_governance").get(
+                "proxies"
+            ),
+            "analysis.proxy_governance.proxies",
+        )
+    ]
+    return {
+        "analytics_hash": composite_hash,
+        "analytics_schema_version": max(
+            int(item["analytics_schema_version"]) for item in analyses
+        ),
+        "as_of_date": min(item["as_of_date"] for item in analyses),
+        "as_of_policy": "MINIMUM_ACCEPTED_SOURCE_DATE",
+        "available_count": available_count,
+        "available_source_keys": list(source_keys),
+        "default_source_key": source_keys[0],
+        "diagnostic_count": sum(row["status"] == "DIAGNOSTIC_ONLY" for row in rows),
+        "dynamic_available_count": sum(
+            row.get("estimator") == "DYNAMIC_FLS" and row.get("status") == "AVAILABLE"
+            for row in rows
+        ),
+        "evidence_mode": evidence_mode,
+        "generation_id": composite_hash,
+        "lens_id": lens_id,
+        "lens_label": label,
+        "method_label": analyses[0]["method_label"],
+        "methodology_manifest_sha256": analyses[0]["methodology_manifest_sha256"],
+        "methodology_version": analyses[0]["methodology_version"],
+        "plan_bundle_id": plan_bundle_id,
+        "proxy_governance": {
+            "candidate_count": len(governed_proxies),
+            "orthogonality_claim": "RAW_CANDIDATES_NOT_ASSUMED_ORTHOGONAL",
+            "proxies": governed_proxies,
+            "selection_boundary": (
+                "TRAIN_ONLY_TIME_ORDERED_VALIDATION_WITH_"
+                "COLLINEARITY_AND_PARSIMONY_GATES"
+            ),
+        },
+        "return_basis": return_basis,
+        "series": rows,
+        "source_sha256": composite_hash,
+        "sources": source_identity,
+        "surface": surface,
+        "unavailable_count": len(rows) - available_count,
+    }
+
+
 def _decomposition_lenses_for_mode(
     root: Path,
     plan_bundle: Path,
@@ -4184,9 +4599,10 @@ def _decomposition_lenses_for_mode(
     ):
         raise ControlPanelValidationError("decomposition plan identity differs")
     expected_plan_schema = 3 if current_plan else 1
+    expected_dispositions_schema = 2 if current_plan else 1
     if (
         plan.get("schema_version") != expected_plan_schema
-        or dispositions.get("schema_version") != 1
+        or dispositions.get("schema_version") != expected_dispositions_schema
     ):
         raise ControlPanelValidationError("decomposition plan schema is unsupported")
     manifest_artifacts = {
@@ -4228,7 +4644,13 @@ def _decomposition_lenses_for_mode(
             raise ControlPanelValidationError(
                 "legacy decomposition plan differs from the governed strategy identities"
             )
-    elif planned_ids != set(strategy_names):
+    elif planned_ids != set(strategy_names) and not (
+        current_plan
+        and planned_ids == CURRENT_PRODUCT_STRATEGY_IDS
+        and set(strategy_names) == CURRENT_REQUIRED_STRATEGY_IDS
+    ):
+        # The accepted plan retains the two explicitly excluded historical rows;
+        # the current report/panel projects the seven required strategies.
         raise ControlPanelValidationError(
             "decomposition plan differs from current strategy identities"
         )
@@ -4236,7 +4658,9 @@ def _decomposition_lenses_for_mode(
     disposition_reasons: dict[str, dict[str, str]] = {}
     for strategy_id, strategy_name in strategy_names.items():
         item = planned_by_id[strategy_id]
-        if _text(item.get("series_id"), "plan series_id") != strategy_name:
+        if (not current_plan or strategy_id in governed_current_ids) and _text(
+            item.get("series_id"), "plan series_id"
+        ) != strategy_name:
             raise ControlPanelValidationError(
                 f"decomposition plan series differs: {strategy_id}"
             )
@@ -4271,7 +4695,10 @@ def _decomposition_lenses_for_mode(
     }
     allowed_lens_names = set(strategy_names.values()) | legacy_excluded_names
 
-    source_analyses: dict[str, dict[str, Any]] = {}
+    analyses_by_surface: dict[str, dict[str, dict[str, Any]]] = {
+        "STATIC": {},
+        **({"DYNAMIC_FLS": {}} if current_plan else {}),
+    }
     source_bindings: list[tuple[Path, str]] = [
         (manifest_path, manifest_sha256),
         (plan_path, plan_sha256),
@@ -4289,12 +4716,13 @@ def _decomposition_lenses_for_mode(
             )
         )
 
+    surface_inputs: tuple[tuple[str, dict[str, Any], dict[str, str], Path], ...]
     for source_key, (expected_lens, source_label) in DECOMPOSITION_LENS_SOURCES.items():
         if current_plan:
-            mode_root = root / "LIVE_ONLY"
+            mode_root = root / evidence_mode
             if not mode_root.is_dir() or mode_root.is_symlink():
                 raise ControlPanelValidationError(
-                    "current plan requires a LIVE_ONLY lens layout"
+                    f"current plan requires a {evidence_mode} lens layout"
                 )
             static_root = mode_root / "STATIC" / source_key
             dynamic_surface_root = mode_root / "DYNAMIC_FLS" / source_key
@@ -4314,22 +4742,10 @@ def _decomposition_lenses_for_mode(
                 field_name=f"{source_label} DYNAMIC_FLS decomposition",
                 expected_schema_version=(1, 2),
             )
-            if canonical_json_bytes(dynamic) != canonical_json_bytes(decomposition):
-                raise ControlPanelValidationError(
-                    f"{source_label} STATIC and DYNAMIC_FLS surfaces differ"
-                )
-            add_generation_bindings(path, identity)
-            add_generation_bindings(dynamic_path, dynamic_identity)
-            decomposition = {
-                **decomposition,
-                "surface_composition": {
-                    "policy": "STATIC_IS_LENS_RECORD_DYNAMIC_PARITY_CHECKED",
-                    "source_key": source_key,
-                    "source_label": source_label,
-                    "static_generation_id": identity["generation_id"],
-                    "dynamic_generation_id": dynamic_identity["generation_id"],
-                },
-            }
+            surface_inputs = (
+                ("STATIC", decomposition, identity, path),
+                ("DYNAMIC_FLS", dynamic, dynamic_identity, dynamic_path),
+            )
         else:
             decomposition, identity, path = _current_analytics(
                 root / source_key,
@@ -4337,148 +4753,99 @@ def _decomposition_lenses_for_mode(
                 field_name=f"{source_label} decomposition",
                 expected_schema_version=(1, 2),
             )
-            add_generation_bindings(path, identity)
-        if decomposition.get("analysis_lens") != expected_lens:
-            raise ControlPanelValidationError(
-                f"decomposition lens differs for {source_key}"
+            surface_inputs = (("STATIC", decomposition, identity, path),)
+        for surface, surface_value, surface_identity, surface_path in surface_inputs:
+            add_generation_bindings(surface_path, surface_identity)
+            plan_spec = (
+                verify_decomposition_surface_against_plan(
+                    plan_bundle,
+                    source_key,
+                    surface,
+                    evidence_mode,
+                    surface_value,
+                    Path(surface_identity["manifest_path"]),
+                )
+                if current_plan
+                else None
             )
-        declared_mode = decomposition.get("evidence_mode", "LIVE_ONLY")
-        if declared_mode != evidence_mode:
-            raise ControlPanelValidationError(
-                f"decomposition evidence mode differs for {source_key}"
-            )
-        selected_names = {
-            _text(item.get("series_id"), "lens selection series_id")
-            for item in _objects(
-                decomposition.get("model_selections"), "lens model selections"
-            )
-        }
-        if not selected_names or not selected_names <= allowed_lens_names:
-            raise ControlPanelValidationError(
-                f"decomposition series boundary differs for {source_key}"
-            )
-        filtered_decomposition, selected_analysis_names = (
-            _factor_decomposition_perimeter(decomposition, analysis_strategy_names)
-        )
-        analysis = _factor_analysis(
-            filtered_decomposition, identity, selected_analysis_names
-        )
-        analysis["analysis_lens"] = expected_lens
-        analysis["source_key"] = source_key
-        analysis["source_label"] = source_label
-        analysis["series"] = [
-            {
-                **row,
-                "source_key": source_key,
-                "source_label": source_label,
-            }
-            for row in analysis["series"]
-        ]
-        source_analyses[source_key] = analysis
-
-    grouped: list[dict[str, Any]] = []
-    for lens_id, label, source_keys, return_basis in DECOMPOSITION_LENS_GROUPS:
-        analyses = [source_analyses[source_key] for source_key in source_keys]
-        rows_by_series: dict[str, dict[str, Any]] = {}
-        for analysis in analyses:
-            for row in analysis["series"]:
-                series_id = _text(row.get("series_id"), "lens series_id")
-                if series_id in rows_by_series:
-                    raise ControlPanelValidationError(
-                        f"decomposition lens duplicates {series_id}: {lens_id}"
+            if plan_spec is not None:
+                source_bindings.append(
+                    (
+                        plan_bundle / Path(plan_spec["spec_path"]),
+                        _text(plan_spec["sha256"], "spec sha256"),
                     )
-                rows_by_series[series_id] = row
-        for series_id in analysis_strategy_names:
-            rows_by_series.setdefault(
-                series_id,
-                _unavailable_factor_row(series_id, series_to_reason[series_id]),
-            )
-        rows = [rows_by_series[name] for name in sorted(rows_by_series)]
-        for row in rows:
-            if (
-                row["status"] == "UNAVAILABLE"
-                and not row["unavailable_reasons"]
-                and current_plan
-            ):
-                reason = disposition_reasons.get(row["series_id"], {}).get(source_key)
-                if reason:
-                    row["unavailable_reasons"] = [reason]
-                    row["selection_status"] = reason
-        source_identity = [
-            {
-                "analytics_hash": item["analytics_hash"],
-                "as_of_date": item["as_of_date"],
-                "generation_id": item["generation_id"],
-                "source_key": item["source_key"],
-                "source_label": item["source_label"],
-                "source_sha256": item["source_sha256"],
+                )
+            if surface_value.get("analysis_lens") != expected_lens:
+                raise ControlPanelValidationError(
+                    f"decomposition lens differs for {source_key}"
+                )
+            declared_mode = surface_value.get("evidence_mode", "LIVE_ONLY")
+            if declared_mode != evidence_mode:
+                raise ControlPanelValidationError(
+                    f"decomposition evidence mode differs for {source_key}"
+                )
+            selected_names = {
+                _text(item.get("series_id"), "lens selection series_id")
+                for item in _objects(
+                    surface_value.get("model_selections"), "lens model selections"
+                )
             }
-            for item in analyses
+            if not selected_names or not selected_names <= allowed_lens_names:
+                raise ControlPanelValidationError(
+                    f"decomposition series boundary differs for {source_key}"
+                )
+            filtered_decomposition, selected_analysis_names = (
+                _factor_decomposition_perimeter(surface_value, analysis_strategy_names)
+            )
+            analysis = _factor_analysis(
+                filtered_decomposition, surface_identity, selected_analysis_names
+            )
+            analysis["analysis_lens"] = expected_lens
+            analysis["plan_spec"] = plan_spec
+            analysis["source_key"] = source_key
+            analysis["source_label"] = source_label
+            analysis["surface"] = surface
+            analysis["series"] = [
+                {
+                    **row,
+                    "source_key": source_key,
+                    "source_label": source_label,
+                    "surface": surface,
+                }
+                for row in analysis["series"]
+            ]
+            analyses_by_surface[surface][source_key] = analysis
+
+    grouped_by_surface: dict[str, list[dict[str, Any]]] = {}
+    for surface, source_analyses in analyses_by_surface.items():
+        grouped_by_surface[surface] = [
+            _group_decomposition_lens_sources(
+                lens_id=lens_id,
+                label=label,
+                source_keys=source_keys,
+                return_basis=return_basis,
+                source_analyses=source_analyses,
+                analysis_strategy_names=analysis_strategy_names,
+                series_to_reason=series_to_reason,
+                disposition_reasons=disposition_reasons,
+                current_plan=current_plan,
+                plan_bundle_id=plan_bundle.name,
+                evidence_mode=evidence_mode,
+                surface=surface,
+            )
+            for lens_id, label, source_keys, return_basis in DECOMPOSITION_LENS_GROUPS
         ]
-        identity_payload = {
-            "lens_id": lens_id,
-            "plan_bundle_id": plan_bundle.name,
-            "sources": source_identity,
+    grouped: list[dict[str, Any]] = []
+    for index, default_lens in enumerate(grouped_by_surface["STATIC"]):
+        surfaces = {
+            surface: rows[index] for surface, rows in grouped_by_surface.items()
         }
-        composite_hash = hashlib.sha256(
-            canonical_json_bytes(identity_payload)
-        ).hexdigest()
-        available_count = sum(row["status"] == "AVAILABLE" for row in rows)
-        governed_proxies = [
-            {
-                **proxy,
-                "source_key": analysis["source_key"],
-                "source_label": analysis["source_label"],
-            }
-            for analysis in analyses
-            for proxy in _objects(
-                _object(
-                    analysis.get("proxy_governance"), "analysis.proxy_governance"
-                ).get("proxies"),
-                "analysis.proxy_governance.proxies",
-            )
-        ]
         grouped.append(
             {
-                "analytics_hash": composite_hash,
-                "analytics_schema_version": max(
-                    int(item["analytics_schema_version"]) for item in analyses
-                ),
-                "as_of_date": min(item["as_of_date"] for item in analyses),
-                "as_of_policy": "MINIMUM_ACCEPTED_SOURCE_DATE",
-                "available_count": available_count,
-                "diagnostic_count": sum(
-                    row["status"] == "DIAGNOSTIC_ONLY" for row in rows
-                ),
-                "dynamic_available_count": sum(
-                    row.get("estimator") == "DYNAMIC_FLS"
-                    and row.get("status") == "AVAILABLE"
-                    for row in rows
-                ),
-                "evidence_mode": evidence_mode,
-                "generation_id": composite_hash,
-                "lens_id": lens_id,
-                "lens_label": label,
-                "method_label": analyses[0]["method_label"],
-                "methodology_manifest_sha256": analyses[0][
-                    "methodology_manifest_sha256"
-                ],
-                "methodology_version": analyses[0]["methodology_version"],
-                "plan_bundle_id": plan_bundle.name,
-                "proxy_governance": {
-                    "candidate_count": len(governed_proxies),
-                    "orthogonality_claim": "RAW_CANDIDATES_NOT_ASSUMED_ORTHOGONAL",
-                    "proxies": governed_proxies,
-                    "selection_boundary": (
-                        "TRAIN_ONLY_TIME_ORDERED_VALIDATION_WITH_"
-                        "COLLINEARITY_AND_PARSIMONY_GATES"
-                    ),
-                },
-                "return_basis": return_basis,
-                "series": rows,
-                "source_sha256": composite_hash,
-                "sources": source_identity,
-                "unavailable_count": len(rows) - available_count,
+                **default_lens,
+                "available_surfaces": list(surfaces),
+                "default_surface": "STATIC",
+                "surfaces": surfaces,
             }
         )
     return (
@@ -4499,6 +4866,7 @@ def _decomposition_lenses(
     contract_snapshot: bytes | None = None,
     *,
     include_hybrid: bool = True,
+    hybrid_plan_bundle: Path | None = None,
 ) -> tuple[dict[str, Any], tuple[tuple[Path, str], ...]]:
     analysis_strategy_names = _dependence_strategy_names(
         strategy_names, contract_snapshot
@@ -4512,60 +4880,82 @@ def _decomposition_lenses(
     )
     modes: dict[str, list[dict[str, Any]]] = {"LIVE_ONLY": live["lenses"]}
     all_bindings = list(live_bindings)
+    manifest, _content, _sha256 = _json_snapshot(
+        plan_bundle / "plan-manifest.json", "decomposition plan manifest"
+    )
+    current_plan = manifest.get("schema_version") == 2
     hybrid_root = root / "LIVE_PLUS_BACKTEST"
+    if hybrid_plan_bundle is not None and (not current_plan or not include_hybrid):
+        raise ControlPanelValidationError(
+            "hybrid plan requires current hybrid analysis"
+        )
+    if hybrid_plan_bundle is not None and (
+        not hybrid_root.is_dir() or hybrid_root.is_symlink()
+    ):
+        raise ControlPanelValidationError(
+            "hybrid decomposition generation root is absent"
+        )
     if include_hybrid and hybrid_root.is_dir() and not hybrid_root.is_symlink():
+        if current_plan and hybrid_plan_bundle is None:
+            raise ControlPanelValidationError(
+                "current hybrid decomposition plan is absent"
+            )
+        selected_hybrid_plan = hybrid_plan_bundle if current_plan else plan_bundle
+        assert selected_hybrid_plan is not None
         hybrid, hybrid_bindings = _decomposition_lenses_for_mode(
-            hybrid_root,
-            plan_bundle,
+            root if current_plan else hybrid_root,
+            selected_hybrid_plan,
             strategy_names,
             analysis_strategy_names,
             "LIVE_PLUS_BACKTEST",
         )
-        dynamic_root = hybrid_root / "dynamic-style"
-        if not dynamic_root.is_dir() or dynamic_root.is_symlink():
-            raise ControlPanelValidationError(
-                "hybrid dynamic-style decomposition is absent"
+        if not current_plan:
+            dynamic_root = hybrid_root / "dynamic-style"
+            if not dynamic_root.is_dir() or dynamic_root.is_symlink():
+                raise ControlPanelValidationError(
+                    "hybrid dynamic-style decomposition is absent"
+                )
+            dynamic, dynamic_identity, dynamic_path = _current_analytics(
+                dynamic_root,
+                filename="decomposition.json",
+                field_name="hybrid dynamic-style decomposition",
+                expected_schema_version=(1, 2),
             )
-        dynamic, dynamic_identity, dynamic_path = _current_analytics(
-            dynamic_root,
-            filename="decomposition.json",
-            field_name="hybrid dynamic-style decomposition",
-            expected_schema_version=(1, 2),
-        )
-        if dynamic.get("evidence_mode") != "LIVE_PLUS_BACKTEST":
-            raise ControlPanelValidationError(
-                "hybrid dynamic-style evidence mode differs"
+            if dynamic.get("evidence_mode") != "LIVE_PLUS_BACKTEST":
+                raise ControlPanelValidationError(
+                    "hybrid dynamic-style evidence mode differs"
+                )
+            filtered_dynamic, selected_dynamic_names = _factor_decomposition_perimeter(
+                dynamic, analysis_strategy_names
             )
-        filtered_dynamic, selected_dynamic_names = _factor_decomposition_perimeter(
-            dynamic, analysis_strategy_names
-        )
-        if selected_dynamic_names != analysis_strategy_names:
-            raise ControlPanelValidationError(
-                "hybrid dynamic factor series differ from the governed product perimeter"
-            )
-        hybrid["lenses"] = [
-            *hybrid["lenses"],
-            _dynamic_factor_lens(
-                filtered_dynamic,
-                dynamic_identity,
-                analysis_strategy_names,
-            ),
-        ]
+            if selected_dynamic_names != analysis_strategy_names:
+                raise ControlPanelValidationError(
+                    "hybrid dynamic factor series differ from the governed product perimeter"
+                )
+            hybrid["lenses"] = [
+                *hybrid["lenses"],
+                _dynamic_factor_lens(
+                    filtered_dynamic,
+                    dynamic_identity,
+                    analysis_strategy_names,
+                ),
+            ]
         modes["LIVE_PLUS_BACKTEST"] = hybrid["lenses"]
         all_bindings.extend(hybrid_bindings)
-        all_bindings.extend(
-            (
-                (dynamic_path, dynamic_identity["sha256"]),
+        if not current_plan:
+            all_bindings.extend(
                 (
-                    Path(dynamic_identity["manifest_path"]),
-                    dynamic_identity["manifest_sha256"],
-                ),
-                (
-                    Path(dynamic_identity["pointer_path"]),
-                    dynamic_identity["pointer_sha256"],
-                ),
+                    (dynamic_path, dynamic_identity["sha256"]),
+                    (
+                        Path(dynamic_identity["manifest_path"]),
+                        dynamic_identity["manifest_sha256"],
+                    ),
+                    (
+                        Path(dynamic_identity["pointer_path"]),
+                        dynamic_identity["pointer_sha256"],
+                    ),
+                )
             )
-        )
     unique_bindings: dict[Path, str] = {}
     for path, sha256 in all_bindings:
         previous = unique_bindings.setdefault(path, sha256)
@@ -4810,6 +5200,29 @@ def _weekly_return_analysis(
         "generation_id": identity["generation_id"],
         "source_sha256": identity["sha256"],
     }
+
+
+def _validate_hybrid_decomposition_lenses(
+    hybrid_lenses: list[dict[str, Any]], lens_ids: set[str]
+) -> None:
+    """Accept current grouped surfaces or the existing separate legacy lens."""
+    grouped_dynamic = all(
+        isinstance(lens.get("surfaces"), Mapping)
+        and set(lens["surfaces"]) == {"STATIC", "DYNAMIC_FLS"}
+        and all(
+            isinstance(lens["surfaces"][surface], Mapping)
+            and lens["surfaces"][surface].get("surface") == surface
+            and bool(lens["surfaces"][surface].get("series"))
+            for surface in ("STATIC", "DYNAMIC_FLS")
+        )
+        for lens in hybrid_lenses
+    )
+    expected = lens_ids if grouped_dynamic else lens_ids | {"DYNAMIC_STYLE"}
+    if {
+        _text(row.get("lens_id"), "hybrid decomposition lens_id")
+        for row in hybrid_lenses
+    } != expected:
+        raise ControlPanelValidationError("hybrid decomposition mode lens set differs")
 
 
 def _hybrid_mode_gate(strategies: list[dict[str, Any]]) -> dict[str, Any]:
@@ -6251,6 +6664,41 @@ def _model_account_gap_underwriting(
     strategy: Mapping[str, Any], gap_policy: Mapping[str, Any]
 ) -> dict[str, Any]:
     strategy_name = _text(strategy.get("strategy_name"), "gap strategy_name")
+    implementation = strategy.get("implementation_reconciliation")
+    if isinstance(implementation, Mapping):
+        metrics = implementation.get("return_reconciliation")
+        if (
+            isinstance(metrics, Mapping)
+            and metrics.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+        ):
+            import portfolio_report as reporter
+
+            reporter._validate_policy_unavailable_comparison(
+                metrics, strategy_id=str(strategy.get("strategy_id"))
+            )
+            return {
+                "status": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+                "comparison_status": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+                "observed_start": None,
+                "observed_end": None,
+                "observations": 0,
+                "reference_cumulative_return": None,
+                "account_cumulative_return": None,
+                "total_gap": None,
+                "causally_bound_components": [],
+                "unresolved_residual": None,
+                "reconciliation_error": None,
+                "signature": "UNAVAILABLE_POLICY_NOT_ADMITTED",
+                "beta": None,
+                "correlation": None,
+                "tracking_error_annualized": None,
+                "unresolved_causes": ["PROVIDER_RETURN_POLICY_NOT_ADMITTED"],
+                "cost_boundary": gap_policy.get("subscription_cost_rule"),
+                "policy_evidence": dict(metrics["policy_evidence"]),
+                "account_live_return_summary": implementation.get(
+                    "account_live_return_summary"
+                ),
+            }
     comparison_status = str(strategy.get("provider_comparison_status") or "UNAVAILABLE")
     available = comparison_status.startswith("DESCRIPTIVE_EXACT_DATE")
     total_gap = (
@@ -6979,7 +7427,10 @@ def _strategy_underwriting(
                     },
                     "provider_or_model_live": {
                         "status": (
-                            "AVAILABLE"
+                            "UNAVAILABLE_POLICY_NOT_ADMITTED"
+                            if gap["comparison_status"]
+                            == "UNAVAILABLE_POLICY_NOT_ADMITTED"
+                            else "AVAILABLE"
                             if provider_evidence.get("provider") is not None
                             or gap["total_gap"] is not None
                             else "UNAVAILABLE"
@@ -7154,6 +7605,7 @@ def _panel_data(
     account_manifest: Mapping[str, Any] | None = None,
     account_manifest_identity: Mapping[str, Any] | None = None,
     financial_contract_snapshot: bytes | None = None,
+    financial_input_contract_snapshot: bytes | None = None,
     hwm_policy_snapshot: bytes | None = None,
     portable_hwm_policy_snapshot: bytes | None = None,
     portable_hwm_performance_policy_snapshot: bytes | None = None,
@@ -7406,13 +7858,7 @@ def _panel_data(
             hybrid_mode = accepted_modes.get("LIVE_PLUS_BACKTEST")
             if hybrid_mode is not None:
                 hybrid_lenses = _objects(hybrid_mode, "hybrid decomposition lenses")
-                if {
-                    _text(row.get("lens_id"), "hybrid decomposition lens_id")
-                    for row in hybrid_lenses
-                } != lens_ids | {"DYNAMIC_STYLE"}:
-                    raise ControlPanelValidationError(
-                        "hybrid decomposition mode lens set differs"
-                    )
+                _validate_hybrid_decomposition_lenses(hybrid_lenses, lens_ids)
                 eligible_versions = {
                     _text(item.get("strategy_name"), "eligible strategy_name"): _text(
                         item.get("version_ref"), "eligible version_ref"
@@ -7757,14 +8203,38 @@ def _panel_data(
         raise ControlPanelValidationError(
             "governed HWM result, generation, calendar, and receipt bytes must be supplied together"
         )
+    governed_input_contract = (
+        financial_input_contract_snapshot
+        if financial_input_contract_snapshot is not None
+        else financial_contract_snapshot
+    )
+    governed_policy = portable_hwm_policy_snapshot
+    if hwm_governed_result is not None:
+        governed_input_contract = (
+            _PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes()
+            if governed_input_contract is None
+            else governed_input_contract
+        )
+        try:
+            governed_policy = governed_hwm_input_policy(
+                _PORTABLE_HWM_POLICY.read_bytes()
+                if governed_policy is None
+                else governed_policy,
+                governed_input_contract,
+                hwm_governed_result.get("policy_sha256", ""),
+            )
+        except CapitalValidationError as exc:
+            raise ControlPanelValidationError(
+                f"governed HWM result is invalid: {exc}"
+            ) from exc
     governed_hwm_proof = (
         _panel_governed_hwm_proof(
             hwm_governed_result,
             hwm_governed_generation_bytes or b"",
             hwm_governed_calendar_bytes or b"",
             hwm_governed_receipt_bytes or b"",
-            policy_bytes=portable_hwm_policy_snapshot,
-            product_contract_bytes=financial_contract_snapshot,
+            policy_bytes=governed_policy,
+            product_contract_bytes=governed_input_contract,
             performance_policy_bytes=portable_hwm_performance_policy_snapshot,
             legacy_policy_bytes=hwm_policy_snapshot,
         )
@@ -8558,10 +9028,15 @@ def _epoch_manifest_report_attestation(
             "independent verification report artifact count differs"
         )
     report_artifact = report_artifacts[0]
+    data_as_of = (
+        _panel_date(manifest.get("calculation_cutoff_date"), "account manifest cutoff")
+        if manifest.get("schema_version") == 9
+        else bundle.manifest.as_of_date
+    )
     if (
         bundle.receipt.independent_report != report_artifact
         or report_artifact.schema_name != "account-manifest-independent-verification"
-        or report_artifact.as_of_date != bundle.manifest.as_of_date
+        or report_artifact.as_of_date != data_as_of
     ):
         raise ControlPanelValidationError(
             "independent verification report artifact identity differs"
@@ -8626,7 +9101,7 @@ def _epoch_manifest_report_attestation(
         or report_artifact.schema_version != str(expected_version)
         or report.get("artifact_id") != _EPOCH_MANIFEST_REPORT_PATH
         or report.get("status") != "VERIFIED"
-        or report.get("as_of_date") != bundle.manifest.as_of_date.isoformat()
+        or report.get("as_of_date") != data_as_of.isoformat()
     ):
         raise ControlPanelValidationError(
             "independent verification report authority fields differ"
@@ -8747,7 +9222,13 @@ def _epoch_manifest_report_attestation(
     )
     expected_verifier = {
         "artifact_id": "tools/verify_account_manifest_generation.py",
-        "as_of_date": bundle.manifest.as_of_date.isoformat(),
+        # The verifier is a code artifact dated by the inputs it read, not by the
+        # calculation boundary.  portfolio_report.py:7597 binds it to the same
+        # `selected_source_identities.as_of_date`; the two must agree.
+        "as_of_date": _text(
+            selected_identities.get("as_of_date"),
+            "account-manifest selected identities as_of_date",
+        ),
         "schema": {
             "name": "independent-account-manifest-verifier",
             "version": "1",
@@ -9215,10 +9696,13 @@ def _rendered_files(
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
     *,
+    invested_capital_result: Mapping[str, Any] | None = None,
+    invested_capital_input_generation_path: Path | None = None,
     report_candidate: Path | None = None,
     strategy_history_contract_path: Path | None = None,
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
+    hybrid_decomposition_plan_bundle: Path | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -9246,6 +9730,29 @@ def _rendered_files(
         report, report_identity, report_path = _current_report(report_root)
         verified_strategy_history: dict[str, Any] | None = None
         strategy_history_binding: tuple[Path, str] | None = None
+        if strategy_history_contract_path is None:
+            if report.get("strategy_history_contract") is not None:
+                raise ControlPanelValidationError(
+                    "published report declares a strategy history contract; "
+                    "--strategy-history-contract is required for HPR HWM parity"
+                )
+        else:
+            # The published report carries the same strategy_history_contract
+            # identity as a candidate, and _compute_panel_numerical_hwm needs
+            # that source's epoch HPR receipts to mirror the report's numerical
+            # HWM.  The baseline projection never carries them, so without this
+            # the published path reports NO_HWM_INPUTS while the report reports
+            # MISSING_DAILY_POINT_CAN_HIDE_PEAK and HWM parity cannot hold for
+            # any portfolio with a declared holding-period span.
+            verified_strategy_history, strategy_history_binding = (
+                _verified_strategy_history_contract(
+                    strategy_history_contract_path,
+                    _object(
+                        report.get("strategy_history_contract"),
+                        "report.strategy_history_contract",
+                    ),
+                )
+            )
     else:
         report, report_identity, report_path = _report_candidate(report_candidate)
         if strategy_history_contract_path is None:
@@ -9294,6 +9801,13 @@ def _rendered_files(
         field_name="portfolio correlation",
         expected_schema_version=(1, 2),
     )
+    if (
+        hybrid_decomposition_plan_bundle is not None
+        and decomposition_plan_bundle is None
+    ):
+        raise ControlPanelValidationError(
+            "hybrid decomposition requires a live plan bundle"
+        )
     if (decomposition_lenses_root is None) != (decomposition_plan_bundle is None):
         raise ControlPanelValidationError(
             "decomposition lens root and plan bundle must be supplied together"
@@ -9301,6 +9815,41 @@ def _rendered_files(
     financial_contract_snapshot = _read_snapshot(
         FINANCIAL_MVP_CONTRACT, "financial MVP contract"
     )
+    financial_input_contract_path = FINANCIAL_MVP_CONTRACT
+    financial_input_contract_bytes = financial_contract_snapshot[0]
+    if invested_capital_input_generation_path is not None:
+        financial_input_contract_path, financial_input_contract_bytes = (
+            resolve_financial_input_authority(
+                invested_capital_input_generation_path,
+                FINANCIAL_MVP_CONTRACT,
+                baseline_catalog,
+            )
+        )
+    if (invested_capital_result is None) != (
+        invested_capital_input_generation_path is None
+    ):
+        raise ControlPanelValidationError(
+            "invested-capital result and input generation must be supplied together"
+        )
+    invested_capital = (
+        dict(
+            verify_governed_capital_result(
+                invested_capital_result,
+                invested_capital_input_generation_path,
+                financial_input_contract_path,
+            )
+        )
+        if invested_capital_result is not None
+        and invested_capital_input_generation_path is not None
+        else None
+    )
+    if (
+        invested_capital is not None
+        and report.get("invested_capital") != invested_capital
+    ):
+        raise ControlPanelValidationError(
+            "panel invested-capital result differs from report authority"
+        )
     _preflight_hybrid_gate, include_hybrid_sources = _report_hybrid_mode_gate(
         report, financial_contract_snapshot[0]
     )
@@ -9326,9 +9875,19 @@ def _rendered_files(
             current_strategy_names_by_id,
             financial_contract_snapshot[0],
             include_hybrid=include_hybrid_sources,
+            hybrid_plan_bundle=hybrid_decomposition_plan_bundle,
         )
         plan_strategy_names = _decomposition_plan_strategy_mapping(
             decomposition_plan_bundle
+        )
+    report_lenses = report.get("decomposition_lenses")
+    if report_lenses is not None and lens_payload is None:
+        raise ControlPanelValidationError(
+            "report decomposition authority requires explicit lens inputs"
+        )
+    if report_lenses is not None and report_lenses != lens_payload:
+        raise ControlPanelValidationError(
+            "panel decomposition projection differs from report authority"
         )
     weekly_payload: dict[str, Any] | None = None
     weekly_path: Path | None = None
@@ -9532,6 +10091,7 @@ def _rendered_files(
         account_manifest=account_manifest,
         account_manifest_identity=account_manifest_identity,
         financial_contract_snapshot=authority_snapshots[FINANCIAL_MVP_CONTRACT][0],
+        financial_input_contract_snapshot=financial_input_contract_bytes,
         hwm_policy_snapshot=authority_snapshots[HWM_POLICY][0],
         portable_hwm_policy_snapshot=authority_snapshots[_PORTABLE_HWM_POLICY][0],
         portable_hwm_performance_policy_snapshot=authority_snapshots[
@@ -9548,6 +10108,8 @@ def _rendered_files(
             else None
         ),
     )
+    if invested_capital is not None:
+        data["invested_capital"] = invested_capital
     _validate_panel_data_schema(
         data,
         authority_snapshots[PANEL_DATA_SCHEMA][0],
@@ -9571,6 +10133,26 @@ def _rendered_files(
     }
     if candidate_driver_map_content is not None:
         files["data/candidate-driver-map.json"] = candidate_driver_map_content
+    downloads, download_bindings = _report_downloads(
+        report_path,
+        report_identity,
+        report_root,
+        require_workbook=invested_capital is not None,
+    )
+    if files["index.html"].count(_DOWNLOAD_PLACEHOLDER) != 1:
+        raise ControlPanelValidationError("report download template location differs")
+    links = [
+        _report_download_link(relative, label, downloads[relative])
+        for relative, label in (
+            (REPORT_DOWNLOAD, "Download report data"),
+            (WORKBOOK_DOWNLOAD, "Download Excel workbook"),
+        )
+        if relative in downloads
+    ]
+    files["index.html"] = files["index.html"].replace(
+        _DOWNLOAD_PLACEHOLDER, " ".join(links).encode("utf-8")
+    )
+    files.update(downloads)
     bound_inputs: dict[str, tuple[Path, str]] = {
         "report": (report_path, report_identity_values["sha256"]),
         "decomposition": (decomposition_path, decomposition_identity["sha256"]),
@@ -9608,8 +10190,22 @@ def _rendered_files(
             authority_snapshots[ACCOUNT_MANIFEST_SCHEMA][1],
         ),
     }
+    bound_inputs.update(download_bindings)
     if strategy_history_binding is not None:
         bound_inputs["strategy_history_contract"] = strategy_history_binding
+    if invested_capital_input_generation_path is not None:
+        bound_inputs["financial_input_contract"] = (
+            financial_input_contract_path,
+            hashlib.sha256(financial_input_contract_bytes).hexdigest(),
+        )
+        capital_input, capital_input_sha256 = _read_snapshot(
+            invested_capital_input_generation_path,
+            "invested-capital input generation",
+        )
+        bound_inputs["invested_capital_input_generation"] = (
+            invested_capital_input_generation_path,
+            capital_input_sha256,
+        )
     if (
         account_manifest_identity is not None
         and account_manifest_identity.get("authority_profile")
@@ -9788,14 +10384,6 @@ def _panel_id(files: Mapping[str, bytes]) -> str:
     return hashlib.sha256(canonical_json_bytes(identity)).hexdigest()
 
 
-def _published_panel_files(candidate_driver_map_path: Path | None) -> tuple[str, ...]:
-    return (
-        *PANEL_FILES,
-        *((DRIVER_MAP_PANEL_FILE,) if candidate_driver_map_path is not None else ()),
-        "candidate.json",
-    )
-
-
 def _candidate_record(
     files: Mapping[str, bytes], data: Mapping[str, Any]
 ) -> dict[str, Any]:
@@ -9869,10 +10457,13 @@ def build_candidate(
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
     *,
+    invested_capital_result: Mapping[str, Any] | None = None,
+    invested_capital_input_generation_path: Path | None = None,
     report_candidate: Path | None = None,
     strategy_history_contract_path: Path | None = None,
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
+    hybrid_decomposition_plan_bundle: Path | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -9908,6 +10499,9 @@ def build_candidate(
         strategy_history_contract_path=strategy_history_contract_path,
         account_manifest_generation_root=account_manifest_generation_root,
         account_manifest_generation_id=account_manifest_generation_id,
+        invested_capital_result=invested_capital_result,
+        invested_capital_input_generation_path=(invested_capital_input_generation_path),
+        hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -9991,10 +10585,13 @@ def verify_candidate(
     manifest_classification_policy_path: Path | None = None,
     manifest_admission_policy_path: Path | None = None,
     *,
+    invested_capital_result: Mapping[str, Any] | None = None,
+    invested_capital_input_generation_path: Path | None = None,
     report_candidate: Path | None = None,
     strategy_history_contract_path: Path | None = None,
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
+    hybrid_decomposition_plan_bundle: Path | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -10030,6 +10627,9 @@ def verify_candidate(
         strategy_history_contract_path=strategy_history_contract_path,
         account_manifest_generation_root=account_manifest_generation_root,
         account_manifest_generation_id=account_manifest_generation_id,
+        invested_capital_result=invested_capital_result,
+        invested_capital_input_generation_path=(invested_capital_input_generation_path),
+        hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -10606,6 +11206,7 @@ def verify_candidate(
     gap_reconciles = True
     causal_attribution_reconciles = True
     causal_attribution_strategy_ids: set[str] = set()
+    policy_unavailable_strategy_ids: set[str] = set()
     for row in underwriting_rows:
         gap = _object(row.get("model_account_gap"), "underwriting model-account gap")
         total_gap = _optional_float(gap.get("total_gap"), "underwriting total gap")
@@ -10646,6 +11247,38 @@ def verify_candidate(
             attribution_value, "underwriting implementation return attribution"
         )
         bridge = _object(attribution.get("bridge"), "underwriting causal return bridge")
+        if bridge.get("status") == "UNAVAILABLE_POLICY_NOT_ADMITTED":
+            import portfolio_report as reporter
+
+            strategy_id = _text(row.get("strategy_id"), "underwriting strategy_id")
+            metrics = _object(
+                detail.get("return_reconciliation"), "underwriting return comparison"
+            )
+            reporter._validate_policy_unavailable_comparison(
+                metrics, strategy_id=strategy_id
+            )
+            reporter._validate_policy_unavailable_comparison(
+                bridge,
+                strategy_id=strategy_id,
+                attribution=True,
+                expected_policy_evidence=_object(
+                    metrics.get("policy_evidence"), "underwriting policy evidence"
+                ),
+            )
+            if gap.get("status") != "UNAVAILABLE_POLICY_NOT_ADMITTED" or any(
+                gap.get(key) is not None
+                for key in (
+                    "total_gap",
+                    "reference_cumulative_return",
+                    "beta",
+                    "correlation",
+                    "tracking_error_annualized",
+                )
+            ):
+                causal_attribution_reconciles = False
+                break
+            policy_unavailable_strategy_ids.add(strategy_id)
+            continue
         model_return = _finite_float(
             bridge.get("model_return"), "underwriting causal model return"
         )
@@ -10710,7 +11343,7 @@ def verify_candidate(
             and causal_attribution_reconciles
             and (
                 not causal_contract_present
-                or causal_attribution_strategy_ids
+                or causal_attribution_strategy_ids | policy_unavailable_strategy_ids
                 == {"grizzlybears-vtma", "p123-ai-factor", "tt-portfolio"}
             ),
             {
@@ -10730,6 +11363,9 @@ def verify_candidate(
                 "causal_attribution_reconciles": causal_attribution_reconciles,
                 "causal_attribution_strategy_ids": sorted(
                     causal_attribution_strategy_ids
+                ),
+                "policy_unavailable_strategy_ids": sorted(
+                    policy_unavailable_strategy_ids
                 ),
             },
         )
@@ -11298,7 +11934,25 @@ def publish_panel(
     *,
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
+    invested_capital_result: Mapping[str, Any] | None = None,
+    invested_capital_input_generation_path: Path | None = None,
+    private_stage_root: Path | None = None,
+    portfolio_root: Path | None = None,
+    hybrid_decomposition_plan_bundle: Path | None = None,
+    strategy_history_contract_path: Path | None = None,
 ) -> dict[str, Any]:
+    governed_hwm_supplied = any(
+        value is not None
+        for value in (
+            hwm_governed_result,
+            hwm_governed_generation_bytes,
+            hwm_governed_calendar_bytes,
+            hwm_governed_receipt_bytes,
+        )
+    )
+    financial_outcome_supplied = (
+        governed_hwm_supplied or invested_capital_result is not None
+    )
     has_generation_root = account_manifest_generation_root is not None
     has_generation_id = account_manifest_generation_id is not None
     if has_generation_root != has_generation_id:
@@ -11306,6 +11960,12 @@ def publish_panel(
             "account manifest generation root and generation id must be supplied together"
         )
     verified_bundle_mode = has_generation_root and has_generation_id
+    if financial_outcome_supplied or financial_mode or verified_bundle_mode:
+        if private_stage_root is None or portfolio_root is None:
+            raise ControlPanelValidationError(
+                "governed financial publication requires private stage context"
+            )
+        validate_private_stage_target(output_root, private_stage_root, portfolio_root)
     if not financial_mode and not verified_bundle_mode:
         raise ControlPanelValidationError(
             "publication requires financial mode or an exact verified account-manifest generation bundle"
@@ -11343,6 +12003,10 @@ def publish_panel(
         manifest_admission_policy_path=manifest_admission_policy_path,
         account_manifest_generation_root=account_manifest_generation_root,
         account_manifest_generation_id=account_manifest_generation_id,
+        invested_capital_result=invested_capital_result,
+        invested_capital_input_generation_path=(invested_capital_input_generation_path),
+        hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+        strategy_history_contract_path=strategy_history_contract_path,
     )
     if verification.get("all_passed") is not True:
         raise ControlPanelValidationError(
@@ -11384,6 +12048,10 @@ def publish_panel(
         manifest_admission_policy_path=manifest_admission_policy_path,
         account_manifest_generation_root=account_manifest_generation_root,
         account_manifest_generation_id=account_manifest_generation_id,
+        invested_capital_result=invested_capital_result,
+        invested_capital_input_generation_path=(invested_capital_input_generation_path),
+        hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+        strategy_history_contract_path=strategy_history_contract_path,
     )
     reproduced_meta = _object(reproduced_data.get("meta"), "panel meta")
     authority_profile = reproduced_meta.get("account_manifest_authority_profile")
@@ -11418,7 +12086,7 @@ def publish_panel(
         raise ControlPanelValidationError(
             "publication requires an admitted independent exact manifest authority profile"
         )
-    published_panel_files = _published_panel_files(candidate_driver_map_path)
+    published_panel_files = (*rendered_files, "candidate.json")
     reproduced_candidate_record = canonical_json_bytes(
         _candidate_record(rendered_files, reproduced_data)
     )
@@ -11707,7 +12375,11 @@ def publish_panel(
         adapter=AdapterIdentity("portfolio-control-panel-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="accepted portfolio, factor/alpha, dynamic replication, dependence, weekly-return, governed-HWM, and candidate driver-map evidence rendered read-only with explicit gaps and no capital authority",
+            boundary=(
+                "accepted portfolio, factor/alpha, dynamic replication, dependence, "
+                "weekly-return, governed-HWM, governed invested-capital when supplied, "
+                "and candidate driver-map evidence rendered read-only with explicit gaps"
+            ),
             fact_types=(
                 "portfolio control panel",
                 "factor and alpha attribution",
@@ -11715,6 +12387,11 @@ def publish_panel(
                 "correlation and dependence",
                 "weekly returns by strategy, factor, style, sector, industry, and benchmark",
                 "governed HWM coverage",
+                *(
+                    ("governed invested capital",)
+                    if data.get("invested_capital") is not None
+                    else ()
+                ),
                 "browser QA",
                 "frozen candidate evidence",
             ),
@@ -11783,14 +12460,17 @@ def _parser() -> argparse.ArgumentParser:
                     "build and verify only, never a published CURRENT generation"
                 ),
             )
-            command.add_argument(
-                "--strategy-history-contract",
-                type=Path,
-                help=(
-                    "Packaged dependence-source.json matching the report's "
-                    "strategy-history contract; required with --report-candidate"
-                ),
-            )
+        command.add_argument(
+            "--strategy-history-contract",
+            type=Path,
+            help=(
+                "Packaged dependence-source.json matching the report's "
+                "strategy-history contract.  Required with --report-candidate, "
+                "and on a published report whenever it declares one: publish "
+                "recomputes the numerical HWM through the same path as build "
+                "and verify, and needs that source's epoch HPR receipts."
+            ),
+        )
         command.add_argument("--legacy-panel", type=Path, required=True)
         command.add_argument(
             "--template-root", type=Path, default=DEFAULT_TEMPLATE_ROOT
@@ -11798,6 +12478,7 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--decomposition-root", type=Path)
         command.add_argument("--decomposition-lenses-root", type=Path)
         command.add_argument("--decomposition-plan-bundle", type=Path)
+        command.add_argument("--hybrid-decomposition-plan-bundle", type=Path)
         command.add_argument("--correlation-root", type=Path)
         command.add_argument("--weekly-returns-root", type=Path)
         command.add_argument("--replication-root", type=Path)
@@ -11883,32 +12564,34 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("--output-root", type=Path, required=name != "verify")
         if name != "build":
             command.add_argument("--candidate-dir", type=Path, required=True)
+        command.add_argument("--hwm-governed-result", type=Path)
+        command.add_argument(
+            "--hwm-governed-input-generation",
+            "--hwm-governed-generation",
+            dest="hwm_governed_input_generation",
+            type=Path,
+        )
+        command.add_argument(
+            "--hwm-governed-calendar-authority",
+            "--hwm-governed-calendar",
+            dest="hwm_governed_calendar_authority",
+            type=Path,
+        )
+        command.add_argument(
+            "--hwm-governed-admission-receipt",
+            "--hwm-governed-receipt",
+            dest="hwm_governed_admission_receipt",
+            type=Path,
+        )
+        command.add_argument("--invested-capital-result", type=Path)
+        command.add_argument("--invested-capital-input-generation", type=Path)
         if name == "publish":
             command.add_argument("--qa-dir", type=Path, required=True)
             command.add_argument(
                 "--coordinated-release-receipt", type=Path, required=True
             )
-            # Governed HWM bundle: result JSON + the three evidence artifacts.
-            command.add_argument(
-                "--hwm-governed-result",
-                type=Path,
-                help="Governed PORT-HWM-4 result JSON (verified before use)",
-            )
-            command.add_argument(
-                "--hwm-governed-generation",
-                type=Path,
-                help="Governed input generation JSON (hash-verified by kernel)",
-            )
-            command.add_argument(
-                "--hwm-governed-calendar",
-                type=Path,
-                help="Accepted governed calendar authority JSON",
-            )
-            command.add_argument(
-                "--hwm-governed-receipt",
-                type=Path,
-                help="Provider admit-or-declare receipt JSON (independent anchor)",
-            )
+            command.add_argument("--private-stage-root", type=Path)
+            command.add_argument("--portfolio-root", type=Path)
     qa = commands.add_parser("qa")
     qa.add_argument("--candidate-dir", type=Path, required=True)
     qa.add_argument("--qa-dir", type=Path, required=True)
@@ -11924,6 +12607,42 @@ def _load_optional_json_arg(path: Path | None) -> dict[str, Any] | None:
         return None
     parsed = json.loads(path.read_text(encoding="utf-8"))
     return parsed if isinstance(parsed, dict) else None
+
+
+def _governed_hwm_cli_values(args: argparse.Namespace) -> dict[str, Any]:
+    paths = (
+        args.hwm_governed_result,
+        args.hwm_governed_input_generation,
+        args.hwm_governed_calendar_authority,
+        args.hwm_governed_admission_receipt,
+    )
+    if all(path is None for path in paths):
+        return {}
+    if any(path is None for path in paths):
+        raise ControlPanelValidationError(
+            "governed HWM paths must be supplied together"
+        )
+    return {
+        "hwm_governed_result": _load_optional_json_arg(paths[0]),
+        "hwm_governed_generation_bytes": paths[1].read_bytes(),
+        "hwm_governed_calendar_bytes": paths[2].read_bytes(),
+        "hwm_governed_receipt_bytes": paths[3].read_bytes(),
+    }
+
+
+def _invested_capital_cli_values(args: argparse.Namespace) -> dict[str, Any]:
+    result_path = args.invested_capital_result
+    input_path = args.invested_capital_input_generation
+    if result_path is None and input_path is None:
+        return {}
+    if result_path is None or input_path is None:
+        raise ControlPanelValidationError(
+            "invested-capital paths must be supplied together"
+        )
+    return {
+        "invested_capital_result": _load_optional_json_arg(result_path),
+        "invested_capital_input_generation_path": input_path,
+    }
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -11973,6 +12692,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.account_manifest_generation_root
                 ),
                 account_manifest_generation_id=args.account_manifest_generation_id,
+                **_governed_hwm_cli_values(args),
+                **_invested_capital_cli_values(args),
+                hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
             )
         elif args.command == "verify":
             if (args.report_root is None) == (args.report_candidate is None):
@@ -12018,6 +12740,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.account_manifest_generation_root
                 ),
                 account_manifest_generation_id=args.account_manifest_generation_id,
+                **_governed_hwm_cli_values(args),
+                **_invested_capital_cli_values(args),
+                hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -12064,24 +12789,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 hwm_portable_receipt=_load_optional_json_arg(
                     getattr(args, "hwm_portable_receipt", None)
                 ),
-                hwm_governed_result=_load_optional_json_arg(
-                    getattr(args, "hwm_governed_result", None)
+                **_governed_hwm_cli_values(args),
+                **_invested_capital_cli_values(args),
+                **(
+                    {
+                        "private_stage_root": args.private_stage_root,
+                        "portfolio_root": args.portfolio_root,
+                    }
+                    if args.private_stage_root is not None
+                    or args.portfolio_root is not None
+                    else {}
                 ),
-                hwm_governed_generation_bytes=(
-                    Path(args.hwm_governed_generation).read_bytes()
-                    if getattr(args, "hwm_governed_generation", None)
-                    else None
-                ),
-                hwm_governed_calendar_bytes=(
-                    Path(args.hwm_governed_calendar).read_bytes()
-                    if getattr(args, "hwm_governed_calendar", None)
-                    else None
-                ),
-                hwm_governed_receipt_bytes=(
-                    Path(args.hwm_governed_receipt).read_bytes()
-                    if getattr(args, "hwm_governed_receipt", None)
-                    else None
-                ),
+                hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                strategy_history_contract_path=args.strategy_history_contract,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)

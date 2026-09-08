@@ -38,6 +38,12 @@ DEFAULT_FILE_COUNT: Final = 55
 DEFAULT_RECORD_COUNT: Final = 14901
 PLANNING_RECORD_COUNT: Final = 14981
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_NATIVE_ARTIFACT_SCHEMAS: Final[dict[str, str]] = {
+    "har/quantbase_20260902_171237.har": "quantbase-native-har",
+    (
+        "har_output/responses/0274_qbapi3.com_200_application_json.json"
+    ): "quantbase-account-activity-response",
+}
 
 _HEADERS: Final[dict[str, tuple[str, ...]]] = {
     "account_activity": (
@@ -351,6 +357,7 @@ def create_plan(
     expected_file_count: int = DEFAULT_FILE_COUNT,
     expected_record_count: int = DEFAULT_RECORD_COUNT,
     planning_record_count: int = PLANNING_RECORD_COUNT,
+    native_artifacts: Sequence[tuple[str, Path]] | None = None,
 ) -> dict[str, object]:
     """Create one content-addressed, private cutover plan."""
 
@@ -370,6 +377,53 @@ def create_plan(
             "CSV record count differs from accepted baseline"
         )
     runbook_hash, runbook_size = hash_file(runbook)
+    native_entries: list[dict[str, object]] = []
+    if native_artifacts is not None:
+        relative_paths: list[str] = []
+        source_paths: list[Path] = []
+        for relative, raw_source_path in native_artifacts:
+            portable = PurePosixPath(relative)
+            if portable.is_absolute() or any(
+                part in {"", ".", ".."} for part in portable.parts
+            ):
+                raise QuantbaseGenerationError(
+                    "native artifact relative path is unsafe"
+                )
+            relative_paths.append(portable.as_posix())
+            source_path = Path(raw_source_path)
+            if (
+                not source_path.is_absolute()
+                or source_path.is_symlink()
+                or not source_path.is_file()
+            ):
+                raise QuantbaseGenerationError(
+                    "native artifact source must be a real absolute file"
+                )
+            source_paths.append(source_path.resolve(strict=True))
+        if len(relative_paths) != len(set(relative_paths)):
+            raise QuantbaseGenerationError(
+                "native artifact relative paths must be unique"
+            )
+        if len(source_paths) != len(set(source_paths)):
+            raise QuantbaseGenerationError("native artifact sources must be unique")
+        if set(relative_paths) != set(_NATIVE_ARTIFACT_SCHEMAS):
+            raise QuantbaseGenerationError(
+                "native artifacts must contain the exact retained HAR and response pair"
+            )
+        for relative, source_path in sorted(
+            zip(relative_paths, source_paths, strict=True), key=lambda item: item[0]
+        ):
+            digest, size = hash_file(source_path)
+            native_entries.append(
+                {
+                    "bytes": size,
+                    "relative_path": relative,
+                    "schema_name": _NATIVE_ARTIFACT_SCHEMAS[relative],
+                    "schema_version": "legacy-unknown",
+                    "sha256": digest,
+                    "source_path": str(source_path),
+                }
+            )
     observed = [
         date.fromisoformat(str(value))
         for item in datasets
@@ -390,6 +444,9 @@ def create_plan(
         },
         "data_root": str(destination),
         "datasets": datasets,
+        **(
+            {"native_artifacts": native_entries} if native_artifacts is not None else {}
+        ),
         "observed_end": max(observed).isoformat(),
         "observed_start": min(observed).isoformat(),
         "provider_id": "quantbase",
@@ -460,27 +517,94 @@ def _entry_path(root: Path, relative: str) -> Path:
     return path
 
 
+def _io_path(path: Path) -> Path:
+    if os.name == "nt" and path.is_absolute() and not str(path).startswith("\\\\?\\"):
+        return Path(f"\\\\?\\{path}")
+    return path
+
+
+def _native_entries(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    if "native_artifacts" not in plan:
+        return []
+    native = _objects(plan["native_artifacts"], "native_artifacts")
+    relative_paths: list[str] = []
+    source_paths: list[str] = []
+    for item in native:
+        relative = _text(item.get("relative_path"), "native relative_path")
+        _entry_path(Path("C:/quantbase-native-validation"), relative)
+        relative_paths.append(relative)
+        source_path = Path(_text(item.get("source_path"), "native source_path"))
+        if not source_path.is_absolute():
+            raise QuantbaseGenerationError("native artifact source must be absolute")
+        source_paths.append(os.path.normcase(os.path.abspath(source_path)))
+        if (
+            item.get("schema_name") != _NATIVE_ARTIFACT_SCHEMAS.get(relative)
+            or item.get("schema_version") != "legacy-unknown"
+        ):
+            raise QuantbaseGenerationError("native artifact contract differs")
+        _text(item.get("sha256"), "native sha256")
+        _integer(item.get("bytes"), "native bytes")
+    if set(relative_paths) != set(_NATIVE_ARTIFACT_SCHEMAS):
+        raise QuantbaseGenerationError(
+            "native artifacts must contain the exact retained HAR and response pair"
+        )
+    if len(relative_paths) != len(set(relative_paths)):
+        raise QuantbaseGenerationError("native artifact relative paths must be unique")
+    if len(source_paths) != len(set(source_paths)):
+        raise QuantbaseGenerationError("native artifact sources must be unique")
+    return native
+
+
 def _expected_entries(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
     entries = _objects(plan.get("datasets"), "datasets")
     runbook = _object(plan.get("runbook"), "runbook")
-    return [*entries, runbook]
+    return [*entries, runbook, *_native_entries(plan)]
+
+
+def _legacy_entries(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
+    return [
+        *_objects(plan.get("datasets"), "datasets"),
+        _object(plan.get("runbook"), "runbook"),
+    ]
+
+
+def _verify_native_sources(plan: Mapping[str, Any]) -> None:
+    for item in _native_entries(plan):
+        relative = _text(item.get("relative_path"), "native relative_path")
+        source_path = Path(_text(item.get("source_path"), "native source_path"))
+        if (
+            not source_path.is_absolute()
+            or source_path.is_symlink()
+            or not source_path.is_file()
+        ):
+            raise QuantbaseGenerationError(
+                "native artifact source must be a real absolute file"
+            )
+        source_path = source_path.resolve(strict=True)
+        digest, size = hash_file(source_path)
+        if digest != item.get("sha256") or size != item.get("bytes"):
+            raise QuantbaseGenerationError(f"planned input differs: {relative}")
 
 
 def _verify_tree(root: Path, plan: Mapping[str, Any], *, legacy: bool) -> None:
     if root.is_symlink() or not root.is_dir():
         raise QuantbaseGenerationError("input root is missing or linked")
-    expected = _expected_entries(plan)
+    expected = _legacy_entries(plan) if legacy else _expected_entries(plan)
     expected_paths = {str(item["relative_path"]) for item in expected}
+    traversal_root = _io_path(root.resolve())
     actual_paths = {
-        path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()
+        path.relative_to(traversal_root).as_posix()
+        for path in traversal_root.rglob("*")
+        if path.is_file()
     }
     if actual_paths != expected_paths:
         raise QuantbaseGenerationError("input inventory differs from the cutover plan")
     if legacy:
         _source_layout(root)
+        _verify_native_sources(plan)
     for item in expected:
         relative = _text(item.get("relative_path"), "relative_path")
-        path = _entry_path(root, relative)
+        path = _io_path(_entry_path(root, relative))
         if path.is_symlink() or not path.is_file():
             raise QuantbaseGenerationError("planned input is missing or linked")
         digest, size = hash_file(path)
@@ -510,15 +634,20 @@ def _copy_to_staging(plan: Mapping[str, Any]) -> Path:
     staging.mkdir(parents=True, exist_ok=True)
     for item in _expected_entries(plan):
         relative = _text(item["relative_path"], "relative_path")
-        source_path = _entry_path(source, relative)
+        source_path = (
+            Path(_text(item["source_path"], "native source_path"))
+            if "source_path" in item
+            else _entry_path(source, relative)
+        )
         destination = _entry_path(staging, relative)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            digest, size = hash_file(destination)
+        io_destination = _io_path(destination)
+        io_destination.parent.mkdir(parents=True, exist_ok=True)
+        if io_destination.exists():
+            digest, size = hash_file(io_destination)
             if digest != item["sha256"] or size != item["bytes"]:
                 raise QuantbaseGenerationError("staging contains conflicting bytes")
         else:
-            shutil.copy2(source_path, destination)
+            shutil.copy2(source_path, io_destination)
     _verify_tree(staging, plan, legacy=False)
     plan_path = (
         _absolute_directory(plan["data_root"], "data_root", existing=True)
@@ -626,10 +755,26 @@ def build_generation(
         )
         for item in datasets
     )
+    native_artifacts = tuple(
+        SourceArtifact(
+            artifact_id=f"source/{item['relative_path']}",
+            sha256=_text(item["sha256"], "native sha256"),
+            size_bytes=_integer(item["bytes"], "native bytes"),
+            as_of_date=as_of,
+            schema_name=_text(item["schema_name"], "native schema_name"),
+            schema_version=_text(item["schema_version"], "native schema_version"),
+        )
+        for item in (
+            _objects(plan["native_artifacts"], "native_artifacts")
+            if "native_artifacts" in plan
+            else []
+        )
+    )
     runbook = _object(plan["runbook"], "runbook")
     plan_hash, plan_size = hash_file(plan_path)
     artifacts = (
         *source_artifacts,
+        *native_artifacts,
         SourceArtifact(
             artifact_id="source/RUNBOOK_QUANTBASE.md",
             sha256=_text(runbook["sha256"], "runbook.sha256"),
@@ -761,7 +906,7 @@ def _verify_remaining_legacy_source(root: Path, plan: Mapping[str, Any]) -> None
         raise QuantbaseGenerationError("legacy source contains undeclared directories")
     expected = {
         _text(item["relative_path"], "relative_path"): item
-        for item in _expected_entries(plan)
+        for item in _legacy_entries(plan)
     }
     actual_files = {
         path.relative_to(root).as_posix(): path
@@ -798,7 +943,7 @@ def cutover_source(plan_path: Path, generation_id: str) -> dict[str, object]:
         return _object(json.loads(result_path.read_text(encoding="utf-8")), "result")
     source = _absolute_directory(str(source), "source_root", existing=True)
     _verify_remaining_legacy_source(source, plan)
-    for item in _expected_entries(plan):
+    for item in _legacy_entries(plan):
         path = _entry_path(source, _text(item["relative_path"], "relative_path"))
         if path.exists():
             path.unlink()

@@ -158,6 +158,80 @@ def test_build_preserves_union_missing_cells_without_fill(tmp_path: Path) -> Non
     assert result["output"]["coverage"] == "PARTIAL_UNION_NO_FILL"
 
 
+def test_build_projects_crypto_candidate_returns_to_observed_bil_calendar(
+    tmp_path: Path,
+) -> None:
+    catalog, source, manifest, _ = _inputs(tmp_path)
+    catalog_document = json.loads(catalog.read_text(encoding="utf-8"))
+    catalog_document["universes"][0]["candidates"].extend(
+        [
+            {
+                "candidate_id": ticker,
+                "source_id": "yahoo-adjusted-etf-daily",
+            }
+            for ticker in ("BTC-USD", "ETH-USD")
+        ]
+    )
+    _write_json(catalog, catalog_document)
+
+    source_document = json.loads(source.read_text(encoding="utf-8"))
+    source_document["tickers"].extend(("BTC-USD", "ETH-USD"))
+    for ticker, starting in (("BTC-USD", Decimal("100")), ("ETH-USD", Decimal("200"))):
+        for offset, multiplier in enumerate(
+            ("1", "1.10", "1.21", "1.331", "1.4641", "1.61051")
+        ):
+            if ticker == "ETH-USD" and offset == 2:
+                continue
+            close = starting * Decimal(multiplier)
+            source_document["rows"].append(
+                {
+                    "Ticker": ticker,
+                    "Ticker.Name": None,
+                    "Date": (date(2026, 1, 1) + timedelta(days=offset)).isoformat()
+                    + "T00:00:00",
+                    "Open": str(close),
+                    "High": str(close),
+                    "Low": str(close),
+                    "Close": str(close),
+                    "Volume": 1,
+                }
+            )
+    source, content = _write_json(source, source_document)
+    manifest_document = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest_document["request"]["tickers"].extend(("BTC-USD", "ETH-USD"))
+    manifest_document["artifact"]["sha256"] = hashlib.sha256(content).hexdigest()
+    manifest_document["artifact"]["size_bytes"] = len(content)
+    manifest_document["coverage"]["observed_tickers"].extend(("BTC-USD", "ETH-USD"))
+    _write_json(manifest, manifest_document)
+
+    outputs, result = sources.build_bundle(catalog, source, manifest)
+
+    assert _csv_rows(outputs[sources.OUTPUT_NAME]) == [
+        ["date", "VALUE", "GROWTH", "BTC-USD", "ETH-USD", "BIL"],
+        ["2026-01-03", "0.1", "0.1", "0.1", "", "0.1"],
+        ["2026-01-04", "0.1", "0.1", "0.1", "0.21", "0.1"],
+    ]
+    assert result["output"]["coverage"] == "PARTIAL_BIL_CALENDAR_NO_FILL"
+    assert result["output"]["calendar_proxy"] == "BIL"
+    assert result["output"]["missing_cells"] == 1
+    assert result["policies"]["calendar"] == (
+        "BIL_OBSERVED_RETURN_DATE_INTERSECTION_NO_FILL"
+    )
+    assert result["policies"]["raw_source_calendar"] == (
+        "PROVIDER_OBSERVED_EXACT_DATE_RETAINED"
+    )
+    crypto = {
+        item["series_id"]: item
+        for item in result["series"]
+        if item["series_id"] in {"BTC-USD", "ETH-USD"}
+    }
+    assert crypto["BTC-USD"]["price_observations"] == 6
+    assert crypto["BTC-USD"]["return_observations"] == 5
+    assert crypto["BTC-USD"]["return_start"] == "2026-01-02"
+    assert crypto["ETH-USD"]["price_observations"] == 5
+    assert crypto["ETH-USD"]["return_observations"] == 4
+
+
 def test_build_rejects_source_hash_and_ticker_drift(tmp_path: Path) -> None:
     catalog, source, manifest, _ = _inputs(tmp_path)
     manifest_document = json.loads(manifest.read_text(encoding="utf-8"))

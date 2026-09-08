@@ -23,6 +23,7 @@ from quant_engine.core import (
     VerificationStatus,
     inventory_generation,
     read_generation_bundle,
+    rename_directory_with_retry,
     stage_generation_bundle,
 )
 from quant_engine.core.contracts import canonical_json_bytes
@@ -1049,10 +1050,13 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
     (legacy / "app.js").write_text("// legacy shell", encoding="utf-8")
     base_factor.write_text("date,RF\n", encoding="utf-8")
     plan = tmp_path / "plan"
+    hybrid_plan = tmp_path / "hybrid-plan"
     correlation = tmp_path / "correlation"
     plan.mkdir()
+    hybrid_plan.mkdir()
     correlation.mkdir()
     (plan / "plan.json").write_text("{}", encoding="utf-8")
+    (hybrid_plan / "plan.json").write_text('{"mode":"hybrid"}', encoding="utf-8")
     returns = correlation / "returns.csv"
     returns.write_text("date,value\n", encoding="utf-8")
     content = returns.read_bytes()
@@ -1092,6 +1096,7 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
         implementation_return_attribution=implementation_return_attribution,
         strategy_attribution_root=attribution,
         decomposition_plan_bundle=plan,
+        hybrid_decomposition_plan_bundle=hybrid_plan,
         correlation_source_root=correlation,
         legacy_panel=legacy,
         as_of_date="2026-08-03",
@@ -1101,7 +1106,98 @@ def test_create_recipe_hash_binds_every_vertical_input(tmp_path: Path) -> None:
     )
 
     assert result["recipe"] == str(output)
-    assert builder._recipe(output)["schema_version"] == 6
+    accepted = builder._recipe(output)
+    assert accepted["schema_version"] == 6
+    assert accepted["hybrid_decomposition_plan_bundle"] == {
+        "path": str(hybrid_plan.resolve()),
+        **builder._directory_inventory(hybrid_plan.resolve()),
+    }
+
+
+def test_release_stages_route_recipe_hybrid_plan_to_all_consumers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recipe_path = _recipe(tmp_path)
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    hybrid_plan = tmp_path / "hybrid-plan"
+    hybrid_plan.mkdir()
+    (hybrid_plan / "plan.json").write_text('{"mode":"hybrid"}', encoding="utf-8")
+    recipe["hybrid_decomposition_plan_bundle"] = {
+        "path": str(hybrid_plan),
+        **builder._directory_inventory(hybrid_plan),
+    }
+    recipe_path.write_bytes(canonical_json_bytes(recipe))
+
+    output_root = tmp_path / "release"
+    stage_results = output_root / "stage-results"
+    stage_results.mkdir(parents=True)
+    candidate = tmp_path / "panel-candidate"
+    candidate.mkdir()
+    stage_values = {
+        "ledger": {"freshness_health": str(tmp_path / "freshness.json")},
+        "attribution": {"destination": str(tmp_path / "live-plan")},
+        "analytics": {
+            "correlation_root": str(tmp_path / "correlation-output"),
+            "decomposition_root": str(tmp_path / "decomposition-output"),
+            "decomposition_lenses_root": str(tmp_path / "lenses-output"),
+            "weekly_root": str(tmp_path / "weekly-output"),
+        },
+        "report": {"candidate_dir": str(tmp_path / "report-candidate")},
+        "workbook": {},
+    }
+    for role, value in stage_values.items():
+        (stage_results / f"{role}.json").write_bytes(canonical_json_bytes(value))
+
+    routed: list[tuple[str, Path | None]] = []
+    routed_lenses: list[tuple[str, object]] = []
+
+    def capture(
+        name: str, result: dict[str, object]
+    ) -> Callable[..., dict[str, object]]:
+        def called(*_args: object, **kwargs: object) -> dict[str, object]:
+            routed.append((name, kwargs.get("hybrid_decomposition_plan_bundle")))
+            if name in {"report", "workbook"}:
+                index = 9 if name == "report" else 10
+                routed_lenses.append((name, _args[index]))
+            return result
+
+        return called
+
+    panel_result = {"candidate_dir": str(candidate)}
+    monkeypatch.setattr(
+        builder,
+        "build_report_candidate",
+        capture("report", {"candidate_dir": str(tmp_path / "report-candidate")}),
+    )
+    monkeypatch.setattr(builder, "build_workbook", capture("workbook", {}))
+    monkeypatch.setattr(
+        builder, "build_panel_candidate", capture("panel-candidate", panel_result)
+    )
+    monkeypatch.setattr(builder, "publish_panel", capture("panel", panel_result))
+    monkeypatch.setattr(builder, "_record_stage", lambda *_args: None)
+    monkeypatch.setattr(
+        builder, "_record_panel_candidate_checkpoint", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        builder, "_load_panel_candidate_checkpoint", lambda *_args: panel_result
+    )
+
+    builder.build_stage(recipe_path, output_root, "report")
+    builder.build_stage(recipe_path, output_root, "workbook")
+    builder.build_stage(recipe_path, output_root, "panel-candidate")
+    builder.build_stage(recipe_path, output_root, "panel", qa_dir=tmp_path / "qa")
+
+    assert routed == [
+        ("report", hybrid_plan),
+        ("workbook", hybrid_plan),
+        ("panel-candidate", hybrid_plan),
+        ("panel-candidate", hybrid_plan),
+        ("panel", hybrid_plan),
+    ]
+    assert routed_lenses == [
+        ("report", tmp_path / "lenses-output"),
+        ("workbook", tmp_path / "lenses-output"),
+    ]
 
 
 def test_create_recipe_can_bind_verified_immutable_provider_ledger(
@@ -1460,6 +1556,8 @@ def _current_plan_bundle(
     source_keys: tuple[str, ...] = ("us-economic",),
     surfaces: tuple[str, ...] = ("STATIC", "DYNAMIC_FLS"),
     plan_mutator: Callable[[dict[str, object]], None] | None = None,
+    strategy_id: str = "strategy-0",
+    series_id: str = "Strategy 0",
 ) -> Path:
     staging = tmp_path / "current-plan-staging"
     staging.mkdir()
@@ -1500,7 +1598,7 @@ def _current_plan_bundle(
                     }
                     for source_key in source_keys
                 ],
-                "series_id": "Strategy 0",
+                "series_id": series_id,
                 "source_dispositions": {
                     source_key: {
                         "authority": "SYNTHETIC_GOVERNED_PLAN",
@@ -1510,7 +1608,7 @@ def _current_plan_bundle(
                     }
                     for source_key in source_keys
                 },
-                "strategy_id": "strategy-0",
+                "strategy_id": strategy_id,
             }
         ],
     }
@@ -1536,10 +1634,10 @@ def _current_plan_bundle(
         },
         "strategies": [
             {
-                "history_series_id": "Strategy 0",
+                "history_series_id": series_id,
                 "outcome_dispositions": {"DECOMPOSITION": "REQUIRED"},
                 "product_requirement": "REQUIRED",
-                "strategy_id": "strategy-0",
+                "strategy_id": strategy_id,
             }
         ],
         "source_segments": [
@@ -1674,7 +1772,7 @@ def _current_plan_bundle(
         target_content = (
             "series_id,date,return,evidence_layer,return_basis,return_type,cost\n"
             + "".join(
-                f"Strategy 0,{observed},{factor_return},LIVE,NET,STRATEGY,INCOMPLETE\n"
+                f"{series_id},{observed},{factor_return},LIVE,NET,STRATEGY,INCOMPLETE\n"
                 for observed, _risk_free, factor_return in dated_returns
             )
         ).encode("utf-8")
@@ -1717,7 +1815,7 @@ def _current_plan_bundle(
             surface_slug = surface.lower().replace("_", "-")
             suffix = "" if surface == "STATIC" else f"-{surface_slug}"
             relative = f"specs/{source_key}{suffix}.json"
-            base_model_id = f"strategy-0-{source_key}-01"
+            base_model_id = f"{strategy_id}-{source_key}-01"
             model_id = f"{base_model_id}-{surface_slug}"
             model = {
                 "as_of_date": "2026-08-03",
@@ -1734,7 +1832,7 @@ def _current_plan_bundle(
                 "ridge_candidates": (
                     ["0.0001"] if surface == "STATIC" else ["0.0000001"]
                 ),
-                "series_id": "Strategy 0",
+                "series_id": series_id,
                 "test_start": "2026-08-02",
                 "train_end": "2026-08-01",
             }
@@ -1746,7 +1844,7 @@ def _current_plan_bundle(
                 "evaluated_on": "2026-08-03",
                 "limiting_inputs": [
                     "factor:us_factors:MKT_RF:rf",
-                    "target:Strategy 0",
+                    f"target:{series_id}",
                 ],
                 "status": "CURRENT_WITHIN_AGE_THRESHOLD",
                 "warning_after_days": 0,
@@ -1799,7 +1897,7 @@ def _current_plan_bundle(
                 "provenance_sources": [plan_provenance],
                 "schema_version": 1,
                 "series_composition": {
-                    "Strategy 0": {"authority": "SYNTHETIC_LAYERED_HISTORY"}
+                    series_id: {"authority": "SYNTHETIC_LAYERED_HISTORY"}
                 },
                 "target_source": {
                     "artifact_id": f"target/{source_key}.csv",
@@ -1870,7 +1968,7 @@ def _current_plan_bundle(
                         "requirement"
                     ],
                     "source_key": source_key,
-                    "strategy_id": "strategy-0",
+                    "strategy_id": strategy_id,
                     "surface": surface,
                 }
                 for source_key in source_keys
@@ -1963,8 +2061,7 @@ def _current_plan_bundle(
         "policies": {
             "calendar": "EXACT_DATE_COMPLETE_CANDIDATE_UNIVERSE_NO_FILL",
             "data_age": (
-                "WARN_IN_DEVELOPMENT_AND_WORKSTATION; "
-                "FAIL_REQUIRED_STALE_SOURCE_IN_RELEASE_QC"
+                "WARN_WITH_COMPLETE_THROUGH_DATE_AGE_DAYS_THRESHOLD_AND_LIMITING_INPUTS"
             ),
             "holdout": {
                 "fraction": "0.20",
@@ -1991,7 +2088,7 @@ def _current_plan_bundle(
     ).hexdigest()
     (staging / "plan-manifest.json").write_bytes(builder.canonical_json_bytes(manifest))
     destination = tmp_path / str(manifest["bundle_id"])
-    staging.rename(destination)
+    rename_directory_with_retry(staging, destination)
     return destination
 
 
@@ -2017,7 +2114,7 @@ def _rebind_current_bundle(
     ).hexdigest()
     (bundle / "plan-manifest.json").write_bytes(builder.canonical_json_bytes(manifest))
     destination = bundle.parent / str(manifest["bundle_id"])
-    bundle.rename(destination)
+    rename_directory_with_retry(bundle, destination)
     return destination, manifest
 
 
@@ -2058,14 +2155,41 @@ def test_generation_id_requires_canonical_hash(value: object) -> None:
         builder._generation_id(value, "synthetic generation_id")
 
 
+@pytest.mark.parametrize("include_hybrid", (False, True))
 def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, include_hybrid: bool
 ) -> None:
     recipe_root = tmp_path / "recipe-fixture"
     recipe_root.mkdir()
     recipe = _recipe(recipe_root)
     bundle = _current_plan_bundle(tmp_path)
     _bind_recipe_plan_bundle(recipe, bundle)
+    if include_hybrid:
+        # This is an argument/routing test; the full numerical vertical validates
+        # both real mode plans and producer outputs independently.
+        hybrid_bundle = tmp_path / "hybrid-routing"
+        shutil.copytree(bundle, hybrid_bundle)
+        hybrid_plan = _current_manifest(hybrid_bundle)
+        hybrid_plan["policies"]["strategy_evidence_mode"] = "LIVE_PLUS_BACKTEST"
+        hybrid_plan["layered_history"]["mode"] = "LIVE_PLUS_BACKTEST"
+        hybrid_bundle, hybrid_plan = _rebind_current_bundle(hybrid_bundle, hybrid_plan)
+        recipe_value = json.loads(recipe.read_bytes())
+        recipe_value["hybrid_decomposition_plan_bundle"] = {
+            "path": str(hybrid_bundle),
+            **builder._directory_inventory(hybrid_bundle),
+        }
+        recipe.write_bytes(builder.canonical_json_bytes(recipe_value))
+        real_specs = builder._current_release_plan_specs
+
+        def routing_specs(selected_bundle, selected_plan):
+            if selected_bundle == hybrid_bundle:
+                return [
+                    {**row, "evidence_mode": "LIVE_PLUS_BACKTEST"}
+                    for row in real_specs(bundle, _current_manifest(bundle))
+                ]
+            return real_specs(selected_bundle, selected_plan)
+
+        monkeypatch.setattr(builder, "_current_release_plan_specs", routing_specs)
     calls: list[tuple[object, ...]] = []
 
     def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
@@ -2086,13 +2210,44 @@ def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter
     output_root = tmp_path / "analytics"
     result = builder.build_analytics(recipe, bundle, output_root)
 
-    assert set(result["lens_generations"]) == {
-        "us-economic:DYNAMIC_FLS",
-        "us-economic:STATIC",
-    }
+    expected_specs = {"us-economic:DYNAMIC_FLS", "us-economic:STATIC"}
+    assert set(result["lens_generations"]) == (
+        {
+            f"{mode}:{spec}"
+            for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
+            for spec in expected_specs
+        }
+        if include_hybrid
+        else expected_specs
+    )
     assert result["schema_version"] == 2
     assert result["plan_bundle_id"] == bundle.name
-    bindings = {row["spec_id"]: row for row in result["lens_generation_bindings"]}
+    bindings = {
+        row["spec_id"]: row
+        for row in result["lens_generation_bindings"]
+        if row["evidence_mode"] == "LIVE_ONLY"
+    }
+    if include_hybrid:
+        assert result["plan_bundle_ids"] == {
+            "LIVE_ONLY": bundle.name,
+            "LIVE_PLUS_BACKTEST": hybrid_bundle.name,
+        }
+        hybrid_bindings = [
+            row
+            for row in result["lens_generation_bindings"]
+            if row["evidence_mode"] == "LIVE_PLUS_BACKTEST"
+        ]
+        assert len(hybrid_bindings) == 2
+        for row in hybrid_bindings:
+            assert row["plan_bundle_id"] == hybrid_bundle.name
+            assert Path(row["root"]) == (
+                output_root
+                / "decomposition-lenses"
+                / "LIVE_PLUS_BACKTEST"
+                / row["surface"]
+                / row["source_key"]
+            )
+        assert result["hybrid_dynamic_generation_id"] is not None
     assert Path(bindings["us-economic:STATIC"]["root"]) == (
         output_root / "decomposition-lenses" / "LIVE_ONLY" / "STATIC" / "us-economic"
     )
@@ -2308,6 +2463,80 @@ def test_current_surface_plan_rejects_assignment_for_blocked_source(
         match="assignments differ from source disposition authority",
     ):
         builder._current_release_plan_specs(bundle, _current_manifest(bundle))
+
+
+def test_release_consumer_accepts_only_exact_method_scope_non_applicability(
+    tmp_path: Path,
+) -> None:
+    def method_scope_na(source_key: str) -> Callable[[dict[str, object]], None]:
+        def mutate(plan: dict[str, object]) -> None:
+            strategies = plan["strategies"]
+            assert isinstance(strategies, list)
+            strategy = strategies[0]
+            assert isinstance(strategy, dict)
+            assignments = strategy["assignments"]
+            assert isinstance(assignments, list)
+            strategy["assignments"] = [
+                assignment
+                for assignment in assignments
+                if isinstance(assignment, dict)
+                and assignment.get("source_key") != source_key
+            ]
+            dispositions = strategy["source_dispositions"]
+            assert isinstance(dispositions, dict)
+            cell = dispositions[source_key]
+            assert isinstance(cell, dict)
+            cell.update(
+                authority="ISSUE_328_ACCEPTED_STRATEGY_TO_LENS_ROUTING",
+                readiness="NOT_APPLICABLE_METHOD_SCOPE",
+                reason="NOT_APPLICABLE_METHOD_SCOPE",
+                requirement="NOT_APPLICABLE_METHOD_SCOPE",
+            )
+
+        return mutate
+
+    accepted_root = tmp_path / "accepted"
+    accepted_root.mkdir()
+    accepted = _current_plan_bundle(
+        accepted_root,
+        source_keys=("us-economic", "europe-economic"),
+        plan_mutator=method_scope_na("us-economic"),
+        strategy_id="p123-eu",
+        series_id="P123 EU",
+    )
+    accepted_manifest = _current_manifest(accepted)
+    accepted_inputs = builder._manifest_artifacts(
+        accepted, accepted_manifest["inputs"], "inputs"
+    )
+    accepted_outputs = builder._manifest_artifacts(
+        accepted, accepted_manifest["outputs"], "outputs"
+    )
+    active_sources, *_rest = builder._governed_plan_sources(
+        accepted, accepted_inputs, accepted_outputs
+    )
+    assert set(active_sources) == {"europe-economic"}
+
+    arbitrary_root = tmp_path / "arbitrary"
+    arbitrary_root.mkdir()
+    arbitrary = _current_plan_bundle(
+        arbitrary_root,
+        source_keys=("us-economic", "us-equity-style"),
+        plan_mutator=method_scope_na("us-equity-style"),
+        strategy_id="qsi",
+        series_id="QSI",
+    )
+    arbitrary_manifest = _current_manifest(arbitrary)
+    arbitrary_inputs = builder._manifest_artifacts(
+        arbitrary, arbitrary_manifest["inputs"], "inputs"
+    )
+    arbitrary_outputs = builder._manifest_artifacts(
+        arbitrary, arbitrary_manifest["outputs"], "outputs"
+    )
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="assignments differ from source disposition authority",
+    ):
+        builder._governed_plan_sources(arbitrary, arbitrary_inputs, arbitrary_outputs)
 
 
 def test_current_surface_plan_rejects_missing_assignment_for_ready_source(
@@ -2622,6 +2851,96 @@ def test_current_surface_plan_rejects_dynamic_policy_substitution(
 
     with pytest.raises(builder.VerticalBuildError, match="dynamic model policy"):
         builder._current_release_plan_specs(bundle, manifest)
+
+
+@pytest.mark.parametrize(
+    ("assurance_profile", "readiness", "capture_date", "expected_error"),
+    [
+        ("DEVELOPMENT", "READY", "2026-09-07", None),
+        ("WORKSTATION_QC", "READY", "2026-09-07", None),
+        ("RELEASE_QC", "READY", "2026-09-07", None),
+        ("RELEASE_QC", "REQUIRED_NOT_READY", "2026-09-07", "market data age differs"),
+        ("RELEASE_QC", "READY", "2026-09-06", "public factor evaluation date differs"),
+    ],
+)
+def test_non_spec_complete_data_age_warns_but_release_receipts_and_readiness_hold(
+    tmp_path: Path,
+    assurance_profile: str,
+    readiness: str,
+    capture_date: str,
+    expected_error: str | None,
+) -> None:
+    public_relative = "inputs/governance/public-factor-source-manifest.json"
+    market_relative = "inputs/market/style_returns.csv"
+    public_path = tmp_path / public_relative
+    public_path.parent.mkdir(parents=True)
+    public_path.write_bytes(
+        builder.canonical_json_bytes(
+            {
+                "acquisition_run": {"evaluation_date": capture_date},
+                "builder": "portfolio-public-decomposition-sources",
+                "builder_version": "0.3.0",
+                "schema_version": 2,
+            }
+        )
+    )
+    market_path = tmp_path / market_relative
+    market_path.parent.mkdir(parents=True)
+    market_path.write_text(
+        "date,BIL,VALUE\n2026-09-01,0.001,0.01\n2026-09-02,0.001,0.02\n",
+        encoding="utf-8",
+    )
+    inputs = {
+        public_relative: builder._sha(public_path),
+        market_relative: builder._sha(market_path),
+    }
+    model_policy = {
+        "source_contracts": {
+            "style": {
+                "input_key": "style_returns",
+                "candidates": ["VALUE"],
+                "column_policy": "CANDIDATE_ID",
+                "risk_free_column": "BIL",
+            }
+        }
+    }
+    contract = {
+        "source_segments": [
+            {
+                "source_id": "public-etf-style-sector-and-market-prices",
+                "readiness": readiness,
+                "freshness": {"max_age_days": 3},
+            }
+        ]
+    }
+    kwargs = {
+        "attribution_bundle": tmp_path,
+        "inputs": inputs,
+        "governed_sources": {"style": "style"},
+        "model_policy": model_policy,
+        "contract": contract,
+        "evaluation_date": "2026-09-07",
+        "assurance_profile": assurance_profile,
+    }
+    if expected_error is not None:
+        with pytest.raises(builder.VerticalBuildError, match=expected_error):
+            builder._expected_non_spec_data_age(**kwargs)
+        return
+    market_sources, capture = builder._expected_non_spec_data_age(**kwargs)
+    assert market_sources == [
+        {
+            "age_days": 5,
+            "complete_through": "2026-09-02",
+            "evaluated_on": "2026-09-07",
+            "limiting_inputs": ["factor:style_returns"],
+            "status": "WARN_COMPLETE_DATA_AGE",
+            "warning_after_days": 3,
+            "input_key": "style_returns",
+            "source_id": "public-etf-style-sector-and-market-prices",
+        }
+    ]
+    assert capture["complete_through"] == "2026-09-07"
+    assert capture["status"] == "CURRENT_WITHIN_AGE_THRESHOLD"
 
 
 def test_current_surface_plan_rejects_empty_age_boundaries(tmp_path: Path) -> None:
@@ -3028,6 +3347,7 @@ def test_panel_invocations_carry_baseline_root(
         "weekly_root": str(tmp_path / "weekly"),
     }
     baseline_root = tmp_path / "stages" / "baseline"
+    hybrid_plan = tmp_path / "hybrid-plan"
     builder.build_panel_candidate(
         recipe,
         tmp_path / "stages" / "report",
@@ -3036,6 +3356,7 @@ def test_panel_invocations_carry_baseline_root(
         analytics,
         tmp_path / "freshness.json",
         tmp_path / "stages" / "panel",
+        hybrid_decomposition_plan_bundle=hybrid_plan,
     )
     builder.publish_panel(
         recipe,
@@ -3047,6 +3368,7 @@ def test_panel_invocations_carry_baseline_root(
         candidate,
         qa,
         tmp_path / "stages" / "panel",
+        hybrid_decomposition_plan_bundle=hybrid_plan,
     )
 
     assert [call[1] for call in calls] == ["build", "verify", "verify", "qa", "publish"]
@@ -3054,6 +3376,12 @@ def test_panel_invocations_carry_baseline_root(
         assert call[0] == "portfolio_control_panel.py"
         assert "--baseline-root" in call
         assert call[call.index("--baseline-root") + 1] == str(baseline_root)
+        assert call[call.index("--decomposition-plan-bundle") + 1] == str(
+            tmp_path / "bundle"
+        )
+        assert call[call.index("--hybrid-decomposition-plan-bundle") + 1] == str(
+            hybrid_plan
+        )
 
 
 def test_panel_publication_validates_browser_qa_before_authorizing_receipt(
@@ -3764,6 +4092,15 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
         return {"status": "PASS"}
 
     monkeypatch.setattr(builder, "_tool", fake_tool)
+    # An epoch triplet is bindable only against the baseline generation it
+    # was selected from, which the builder reads from the baseline root's
+    # published pointer.  This test stages no baseline publication, so stand
+    # the resolver in the way the surrounding tests do.
+    monkeypatch.setattr(
+        builder,
+        "_published_generation",
+        lambda root: ("b" * 64, root / "generations" / ("b" * 64)),
+    )
     monkeypatch.setattr(
         builder,
         "_require_exact_report_delivery",
@@ -3809,6 +4146,9 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
         assert call[call.index("--epoch-manifest-generation-root") + 1] == str(
             generation_root
         )
+    bind = next(call for call in calls if call[1] == "bind-workbook-evidence")
+    assert bind[bind.index("--baseline-root") + 1] == str(tmp_path / "baseline")
+    assert bind[bind.index("--baseline-generation-id") + 1] == "b" * 64
     assert result["epoch_manifest_generation_id"] == manifest.generation_id
     assert result["epoch_manifest_artifact"]["sha256"] == PREWIRE_MANIFEST_SHA256
 
@@ -3933,6 +4273,82 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
     assert built["generation_id"] == "f" * 64
 
 
+def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = tmp_path / "report-candidate"
+    candidate.mkdir()
+    runtime = tmp_path / "xlsx-runtime.exe"
+    cli = tmp_path / "xlsx-cli.py"
+    runtime.write_bytes(b"runtime")
+    cli.write_bytes(b"cli")
+    monkeypatch.setattr(builder, "XLSX_RUNTIME", runtime)
+    monkeypatch.setattr(builder, "XLSX_CLI", cli)
+    monkeypatch.setattr(builder, "_accepted_xlsx_evidence", lambda _path: True)
+    monkeypatch.setattr(
+        builder,
+        "_accepted_workbook_validation",
+        lambda _path, _candidate: {"all_passed": True},
+    )
+    calls: list[tuple[object, ...]] = []
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(args)
+        if args[1] == "build":
+            return {"candidate_dir": str(candidate)}
+        if args[1] == "publish":
+            return {"generation_id": "f" * 64}
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    monkeypatch.setattr(
+        builder,
+        "_require_exact_report_delivery",
+        lambda _root, generation_id, _delivery: {
+            "delivery_classification": "NON_AUTHORITY_HUMAN_DELIVERY",
+            "generation_id": generation_id,
+            "workbook_status": "EXACT_NON_AUTHORITY",
+        },
+    )
+    live_plan = tmp_path / "live-plan"
+    hybrid_plan = tmp_path / "hybrid-plan"
+    portfolio_root = tmp_path / "portfolio"
+    output_root = portfolio_root / "report-stage"
+
+    builder.build_report(
+        tmp_path / "baseline",
+        tmp_path / "ledger",
+        tmp_path / "freshness.json",
+        tmp_path / "history.json",
+        tmp_path / "implementation.json",
+        tmp_path / "return-attribution.json",
+        tmp_path / "attribution",
+        output_root,
+        tmp_path / "correlation",
+        tmp_path / "decomposition-lenses",
+        live_plan,
+        hybrid_decomposition_plan_bundle=hybrid_plan,
+        hwm_governed_result_path=tmp_path / "hwm-result.json",
+        hwm_governed_input_generation_path=tmp_path / "hwm-input.json",
+        hwm_governed_calendar_authority_path=tmp_path / "hwm-calendar.json",
+        hwm_governed_admission_receipt_path=tmp_path / "hwm-receipt.json",
+        portfolio_root=portfolio_root,
+    )
+
+    report_calls = [
+        call
+        for call in calls
+        if call[0] == "portfolio_report.py"
+        and call[1] in {"build", "verify", "publish"}
+    ]
+    assert [call[1] for call in report_calls] == ["build", "verify", "publish"]
+    for call in report_calls:
+        assert call[call.index("--decomposition-plan-bundle") + 1] == str(live_plan)
+        assert call[call.index("--hybrid-decomposition-plan-bundle") + 1] == str(
+            hybrid_plan
+        )
+
+
 def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3973,8 +4389,14 @@ def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
         "epoch_manifest_generation_root": generation_root,
         "epoch_manifest_generation_id": "b" * 64,
     }
-    assert calls["candidate_kwargs"] == expected_epoch
-    assert calls["workbook_kwargs"] == expected_epoch
+    assert calls["candidate_kwargs"] == {
+        **expected_epoch,
+        "hybrid_decomposition_plan_bundle": None,
+    }
+    assert calls["workbook_kwargs"] == {
+        **expected_epoch,
+        "hybrid_decomposition_plan_bundle": None,
+    }
 
 
 def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
@@ -4010,6 +4432,7 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
 
     def real_candidate_boundary(*_args: object, **kwargs: object) -> dict[str, object]:
         assert kwargs == {
+            "hybrid_decomposition_plan_bundle": None,
             "epoch_manifest_generation_root": epoch_root,
             "epoch_manifest_generation_id": "d" * 64,
         }
@@ -4039,6 +4462,7 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
     assert Path(str(calls["candidate"])).resolve() == candidate_path.resolve()
     assert (candidate_path / "portfolio-report-data.json").is_file()
     assert calls["epoch"] == {
+        "hybrid_decomposition_plan_bundle": None,
         "epoch_manifest_generation_root": epoch_root,
         "epoch_manifest_generation_id": "d" * 64,
     }
@@ -4347,3 +4771,175 @@ def test_schema10_publish_rejects_mutated_epoch_candidate_identity(
             expected_epoch_manifest_generation_id=expected_generation_id,
             expected_epoch_manifest_source=expected_source,
         )
+
+
+def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    paths = {
+        "result": tmp_path / "result.json",
+        "input_generation": tmp_path / "input.json",
+        "calendar_authority": tmp_path / "calendar.json",
+        "admission_receipt": tmp_path / "receipt.json",
+    }
+    capital_result_path = tmp_path / "capital-result.json"
+    capital_input_path = tmp_path / "capital-input.json"
+    captured: tuple[object, ...] = ()
+
+    def tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal captured
+        captured = args
+        return {"candidate_dir": str(tmp_path / "candidate")}
+
+    monkeypatch.setattr(builder, "_tool", tool)
+    builder.build_report_candidate(
+        tmp_path / "baseline",
+        tmp_path / "ledger",
+        tmp_path / "freshness.json",
+        tmp_path / "history.json",
+        tmp_path / "implementation.json",
+        tmp_path / "return-attribution.json",
+        None,
+        tmp_path / "report-stage",
+        hwm_governed_result_path=paths["result"],
+        hwm_governed_input_generation_path=paths["input_generation"],
+        hwm_governed_calendar_authority_path=paths["calendar_authority"],
+        hwm_governed_admission_receipt_path=paths["admission_receipt"],
+        portfolio_root=tmp_path / "portfolio",
+        invested_capital_result_path=capital_result_path,
+        invested_capital_input_generation_path=capital_input_path,
+    )
+
+    assert builder._governed_hwm_arguments(**paths) == (
+        "--hwm-governed-result",
+        str(paths["result"]),
+        "--hwm-governed-input-generation",
+        str(paths["input_generation"]),
+        "--hwm-governed-calendar-authority",
+        str(paths["calendar_authority"]),
+        "--hwm-governed-admission-receipt",
+        str(paths["admission_receipt"]),
+    )
+    for flag, path in zip(
+        builder._governed_hwm_arguments(**paths)[::2],
+        paths.values(),
+        strict=True,
+    ):
+        index = captured.index(flag)
+        assert captured[index + 1] == str(path)
+
+    forwarded: list[dict[str, object]] = []
+
+    def report_candidate(*_args: object, **kwargs: object) -> dict[str, object]:
+        forwarded.append(kwargs)
+        return {"candidate_dir": str(tmp_path / "candidate")}
+
+    def workbook(*_args: object, **kwargs: object) -> dict[str, object]:
+        forwarded.append(kwargs)
+        return {"generation_id": "f" * 64}
+
+    monkeypatch.setattr(builder, "build_report_candidate", report_candidate)
+    monkeypatch.setattr(builder, "build_workbook", workbook)
+    builder.build_report(
+        tmp_path / "baseline",
+        tmp_path / "ledger",
+        tmp_path / "freshness.json",
+        tmp_path / "history.json",
+        tmp_path / "implementation.json",
+        tmp_path / "return-attribution.json",
+        None,
+        tmp_path / "report-stage",
+        hwm_governed_result_path=paths["result"],
+        hwm_governed_input_generation_path=paths["input_generation"],
+        hwm_governed_calendar_authority_path=paths["calendar_authority"],
+        hwm_governed_admission_receipt_path=paths["admission_receipt"],
+        portfolio_root=tmp_path / "portfolio",
+        invested_capital_result_path=capital_result_path,
+        invested_capital_input_generation_path=capital_input_path,
+    )
+    expected = {
+        "hwm_governed_result_path": paths["result"],
+        "hwm_governed_input_generation_path": paths["input_generation"],
+        "hwm_governed_calendar_authority_path": paths["calendar_authority"],
+        "hwm_governed_admission_receipt_path": paths["admission_receipt"],
+        "portfolio_root": tmp_path / "portfolio",
+        "invested_capital_result_path": capital_result_path,
+        "invested_capital_input_generation_path": capital_input_path,
+    }
+    assert len(forwarded) == 2
+    assert all(
+        all(call[key] == value for key, value in expected.items()) for call in forwarded
+    )
+
+    panel_calls: list[tuple[object, ...]] = []
+
+    def panel_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        panel_calls.append(args)
+        return {"candidate_dir": str(tmp_path / "panel-candidate")}
+
+    monkeypatch.setattr(builder, "_tool", panel_tool)
+    monkeypatch.setattr(
+        builder,
+        "_recipe",
+        lambda _path: {"legacy_panel": {"path": str(tmp_path / "legacy")}},
+    )
+    # The panel takes the verified dependence source by name; resolving it needs
+    # a real correlation source root, which this argument-forwarding test does
+    # not stage.
+    dependence_source = tmp_path / "correlation" / "dependence-source.json"
+    monkeypatch.setattr(
+        builder, "_history_contract_path", lambda _recipe: dependence_source
+    )
+    monkeypatch.setattr(builder, "_epoch_manifest_panel_identity", lambda _recipe: None)
+    monkeypatch.setattr(
+        builder, "_stage_account_strategy_manifest", lambda *_args: None
+    )
+    monkeypatch.setattr(builder, "_panel_financial_arguments", lambda *_args: ())
+    builder.build_panel_candidate(
+        tmp_path / "recipe.json",
+        tmp_path / "report",
+        tmp_path / "baseline",
+        tmp_path / "attribution",
+        {
+            "decomposition_root": str(tmp_path / "decomposition"),
+            "decomposition_lenses_root": str(tmp_path / "lenses"),
+            "correlation_root": str(tmp_path / "correlation"),
+            "weekly_root": str(tmp_path / "weekly"),
+        },
+        tmp_path / "freshness.json",
+        tmp_path / "panel-stage",
+        **expected,
+    )
+    assert len(panel_calls) == 2
+    for call in panel_calls:
+        for flag, path in zip(
+            builder._governed_hwm_arguments(**paths)[::2],
+            paths.values(),
+            strict=True,
+        ):
+            index = call.index(flag)
+            assert call[index + 1] == str(path)
+        index = call.index("--strategy-history-contract")
+        assert call[index + 1] == str(dependence_source)
+
+
+@pytest.mark.parametrize("relation", ("equal", "inside", "contains"))
+def test_private_stage_rejects_production_root_overlap_before_any_write(
+    tmp_path: Path,
+    relation: str,
+) -> None:
+    from portfolio_private_stage import PrivateStageError, validate_private_stage_target
+
+    portfolio_root = tmp_path / "portfolio"
+    production = portfolio_root / "reporting"
+    target = {
+        "equal": production,
+        "inside": production / "nested",
+        "contains": portfolio_root,
+    }[relation]
+
+    with pytest.raises(PrivateStageError, match="overlaps production root"):
+        validate_private_stage_target(target, target, portfolio_root)
+
+    assert not target.exists()

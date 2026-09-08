@@ -64,17 +64,21 @@ launcher if launcher publication fails. The complete source-to-panel workflow
 uses the coordinated release boundary so report, analytics, weekly-return, and
 panel authorities cannot silently diverge.
 
-## Windows publication boundary
+## Directory lease boundary
 
-Windows pathname replacement can redirect a coordinated transaction after a
-directory has been checked. Therefore `commit_release`, `recover_release`, and
-`rollback_release` fail closed on Windows with
-`WINDOWS_NAMESPACE_UNTRUSTED`, before they read or change release state.
-`prepare_release` remains available to stage immutable evidence, but it does
-not authorize publication. Rehearsal entry points return the in-memory
-`PUBLICATION_UNAVAILABLE` result and do not create output on that platform.
+Pathname replacement can redirect a coordinated transaction after a directory
+has been checked, and on Windows a junction makes that cheap. Revalidating
+pathnames before individual operations is not enough.
 
-`publish_generation` remains a separate single-root primitive; it does not
-carry the coordinated hostile-writer guarantee. A future Windows broker must
-hold stable directory identities and handles across the complete coordinated
-transaction. Revalidating pathnames before individual operations is not enough.
+Therefore `commit_release`, `recover_release`, and `rollback_release` acquire a
+directory lease on every target root before they mutate state, and revalidate
+every lease before each mutating step. A lease holds an open handle and records
+the directory identity behind it: volume serial number and file index on
+Windows, device and inode elsewhere. A root that is renamed or re-pointed
+mid-transaction fails its lease check and raises `ReleaseConflictError` rather
+than redirecting a write. This holds on every platform, so these entry points
+are available on every platform.
+
+`prepare_release` stages immutable evidence and does not authorize publication.
+`publish_generation` remains a separate single-root primitive and does not
+carry the coordinated hostile-writer guarantee.

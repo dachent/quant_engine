@@ -14,12 +14,21 @@
     "repository_sha",
     "tool_sha256",
     "product",
-    "source_pointers",
     "source_manifests",
     "inputs",
     "outputs",
     "mode_status",
     "verification"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "required": ["source_selection_mode"],
+        "properties": {"source_selection_mode": {"const": "IMMUTABLE_GENERATIONS"}}
+      },
+      "then": {"not": {"required": ["source_pointers"]}},
+      "else": {"required": ["source_pointers"]}
+    }
   ],
   "properties": {
     "$schema": {"type": "string", "minLength": 1},
@@ -30,6 +39,7 @@
     "as_of_date": {"type": "string", "format": "date"},
     "repository_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "tool_sha256": {"$ref": "#/$defs/sha256"},
+    "source_selection_mode": {"enum": ["CURRENT_POINTERS", "IMMUTABLE_GENERATIONS"]},
     "product": {
       "type": "object",
       "additionalProperties": false,
@@ -62,6 +72,8 @@
         "matrixport": {"type": "string", "minLength": 2},
         "quantbase": {"type": "string", "minLength": 2},
         "portfolio123": {"type": "string", "minLength": 2},
+        "portfolio123-provider-history": {"type": "string", "minLength": 2},
+        "portfolio-fx-rates": {"type": "string", "minLength": 2},
         "strategy-history": {"type": "string", "minLength": 2}
       }
     },

@@ -9,7 +9,7 @@ import hashlib
 import json
 from pathlib import Path, PurePosixPath
 import re
-from typing import Any, Final, Mapping, Self
+from typing import Any, Final, Mapping, Self, Sequence
 
 from quant_engine.core.strict_json import StrictJSONError, strict_json_object
 
@@ -68,7 +68,7 @@ def _parse_date(value: object, field_name: str) -> date:
     return parsed
 
 
-def canonical_json_bytes(value: Mapping[str, Any]) -> bytes:
+def canonical_json_bytes(value: Mapping[str, Any] | Sequence[Any]) -> bytes:
     """Serialize a manifest value using the sole canonical JSON encoding."""
 
     return (

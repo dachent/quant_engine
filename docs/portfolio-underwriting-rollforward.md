@@ -18,9 +18,15 @@ release commit. WSL may be used for read-only inspection, but it is not the
 publication runtime: the governed data, durable Python environment, browser
 QA, and stable launcher use Windows paths and Windows filesystem semantics.
 
+The canonical workspace keeps `dataPortfolio/` beside `repo/`. An isolated
+checkout must set `$portfolioRoot` to the explicit existing governed root.
+Synced storage is allowed; real data remains outside Git and CI. Retain the
+existing issue-bound release targets and data in place.
+
 ```powershell
 $repoRoot = [IO.Path]::GetFullPath($PWD)
-$portfolioRoot = [IO.Path]::GetFullPath('C:\Tools\quant-engine\data')
+# Canonical repo example; use the explicit configured root in an isolated checkout.
+$portfolioRoot = [IO.Path]::GetFullPath((Join-Path $PWD '../dataPortfolio'))
 $enginePython = 'C:\Tools\quant-engine\.venv\Scripts\python.exe'
 $taskPackagePath = (
   Get-ChildItem (Join-Path $repoRoot 'packages') -Directory |
@@ -56,8 +62,8 @@ if (-not $loadedCore.StartsWith($repoRoot, [StringComparison]::OrdinalIgnoreCase
   throw "Python package authority escaped the release checkout: $loadedCore"
 }
 
-if ($portfolioRoot -like '*\OneDrive -*' -or $portfolioRoot -like '*\repo\*') {
-  throw 'Portfolio authority must remain outside synced storage and Git.'
+if ($portfolioRoot -like '*\repo\*') {
+  throw 'Portfolio authority must remain outside Git.'
 }
 if ((git status --porcelain).Count -ne 0) {
   throw 'The release checkout must be clean.'

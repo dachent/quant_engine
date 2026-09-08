@@ -284,6 +284,14 @@ def _receipt_for_assignment(
         for row in ledger.get("flows", [])
         if isinstance(row, Mapping)
         and row.get("account_id") == account_id
+        # Explicitly unassigned wallet activity remains hash-bound source
+        # evidence but is not an observed flow of this funded strategy epoch.
+        and not (
+            row.get("provider_account_scope") == "ACCOUNT_ONLY"
+            and row.get("mapping_status") == "UNMAPPED"
+            and "strategy_id" in row
+            and row["strategy_id"] is None
+        )
         and start <= _fact_date(row, "flows") <= end
     ]
     anchor_rows = [

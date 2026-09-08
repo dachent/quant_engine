@@ -27,6 +27,7 @@ dev = [
   "quant-engine-portfolio-ledger",
   "quant-engine-portfolio123",
   "quant-engine-schwab",
+  "quant-engine-turingtrader",
   "quant-engine-web-contract-harvester",
   "ruff==0.15.22",
   "types-PyYAML>=6.0.12,<7",
@@ -37,7 +38,7 @@ package = false
 required-version = ">=0.11.28,<0.12"
 
 [tool.uv.workspace]
-members = ["apps/schwab-trading", "packages/alpaca", "packages/ci-controls", "packages/core", "packages/fidelity", "packages/ibkr", "packages/matrixport", "packages/portfolio-ledger", "packages/portfolio123", "packages/schwab", "packages/web-contracts"]
+members = ["apps/schwab-trading", "packages/alpaca", "packages/ci-controls", "packages/core", "packages/fidelity", "packages/ibkr", "packages/matrixport", "packages/portfolio-ledger", "packages/portfolio123", "packages/schwab", "packages/turingtrader", "packages/web-contracts"]
 
 [tool.uv.sources]
 quant-engine-ci-controls = { workspace = true }
@@ -49,6 +50,7 @@ quant-engine-matrixport = { workspace = true }
 quant-engine-portfolio-ledger = { workspace = true }
 quant-engine-portfolio123 = { workspace = true }
 quant-engine-schwab = { workspace = true }
+quant-engine-turingtrader = { workspace = true }
 quant-engine-web-contract-harvester = { workspace = true }
 
 [tool.pytest.ini_options]
@@ -61,6 +63,7 @@ addopts = [
   "no:cacheprovider",
 ]
 testpaths = ["tests"]
+pythonpath = [".", "tools"]
 
 [tool.ruff]
 target-version = "py311"
@@ -73,7 +76,7 @@ select = ["E4", "E7", "E9", "F"]
 python_version = "3.11"
 strict = true
 explicit_package_bases = true
-mypy_path = ["packages/alpaca/src", "packages/ci-controls/src", "packages/core/src", "packages/fidelity/src", "packages/ibkr/src", "packages/matrixport/src", "packages/portfolio-ledger/src", "packages/portfolio123/src", "packages/schwab/src", "packages/web-contracts/src", "tools"]
+mypy_path = ["packages/alpaca/src", "packages/ci-controls/src", "packages/core/src", "packages/fidelity/src", "packages/ibkr/src", "packages/matrixport/src", "packages/portfolio-ledger/src", "packages/portfolio123/src", "packages/schwab/src", "packages/turingtrader/src", "packages/web-contracts/src", "tools"]
 incremental = false
 pretty = true
 show_error_codes = true

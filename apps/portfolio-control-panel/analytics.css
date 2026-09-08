@@ -1020,3 +1020,17 @@ section[data-view="capital"] .callout-neutral {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Unbreakable evidence tokens must wrap rather than clip.
+   Full-precision USD amounts, sha256 digests and generation ids carry no break
+   opportunity, so in a narrow grid column -- .gate-row's first track is
+   minmax(138px, 1.25fr) -- such a token overflows its own box horizontally and
+   browser_qa reports text_overflow.  Only wrapping changes; heights are
+   unaffected. */
+.gate-name,
+.gate-name small,
+#hwm-status,
+.callout,
+.validation-card {
+  overflow-wrap: anywhere;
+}

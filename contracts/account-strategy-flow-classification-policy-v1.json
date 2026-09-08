@@ -1,9 +1,9 @@
 {
   "schema_version": 1,
   "artifact_id": "contracts/account-strategy-flow-classification-policy-v1.json",
-  "as_of_date": "2026-07-30",
+  "as_of_date": "2026-09-06",
   "policy_id": "ACCOUNT_STRATEGY_FLOW_CLASSIFICATION",
-  "policy_version": "1",
+  "policy_version": "2",
   "event_dispositions": {
     "exact": [
       {"flow_type": "EXTERNAL_CONTRIBUTION", "disposition": "EXTERNAL", "amount_sign": "POSITIVE"},
@@ -14,7 +14,7 @@
         "flow_type": "ACCOUNT_TRANSFER",
         "disposition": "INTERNAL",
         "amount_sign": "NONZERO",
-        "counterparty_rule": "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT"
+        "counterparty_rule": "SAME_DATE_DIFFERENT_ACCOUNT_EXACT_OPPOSITE_AMOUNT_WITH_SOURCE_IDENTITY_V1"
       }
     ],
     "prefix": [
