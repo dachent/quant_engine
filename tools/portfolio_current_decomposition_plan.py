@@ -659,6 +659,7 @@ def _layered_history_targets(
             row["strategy_version"],
         )
         segment_index.setdefault(segment_key, []).append(row)
+    calculation_complete_through = common_complete_through.isoformat()
     target_rows: list[dict[str, str]] = []
     for row in selected_projection:
         projection_key = (
@@ -675,6 +676,16 @@ def _layered_history_targets(
         ):
             raise CurrentPlanError("layered projection does not match one segment")
         segment = matches[0]
+        if row["date"] > calculation_complete_through:
+            # The calculation window is the latest date common to every planned
+            # series.  Rows after it stay in the accepted history -- and in
+            # accepted_history_complete_through below -- but must not enter the
+            # factor target series: portfolio_correlation windows the dependence
+            # lens to the same common date, and the control panel requires the
+            # factor window to be contained by the dependence window.  Without
+            # this the two lenses silently describe different periods whenever
+            # one strategy reports past the common date.
+            continue
         target_rows.append(
             {
                 "series_id": row["series_id"],
