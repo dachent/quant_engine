@@ -4889,13 +4889,15 @@ def build_panel_candidate(
         validate_private_stage_target(output_root, output_root, portfolio_root)
     recipe = _recipe(recipe_path)
     legacy_panel = _path(recipe["legacy_panel"]["path"], "legacy panel")
-    strategy_history_contract = (
-        _path(recipe["correlation_source_root"]["path"], "correlation source root")
-        / "dependence-source.json"
-    )
+    # _history_contract_path verifies the dependence source and returns it, or
+    # returns the legacy schema-6 evidence proof, which the panel does not accept
+    # by filename.  Pass it exactly when the panel can consume it: never guard on
+    # mere existence, or a missing source silently reverts the panel to
+    # NO_HWM_INPUTS and HPR HWM parity fails with a misleading diff.
+    strategy_history_contract = _history_contract_path(recipe)
     strategy_history_arguments = (
         ("--strategy-history-contract", str(strategy_history_contract))
-        if strategy_history_contract.is_file()
+        if strategy_history_contract.name == "dependence-source.json"
         else ()
     )
     epoch_identity = _epoch_manifest_panel_identity(recipe)
@@ -5079,13 +5081,15 @@ def publish_panel(
         validate_private_stage_target(output_root, output_root, portfolio_root)
     recipe = _recipe(recipe_path)
     legacy_panel = _path(recipe["legacy_panel"]["path"], "legacy panel")
-    strategy_history_contract = (
-        _path(recipe["correlation_source_root"]["path"], "correlation source root")
-        / "dependence-source.json"
-    )
+    # _history_contract_path verifies the dependence source and returns it, or
+    # returns the legacy schema-6 evidence proof, which the panel does not accept
+    # by filename.  Pass it exactly when the panel can consume it: never guard on
+    # mere existence, or a missing source silently reverts the panel to
+    # NO_HWM_INPUTS and HPR HWM parity fails with a misleading diff.
+    strategy_history_contract = _history_contract_path(recipe)
     strategy_history_arguments = (
         ("--strategy-history-contract", str(strategy_history_contract))
-        if strategy_history_contract.is_file()
+        if strategy_history_contract.name == "dependence-source.json"
         else ()
     )
     epoch_identity = _epoch_manifest_panel_identity(recipe)

@@ -9730,7 +9730,13 @@ def _rendered_files(
         report, report_identity, report_path = _current_report(report_root)
         verified_strategy_history: dict[str, Any] | None = None
         strategy_history_binding: tuple[Path, str] | None = None
-        if strategy_history_contract_path is not None:
+        if strategy_history_contract_path is None:
+            if report.get("strategy_history_contract") is not None:
+                raise ControlPanelValidationError(
+                    "published report declares a strategy history contract; "
+                    "--strategy-history-contract is required for HPR HWM parity"
+                )
+        else:
             # The published report carries the same strategy_history_contract
             # identity as a candidate, and _compute_panel_numerical_hwm needs
             # that source's epoch HPR receipts to mirror the report's numerical
