@@ -4889,6 +4889,15 @@ def build_panel_candidate(
         validate_private_stage_target(output_root, output_root, portfolio_root)
     recipe = _recipe(recipe_path)
     legacy_panel = _path(recipe["legacy_panel"]["path"], "legacy panel")
+    strategy_history_contract = (
+        _path(recipe["correlation_source_root"]["path"], "correlation source root")
+        / "dependence-source.json"
+    )
+    strategy_history_arguments = (
+        ("--strategy-history-contract", str(strategy_history_contract))
+        if strategy_history_contract.is_file()
+        else ()
+    )
     epoch_identity = _epoch_manifest_panel_identity(recipe)
     if epoch_identity is None:
         account_strategy_manifest = _stage_account_strategy_manifest(
@@ -4937,6 +4946,7 @@ def build_panel_candidate(
         "build",
         "--report-root",
         str(report_root),
+        *strategy_history_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -4971,6 +4981,7 @@ def build_panel_candidate(
         "verify",
         "--report-root",
         str(report_root),
+        *strategy_history_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5068,6 +5079,15 @@ def publish_panel(
         validate_private_stage_target(output_root, output_root, portfolio_root)
     recipe = _recipe(recipe_path)
     legacy_panel = _path(recipe["legacy_panel"]["path"], "legacy panel")
+    strategy_history_contract = (
+        _path(recipe["correlation_source_root"]["path"], "correlation source root")
+        / "dependence-source.json"
+    )
+    strategy_history_arguments = (
+        ("--strategy-history-contract", str(strategy_history_contract))
+        if strategy_history_contract.is_file()
+        else ()
+    )
     epoch_identity = _epoch_manifest_panel_identity(recipe)
     if recipe["schema_version"] == 9 and account_strategy_manifest is None:
         account_strategy_manifest = _stage_account_strategy_manifest(
@@ -5134,6 +5154,7 @@ def publish_panel(
         "verify",
         "--report-root",
         str(report_root),
+        *strategy_history_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5179,6 +5200,7 @@ def publish_panel(
         "publish",
         "--report-root",
         str(report_root),
+        *strategy_history_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",

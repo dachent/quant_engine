@@ -6633,7 +6633,13 @@ def _parity_values_equal(actual: object, expected: object) -> bool:
         with localcontext() as context:
             context.prec = 15
             context.rounding = ROUND_HALF_EVEN
-            return +Decimal(str(actual)) == +Decimal(str(expected))
+            # Round the exact binary values, not str(): repr gives the shortest
+            # round-tripping decimal, so one operand can present as 16 digits
+            # ending in 5 and take banker's rounding at the 15-digit boundary
+            # while its neighbour presents 17 digits and rounds up.  Two doubles
+            # one ULP apart -- which is all Excel's own round-trip guarantees --
+            # then compare unequal at the very boundary this is meant to absorb.
+            return +Decimal(actual) == +Decimal(expected)
     return actual == expected
 
 

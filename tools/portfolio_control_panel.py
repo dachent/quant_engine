@@ -9730,6 +9730,23 @@ def _rendered_files(
         report, report_identity, report_path = _current_report(report_root)
         verified_strategy_history: dict[str, Any] | None = None
         strategy_history_binding: tuple[Path, str] | None = None
+        if strategy_history_contract_path is not None:
+            # The published report carries the same strategy_history_contract
+            # identity as a candidate, and _compute_panel_numerical_hwm needs
+            # that source's epoch HPR receipts to mirror the report's numerical
+            # HWM.  The baseline projection never carries them, so without this
+            # the published path reports NO_HWM_INPUTS while the report reports
+            # MISSING_DAILY_POINT_CAN_HIDE_PEAK and HWM parity cannot hold for
+            # any portfolio with a declared holding-period span.
+            verified_strategy_history, strategy_history_binding = (
+                _verified_strategy_history_contract(
+                    strategy_history_contract_path,
+                    _object(
+                        report.get("strategy_history_contract"),
+                        "report.strategy_history_contract",
+                    ),
+                )
+            )
     else:
         report, report_identity, report_path = _report_candidate(report_candidate)
         if strategy_history_contract_path is None:
