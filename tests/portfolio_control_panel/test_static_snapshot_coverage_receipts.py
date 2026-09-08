@@ -674,4 +674,11 @@ def test_static_receipts_pass_the_public_producer_and_independent_verifier(
         bundle.payloads["verification/independent-verification.json"]
     )
     assert staged_report["status"] == "VERIFIED"
-    assert staged_report["as_of_date"] == data_date
+    # The staged manifest is schema 9, and portfolio_control_panel.py:9031 takes
+    # a schema-9 bundle's data date from `calculation_cutoff_date` and requires
+    # the bundled report artifact to carry it.  A current-product manifest is
+    # computed through the crosswalk cutoff, which is earlier than either
+    # catalog snapshot whenever the required series end on different days, so
+    # the report is dated by the boundary it verified rather than by the newest
+    # input it read.
+    assert staged_report["as_of_date"] == cutoff_date

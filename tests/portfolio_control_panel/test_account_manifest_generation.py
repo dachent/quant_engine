@@ -26025,7 +26025,13 @@ def test_independent_verifier_accepts_later_baseline_receipt_capped_at_ledger_da
     report = verifier_module.IndependentAccountManifestVerifier().verify(
         _mixed_verifier_inputs(verifier_module, selected), payloads
     )
-    assert json.loads(report)["as_of_date"] == "2026-02-03"
+    # The manifest is schema 9 and is computed through the provider boundary,
+    # 2026-02-01, even though the later baseline snapshot carries 2026-02-03.
+    # portfolio_control_panel.py:9031 takes a schema-9 bundle's data date from
+    # `calculation_cutoff_date` and requires the bundled report to carry it, so
+    # the report is dated by the boundary it verified -- which is the boundary
+    # this test's own name states.
+    assert json.loads(report)["as_of_date"] == "2026-02-01"
     coverage = json.loads(payloads["authority/account-flow-coverage.json"])
     assert {
         row["requested_end"]

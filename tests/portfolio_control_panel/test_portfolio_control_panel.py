@@ -6134,7 +6134,13 @@ def test_hwm_coverage_adds_named_exception_when_material_nav_is_missing() -> Non
 def test_mvp_exposes_all_nine_accepted_views() -> None:
     template = (panel.DEFAULT_TEMPLATE_ROOT / "index.html").read_text(encoding="utf-8")
 
-    assert template.count('class="nav-item') == 9
+    # Nine views exist, but only eight are primary navigation.  The frozen
+    # candidate catalog is dated research context that cannot change current
+    # strategies, readiness or allocation, so it is reachable only through the
+    # appendix link: interaction_qa.mjs:878 requires zero [data-nav="candidates"]
+    # elements anywhere in the document, and the last published generation
+    # (41f41362) shipped none.
+    assert template.count('class="nav-item') == 8
     for view in (
         "command",
         "capital",
@@ -6143,13 +6149,14 @@ def test_mvp_exposes_all_nine_accepted_views() -> None:
         "attribution",
         "dependence",
         "weekly",
-        "candidates",
         "data",
     ):
         assert f'data-nav="{view}"' in template
+    assert 'data-nav="candidates"' not in template
     assert 'data-view="signals"' in template
     assert 'data-view="candidates"' in template
     assert 'id="candidate-appendix-button"' in template
+    assert 'data-open-view="candidates"' in template
 
 
 def test_allocation_target_and_drift_fail_closed_without_admitted_target() -> None:
@@ -11094,6 +11101,13 @@ def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_recei
     }
     monkeypatch.setattr(builder, "_recipe", lambda _path: recipe)
     monkeypatch.setattr(builder, "_panel_financial_arguments", lambda *_args: [])
+    # Resolving the verified dependence source needs a real correlation source
+    # root, which create_recipe requires of every recipe it validates but this
+    # synthetic seam recipe does not carry.
+    dependence_source = tmp_path / "correlation" / "dependence-source.json"
+    monkeypatch.setattr(
+        builder, "_history_contract_path", lambda _recipe: dependence_source
+    )
     panel_result: dict[str, Any] = {}
 
     def real_panel_tool(*args: object, **_kwargs: object) -> dict[str, Any]:
@@ -11112,6 +11126,9 @@ def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_recei
         if command == "qa":
             return panel.validate_qa(candidate, qa)
         assert command == "publish"
+        assert args[args.index("--strategy-history-contract") + 1] == str(
+            dependence_source
+        )
         receipt_path = Path(str(args[args.index("--coordinated-release-receipt") + 1]))
         receipt_bytes = receipt_path.read_bytes()
         assert receipt_bytes == canonical_json_bytes(json.loads(receipt_bytes))
