@@ -213,13 +213,13 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
         "315471b602bb4ce61cd854195162708ab188f6e08d6597deb9b9da11ca5bce44"
     ),
     "current_generation_id": (
-        "314cb445ff0f83c1a6c5e7ac26bb93405fe123c3d37dc742069755cc0c50dca8"
+        "f128bcc30e24779f55096c1002df08a54a2cb32f872bbb984d26ff306568c356"
     ),
     "current_manifest_sha256": (
-        "d44ac9484e4cbcb43626dcc669ff22f5eef5d8eed9569a0a0a547918648bfa20"
+        "518371f1663d9d21e744a0b1553db8a2dd8f89c1ed56e5e74e8a9507d800f069"
     ),
     "current_catalog_sha256": (
-        "f52199b936414af2e38e65264731a272f42c7d58493167708f9ebbe929682390"
+        "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829"
     ),
     "legacy_generation_id": (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
