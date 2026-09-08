@@ -473,6 +473,27 @@ class IndependentVerifierInputs:
         return max(_selected_date(self.provider_ledger), _selected_date(self.baseline))
 
     @property
+    def verified_data_as_of_date(self) -> date:
+        """Return the boundary through which this verification actually applies.
+
+        A current-product manifest is computed through the crosswalk's
+        `calculation_cutoff_date`, which may be earlier than either catalog
+        snapshot when the required series end on different days.  The report
+        must be dated by what it verified, not by the newest input it read.
+        """
+
+        if self.current_epoch_crosswalk is None:
+            return self.generation_as_of_date
+        payload = self.current_epoch_crosswalk.json_object("current epoch crosswalk")
+        cutoff = payload.get("calculation_cutoff_date")
+        if not isinstance(cutoff, str):
+            _fail()
+        try:
+            return date.fromisoformat(cutoff)
+        except ValueError:
+            _fail()
+
+    @property
     def _is_mixed(self) -> bool:
         return self.receipt_authority is not None
 
@@ -6401,7 +6422,7 @@ def _assemble_mixed_report(
     return {
         "schema_version": 3,
         "artifact_id": _REPORT_PATH,
-        "as_of_date": selected.generation_as_of_date.isoformat(),
+        "as_of_date": selected.verified_data_as_of_date.isoformat(),
         "status": "VERIFIED",
         "verifier": verifier_artifact,
         "selected_source_identities": selected_source_identities,
