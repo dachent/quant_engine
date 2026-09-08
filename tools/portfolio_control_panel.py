@@ -12457,14 +12457,17 @@ def _parser() -> argparse.ArgumentParser:
                     "build and verify only, never a published CURRENT generation"
                 ),
             )
-            command.add_argument(
-                "--strategy-history-contract",
-                type=Path,
-                help=(
-                    "Packaged dependence-source.json matching the report's "
-                    "strategy-history contract; required with --report-candidate"
-                ),
-            )
+        command.add_argument(
+            "--strategy-history-contract",
+            type=Path,
+            help=(
+                "Packaged dependence-source.json matching the report's "
+                "strategy-history contract.  Required with --report-candidate, "
+                "and on a published report whenever it declares one: publish "
+                "recomputes the numerical HWM through the same path as build "
+                "and verify, and needs that source's epoch HPR receipts."
+            ),
+        )
         command.add_argument("--legacy-panel", type=Path, required=True)
         command.add_argument(
             "--template-root", type=Path, default=DEFAULT_TEMPLATE_ROOT
