@@ -5204,7 +5204,6 @@ def publish_panel(
         "publish",
         "--report-root",
         str(report_root),
-        *strategy_history_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
