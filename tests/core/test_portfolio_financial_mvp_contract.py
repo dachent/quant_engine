@@ -4361,3 +4361,36 @@ def test_hand_edit_of_generated_view_is_detected(tmp_path: Path) -> None:
     summary.write_text("hand edited\n", encoding="utf-8")
     with pytest.raises(contract_tool.FinancialMvpContractError, match="view drift"):
         contract_tool.check_views(contract, tmp_path)
+
+
+def test_retained_account_input_transition_survives_epoch_manifest_binding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Binding an epoch manifest must not change which contract this is.
+
+    The retained account-input contract carries its own provider-ledger
+    transition, selected by comparing the contract digest against
+    ``_RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST``.  Binding an epoch manifest
+    raises ``contract_schema_version`` to 7 and adds ``epoch_manifest_source``,
+    which moves that digest.  Comparing the bound digest silently drops the
+    override for every bound copy, so the retained contract cannot be used in
+    any epoch-bound pipeline.
+    """
+
+    contract = _contract()
+    monkeypatch.setattr(
+        contract_tool,
+        "_RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST",
+        contract_tool.contract_digest(contract),
+    )
+    bound = copy.deepcopy(contract)
+    bound["contract_schema_version"] = 7
+    bound["epoch_manifest_source"] = {"probe": True}
+
+    # The override binds this contract to the retained lineage, which is not the
+    # lineage its own receipts name, so the mismatch proves the override applied.
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="provider-ledger history lineage differs from the admitted transition",
+    ):
+        contract_tool._verify_strategy_version_history_evidence(bound)
