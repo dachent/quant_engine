@@ -63,9 +63,12 @@ def assert_decomposition_vertical(vertical) -> None:
             assert set(lens["surfaces"]) == {"STATIC", "DYNAMIC_FLS"}
             for surface in lens["surfaces"].values():
                 for source in surface["sources"]:
-                    assert Path(source["plan_spec"]["spec_path"]).is_relative_to(
-                        vertical.plan_bundles[mode]
-                    )
+                    # The recorded path is relative to the plan bundle so the
+                    # report identity does not change when publish snapshots the
+                    # bundle to a temporary root.
+                    spec_path = Path(source["plan_spec"]["spec_path"])
+                    assert not spec_path.is_absolute()
+                    assert (vertical.plan_bundles[mode] / spec_path).is_file()
 
     with pytest.raises(panel.ControlPanelValidationError, match="hybrid.*plan"):
         panel._decomposition_lenses(

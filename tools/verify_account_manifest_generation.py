@@ -2097,7 +2097,9 @@ def _report_source_metadata(
     if type(selected) is not IndependentVerifierInputs:
         _fail()
     try:
-        generated_date = selected.generation_as_of_date.isoformat()
+        # The verifier artifact is dated by the boundary the report covers, so
+        # it stays consistent with the report's own as_of_date.
+        generated_date = selected.verified_data_as_of_date.isoformat()
         verifier_artifact = _subject_artifact(
             selected.independent_verifier_source.contents,
             "tools/verify_account_manifest_generation.py",
