@@ -374,18 +374,21 @@
       $("#invested-capital-daily-table").innerHTML = tableMarkup([["Date"], ["Strategy"], ["Invested capital", "numeric"]], [emptyRow(3)]);
       return;
     }
-    $("#invested-capital-status").textContent = statusText(capital.status);
+    $("#invested-capital-status").innerHTML = statusText(capital.status);
     renderKpis("#invested-capital-kpis", [
       ["Current invested capital", currency(capital.current_aggregate_usd), `Complete through ${formatDate(capital.complete_through)}`],
       ["Daily history", integer.format(capital.daily_aggregate.length), "Verified portfolio-total observations"],
-      ["Authority", statusText(capital.authority_profile), `Policy ${safe(capital.policy_id)}`],
+      ["Authority", humanStatus(capital.authority_profile), `Policy ${safe(capital.policy_id)}`],
     ]);
     const currentRows = [
       ...capital.current_by_strategy.map((row) => `<tr><td>${safe(row.strategy_id)}</td><td class="numeric">${currency(row.invested_capital_usd)}</td></tr>`),
       `<tr><td><strong>Portfolio total</strong></td><td class="numeric"><strong>${currency(capital.current_aggregate_usd)}</strong></td></tr>`,
     ];
     $("#invested-capital-current-table").innerHTML = tableMarkup([["Strategy"], ["Invested capital", "numeric"]], currentRows);
-    const selectedRows = selectedContextStrategy === "ALL" ? [] : capital.daily_by_strategy.filter((row) => row.strategy_id === selectedContextStrategy);
+    const selectedStrategyId = selectedContextStrategy === "ALL"
+      ? null
+      : (strategyByName(selectedContextStrategy)?.strategy_id ?? selectedContextStrategy);
+    const selectedRows = selectedStrategyId === null ? [] : capital.daily_by_strategy.filter((row) => row.strategy_id === selectedStrategyId);
     const dailyRows = [
       ...capital.daily_aggregate.map((row) => `<tr><td>${safe(formatDate(row.date))}</td><td>Portfolio total</td><td class="numeric">${currency(row.invested_capital_usd)}</td></tr>`),
       ...selectedRows.map((row) => `<tr><td>${safe(formatDate(row.date))}</td><td>${safe(row.strategy_id)}</td><td class="numeric">${currency(row.invested_capital_usd)}</td></tr>`),
