@@ -12051,6 +12051,7 @@ def publish_panel(
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+        strategy_history_contract_path=strategy_history_contract_path,
     )
     reproduced_meta = _object(reproduced_data.get("meta"), "panel meta")
     authority_profile = reproduced_meta.get("account_manifest_authority_profile")
