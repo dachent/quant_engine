@@ -830,7 +830,7 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:c398d18f559b30abe323a3ccb0b3b53331bcdedca465006c9c17b05700b846a3",
+    "version_ref": "account-live-segment:1ea12119e24f31fc6820593af890f80026955d7de05676433db18a5d0025a529",
     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
     "receipt_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
    },
@@ -1024,13 +1024,13 @@
     "evidence_layer": "ACCOUNT_LIVE",
     "frequency": "DAILY",
     "mode_admission": "INCLUDE_SELECTED_LIVE",
-    "observed_end": "2026-08-13",
+    "observed_end": "2026-09-03",
     "observed_start": "2025-12-07",
     "return_basis": "NET",
-    "return_observations": 246,
+    "return_observations": 267,
     "return_type": "TOTAL",
     "segment_id": "robuxio-crypto:account-live",
-    "sha256": "c398d18f559b30abe323a3ccb0b3b53331bcdedca465006c9c17b05700b846a3",
+    "sha256": "1ea12119e24f31fc6820593af890f80026955d7de05676433db18a5d0025a529",
     "source_generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
     "source_generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
     "source_id": "matrixport-account-generation",
@@ -1250,7 +1250,7 @@
     "interval": {
      "assignment_date": "2025-08-26",
      "observed_start": "2025-12-07",
-     "observed_end": "2026-08-13",
+     "observed_end": "2026-09-03",
      "effective_start": "2025-12-06",
      "effective_end": null
     },
@@ -3414,7 +3414,7 @@
    "evidence_layer": "ACCOUNT_LIVE",
    "interval": {
     "observed_start": "2025-12-07",
-    "observed_end": "2026-08-13",
+    "observed_end": "2026-09-03",
     "effective_start": "2025-12-06",
     "effective_end": null,
     "splice_policy": "ACCOUNT_LIVE_STARTS_AT_ACCEPTED_SUBSCRIPTION; EARLIER_PROVIDER_ROWS_RETAIN_PROVIDER_LAYER; DAILY_METRICS_ADMIT_EXACT_ADJACENT_CALENDAR_DAY_RETURNS_ONLY; EPOCH_TWR_ADMITS_ONLY_HASH_BOUND_DECLARED_TWO_DAY_NO_FLOW_SPANS_WITH_EXACT_NAV_AND_SHARE_ENDPOINTS; USD_CONVERSION_USES_OWNER_APPROVED_EXACT_EVENT_AND_NAV_DATE_FX_THROUGH_2026_09_03; NEVER_FILL_OR_INFER_CALENDAR_CLOSURE"
