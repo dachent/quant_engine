@@ -11939,6 +11939,7 @@ def publish_panel(
     private_stage_root: Path | None = None,
     portfolio_root: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    strategy_history_contract_path: Path | None = None,
 ) -> dict[str, Any]:
     governed_hwm_supplied = any(
         value is not None
@@ -12005,6 +12006,7 @@ def publish_panel(
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+        strategy_history_contract_path=strategy_history_contract_path,
     )
     if verification.get("all_passed") is not True:
         raise ControlPanelValidationError(
@@ -12798,6 +12800,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else {}
                 ),
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                strategy_history_contract_path=args.strategy_history_contract,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)
