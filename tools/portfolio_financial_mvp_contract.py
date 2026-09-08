@@ -171,7 +171,9 @@ _RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST: Final = (
 _MATRIXPORT_OWNER_EPOCH: Final = {
     "effective_start": "2025-12-06",
     "observed_start": "2025-12-07",
-    "observed_end": "2026-09-03",
+    # Bounded by the ledger's AUTHORITATIVE ACCOUNT_LIVE admission, not by the
+    # RECONCILIATION_ONLY provider-live series that runs to 2026-09-03.
+    "observed_end": "2026-08-13",
 }
 _MATRIXPORT_GAP_SPAN_RECEIPTS: Final = (
     {
@@ -441,10 +443,14 @@ _HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
     ),
 }
 _HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final = {
+    # The provider ledger admits robuxio ACCOUNT_LIVE as AUTHORITATIVE only through
+    # 2026-08-13; after that only a RECONCILIATION_ONLY provider-live series exists.
+    # The account window therefore ends 2026-08-13, which is what the retained
+    # account-input contract already asserts.
     "robuxio-crypto:account-live": {
-        "observed_end": "2026-09-03",
-        "return_observations": 267,
-        "sha256": "1ea12119e24f31fc6820593af890f80026955d7de05676433db18a5d0025a529",
+        "observed_end": "2026-08-13",
+        "return_observations": 246,
+        "sha256": "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
     },
     "grizzlybears-vtma:account-live": {
         "observed_end": "2026-09-02",
