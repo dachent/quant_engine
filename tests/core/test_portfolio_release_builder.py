@@ -4092,6 +4092,15 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
         return {"status": "PASS"}
 
     monkeypatch.setattr(builder, "_tool", fake_tool)
+    # An epoch triplet is bindable only against the baseline generation it
+    # was selected from, which the builder reads from the baseline root's
+    # published pointer.  This test stages no baseline publication, so stand
+    # the resolver in the way the surrounding tests do.
+    monkeypatch.setattr(
+        builder,
+        "_published_generation",
+        lambda root: ("b" * 64, root / "generations" / ("b" * 64)),
+    )
     monkeypatch.setattr(
         builder,
         "_require_exact_report_delivery",
@@ -4137,6 +4146,9 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
         assert call[call.index("--epoch-manifest-generation-root") + 1] == str(
             generation_root
         )
+    bind = next(call for call in calls if call[1] == "bind-workbook-evidence")
+    assert bind[bind.index("--baseline-root") + 1] == str(tmp_path / "baseline")
+    assert bind[bind.index("--baseline-generation-id") + 1] == "b" * 64
     assert result["epoch_manifest_generation_id"] == manifest.generation_id
     assert result["epoch_manifest_artifact"]["sha256"] == PREWIRE_MANIFEST_SHA256
 
@@ -4872,6 +4884,13 @@ def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
         "_recipe",
         lambda _path: {"legacy_panel": {"path": str(tmp_path / "legacy")}},
     )
+    # The panel takes the verified dependence source by name; resolving it needs
+    # a real correlation source root, which this argument-forwarding test does
+    # not stage.
+    dependence_source = tmp_path / "correlation" / "dependence-source.json"
+    monkeypatch.setattr(
+        builder, "_history_contract_path", lambda _recipe: dependence_source
+    )
     monkeypatch.setattr(builder, "_epoch_manifest_panel_identity", lambda _recipe: None)
     monkeypatch.setattr(
         builder, "_stage_account_strategy_manifest", lambda *_args: None
@@ -4901,6 +4920,8 @@ def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
         ):
             index = call.index(flag)
             assert call[index + 1] == str(path)
+        index = call.index("--strategy-history-contract")
+        assert call[index + 1] == str(dependence_source)
 
 
 @pytest.mark.parametrize("relation", ("equal", "inside", "contains"))

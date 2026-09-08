@@ -4227,6 +4227,16 @@ def build_workbook(
             str(epoch_crosswalk_path),
             "--epoch-manifest-generation-root",
             str(epoch_manifest_generation_root),
+            # an epoch triplet is only bindable against the baseline it was
+            # selected from; portfolio_report requires the root and its
+            # generation identity together, and only, whenever the triplet is
+            # present.  A baseline root that is not carrying a published
+            # pointer is legitimate without a triplet, so resolving the
+            # identity belongs inside this branch too.
+            "--baseline-root",
+            str(baseline_root),
+            "--baseline-generation-id",
+            _published_generation(baseline_root)[0],
         )
     if not XLSX_RUNTIME.is_file() or not XLSX_CLI.is_file():
         raise VerticalBuildError("xlsx-win durable runtime is unavailable")
@@ -4297,13 +4307,6 @@ def build_workbook(
         str(result_path),
         "--validation-result",
         str(validation_path),
-        # an epoch triplet is only bindable against the baseline it was selected
-        # from; portfolio_report requires the root and its generation identity
-        # together whenever the triplet is present
-        "--baseline-root",
-        str(baseline_root),
-        "--baseline-generation-id",
-        _published_generation(baseline_root)[0],
         *epoch_arguments,
         "--evidence",
         str(binding_path),
