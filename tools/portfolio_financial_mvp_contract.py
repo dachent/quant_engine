@@ -439,7 +439,7 @@ _HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
     ),
     "robuxio-crypto:account-live": (
         "cb9609449f633b3077fd2dbfd3cd67764f61290c0d0dee682368d235cae77b13",
-        "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+        "c398d18f559b30abe323a3ccb0b3b53331bcdedca465006c9c17b05700b846a3",
     ),
 }
 _HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final = {
@@ -450,7 +450,7 @@ _HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final = {
     "robuxio-crypto:account-live": {
         "observed_end": "2026-08-13",
         "return_observations": 246,
-        "sha256": "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+        "sha256": "c398d18f559b30abe323a3ccb0b3b53331bcdedca465006c9c17b05700b846a3",
     },
     "grizzlybears-vtma:account-live": {
         "observed_end": "2026-09-02",

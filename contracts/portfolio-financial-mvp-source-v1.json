@@ -830,7 +830,7 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+    "version_ref": "account-live-segment:c398d18f559b30abe323a3ccb0b3b53331bcdedca465006c9c17b05700b846a3",
     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
     "receipt_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
    },
@@ -1030,7 +1030,7 @@
     "return_observations": 246,
     "return_type": "TOTAL",
     "segment_id": "robuxio-crypto:account-live",
-    "sha256": "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
+    "sha256": "c398d18f559b30abe323a3ccb0b3b53331bcdedca465006c9c17b05700b846a3",
     "source_generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
     "source_generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
     "source_id": "matrixport-account-generation",
