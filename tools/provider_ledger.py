@@ -4080,7 +4080,13 @@ def _portfolio123_provider_returns(
 
         equity_table = pq.read_table(
             equity_path,
-            columns=["_entity_id", "Date", "Total Equity", "Cash Added"],
+            columns=[
+                "_entity_id",
+                "Date",
+                "Total Equity",
+                "Cash Added",
+                "100 USD Ret",
+            ],
         )
     except Exception as exc:
         raise ProviderLedgerError("Portfolio123 equity curve is unreadable") from exc
@@ -4127,6 +4133,12 @@ def _portfolio123_provider_returns(
     equity_observations: dict[str, dict[date, tuple[Decimal, Decimal]]] = {
         entity_id: {} for entity_id in selected
     }
+    # P123's own "value of 100 invested" index. Unlike Total Equity it accrues
+    # dividends before the pay date, so it is the provider's return measure
+    # rather than a reconstruction of it.
+    return_index: dict[str, dict[date, Decimal]] = {
+        entity_id: {} for entity_id in selected
+    }
     for row in equity_table.to_pylist():
         entity_id = str(row.get("_entity_id") or "")
         if entity_id not in equity_observations:
@@ -4143,6 +4155,17 @@ def _portfolio123_provider_returns(
                 "Portfolio123 equity curve has conflicting duplicate dates"
             )
         equity_observations[entity_id][observed] = equity_observation
+        raw_index = str(row.get("100 USD Ret") or "").strip()
+        if raw_index:
+            level = _decimal(raw_index, "Portfolio123 return index")
+            if level <= 0:
+                raise ProviderLedgerError("Portfolio123 return index must be positive")
+            prior_level = return_index[entity_id].get(observed)
+            if prior_level is not None and prior_level != level:
+                raise ProviderLedgerError(
+                    "Portfolio123 return index has conflicting duplicate dates"
+                )
+            return_index[entity_id][observed] = level
 
     for row in performance_rows:
         entity_id = str(row.get("_entity_id") or "")
@@ -4179,25 +4202,22 @@ def _portfolio123_provider_returns(
             # performance curve alone.  This is single-source: there is no
             # managed series to cross-check against, which the distinct
             # return_basis records rather than hides.
-            ordered_book = sorted(equity_observations[entity_id].items())
-            if len(ordered_book) < 2:
+            # Total Equity excludes accrued dividends and steps on the pay
+            # date, so deriving from it disagrees with the provider's own
+            # measure by up to 1.4 percentage points on dividend days. Take
+            # P123's index instead, which is also flow-neutral: it reads 100.00
+            # on the funding row, so `Cash Added` needs no adjustment here.
+            ordered_book = sorted(return_index[entity_id].items())
+            if len(ordered_book) < 2 or len(ordered_book) != len(
+                equity_observations[entity_id]
+            ):
                 raise ProviderLedgerError(
                     f"Portfolio123 provider path is unavailable: {entity_id}"
                 )
-            for (_prior_observed, prior_values), (observed, values) in zip(
+            for (_prior_observed, prior_level), (observed, level) in zip(
                 ordered_book, ordered_book[1:], strict=False
             ):
-                prior_equity, _prior_added = prior_values
-                equity, cash_added = values
-                # P123 `Cash Added` semantics are recorded as UNRESOLVED and are
-                # deliberately excluded from every return formula, so an
-                # interval carrying a flow cannot be derived here rather than
-                # being adjusted under a convention nobody has established.
-                if cash_added != 0:
-                    raise ProviderLedgerError(
-                        "Portfolio123 book interval has an unresolved cash flow"
-                    )
-                period_return = equity / prior_equity - Decimal(1)
+                period_return = level / prior_level - Decimal(1)
                 if period_return <= -1:
                     raise ProviderLedgerError("Portfolio123 provider return is invalid")
                 result.append(
@@ -4208,7 +4228,7 @@ def _portfolio123_provider_returns(
                         "generation_id": manifest.generation_id,
                         "provider_id": "portfolio123",
                         "return": format(period_return, "f"),
-                        "return_basis": "OBSERVED_STRATEGY_EQUITY_CURVE",
+                        "return_basis": "OBSERVED_STRATEGY_RETURN_INDEX",
                         "return_type": "TOTAL",
                         "strategy_id": str(p123["strategy_id"]),
                         "strategy_name": str(p123["strategy_name"]),

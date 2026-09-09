@@ -389,7 +389,10 @@ def _p123_provider_generation(
             tables / "har_managed_performance.parquet"
         )
     pq.write_table(
-        pa.Table.from_pylist(equity_rows), paths["tables/har_equity_curve.parquet"]
+        pa.Table.from_pylist(
+            [{**row, "100 USD Ret": row.get("100 USD Ret", "")} for row in equity_rows]
+        ),
+        paths["tables/har_equity_curve.parquet"],
     )
     pq.write_table(
         pa.Table.from_pylist([{"entity_id": entity_id, "entity_kind": entity_kind}]),
@@ -6124,18 +6127,23 @@ def test_p123_owned_book_derives_returns_from_its_strategy_equity_curve(
                 "Date": "2026-01-02",
                 "Total Equity": "100",
                 "Cash Added": "100",
+                "100 USD Ret": "100",
             },
             {
+                # Total Equity moves differently from the index on a dividend
+                # pay date; the index is the provider's own measure and wins.
                 "_entity_id": "exact-eu-model",
                 "Date": "2026-01-05",
-                "Total Equity": "125",
+                "Total Equity": "140",
                 "Cash Added": "0",
+                "100 USD Ret": "125",
             },
             {
                 "_entity_id": "exact-eu-model",
                 "Date": "2026-01-06",
                 "Total Equity": "100",
                 "Cash Added": "0",
+                "100 USD Ret": "100",
             },
         ],
         entity_kind="book",
@@ -6149,7 +6157,7 @@ def test_p123_owned_book_derives_returns_from_its_strategy_equity_curve(
         ("2026-01-06", "-0.2"),
     ]
     assert {row["return_basis"] for row in returned} == {
-        "OBSERVED_STRATEGY_EQUITY_CURVE"
+        "OBSERVED_STRATEGY_RETURN_INDEX"
     }
 
 
@@ -6184,8 +6192,12 @@ def test_p123_missing_managed_capture_still_fails_for_a_subscribed_strategy(
         ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
 
 
-def test_p123_book_interval_with_a_cash_flow_fails_closed(tmp_path: Path) -> None:
-    """P123 cash-added semantics are UNRESOLVED, so a flow cannot be adjusted."""
+def test_p123_book_without_a_provider_index_fails_closed(tmp_path: Path) -> None:
+    """A book whose capture has no return index cannot be derived at all.
+
+    This is the real p123-eu case: entity 1832531 has 7,218 equity rows and a
+    blank `100 USD Ret` on every one of them.
+    """
 
     provider_ref, manifest, evidence = _p123_provider_generation(
         tmp_path,
@@ -6195,17 +6207,21 @@ def test_p123_book_interval_with_a_cash_flow_fails_closed(tmp_path: Path) -> Non
                 "Date": "2026-01-02",
                 "Total Equity": "100",
                 "Cash Added": "0",
+                "100 USD Ret": "",
             },
             {
                 "_entity_id": "exact-eu-model",
                 "Date": "2026-01-05",
-                "Total Equity": "225",
-                "Cash Added": "100",
+                "Total Equity": "125",
+                "Cash Added": "0",
+                "100 USD Ret": "",
             },
         ],
         entity_kind="book",
         include_performance_table=False,
     )
 
-    with pytest.raises(ledger.ProviderLedgerError, match="unresolved cash flow"):
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="provider path is unavailable"
+    ):
         ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
