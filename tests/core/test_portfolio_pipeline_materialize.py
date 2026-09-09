@@ -2774,12 +2774,30 @@ def test_applicable_correction_and_rederive_receipt_are_runtime_authorities(
             _fixture_conformance(product, resolved_registry, forged)
 
 
-def test_generation_date_rule_allows_dated_ledger_only() -> None:
-    earlier = date(2026, 7, 31)
+def test_generation_date_rule_separates_data_date_from_calculation_date() -> None:
+    """Data-dated roles may lag the release; the panel is generated at release.
 
-    assert materializer._generation_as_of_allowed("ledger", earlier, AS_OF)
-    assert not materializer._generation_as_of_allowed("baseline", earlier, AS_OF)
-    assert not materializer._generation_as_of_allowed("ledger", date(2026, 8, 4), AS_OF)
+    The ledger, the baseline and the report all carry the date of the market data
+    they cover, which precedes the date the release is calculated -- the
+    release-QC planning date is pinned to the public factor capture date, and the
+    plan records `complete_through` and `evaluated_on` separately with an age
+    threshold between them.  Requiring the baseline and report to equal the
+    release date, while exempting the ledger they are computed from, made every
+    release unsatisfiable whenever the market data was even one day behind.
+    """
+
+    earlier = date(2026, 7, 31)
+    later = date(2026, 8, 4)
+
+    for role in ("ledger", "baseline", "report"):
+        assert materializer._generation_as_of_allowed(role, earlier, AS_OF)
+        assert materializer._generation_as_of_allowed(role, AS_OF, AS_OF)
+        # A generation dated after the release it belongs to is still refused.
+        assert not materializer._generation_as_of_allowed(role, later, AS_OF)
+
+    # The panel is produced at release time and carries no upstream data date.
+    assert materializer._generation_as_of_allowed("panel", AS_OF, AS_OF)
+    assert not materializer._generation_as_of_allowed("panel", earlier, AS_OF)
 
 
 def _hybrid_panel_lenses(analytics_ids: dict[str, str]) -> dict[str, object]:
@@ -3887,3 +3905,30 @@ def test_generated_semantic_command_declares_exact_gate_file(
         str(output_root / "stages" / "report-candidate")
         in nodes["build-workbook"]["declared_writes"]
     )
+
+
+def test_governed_hwm_assessment_binds_the_admitted_input_contract() -> None:
+    """The HWM kernel is bound to the contract the ledger was admitted under.
+
+    A contract can never pin a ledger built from itself, so the admitted input
+    contract and the product contract legitimately differ.  The admission receipt
+    names the former; `portfolio_report` and `portfolio_control_panel` already
+    reconcile this by retargeting the current policy onto that input.  This pins
+    the same reconciliation in the materialiser, which previously passed the
+    product contract and the raw policy and so could never verify a governed
+    result built against the admitted input.
+    """
+    import inspect
+
+    source = inspect.getsource(materializer._hwm_input_authority_assessment)
+    assert "governed_hwm_input_policy(" in source
+    assert "product_contract_bytes=input_contract_bytes" in source
+    assert "policy_bytes=governed_policy_bytes" in source
+
+    signature = inspect.signature(materializer._hwm_input_authority_assessment)
+    assert "input_contract_path" in signature.parameters
+    # Absent a separate input contract the behaviour is unchanged: the product
+    # contract is still what gets verified.
+    assert signature.parameters["input_contract_path"].default is None
+    for entry in (materializer.build_spec, materializer.build_production_spec):
+        assert "financial_input_contract_path" in inspect.signature(entry).parameters

@@ -1226,17 +1226,7 @@ def _verify_strategy_version_history_evidence(
 
     ledger_transition = dict(_HISTORY_PROVIDER_LEDGER_TRANSITION)
     segment_projections = dict(_HISTORY_SEGMENT_PROJECTION_OVERRIDES)
-    # The retained account-input contract keeps its own provider-ledger
-    # transition.  Identify it by its unbound digest: binding an epoch manifest
-    # raises contract_schema_version to 7 and adds epoch_manifest_source, which
-    # moves the digest and would otherwise drop the override for every bound
-    # copy of the same contract.
-    unbound = {
-        key: value for key, value in contract.items() if key != "epoch_manifest_source"
-    }
-    if "epoch_manifest_source" in contract:
-        unbound["contract_schema_version"] = 6
-    if contract_digest(unbound) == _RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST:
+    if contract_digest(contract) == _RETAINED_ACCOUNT_INPUT_CONTRACT_DIGEST:
         ledger_transition.update(
             {
                 "current_generation_id": "f82267636c1909337e6efb8711aeed345283db6f3388ff1ff3a481ee3f4a803c",

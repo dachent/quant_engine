@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Final, Mapping, Sequence, cast
 
 from quant_engine.core import (
     CoverageStatus,
@@ -29,6 +29,10 @@ from quant_engine.portfolio_ledger import (
 )
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
+)
+from portfolio_invested_capital import (
+    CapitalValidationError,
+    governed_hwm_input_policy,
 )
 
 
@@ -1384,6 +1388,7 @@ def _derive_product_authority(
     candidate_generation_ids: Mapping[str, str],
     correction_registry_path: Path | None = None,
     rederive_registry_path: Path | None = None,
+    input_contract_path: Path | None = None,
 ) -> dict[str, Any]:
     vertical = _load(vertical_path, "vertical recipe")
     if vertical.get("schema_version") not in {7, 9, 10}:
@@ -1416,12 +1421,70 @@ def _derive_product_authority(
     provider_generation = _absolute(
         provider_definition.get("path"), "provider ledger generation"
     )
+    # The admit-or-declare receipt records the contract the ledger was ADMITTED
+    # under -- the retained account-input contract, which cannot be the product
+    # contract because a contract never pins a ledger built from itself.  Compare
+    # the receipt against the contract that produced it, while the product
+    # authority (lineage, source matrix, conformance) stays the product contract.
+    # With no separate input contract supplied this is the product contract,
+    # exactly as before.
+    admission_contract = contract
+    admission_raw_sha256 = contract_raw_sha256
+    admission_semantic_sha256 = contract_semantic_sha256
+    admission_census_sha256 = census_sha256
+    if input_contract_path is not None:
+        resolved_input = input_contract_path.resolve()
+        try:
+            admission_contract = module.load_contract(
+                resolved_input, CURRENT_STRATEGY_REGISTRY, FINANCIAL_MVP_SCHEMA
+            )
+            admission_semantic_sha256 = module.contract_digest(admission_contract)
+            admission_census_sha256 = module.census_digest(
+                admission_contract["current_census"]
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise MaterializationError(
+                "financial MVP admitted input authority is invalid"
+            ) from exc
+        admission_raw_sha256, _ = _sha(resolved_input)
+
+        # Matching the receipt is not sufficient: an old admission marked READY
+        # could otherwise be paired with a current conformance contract that
+        # governs different accounts or different financial rules.  This is the
+        # predicate `portfolio_invested_capital.resolve_financial_input_authority`
+        # already applies to the same current/retained pair -- identical product,
+        # census, REQUIRED strategy set and invested-capital policy.
+        def _required_strategy_ids(source: Mapping[str, Any]) -> set[str]:
+            return {
+                str(row["strategy_id"])
+                for row in source["strategies"]
+                if row.get("product_requirement") == "REQUIRED"
+            }
+
+        try:
+            compatible = (
+                contract["product"]["product_id"]
+                == admission_contract["product"]["product_id"]
+                and census_sha256 == admission_census_sha256
+                and _required_strategy_ids(contract)
+                == _required_strategy_ids(admission_contract)
+                and module.invested_capital_policy_digest(contract)
+                == module.invested_capital_policy_digest(admission_contract)
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MaterializationError(
+                "financial MVP admitted input authority is invalid"
+            ) from exc
+        if not compatible:
+            raise MaterializationError(
+                "admitted input differs from the current calculation authority"
+            )
     admission = _provider_admission_authority(
         provider_generation,
-        contract,
-        contract_raw_sha256=contract_raw_sha256,
-        contract_semantic_sha256=contract_semantic_sha256,
-        census_sha256=census_sha256,
+        admission_contract,
+        contract_raw_sha256=admission_raw_sha256,
+        contract_semantic_sha256=admission_semantic_sha256,
+        census_sha256=admission_census_sha256,
     )
     correction_registry = _authority_registry(
         correction_registry_path,
@@ -1454,7 +1517,7 @@ def _derive_product_authority(
         source_matrix_sha256=source_matrix_sha256,
         invested_capital_policy_sha256=invested_sha256,
     )
-    return {
+    derived: dict[str, Any] = {
         "contract": _file_definition(contract_path),
         "conformance": conformance,
         "correction_registry": correction_registry,
@@ -1469,6 +1532,11 @@ def _derive_product_authority(
         "rederive_registry": rederive_registry,
         "source_matrix": _file_definition(source_matrix_path),
     }
+    if input_contract_path is not None:
+        # Recorded so _recipe can re-derive the identical block: the admission
+        # comparison depends on which contract the ledger was admitted under.
+        derived["input_contract"] = _file_definition(input_contract_path.resolve())
+    return derived
 
 
 def _product_gate_payload(authority: Mapping[str, Any]) -> dict[str, Any]:
@@ -1494,6 +1562,7 @@ def _hwm_input_authority_assessment(
     hwm_bindings: Mapping[str, Path] | None = None,
     hwm_source_paths: Mapping[str, Path] | None = None,
     assessment_path: Path | None = None,
+    input_contract_path: Path | None = None,
 ) -> dict[str, Any]:
     """Independently assess the actual governed PORT-HWM-4 result bundle."""
 
@@ -1595,13 +1664,35 @@ def _hwm_input_authority_assessment(
         raise MaterializationError("governed HWM admission receipt binding differs")
     try:
         result = _load(paths["governed_result"], "governed HWM result")
+        # The governed HWM kernel is bound to the contract the provider ledger was
+        # ADMITTED under, which the admission receipt names.  That is the retained
+        # account-input contract, not the product contract this spec's authority
+        # gate carries: a contract can never pin a ledger built from itself, so the
+        # two legitimately differ.  portfolio_report.py:5312 and
+        # portfolio_control_panel.py:8219 already reconcile this the same way --
+        # retarget the current policy onto the admitted input and require the
+        # result to agree.  With no separate input contract supplied this is the
+        # product contract, exactly as before.
+        input_contract_bytes = (
+            contract_path if input_contract_path is None else input_contract_path
+        ).read_bytes()
+        try:
+            governed_policy_bytes = governed_hwm_input_policy(
+                HWM_GOVERNED_POLICY.read_bytes(),
+                input_contract_bytes,
+                _text(result.get("policy_sha256"), "governed HWM policy sha256"),
+            )
+        except CapitalValidationError as exc:
+            raise MaterializationError(
+                "governed HWM policy differs from the admitted input authority"
+            ) from exc
         accepted = verify_governed_hwm_result(
             result,
             paths["input_generation"].read_bytes(),
             calendar_bytes=paths["calendar_authority"].read_bytes(),
             input_receipt_bytes=paths["provider_admission_receipt"].read_bytes(),
-            policy_bytes=HWM_GOVERNED_POLICY.read_bytes(),
-            product_contract_bytes=contract_path.read_bytes(),
+            policy_bytes=governed_policy_bytes,
+            product_contract_bytes=input_contract_bytes,
             performance_policy_bytes=HWM_PERFORMANCE_POLICY.read_bytes(),
             legacy_policy_bytes=HWM_LEGACY_POLICY.read_bytes(),
         )
@@ -1631,6 +1722,8 @@ def _hwm_input_authority_assessment(
             hwm_source_paths,
             contract_path=contract_path,
             bindings=paths,
+            input_contract_path=input_contract_path,
+            policy_bytes=governed_policy_bytes,
         )
     except (ImportError, OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         raise MaterializationError(
@@ -1651,6 +1744,11 @@ def _hwm_input_authority_assessment(
         "result_sha256": definitions["governed_result"]["sha256"],
         "state": "AVAILABLE",
         "unresolved_source_ids": remaining_source_ids,
+        **(
+            {}
+            if input_contract_path is None
+            else {"input_contract": _file_definition(input_contract_path)}
+        ),
     }
 
 
@@ -1660,6 +1758,7 @@ def _product_gate_rows(
     *,
     hwm_bindings: Mapping[str, Path] | None = None,
     hwm_source_paths: Mapping[str, Path] | None = None,
+    input_contract_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     payload = _product_gate_payload(authority)
     product_bytes = canonical_json_bytes(payload)
@@ -1687,6 +1786,7 @@ def _product_gate_rows(
             hwm_bindings=hwm_bindings,
             hwm_source_paths=hwm_source_paths,
             assessment_path=hwm_path,
+            input_contract_path=input_contract_path,
         )
     )
     _write_exact(hwm_path, hwm_bytes)
@@ -1798,7 +1898,9 @@ def _recipe(path: Path) -> dict[str, Any]:
         _generation_expectation(expected[role], role)
     if schema_version == 3:
         authority = recipe["product_authority"]
-        if not isinstance(authority, dict) or set(authority) != {
+        # input_contract is present only when the ledger was admitted under a
+        # contract other than the product contract.
+        if not isinstance(authority, dict) or set(authority) - {"input_contract"} != {
             "contract",
             "conformance",
             "correction_registry",
@@ -1841,6 +1943,13 @@ def _recipe(path: Path) -> dict[str, Any]:
             {role: str(expected[role]["generation_id"]) for role in RELEASE_ROLES},
             registry_paths["correction_registry"],
             registry_paths["rederive_registry"],
+            input_contract_path=(
+                None
+                if authority.get("input_contract") is None
+                else _validate_file_definition(
+                    authority["input_contract"], "financial MVP admitted input"
+                )
+            ),
         )
         if canonical_json_bytes(authority) != canonical_json_bytes(expected_authority):
             raise MaterializationError("financial MVP product authority is stale")
@@ -2324,6 +2433,7 @@ def create_recipe(
     financial_mvp_source_matrix: Path | None = None,
     correction_registry: Path | None = None,
     rederive_receipt_registry: Path | None = None,
+    financial_input_contract: Path | None = None,
 ) -> dict[str, Any]:
     vertical = _load(vertical_recipe.resolve(), "vertical recipe")
     if vertical.get("schema_version") not in {6, 7, 9, 10}:
@@ -2389,6 +2499,7 @@ def create_recipe(
             if rederive_receipt_registry is None
             else rederive_receipt_registry.resolve()
         ),
+        input_contract_path=financial_input_contract,
     )
     _write_exact(output, canonical_json_bytes(payload))
     _recipe(output)
@@ -2514,14 +2625,35 @@ def _result(
     checks[name] = {"evidence": evidence, "status": "PASS" if passed else "FAIL"}
 
 
+_DATA_DATED_RELEASE_ROLES: Final = frozenset({"ledger", "baseline", "report"})
+
+
 def _generation_as_of_allowed(
     role: str, generation_as_of: date, release_as_of: date
 ) -> bool:
-    """Allow a dated source ledger while keeping derived release roles exact-date."""
+    """Allow data-dated roles to lag the release; keep the panel exact-date.
+
+    The ledger is dated by the market data it carries, which legitimately lags
+    the evaluation date -- the release-QC planning date is pinned to the public
+    factor capture date, and the plan records `complete_through` and
+    `evaluated_on` as separate fields with an age threshold between them.
+
+    The baseline and the report are computed from that same ledger and inherit
+    its data date, so holding them to the exact release date while exempting
+    their own source was inconsistent: with the market data three days behind
+    the capture date, no release could satisfy both rules at once.  Freshness is
+    still asserted -- `_freshness_*` compares every assessment row's
+    `evaluated_on` against the release date, and the plan's own age threshold
+    still applies -- so the boundary is enforced where the data age is actually
+    measured rather than duplicated here.
+
+    The panel is generated at release time and carries no upstream data date, so
+    it stays exact.
+    """
 
     return (
         generation_as_of <= release_as_of
-        if role == "ledger"
+        if role in _DATA_DATED_RELEASE_ROLES
         else generation_as_of == release_as_of
     )
 
@@ -2704,7 +2836,9 @@ def semantic(
             generation_rows[role] = {
                 "actual_generation_id": actual["generation_id"],
                 "as_of_rule": (
-                    "ON_OR_BEFORE_RELEASE" if role == "ledger" else "EXACT_RELEASE_DATE"
+                    "ON_OR_BEFORE_RELEASE"
+                    if role in _DATA_DATED_RELEASE_ROLES
+                    else "EXACT_RELEASE_DATE"
                 ),
                 "expected_generation_id": expected["generation_id"],
                 "file_count": len(inventory_files),
@@ -2853,6 +2987,33 @@ def semantic(
             output_root / "stages" / "analytics" / root_name
         )
         analytics_ids[name] = generation_id
+    # The perimeter is whatever the accepted product requires, not a constant.
+    # This was pinned at 9 by 24101f4, when the product had nine REQUIRED
+    # strategies; it now has seven, so the literal rejected every correct
+    # release.  Derive it from the same conformance block the HWM assessment
+    # uses for required_strategy_ids.
+    # Schema-2 recovery recipes carry no conformance block; those keep the
+    # report-versus-panel equality without an absolute count.
+    authority_block = recipe.get("product_authority")
+    conformance_block = (
+        authority_block.get("conformance")
+        if isinstance(authority_block, Mapping)
+        else None
+    )
+    conformance_strategies = (
+        conformance_block.get("strategies")
+        if isinstance(conformance_block, Mapping)
+        else None
+    )
+    required_strategy_count = (
+        sum(
+            1
+            for row in conformance_strategies
+            if isinstance(row, Mapping) and row.get("product_requirement") == "REQUIRED"
+        )
+        if isinstance(conformance_strategies, list)
+        else None
+    )
     panel_meta = panel.get("meta")
     report_hwm = report.get("hwm_summary")
     panel_hwm = panel.get("hwm_summary")
@@ -2865,9 +3026,11 @@ def semantic(
         and all(panel_meta.get(key) == value for key, value in analytics_ids.items())
         and isinstance(report_hwm, dict)
         and report_hwm == panel_hwm
-        and len(report.get("strategy_summary", []))
-        == len(panel.get("strategies", []))
-        == 9
+        and len(report.get("strategy_summary", [])) == len(panel.get("strategies", []))
+        and (
+            required_strategy_count is None
+            or len(panel.get("strategies", [])) == required_strategy_count
+        )
     )
     _result(
         checks,
@@ -3087,6 +3250,7 @@ def build_spec(
     hwm_governed_input_generation_path: Path | None = None,
     hwm_governed_calendar_authority_path: Path | None = None,
     hwm_governed_admission_receipt_path: Path | None = None,
+    financial_input_contract_path: Path | None = None,
 ) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
     if recipe.get("schema_version") != 3:
@@ -3443,6 +3607,7 @@ def build_spec(
             hwm_governed_calendar_authority_path,
             hwm_governed_admission_receipt_path,
         ),
+        input_contract_path=financial_input_contract_path,
     )
     manifest_gate_path = spec_path.with_name(
         "financial-epoch-manifest-input-authority.json"
@@ -3629,6 +3794,7 @@ def build_production_spec(
     hwm_governed_calendar_authority_path: Path | None = None,
     hwm_governed_admission_receipt_path: Path | None = None,
     financial_artifacts_path: Path | None = None,
+    financial_input_contract_path: Path | None = None,
 ) -> dict[str, Any]:
     """Bind a verified private proof to the stable production root set."""
 
@@ -3932,6 +4098,7 @@ def build_production_spec(
     product_gates = _product_gate_rows(
         production_product_authority,
         product_path,
+        input_contract_path=financial_input_contract_path,
         hwm_bindings=hwm_bindings,
         hwm_source_paths=(
             _production_hwm_source_paths(
@@ -4040,6 +4207,7 @@ def _parser() -> argparse.ArgumentParser:
     recipe_cmd.add_argument("--financial-mvp-source-matrix", type=Path, required=True)
     recipe_cmd.add_argument("--correction-registry", type=Path)
     recipe_cmd.add_argument("--rederive-receipt-registry", type=Path)
+    recipe_cmd.add_argument("--financial-input-contract", type=Path)
     recipe_cmd.add_argument("--output", type=Path, required=True)
     spec_cmd = commands.add_parser("spec")
     spec_cmd.add_argument("--recipe", type=Path, required=True)
@@ -4049,6 +4217,13 @@ def _parser() -> argparse.ArgumentParser:
     spec_cmd.add_argument("--hwm-governed-input-generation", type=Path)
     spec_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
     spec_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
+    spec_cmd.add_argument(
+        "--financial-input-contract",
+        type=Path,
+        help=(
+            "The contract the provider ledger was ADMITTED under, when it differs from the product contract. Defaults to the product contract."
+        ),
+    )
     production_cmd = commands.add_parser("production-spec")
     production_cmd.add_argument("--recipe", type=Path, required=True)
     production_cmd.add_argument("--prepared-root", type=Path, required=True)
@@ -4060,6 +4235,13 @@ def _parser() -> argparse.ArgumentParser:
     production_cmd.add_argument("--hwm-governed-input-generation", type=Path)
     production_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
     production_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
+    production_cmd.add_argument(
+        "--financial-input-contract",
+        type=Path,
+        help=(
+            "The contract the provider ledger was ADMITTED under, when it differs from the product contract. Defaults to the product contract."
+        ),
+    )
     production_cmd.add_argument(
         "--financial-artifacts",
         type=Path,
@@ -4089,6 +4271,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.financial_mvp_source_matrix,
                 args.correction_registry,
                 args.rederive_receipt_registry,
+                args.financial_input_contract,
             )
         elif args.command == "spec":
             result = build_spec(
@@ -4099,6 +4282,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.hwm_governed_input_generation,
                 args.hwm_governed_calendar_authority,
                 args.hwm_governed_admission_receipt,
+                args.financial_input_contract,
             )
         else:
             result = build_production_spec(
@@ -4113,6 +4297,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.hwm_governed_calendar_authority,
                 args.hwm_governed_admission_receipt,
                 args.financial_artifacts,
+                args.financial_input_contract,
             )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"portfolio-pipeline: FAIL: {exc}", file=sys.stderr)

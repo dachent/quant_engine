@@ -970,8 +970,43 @@
               }
             }
           }
+        },
+        "crosswalk": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "size_bytes", "schema"],
+          "properties": {
+            "path": {"const": "authority/account-assignment-crosswalk.json"},
+            "sha256": {"$ref": "#/$defs/hash"},
+            "size_bytes": {"type": "integer", "minimum": 1},
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "version"],
+              "properties": {
+                "name": {"const": "account-strategy-current-epoch-crosswalk"},
+                "version": {"const": "1"}
+              }
+            }
+          }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"artifact": {"properties": {"schema": {"properties": {"version": {"const": "8"}}}}}},
+            "required": ["artifact"]
+          },
+          "then": {"not": {"required": ["crosswalk"]}}
+        },
+        {
+          "if": {
+            "properties": {"artifact": {"properties": {"schema": {"properties": {"version": {"const": "9"}}}}}},
+            "required": ["artifact"]
+          },
+          "then": {"required": ["crosswalk"]}
+        }
+      ]
     },
     "verified_bundle_producer_readiness": {
       "type": "object",

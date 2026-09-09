@@ -8967,6 +8967,36 @@ def _epoch_manifest_source_from_bundle(
             },
         },
     }
+    # A schema-9 bundle carries the assignment crosswalk as a subject, and
+    # portfolio_financial_mvp_contract.epoch_manifest_source_from_bundle -- the copy
+    # the release builder records in the recipe -- includes it.  Omitting it here
+    # made the panel attest to a narrower identity than the recipe states, which
+    # portfolio_pipeline_materialize.py:2354 compares for equality.  Retained
+    # schema-8 bundles carry no crosswalk and are unchanged.
+    #
+    # Record what the bundle carries rather than re-validating its completeness:
+    # the contract binder already rejects a schema-9 bundle with no crosswalk, and
+    # the equality comparison above still fails closed on a genuinely missing one.
+    crosswalk_matches = (
+        tuple(
+            entry
+            for entry in bundle.manifest.artifacts
+            if entry.artifact_id == _EPOCH_MANIFEST_ACCOUNT_ASSIGNMENT_CROSSWALK_PATH
+        )
+        if schema_version == 9
+        else ()
+    )
+    if len(crosswalk_matches) == 1:
+        crosswalk = crosswalk_matches[0]
+        source["crosswalk"] = {
+            "path": _EPOCH_MANIFEST_ACCOUNT_ASSIGNMENT_CROSSWALK_PATH,
+            "sha256": crosswalk.sha256,
+            "size_bytes": crosswalk.size_bytes,
+            "schema": {
+                "name": crosswalk.schema_name,
+                "version": crosswalk.schema_version,
+            },
+        }
     return value, source
 
 

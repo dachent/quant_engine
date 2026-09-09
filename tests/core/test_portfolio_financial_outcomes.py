@@ -461,3 +461,56 @@ def test_capital_ledger_binding_requires_a_bound_ledger(tmp_path):
         match="capital provider ledger binding is absent",
     ):
         outcomes.verify_selected_capital_ledger(absent, selected / "generation.json")
+
+
+def test_hwm_replay_uses_the_admitted_input_authority(tmp_path, monkeypatch):
+    """The replay must rebuild under the authority the observations were built under.
+
+    A provider ledger admitted under a retained input contract carries a policy
+    retargeted onto that contract.  Replaying with the product contract and the
+    repository policy rebuilds different bytes and rejects a correct generation.
+    """
+    import portfolio_hwm_selected_inputs as builder
+
+    product = tmp_path / "product-contract.json"
+    product.write_bytes(b'{"product": 1}')
+    retained = tmp_path / "retained-input-contract.json"
+    retained.write_bytes(b'{"retained": 1}')
+    generation = tmp_path / "input-generation.json"
+    generation.write_bytes(b'{"rebuilt": true}')
+    bindings = {
+        "calendar_authority": tmp_path / "calendar.json",
+        "input_generation": generation,
+        "provider_admission_receipt": tmp_path / "receipt.json",
+    }
+    retargeted = b'{"retargeted": "policy"}'
+    observed: list[dict[str, object]] = []
+
+    def _build(**kwargs):
+        observed.append(kwargs)
+        return {"rebuilt": True}
+
+    monkeypatch.setattr(builder, "build_selected_hwm_inputs", _build)
+
+    resolved = outcomes.verify_selected_hwm_generation(
+        {},
+        contract_path=product,
+        bindings=bindings,
+        input_contract_path=retained,
+        policy_bytes=retargeted,
+    )
+    assert resolved == {
+        "portfolio-calendars",
+        "portfolio-fx-rates",
+        "portfolio-security-master",
+    }
+    assert observed[-1]["financial_contract_path"] == retained
+    assert observed[-1]["hwm_policy_bytes"] == retargeted
+
+    # With no admitted input supplied the product contract and the repository
+    # policy still govern, exactly as before.
+    outcomes.verify_selected_hwm_generation(
+        {}, contract_path=product, bindings=bindings
+    )
+    assert observed[-1]["financial_contract_path"] == product
+    assert observed[-1]["hwm_policy_bytes"] is None

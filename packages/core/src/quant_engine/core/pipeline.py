@@ -1227,11 +1227,48 @@ def _verify_financial_outcomes(spec: PipelineSpec) -> dict[str, Any]:
         sys.path[:] = previous_path
 
 
+def _governed_hwm_input_policy(
+    current_policy_bytes: bytes,
+    input_contract_bytes: bytes,
+    expected_policy_sha256: str,
+) -> bytes:
+    """Retarget the repository HWM policy onto the exact admitted input contract."""
+
+    tools_root = Path(__file__).resolve().parents[5] / "tools"
+    path = tools_root / "portfolio_invested_capital.py"
+    if path.is_symlink() or not path.is_file():
+        raise PipelineValidationError("governed HWM policy authority is unavailable")
+    module_spec = importlib.util.spec_from_file_location(
+        "quant_engine_pipeline_invested_capital_policy", path
+    )
+    if module_spec is None or module_spec.loader is None:
+        raise PipelineValidationError("governed HWM policy authority is unavailable")
+    module = importlib.util.module_from_spec(module_spec)
+    previous_path = list(sys.path)
+    try:
+        sys.path.insert(0, str(tools_root))
+        module_spec.loader.exec_module(module)
+        retargeted = module.governed_hwm_input_policy(
+            current_policy_bytes, input_contract_bytes, expected_policy_sha256
+        )
+    except (ImportError, OSError, ValueError, KeyError, TypeError) as exc:
+        raise PipelineValidationError(
+            "governed HWM policy differs from the admitted input authority"
+        ) from exc
+    finally:
+        sys.path[:] = previous_path
+    if not isinstance(retargeted, bytes):
+        raise PipelineValidationError("governed HWM policy authority is invalid")
+    return retargeted
+
+
 def _verify_selected_hwm_sources(
     spec: PipelineSpec,
     *,
     contract_path: Path,
     bindings: Mapping[str, Path],
+    input_contract_path: Path | None = None,
+    policy_bytes: bytes | None = None,
 ) -> set[str]:
     """Replay the selected account-ledger HWM inputs through the product verifier."""
 
@@ -1254,6 +1291,8 @@ def _verify_selected_hwm_sources(
             source_paths,
             contract_path=contract_path,
             bindings=bindings,
+            input_contract_path=input_contract_path,
+            policy_bytes=policy_bytes,
         )
         if not isinstance(resolved, set) or any(
             not isinstance(source_id, str) for source_id in resolved
@@ -1589,6 +1628,17 @@ def _expected_hwm_input_authority(
     bindings = _object(assessment["bindings"], "financial MVP HWM bindings")
     if set(bindings) != _HWM_BINDING_KEYS:
         raise PipelineValidationError("financial MVP HWM binding roles differ")
+    # A provider ledger ADMITTED under a retained input contract carries that
+    # contract here.  The replay below must use the authority the observations
+    # were built under, not the later product contract this spec also gates.
+    admitted_contract = assessment.get("input_contract")
+    admitted_contract_path = (
+        None
+        if admitted_contract is None
+        else _file_definition_value(
+            admitted_contract, "financial MVP HWM input contract"
+        )[0]
+    )
     resolved: dict[str, tuple[Path, str, int]] = {
         key: _file_definition_value(bindings[key], f"financial MVP HWM {key}")
         for key in sorted(_HWM_BINDING_KEYS)
@@ -1632,15 +1682,25 @@ def _expected_hwm_input_authority(
             verify_governed_hwm_result,
         )
 
+        input_contract_bytes = (
+            contract_gate.path
+            if admitted_contract_path is None
+            else admitted_contract_path
+        ).read_bytes()
+        governed_policy_bytes = _governed_hwm_input_policy(
+            (
+                repository_root / "contracts" / "portfolio-hwm-policy-v4.json"
+            ).read_bytes(),
+            input_contract_bytes,
+            _hash(result.get("policy_sha256"), "governed HWM policy sha256"),
+        )
         verified = verify_governed_hwm_result(
             result,
             input_path.read_bytes(),
             calendar_bytes=calendar_path.read_bytes(),
             input_receipt_bytes=provider_path.read_bytes(),
-            policy_bytes=(
-                repository_root / "contracts" / "portfolio-hwm-policy-v4.json"
-            ).read_bytes(),
-            product_contract_bytes=contract_gate.path.read_bytes(),
+            policy_bytes=governed_policy_bytes,
+            product_contract_bytes=input_contract_bytes,
             performance_policy_bytes=(
                 repository_root / "contracts" / "portfolio-performance-policy-v1.json"
             ).read_bytes(),
@@ -1667,6 +1727,8 @@ def _expected_hwm_input_authority(
         spec,
         contract_path=contract_gate.path,
         bindings={key: value[0] for key, value in resolved.items()},
+        input_contract_path=admitted_contract_path,
+        policy_bytes=governed_policy_bytes,
     )
     remaining_source_ids = sorted(set(unresolved_source_ids) - set(resolved_source_ids))
     if remaining_source_ids or provider_admission.get("product_readiness") != (
@@ -1683,6 +1745,7 @@ def _expected_hwm_input_authority(
         "result_sha256": resolved["governed_result"][1],
         "state": "AVAILABLE",
         "unresolved_source_ids": remaining_source_ids,
+        **({} if admitted_contract is None else {"input_contract": admitted_contract}),
     }
 
 
