@@ -1447,6 +1447,38 @@ def _derive_product_authority(
                 "financial MVP admitted input authority is invalid"
             ) from exc
         admission_raw_sha256, _ = _sha(resolved_input)
+
+        # Matching the receipt is not sufficient: an old admission marked READY
+        # could otherwise be paired with a current conformance contract that
+        # governs different accounts or different financial rules.  This is the
+        # predicate `portfolio_invested_capital.resolve_financial_input_authority`
+        # already applies to the same current/retained pair -- identical product,
+        # census, REQUIRED strategy set and invested-capital policy.
+        def _required_strategy_ids(source: Mapping[str, Any]) -> set[str]:
+            return {
+                str(row["strategy_id"])
+                for row in source["strategies"]
+                if row.get("product_requirement") == "REQUIRED"
+            }
+
+        try:
+            compatible = (
+                contract["product"]["product_id"]
+                == admission_contract["product"]["product_id"]
+                and census_sha256 == admission_census_sha256
+                and _required_strategy_ids(contract)
+                == _required_strategy_ids(admission_contract)
+                and module.invested_capital_policy_digest(contract)
+                == module.invested_capital_policy_digest(admission_contract)
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MaterializationError(
+                "financial MVP admitted input authority is invalid"
+            ) from exc
+        if not compatible:
+            raise MaterializationError(
+                "admitted input differs from the current calculation authority"
+            )
     admission = _provider_admission_authority(
         provider_generation,
         admission_contract,

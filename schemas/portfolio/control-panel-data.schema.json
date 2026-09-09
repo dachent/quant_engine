@@ -990,7 +990,23 @@
             }
           }
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"artifact": {"properties": {"schema": {"properties": {"version": {"const": "8"}}}}}},
+            "required": ["artifact"]
+          },
+          "then": {"not": {"required": ["crosswalk"]}}
+        },
+        {
+          "if": {
+            "properties": {"artifact": {"properties": {"schema": {"properties": {"version": {"const": "9"}}}}}},
+            "required": ["artifact"]
+          },
+          "then": {"required": ["crosswalk"]}
+        }
+      ]
     },
     "verified_bundle_producer_readiness": {
       "type": "object",
