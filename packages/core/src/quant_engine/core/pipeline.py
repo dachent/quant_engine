@@ -1683,8 +1683,9 @@ def _expected_hwm_input_authority(
         )
 
         input_contract_bytes = (
-            contract_gate.path if admitted_contract_path is None else
-            admitted_contract_path
+            contract_gate.path
+            if admitted_contract_path is None
+            else admitted_contract_path
         ).read_bytes()
         governed_policy_bytes = _governed_hwm_input_policy(
             (

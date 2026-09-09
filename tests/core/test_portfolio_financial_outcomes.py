@@ -462,6 +462,7 @@ def test_capital_ledger_binding_requires_a_bound_ledger(tmp_path):
     ):
         outcomes.verify_selected_capital_ledger(absent, selected / "generation.json")
 
+
 def test_hwm_replay_uses_the_admitted_input_authority(tmp_path, monkeypatch):
     """The replay must rebuild under the authority the observations were built under.
 
