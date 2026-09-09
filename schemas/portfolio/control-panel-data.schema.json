@@ -970,6 +970,25 @@
               }
             }
           }
+        },
+        "crosswalk": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "size_bytes", "schema"],
+          "properties": {
+            "path": {"const": "authority/account-assignment-crosswalk.json"},
+            "sha256": {"$ref": "#/$defs/hash"},
+            "size_bytes": {"type": "integer", "minimum": 1},
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "version"],
+              "properties": {
+                "name": {"const": "account-strategy-current-epoch-crosswalk"},
+                "version": {"const": "1"}
+              }
+            }
+          }
         }
       }
     },
