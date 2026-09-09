@@ -469,6 +469,22 @@ def _exact_file(root: Path, relative: Path, name: str) -> Path:
     return io_path
 
 
+def _optional_file(root: Path, relative: Path, name: str) -> Path | None:
+    """Resolve a file that may legitimately be absent from this generation.
+
+    Containment, symlink rejection and long-path handling are delegated to
+    _exact_file so the two cannot drift; only absence is treated as a valid
+    outcome, leaving the caller to decide whether it is required.
+    """
+
+    candidate = root.resolve() / relative
+    if candidate.is_symlink():
+        raise ProviderLedgerError(f"{name} must be a regular file")
+    if not candidate.is_file():
+        return None
+    return _exact_file(root, relative, name)
+
+
 def _verify_hash(path: Path, expected: object, name: str) -> tuple[str, int]:
     digest, size = hash_file(path)
     if digest != _text(expected, f"{name}.sha256"):
@@ -4021,7 +4037,11 @@ def _portfolio123_provider_returns(
         Path("tables/har_equity_curve.parquet"),
         "Portfolio123 equity curve",
     )
-    performance_path = _exact_file(
+    # `app_investment_perfdata` exists only for managed strategies the owner
+    # SUBSCRIBES to.  An owner-authored book is captured as
+    # `strategy_<id>_perf.csv` and never appears in that table, so the file is
+    # required only when some selected entity is actually a managed investment.
+    performance_path = _optional_file(
         generation_root,
         Path("tables/har_managed_performance.parquet"),
         "Portfolio123 managed performance",
@@ -4047,9 +4067,10 @@ def _portfolio123_provider_returns(
         equity_artifact.size_bytes,
     ):
         raise ProviderLedgerError("Portfolio123 equity curve differs from its manifest")
-    if performance_artifact is None or hash_file(performance_path) != (
-        performance_artifact.sha256,
-        performance_artifact.size_bytes,
+    if performance_path is not None and (
+        performance_artifact is None
+        or hash_file(performance_path)
+        != (performance_artifact.sha256, performance_artifact.size_bytes)
     ):
         raise ProviderLedgerError(
             "Portfolio123 managed performance differs from its manifest"
@@ -4063,15 +4084,42 @@ def _portfolio123_provider_returns(
         )
     except Exception as exc:
         raise ProviderLedgerError("Portfolio123 equity curve is unreadable") from exc
+    entities_path = _exact_file(
+        generation_root, Path("tables/entities.parquet"), "Portfolio123 entities"
+    )
+    entities_artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "tables/entities.parquet"
+        ),
+        None,
+    )
+    if entities_artifact is None or hash_file(entities_path) != (
+        entities_artifact.sha256,
+        entities_artifact.size_bytes,
+    ):
+        raise ProviderLedgerError("Portfolio123 entities differ from their manifest")
     try:
-        performance_table = pq.read_table(
-            performance_path,
-            columns=["_entity_id", "field", "value"],
-        )
+        entity_kinds = {
+            str(row.get("entity_id")): str(row.get("entity_kind") or "")
+            for row in pq.read_table(
+                entities_path, columns=["entity_id", "entity_kind"]
+            ).to_pylist()
+        }
     except Exception as exc:
-        raise ProviderLedgerError(
-            "Portfolio123 managed performance is unreadable"
-        ) from exc
+        raise ProviderLedgerError("Portfolio123 entities are unreadable") from exc
+    performance_rows: list[Mapping[str, Any]] = []
+    if performance_path is not None:
+        try:
+            performance_rows = pq.read_table(
+                performance_path,
+                columns=["_entity_id", "field", "value"],
+            ).to_pylist()
+        except Exception as exc:
+            raise ProviderLedgerError(
+                "Portfolio123 managed performance is unreadable"
+            ) from exc
     selected: dict[str, dict[str, str]] = {
         _text(item["provider"].get("entity_id"), "Portfolio123 entity_id"): {}
         for item in p123_rows
@@ -4096,7 +4144,7 @@ def _portfolio123_provider_returns(
             )
         equity_observations[entity_id][observed] = equity_observation
 
-    for row in performance_table.to_pylist():
+    for row in performance_rows:
         entity_id = str(row.get("_entity_id") or "")
         if entity_id not in selected:
             continue
@@ -4116,6 +4164,57 @@ def _portfolio123_provider_returns(
     for p123 in p123_rows:
         entity_id = _text(p123["provider"].get("entity_id"), "Portfolio123 entity_id")
         fields = selected[entity_id]
+        if not fields:
+            # Only an owner-authored book may take this route.  A managed
+            # investment whose capture is merely missing must still fail, or a
+            # lost file would silently downgrade it to the weaker single-source
+            # derivation instead of blocking.
+            if entity_kinds.get(entity_id) != "book":
+                raise ProviderLedgerError(
+                    f"Portfolio123 provider path is unavailable: {entity_id}"
+                )
+            # An owner-authored book has no `app_investment_perfdata` capture --
+            # that surface exists only for managed strategies the owner
+            # subscribes to -- so its provider-live series is the strategy
+            # performance curve alone.  This is single-source: there is no
+            # managed series to cross-check against, which the distinct
+            # return_basis records rather than hides.
+            ordered_book = sorted(equity_observations[entity_id].items())
+            if len(ordered_book) < 2:
+                raise ProviderLedgerError(
+                    f"Portfolio123 provider path is unavailable: {entity_id}"
+                )
+            for (_prior_observed, prior_values), (observed, values) in zip(
+                ordered_book, ordered_book[1:], strict=False
+            ):
+                prior_equity, _prior_added = prior_values
+                equity, cash_added = values
+                # P123 `Cash Added` semantics are recorded as UNRESOLVED and are
+                # deliberately excluded from every return formula, so an
+                # interval carrying a flow cannot be derived here rather than
+                # being adjusted under a convention nobody has established.
+                if cash_added != 0:
+                    raise ProviderLedgerError(
+                        "Portfolio123 book interval has an unresolved cash flow"
+                    )
+                period_return = equity / prior_equity - Decimal(1)
+                if period_return <= -1:
+                    raise ProviderLedgerError("Portfolio123 provider return is invalid")
+                result.append(
+                    {
+                        "cost": None,
+                        "date": observed.isoformat(),
+                        "evidence_layer": "PROVIDER_LIVE",
+                        "generation_id": manifest.generation_id,
+                        "provider_id": "portfolio123",
+                        "return": format(period_return, "f"),
+                        "return_basis": "OBSERVED_STRATEGY_EQUITY_CURVE",
+                        "return_type": "TOTAL",
+                        "strategy_id": str(p123["strategy_id"]),
+                        "strategy_name": str(p123["strategy_name"]),
+                    }
+                )
+            continue
         if not required_fields <= set(fields):
             raise ProviderLedgerError(
                 f"Portfolio123 provider path is unavailable: {entity_id}"

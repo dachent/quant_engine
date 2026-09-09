@@ -340,6 +340,8 @@ def _p123_provider_generation(
     performance_data: list[list[int]] | None = None,
     performance_data_json: str | None = None,
     include_performance_receipt: bool = True,
+    entity_kind: str = "strategy",
+    include_performance_table: bool = True,
 ) -> tuple[dict[str, str], GenerationManifest, list[dict[str, object]]]:
     """Stage a minimal retained-style P123 generation for ledger source tests."""
 
@@ -380,17 +382,24 @@ def _p123_provider_generation(
     ]
     paths = {
         "tables/har_equity_curve.parquet": tables / "har_equity_curve.parquet",
-        "tables/har_managed_performance.parquet": (
-            tables / "har_managed_performance.parquet"
-        ),
+        "tables/entities.parquet": tables / "entities.parquet",
     }
+    if include_performance_table:
+        paths["tables/har_managed_performance.parquet"] = (
+            tables / "har_managed_performance.parquet"
+        )
     pq.write_table(
         pa.Table.from_pylist(equity_rows), paths["tables/har_equity_curve.parquet"]
     )
     pq.write_table(
-        pa.Table.from_pylist(performance_rows),
-        paths["tables/har_managed_performance.parquet"],
+        pa.Table.from_pylist([{"entity_id": entity_id, "entity_kind": entity_kind}]),
+        paths["tables/entities.parquet"],
     )
+    if include_performance_table:
+        pq.write_table(
+            pa.Table.from_pylist(performance_rows),
+            paths["tables/har_managed_performance.parquet"],
+        )
     artifacts = tuple(
         SourceArtifact.from_path(
             path,
@@ -6094,3 +6103,109 @@ def test_internal_transfer_with_available_amount_is_counted() -> None:
     assert len(rows) == 1
     # (200 - 100) / 100 - 1 = 0 â€” the doubling is flow, not performance.
     assert ledger._observed_decimal(rows[0]["return"], "return") == 0
+
+
+def test_p123_owned_book_derives_returns_from_its_strategy_equity_curve(
+    tmp_path: Path,
+) -> None:
+    """An owned book has no managed capture, so its own curve is the source.
+
+    `app_investment_perfdata` exists only for managed strategies the owner
+    subscribes to. A book the owner authored is captured as
+    `strategy_<id>_perf.csv`, so requiring the managed table would make the
+    provider-live layer permanently unreachable for it.
+    """
+
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-02",
+                "Total Equity": "100",
+                "Cash Added": "100",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-05",
+                "Total Equity": "125",
+                "Cash Added": "0",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-06",
+                "Total Equity": "100",
+                "Cash Added": "0",
+            },
+        ],
+        entity_kind="book",
+        include_performance_table=False,
+    )
+
+    returned = ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
+
+    assert [(row["date"], row["return"]) for row in returned] == [
+        ("2026-01-05", "0.25"),
+        ("2026-01-06", "-0.2"),
+    ]
+    assert {row["return_basis"] for row in returned} == {
+        "OBSERVED_STRATEGY_EQUITY_CURVE"
+    }
+
+
+def test_p123_missing_managed_capture_still_fails_for_a_subscribed_strategy(
+    tmp_path: Path,
+) -> None:
+    """A lost managed capture must block, not fall back to the weaker curve."""
+
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-02",
+                "Total Equity": "100",
+                "Cash Added": "0",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-05",
+                "Total Equity": "125",
+                "Cash Added": "0",
+            },
+        ],
+        entity_kind="strategy",
+        include_performance_table=False,
+    )
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="provider path is unavailable"
+    ):
+        ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
+
+
+def test_p123_book_interval_with_a_cash_flow_fails_closed(tmp_path: Path) -> None:
+    """P123 cash-added semantics are UNRESOLVED, so a flow cannot be adjusted."""
+
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
+        equity_rows=[
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-02",
+                "Total Equity": "100",
+                "Cash Added": "0",
+            },
+            {
+                "_entity_id": "exact-eu-model",
+                "Date": "2026-01-05",
+                "Total Equity": "225",
+                "Cash Added": "100",
+            },
+        ],
+        entity_kind="book",
+        include_performance_table=False,
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="unresolved cash flow"):
+        ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
