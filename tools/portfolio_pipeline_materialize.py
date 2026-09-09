@@ -1388,6 +1388,7 @@ def _derive_product_authority(
     candidate_generation_ids: Mapping[str, str],
     correction_registry_path: Path | None = None,
     rederive_registry_path: Path | None = None,
+    input_contract_path: Path | None = None,
 ) -> dict[str, Any]:
     vertical = _load(vertical_path, "vertical recipe")
     if vertical.get("schema_version") not in {7, 9, 10}:
@@ -1420,12 +1421,38 @@ def _derive_product_authority(
     provider_generation = _absolute(
         provider_definition.get("path"), "provider ledger generation"
     )
+    # The admit-or-declare receipt records the contract the ledger was ADMITTED
+    # under -- the retained account-input contract, which cannot be the product
+    # contract because a contract never pins a ledger built from itself.  Compare
+    # the receipt against the contract that produced it, while the product
+    # authority (lineage, source matrix, conformance) stays the product contract.
+    # With no separate input contract supplied this is the product contract,
+    # exactly as before.
+    admission_contract = contract
+    admission_raw_sha256 = contract_raw_sha256
+    admission_semantic_sha256 = contract_semantic_sha256
+    admission_census_sha256 = census_sha256
+    if input_contract_path is not None:
+        resolved_input = input_contract_path.resolve()
+        try:
+            admission_contract = module.load_contract(
+                resolved_input, CURRENT_STRATEGY_REGISTRY, FINANCIAL_MVP_SCHEMA
+            )
+            admission_semantic_sha256 = module.contract_digest(admission_contract)
+            admission_census_sha256 = module.census_digest(
+                admission_contract["current_census"]
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise MaterializationError(
+                "financial MVP admitted input authority is invalid"
+            ) from exc
+        admission_raw_sha256, _ = _sha(resolved_input)
     admission = _provider_admission_authority(
         provider_generation,
-        contract,
-        contract_raw_sha256=contract_raw_sha256,
-        contract_semantic_sha256=contract_semantic_sha256,
-        census_sha256=census_sha256,
+        admission_contract,
+        contract_raw_sha256=admission_raw_sha256,
+        contract_semantic_sha256=admission_semantic_sha256,
+        census_sha256=admission_census_sha256,
     )
     correction_registry = _authority_registry(
         correction_registry_path,
@@ -1458,7 +1485,7 @@ def _derive_product_authority(
         source_matrix_sha256=source_matrix_sha256,
         invested_capital_policy_sha256=invested_sha256,
     )
-    return {
+    derived: dict[str, Any] = {
         "contract": _file_definition(contract_path),
         "conformance": conformance,
         "correction_registry": correction_registry,
@@ -1473,6 +1500,11 @@ def _derive_product_authority(
         "rederive_registry": rederive_registry,
         "source_matrix": _file_definition(source_matrix_path),
     }
+    if input_contract_path is not None:
+        # Recorded so _recipe can re-derive the identical block: the admission
+        # comparison depends on which contract the ledger was admitted under.
+        derived["input_contract"] = _file_definition(input_contract_path.resolve())
+    return derived
 
 
 def _product_gate_payload(authority: Mapping[str, Any]) -> dict[str, Any]:
@@ -1827,7 +1859,9 @@ def _recipe(path: Path) -> dict[str, Any]:
         _generation_expectation(expected[role], role)
     if schema_version == 3:
         authority = recipe["product_authority"]
-        if not isinstance(authority, dict) or set(authority) != {
+        # input_contract is present only when the ledger was admitted under a
+        # contract other than the product contract.
+        if not isinstance(authority, dict) or set(authority) - {"input_contract"} != {
             "contract",
             "conformance",
             "correction_registry",
@@ -1870,6 +1904,13 @@ def _recipe(path: Path) -> dict[str, Any]:
             {role: str(expected[role]["generation_id"]) for role in RELEASE_ROLES},
             registry_paths["correction_registry"],
             registry_paths["rederive_registry"],
+            input_contract_path=(
+                None
+                if authority.get("input_contract") is None
+                else _validate_file_definition(
+                    authority["input_contract"], "financial MVP admitted input"
+                )
+            ),
         )
         if canonical_json_bytes(authority) != canonical_json_bytes(expected_authority):
             raise MaterializationError("financial MVP product authority is stale")
@@ -2353,6 +2394,7 @@ def create_recipe(
     financial_mvp_source_matrix: Path | None = None,
     correction_registry: Path | None = None,
     rederive_receipt_registry: Path | None = None,
+    financial_input_contract: Path | None = None,
 ) -> dict[str, Any]:
     vertical = _load(vertical_recipe.resolve(), "vertical recipe")
     if vertical.get("schema_version") not in {6, 7, 9, 10}:
@@ -2418,6 +2460,7 @@ def create_recipe(
             if rederive_receipt_registry is None
             else rederive_receipt_registry.resolve()
         ),
+        input_contract_path=financial_input_contract,
     )
     _write_exact(output, canonical_json_bytes(payload))
     _recipe(output)
@@ -4073,6 +4116,7 @@ def _parser() -> argparse.ArgumentParser:
     recipe_cmd.add_argument("--financial-mvp-source-matrix", type=Path, required=True)
     recipe_cmd.add_argument("--correction-registry", type=Path)
     recipe_cmd.add_argument("--rederive-receipt-registry", type=Path)
+    recipe_cmd.add_argument("--financial-input-contract", type=Path)
     recipe_cmd.add_argument("--output", type=Path, required=True)
     spec_cmd = commands.add_parser("spec")
     spec_cmd.add_argument("--recipe", type=Path, required=True)
@@ -4136,6 +4180,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.financial_mvp_source_matrix,
                 args.correction_registry,
                 args.rederive_receipt_registry,
+                args.financial_input_contract,
             )
         elif args.command == "spec":
             result = build_spec(
