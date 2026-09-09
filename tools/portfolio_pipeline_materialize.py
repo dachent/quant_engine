@@ -12,7 +12,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Final, Mapping, Sequence, cast
 
 from quant_engine.core import (
     CoverageStatus,
@@ -2586,14 +2586,35 @@ def _result(
     checks[name] = {"evidence": evidence, "status": "PASS" if passed else "FAIL"}
 
 
+_DATA_DATED_RELEASE_ROLES: Final = frozenset({"ledger", "baseline", "report"})
+
+
 def _generation_as_of_allowed(
     role: str, generation_as_of: date, release_as_of: date
 ) -> bool:
-    """Allow a dated source ledger while keeping derived release roles exact-date."""
+    """Allow data-dated roles to lag the release; keep the panel exact-date.
+
+    The ledger is dated by the market data it carries, which legitimately lags
+    the evaluation date -- the release-QC planning date is pinned to the public
+    factor capture date, and the plan records `complete_through` and
+    `evaluated_on` as separate fields with an age threshold between them.
+
+    The baseline and the report are computed from that same ledger and inherit
+    its data date, so holding them to the exact release date while exempting
+    their own source was inconsistent: with the market data three days behind
+    the capture date, no release could satisfy both rules at once.  Freshness is
+    still asserted -- `_freshness_*` compares every assessment row's
+    `evaluated_on` against the release date, and the plan's own age threshold
+    still applies -- so the boundary is enforced where the data age is actually
+    measured rather than duplicated here.
+
+    The panel is generated at release time and carries no upstream data date, so
+    it stays exact.
+    """
 
     return (
         generation_as_of <= release_as_of
-        if role == "ledger"
+        if role in _DATA_DATED_RELEASE_ROLES
         else generation_as_of == release_as_of
     )
 
@@ -2776,7 +2797,9 @@ def semantic(
             generation_rows[role] = {
                 "actual_generation_id": actual["generation_id"],
                 "as_of_rule": (
-                    "ON_OR_BEFORE_RELEASE" if role == "ledger" else "EXACT_RELEASE_DATE"
+                    "ON_OR_BEFORE_RELEASE"
+                    if role in _DATA_DATED_RELEASE_ROLES
+                    else "EXACT_RELEASE_DATE"
                 ),
                 "expected_generation_id": expected["generation_id"],
                 "file_count": len(inventory_files),
