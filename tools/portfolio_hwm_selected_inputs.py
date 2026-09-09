@@ -1037,6 +1037,7 @@ def _build_selected_hwm_inputs(
     calendar_authority_path: Path,
     provider_admission_path: Path,
     hwm_policy_path: Path,
+    hwm_policy_bytes: bytes | None = None,
 ) -> Row:
     generation_path = _filesystem_path(account_manifest_generation_path)
     if generation_path.name != "generation.json":
@@ -1092,7 +1093,15 @@ def _build_selected_hwm_inputs(
         raise SelectedHwmInputError(
             "financial contract schema version is unsupported for HWM"
         )
-    policy_bytes, policy = _load_object(Path(hwm_policy_path), "HWM policy")
+    # A ledger admitted under a retained input contract carries a policy
+    # retargeted onto that contract, so its bytes are supplied directly rather
+    # than read from the repository file.  With none supplied this reads the
+    # repository policy, exactly as before.
+    if hwm_policy_bytes is None:
+        policy_bytes, policy = _load_object(Path(hwm_policy_path), "HWM policy")
+    else:
+        policy_bytes = hwm_policy_bytes
+        policy = strict_json_object(hwm_policy_bytes, label="HWM policy")
     validate_as_held_hwm_policy(policy)
     calendar_bytes, calendar = _load_object(
         Path(calendar_authority_path), "calendar authority"
@@ -1190,6 +1199,7 @@ def build_selected_hwm_inputs(
     calendar_authority_path: Path,
     provider_admission_path: Path,
     hwm_policy_path: Path,
+    hwm_policy_bytes: bytes | None = None,
 ) -> Row:
     """Build schema-1 HWM inputs from one exact verified account-manifest generation.
 
@@ -1212,6 +1222,7 @@ def build_selected_hwm_inputs(
             calendar_authority_path=calendar_authority_path,
             provider_admission_path=provider_admission_path,
             hwm_policy_path=hwm_policy_path,
+            hwm_policy_bytes=hwm_policy_bytes,
         )
     except SelectedHwmInputError:
         raise

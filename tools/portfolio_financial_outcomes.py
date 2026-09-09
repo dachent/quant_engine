@@ -389,22 +389,34 @@ def verify_selected_hwm_generation(
     *,
     contract_path: Path,
     bindings: Mapping[str, Path],
+    input_contract_path: Path | None = None,
+    policy_bytes: bytes | None = None,
 ) -> set[str]:
     """Rebuild schema-1 HWM observations from exact account source bytes.
 
     This account-NAV route verifies native USD and canonical account/strategy
     identities directly. It does not consume security prices or a foreign-FX
     series. Their frozen generic prerequisites cannot create a dependency cycle.
+
+    The replay must use the authority the observations were actually built
+    under. When the provider ledger was ADMITTED under a retained input
+    contract, that contract and the policy retargeted onto it are supplied
+    here; the product contract and repository policy would rebuild different
+    bytes and reject a correct generation. With neither supplied this is the
+    product contract and the repository policy, exactly as before.
     """
     from portfolio_hwm_selected_inputs import build_selected_hwm_inputs
     from portfolio_pipeline_materialize import HWM_GOVERNED_POLICY
 
     rebuilt = build_selected_hwm_inputs(
         **source_paths,
-        financial_contract_path=contract_path,
+        financial_contract_path=(
+            contract_path if input_contract_path is None else input_contract_path
+        ),
         calendar_authority_path=bindings["calendar_authority"],
         provider_admission_path=bindings["provider_admission_receipt"],
         hwm_policy_path=HWM_GOVERNED_POLICY,
+        hwm_policy_bytes=policy_bytes,
     )
     if rebuilt != json.loads(bindings["input_generation"].read_bytes()):
         raise FinancialOutcomeError(

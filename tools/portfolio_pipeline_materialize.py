@@ -1722,6 +1722,8 @@ def _hwm_input_authority_assessment(
             hwm_source_paths,
             contract_path=contract_path,
             bindings=paths,
+            input_contract_path=input_contract_path,
+            policy_bytes=governed_policy_bytes,
         )
     except (ImportError, OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
         raise MaterializationError(
@@ -1742,6 +1744,11 @@ def _hwm_input_authority_assessment(
         "result_sha256": definitions["governed_result"]["sha256"],
         "state": "AVAILABLE",
         "unresolved_source_ids": remaining_source_ids,
+        **(
+            {}
+            if input_contract_path is None
+            else {"input_contract": _file_definition(input_contract_path)}
+        ),
     }
 
 
