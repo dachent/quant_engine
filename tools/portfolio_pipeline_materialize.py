@@ -30,6 +30,10 @@ from quant_engine.portfolio_ledger import (
 from quant_engine.portfolio_ledger.hwm_governed_execution import (
     verify_governed_hwm_result,
 )
+from portfolio_invested_capital import (
+    CapitalValidationError,
+    governed_hwm_input_policy,
+)
 
 
 class MaterializationError(ValueError):
@@ -1494,6 +1498,7 @@ def _hwm_input_authority_assessment(
     hwm_bindings: Mapping[str, Path] | None = None,
     hwm_source_paths: Mapping[str, Path] | None = None,
     assessment_path: Path | None = None,
+    input_contract_path: Path | None = None,
 ) -> dict[str, Any]:
     """Independently assess the actual governed PORT-HWM-4 result bundle."""
 
@@ -1595,13 +1600,35 @@ def _hwm_input_authority_assessment(
         raise MaterializationError("governed HWM admission receipt binding differs")
     try:
         result = _load(paths["governed_result"], "governed HWM result")
+        # The governed HWM kernel is bound to the contract the provider ledger was
+        # ADMITTED under, which the admission receipt names.  That is the retained
+        # account-input contract, not the product contract this spec's authority
+        # gate carries: a contract can never pin a ledger built from itself, so the
+        # two legitimately differ.  portfolio_report.py:5312 and
+        # portfolio_control_panel.py:8219 already reconcile this the same way --
+        # retarget the current policy onto the admitted input and require the
+        # result to agree.  With no separate input contract supplied this is the
+        # product contract, exactly as before.
+        input_contract_bytes = (
+            contract_path if input_contract_path is None else input_contract_path
+        ).read_bytes()
+        try:
+            governed_policy_bytes = governed_hwm_input_policy(
+                HWM_GOVERNED_POLICY.read_bytes(),
+                input_contract_bytes,
+                _text(result.get("policy_sha256"), "governed HWM policy sha256"),
+            )
+        except CapitalValidationError as exc:
+            raise MaterializationError(
+                "governed HWM policy differs from the admitted input authority"
+            ) from exc
         accepted = verify_governed_hwm_result(
             result,
             paths["input_generation"].read_bytes(),
             calendar_bytes=paths["calendar_authority"].read_bytes(),
             input_receipt_bytes=paths["provider_admission_receipt"].read_bytes(),
-            policy_bytes=HWM_GOVERNED_POLICY.read_bytes(),
-            product_contract_bytes=contract_path.read_bytes(),
+            policy_bytes=governed_policy_bytes,
+            product_contract_bytes=input_contract_bytes,
             performance_policy_bytes=HWM_PERFORMANCE_POLICY.read_bytes(),
             legacy_policy_bytes=HWM_LEGACY_POLICY.read_bytes(),
         )
@@ -1660,6 +1687,7 @@ def _product_gate_rows(
     *,
     hwm_bindings: Mapping[str, Path] | None = None,
     hwm_source_paths: Mapping[str, Path] | None = None,
+    input_contract_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     payload = _product_gate_payload(authority)
     product_bytes = canonical_json_bytes(payload)
@@ -1687,6 +1715,7 @@ def _product_gate_rows(
             hwm_bindings=hwm_bindings,
             hwm_source_paths=hwm_source_paths,
             assessment_path=hwm_path,
+            input_contract_path=input_contract_path,
         )
     )
     _write_exact(hwm_path, hwm_bytes)
@@ -3087,6 +3116,7 @@ def build_spec(
     hwm_governed_input_generation_path: Path | None = None,
     hwm_governed_calendar_authority_path: Path | None = None,
     hwm_governed_admission_receipt_path: Path | None = None,
+    financial_input_contract_path: Path | None = None,
 ) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
     if recipe.get("schema_version") != 3:
@@ -3443,6 +3473,7 @@ def build_spec(
             hwm_governed_calendar_authority_path,
             hwm_governed_admission_receipt_path,
         ),
+        input_contract_path=financial_input_contract_path,
     )
     manifest_gate_path = spec_path.with_name(
         "financial-epoch-manifest-input-authority.json"
@@ -3629,6 +3660,7 @@ def build_production_spec(
     hwm_governed_calendar_authority_path: Path | None = None,
     hwm_governed_admission_receipt_path: Path | None = None,
     financial_artifacts_path: Path | None = None,
+    financial_input_contract_path: Path | None = None,
 ) -> dict[str, Any]:
     """Bind a verified private proof to the stable production root set."""
 
@@ -3932,6 +3964,7 @@ def build_production_spec(
     product_gates = _product_gate_rows(
         production_product_authority,
         product_path,
+        input_contract_path=financial_input_contract_path,
         hwm_bindings=hwm_bindings,
         hwm_source_paths=(
             _production_hwm_source_paths(
@@ -4049,6 +4082,13 @@ def _parser() -> argparse.ArgumentParser:
     spec_cmd.add_argument("--hwm-governed-input-generation", type=Path)
     spec_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
     spec_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
+    spec_cmd.add_argument(
+        "--financial-input-contract",
+        type=Path,
+        help=(
+            "The contract the provider ledger was ADMITTED under, when it differs from the product contract. Defaults to the product contract."
+        ),
+    )
     production_cmd = commands.add_parser("production-spec")
     production_cmd.add_argument("--recipe", type=Path, required=True)
     production_cmd.add_argument("--prepared-root", type=Path, required=True)
@@ -4060,6 +4100,13 @@ def _parser() -> argparse.ArgumentParser:
     production_cmd.add_argument("--hwm-governed-input-generation", type=Path)
     production_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
     production_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
+    production_cmd.add_argument(
+        "--financial-input-contract",
+        type=Path,
+        help=(
+            "The contract the provider ledger was ADMITTED under, when it differs from the product contract. Defaults to the product contract."
+        ),
+    )
     production_cmd.add_argument(
         "--financial-artifacts",
         type=Path,
@@ -4099,6 +4146,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.hwm_governed_input_generation,
                 args.hwm_governed_calendar_authority,
                 args.hwm_governed_admission_receipt,
+                args.financial_input_contract,
             )
         else:
             result = build_production_spec(
@@ -4113,6 +4161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.hwm_governed_calendar_authority,
                 args.hwm_governed_admission_receipt,
                 args.financial_artifacts,
+                args.financial_input_contract,
             )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"portfolio-pipeline: FAIL: {exc}", file=sys.stderr)

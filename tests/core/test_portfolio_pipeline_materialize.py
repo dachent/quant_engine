@@ -3887,3 +3887,30 @@ def test_generated_semantic_command_declares_exact_gate_file(
         str(output_root / "stages" / "report-candidate")
         in nodes["build-workbook"]["declared_writes"]
     )
+
+
+def test_governed_hwm_assessment_binds_the_admitted_input_contract() -> None:
+    """The HWM kernel is bound to the contract the ledger was admitted under.
+
+    A contract can never pin a ledger built from itself, so the admitted input
+    contract and the product contract legitimately differ.  The admission receipt
+    names the former; `portfolio_report` and `portfolio_control_panel` already
+    reconcile this by retargeting the current policy onto that input.  This pins
+    the same reconciliation in the materialiser, which previously passed the
+    product contract and the raw policy and so could never verify a governed
+    result built against the admitted input.
+    """
+    import inspect
+
+    source = inspect.getsource(materializer._hwm_input_authority_assessment)
+    assert "governed_hwm_input_policy(" in source
+    assert "product_contract_bytes=input_contract_bytes" in source
+    assert "policy_bytes=governed_policy_bytes" in source
+
+    signature = inspect.signature(materializer._hwm_input_authority_assessment)
+    assert "input_contract_path" in signature.parameters
+    # Absent a separate input contract the behaviour is unchanged: the product
+    # contract is still what gets verified.
+    assert signature.parameters["input_contract_path"].default is None
+    for entry in (materializer.build_spec, materializer.build_production_spec):
+        assert "financial_input_contract_path" in inspect.signature(entry).parameters
