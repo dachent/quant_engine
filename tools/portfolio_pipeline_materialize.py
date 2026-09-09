@@ -2925,6 +2925,33 @@ def semantic(
             output_root / "stages" / "analytics" / root_name
         )
         analytics_ids[name] = generation_id
+    # The perimeter is whatever the accepted product requires, not a constant.
+    # This was pinned at 9 by 24101f4, when the product had nine REQUIRED
+    # strategies; it now has seven, so the literal rejected every correct
+    # release.  Derive it from the same conformance block the HWM assessment
+    # uses for required_strategy_ids.
+    # Schema-2 recovery recipes carry no conformance block; those keep the
+    # report-versus-panel equality without an absolute count.
+    authority_block = recipe.get("product_authority")
+    conformance_block = (
+        authority_block.get("conformance")
+        if isinstance(authority_block, Mapping)
+        else None
+    )
+    conformance_strategies = (
+        conformance_block.get("strategies")
+        if isinstance(conformance_block, Mapping)
+        else None
+    )
+    required_strategy_count = (
+        sum(
+            1
+            for row in conformance_strategies
+            if isinstance(row, Mapping) and row.get("product_requirement") == "REQUIRED"
+        )
+        if isinstance(conformance_strategies, list)
+        else None
+    )
     panel_meta = panel.get("meta")
     report_hwm = report.get("hwm_summary")
     panel_hwm = panel.get("hwm_summary")
@@ -2937,9 +2964,11 @@ def semantic(
         and all(panel_meta.get(key) == value for key, value in analytics_ids.items())
         and isinstance(report_hwm, dict)
         and report_hwm == panel_hwm
-        and len(report.get("strategy_summary", []))
-        == len(panel.get("strategies", []))
-        == 9
+        and len(report.get("strategy_summary", [])) == len(panel.get("strategies", []))
+        and (
+            required_strategy_count is None
+            or len(panel.get("strategies", [])) == required_strategy_count
+        )
     )
     _result(
         checks,
