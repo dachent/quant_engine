@@ -761,6 +761,28 @@ def admitted_binding_set_digest(
     return len(rows), hashlib.sha256(_canonical_json_value_bytes(rows)).hexdigest()
 
 
+def _exclusion_readiness_impact(
+    policy: Mapping[str, Any], source: Mapping[str, Any], reason: str
+) -> str:
+    """Mirror of tools/provider_ledger.py::_exclusion_readiness_impact.
+
+    The verifier must resolve an exclusion's readiness exactly as the builder
+    did, or a correctly built receipt fails verification.
+    """
+
+    by_reason = policy.get("exclusion_readiness_impact_by_reason")
+    if isinstance(by_reason, Mapping) and reason in by_reason:
+        return _text(by_reason[reason], "exclusion readiness impact by reason")
+    default = policy.get("exclusion_readiness_impact")
+    if default is not None:
+        return _text(default, "exclusion readiness impact")
+    return (
+        "REQUIRED_NOT_READY"
+        if source.get("product_requirement") == "REQUIRED"
+        else "NO_CURRENT_PRODUCT_EFFECT"
+    )
+
+
 def validate_admit_or_declare_receipt(
     value: Mapping[str, object],
     *,
@@ -1160,7 +1182,8 @@ def validate_admit_or_declare_receipt(
                     "allowed exclusion reasons",
                 )
             )
-            or item.readiness_impact != policy.get("exclusion_readiness_impact")
+            or item.readiness_impact
+            != _exclusion_readiness_impact(policy, source, item.reason or "")
             or item.invalidated_outputs != expected_invalidated
         ):
             raise ProviderAdmissionError(

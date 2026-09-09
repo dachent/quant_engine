@@ -184,6 +184,8 @@ def _fixture(
     missing_product_class: bool = False,
     policy_effective_start: date = DAY,
     policy_effective_end: date | None = None,
+    readiness_by_reason: dict[str, str] | None = None,
+    unreferenced_dataset: bool = False,
 ) -> tuple[
     dict[str, Any],
     list[ProviderGenerationIdentity],
@@ -263,6 +265,15 @@ def _fixture(
                         "SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"
                     ),
                     "exclusion_readiness_impact": "REQUIRED_NOT_READY",
+                    **(
+                        {}
+                        if readiness_by_reason is None
+                        else {
+                            "exclusion_readiness_impact_by_reason": dict(
+                                readiness_by_reason
+                            )
+                        }
+                    ),
                     "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
                     "policy_owner": "PRODUCT_OWNER_GOVERNING_ISSUE_303",
                     "policy_version": "1",
@@ -308,6 +319,8 @@ def _fixture(
         manifests[provider_id] = manifest
         catalogs[provider_id] = catalog
         provider_facts[provider_id] = {"nav_observations": [row]}
+        if unreferenced_dataset and provider_id == "schwab":
+            catalog["unreferenced_collection"] = [{"synthetic": True}]
         inventory = ledger._provider_inventory(
             provider_id, manifest, catalog, sources[source_id]
         )
@@ -1073,3 +1086,59 @@ def test_receipt_reproduces_every_contract_admitted_set() -> None:
         assert admitted_counts[segment_id] == policy["admitted_item_count"], segment_id
         checked += 1
     assert checked >= 7
+
+
+def test_per_reason_readiness_map_is_honored_by_builder_and_verifier() -> None:
+    """The verifier must resolve an exclusion exactly as the builder did.
+
+    A per-reason map that the builder applies but the verifier does not would
+    make every correctly built receipt fail its own validation, so this walks
+    the full builder -> verifier round trip rather than the resolver alone.
+    """
+
+    receipt, _receipt_bytes, authority, provider_generations = _receipt(
+        unreferenced_dataset=True,
+        readiness_by_reason={
+            "REQUIRED_DATA_CLASS_NOT_MATERIALIZED": "REQUIRED_NOT_READY",
+            "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER": "NO_CURRENT_PRODUCT_EFFECT",
+        },
+    )
+    ledger.validate_admit_or_declare_receipt(
+        receipt,
+        product_authority=authority,
+        source_segments=authority["sources"],
+        provider_generations=provider_generations,
+    )
+    impacts = {
+        (row["reason"], row["readiness_impact"])
+        for row in receipt["dispositions"]
+        if row["action"] == "EXCLUDE"
+    }
+    assert (
+        "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER",
+        "NO_CURRENT_PRODUCT_EFFECT",
+    ) in impacts
+    assert not any(
+        reason == "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
+        and impact == "REQUIRED_NOT_READY"
+        for reason, impact in impacts
+    )
+
+
+def test_absent_readiness_map_keeps_the_scalar_impact() -> None:
+    """An unamended contract must behave exactly as it did before the map."""
+
+    receipt, _receipt_bytes, authority, provider_generations = _receipt(
+        unreferenced_dataset=True
+    )
+    ledger.validate_admit_or_declare_receipt(
+        receipt,
+        product_authority=authority,
+        source_segments=authority["sources"],
+        provider_generations=provider_generations,
+    )
+    assert {
+        row["readiness_impact"]
+        for row in receipt["dispositions"]
+        if row["action"] == "EXCLUDE"
+    } == {"REQUIRED_NOT_READY"}

@@ -1043,7 +1043,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # was rebound to the generation built from the canonical account-input
     # contract, which admits robuxio-crypto through 2026-09-03.
     assert contract_tool.contract_digest(contract) == (
-        "2a5efb154ad05faff330bb7dce910b0e710a10465df6e91a6ade45a442e8052e"
+        "fba8134823b4db76b6e357b55446f1a5671ed2668f18cac24900c15630330d50"
     )
 
 
@@ -4076,10 +4076,11 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         ).encode("utf-8")
         + b"\n"
     )
-    # Moved with the matrixport segment completion and the provider-ledger
-    # lineage rebind; both edit source_segments, which this proof hashes.
+    # Moved with the matrixport segment completion, the provider-ledger
+    # lineage rebind, and the per-reason exclusion readiness map; each edits
+    # source_segments, which this proof hashes.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "d31b3e82123d9ab1068f20f0e6eafa16318f2ab0bd88b52b59669339fb372c95"
+        "5b39ef62551a8b68faf88b3635e3cf27f772a4c5d4e279103566b37efe5fbee6"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4116,7 +4117,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "d31b3e82123d9ab1068f20f0e6eafa16318f2ab0bd88b52b59669339fb372c95"
+        "5b39ef62551a8b68faf88b3635e3cf27f772a4c5d4e279103566b37efe5fbee6"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json

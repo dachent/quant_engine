@@ -31,7 +31,12 @@ set, and admitted binding set. An admitted binding includes its exact sorted
 target facts, evidence layer, transform, and transform version; an artifact that
 feeds several fact collections cannot be collapsed to a generic artifact fact.
 Every exclusion is authorized by the #303 policy ID, owner, version, effective
-interval, permitted reason, readiness effect, and invalidated-output rule.
+interval, permitted reason, readiness effect, and invalidated-output rule. The
+readiness effect may be declared per reason: a required data class that
+materialized nothing blocks the product, while a bundle item no product fact
+references is recorded with no current product effect. A required data class
+can never be mapped to no effect -- the schema and the contract validator both
+refuse it.
 Unknown or changed source items are not automatically excluded: they fail until
 the authoritative source policy is deliberately updated and revalidated.
 
