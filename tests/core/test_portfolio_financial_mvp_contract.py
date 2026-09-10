@@ -1042,8 +1042,14 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # from the segment the contract now states, and the provider-ledger lineage
     # was rebound to the generation built from the canonical account-input
     # contract, which admits robuxio-crypto through 2026-09-03.
+    # Moved again when the Portfolio123 current generation became the union of
+    # the 2026-08-14 and 2026-09-02 capture campaigns: the 2026-09-02 refresh
+    # dropped har_managed_performance, which the provider-live return route
+    # reads, so neither published generation carried every captured family.
+    # The union generation restores it, and its two admitted items are the
+    # first Portfolio123 rows the product has ever admitted.
     assert contract_tool.contract_digest(contract) == (
-        "fba8134823b4db76b6e357b55446f1a5671ed2668f18cac24900c15630330d50"
+        "8a65491add34e8d4521feb174b3fcb2dd16c0ef65819a6db4e5504d3cb0ec38b"
     )
 
 
@@ -1122,9 +1128,13 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             ),
         },
         "portfolio123-model-generation": {
-            "admitted_item_count": 0,
+            # The union generation restored har_managed_performance, so the
+            # provider-live return route materializes and Portfolio123 admits
+            # its first two items: the managed-performance table and the
+            # PROVIDER_LIVE_RETURN data class it produces.
+            "admitted_item_count": 2,
             "admitted_item_set_sha256": (
-                "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+                "1ed305c46dc831fb820947bee3e468d3994eec9e3ef124fec88da5be42430731"
             ),
         },
     }
@@ -1468,7 +1478,7 @@ def test_p123_admitted_set_and_hwm_bind_independently_computed_contract_hashes()
     p123 = _source(contract, "portfolio123-model-generation")
     assert (
         p123["admission"]["dataset_disposition_policy"]["admitted_item_set_sha256"]
-        == "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570"
+        == "1ed305c46dc831fb820947bee3e468d3994eec9e3ef124fec88da5be42430731"
     )
 
     raw_sha256 = hashlib.sha256(contract_bytes).hexdigest()
@@ -1902,10 +1912,10 @@ def test_p123_history_accepts_exact_eu_vintage_with_current_ai_vintage() -> None
         ),
     ]
     assert ai["capture"]["generation_id"] == (
-        "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45"
+        "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8"
     )
     assert {receipt["generation_id"] for receipt in ai["source_receipts"]} == {
-        "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45"
+        "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8"
     }
 
     contract_tool._validate_history_corrections(
@@ -4077,10 +4087,11 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     # Moved with the matrixport segment completion, the provider-ledger
-    # lineage rebind, and the per-reason exclusion readiness map; each edits
-    # source_segments, which this proof hashes.
+    # lineage rebind, the per-reason exclusion readiness map, and the
+    # Portfolio123 union-generation repin; each edits source_segments, which
+    # this proof hashes.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "5b39ef62551a8b68faf88b3635e3cf27f772a4c5d4e279103566b37efe5fbee6"
+        "ce1c3de5cef41dcbdf10f700f08f41df96fcae2304c3aca678a56ab930048c11"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4117,7 +4128,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "5b39ef62551a8b68faf88b3635e3cf27f772a4c5d4e279103566b37efe5fbee6"
+        "ce1c3de5cef41dcbdf10f700f08f41df96fcae2304c3aca678a56ab930048c11"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json

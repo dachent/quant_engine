@@ -229,8 +229,8 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
             "2026-09-03",
         ),
         "portfolio123": (
-            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
-            "b1e6ed8e6b447fff4116900b73e712496d7a6edf00fa729f5f81f896471b7a53",
+            "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
+            "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
             "2026-09-02",
         ),
         "quantbase": (
