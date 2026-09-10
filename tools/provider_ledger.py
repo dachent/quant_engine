@@ -82,6 +82,8 @@ _ACCOUNT_FACTS: Final = {
         "nav_observations",
         "positions",
         "transactions",
+        # Derived from the flows above, so it must stay last in this tuple.
+        "capital_anchors",
     ),
     "matrixport": ("capital_anchors", "nav_observations"),
     "portfolio123": (),
@@ -1137,6 +1139,12 @@ def _matrixport_capital_anchors(
     accounts: set[str],
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ]
+    | None = None,
 ) -> list[dict[str, Any]]:
     """Admit exact strategy subscriptions without allocating wallet deposits.
 
@@ -1192,7 +1200,17 @@ def _matrixport_capital_anchors(
         },
         "matrixport daily portfolio totals",
     )
-    source_backed_dates = _matrixport_source_backed_usd_dates(manifest, run_root)
+    if fx_rates is None:
+        source_backed_dates = _matrixport_source_backed_usd_dates(manifest, run_root)
+    else:
+        # The extractor labels the USDT rows assumed_stablecoin_parity, so the
+        # strict component it wrote is not source-backed.  The owner-selected
+        # daily Close is, and NAV already recognises the same days through
+        # _matrixport_daily_fx_totals; the anchor must not be held to a
+        # stricter rule than the NAV it is recognised against.
+        source_backed_dates = set(
+            _matrixport_daily_fx_totals(manifest, run_root, fx_rates)
+        )
 
     def timestamp_day(value: object, name: str) -> date:
         try:
@@ -1385,6 +1403,109 @@ def _quantbase_nav_observations(
             }
         )
     return observations
+
+
+def _ibkr_capital_anchors(
+    generation_id: str,
+    flow_rows: Sequence[Mapping[str, Any]],
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Admit funded capital from the account's own external deposits.
+
+    IBKR states external funding directly: an activity flow classified
+    EXTERNAL_CAPITAL is money the owner put into the account, already parsed,
+    dated and hash-bound to its statement artifact. Deriving the anchor from
+    that flow keeps the provenance of the source record rather than reading the
+    statement a second time under a different rule.
+
+    Withdrawals share the DEPOSIT_OR_WITHDRAWAL classification and are not
+    capital anchors, so only positive amounts are admitted.
+    """
+
+    anchors: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    opened: set[str] = set()
+    for row in sorted(
+        flow_rows,
+        key=lambda item: (
+            str(item.get("nav_recognition_date") or item.get("event_date") or ""),
+            str(item.get("record_id") or ""),
+        ),
+    ):
+        if row.get("flow_type") != "DEPOSIT_OR_WITHDRAWAL":
+            continue
+        if row.get("capital_disposition") != "EXTERNAL_CAPITAL":
+            continue
+        amount = _observed_decimal(row.get("amount"), "ibkr flow amount")
+        if amount is None or amount <= 0:
+            continue
+        account_id = _text(row.get("account_id"), "ibkr flow account_id")
+        recognition_day = _day(
+            row.get("nav_recognition_date") or row.get("event_date"),
+            "ibkr flow nav_recognition_date",
+        )
+        event_day = _day(row.get("event_date"), "ibkr flow event_date")
+        if recognition_day < event_day:
+            raise ProviderLedgerError("ibkr deposit recognition predates the deposit")
+        strategy_id, mapping_status = _mapped_strategy_for_account(
+            account_id, recognition_day, accounts, strategies, assignments
+        )
+        source_artifact_id = row.get("source_artifact_id")
+        source_record_id = row.get("source_record_id")
+        if not isinstance(source_artifact_id, str) or not source_artifact_id.strip():
+            # A capital anchor must name the artifact it came from. A deposit
+            # without that provenance is recorded as unadmitted rather than
+            # dropped, so the funded amount is never silently lost.
+            findings.append(
+                {
+                    "account_in_provenance": account_id in accounts,
+                    "effective_date": event_day.isoformat(),
+                    "fact_type": "capital_anchors",
+                    "provider_id": "ibkr",
+                    "record_id": _text(row.get("record_id"), "ibkr flow record_id"),
+                    "status": "UNADMITTED_NO_SOURCE_ARTIFACT",
+                }
+            )
+            continue
+        if not isinstance(source_record_id, str) or not source_record_id.strip():
+            findings.append(
+                {
+                    "account_in_provenance": account_id in accounts,
+                    "effective_date": event_day.isoformat(),
+                    "fact_type": "capital_anchors",
+                    "provider_id": "ibkr",
+                    "record_id": _text(row.get("record_id"), "ibkr flow record_id"),
+                    "status": "UNADMITTED_NO_SOURCE_RECORD",
+                }
+            )
+            continue
+        opening = account_id not in opened
+        opened.add(account_id)
+        anchors.append(
+            {
+                "account_id": account_id,
+                "amount": dict(_object(row.get("amount"), "ibkr flow amount")),
+                "capital_type": (
+                    "OPENING_CAPITAL_ANCHOR"
+                    if opening
+                    else "STRATEGY_CAPITAL_ALLOCATION"
+                ),
+                "event_date": event_day.isoformat(),
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": generation_id,
+                "mapping_basis": "EXTERNAL_CAPITAL_DEPOSIT",
+                "mapping_status": mapping_status,
+                "nav_recognition_date": recognition_day.isoformat(),
+                "provider_id": "ibkr",
+                "record_id": f"ibkr-capital-anchor:{source_record_id}",
+                "source_artifact_id": source_artifact_id,
+                "source_record_id": source_record_id,
+                "strategy_id": strategy_id,
+            }
+        )
+    return anchors, findings
 
 
 def _quantbase_capital_anchors(
@@ -2269,6 +2390,7 @@ def _project_account_facts(
                         accounts,
                         strategies,
                         assignments,
+                        fx_rates,
                     )
                     if source_fact == "capital_anchors"
                     else _matrixport_nav_observations(
@@ -2324,6 +2446,29 @@ def _project_account_facts(
                             "account_in_provenance": row["account_id"] in accounts,
                             "effective_date": row.get("as_of_date")
                             or row.get("event_date"),
+                            "fact_type": target_fact,
+                            "provider_id": provider_id,
+                            "record_id": row["record_id"],
+                            "status": "UNMAPPED",
+                        }
+                    )
+            continue
+        if provider_id == "ibkr" and source_fact == "capital_anchors":
+            rows, anchor_findings = _ibkr_capital_anchors(
+                generation_id,
+                projections["flows"],
+                accounts,
+                strategies,
+                assignments,
+            )
+            exceptions.extend(anchor_findings)
+            projections[target_fact].extend(rows)
+            for row in rows:
+                if row["mapping_status"] == "UNMAPPED":
+                    exceptions.append(
+                        {
+                            "account_in_provenance": row["account_id"] in accounts,
+                            "effective_date": row["event_date"],
                             "fact_type": target_fact,
                             "provider_id": provider_id,
                             "record_id": row["record_id"],
