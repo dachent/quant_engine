@@ -1049,7 +1049,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # The union generation restores it, and its two admitted items are the
     # first Portfolio123 rows the product has ever admitted.
     assert contract_tool.contract_digest(contract) == (
-        "487cc9382d381ab6cc9540f06b65cbeebff5b520a63f8946e4e8244a354fb3cd"
+        "2f9e378e9f6c423d5efe310eb6b81e294430ecaf6ff05c3f63a10c00b5f8bebd"
     )
 
 
@@ -1100,9 +1100,13 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             "product_data_class_set_sha256": (
                 "eaeee09eac3d4f358f875c89b8c03e1b0ac3a3b509f9f715189b2981cf7a7153"
             ),
-            "admitted_item_count": 24,
+            # Moved from 24 to 25 when CAPITAL_ANCHOR materialized: netting
+            # each statement account's capital events on their own event date
+            # cancels IBKR's deposit advance against its reversal, which a
+            # per-row rule reads as opening capital that never funded.
+            "admitted_item_count": 25,
             "admitted_item_set_sha256": (
-                "cf712a4c968f7e749342044ce3ca97a83c6785a0a1c2be2e2fe4e329ee3a7101"
+                "e74f64b3e344b0dad5ba2c08d366a7171a32837b0901056c8a6930d2ced66f9c"
             ),
         },
         "matrixport-account-generation": {
@@ -4094,7 +4098,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # Portfolio123 union-generation repin; each edits source_segments, which
     # this proof hashes.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "ae13197e07fa5363e1096cd7ed307eb86d6628999a9a0467f342298a4bbb0a8f"
+        "aebccec0c40c6a8e2e31ddf706c2251efa8ca49fce05fce6551d4d0702f4aa99"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4131,7 +4135,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "ae13197e07fa5363e1096cd7ed307eb86d6628999a9a0467f342298a4bbb0a8f"
+        "aebccec0c40c6a8e2e31ddf706c2251efa8ca49fce05fce6551d4d0702f4aa99"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
