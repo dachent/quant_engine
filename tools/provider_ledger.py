@@ -4302,33 +4302,37 @@ def _portfolio123_provider_returns(
             raise ProviderLedgerError(
                 "Portfolio123 managed performance calendar differs"
             )
+        # Each observation is [marker, Strategy, Total Value]: `panels` names
+        # the two graphs, Strategy at idx 0 and Total Value at idx 1, and the
+        # leading element is a marker outside that indexing. The reconciliation
+        # curve carries the same pair in its own two columns, so the existing
+        # element-wise check against it holds; only the performance level was
+        # read from the wrong element. Taking the marker as the level collapsed
+        # every return onto the three values the marker takes.
         parsed: list[tuple[date, Decimal, Decimal, Decimal]] = []
         for observed, raw in zip(calendar, data, strict=True):
             if not isinstance(raw, list) or len(raw) != 3:
                 raise ProviderLedgerError(
                     "Portfolio123 managed performance observation differs"
                 )
-            wealth = Decimal(1) + _decimal(
-                raw[0], "Portfolio123 managed strategy performance"
-            ) / Decimal(100)
-            total_equity = _decimal(raw[1], "Portfolio123 managed total value")
-            cash_added = _decimal(raw[2], "Portfolio123 managed cash added")
-            if wealth <= 0 or total_equity <= 0:
+            level = _decimal(raw[1], "Portfolio123 managed strategy level")
+            total_value = _decimal(raw[2], "Portfolio123 managed total value")
+            if level <= 0 or total_value < 0:
                 raise ProviderLedgerError(
                     "Portfolio123 managed performance contains invalid values"
                 )
-            parsed.append((observed, wealth, total_equity, cash_added))
+            parsed.append((observed, level, level, total_value))
         if len(parsed) < 2:
             raise ProviderLedgerError(
                 f"Portfolio123 provider path is unavailable: {entity_id}"
             )
         ordered_equity = sorted(equity_observations[entity_id].items())
         overlap = 0
-        for observed, _wealth, total_equity, cash_added in parsed:
+        for observed, _level, curve_level, curve_total in parsed:
             if observed not in equity_observations[entity_id]:
                 continue
             overlap += 1
-            if equity_observations[entity_id][observed] != (total_equity, cash_added):
+            if equity_observations[entity_id][observed] != (curve_level, curve_total):
                 raise ProviderLedgerError(
                     "Portfolio123 managed performance and equity differ"
                 )

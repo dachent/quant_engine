@@ -340,6 +340,7 @@ def _p123_provider_generation(
     performance_data: list[list[int]] | None = None,
     performance_data_json: str | None = None,
     include_performance_receipt: bool = True,
+    equity_levels: tuple[str, ...] | None = None,
 ) -> tuple[dict[str, str], GenerationManifest, list[dict[str, object]]]:
     """Stage a minimal retained-style P123 generation for ledger source tests."""
 
@@ -384,6 +385,13 @@ def _p123_provider_generation(
             tables / "har_managed_performance.parquet"
         ),
     }
+    if equity_levels is not None:
+        # The reconciliation curve carries the same Strategy level the payload
+        # declares, so a precision case must move both together.
+        equity_rows = [
+            {**row, "Total Equity": level}
+            for row, level in zip(equity_rows, equity_levels, strict=True)
+        ]
     pq.write_table(
         pa.Table.from_pylist(equity_rows), paths["tables/har_equity_curve.parquet"]
     )
@@ -476,13 +484,22 @@ def test_p123_managed_returns_select_only_evidence_from_the_bound_generation(
     assert len(returned) == 2
 
 
-def test_p123_returns_use_managed_strategy_levels_not_equity_reconciliation(
+def test_p123_returns_use_managed_strategy_levels_not_the_marker(
     tmp_path: Path,
 ) -> None:
-    """Changing the reconciliation curve must not change the managed return path."""
+    """Returns come from the Strategy level, not the leading marker element.
 
-    first_ref, first_manifest, evidence = _p123_provider_generation(
-        tmp_path / "first",
+    Each observation is [marker, Strategy, Total Value]. `panels` names two
+    graphs -- Strategy at idx 0, Total Value at idx 1 -- and the marker sits
+    outside that indexing. Every captured entity carries a marker drawn from
+    {0, 1, 3}; reading it as the performance level collapses the whole series
+    onto three values. Compounding the Strategy level instead reproduces the
+    provider's own reported total return, which is how the real mapping was
+    established.
+    """
+
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
         equity_rows=[
             {
                 "_entity_id": "exact-eu-model",
@@ -497,34 +514,55 @@ def test_p123_returns_use_managed_strategy_levels_not_equity_reconciliation(
                 "Cash Added": "70",
             },
         ],
-    )
-    second_ref, second_manifest, second_evidence = _p123_provider_generation(
-        tmp_path / "second",
-        equity_rows=[
-            {
-                "_entity_id": "exact-eu-model",
-                "Date": "2026-01-02",
-                "Total Equity": "1700",
-                "Cash Added": "500",
-            },
-            {
-                "_entity_id": "exact-eu-model",
-                "Date": "2026-01-06",
-                "Total Equity": "1300",
-                "Cash Added": "900",
-            },
-        ],
-        performance_data=[[0, 1700, 500], [25, 1400, 700], [0, 1300, 900]],
+        # markers vary independently of the level and must not move the return
+        performance_data=[[0, 100, 50], [3, 125, 60], [1, 100, 70]],
     )
 
-    first = ledger._portfolio123_provider_returns(first_ref, first_manifest, evidence)
-    second = ledger._portfolio123_provider_returns(
-        second_ref, second_manifest, second_evidence
-    )
+    returned = ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
 
-    expected = [("2026-01-05", "0.25"), ("2026-01-06", "-0.2")]
-    assert [(row["date"], row["return"]) for row in first] == expected
-    assert [(row["date"], row["return"]) for row in second] == expected
+    assert [(row["date"], row["return"]) for row in returned] == [
+        ("2026-01-05", "0.25"),
+        ("2026-01-06", "-0.2"),
+    ]
+
+
+def test_p123_marker_element_does_not_reach_the_return(tmp_path: Path) -> None:
+    """Changing only the marker leaves every derived return identical."""
+
+    def _returns(markers: list[int]) -> list[tuple[str, str]]:
+        ref, manifest, evidence = _p123_provider_generation(
+            tmp_path / f"m{''.join(str(m) for m in markers)}",
+            equity_rows=[
+                {
+                    "_entity_id": "exact-eu-model",
+                    "Date": "2026-01-02",
+                    "Total Equity": "100",
+                    "Cash Added": "50",
+                },
+                {
+                    "_entity_id": "exact-eu-model",
+                    "Date": "2026-01-06",
+                    "Total Equity": "100",
+                    "Cash Added": "70",
+                },
+            ],
+            performance_data=[
+                [markers[0], 100, 50],
+                [markers[1], 125, 60],
+                [markers[2], 100, 70],
+            ],
+        )
+        rows = ledger._portfolio123_provider_returns(ref, manifest, evidence)
+        return [(row["date"], row["return"]) for row in rows]
+
+    assert (
+        _returns([0, 0, 0])
+        == _returns([1, 3, 1])
+        == [
+            ("2026-01-05", "0.25"),
+            ("2026-01-06", "-0.2"),
+        ]
+    )
 
 
 def test_p123_returns_preserve_decimal_precision_from_managed_json(
@@ -548,18 +586,24 @@ def test_p123_returns_preserve_decimal_precision_from_managed_json(
                 "Cash Added": "0",
             },
         ],
+        # the Strategy level carries the precision, so that element is what
+        # must survive the JSON round trip
         performance_data_json=(
-            "[[0.12345678901234567890123456789,100,0],"
-            "[0.22345678901234567890123456789,100,0],"
-            "[0.32345678901234567890123456789,100,0]]"
+            "[[0,100.12345678901234567890123456789,0],"
+            "[1,100.22345678901234567890123456789,0],"
+            "[3,100.32345678901234567890123456789,0]]"
+        ),
+        equity_levels=(
+            "100.12345678901234567890123456789",
+            "100.32345678901234567890123456789",
         ),
     )
 
     returned = ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
 
-    first_wealth = Decimal("1.0012345678901234567890123456789")
-    second_wealth = Decimal("1.0022345678901234567890123456789")
-    assert returned[0]["return"] == format(second_wealth / first_wealth - 1, "f")
+    first_level = Decimal("100.12345678901234567890123456789")
+    second_level = Decimal("100.22345678901234567890123456789")
+    assert returned[0]["return"] == format(second_level / first_level - 1, "f")
 
 
 @pytest.mark.parametrize("case", ("missing", "mismatched"))
