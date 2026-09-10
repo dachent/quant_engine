@@ -3008,13 +3008,17 @@ def _portfolio123_provider_performance_returns(
     for day, raw in zip(calendar, data, strict=True):
         if not isinstance(raw, list) or len(raw) != 3:
             raise TargetSeriesError("Portfolio123 performance observation differs")
-        strategy_level = _decimal(raw[0], "Portfolio123 strategy performance")
-        total_equity = _positive_decimal(raw[1], "Portfolio123 total value")
-        cash_added = _decimal(raw[2], "Portfolio123 cash added")
-        wealth = Decimal(1) + strategy_level / Decimal(100)
-        if wealth <= 0:
-            raise TargetSeriesError("Portfolio123 strategy performance is invalid")
-        parsed.append((day, wealth, total_equity, cash_added))
+        # Each observation is [marker, Strategy, Total Value]: ``panels`` names
+        # the two graphs, Strategy at idx 0 and Total Value at idx 1, and the
+        # leading element is a marker outside that indexing.  Reading the
+        # marker as a percentage collapsed every return onto the three values
+        # the marker takes.  The level is already a wealth index, so period
+        # returns are its ratios and its base cancels.
+        level = _positive_decimal(raw[1], "Portfolio123 strategy performance level")
+        total_value = _decimal(raw[2], "Portfolio123 total value")
+        if total_value < 0:
+            raise TargetSeriesError("Portfolio123 total value is invalid")
+        parsed.append((day, level, level, total_value))
 
     equity_rows = [
         row
@@ -3040,11 +3044,11 @@ def _portfolio123_provider_performance_returns(
             raise TargetSeriesError("Portfolio123 equity curve conflicts")
         equity_by_day[day] = equity_identity
     overlap = 0
-    for day, _wealth, total_equity, cash_added in parsed:
+    for day, _level, curve_level, curve_total in parsed:
         if day not in equity_by_day:
             continue
         overlap += 1
-        if equity_by_day[day] != (total_equity, cash_added):
+        if equity_by_day[day] != (curve_level, curve_total):
             raise TargetSeriesError("Portfolio123 performance and equity paths differ")
     if overlap < 2:
         raise TargetSeriesError(

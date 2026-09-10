@@ -302,7 +302,12 @@ def _p123_generation(path: Path) -> None:
             [
                 {"_entity_id": exact_id, "field": field, "value": value}
                 for field, value in (
-                    ("data", json.dumps([[0, 100, 100], [1, 101, 101], [-1, 99, 99]])),
+                    # Real Portfolio123 markers are small day codes unrelated
+                    # to the level.  Setting the marker to ``level - 100``
+                    # makes reading it as a percentage arithmetically identical
+                    # to reading the level, which is how the marker survived as
+                    # the emitted series.  These markers keep the two apart.
+                    ("data", json.dumps([[0, 100, 100], [1, 101, 101], [3, 99, 99]])),
                     ("date", "2025-11-13"),
                     ("dateLast", "2025-11-17"),
                     (
@@ -430,6 +435,9 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
     assert dispositions["EU [P123]"]["exact_equity_curve_rows"] == 3
     assert dispositions["EU [P123]"]["provider_live"] == {
         "cash_added_semantics": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",
+        # Levels 100 -> 101 -> 99 compound to -1%.  Reading the leading markers
+        # 0/1/3 as percentages instead compounds to +3%.
+        "cumulative_return": "-0.01",
         "equity_overlap_observations": 3,
         "observed_end": "2025-11-17",
         "observed_start": "2025-11-14",
