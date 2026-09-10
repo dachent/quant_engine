@@ -1049,7 +1049,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # The union generation restores it, and its two admitted items are the
     # first Portfolio123 rows the product has ever admitted.
     assert contract_tool.contract_digest(contract) == (
-        "f1704fffc40f45c56ddef0854d78836dfc1aa025e6d88d3dfda60355bbdf8155"
+        "3bf50f4374a8ddd283c9b582566eb939919aecec723180d3c7255f952987ab97"
     )
 
 
@@ -1069,13 +1069,11 @@ def test_quantbase_generation_is_account_live_from_accepted_membership() -> None
     admission = source["admission"]
     assert admission["transform"] == "provider-ledger"
     assert admission["version"] == "1"
+    # The three leverage facts left MVP-2's scope under the issue #396 deferral.
     assert admission["facts"] == [
         "NAV_OBSERVATION",
         "EXTERNAL_FLOW",
         "CAPITAL_ANCHOR",
-        "FINANCING_LIABILITY",
-        "LEVERAGE_EXPOSURE",
-        "FINANCING_COST",
     ]
     assert admission["dataset_disposition_policy"]["policy_id"] == (
         "PROVIDER_ADMIT_OR_DECLARE_V1"
@@ -1098,7 +1096,7 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
                 "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8"
             ),
             "product_data_class_set_sha256": (
-                "eaeee09eac3d4f358f875c89b8c03e1b0ac3a3b509f9f715189b2981cf7a7153"
+                "d5559b19d9aa437788772ab7b5c89c1f2ad9176c5a2d63f4f1e492a3f57b596d"
             ),
             # Moved from 24 to 25 when CAPITAL_ANCHOR materialized: netting
             # each statement account's capital events on their own event date
@@ -1106,7 +1104,7 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             # per-row rule reads as opening capital that never funded.
             "admitted_item_count": 25,
             "admitted_item_set_sha256": (
-                "e74f64b3e344b0dad5ba2c08d366a7171a32837b0901056c8a6930d2ced66f9c"
+                "fa6c82a9c1d89b302b3fc9e0935566ef77105e86a4c38e155dc18ae309c30b3a"
             ),
         },
         "matrixport-account-generation": {
@@ -1119,19 +1117,19 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             # provider-reported USD value that no Robuxio holding carries.
             "admitted_item_count": 6,
             "admitted_item_set_sha256": (
-                "1593ef013cdd8cc192cdaca2a6bd7b2eced0e3315975b101129fdcaa807838d7"
+                "1c00617f3db60ee5b1571ef822261c39c02cf0c620604a66a35c45616f82141c"
             ),
         },
         "quantbase-account-generation": {
             "admitted_item_count": 6,
             "admitted_item_set_sha256": (
-                "50fcb8d5a059f3496d56561f178d8f1b53fdeda620d733cf6e5f9a5c9b188923"
+                "c08d7a42db964d459235cf0071a843a6b3b703c03932b5c3b72b0ccab7b1843b"
             ),
         },
         "schwab-account-generation": {
             "admitted_item_count": 22,
             "admitted_item_set_sha256": (
-                "e179a13eb016d9163be8b2c781d2bac9ac70f0b7d6a5d23294d38d5d85a7dc0b"
+                "c736740e96e30517af5597c8819332d8e1020b45e0a8e35c646897f6b2bf4a26"
             ),
         },
         "portfolio123-model-generation": {
@@ -1849,9 +1847,9 @@ def test_accepted_provider_ledger_history_identity_cannot_be_coherently_relabell
     """History lineage is a fixed receipt, not a replaceable generation label."""
 
     replacements = {
-        "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb": ("a" * 64),
-        "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6": ("b" * 64),
-        "66e97d05ebe4d7cbd394254089ab9b7db4a2d40c0df8c0d483e89dc55514cd65": ("c" * 64),
+        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34": ("a" * 64),
+        "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838": ("b" * 64),
+        "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb": ("c" * 64),
     }
 
     def replace_lineage(value: object) -> object:
@@ -2016,10 +2014,10 @@ def test_two_vintage_history_accepts_current_active_and_retains_07c590_echo() ->
     """Active owner history advances without relabelling deprecated Echo evidence."""
 
     active_generation = (
-        "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb"
+        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
     )
-    active_manifest = "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
-    active_catalog = "66e97d05ebe4d7cbd394254089ab9b7db4a2d40c0df8c0d483e89dc55514cd65"
+    active_manifest = "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+    active_catalog = "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -2168,9 +2166,9 @@ def test_deprecated_history_receipt_is_independent_of_current_source_as_of(
 def test_owner_account_history_rebinds_to_current_ledger_generation() -> None:
     """The active owner-history lineage follows the corrected governed ledger."""
 
-    generation_id = "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb"
-    manifest_sha256 = "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
-    catalog_sha256 = "66e97d05ebe4d7cbd394254089ab9b7db4a2d40c0df8c0d483e89dc55514cd65"
+    generation_id = "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
+    manifest_sha256 = "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+    catalog_sha256 = "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
     contract = _contract()
     owner_source = _source(contract, "owner-account-live-history")
     assert owner_source["current_generation"] == {
@@ -2209,9 +2207,9 @@ def test_two_vintage_history_rejects_legacy_rollbacks_and_rewrites() -> None:
     """The deprecated event-only class cannot authorize active-lineage changes."""
 
     active_generation = (
-        "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb"
+        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
     )
-    active_manifest = "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+    active_manifest = "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -2493,13 +2491,14 @@ def test_leverage_policy_preserves_returns_without_inflating_invested_capital() 
     assert vector["invested_capital"] == "100"
     assert vector["total_return"] == vector["twr"] == vector["mwr_one_year"] == "0.14"
     contract = _contract()
-    leverage_classes = {
-        "FINANCING_LIABILITY",
-        "LEVERAGE_EXPOSURE",
-        "FINANCING_COST",
-    }
+    # Issue #396 deferred the three leverage classes out of MVP-2's scope, so
+    # no account source may declare one: a declared class with no producer
+    # returns the product to REQUIRED_DATA_CLASS_NOT_MATERIALIZED. The
+    # calculation contract below still governs how leverage is treated if and
+    # when the facts return.
     for source_id in contract_tool.REQUIRED_ACCOUNT_PROVIDER_SOURCE_IDS:
-        assert leverage_classes <= set(_source(contract, source_id)["data_classes"])
+        declared = set(_source(contract, source_id)["data_classes"])
+        assert not contract_tool.DEFERRED_LEVERAGE_CLASSES & declared
 
     changed = _contract()
     changed_vector = _outcome(changed, "INVESTED_CAPITAL")["calculation_contract"][
@@ -2512,14 +2511,15 @@ def test_leverage_policy_preserves_returns_without_inflating_invested_capital() 
     ):
         _validate(changed)
 
-    missing_source_fact = _contract()
-    ibkr = _source(missing_source_fact, "ibkr-account-generation")
-    ibkr["data_classes"].remove("FINANCING_LIABILITY")
+    readded_source_fact = _contract()
+    ibkr = _source(readded_source_fact, "ibkr-account-generation")
+    ibkr["data_classes"].append("FINANCING_LIABILITY")
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
-        match="account source lacks leverage facts: ibkr-account-generation",
+        match="source declares leverage facts deferred by issue 396: "
+        "ibkr-account-generation",
     ):
-        _validate(missing_source_fact)
+        _validate(readded_source_fact)
 
 
 @pytest.mark.parametrize(
@@ -2699,12 +2699,10 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
     assert source["readiness"] == "REQUIRED_NOT_READY"
     assert source["blockers"] == [324, 318]
     admission = source["admission"]
+    # The three leverage facts left MVP-2's scope under the issue #396 deferral.
     assert admission["facts"] == [
         "NAV_OBSERVATION",
         "CAPITAL_ANCHOR",
-        "FINANCING_LIABILITY",
-        "LEVERAGE_EXPOSURE",
-        "FINANCING_COST",
         "EXTERNAL_FLOW",
     ]
     assert admission["transform"] == "provider-ledger"
@@ -2735,7 +2733,9 @@ def test_matrixport_declared_gap_policy_is_authoritative_and_propagated() -> Non
         for row in matrix["rows"]
         if row["source_id"] == "matrixport-account-generation"
     ]
-    assert len(rows) == 30
+    # Six rows per declared data class; matrixport declares two after the
+    # issue #396 deferral removed three.
+    assert len(rows) == 12
     assert all(row["declared_gap_policy"] == policy for row in rows)
     assert all(
         row["declared_gap_policy"] is None
@@ -4098,7 +4098,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # Portfolio123 union-generation repin; each edits source_segments, which
     # this proof hashes.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "09dfd5f0d060d9add45b7c29860cb706722ba9327ab7db573ba7731208693320"
+        "928f7d6051dc78e2cb53ad9aaf8c7613fb1b44705246b3b4414c54d009e9d167"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4135,7 +4135,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "09dfd5f0d060d9add45b7c29860cb706722ba9327ab7db573ba7731208693320"
+        "928f7d6051dc78e2cb53ad9aaf8c7613fb1b44705246b3b4414c54d009e9d167"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json

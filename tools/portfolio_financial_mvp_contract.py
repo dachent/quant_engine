@@ -78,11 +78,8 @@ REQUIRED_SOURCE_CLASSES: Final = frozenset(
         "CRYPTO_RETURN",
         "ETF_STYLE_RETURN",
         "EXTERNAL_FLOW",
-        "FINANCING_COST",
-        "FINANCING_LIABILITY",
         "FX_RATE",
         "INDUSTRY_RETURN",
-        "LEVERAGE_EXPOSURE",
         "MARKET_PRICE",
         "POSITION",
         "PROVIDER_LIVE_RETURN",
@@ -108,6 +105,16 @@ REQUIRED_PROVIDER_SOURCE_IDS: Final = frozenset(
         "portfolio123-model-generation",
         "quantbase-account-generation",
         "schwab-account-generation",
+    }
+)
+# Deferred by owner ruling under issue #396: declared by no segment until a
+# provider can materialize them. `_DATA_CLASS_ADMISSION_FACT` still maps them,
+# so re-adding a class needs only its producer and this set.
+DEFERRED_LEVERAGE_CLASSES: Final = frozenset(
+    {
+        "FINANCING_COST",
+        "FINANCING_LIABILITY",
+        "LEVERAGE_EXPOSURE",
     }
 )
 REQUIRED_ACCOUNT_PROVIDER_SOURCE_IDS: Final = frozenset(
@@ -213,13 +220,13 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
         "315471b602bb4ce61cd854195162708ab188f6e08d6597deb9b9da11ca5bce44"
     ),
     "current_generation_id": (
-        "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb"
+        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
     ),
     "current_manifest_sha256": (
-        "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+        "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
     ),
     "current_catalog_sha256": (
-        "66e97d05ebe4d7cbd394254089ab9b7db4a2d40c0df8c0d483e89dc55514cd65"
+        "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
     ),
     "legacy_generation_id": (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
@@ -5513,17 +5520,16 @@ def _validate_sources(
             raise FinancialMvpContractError(
                 f"source segment has no data class: {source_id}"
             )
-        if source_id in REQUIRED_ACCOUNT_PROVIDER_SOURCE_IDS:
-            missing_leverage_classes = {
-                "FINANCING_COST",
-                "FINANCING_LIABILITY",
-                "LEVERAGE_EXPOSURE",
-            } - set(classes)
-            if missing_leverage_classes:
-                raise FinancialMvpContractError(
-                    f"account source lacks leverage facts: {source_id}: "
-                    f"{sorted(missing_leverage_classes)}"
-                )
+        # Issue #396 defers the leverage facts by owner ruling: no provider has
+        # a materialization path for them, so declaring one would only restore
+        # REQUIRED_DATA_CLASS_NOT_MATERIALIZED and block execution again.
+        # Re-adding a class belongs with its producer, in the same change.
+        deferred_leverage_classes = DEFERRED_LEVERAGE_CLASSES & set(classes)
+        if deferred_leverage_classes:
+            raise FinancialMvpContractError(
+                f"source declares leverage facts deferred by issue 396: "
+                f"{source_id}: {sorted(deferred_leverage_classes)}"
+            )
         data_classes.update(classes)
         subjects = _object(row["subjects"], "source_segment.subjects")
         _strict_keys(

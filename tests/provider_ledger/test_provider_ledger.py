@@ -178,20 +178,20 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
         "p123-eu-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-                "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
             ),
             (
                 "provider-ledger-catalog",
-                "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-                "66e97d05ebe4d7cbd394254089ab9b7db4a2d40c0df8c0d483e89dc55514cd65",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb",
             ),
         },
         "volatis-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-                "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
             ),
         },
         "echotrade-event-only-account-live-rejected": {
@@ -282,7 +282,7 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
     }
     assert expected_history_generations == {
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
-        "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
     }
     accepted_history_generations = {
         receipt["generation_id"]
@@ -5807,16 +5807,17 @@ _IBKR_ASSIGNMENTS = {
 }
 
 
-def test_ibkr_reversed_deposit_advance_does_not_open_the_capital_anchor(
+def test_ibkr_deposit_advance_opens_on_the_date_nav_recognises_it(
     tmp_path: Path,
 ) -> None:
-    """A deposit advance and its cancellation share an event date and net out.
+    """A deposit advance is real capital from the day NAV recognises it.
 
     IBKR credits an advance against a pending wire so the account can trade,
-    then reverses it when the wire lands.  Reading either row on its own makes
-    money that never funded the account look like its opening capital, and the
-    reversal's own NAV-recognition date is a week later, so a date-keyed rule
-    does not catch it either.  Netting the event date is what does.
+    then reverses it when the wire lands.  The advance and its reversal share
+    an event date but recognise eight days apart, and the account's NAV rises
+    by the advance on the day it recognises.  Netting the shared event date
+    would cancel the pair and hide that capital for the whole window; netting
+    the recognition date reproduces what NAV shows.
     """
 
     catalog = {
@@ -5848,13 +5849,22 @@ def test_ibkr_reversed_deposit_advance_does_not_open_the_capital_anchor(
         "gen-1", catalog, {_IBKR_ACCOUNT}, {"p123-eu"}, _IBKR_ASSIGNMENTS
     )
 
-    assert [(item["event_date"], item["capital_type"]) for item in anchors] == [
-        ("2025-11-25", "OPENING_CAPITAL_ANCHOR")
+    assert [
+        (item["nav_recognition_date"], item["capital_type"], item["amount"]["value"])
+        for item in anchors
+    ] == [
+        ("2025-11-24", "OPENING_CAPITAL_ANCHOR", "3572.46"),
+        ("2025-12-02", "STRATEGY_CAPITAL_ALLOCATION", "1677.54"),
     ]
-    assert anchors[0]["amount"]["value"] == "5250"
-    assert anchors[0]["nav_recognition_date"] == "2025-12-02"
-    assert anchors[0]["opening_nav"]["value"] == "10081.673628706"
+    # The opening is dated by the advance's own entry, and corroborated by the
+    # NAV of the day it recognises.
+    assert anchors[0]["event_date"] == "2025-11-24"
+    assert anchors[0]["opening_nav"]["value"] == "8417.9359133"
     assert anchors[0]["strategy_id"] == "p123-eu"
+    # The reversal nets against the wire that replaced it, both recognising
+    # 2025-12-02: -3,572.46 + 5,250 = 1,677.54.
+    assert anchors[1]["event_date"] == "2025-11-25"
+    assert "opening_nav" not in anchors[1]
 
 
 def test_ibkr_sibling_account_transfers_fund_the_receiving_account(

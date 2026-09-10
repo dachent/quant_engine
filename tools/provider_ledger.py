@@ -2350,11 +2350,14 @@ def _ibkr_capital_anchors(
 ) -> list[dict[str, Any]]:
     """Net each statement account's capital events on their own event date.
 
-    A single flow row is not a capital event.  IBKR credits a deposit advance
-    against a pending wire and then reverses it: both rows carry the same event
-    date, and reading either one alone makes money that never funded the account
-    look like its opening capital.  Small end-of-month adjustments offset the
-    same way.  Netting the day is what distinguishes capital from bookkeeping.
+    A single flow row is not a capital event, and the date a row is entered is
+    not the date its capital exists.  IBKR credits a deposit advance against a
+    pending wire and reverses it later: the advance and its reversal share an
+    event date but recognise eight days apart, and the account's NAV rose by
+    the advance on the day it recognised.  Netting the recognition date is what
+    reproduces the capital NAV actually holds; netting the entry date hides it.
+    Small end-of-month adjustments still offset, because they recognise
+    together.
 
     Internal transfers between the owner's own statement accounts are capital
     events for the receiving account even though they are not external capital
@@ -2382,9 +2385,11 @@ def _ibkr_capital_anchors(
         if nav_by_account_day.setdefault(key, value) != value:
             raise ProviderLedgerError("ibkr account NAV has conflicting duplicates")
 
-    by_day: dict[str, dict[date, list[tuple[Mapping[str, Any], str, Decimal]]]] = (
-        defaultdict(lambda: defaultdict(list))
-    )
+    # Keyed by recognition date; each entry keeps its own event date so the
+    # anchor can still report when the capital was committed.
+    by_day: dict[
+        str, dict[date, list[tuple[Mapping[str, Any], str, Decimal, date]]]
+    ] = defaultdict(lambda: defaultdict(list))
     unquantified: set[str] = set()
     for row in flow_rows:
         if row.get("flow_type") not in _IBKR_CAPITAL_FLOW_TYPES:
@@ -2404,8 +2409,16 @@ def _ibkr_capital_anchors(
             unquantified.add(account_id)
             continue
         currency = _text(raw_amount.get("currency"), "ibkr flow currency")
-        day = _day(row.get("event_date"), "ibkr flow event_date")
-        by_day[account_id][day].append((row, currency, amount))
+        event_day = _day(row.get("event_date"), "ibkr flow event_date")
+        recognition_day = _day(
+            row.get("nav_recognition_date") or row["event_date"],
+            "ibkr flow nav_recognition_date",
+        )
+        if recognition_day < event_day:
+            raise ProviderLedgerError(
+                "ibkr capital event recognises before it is entered"
+            )
+        by_day[account_id][recognition_day].append((row, currency, amount, event_day))
 
     anchors: list[dict[str, Any]] = []
     for account_id in sorted(by_day):
@@ -2414,35 +2427,28 @@ def _ibkr_capital_anchors(
         opened = False
         for day in sorted(by_day[account_id]):
             rows = by_day[account_id][day]
-            currencies = {currency for _row, currency, _amount in rows}
+            currencies = {currency for _row, currency, _amount, _event in rows}
             if len(currencies) != 1:
                 raise ProviderLedgerError(
-                    "ibkr capital events mix currencies on one event date"
+                    "ibkr capital events mix currencies on one recognition date"
                 )
             currency = currencies.pop()
-            net = sum((amount for _row, _currency, amount in rows), Decimal(0))
+            net = sum((amount for _row, _currency, amount, _event in rows), Decimal(0))
             if net == 0:
                 # An advance and its reversal, or offsetting adjustments.
                 continue
-            if net < 0:
-                if not opened:
-                    raise ProviderLedgerError(
-                        "ibkr account returns capital before it is funded"
-                    )
-                # Capital returned is carried by the flow rows, which declare
-                # their own external or internal disposition.
-                continue
-            recognition_day = max(
-                _day(
-                    item.get("nav_recognition_date") or item["event_date"],
-                    "ibkr flow nav_recognition_date",
+            if net < 0 and not opened:
+                raise ProviderLedgerError(
+                    "ibkr account returns capital before it is funded"
                 )
-                for item, _currency, _amount in rows
-            )
+            # The day's capital is committed once its last component is entered,
+            # and recognised on the grouping date.
+            recognition_day = day
+            event_day = max(event for _row, _currency, _amount, event in rows)
             strategy_id, mapping_status = _mapped_strategy_for_account(
                 account_id, recognition_day, accounts, strategies, assignments
             )
-            source_record_id = f"{account_id}:{day.isoformat()}"
+            source_record_id = f"{account_id}:{recognition_day.isoformat()}"
             anchor: dict[str, Any] = {
                 "account_id": account_id,
                 "amount": {
@@ -2455,7 +2461,7 @@ def _ibkr_capital_anchors(
                     if not opened
                     else "STRATEGY_CAPITAL_ALLOCATION"
                 ),
-                "event_date": day.isoformat(),
+                "event_date": event_day.isoformat(),
                 "evidence_layer": "ACCOUNT_LIVE",
                 "generation_id": generation_id,
                 "mapping_basis": "NET_STATEMENT_ACCOUNT_CAPITAL_ON_PROVIDER_EVENT_DATE",
@@ -2470,7 +2476,7 @@ def _ibkr_capital_anchors(
                 "source_record_id": source_record_id,
                 "strategy_id": strategy_id,
             }
-            if not opened:
+            if not opened and net > 0:
                 opening_nav = nav_by_account_day.get((account_id, recognition_day))
                 if opening_nav is None or opening_nav <= 0:
                     raise ProviderLedgerError(
@@ -2485,7 +2491,9 @@ def _ibkr_capital_anchors(
                 anchor["nav_source_artifact_id"] = "normalized/ibkr-catalog.json"
                 opened = True
             anchors.append(anchor)
-    anchors.sort(key=lambda item: (str(item["event_date"]), str(item["record_id"])))
+    anchors.sort(
+        key=lambda item: (str(item["nav_recognition_date"]), str(item["record_id"]))
+    )
     return anchors
 
 

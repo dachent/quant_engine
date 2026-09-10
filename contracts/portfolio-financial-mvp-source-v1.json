@@ -585,8 +585,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
-    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -626,8 +626,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
-    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -667,8 +667,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:de46b08ec45f4096ae5bf501b39e6efa71ae51ae825bee63161aa804422067b3",
-    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -708,8 +708,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:4235428716b167f3c21e2843a7e16dd8ea50d8e542cd465e0cf6887b89072435",
-    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -790,8 +790,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:a7271e772c6d21ee4b3b2ed76149ddd9639d10c5c8be371550203fc2d67c9b61",
-    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -955,8 +955,8 @@
     "return_type": "TOTAL",
     "segment_id": "grizzlybears-vtma:account-live",
     "sha256": "a7271e772c6d21ee4b3b2ed76149ddd9639d10c5c8be371550203fc2d67c9b61",
-    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "grizzlybears-vtma",
     "strategy_version": "UNRESOLVED"
@@ -974,8 +974,8 @@
     "return_type": "TOTAL",
     "segment_id": "p123-ai-factor:account-live",
     "sha256": "7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
-    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "p123-ai-factor",
     "strategy_version": "UNRESOLVED"
@@ -993,8 +993,8 @@
     "return_type": "TOTAL",
     "segment_id": "p123-eu:account-live",
     "sha256": "63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
-    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "p123-eu",
     "strategy_version": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"
@@ -1012,8 +1012,8 @@
     "return_type": "TOTAL",
     "segment_id": "qsi:account-live",
     "sha256": "de46b08ec45f4096ae5bf501b39e6efa71ae51ae825bee63161aa804422067b3",
-    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "qsi",
     "strategy_version": "UNRESOLVED"
@@ -1069,8 +1069,8 @@
     "return_type": "TOTAL",
     "segment_id": "tt-portfolio:account-live",
     "sha256": "4235428716b167f3c21e2843a7e16dd8ea50d8e542cd465e0cf6887b89072435",
-    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "tt-portfolio",
     "strategy_version": "UNRESOLVED"
@@ -1544,8 +1544,8 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-     "generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
      "as_of": "2026-09-04"
     },
     "strategy_version": {
@@ -1574,21 +1574,21 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb/generation.json",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
      },
      {
       "artifact_role": "provider-ledger-catalog",
-      "artifact_selector": "generations/30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb/provider-ledger.json",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/provider-ledger.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "normalized/provider-ledger.json",
-      "sha256": "66e97d05ebe4d7cbd394254089ab9b7db4a2d40c0df8c0d483e89dc55514cd65"
+      "sha256": "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
      }
     ],
     "disposition_reason": "Owner funding precedes the first measurable account return by one day. Provider-live history remains a separate comparison and never overwrites this path.",
@@ -1745,8 +1745,8 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-     "generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
      "as_of": "2026-09-04"
     },
     "strategy_version": {
@@ -1775,12 +1775,12 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb/generation.json",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
      },
      {
       "artifact_role": "quantbase-account-activity",
@@ -2966,10 +2966,7 @@
    },
    "data_classes": [
     "ACCOUNT_NAV",
-    "CAPITAL_ANCHOR",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
-    "FINANCING_COST"
+    "CAPITAL_ANCHOR"
    ],
    "authority": "OWNER_ACCOUNT_LEDGER_AND_ACTUAL_FUNDING_EVENTS",
    "endpoint_or_artifact_selector": "accepted provider-ledger ACCOUNT_LIVE facts and funding/subscription evidence",
@@ -3011,10 +3008,7 @@
      "ACCOUNT_NAV",
      "ACCOUNT_LIVE_RETURN",
      "CAPITAL_ANCHOR",
-     "FUNDED_MEMBERSHIP",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST"
+     "FUNDED_MEMBERSHIP"
     ]
    },
    "product_requirement": "REQUIRED",
@@ -3029,8 +3023,8 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "as_of": "2026-09-04"
    },
    "existence_status": "EXISTS",
@@ -3072,10 +3066,7 @@
    "data_classes": [
     "ACCOUNT_NAV",
     "POSITION",
-    "TRANSACTION",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
-    "FINANCING_COST"
+    "TRANSACTION"
    ],
    "authority": "ALPACA_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "alpaca-generation.json in an exact governed generation",
@@ -3116,10 +3107,7 @@
     "facts": [
      "NAV_OBSERVATION",
      "POSITION",
-     "TRANSACTION",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST"
+     "TRANSACTION"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -3129,8 +3117,8 @@
      "effective_start": "2026-07-17",
      "effective_end": null,
      "upstream_inventory_sha256": "786045f1bf7df06e759ab73b2eaf61527965101be3e958e9e234d4290c8892da",
-     "product_data_class_count": 6,
-     "product_data_class_set_sha256": "2198604e07fd211964a07ddce98a0f7e13bae0ea9a5a9caba539a315bd08ae3e",
+     "product_data_class_count": 3,
+     "product_data_class_set_sha256": "00b0e89f027127d602ce526c9d76cf35dcc5cd4a87ad409b29bd720da2dda79d",
      "admitted_item_count": 0,
      "admitted_item_set_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
      "allowed_exclusion_reasons": [
@@ -3170,10 +3158,7 @@
    "data_classes": [
     "EXTERNAL_FLOW",
     "CORPORATE_ACTION",
-    "TRANSACTION",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
-    "FINANCING_COST"
+    "TRANSACTION"
    ],
    "authority": "FIDELITY_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "fidelity-generation.json in an exact governed generation",
@@ -3214,10 +3199,7 @@
     "facts": [
      "EXTERNAL_FLOW",
      "CORPORATE_ACTION",
-     "TRANSACTION",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST"
+     "TRANSACTION"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -3227,8 +3209,8 @@
      "effective_start": "2024-10-03",
      "effective_end": null,
      "upstream_inventory_sha256": "c62cd179cd721a06a1dafd0ac8c646d77370089781ed6b5c7a3a776d16548514",
-     "product_data_class_count": 6,
-     "product_data_class_set_sha256": "42a2267ad7b849073b6a163b8bb8c9db9b176236d7576935375bd3d484ac86b9",
+     "product_data_class_count": 3,
+     "product_data_class_set_sha256": "14b8b16404dc44bae1068a4ed8b3ed4a7b683ca786f7fd3879625b43eace9402",
      "admitted_item_count": 0,
      "admitted_item_set_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
      "allowed_exclusion_reasons": [
@@ -3276,10 +3258,7 @@
     "TRANSACTION",
     "EXTERNAL_FLOW",
     "CORPORATE_ACTION",
-    "CAPITAL_ANCHOR",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
-    "FINANCING_COST"
+    "CAPITAL_ANCHOR"
    ],
    "authority": "IBKR_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "ibkr-catalog.json in an exact governed generation",
@@ -3323,10 +3302,7 @@
      "TRANSACTION",
      "EXTERNAL_FLOW",
      "CORPORATE_ACTION",
-     "CAPITAL_ANCHOR",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST"
+     "CAPITAL_ANCHOR"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -3336,10 +3312,10 @@
      "effective_start": "2026-08-14",
      "effective_end": null,
      "upstream_inventory_sha256": "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8",
-     "product_data_class_count": 9,
-     "product_data_class_set_sha256": "eaeee09eac3d4f358f875c89b8c03e1b0ac3a3b509f9f715189b2981cf7a7153",
+     "product_data_class_count": 6,
+     "product_data_class_set_sha256": "d5559b19d9aa437788772ab7b5c89c1f2ad9176c5a2d63f4f1e492a3f57b596d",
      "admitted_item_count": 25,
-     "admitted_item_set_sha256": "e74f64b3e344b0dad5ba2c08d366a7171a32837b0901056c8a6930d2ced66f9c",
+     "admitted_item_set_sha256": "fa6c82a9c1d89b302b3fc9e0935566ef77105e86a4c38e155dc18ae309c30b3a",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -3407,10 +3383,7 @@
    },
    "data_classes": [
     "ACCOUNT_NAV",
-    "CAPITAL_ANCHOR",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
-    "FINANCING_COST"
+    "CAPITAL_ANCHOR"
    ],
    "authority": "MATRIXPORT_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "catalog.json in an exact governed Matrixport generation",
@@ -3451,9 +3424,6 @@
     "facts": [
      "NAV_OBSERVATION",
      "CAPITAL_ANCHOR",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST",
      "EXTERNAL_FLOW"
     ],
     "dataset_disposition_policy": {
@@ -3464,10 +3434,10 @@
      "effective_start": "2026-08-16",
      "effective_end": null,
      "upstream_inventory_sha256": "24f77dcf8c81b5c4906f66013568c2ec205e46752117c9bad56aba2e65d3b98e",
-     "product_data_class_count": 5,
-     "product_data_class_set_sha256": "e9caeb93ca23707bdc1d9b261c847fd72e42a07f2b3b962085585b738ac72837",
+     "product_data_class_count": 2,
+     "product_data_class_set_sha256": "792f5bd0bbca0836b4e25a3559adf6f69aab248a4289959925bc0d1caa05c978",
      "admitted_item_count": 6,
-     "admitted_item_set_sha256": "1593ef013cdd8cc192cdaca2a6bd7b2eced0e3315975b101129fdcaa807838d7",
+     "admitted_item_set_sha256": "1c00617f3db60ee5b1571ef822261c39c02cf0c620604a66a35c45616f82141c",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -3592,10 +3562,7 @@
    "data_classes": [
     "ACCOUNT_NAV",
     "EXTERNAL_FLOW",
-    "CAPITAL_ANCHOR",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
-    "FINANCING_COST"
+    "CAPITAL_ANCHOR"
    ],
    "authority": "QUANTBASE_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "quantbase-generation.json in an exact governed generation",
@@ -3636,10 +3603,7 @@
     "facts": [
      "NAV_OBSERVATION",
      "EXTERNAL_FLOW",
-     "CAPITAL_ANCHOR",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST"
+     "CAPITAL_ANCHOR"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -3649,10 +3613,10 @@
      "effective_start": "2026-08-16",
      "effective_end": null,
      "upstream_inventory_sha256": "2abcd635064683b61f71e11b07893a52029c7bb32d2a7d5ceb38e27a1aa9020f",
-     "product_data_class_count": 6,
-     "product_data_class_set_sha256": "bba034d63f9689fab27403bcdf233476cd7215a9a74dd56c4137133bd0b1e5ab",
+     "product_data_class_count": 3,
+     "product_data_class_set_sha256": "70fcf851a90a424642d944bf3e0a5c7fe984bde6506c9e284e4463c5d8a69ce1",
      "admitted_item_count": 6,
-     "admitted_item_set_sha256": "50fcb8d5a059f3496d56561f178d8f1b53fdeda620d733cf6e5f9a5c9b188923",
+     "admitted_item_set_sha256": "c08d7a42db964d459235cf0071a843a6b3b703c03932b5c3b72b0ccab7b1843b",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -3721,9 +3685,6 @@
    "data_classes": [
     "ACCOUNT_NAV",
     "EXTERNAL_FLOW",
-    "FINANCING_COST",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
     "POSITION",
     "TRANSACTION"
    ],
@@ -3767,10 +3728,7 @@
      "NAV_OBSERVATION",
      "POSITION",
      "TRANSACTION",
-     "EXTERNAL_FLOW",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST"
+     "EXTERNAL_FLOW"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -3780,10 +3738,10 @@
      "effective_start": "2026-08-14",
      "effective_end": null,
      "upstream_inventory_sha256": "548db85021b3a735b9145934795c37d7d99f51360fba94f0548120f1828eaf33",
-     "product_data_class_count": 7,
-     "product_data_class_set_sha256": "1c25b5de8b23eb2d740ca250610df635f304a61b2fcfe1c0f0fc7070b98e4a0a",
+     "product_data_class_count": 4,
+     "product_data_class_set_sha256": "18d18597c804b6483e3af2150b1b98f9e4583db9364a08f80c24e75216c94a02",
      "admitted_item_count": 22,
-     "admitted_item_set_sha256": "e179a13eb016d9163be8b2c781d2bac9ac70f0b7d6a5d23294d38d5d85a7dc0b",
+     "admitted_item_set_sha256": "c736740e96e30517af5597c8819332d8e1020b45e0a8e35c646897f6b2bf4a26",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
