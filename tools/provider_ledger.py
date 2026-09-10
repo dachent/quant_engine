@@ -2341,6 +2341,68 @@ _IBKR_CAPITAL_FLOW_TYPES: Final = (
 )
 
 
+def _assignable_strategies(
+    account_id: str,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> set[str]:
+    """Return the in-perimeter strategies this account is ever assigned to."""
+
+    if account_id not in accounts:
+        return set()
+    return {
+        strategy
+        for item in assignments.get(account_id, ())
+        for strategy in (item.get("strategy_id"),)
+        if isinstance(strategy, str)
+        and strategy in strategies
+        and item.get("effective_start") not in {None, ""}
+    }
+
+
+def _capital_anchor_epoch_strategy(
+    account_id: str,
+    day: date,
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> tuple[str | None, str]:
+    """Resolve the epoch a capital event funds.
+
+    An anchor is a per-strategy fact, so the window that contains the event is
+    the first answer.  Capital committed before an account's earliest epoch
+    begins is that epoch's opening capital: owner rule HWM-003 makes capital
+    continuous across epochs, and an account funded ahead of its strategy start
+    opens holding what it was funded with.  A day after an epoch has begun but
+    inside no window is a real gap and maps to nothing.
+    """
+
+    strategy_id, mapping_status = _mapped_strategy_for_account(
+        account_id, day, accounts, strategies, assignments
+    )
+    if mapping_status == "MAPPED" or account_id not in accounts:
+        return strategy_id, mapping_status
+    starts: list[tuple[date, str]] = []
+    for item in assignments.get(account_id, ()):
+        strategy = item.get("strategy_id")
+        raw_start = item.get("effective_start")
+        if not isinstance(strategy, str) or strategy not in strategies:
+            continue
+        if raw_start in {None, ""}:
+            continue
+        starts.append((_day(raw_start, "assignment.effective_start"), strategy))
+    if not starts:
+        return None, "UNMAPPED"
+    first_start = min(start for start, _strategy in starts)
+    if day >= first_start:
+        return None, "UNMAPPED"
+    opening = {strategy for start, strategy in starts if start == first_start}
+    if len(opening) != 1:
+        return None, "UNMAPPED"
+    return opening.pop(), "MAPPED"
+
+
 def _ibkr_capital_anchors(
     generation_id: str,
     catalog: Mapping[str, Any],
@@ -2424,6 +2486,11 @@ def _ibkr_capital_anchors(
     for account_id in sorted(by_day):
         if account_id in unquantified:
             continue
+        # An anchor names the strategy it funds.  An account the product never
+        # assigns to a strategy has no epoch to name, so it yields no anchors
+        # rather than anchors nothing can attribute.
+        if not _assignable_strategies(account_id, accounts, strategies, assignments):
+            continue
         opened = False
         for day in sorted(by_day[account_id]):
             rows = by_day[account_id][day]
@@ -2445,7 +2512,7 @@ def _ibkr_capital_anchors(
             # and recognised on the grouping date.
             recognition_day = day
             event_day = max(event for _row, _currency, _amount, event in rows)
-            strategy_id, mapping_status = _mapped_strategy_for_account(
+            strategy_id, mapping_status = _capital_anchor_epoch_strategy(
                 account_id, recognition_day, accounts, strategies, assignments
             )
             source_record_id = f"{account_id}:{recognition_day.isoformat()}"
