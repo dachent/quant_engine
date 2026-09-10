@@ -652,22 +652,25 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
                 raise StrategyHistoryError(
                     "Portfolio123 exact EU performance observation differs"
                 )
-            wealth = Decimal(1) + _decimal(
-                raw[0], "Portfolio123 exact EU strategy performance"
-            ) / Decimal(100)
-            total_equity = _decimal(raw[1], "Portfolio123 exact EU total value")
-            cash_added = _decimal(raw[2], "Portfolio123 exact EU cash added")
-            if wealth <= 0 or total_equity <= 0:
+            # Each observation is [marker, Strategy, Total Value]: ``panels`` names
+            # the two graphs, Strategy at idx 0 and Total Value at idx 1, and the
+            # leading element is a marker outside that indexing.  Reading the
+            # marker as a percentage collapsed every return onto the three values
+            # the marker takes.  The level is already a wealth index, so period
+            # returns are its ratios and its base cancels.
+            level = _decimal(raw[1], "Portfolio123 exact EU strategy level")
+            total_value = _decimal(raw[2], "Portfolio123 exact EU total value")
+            if level <= 0 or total_value < 0:
                 raise StrategyHistoryError(
                     "Portfolio123 exact EU performance contains invalid values"
                 )
-            parsed.append((observed, wealth, total_equity, cash_added))
+            parsed.append((observed, level, level, total_value))
         overlap = 0
-        for observed, _wealth, total_equity, cash_added in parsed:
+        for observed, _level, curve_level, curve_total in parsed:
             if observed not in observations:
                 continue
             overlap += 1
-            if observations[observed] != (total_equity, cash_added):
+            if observations[observed] != (curve_level, curve_total):
                 raise StrategyHistoryError(
                     "Portfolio123 exact EU performance and equity differ"
                 )
@@ -683,8 +686,15 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
             raise StrategyHistoryError(
                 "Portfolio123 exact EU provider return is invalid"
             )
+        compounded = Decimal(1)
+        for provider_return in provider_returns:
+            compounded *= Decimal(1) + provider_return
         provider_summary = {
+            # The transform previously published only counts, so nothing
+            # observed whether the level or the leading marker produced the
+            # series.  The compounded result is the transform's own answer.
             "cash_added_semantics": "UNRESOLVED_NOT_USED_IN_RETURN_FORMULA",
+            "cumulative_return": format((compounded - Decimal(1)).normalize(), "f"),
             "equity_overlap_observations": overlap,
             "observed_end": parsed[-1][0].isoformat(),
             "observed_start": parsed[1][0].isoformat(),

@@ -204,9 +204,9 @@
     "source_segment_id": "portfolio123-model-generation",
     "account_sleeve_ids": [],
     "generation": {
-     "generation_id": "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
-     "manifest_sha256": "b1e6ed8e6b447fff4116900b73e712496d7a6edf00fa729f5f81f896471b7a53",
-     "pointer_sha256": "92f1f7af811227a93988875016d73eb7d07cafcce5b17df7c923bce71039e8a1",
+     "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
+     "manifest_sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
+     "pointer_sha256": "79024a424f05eae38fcb57c0db4853359e2beaf9103a3c385436433c54422431",
      "as_of": "2026-09-02"
     }
    },
@@ -585,8 +585,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
-    "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-    "receipt_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
+    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -626,8 +626,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
-    "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-    "receipt_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
+    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -667,8 +667,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:de46b08ec45f4096ae5bf501b39e6efa71ae51ae825bee63161aa804422067b3",
-    "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-    "receipt_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
+    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -708,8 +708,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:4235428716b167f3c21e2843a7e16dd8ea50d8e542cd465e0cf6887b89072435",
-    "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-    "receipt_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
+    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -790,8 +790,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:a7271e772c6d21ee4b3b2ed76149ddd9639d10c5c8be371550203fc2d67c9b61",
-    "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-    "receipt_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
+    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -955,8 +955,8 @@
     "return_type": "TOTAL",
     "segment_id": "grizzlybears-vtma:account-live",
     "sha256": "a7271e772c6d21ee4b3b2ed76149ddd9639d10c5c8be371550203fc2d67c9b61",
-    "source_generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-    "source_generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
+    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
     "source_id": "owner-account-live-history",
     "strategy_id": "grizzlybears-vtma",
     "strategy_version": "UNRESOLVED"
@@ -974,8 +974,8 @@
     "return_type": "TOTAL",
     "segment_id": "p123-ai-factor:account-live",
     "sha256": "7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
-    "source_generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-    "source_generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
+    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
     "source_id": "owner-account-live-history",
     "strategy_id": "p123-ai-factor",
     "strategy_version": "UNRESOLVED"
@@ -993,8 +993,8 @@
     "return_type": "TOTAL",
     "segment_id": "p123-eu:account-live",
     "sha256": "63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
-    "source_generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-    "source_generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
+    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
     "source_id": "owner-account-live-history",
     "strategy_id": "p123-eu",
     "strategy_version": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"
@@ -1012,8 +1012,8 @@
     "return_type": "TOTAL",
     "segment_id": "qsi:account-live",
     "sha256": "de46b08ec45f4096ae5bf501b39e6efa71ae51ae825bee63161aa804422067b3",
-    "source_generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-    "source_generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
+    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
     "source_id": "owner-account-live-history",
     "strategy_id": "qsi",
     "strategy_version": "UNRESOLVED"
@@ -1069,8 +1069,8 @@
     "return_type": "TOTAL",
     "segment_id": "tt-portfolio:account-live",
     "sha256": "4235428716b167f3c21e2843a7e16dd8ea50d8e542cd465e0cf6887b89072435",
-    "source_generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-    "source_generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
+    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
     "source_id": "owner-account-live-history",
     "strategy_id": "tt-portfolio",
     "strategy_version": "UNRESOLVED"
@@ -1300,8 +1300,8 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
-     "generation_sha256": "b1e6ed8e6b447fff4116900b73e712496d7a6edf00fa729f5f81f896471b7a53",
+     "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
+     "generation_sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
      "as_of": "2026-09-02"
     },
     "strategy_version": {
@@ -1330,27 +1330,27 @@
     "source_receipts": [
      {
       "artifact_role": "portfolio123-generation-manifest",
-      "artifact_selector": "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45/generation.json",
+      "artifact_selector": "generations/80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8/generation.json",
       "authority_root": "PORTFOLIO123",
-      "generation_id": "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+      "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "b1e6ed8e6b447fff4116900b73e712496d7a6edf00fa729f5f81f896471b7a53"
+      "sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb"
      },
      {
       "artifact_role": "portfolio123-simulation-returns",
-      "artifact_selector": "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45/tables/returns_daily.parquet",
+      "artifact_selector": "generations/80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8/tables/returns_daily.parquet",
       "authority_root": "PORTFOLIO123",
-      "generation_id": "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+      "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "tables/returns_daily.parquet",
       "sha256": "ea900ebf4b6073c715922535559bded916ff9f1283cb6326cef5b1177861045e"
      },
      {
       "artifact_role": "portfolio123-strategy-relationships",
-      "artifact_selector": "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45/tables/strategy_relationships.parquet",
+      "artifact_selector": "generations/80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8/tables/strategy_relationships.parquet",
       "authority_root": "PORTFOLIO123",
-      "generation_id": "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+      "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "tables/strategy_relationships.parquet",
       "sha256": "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc"
@@ -1417,19 +1417,19 @@
       "artifact_role": "portfolio123-current-pointer",
       "artifact_selector": "CURRENT.json",
       "authority_root": "PORTFOLIO123",
-      "generation_id": "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+      "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
       "locator_kind": "CURRENT_POINTER",
       "manifest_artifact_id": null,
-      "sha256": "92f1f7af811227a93988875016d73eb7d07cafcce5b17df7c923bce71039e8a1"
+      "sha256": "79024a424f05eae38fcb57c0db4853359e2beaf9103a3c385436433c54422431"
      },
      {
       "artifact_role": "portfolio123-generation-manifest",
-      "artifact_selector": "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45/generation.json",
+      "artifact_selector": "generations/80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8/generation.json",
       "authority_root": "PORTFOLIO123",
-      "generation_id": "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+      "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "b1e6ed8e6b447fff4116900b73e712496d7a6edf00fa729f5f81f896471b7a53"
+      "sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb"
      }
     ],
     "disposition_reason": "The exact provider-live model is captured, but the exact-version backtest is not. Other European books are different models and cannot be substituted.",
@@ -1544,8 +1544,8 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-     "generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
+     "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+     "generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
      "as_of": "2026-09-04"
     },
     "strategy_version": {
@@ -1574,21 +1574,21 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056/generation.json",
+      "artifact_selector": "generations/30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+      "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
+      "sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
      },
      {
       "artifact_role": "provider-ledger-catalog",
-      "artifact_selector": "generations/fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056/provider-ledger.json",
+      "artifact_selector": "generations/30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb/provider-ledger.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+      "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "normalized/provider-ledger.json",
-      "sha256": "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829"
+      "sha256": "66e97d05ebe4d7cbd394254089ab9b7db4a2d40c0df8c0d483e89dc55514cd65"
      }
     ],
     "disposition_reason": "Owner funding precedes the first measurable account return by one day. Provider-live history remains a separate comparison and never overwrites this path.",
@@ -1745,8 +1745,8 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-     "generation_sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
+     "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+     "generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
      "as_of": "2026-09-04"
     },
     "strategy_version": {
@@ -1775,12 +1775,12 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056/generation.json",
+      "artifact_selector": "generations/30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+      "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
+      "sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
      },
      {
       "artifact_role": "quantbase-account-activity",
@@ -2892,11 +2892,11 @@
      "authority_issue": 303,
      "effective_start": "2026-08-14",
      "effective_end": null,
-     "upstream_inventory_sha256": "57a3598e0716e4d5c245ad3600be7a36e208ec1513b14c61ccec92f19cc367ad",
+     "upstream_inventory_sha256": "9ea70645cc8f40dd38148fc115fa65ca02ef6d43eb932ece404c989fde555da1",
      "product_data_class_count": 1,
-     "product_data_class_set_sha256": "ea0a4030d0088cb92ae3af84435fea8a6fcabc5c5d77284625cb690790784c0e",
-     "admitted_item_count": 0,
-     "admitted_item_set_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
+     "product_data_class_set_sha256": "923a4cb2ed9de485c824a0893df30c9b0cf8b839da3b037115db79c8b4eeab9f",
+     "admitted_item_count": 2,
+     "admitted_item_set_sha256": "1ed305c46dc831fb820947bee3e468d3994eec9e3ef124fec88da5be42430731",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -2917,8 +2917,8 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
-    "sha256": "b1e6ed8e6b447fff4116900b73e712496d7a6edf00fa729f5f81f896471b7a53",
+    "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
+    "sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
     "as_of": "2026-09-02"
    },
    "existence_status": "EXISTS",
@@ -3029,8 +3029,8 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-    "sha256": "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
+    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+    "sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
     "as_of": "2026-09-04"
    },
    "existence_status": "EXISTS",
@@ -3338,8 +3338,8 @@
      "upstream_inventory_sha256": "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8",
      "product_data_class_count": 9,
      "product_data_class_set_sha256": "eaeee09eac3d4f358f875c89b8c03e1b0ac3a3b509f9f715189b2981cf7a7153",
-     "admitted_item_count": 24,
-     "admitted_item_set_sha256": "cf712a4c968f7e749342044ce3ca97a83c6785a0a1c2be2e2fe4e329ee3a7101",
+     "admitted_item_count": 25,
+     "admitted_item_set_sha256": "e74f64b3e344b0dad5ba2c08d366a7171a32837b0901056c8a6930d2ced66f9c",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -3466,8 +3466,8 @@
      "upstream_inventory_sha256": "24f77dcf8c81b5c4906f66013568c2ec205e46752117c9bad56aba2e65d3b98e",
      "product_data_class_count": 5,
      "product_data_class_set_sha256": "e9caeb93ca23707bdc1d9b261c847fd72e42a07f2b3b962085585b738ac72837",
-     "admitted_item_count": 3,
-     "admitted_item_set_sha256": "5e537ece23c3cc9d79cf41a5b3f499f1228bf77264ea97b5a5dd0c9acf4ee141",
+     "admitted_item_count": 6,
+     "admitted_item_set_sha256": "1593ef013cdd8cc192cdaca2a6bd7b2eced0e3315975b101129fdcaa807838d7",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"

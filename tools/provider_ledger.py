@@ -77,6 +77,7 @@ _ACCOUNT_FACTS: Final = {
     "alpaca": ("nav_observations", "positions", "transactions"),
     "fidelity": ("cash_flows", "corporate_actions", "transactions"),
     "ibkr": (
+        "capital_anchors",
         "corporate_actions",
         "flows",
         "nav_observations",
@@ -839,6 +840,56 @@ def _matrixport_daily_fx_totals(
     }
 
 
+def _matrixport_daily_native_totals(
+    manifest: GenerationManifest,
+    run_root: Path,
+) -> dict[date, dict[str, Decimal]]:
+    """Total each day's active native holdings in their own currency.
+
+    The owner-selected FX total proves the account's USD value.  Proving that
+    one subscription funded the whole account has to happen in the currency the
+    subscription was denominated in, where the comparison is exact and no rate
+    stands between the two figures.
+    """
+
+    artifact_id = "csv/daily_holdings.csv"
+    artifact = _find_manifest_artifact(
+        manifest, artifact_id, "matrixport daily holdings"
+    )
+    rows = _verified_csv_rows(
+        _exact_file(run_root, Path(artifact_id), "matrixport daily holdings"),
+        artifact.sha256,
+        {"currency", "native_value", "share", "utc_date"},
+        "matrixport daily holdings",
+    )
+    totals: dict[date, dict[str, Decimal]] = defaultdict(dict)
+    incomplete_days: set[date] = set()
+    with localcontext() as context:
+        context.prec = 80
+        for row in rows:
+            day = _day(row.get("utc_date"), "matrixport daily holdings utc_date")
+            share = _observed_decimal(
+                row.get("share"), "matrixport daily holdings share"
+            )
+            if share is None:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_ACCOUNT_COMPONENT_INVALID: active share is absent"
+                )
+            if share == 0:
+                continue
+            native = _observed_decimal(
+                row.get("native_value"), "matrixport native holding value"
+            )
+            if native is None:
+                incomplete_days.add(day)
+                continue
+            currency = _text(row.get("currency"), "matrixport holding currency")
+            totals[day][currency] = totals[day].get(currency, Decimal(0)) + native
+    for day in incomplete_days:
+        totals.pop(day, None)
+    return dict(totals)
+
+
 def _matrixport_flows(
     generation_id: str,
     manifest: GenerationManifest,
@@ -1137,6 +1188,12 @@ def _matrixport_capital_anchors(
     accounts: set[str],
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+    fx_rates: tuple[
+        str,
+        Mapping[tuple[str, date], Decimal],
+        tuple[SourceArtifact, SourceArtifact],
+    ]
+    | None = None,
 ) -> list[dict[str, Any]]:
     """Admit exact strategy subscriptions without allocating wallet deposits.
 
@@ -1192,7 +1249,20 @@ def _matrixport_capital_anchors(
         },
         "matrixport daily portfolio totals",
     )
-    source_backed_dates = _matrixport_source_backed_usd_dates(manifest, run_root)
+    # Every retained Robuxio holding is USDT labelled
+    # ``assumed_stablecoin_parity``, so the provider-reported USD route
+    # qualifies no day at all and the one subscription was silently skipped.
+    # The NAV series does not depend on that route: it converts each native
+    # holding by the owner-selected daily close.  The anchor now rests on the
+    # same evidence.
+    fx_daily_totals: dict[date, tuple[Decimal, list[dict[str, Any]]]] | None = None
+    native_totals: dict[date, dict[str, Decimal]] = {}
+    source_backed_dates: set[date] = set()
+    if fx_rates is None:
+        source_backed_dates = _matrixport_source_backed_usd_dates(manifest, run_root)
+    else:
+        fx_daily_totals = _matrixport_daily_fx_totals(manifest, run_root, fx_rates)
+        native_totals = _matrixport_daily_native_totals(manifest, run_root)
 
     def timestamp_day(value: object, name: str) -> date:
         try:
@@ -1234,7 +1304,12 @@ def _matrixport_capital_anchors(
         recognition_day = timestamp_day(
             row["confirm_nav_time_utc"], "matrixport subscription confirmation time"
         )
-        if recognition_day not in source_backed_dates:
+        qualified = (
+            recognition_day in source_backed_dates
+            if fx_daily_totals is None
+            else recognition_day in fx_daily_totals
+        )
+        if not qualified:
             continue
         if recognition_day < event_day:
             raise ProviderLedgerError(
@@ -1278,7 +1353,37 @@ def _matrixport_capital_anchors(
             "source_record_id": source_record_id,
             "strategy_id": strategy_id,
         }
-        if opening:
+        if opening and fx_daily_totals is not None:
+            subscription_currency = _text(
+                row.get("subscription_currency"),
+                "matrixport subscription currency",
+            )
+            recognition_holdings = native_totals.get(recognition_day, {})
+            if set(recognition_holdings) != {subscription_currency}:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_OPENING_NAV_UNAVAILABLE: the recognition day's "
+                    "active holdings are not the subscription currency alone"
+                )
+            if recognition_holdings[subscription_currency].quantize(
+                Decimal("0.01")
+            ) != amount.quantize(Decimal("0.01")):
+                raise ProviderLedgerError(
+                    "MATRIXPORT_OPENING_NAV_SUBSCRIPTION_MISMATCH"
+                )
+            opening_value, valuation_fx = fx_daily_totals[recognition_day]
+            if opening_value <= 0:
+                raise ProviderLedgerError(
+                    "MATRIXPORT_OPENING_NAV_UNAVAILABLE: the owner-selected "
+                    "conversion is non-positive"
+                )
+            anchor["opening_nav"] = {
+                "currency": "USD",
+                "status": "AVAILABLE",
+                "value": format(opening_value.normalize(), "f"),
+            }
+            anchor["nav_source_artifact_id"] = "csv/daily_holdings.csv"
+            anchor["valuation_fx"] = valuation_fx
+        elif opening:
             matched_nav_rows = nav_rows_by_day.get(recognition_day, [])
             if len(matched_nav_rows) != 1:
                 raise ProviderLedgerError(
@@ -2228,6 +2333,162 @@ def _mapped_strategy(
     return (unique[0], "MAPPED") if len(unique) == 1 else (None, "UNMAPPED")
 
 
+_IBKR_CAPITAL_FLOW_TYPES: Final = (
+    "DEPOSIT_OR_WITHDRAWAL",
+    "TRANSFER:ACATS:IN",
+    "TRANSFER:INTERNAL:IN",
+    "TRANSFER:INTERNAL:OUT",
+)
+
+
+def _ibkr_capital_anchors(
+    generation_id: str,
+    catalog: Mapping[str, Any],
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> list[dict[str, Any]]:
+    """Net each statement account's capital events on their own event date.
+
+    A single flow row is not a capital event.  IBKR credits a deposit advance
+    against a pending wire and then reverses it: both rows carry the same event
+    date, and reading either one alone makes money that never funded the account
+    look like its opening capital.  Small end-of-month adjustments offset the
+    same way.  Netting the day is what distinguishes capital from bookkeeping.
+
+    Internal transfers between the owner's own statement accounts are capital
+    events for the receiving account even though they are not external capital
+    for the household: strategies are mapped to accounts, so an account funded
+    by its sibling is funded.  The external/internal distinction stays on the
+    flow rows, which carry ``capital_disposition``.
+
+    An account whose capital history contains an amount-less event -- an
+    in-kind ACATS transfer -- has no arithmetic that could net its days, so it
+    yields no anchors at all rather than a series with a hole in it.
+    """
+
+    flow_rows = _objects(catalog.get("flows") or [], "ibkr.flows")
+    nav_rows = _objects(catalog.get("nav_observations") or [], "ibkr.nav_observations")
+    nav_by_account_day: dict[tuple[str, date], Decimal] = {}
+    for row in nav_rows:
+        account_id = _text(row.get("account_id"), "ibkr nav account_id")
+        day = _day(row.get("as_of_date"), "ibkr nav as_of_date")
+        value = _observed_decimal(
+            _object(row.get("nav"), "ibkr nav").get("value"), "ibkr nav value"
+        )
+        if value is None:
+            continue
+        key = (account_id, day)
+        if nav_by_account_day.setdefault(key, value) != value:
+            raise ProviderLedgerError("ibkr account NAV has conflicting duplicates")
+
+    by_day: dict[str, dict[date, list[tuple[Mapping[str, Any], str, Decimal]]]] = (
+        defaultdict(lambda: defaultdict(list))
+    )
+    unquantified: set[str] = set()
+    for row in flow_rows:
+        if row.get("flow_type") not in _IBKR_CAPITAL_FLOW_TYPES:
+            continue
+        if row.get("provider_account_scope") != "STATEMENT_ACCOUNT":
+            continue
+        account_id = _text(row.get("account_id"), "ibkr flow account_id")
+        raw_amount = row.get("amount")
+        # An in-kind ACATS transfer carries no money at all, and a money
+        # observation the provider declares unavailable carries no value.
+        # Either way this account has a capital event no arithmetic can net.
+        if not isinstance(raw_amount, Mapping):
+            unquantified.add(account_id)
+            continue
+        amount = _observed_decimal(raw_amount, "ibkr flow amount")
+        if amount is None:
+            unquantified.add(account_id)
+            continue
+        currency = _text(raw_amount.get("currency"), "ibkr flow currency")
+        day = _day(row.get("event_date"), "ibkr flow event_date")
+        by_day[account_id][day].append((row, currency, amount))
+
+    anchors: list[dict[str, Any]] = []
+    for account_id in sorted(by_day):
+        if account_id in unquantified:
+            continue
+        opened = False
+        for day in sorted(by_day[account_id]):
+            rows = by_day[account_id][day]
+            currencies = {currency for _row, currency, _amount in rows}
+            if len(currencies) != 1:
+                raise ProviderLedgerError(
+                    "ibkr capital events mix currencies on one event date"
+                )
+            currency = currencies.pop()
+            net = sum((amount for _row, _currency, amount in rows), Decimal(0))
+            if net == 0:
+                # An advance and its reversal, or offsetting adjustments.
+                continue
+            if net < 0:
+                if not opened:
+                    raise ProviderLedgerError(
+                        "ibkr account returns capital before it is funded"
+                    )
+                # Capital returned is carried by the flow rows, which declare
+                # their own external or internal disposition.
+                continue
+            recognition_day = max(
+                _day(
+                    item.get("nav_recognition_date") or item["event_date"],
+                    "ibkr flow nav_recognition_date",
+                )
+                for item, _currency, _amount in rows
+            )
+            strategy_id, mapping_status = _mapped_strategy_for_account(
+                account_id, recognition_day, accounts, strategies, assignments
+            )
+            source_record_id = f"{account_id}:{day.isoformat()}"
+            anchor: dict[str, Any] = {
+                "account_id": account_id,
+                "amount": {
+                    "currency": currency,
+                    "status": "AVAILABLE",
+                    "value": format(net.normalize(), "f"),
+                },
+                "capital_type": (
+                    "OPENING_CAPITAL_ANCHOR"
+                    if not opened
+                    else "STRATEGY_CAPITAL_ALLOCATION"
+                ),
+                "event_date": day.isoformat(),
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": generation_id,
+                "mapping_basis": "NET_STATEMENT_ACCOUNT_CAPITAL_ON_PROVIDER_EVENT_DATE",
+                "mapping_status": mapping_status,
+                "nav_recognition_date": recognition_day.isoformat(),
+                "provider_id": "ibkr",
+                "record_id": f"ibkr-capital-anchor:{source_record_id}",
+                "source_artifact_id": _text(
+                    rows[0][0].get("source_artifact_id"),
+                    "ibkr flow source_artifact_id",
+                ),
+                "source_record_id": source_record_id,
+                "strategy_id": strategy_id,
+            }
+            if not opened:
+                opening_nav = nav_by_account_day.get((account_id, recognition_day))
+                if opening_nav is None or opening_nav <= 0:
+                    raise ProviderLedgerError(
+                        "IBKR_OPENING_NAV_UNAVAILABLE: the account holds no "
+                        "positive NAV on the day its capital is recognized"
+                    )
+                anchor["opening_nav"] = {
+                    "currency": currency,
+                    "status": "AVAILABLE",
+                    "value": format(opening_nav.normalize(), "f"),
+                }
+                anchor["nav_source_artifact_id"] = "normalized/ibkr-catalog.json"
+                opened = True
+            anchors.append(anchor)
+    anchors.sort(key=lambda item: (str(item["event_date"]), str(item["record_id"])))
+    return anchors
+
+
 def _project_account_facts(
     provider_id: str,
     generation_id: str,
@@ -2250,6 +2511,24 @@ def _project_account_facts(
         raise ProviderLedgerError(f"unknown provider fact mapping: {provider_id}")
     for source_fact in _ACCOUNT_FACTS[provider_id]:
         target_fact = "flows" if source_fact == "cash_flows" else source_fact
+        if provider_id == "ibkr" and source_fact == "capital_anchors":
+            rows = _ibkr_capital_anchors(
+                generation_id, catalog, accounts, strategies, assignments
+            )
+            projections[target_fact].extend(rows)
+            for row in rows:
+                if row["mapping_status"] == "UNMAPPED":
+                    exceptions.append(
+                        {
+                            "account_in_provenance": row["account_id"] in accounts,
+                            "effective_date": row["event_date"],
+                            "fact_type": target_fact,
+                            "provider_id": provider_id,
+                            "record_id": row["record_id"],
+                            "status": "UNMAPPED",
+                        }
+                    )
+            continue
         if provider_id in _CSV_FACT_ACCOUNT and source_fact in {
             "capital_anchors",
             "flows",
@@ -2269,6 +2548,7 @@ def _project_account_facts(
                         accounts,
                         strategies,
                         assignments,
+                        fx_rates=fx_rates,
                     )
                     if source_fact == "capital_anchors"
                     else _matrixport_nav_observations(
@@ -4157,33 +4437,37 @@ def _portfolio123_provider_returns(
             raise ProviderLedgerError(
                 "Portfolio123 managed performance calendar differs"
             )
+        # Each observation is [marker, Strategy, Total Value]: `panels` names
+        # the two graphs, Strategy at idx 0 and Total Value at idx 1, and the
+        # leading element is a marker outside that indexing. The reconciliation
+        # curve carries the same pair in its own two columns, so the existing
+        # element-wise check against it holds; only the performance level was
+        # read from the wrong element. Taking the marker as the level collapsed
+        # every return onto the three values the marker takes.
         parsed: list[tuple[date, Decimal, Decimal, Decimal]] = []
         for observed, raw in zip(calendar, data, strict=True):
             if not isinstance(raw, list) or len(raw) != 3:
                 raise ProviderLedgerError(
                     "Portfolio123 managed performance observation differs"
                 )
-            wealth = Decimal(1) + _decimal(
-                raw[0], "Portfolio123 managed strategy performance"
-            ) / Decimal(100)
-            total_equity = _decimal(raw[1], "Portfolio123 managed total value")
-            cash_added = _decimal(raw[2], "Portfolio123 managed cash added")
-            if wealth <= 0 or total_equity <= 0:
+            level = _decimal(raw[1], "Portfolio123 managed strategy level")
+            total_value = _decimal(raw[2], "Portfolio123 managed total value")
+            if level <= 0 or total_value < 0:
                 raise ProviderLedgerError(
                     "Portfolio123 managed performance contains invalid values"
                 )
-            parsed.append((observed, wealth, total_equity, cash_added))
+            parsed.append((observed, level, level, total_value))
         if len(parsed) < 2:
             raise ProviderLedgerError(
                 f"Portfolio123 provider path is unavailable: {entity_id}"
             )
         ordered_equity = sorted(equity_observations[entity_id].items())
         overlap = 0
-        for observed, _wealth, total_equity, cash_added in parsed:
+        for observed, _level, curve_level, curve_total in parsed:
             if observed not in equity_observations[entity_id]:
                 continue
             overlap += 1
-            if equity_observations[entity_id][observed] != (total_equity, cash_added):
+            if equity_observations[entity_id][observed] != (curve_level, curve_total):
                 raise ProviderLedgerError(
                     "Portfolio123 managed performance and equity differ"
                 )

@@ -213,13 +213,13 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
         "315471b602bb4ce61cd854195162708ab188f6e08d6597deb9b9da11ca5bce44"
     ),
     "current_generation_id": (
-        "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056"
+        "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb"
     ),
     "current_manifest_sha256": (
-        "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
+        "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
     ),
     "current_catalog_sha256": (
-        "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829"
+        "66e97d05ebe4d7cbd394254089ab9b7db4a2d40c0df8c0d483e89dc55514cd65"
     ),
     "legacy_generation_id": (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
@@ -280,9 +280,9 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             "CURRENT.json",
             "d0d3ebc232d66518654a63dce3ca343d33b9600b539a82ae4c4fd8ea69649ba1",
         ): (
-            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
             "CURRENT.json",
-            "92f1f7af811227a93988875016d73eb7d07cafcce5b17df7c923bce71039e8a1",
+            "79024a424f05eae38fcb57c0db4853359e2beaf9103a3c385436433c54422431",
         ),
         (
             "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
@@ -292,12 +292,12 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             ),
             "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907",
         ): (
-            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
             (
-                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
-                "1e24af6dd0ec6d45/generation.json"
+                "generations/80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5"
+                "ebe2182aac5eef8/generation.json"
             ),
-            "b1e6ed8e6b447fff4116900b73e712496d7a6edf00fa729f5f81f896471b7a53",
+            "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
         ),
         (
             "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
@@ -307,10 +307,10 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             ),
             "ea900ebf4b6073c715922535559bded916ff9f1283cb6326cef5b1177861045e",
         ): (
-            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
             (
-                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
-                "1e24af6dd0ec6d45/tables/returns_daily.parquet"
+                "generations/80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5"
+                "ebe2182aac5eef8/tables/returns_daily.parquet"
             ),
             "ea900ebf4b6073c715922535559bded916ff9f1283cb6326cef5b1177861045e",
         ),
@@ -322,10 +322,10 @@ _HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
             ),
             "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc",
         ): (
-            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
+            "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
             (
-                "generations/058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f8"
-                "1e24af6dd0ec6d45/tables/strategy_relationships.parquet"
+                "generations/80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5"
+                "ebe2182aac5eef8/tables/strategy_relationships.parquet"
             ),
             "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc",
         ),

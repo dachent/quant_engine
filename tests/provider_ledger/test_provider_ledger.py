@@ -178,20 +178,20 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
         "p123-eu-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-                "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
+                "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+                "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
             ),
             (
                 "provider-ledger-catalog",
-                "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-                "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829",
+                "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+                "66e97d05ebe4d7cbd394254089ab9b7db4a2d40c0df8c0d483e89dc55514cd65",
             ),
         },
         "volatis-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
-                "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668",
+                "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+                "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
             ),
         },
         "echotrade-event-only-account-live-rejected": {
@@ -229,8 +229,8 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
             "2026-09-03",
         ),
         "portfolio123": (
-            "058354e3c3b4e6b20692616f962af55733e3ab8be3fbc5f81e24af6dd0ec6d45",
-            "b1e6ed8e6b447fff4116900b73e712496d7a6edf00fa729f5f81f896471b7a53",
+            "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
+            "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
             "2026-09-02",
         ),
         "quantbase": (
@@ -282,7 +282,7 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
     }
     assert expected_history_generations == {
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
-        "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056",
+        "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
     }
     accepted_history_generations = {
         receipt["generation_id"]
@@ -340,6 +340,7 @@ def _p123_provider_generation(
     performance_data: list[list[int]] | None = None,
     performance_data_json: str | None = None,
     include_performance_receipt: bool = True,
+    equity_levels: tuple[str, ...] | None = None,
 ) -> tuple[dict[str, str], GenerationManifest, list[dict[str, object]]]:
     """Stage a minimal retained-style P123 generation for ledger source tests."""
 
@@ -384,6 +385,13 @@ def _p123_provider_generation(
             tables / "har_managed_performance.parquet"
         ),
     }
+    if equity_levels is not None:
+        # The reconciliation curve carries the same Strategy level the payload
+        # declares, so a precision case must move both together.
+        equity_rows = [
+            {**row, "Total Equity": level}
+            for row, level in zip(equity_rows, equity_levels, strict=True)
+        ]
     pq.write_table(
         pa.Table.from_pylist(equity_rows), paths["tables/har_equity_curve.parquet"]
     )
@@ -476,13 +484,22 @@ def test_p123_managed_returns_select_only_evidence_from_the_bound_generation(
     assert len(returned) == 2
 
 
-def test_p123_returns_use_managed_strategy_levels_not_equity_reconciliation(
+def test_p123_returns_use_managed_strategy_levels_not_the_marker(
     tmp_path: Path,
 ) -> None:
-    """Changing the reconciliation curve must not change the managed return path."""
+    """Returns come from the Strategy level, not the leading marker element.
 
-    first_ref, first_manifest, evidence = _p123_provider_generation(
-        tmp_path / "first",
+    Each observation is [marker, Strategy, Total Value]. `panels` names two
+    graphs -- Strategy at idx 0, Total Value at idx 1 -- and the marker sits
+    outside that indexing. Every captured entity carries a marker drawn from
+    {0, 1, 3}; reading it as the performance level collapses the whole series
+    onto three values. Compounding the Strategy level instead reproduces the
+    provider's own reported total return, which is how the real mapping was
+    established.
+    """
+
+    provider_ref, manifest, evidence = _p123_provider_generation(
+        tmp_path,
         equity_rows=[
             {
                 "_entity_id": "exact-eu-model",
@@ -497,34 +514,55 @@ def test_p123_returns_use_managed_strategy_levels_not_equity_reconciliation(
                 "Cash Added": "70",
             },
         ],
-    )
-    second_ref, second_manifest, second_evidence = _p123_provider_generation(
-        tmp_path / "second",
-        equity_rows=[
-            {
-                "_entity_id": "exact-eu-model",
-                "Date": "2026-01-02",
-                "Total Equity": "1700",
-                "Cash Added": "500",
-            },
-            {
-                "_entity_id": "exact-eu-model",
-                "Date": "2026-01-06",
-                "Total Equity": "1300",
-                "Cash Added": "900",
-            },
-        ],
-        performance_data=[[0, 1700, 500], [25, 1400, 700], [0, 1300, 900]],
+        # markers vary independently of the level and must not move the return
+        performance_data=[[0, 100, 50], [3, 125, 60], [1, 100, 70]],
     )
 
-    first = ledger._portfolio123_provider_returns(first_ref, first_manifest, evidence)
-    second = ledger._portfolio123_provider_returns(
-        second_ref, second_manifest, second_evidence
-    )
+    returned = ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
 
-    expected = [("2026-01-05", "0.25"), ("2026-01-06", "-0.2")]
-    assert [(row["date"], row["return"]) for row in first] == expected
-    assert [(row["date"], row["return"]) for row in second] == expected
+    assert [(row["date"], row["return"]) for row in returned] == [
+        ("2026-01-05", "0.25"),
+        ("2026-01-06", "-0.2"),
+    ]
+
+
+def test_p123_marker_element_does_not_reach_the_return(tmp_path: Path) -> None:
+    """Changing only the marker leaves every derived return identical."""
+
+    def _returns(markers: list[int]) -> list[tuple[str, str]]:
+        ref, manifest, evidence = _p123_provider_generation(
+            tmp_path / f"m{''.join(str(m) for m in markers)}",
+            equity_rows=[
+                {
+                    "_entity_id": "exact-eu-model",
+                    "Date": "2026-01-02",
+                    "Total Equity": "100",
+                    "Cash Added": "50",
+                },
+                {
+                    "_entity_id": "exact-eu-model",
+                    "Date": "2026-01-06",
+                    "Total Equity": "100",
+                    "Cash Added": "70",
+                },
+            ],
+            performance_data=[
+                [markers[0], 100, 50],
+                [markers[1], 125, 60],
+                [markers[2], 100, 70],
+            ],
+        )
+        rows = ledger._portfolio123_provider_returns(ref, manifest, evidence)
+        return [(row["date"], row["return"]) for row in rows]
+
+    assert (
+        _returns([0, 0, 0])
+        == _returns([1, 3, 1])
+        == [
+            ("2026-01-05", "0.25"),
+            ("2026-01-06", "-0.2"),
+        ]
+    )
 
 
 def test_p123_returns_preserve_decimal_precision_from_managed_json(
@@ -548,18 +586,24 @@ def test_p123_returns_preserve_decimal_precision_from_managed_json(
                 "Cash Added": "0",
             },
         ],
+        # the Strategy level carries the precision, so that element is what
+        # must survive the JSON round trip
         performance_data_json=(
-            "[[0.12345678901234567890123456789,100,0],"
-            "[0.22345678901234567890123456789,100,0],"
-            "[0.32345678901234567890123456789,100,0]]"
+            "[[0,100.12345678901234567890123456789,0],"
+            "[1,100.22345678901234567890123456789,0],"
+            "[3,100.32345678901234567890123456789,0]]"
+        ),
+        equity_levels=(
+            "100.12345678901234567890123456789",
+            "100.32345678901234567890123456789",
         ),
     )
 
     returned = ledger._portfolio123_provider_returns(provider_ref, manifest, evidence)
 
-    first_wealth = Decimal("1.0012345678901234567890123456789")
-    second_wealth = Decimal("1.0022345678901234567890123456789")
-    assert returned[0]["return"] == format(second_wealth / first_wealth - 1, "f")
+    first_level = Decimal("100.12345678901234567890123456789")
+    second_level = Decimal("100.22345678901234567890123456789")
+    assert returned[0]["return"] == format(second_level / first_level - 1, "f")
 
 
 @pytest.mark.parametrize("case", ("missing", "mismatched"))
@@ -5487,6 +5531,8 @@ def test_matrixport_wallet_history_admits_source_bound_zero_flow_coverage(
 def test_matrixport_parity_derived_opening_nav_does_not_admit_capital_anchor(
     tmp_path: Path,
 ) -> None:
+    """Without the owner-selected FX generation there is no USD basis at all."""
+
     run_id = "matrixport-source"
     csv_root = tmp_path / "output" / run_id / "csv"
     csv_root.mkdir(parents=True)
@@ -5539,6 +5585,371 @@ def test_matrixport_parity_derived_opening_nav_does_not_admit_capital_anchor(
         )
         == []
     )
+
+
+def _matrixport_subscription_fixture(
+    tmp_path: Path,
+    *,
+    holdings_value: str = "49891.55",
+) -> tuple[object, dict[str, object]]:
+    """One Robuxio subscription whose only holding is parity-labelled USDT."""
+
+    run_id = "matrixport-source"
+    csv_root = tmp_path / "output" / run_id / "csv"
+    csv_root.mkdir(parents=True)
+    subscription_path = csv_root / "subscription_details.csv"
+    subscription_path.write_text(
+        "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,"
+        "subscription_amount,subscription_currency,subscription_time_utc\n"
+        "49891.55,2025-12-06T00:00:00+00:00,7402822649690198016,7361599360326447104,"
+        "49891.55,USDT,2025-12-05T21:34:17.414000+00:00\n",
+        encoding="utf-8-sig",
+    )
+    totals_path = csv_root / "daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,"
+        "strict_complete\n2025-12-06,49891.55,49891.55,true\n",
+        encoding="utf-8-sig",
+    )
+    holdings_path, quality_path = _write_matrixport_valuation_evidence(
+        totals_path,
+        day="2025-12-06",
+        value=holdings_value,
+        valuation_source="assumed_stablecoin_parity",
+    )
+    manifest = _make_two_artifact_manifest(
+        {
+            "csv/daily_portfolio_totals.csv": totals_path,
+            "csv/daily_holdings.csv": holdings_path,
+            "csv/subscription_details.csv": subscription_path,
+            "csv/valuation_quality_issues.csv": quality_path,
+        }
+    )
+    catalog: dict[str, object] = {
+        "catalog_schema_version": 2,
+        "source_run_id": run_id,
+    }
+    return manifest, catalog
+
+
+_MATRIXPORT_ANCHOR_ASSIGNMENTS = {
+    "account-d2e5821e608e25f1": [
+        {
+            "effective_start": "2025-12-06",
+            "mapping_status": "MAPPED",
+            "strategy_id": "robuxio-crypto",
+        }
+    ]
+}
+
+
+def test_matrixport_capital_anchor_opens_on_the_selected_daily_close(
+    tmp_path: Path,
+) -> None:
+    """The anchor rests on the evidence the NAV series already rests on.
+
+    Every retained Robuxio holding is USDT labelled
+    ``assumed_stablecoin_parity``, so gating the anchor on a provider-reported
+    USD value dropped the only subscription the account has.  The owner-selected
+    daily close converts the same holdings the NAV observations use, so the
+    opening NAV is that day's account total and carries the rate that made it.
+    """
+
+    manifest, catalog = _matrixport_subscription_fixture(tmp_path)
+    fx_generation_id = "f" * 64
+    fx = (
+        fx_generation_id,
+        {("USDT", date(2025, 12, 6)): Decimal("1.0003390312194824")},
+        (),
+    )
+
+    anchors = ledger._matrixport_capital_anchors(
+        "gen-1",
+        manifest,
+        catalog,
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        _MATRIXPORT_ANCHOR_ASSIGNMENTS,
+        fx_rates=fx,
+    )
+
+    assert len(anchors) == 1
+    anchor = anchors[0]
+    assert anchor["capital_type"] == "OPENING_CAPITAL_ANCHOR"
+    assert anchor["amount"] == {
+        "currency": "USDT",
+        "status": "AVAILABLE",
+        "value": "49891.55",
+    }
+    assert anchor["event_date"] == "2025-12-05"
+    assert anchor["nav_recognition_date"] == "2025-12-06"
+    assert anchor["nav_source_artifact_id"] == "csv/daily_holdings.csv"
+    assert anchor["opening_nav"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "49908.46479303836713372",
+    }
+    assert anchor["valuation_fx"] == [
+        {
+            "base_currency": "USD",
+            "currency": "USDT",
+            "date": "2025-12-06",
+            "field": "Close",
+            "generation_id": fx_generation_id,
+            "provider": "yahoo",
+            "rate": "1.0003390312194824",
+            "source_artifact_id": "rates.csv",
+            "timing": "UTC_DAILY_CLOSE",
+        }
+    ]
+
+
+def test_matrixport_capital_anchor_requires_the_whole_account_in_native_units(
+    tmp_path: Path,
+) -> None:
+    """A subscription smaller than the day's holdings is not the whole account.
+
+    The comparison has to run in the subscription's own currency.  Comparing
+    the native amount against an FX-converted total would pass or fail on the
+    rate rather than on whether this subscription funded the account.
+    """
+
+    manifest, catalog = _matrixport_subscription_fixture(
+        tmp_path, holdings_value="60000"
+    )
+    fx = ("f" * 64, {("USDT", date(2025, 12, 6)): Decimal("1")}, ())
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="MATRIXPORT_OPENING_NAV_SUBSCRIPTION_MISMATCH",
+    ):
+        ledger._matrixport_capital_anchors(
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            _MATRIXPORT_ANCHOR_ASSIGNMENTS,
+            fx_rates=fx,
+        )
+
+
+def test_matrixport_capital_anchor_fails_closed_without_a_selected_rate(
+    tmp_path: Path,
+) -> None:
+    """No owner-selected close for the recognition day means no anchor at all."""
+
+    manifest, catalog = _matrixport_subscription_fixture(tmp_path)
+    fx = ("f" * 64, {("USDT", date(2025, 12, 5)): Decimal("1.0002319812774658")}, ())
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="portfolio FX lacks USDT/USD on 2025-12-06",
+    ):
+        ledger._matrixport_capital_anchors(
+            "gen-1",
+            manifest,
+            catalog,
+            tmp_path,
+            {"account-d2e5821e608e25f1"},
+            {"robuxio-crypto"},
+            _MATRIXPORT_ANCHOR_ASSIGNMENTS,
+            fx_rates=fx,
+        )
+
+
+def _ibkr_flow(
+    account_id: str,
+    event_date: str,
+    flow_type: str,
+    value: str | None,
+    *,
+    nav_recognition_date: str | None = None,
+    record_id: str | None = None,
+) -> dict[str, object]:
+    amount: object = None
+    if value is not None:
+        amount = {"currency": "USD", "status": "AVAILABLE", "value": value}
+    return {
+        "account_id": account_id,
+        "amount": amount,
+        "event_date": event_date,
+        "flow_type": flow_type,
+        "nav_recognition_date": nav_recognition_date or event_date,
+        "provider_account_scope": "STATEMENT_ACCOUNT",
+        "record_id": record_id or f"flow-{account_id}-{event_date}-{value}",
+        "source_artifact_id": "legacy/legacy-001.xml",
+    }
+
+
+def _ibkr_nav(account_id: str, as_of_date: str, value: str) -> dict[str, object]:
+    return {
+        "account_id": account_id,
+        "as_of_date": as_of_date,
+        "nav": {"currency": "USD", "status": "AVAILABLE", "value": value},
+        "record_id": f"nav-{account_id}-{as_of_date}",
+        "source_artifact_id": "legacy/legacy-001.xml",
+        "value_basis": "ACCOUNT_TOTAL",
+    }
+
+
+_IBKR_ACCOUNT = "account-d69701da9143c430"
+_IBKR_ASSIGNMENTS = {
+    _IBKR_ACCOUNT: [
+        {
+            "effective_start": "2025-11-20",
+            "mapping_status": "MAPPED",
+            "strategy_id": "p123-eu",
+        }
+    ]
+}
+
+
+def test_ibkr_reversed_deposit_advance_does_not_open_the_capital_anchor(
+    tmp_path: Path,
+) -> None:
+    """A deposit advance and its cancellation share an event date and net out.
+
+    IBKR credits an advance against a pending wire so the account can trade,
+    then reverses it when the wire lands.  Reading either row on its own makes
+    money that never funded the account look like its opening capital, and the
+    reversal's own NAV-recognition date is a week later, so a date-keyed rule
+    does not catch it either.  Netting the event date is what does.
+    """
+
+    catalog = {
+        "flows": [
+            _ibkr_flow(_IBKR_ACCOUNT, "2025-11-24", "DEPOSIT_OR_WITHDRAWAL", "3572.46"),
+            _ibkr_flow(
+                _IBKR_ACCOUNT,
+                "2025-11-24",
+                "DEPOSIT_OR_WITHDRAWAL",
+                "-3572.46",
+                nav_recognition_date="2025-12-02",
+                record_id="flow-cancellation",
+            ),
+            _ibkr_flow(
+                _IBKR_ACCOUNT,
+                "2025-11-25",
+                "DEPOSIT_OR_WITHDRAWAL",
+                "5250",
+                nav_recognition_date="2025-12-02",
+            ),
+        ],
+        "nav_observations": [
+            _ibkr_nav(_IBKR_ACCOUNT, "2025-11-24", "8417.9359133"),
+            _ibkr_nav(_IBKR_ACCOUNT, "2025-12-02", "10081.673628706"),
+        ],
+    }
+
+    anchors = ledger._ibkr_capital_anchors(
+        "gen-1", catalog, {_IBKR_ACCOUNT}, {"p123-eu"}, _IBKR_ASSIGNMENTS
+    )
+
+    assert [(item["event_date"], item["capital_type"]) for item in anchors] == [
+        ("2025-11-25", "OPENING_CAPITAL_ANCHOR")
+    ]
+    assert anchors[0]["amount"]["value"] == "5250"
+    assert anchors[0]["nav_recognition_date"] == "2025-12-02"
+    assert anchors[0]["opening_nav"]["value"] == "10081.673628706"
+    assert anchors[0]["strategy_id"] == "p123-eu"
+
+
+def test_ibkr_sibling_account_transfers_fund_the_receiving_account(
+    tmp_path: Path,
+) -> None:
+    """Strategies map to accounts, so an account funded by its sibling is funded."""
+
+    catalog = {
+        "flows": [
+            _ibkr_flow(
+                _IBKR_ACCOUNT,
+                "2025-11-20",
+                "TRANSFER:INTERNAL:IN",
+                "486.181872",
+                record_id="flow-in-1",
+            ),
+            _ibkr_flow(
+                _IBKR_ACCOUNT,
+                "2025-11-20",
+                "TRANSFER:INTERNAL:IN",
+                "890.336665",
+                record_id="flow-in-2",
+            ),
+        ],
+        "nav_observations": [_ibkr_nav(_IBKR_ACCOUNT, "2025-11-20", "1370.5")],
+    }
+
+    anchors = ledger._ibkr_capital_anchors(
+        "gen-1", catalog, {_IBKR_ACCOUNT}, {"p123-eu"}, _IBKR_ASSIGNMENTS
+    )
+
+    assert len(anchors) == 1
+    assert anchors[0]["amount"]["value"] == "1376.518537"
+    assert anchors[0]["capital_type"] == "OPENING_CAPITAL_ANCHOR"
+    assert (
+        anchors[0]["mapping_basis"]
+        == "NET_STATEMENT_ACCOUNT_CAPITAL_ON_PROVIDER_EVENT_DATE"
+    )
+    assert anchors[0]["opening_nav"]["value"] == "1370.5"
+
+
+def test_ibkr_in_kind_transfer_yields_no_anchors_for_that_account(
+    tmp_path: Path,
+) -> None:
+    """An ACATS transfer carries securities, not an amount that can be netted."""
+
+    catalog = {
+        "flows": [
+            _ibkr_flow(_IBKR_ACCOUNT, "2025-09-14", "DEPOSIT_OR_WITHDRAWAL", "100"),
+            _ibkr_flow(_IBKR_ACCOUNT, "2025-09-30", "TRANSFER:ACATS:IN", None),
+        ],
+        "nav_observations": [_ibkr_nav(_IBKR_ACCOUNT, "2025-09-14", "100")],
+    }
+
+    assert (
+        ledger._ibkr_capital_anchors(
+            "gen-1", catalog, {_IBKR_ACCOUNT}, {"p123-eu"}, _IBKR_ASSIGNMENTS
+        )
+        == []
+    )
+
+
+def test_ibkr_capital_returned_before_funding_fails_closed(tmp_path: Path) -> None:
+    catalog = {
+        "flows": [
+            _ibkr_flow(_IBKR_ACCOUNT, "2025-11-20", "DEPOSIT_OR_WITHDRAWAL", "-500")
+        ],
+        "nav_observations": [_ibkr_nav(_IBKR_ACCOUNT, "2025-11-20", "100")],
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="ibkr account returns capital before it is funded",
+    ):
+        ledger._ibkr_capital_anchors(
+            "gen-1", catalog, {_IBKR_ACCOUNT}, {"p123-eu"}, _IBKR_ASSIGNMENTS
+        )
+
+
+def test_ibkr_opening_anchor_requires_a_positive_nav_on_recognition(
+    tmp_path: Path,
+) -> None:
+    catalog = {
+        "flows": [
+            _ibkr_flow(_IBKR_ACCOUNT, "2025-11-20", "DEPOSIT_OR_WITHDRAWAL", "100")
+        ],
+        "nav_observations": [_ibkr_nav(_IBKR_ACCOUNT, "2025-11-19", "100")],
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="IBKR_OPENING_NAV_UNAVAILABLE"
+    ):
+        ledger._ibkr_capital_anchors(
+            "gen-1", catalog, {_IBKR_ACCOUNT}, {"p123-eu"}, _IBKR_ASSIGNMENTS
+        )
 
 
 def test_matrixport_pre_funding_assignment_cannot_be_promoted_to_owner_account() -> (

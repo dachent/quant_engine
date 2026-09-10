@@ -50,7 +50,30 @@
           "source_artifact_id": {"type": "string", "minLength": 1},
           "source_product_id": {"type": "string", "minLength": 1},
           "source_record_id": {"type": "string", "minLength": 1},
-          "strategy_id": {"type": ["string", "null"]}
+          "strategy_id": {"type": ["string", "null"]},
+          "valuation_fx": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "base_currency", "currency", "date", "field", "generation_id",
+                "provider", "rate", "source_artifact_id", "timing"
+              ],
+              "properties": {
+                "base_currency": {"type": "string", "minLength": 1},
+                "currency": {"type": "string", "minLength": 1},
+                "date": {"type": "string", "format": "date"},
+                "field": {"type": "string", "minLength": 1},
+                "generation_id": {"type": "string", "minLength": 1},
+                "provider": {"type": "string", "minLength": 1},
+                "rate": {"type": "string", "minLength": 1},
+                "source_artifact_id": {"type": "string", "minLength": 1},
+                "timing": {"type": "string", "minLength": 1}
+              }
+            }
+          }
         },
         "allOf": [
           {

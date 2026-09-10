@@ -1302,14 +1302,18 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         {"graphs": [{"idx": 0, "s": "Strategy"}]},
         {"graphs": [{"idx": 1, "s": "Total Value"}]},
     ]
+    # Real Portfolio123 markers are small day codes unrelated to the level.
+    # Setting the marker to ``level - 100`` makes reading it as a percentage
+    # arithmetically identical to reading the level, which is how the marker
+    # survived as the emitted return series.  These markers keep the two apart.
     data = [
         [0.0, 100.0, 100.0],
         [1.0, 101.0, 101.0],
-        [2.0, 102.0, 99.0],
-        [3.0, 103.0, 100.0],
-        [4.0, 104.0, 101.0],
-        [5.0, 105.0, 102.0],
-        [6.0, 106.0, 103.0],
+        [3.0, 102.0, 99.0],
+        [1.0, 103.0, 100.0],
+        [1.0, 104.0, 101.0],
+        [3.0, 105.0, 102.0],
+        [1.0, 106.0, 103.0],
     ]
     pq.write_table(
         pa.Table.from_pylist(
