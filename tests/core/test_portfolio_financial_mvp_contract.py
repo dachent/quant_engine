@@ -1049,7 +1049,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # The union generation restores it, and its two admitted items are the
     # first Portfolio123 rows the product has ever admitted.
     assert contract_tool.contract_digest(contract) == (
-        "2f9e378e9f6c423d5efe310eb6b81e294430ecaf6ff05c3f63a10c00b5f8bebd"
+        "a7567cbabb968d5d5b16d37b382eaf3dc0e0acce100a53e2d92a1e6bb2e6d0f6"
     )
 
 
@@ -1849,9 +1849,9 @@ def test_accepted_provider_ledger_history_identity_cannot_be_coherently_relabell
     """History lineage is a fixed receipt, not a replaceable generation label."""
 
     replacements = {
-        "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056": ("a" * 64),
-        "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668": ("b" * 64),
-        "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829": ("c" * 64),
+        "2a7ffa9a8fcda8cba68edba07a33a04bd588d40f6abde50dac82fb42b63cbd67": ("a" * 64),
+        "dfe2d90e6a68123ae4e0e06a35395db0d7721a7c2405a6a2ad3be486f682c3bd": ("b" * 64),
+        "ab37c8589fe65ffa689f0b2941e3b1d1da5b9be751a41096b4787c98ed219aa9": ("c" * 64),
     }
 
     def replace_lineage(value: object) -> object:
@@ -2016,10 +2016,10 @@ def test_two_vintage_history_accepts_current_active_and_retains_07c590_echo() ->
     """Active owner history advances without relabelling deprecated Echo evidence."""
 
     active_generation = (
-        "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056"
+        "2a7ffa9a8fcda8cba68edba07a33a04bd588d40f6abde50dac82fb42b63cbd67"
     )
-    active_manifest = "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
-    active_catalog = "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829"
+    active_manifest = "dfe2d90e6a68123ae4e0e06a35395db0d7721a7c2405a6a2ad3be486f682c3bd"
+    active_catalog = "ab37c8589fe65ffa689f0b2941e3b1d1da5b9be751a41096b4787c98ed219aa9"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -2168,9 +2168,9 @@ def test_deprecated_history_receipt_is_independent_of_current_source_as_of(
 def test_owner_account_history_rebinds_to_current_ledger_generation() -> None:
     """The active owner-history lineage follows the corrected governed ledger."""
 
-    generation_id = "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056"
-    manifest_sha256 = "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
-    catalog_sha256 = "6a4f15056c03dd6f74b85e6f5e5d40002d7102e1581fdb6fc4d311d5382ae829"
+    generation_id = "2a7ffa9a8fcda8cba68edba07a33a04bd588d40f6abde50dac82fb42b63cbd67"
+    manifest_sha256 = "dfe2d90e6a68123ae4e0e06a35395db0d7721a7c2405a6a2ad3be486f682c3bd"
+    catalog_sha256 = "ab37c8589fe65ffa689f0b2941e3b1d1da5b9be751a41096b4787c98ed219aa9"
     contract = _contract()
     owner_source = _source(contract, "owner-account-live-history")
     assert owner_source["current_generation"] == {
@@ -2209,9 +2209,9 @@ def test_two_vintage_history_rejects_legacy_rollbacks_and_rewrites() -> None:
     """The deprecated event-only class cannot authorize active-lineage changes."""
 
     active_generation = (
-        "fba9c9412ec5b7520794f7babcfda5266d62a77ce5624df58f85776eb6635056"
+        "2a7ffa9a8fcda8cba68edba07a33a04bd588d40f6abde50dac82fb42b63cbd67"
     )
-    active_manifest = "3b5a1100abb5f47701028040d4c2340efb659ba365689716f886a9b9a431c668"
+    active_manifest = "dfe2d90e6a68123ae4e0e06a35395db0d7721a7c2405a6a2ad3be486f682c3bd"
     legacy_generation = (
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e"
     )
@@ -4098,7 +4098,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # Portfolio123 union-generation repin; each edits source_segments, which
     # this proof hashes.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "aebccec0c40c6a8e2e31ddf706c2251efa8ca49fce05fce6551d4d0702f4aa99"
+        "77f1953b4832ad9b1159881d3f0e7d61af523b1ff3fff846f20fc78fdacc7309"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4135,7 +4135,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "aebccec0c40c6a8e2e31ddf706c2251efa8ca49fce05fce6551d4d0702f4aa99"
+        "77f1953b4832ad9b1159881d3f0e7d61af523b1ff3fff846f20fc78fdacc7309"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
