@@ -2902,6 +2902,10 @@
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
      ],
      "exclusion_readiness_impact": "REQUIRED_NOT_READY",
+     "exclusion_readiness_impact_by_reason": {
+      "REQUIRED_DATA_CLASS_NOT_MATERIALIZED": "REQUIRED_NOT_READY",
+      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER": "NO_CURRENT_PRODUCT_EFFECT"
+     },
      "exclusion_invalidated_outputs_rule": "SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"
     }
    },
@@ -3341,6 +3345,10 @@
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
      ],
      "exclusion_readiness_impact": "REQUIRED_NOT_READY",
+     "exclusion_readiness_impact_by_reason": {
+      "REQUIRED_DATA_CLASS_NOT_MATERIALIZED": "REQUIRED_NOT_READY",
+      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER": "NO_CURRENT_PRODUCT_EFFECT"
+     },
      "exclusion_invalidated_outputs_rule": "SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"
     }
    },
@@ -3465,6 +3473,10 @@
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
      ],
      "exclusion_readiness_impact": "REQUIRED_NOT_READY",
+     "exclusion_readiness_impact_by_reason": {
+      "REQUIRED_DATA_CLASS_NOT_MATERIALIZED": "REQUIRED_NOT_READY",
+      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER": "NO_CURRENT_PRODUCT_EFFECT"
+     },
      "exclusion_invalidated_outputs_rule": "SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"
     }
    },
@@ -3646,6 +3658,10 @@
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
      ],
      "exclusion_readiness_impact": "REQUIRED_NOT_READY",
+     "exclusion_readiness_impact_by_reason": {
+      "REQUIRED_DATA_CLASS_NOT_MATERIALIZED": "REQUIRED_NOT_READY",
+      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER": "NO_CURRENT_PRODUCT_EFFECT"
+     },
      "exclusion_invalidated_outputs_rule": "SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"
     }
    },
@@ -3773,6 +3789,10 @@
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
      ],
      "exclusion_readiness_impact": "REQUIRED_NOT_READY",
+     "exclusion_readiness_impact_by_reason": {
+      "REQUIRED_DATA_CLASS_NOT_MATERIALIZED": "REQUIRED_NOT_READY",
+      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER": "NO_CURRENT_PRODUCT_EFFECT"
+     },
      "exclusion_invalidated_outputs_rule": "SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"
     }
    },

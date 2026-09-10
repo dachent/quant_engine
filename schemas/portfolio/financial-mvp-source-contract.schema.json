@@ -1510,6 +1510,22 @@
                 "exclusion_readiness_impact": {
                   "enum": ["NO_CURRENT_PRODUCT_EFFECT", "REQUIRED_NOT_READY"]
                 },
+                "exclusion_readiness_impact_by_reason": {
+                  "type": "object",
+                  "minProperties": 1,
+                  "additionalProperties": false,
+                  "properties": {
+                    "REQUIRED_DATA_CLASS_NOT_MATERIALIZED": {
+                      "enum": ["REQUIRED_NOT_READY"]
+                    },
+                    "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER": {
+                      "enum": ["NO_CURRENT_PRODUCT_EFFECT", "REQUIRED_NOT_READY"]
+                    },
+                    "NO_CURRENT_PRODUCT_CONSUMER": {
+                      "enum": ["NO_CURRENT_PRODUCT_EFFECT"]
+                    }
+                  }
+                },
                 "policy_id": {"const": "PROVIDER_ADMIT_OR_DECLARE_V1"},
                 "policy_owner": {"const": "PRODUCT_OWNER_GOVERNING_ISSUE_303"},
                 "policy_version": {"const": "1"},

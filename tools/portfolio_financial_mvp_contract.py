@@ -5688,7 +5688,12 @@ def _validate_sources(
                     "product_data_class_count",
                     "product_data_class_set_sha256",
                     "upstream_inventory_sha256",
-                },
+                }
+                | (
+                    {"exclusion_readiness_impact_by_reason"}
+                    if "exclusion_readiness_impact_by_reason" in policy
+                    else set()
+                ),
                 "admission.dataset_disposition_policy",
             )
             if (
@@ -5740,6 +5745,43 @@ def _validate_sources(
                 raise FinancialMvpContractError(
                     "dataset disposition readiness impact differs"
                 )
+            by_reason = policy.get("exclusion_readiness_impact_by_reason")
+            if by_reason is not None:
+                by_reason = _object(
+                    by_reason,
+                    "admission.dataset_disposition_policy"
+                    ".exclusion_readiness_impact_by_reason",
+                )
+                allowed_reasons = set(
+                    _strings(
+                        policy["allowed_exclusion_reasons"],
+                        "allowed_exclusion_reasons",
+                    )
+                )
+                for reason, impact in sorted(by_reason.items()):
+                    if reason not in allowed_reasons:
+                        raise FinancialMvpContractError(
+                            "dataset disposition readiness maps an unauthorized reason"
+                        )
+                    if impact not in {
+                        "NO_CURRENT_PRODUCT_EFFECT",
+                        "REQUIRED_NOT_READY",
+                    }:
+                        raise FinancialMvpContractError(
+                            "dataset disposition readiness impact by reason differs"
+                        )
+                # An unreferenced bundle file may be declared to have no current
+                # product effect.  A REQUIRED data class that materialized
+                # nothing may never be: that is the gap the gate exists to catch,
+                # and the map must not become a way to waive it.
+                if (
+                    row["product_requirement"] == "REQUIRED"
+                    and by_reason.get("REQUIRED_DATA_CLASS_NOT_MATERIALIZED")
+                    == "NO_CURRENT_PRODUCT_EFFECT"
+                ):
+                    raise FinancialMvpContractError(
+                        "required data class readiness cannot be waived by reason"
+                    )
             if policy["policy_id"] != "PROVIDER_ADMIT_OR_DECLARE_V1":
                 raise FinancialMvpContractError("dataset disposition policy differs")
             if policy["policy_owner"] != "PRODUCT_OWNER_GOVERNING_ISSUE_303":

@@ -5337,6 +5337,32 @@ def _product_data_class_set_digest(
     return product_data_class_set_digest(inventory)
 
 
+def _exclusion_readiness_impact(
+    policy: Mapping[str, Any], source: Mapping[str, Any], reason: str
+) -> str:
+    """Resolve the readiness impact the owner policy assigns to one exclusion.
+
+    A REQUIRED data class that materialized nothing blocks the product.  A
+    source item inside a provider bundle that no product fact references does
+    not: it is still recorded and published as an exclusion, but it has no
+    current product effect.  The policy may map each allowed reason to its own
+    impact; with no map the single scalar that predates it still governs, so
+    an unamended contract behaves exactly as before.
+    """
+
+    by_reason = policy.get("exclusion_readiness_impact_by_reason")
+    if isinstance(by_reason, Mapping) and reason in by_reason:
+        return _text(by_reason[reason], "exclusion readiness impact by reason")
+    default = policy.get("exclusion_readiness_impact")
+    if default is not None:
+        return _text(default, "exclusion readiness impact")
+    return (
+        "REQUIRED_NOT_READY"
+        if source.get("product_requirement") == "REQUIRED"
+        else "NO_CURRENT_PRODUCT_EFFECT"
+    )
+
+
 def _materialized_rows(
     provider_id: str,
     item: ProviderDatasetInventoryItem,
@@ -5488,11 +5514,7 @@ def _dataset_disposition(
             source_segment_id=str(source["source_id"]),
             source_segment_sha256=source_sha256,
             authority_ref=authority_ref,
-            readiness_impact=(
-                "REQUIRED_NOT_READY"
-                if source.get("product_requirement") == "REQUIRED"
-                else "NO_CURRENT_PRODUCT_EFFECT"
-            ),
+            readiness_impact=_exclusion_readiness_impact(policy, source, reason),
             consumers=consumers,
             invalidated_outputs=invalidated,
             evidence_layer=evidence_layer,
@@ -5649,7 +5671,9 @@ def _admit_or_declare_receipt(
                     raise ProviderLedgerError(
                         f"{provider_id} dataset exclusion is not authorized"
                     )
-                if disposition.readiness_impact != policy["exclusion_readiness_impact"]:
+                if disposition.readiness_impact != _exclusion_readiness_impact(
+                    policy, source, disposition.reason or ""
+                ):
                     raise ProviderLedgerError(
                         f"{provider_id} dataset exclusion readiness differs"
                     )
