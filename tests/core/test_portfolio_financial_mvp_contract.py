@@ -1049,7 +1049,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # The union generation restores it, and its two admitted items are the
     # first Portfolio123 rows the product has ever admitted.
     assert contract_tool.contract_digest(contract) == (
-        "8a65491add34e8d4521feb174b3fcb2dd16c0ef65819a6db4e5504d3cb0ec38b"
+        "487cc9382d381ab6cc9540f06b65cbeebff5b520a63f8946e4e8244a354fb3cd"
     )
 
 
@@ -1109,10 +1109,13 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             # Recomputed with the owner-approved FX admission: the admitted set
             # covers each disposition's materialized record count, sha and
             # observed range, and robuxio's admitted window moved from
-            # 2026-08-13 to 2026-09-03.  The admitted item count is unchanged.
-            "admitted_item_count": 3,
+            # 2026-08-13 to 2026-09-03.
+            # Moved from three items to six when the capital anchor started
+            # resting on the owner-selected daily close instead of a
+            # provider-reported USD value that no Robuxio holding carries.
+            "admitted_item_count": 6,
             "admitted_item_set_sha256": (
-                "5e537ece23c3cc9d79cf41a5b3f499f1228bf77264ea97b5a5dd0c9acf4ee141"
+                "1593ef013cdd8cc192cdaca2a6bd7b2eced0e3315975b101129fdcaa807838d7"
             ),
         },
         "quantbase-account-generation": {
@@ -4091,7 +4094,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # Portfolio123 union-generation repin; each edits source_segments, which
     # this proof hashes.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "ce1c3de5cef41dcbdf10f700f08f41df96fcae2304c3aca678a56ab930048c11"
+        "ae13197e07fa5363e1096cd7ed307eb86d6628999a9a0467f342298a4bbb0a8f"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4128,7 +4131,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "ce1c3de5cef41dcbdf10f700f08f41df96fcae2304c3aca678a56ab930048c11"
+        "ae13197e07fa5363e1096cd7ed307eb86d6628999a9a0467f342298a4bbb0a8f"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json

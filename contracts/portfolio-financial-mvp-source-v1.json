@@ -3466,8 +3466,8 @@
      "upstream_inventory_sha256": "24f77dcf8c81b5c4906f66013568c2ec205e46752117c9bad56aba2e65d3b98e",
      "product_data_class_count": 5,
      "product_data_class_set_sha256": "e9caeb93ca23707bdc1d9b261c847fd72e42a07f2b3b962085585b738ac72837",
-     "admitted_item_count": 3,
-     "admitted_item_set_sha256": "5e537ece23c3cc9d79cf41a5b3f499f1228bf77264ea97b5a5dd0c9acf4ee141",
+     "admitted_item_count": 6,
+     "admitted_item_set_sha256": "1593ef013cdd8cc192cdaca2a6bd7b2eced0e3315975b101129fdcaa807838d7",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
