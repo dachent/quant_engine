@@ -3551,6 +3551,12 @@ def build_spec(
         "schema_version": (
             3
             if manifest_inputs is not None
+            # A reused verified epoch-manifest generation is its own
+            # profile: it carries one generation identity where schema 3
+            # carries the five raw role files, and the consumer has to
+            # know which of the two it is reading.
+            else 4
+            if recipe.get("epoch_manifest_generation") is not None
             else 2
             if recipe.get("schema_version") == 3
             else 1

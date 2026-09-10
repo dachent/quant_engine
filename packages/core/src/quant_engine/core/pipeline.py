@@ -53,6 +53,7 @@ _FINANCIAL_MVP_PRODUCT_GATE: Final = "financial-mvp-product-conformance"
 _FINANCIAL_MVP_HWM_INPUT_AUTHORITY_GATE: Final = "financial-mvp-hwm-input-authority"
 _OWNER_PUBLICATION_AUTHORIZATION_GATE: Final = "owner-publication-authorization"
 _FINANCIAL_EPOCH_MANIFEST_GATE: Final = "financial-epoch-manifest-input-authority"
+_FINANCIAL_MVP_BOUND_CONTRACT_GATE: Final = "financial-mvp-bound-contract"
 _FINANCIAL_EPOCH_MANIFEST_INPUTS: Final = {
     "account_strategy_admission_policy",
     "account_strategy_classified_flows",
@@ -1130,6 +1131,55 @@ def _gate_json(spec: PipelineSpec, gate_id: str) -> tuple[dict[str, Any], bytes]
             f"pipeline gate is unreadable: {gate_id}"
         ) from exc
     return value, content
+
+
+def _verified_epoch_manifest_orchestration(
+    spec: PipelineSpec, raw: Mapping[str, Any]
+) -> None:
+    """Bind the contract's epoch-manifest identity to the bound contract's own.
+
+    A schema-10 vertical recipe reuses one verified epoch-manifest generation
+    rather than the five raw role files, so there is no epoch-manifest input
+    gate to compare against. What the run does have is the bound financial-MVP
+    contract, which carries the same `epoch_manifest_source` the release
+    builder read out of that generation's bundle. Requiring the two to agree,
+    and the contract's own digests to be digests of what it states, is what
+    stops an orchestration contract naming one epoch manifest while the build
+    consumes another.
+    """
+
+    generation = _object(
+        raw["epoch_manifest_generation"], "portfolio epoch manifest generation"
+    )
+    _strict(
+        generation,
+        {"generation_id", "runtime_root", "source"},
+        "portfolio epoch manifest generation",
+    )
+    source = _object(generation["source"], "portfolio epoch manifest source")
+    declared = _hash(
+        raw["epoch_manifest_source_sha256"], "portfolio epoch manifest source sha256"
+    )
+    if hashlib.sha256(canonical_json_bytes(source)).hexdigest() != declared:
+        raise PipelineValidationError("portfolio epoch manifest source sha256 differs")
+    bound_contract, bound_bytes = _gate_json(spec, _FINANCIAL_MVP_BOUND_CONTRACT_GATE)
+    if (
+        _hash(
+            raw["financial_mvp_bound_contract_sha256"],
+            "portfolio financial MVP bound contract sha256",
+        )
+        != hashlib.sha256(bound_bytes).hexdigest()
+    ):
+        raise PipelineValidationError(
+            "portfolio financial MVP bound contract sha256 differs"
+        )
+    bound_source = bound_contract.get("epoch_manifest_source")
+    if not isinstance(bound_source, dict) or canonical_json_bytes(
+        bound_source
+    ) != canonical_json_bytes(source):
+        raise PipelineValidationError(
+            "portfolio epoch manifest source differs from the bound contract"
+        )
 
 
 def _financial_epoch_manifest_authority(
@@ -2378,7 +2428,7 @@ def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
         "source_acquisitions",
         "stages",
     }
-    if schema_version in {2, 3}:
+    if schema_version in {2, 3, 4}:
         expected_keys.add("product_authority")
     if schema_version == 3:
         expected_keys.update(
@@ -2387,11 +2437,22 @@ def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
                 "financial_epoch_manifest_proof_sha256",
             }
         )
+    if schema_version == 4:
+        # A schema-10 vertical recipe reuses one verified epoch-manifest
+        # generation instead of the five raw role files, so the contract
+        # carries that generation's identity rather than the input set.
+        expected_keys.update(
+            {
+                "epoch_manifest_generation",
+                "epoch_manifest_source_sha256",
+                "financial_mvp_bound_contract_sha256",
+            }
+        )
     _strict(raw, expected_keys, "portfolio orchestration contract")
-    if schema_version not in {1, 2, 3} or raw["profile"] != _PORTFOLIO_PROFILE:
+    if schema_version not in {1, 2, 3, 4} or raw["profile"] != _PORTFOLIO_PROFILE:
         raise PipelineValidationError("portfolio orchestration profile is unsupported")
     product_authority = _financial_mvp_product_authority(spec)
-    if schema_version in {2, 3}:
+    if schema_version in {2, 3, 4}:
         if product_authority is None or canonical_json_bytes(
             raw["product_authority"]
         ) != canonical_json_bytes(product_authority["raw"]):
@@ -2402,6 +2463,8 @@ def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
         raise PipelineValidationError(
             "financial MVP product gate requires portfolio contract schema 2"
         )
+    if schema_version == 4:
+        _verified_epoch_manifest_orchestration(spec, raw)
     epoch_authority = _financial_epoch_manifest_authority(spec)
     if schema_version == 3:
         if epoch_authority is None or (
