@@ -1049,7 +1049,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # The union generation restores it, and its two admitted items are the
     # first Portfolio123 rows the product has ever admitted.
     assert contract_tool.contract_digest(contract) == (
-        "3bf50f4374a8ddd283c9b582566eb939919aecec723180d3c7255f952987ab97"
+        "b9dd23f8d2cf28343e33a1fc7c4b903f4af4fd06e03a7107f49e8b873a60e043"
     )
 
 
@@ -1099,12 +1099,15 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
                 "d5559b19d9aa437788772ab7b5c89c1f2ad9176c5a2d63f4f1e492a3f57b596d"
             ),
             # Moved from 24 to 25 when CAPITAL_ANCHOR materialized: netting
-            # each statement account's capital events on their own event date
-            # cancels IBKR's deposit advance against its reversal, which a
-            # per-row rule reads as opening capital that never funded.
+            # each statement account's capital events on their own recognition
+            # date cancels IBKR's deposit advance against its reversal, which
+            # a per-row rule reads as opening capital that never funded. Only
+            # the opening is an anchor, because every later IBKR capital
+            # movement is already one of the flow rows the anchor was netted
+            # from.
             "admitted_item_count": 25,
             "admitted_item_set_sha256": (
-                "fa6c82a9c1d89b302b3fc9e0935566ef77105e86a4c38e155dc18ae309c30b3a"
+                "0b8c38b8dcfcc551ac38dae244b47fd431488cc57d220656c5223967cd6892c2"
             ),
         },
         "matrixport-account-generation": {
@@ -4098,7 +4101,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # Portfolio123 union-generation repin; each edits source_segments, which
     # this proof hashes.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "928f7d6051dc78e2cb53ad9aaf8c7613fb1b44705246b3b4414c54d009e9d167"
+        "9f14889302c0719fcbcc61dd4d69b358f5333700ed7d8533581bb85a5fab9116"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4135,7 +4138,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "928f7d6051dc78e2cb53ad9aaf8c7613fb1b44705246b3b4414c54d009e9d167"
+        "9f14889302c0719fcbcc61dd4d69b358f5333700ed7d8533581bb85a5fab9116"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json

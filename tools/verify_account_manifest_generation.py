@@ -1191,15 +1191,16 @@ def _derive_first_available_nav_epoch(
         first = funded_navs[0]
         opening_anchor = facts.opening_anchor
         flows = facts.flows
-        if opening_anchor is None:
-            # FIRST_AVAILABLE_NAV already contains cash recognized on or
-            # before the opening observation; those facts remain authority
-            # evidence but do not enter the independently recomputed epoch.
-            flows = tuple(
-                flow
-                for flow in facts.flows
-                if (flow.nav_recognition_date or flow.event_date) > first.as_of_date
-            )
+        # FIRST_AVAILABLE_NAV already contains cash recognized on or before
+        # the opening observation, and so does a provider capital anchor: the
+        # anchor states the capital the epoch opens holding on that same day.
+        # Those facts remain authority evidence but do not enter the
+        # independently recomputed epoch.
+        flows = tuple(
+            flow
+            for flow in facts.flows
+            if (flow.nav_recognition_date or flow.event_date) > first.as_of_date
+        )
 
         def signed_flow(start_exclusive: date, end_inclusive: date) -> Decimal:
             return sum(
@@ -1560,7 +1561,11 @@ def _recognition_legs_attach_to_observed_intervals(
         for prior, current in zip(funded, funded[1:])
     )
     flows = facts.flows
-    if predecessor is None and facts.opening_anchor is None:
+    if predecessor is None:
+        # An opening that is not a predecessor's closing NAV -- a first
+        # available NAV or a provider capital anchor -- already contains the
+        # cash recognized on or before it, so those legs carry no linkage
+        # obligation.
         flows = tuple(
             flow
             for flow in flows

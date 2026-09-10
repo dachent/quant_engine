@@ -3315,7 +3315,7 @@
      "product_data_class_count": 6,
      "product_data_class_set_sha256": "d5559b19d9aa437788772ab7b5c89c1f2ad9176c5a2d63f4f1e492a3f57b596d",
      "admitted_item_count": 25,
-     "admitted_item_set_sha256": "fa6c82a9c1d89b302b3fc9e0935566ef77105e86a4c38e155dc18ae309c30b3a",
+     "admitted_item_set_sha256": "0b8c38b8dcfcc551ac38dae244b47fd431488cc57d220656c5223967cd6892c2",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"

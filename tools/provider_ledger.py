@@ -2504,7 +2504,14 @@ def _ibkr_capital_anchors(
             if net == 0:
                 # An advance and its reversal, or offsetting adjustments.
                 continue
-            if net < 0 and not opened:
+            if opened:
+                # Only the opening is an anchor.  Unlike Quantbase, whose
+                # anchors come from fund activity the ledger does not project
+                # as flows, every later IBKR capital movement is already a
+                # flow row: emitting it again as a STRATEGY_CAPITAL_ALLOCATION
+                # would add the same money to invested capital twice.
+                break
+            if net < 0:
                 raise ProviderLedgerError(
                     "ibkr account returns capital before it is funded"
                 )
@@ -2542,6 +2549,10 @@ def _ibkr_capital_anchors(
                 ),
                 "source_record_id": source_record_id,
                 "strategy_id": strategy_id,
+                # Every anchor names the artifact its NAV evidence comes from,
+                # opening or not: the manifest requires the provenance on the
+                # allocation rows too.
+                "nav_source_artifact_id": "normalized/ibkr-catalog.json",
             }
             if not opened and net > 0:
                 opening_nav = nav_by_account_day.get((account_id, recognition_day))
@@ -2555,7 +2566,6 @@ def _ibkr_capital_anchors(
                     "status": "AVAILABLE",
                     "value": format(opening_nav.normalize(), "f"),
                 }
-                anchor["nav_source_artifact_id"] = "normalized/ibkr-catalog.json"
                 opened = True
             anchors.append(anchor)
     anchors.sort(

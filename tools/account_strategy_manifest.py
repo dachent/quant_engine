@@ -2979,10 +2979,14 @@ def analyze_epoch(
     )
     if first_funded is None:
         return None
-    if prev_closing is None and opening_anchor is None:
-        # FIRST_AVAILABLE_NAV is a complete opening observation.  Any flow
-        # recognized on or before it is already represented in that NAV, so it
-        # is not an epoch movement, trace entry, or return-link obligation.
+    if prev_closing is None:
+        # FIRST_AVAILABLE_NAV is a complete opening observation, and so is a
+        # provider capital anchor: the anchor states the capital the epoch
+        # opens holding, recognized on that same first funded day.  Either
+        # way a flow recognized on or before the opening is already inside
+        # it, so it is not an epoch movement, trace entry, or return-link
+        # obligation.  Only a predecessor's closing NAV leaves the first
+        # day's own cash outside the opening.
         def post_opening_legs(
             source: Mapping[tuple[str, str], Decimal],
         ) -> dict[tuple[str, str], Decimal]:

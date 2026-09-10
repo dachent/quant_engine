@@ -5852,19 +5852,14 @@ def test_ibkr_deposit_advance_opens_on_the_date_nav_recognises_it(
     assert [
         (item["nav_recognition_date"], item["capital_type"], item["amount"]["value"])
         for item in anchors
-    ] == [
-        ("2025-11-24", "OPENING_CAPITAL_ANCHOR", "3572.46"),
-        ("2025-12-02", "STRATEGY_CAPITAL_ALLOCATION", "1677.54"),
-    ]
+    ] == [("2025-11-24", "OPENING_CAPITAL_ANCHOR", "3572.46")]
     # The opening is dated by the advance's own entry, and corroborated by the
     # NAV of the day it recognises.
     assert anchors[0]["event_date"] == "2025-11-24"
     assert anchors[0]["opening_nav"]["value"] == "8417.9359133"
     assert anchors[0]["strategy_id"] == "p123-eu"
-    # The reversal nets against the wire that replaced it, both recognising
-    # 2025-12-02: -3,572.46 + 5,250 = 1,677.54.
-    assert anchors[1]["event_date"] == "2025-11-25"
-    assert "opening_nav" not in anchors[1]
+    # The reversal and the wire that replaced it both recognise 2025-12-02 and
+    # net to 1,677.54, which stays where it already is: on the flow rows.
 
 
 def test_ibkr_sibling_account_transfers_fund_the_receiving_account(
@@ -5963,11 +5958,8 @@ def test_ibkr_capital_before_the_first_epoch_opens_that_epoch(
     assert [
         (item["nav_recognition_date"], item["capital_type"], item["strategy_id"])
         for item in anchors
-    ] == [
-        ("2026-01-05", "OPENING_CAPITAL_ANCHOR", "p123-ai-factor"),
-        ("2026-01-23", "STRATEGY_CAPITAL_ALLOCATION", "p123-ai-factor"),
-    ]
-    assert all(item["mapping_status"] == "MAPPED" for item in anchors)
+    ] == [("2026-01-05", "OPENING_CAPITAL_ANCHOR", "p123-ai-factor")]
+    assert anchors[0]["mapping_status"] == "MAPPED"
 
 
 def test_ibkr_account_with_no_assignment_yields_no_anchors(tmp_path: Path) -> None:
@@ -6002,6 +5994,36 @@ def test_ibkr_capital_returned_before_funding_fails_closed(tmp_path: Path) -> No
         ledger._ibkr_capital_anchors(
             "gen-1", catalog, {_IBKR_ACCOUNT}, {"p123-eu"}, _IBKR_ASSIGNMENTS
         )
+
+
+def test_ibkr_capital_after_the_opening_stays_on_the_flow_rows(
+    tmp_path: Path,
+) -> None:
+    """Only the opening is an anchor, because the rest is already a flow.
+
+    Quantbase anchors come from fund activity the ledger does not project as
+    flows, so they can be capital in their own right. Every IBKR anchor is
+    netted out of IBKR flow rows, so emitting the later ones as
+    STRATEGY_CAPITAL_ALLOCATION would add the same money to an epoch's
+    invested capital twice.
+    """
+
+    catalog = {
+        "flows": [
+            _ibkr_flow(_IBKR_ACCOUNT, "2025-11-20", "DEPOSIT_OR_WITHDRAWAL", "5000"),
+            _ibkr_flow(_IBKR_ACCOUNT, "2026-02-23", "DEPOSIT_OR_WITHDRAWAL", "2111.14"),
+            _ibkr_flow(_IBKR_ACCOUNT, "2026-02-24", "DEPOSIT_OR_WITHDRAWAL", "-1981.4"),
+        ],
+        "nav_observations": [_ibkr_nav(_IBKR_ACCOUNT, "2025-11-20", "5000")],
+    }
+
+    anchors = ledger._ibkr_capital_anchors(
+        "gen-1", catalog, {_IBKR_ACCOUNT}, {"p123-eu"}, _IBKR_ASSIGNMENTS
+    )
+
+    assert [
+        (item["capital_type"], item["amount"]["value"]) for item in anchors
+    ] == [("OPENING_CAPITAL_ANCHOR", "5000")]
 
 
 def test_ibkr_opening_anchor_requires_a_positive_nav_on_recognition(
