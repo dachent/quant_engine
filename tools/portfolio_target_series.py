@@ -3342,7 +3342,15 @@ def _p123_ai_backtest(
     provider = evidence.get("provider")
     if not isinstance(provider, dict) or provider.get("provider_id") != "portfolio123":
         raise TargetSeriesError("Portfolio123 AI provider evidence is absent")
-    provider_entity_id = str(provider.get("entity_id", "")).strip()
+    # Portfolio123 keeps two identifier spaces.  har_managed_performance is
+    # keyed by the managed portfolio id, which the provider-live return route
+    # needs; strategy_relationships and returns_daily are keyed by the model id
+    # behind it, which the live/simulation twin route needs.  A managed
+    # portfolio therefore names its model explicitly rather than being looked
+    # up in a table it does not appear in.
+    provider_entity_id = str(
+        provider.get("model_entity_id") or provider.get("entity_id", "")
+    ).strip()
     if not provider_entity_id:
         raise TargetSeriesError("Portfolio123 AI provider identity is absent")
     twins: set[str] = set()
