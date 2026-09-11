@@ -3257,6 +3257,7 @@ def _governed_hwm_coverage(
     freshness_health: Sequence[Mapping[str, Any]] | None = None,
     *,
     require_freshness: bool = False,
+    calculation_boundary: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
         return governed_hwm_coverage(
@@ -3264,6 +3265,7 @@ def _governed_hwm_coverage(
             policy,
             freshness_health,
             require_freshness=require_freshness,
+            calculation_boundary=calculation_boundary,
         )
     except HwmCoverageError as exc:
         raise ControlPanelValidationError(str(exc)) from exc
@@ -8118,6 +8120,13 @@ def _panel_data(
         effective_hwm_policy,
         freshness_health,
         require_freshness=True,
+        # The same common end date the report truncated every series to, so
+        # the panel qualifies the perimeter exactly as the report did.
+        calculation_boundary=(
+            str(report["calculation_cutoff_date"])
+            if report.get("calculation_cutoff_date") is not None
+            else None
+        ),
     )
     # Governed authority: the retained baseline named by the report is the
     # source, while owner controls independently project its seven-strategy

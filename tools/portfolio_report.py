@@ -5399,6 +5399,7 @@ def build_report_data(
                 effective_hwm_policy,
                 freshness,
                 require_freshness=True,
+                calculation_boundary=calculation_cutoff_date,
             )
         except HwmCoverageError as exc:
             raise ReportValidationError(str(exc)) from exc

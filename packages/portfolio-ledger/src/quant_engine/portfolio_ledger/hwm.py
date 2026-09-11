@@ -550,8 +550,17 @@ def governed_hwm_coverage(
     freshness_health: Sequence[Mapping[str, Any]] | None = None,
     *,
     require_freshness: bool = False,
+    calculation_boundary: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Qualify the material strategy perimeter for an automated systematic HWM."""
+    """Qualify the material strategy perimeter for an automated systematic HWM.
+
+    `calculation_boundary` is the common end date every series is truncated
+    to. A strategy whose provider has published past it is not stale: its
+    evidence stops there because the boundary says so. Without the boundary
+    the freshness comparison cannot tell that apart from a series that is
+    genuinely missing days the provider already published, and treats both
+    as a mismatch.
+    """
 
     policy_id = _text(policy.get("policy_id", "PORT-HWM-2"), "policy.policy_id")
     excluded = set(policy.get("excluded_strategy_ids", []))
@@ -685,10 +694,21 @@ def governed_hwm_coverage(
             if selected_freshness is not None
             else None
         )
+        # A later freshness date means the provider has published past this
+        # evidence. That is staleness only when the evidence stops SHORT of
+        # the common boundary; evidence that stops exactly at the boundary was
+        # truncated there on purpose, and the extra provider day is outside
+        # the calculation window rather than missing from it.
+        truncated_at_boundary = (
+            calculation_boundary is not None
+            and evidence_observed_end is not None
+            and str(evidence_observed_end) == str(calculation_boundary)
+        )
         freshness_boundary_mismatch = (
             evidence_observed_end is not None
             and freshness_observed_end is not None
             and str(evidence_observed_end) != str(freshness_observed_end)
+            and not truncated_at_boundary
         )
         freshness_blocked = freshness_blocked or freshness_boundary_mismatch
         row["hwm_freshness_status"] = (
