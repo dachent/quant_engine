@@ -366,6 +366,42 @@ def _p123_generation(path: Path) -> None:
     )
 
 
+def _bundle_inputs(tmp_path: Path) -> dict[str, Path]:
+    """The minimum retained-source set `build_bundle` requires."""
+    grizzly = tmp_path / "grizzly.xlsx"
+    tt = tmp_path / "tt.xlsx"
+    qsi_archive = tmp_path / "qsi.zip"
+    qsi_appendix = tmp_path / "qsi.xlsx"
+    qsi_prices = tmp_path / "qsi-prices"
+    volatis = tmp_path / "volatis.csv"
+    _grizzly(grizzly)
+    _tt(tt)
+    _qsi_subscription_archive(qsi_archive)
+    _qsi_appendix(qsi_appendix)
+    _qsi_prices(qsi_prices)
+    volatis.write_text(
+        "\n".join(
+            [
+                "time,value,cost_basis,profit_loss",
+                "10/15/2024,990,1000,-0.01",
+                "10/16/2024,1000,1000,0",
+                "10/17/2024,1010,1000,0.01",
+                "08/04/2026,1100,1000,0.1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "grizzly_workbook": grizzly,
+        "tt_workbook": tt,
+        "qsi_subscription_archive": qsi_archive,
+        "qsi_appendix_workbook": qsi_appendix,
+        "qsi_price_root": qsi_prices,
+        "volatis_pricehistory_csv": volatis,
+    }
+
+
 def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> None:
     grizzly = tmp_path / "grizzly.xlsx"
     tt = tmp_path / "tt.xlsx"
@@ -404,7 +440,7 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
 
     assert manifest["verification"] == "VERIFIED"
     assert manifest["builder"] == "portfolio-strategy-history"
-    assert manifest["builder_version"] == "1.4.0"
+    assert manifest["builder_version"] == "1.5.0"
     assert {item["series_id"] for item in manifest["series"]} == {
         "GrizzlyBears VTMA",
         "QSI",
@@ -572,6 +608,57 @@ def test_qsi_current_archive_is_newer_overlap_authority(tmp_path: Path) -> None:
     assert revision["accepted_authority"] == "NEWER_CURRENT_ARCHIVE"
     assert revision["overlap_observations"] == 30
     assert revision["max_abs_return_revision"] == pytest.approx(0.001)
+
+
+def test_each_series_is_capped_at_its_own_live_inception(tmp_path: Path) -> None:
+    """Prehistory is admitted per strategy, not against one global boundary.
+
+    `portfolio_target_series` rejects a series whose last row reaches that
+    strategy's own account-live start, so capping every series at a single
+    as-of discards evidence that is still admissible for the later-starting
+    strategies. A name that is not in this bundle is recorded, not fatal: the
+    caller supplies the whole product's inception map.
+    """
+    tt_path = tmp_path / "tt.xlsx"
+    _tt(tt_path)
+    uncapped, definition = history._tt(tt_path)
+    last = date.fromisoformat(max(row["date"] for row in uncapped))
+    boundary = last - timedelta(days=3)
+
+    returns, manifest = history.build_bundle(
+        **_bundle_inputs(tmp_path),
+        as_of_date="2026-08-03",
+        live_inceptions={
+            definition["series_id"]: boundary.isoformat(),
+            "Series That Is Not In This Bundle": "2020-01-01",
+        },
+    )
+    payload = json.loads(manifest)
+    assert payload["live_inceptions_applied"] == {
+        definition["series_id"]: boundary.isoformat()
+    }
+    assert payload["live_inceptions_not_in_bundle"] == [
+        "Series That Is Not In This Bundle"
+    ]
+    capped = [
+        row
+        for row in history.csv.DictReader(io.StringIO(returns.decode("utf-8")))
+        if row["series_id"] == definition["series_id"]
+    ]
+    assert capped
+    assert max(date.fromisoformat(row["date"]) for row in capped) < boundary
+    entry = next(
+        item
+        for item in payload["series"]
+        if item["series_id"] == definition["series_id"]
+    )
+    assert entry["live_inception"] == boundary.isoformat()
+    assert entry["return_observations"] == len(capped)
+    assert entry["observed_end"] == capped[-1]["date"]
+    assert entry["source_rows_excluded_at_or_after_live_inception"] > 0
+    assert entry["coverage_disposition"] == (
+        "COMPLETE_STRICTLY_BEFORE_ACCOUNT_LIVE_INCEPTION"
+    )
 
 
 def test_readers_do_not_admit_rows_after_the_as_of_date(tmp_path: Path) -> None:

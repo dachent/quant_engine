@@ -69,7 +69,9 @@ QUANTBASE_ACTIVITY_FIELDS: Final = frozenset(
 CORRELATION_FIELDS: Final = ("series_id", "date", "return", "evidence_layer")
 CORRELATION_FIELDS_V2: Final = (*CORRELATION_FIELDS, "strategy_version")
 STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
-STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
+STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset(
+    {"1.2.0", "1.3.0", "1.4.0", "1.5.0"}
+)
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-4"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
 LAYERED_HISTORY_BUILDER_VERSION: Final = "1.14.0"

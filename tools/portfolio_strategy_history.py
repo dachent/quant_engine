@@ -36,7 +36,7 @@ RETURN_FIELDS: Final = (
     "strategy_version",
 )
 SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.4.0"
+BUILDER_VERSION: Final = "1.5.0"
 _SHEET_NS: Final = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS: Final = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PKG_REL_NS: Final = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -45,6 +45,14 @@ _SLUG = re.compile(r"\((tt-[^)]+)\)\s*$")
 
 class StrategyHistoryError(ValueError):
     """A retained history source or transformation violates the contract."""
+
+
+def _date_value(value: object, field: str) -> date:
+    try:
+        parsed = date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise StrategyHistoryError(f"{field} must be a canonical date") from exc
+    return parsed
 
 
 def _sha256(path: Path) -> tuple[str, int]:
@@ -1846,7 +1854,7 @@ def _qsi(
         source=archive_source,
         coverage_disposition=(
             "COMPLETE_THROUGH_DECLARED_AS_OF_WITH_LATER_SOURCE_ROWS_EXCLUDED"
-            if current_subscription_archive is not None and excluded_after_as_of
+            if excluded_after_as_of
             else "COMPLETE_WITHIN_RETAINED_2013_2025_MODEL_BOUNDARY"
         ),
     )
@@ -1855,11 +1863,14 @@ def _qsi(
     definition["exact_weekly_observed_start"] = min(ends).isoformat()
     definition["exact_weekly_observed_end"] = max(ends).isoformat()
     definition["source_artifacts"] = sources
+    # Excluding source rows is a provenance fact on every branch, not only when
+    # a current subscription archive supplied them. Recording it solely on that
+    # branch let the appendix path drop weeks silently.
+    definition["source_rows_excluded_after_as_of"] = excluded_after_as_of
     if revision_validation is not None:
         assert source_observed_end is not None
         definition["history_revision_validation"] = revision_validation
         definition["source_observed_end"] = source_observed_end.isoformat()
-        definition["source_rows_excluded_after_as_of"] = excluded_after_as_of
     return accepted, definition
 
 
@@ -1954,6 +1965,7 @@ def build_bundle(
     volatis_pricehistory_csv: Path,
     as_of_date: str,
     portfolio123_generation_root: Path | None = None,
+    live_inceptions: Mapping[str, str] | None = None,
 ) -> tuple[bytes, bytes]:
     try:
         accepted_as_of = date.fromisoformat(as_of_date)
@@ -1993,6 +2005,56 @@ def build_bundle(
         ),
     )
     rows = [row for accepted, _ in parts for row in accepted]
+    definitions = [definition for _accepted, definition in parts]
+
+    # Prehistory is admitted per strategy, strictly before that strategy's own
+    # account-live inception (`portfolio_target_series` rejects a series whose
+    # last row reaches its live start). Capping every series at one global
+    # as-of instead discards evidence that is admissible for the later-starting
+    # strategies, so each boundary is applied to its own series and recorded.
+    boundaries = {
+        series_id: _date_value(value, f"live inception {series_id}")
+        for series_id, value in (live_inceptions or {}).items()
+    }
+    # A caller supplies the whole product's inception map; this bundle carries
+    # only the series whose history comes from these retained vendor files, and
+    # the rest are sourced elsewhere. Names outside it are recorded, not fatal.
+    present = {item["series_id"] for item in definitions}
+    not_applicable = sorted(set(boundaries) - present)
+    boundaries = {k: v for k, v in boundaries.items() if k in present}
+    if boundaries:
+        kept: list[dict[str, str]] = []
+        excluded_by_series: dict[str, int] = {}
+        for row in rows:
+            boundary = boundaries.get(row["series_id"])
+            if boundary is not None and date.fromisoformat(row["date"]) >= boundary:
+                excluded_by_series[row["series_id"]] = (
+                    excluded_by_series.get(row["series_id"], 0) + 1
+                )
+                continue
+            kept.append(row)
+        rows = kept
+        for definition in definitions:
+            series_id = definition["series_id"]
+            boundary = boundaries.get(series_id)
+            if boundary is None:
+                continue
+            series_rows = [item for item in rows if item["series_id"] == series_id]
+            if not series_rows:
+                raise StrategyHistoryError(
+                    f"live inception excludes the whole history: {series_id}"
+                )
+            definition["live_inception"] = boundary.isoformat()
+            definition["observed_end"] = series_rows[-1]["date"]
+            definition["return_observations"] = len(series_rows)
+            definition["source_rows_excluded_at_or_after_live_inception"] = (
+                excluded_by_series.get(series_id, 0)
+            )
+            if excluded_by_series.get(series_id):
+                definition["coverage_disposition"] = (
+                    "COMPLETE_STRICTLY_BEFORE_ACCOUNT_LIVE_INCEPTION"
+                )
+
     rows.sort(key=lambda item: (item["series_id"], item["date"]))
     if any(date.fromisoformat(row["date"]) > accepted_as_of for row in rows):
         raise StrategyHistoryError("history contains observations after as_of_date")
@@ -2011,7 +2073,12 @@ def build_bundle(
             "size_bytes": len(returns_content),
         },
         "schema_version": SCHEMA_VERSION,
-        "series": [definition for _, definition in parts],
+        "live_inceptions_applied": {
+            series_id: boundary.isoformat()
+            for series_id, boundary in sorted(boundaries.items())
+        },
+        "live_inceptions_not_in_bundle": not_applicable,
+        "series": definitions,
         "verification": "VERIFIED",
     }
     history_dispositions = [volatis_disposition]
@@ -2076,6 +2143,17 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--volatis-pricehistory-csv", type=Path, required=True)
     parser.add_argument("--portfolio123-generation-root", type=Path)
     parser.add_argument("--as-of-date", required=True)
+    parser.add_argument(
+        "--live-inception",
+        action="append",
+        default=[],
+        metavar="SERIES=YYYY-MM-DD",
+        help=(
+            "Account-live inception for one series. Its prehistory is admitted "
+            "strictly before this date, which is what the layered-history "
+            "consumer requires; repeat per series."
+        ),
+    )
     parser.add_argument("--output-root", type=Path, required=True)
     return parser
 
@@ -2085,6 +2163,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = write_bundle(
             args.output_root,
+            live_inceptions=dict(
+                (part.strip() for part in item.split("=", 1))
+                for item in args.live_inception
+            ),
             grizzly_workbook=args.grizzly_workbook,
             grizzly_original_design_workbook=args.grizzly_original_design_workbook,
             grizzly_spx_workbook=args.grizzly_spx_workbook,
