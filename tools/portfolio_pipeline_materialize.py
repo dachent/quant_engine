@@ -106,6 +106,9 @@ SCHEMA_9_VERTICAL_RECIPE_KEYS = frozenset(
     }
 )
 RELEASE_ROLES = ("ledger", "baseline", "report", "panel")
+# Roles whose release-builder path validates the private stage target against
+# production and therefore requires --portfolio-root on a financial run.
+_PORTFOLIO_ROOT_STAGES: Final = ("workbook", "panel")
 ROOT_IDS = {
     "ledger": "provider-ledger",
     "baseline": "baseline",
@@ -3255,7 +3258,16 @@ def build_spec(
     hwm_governed_calendar_authority_path: Path | None = None,
     hwm_governed_admission_receipt_path: Path | None = None,
     financial_input_contract_path: Path | None = None,
+    portfolio_root: Path | None = None,
 ) -> dict[str, Any]:
+    if portfolio_root is None:
+        # Fail here rather than four nodes into the run. `build_workbook` and
+        # `build_panel` refuse a financial publication without this root, and
+        # every schema-3 vertical is financial, so an omitted root is always a
+        # blocked execute with an opaque node failure.
+        raise MaterializationError(
+            "financial pipeline specification requires a portfolio root"
+        )
     recipe = _recipe(recipe_path)
     if recipe.get("schema_version") != 3:
         raise MaterializationError(
@@ -3446,6 +3458,13 @@ def build_spec(
                 args.extend((flag, str(manifest_input_paths[key])))
         if role == "panel":
             args.extend(("--qa-dir", str(qa_dir)))
+        # `build_workbook` and `build_panel` treat any run carrying governed
+        # HWM, invested capital or decomposition lenses as a financial
+        # publication and refuse it without a portfolio root, which is what
+        # proves the stage output root is disjoint from production. Every
+        # financial vertical has lenses, so both roles always need it.
+        if role in _PORTFOLIO_ROOT_STAGES and portfolio_root is not None:
+            args.extend(("--portfolio-root", str(portfolio_root)))
         reads = [*previous_outputs, *source_paths]
         for dependency in STAGE_DEPENDENCIES[role]:
             reads.extend(stage_writes[dependency])
@@ -4231,6 +4250,15 @@ def _parser() -> argparse.ArgumentParser:
             "The contract the provider ledger was ADMITTED under, when it differs from the product contract. Defaults to the product contract."
         ),
     )
+    spec_cmd.add_argument(
+        "--portfolio-root",
+        type=Path,
+        help=(
+            "The production portfolio root. Required for a financial vertical: "
+            "the workbook and panel roles prove their stage output is disjoint "
+            "from it before publishing governed HWM."
+        ),
+    )
     production_cmd = commands.add_parser("production-spec")
     production_cmd.add_argument("--recipe", type=Path, required=True)
     production_cmd.add_argument("--prepared-root", type=Path, required=True)
@@ -4290,6 +4318,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.hwm_governed_calendar_authority,
                 args.hwm_governed_admission_receipt,
                 args.financial_input_contract,
+                args.portfolio_root,
             )
         else:
             result = build_production_spec(

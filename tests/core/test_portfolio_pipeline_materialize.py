@@ -1071,12 +1071,27 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
     output_root = tmp_path / "schema10-dag"
     spec_path = output_root / "pipeline-spec.json"
 
-    materializer.build_spec(pipeline_recipe, output_root, spec_path)
+    materializer.build_spec(
+        pipeline_recipe, output_root, spec_path,
+        portfolio_root=tmp_path / "portfolio",
+    )
 
     assert calls == [(generation_root, epoch_manifest.generation_id)]
     # The panel command writes the manifest from the same verified bundle, so
     # the spec build leaves that node's declared output untouched.
     assert not (output_root / "stages" / "panel").exists()
+    # `build_workbook` and `build_panel` refuse a financial publication
+    # without a portfolio root, so the nodes that run them must carry it.
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    argv_by_node = {row["node_id"]: row.get("argv", []) for row in spec["nodes"]}
+    for node_id in ("build-workbook", "build-panel"):
+        argv = argv_by_node[node_id]
+        assert "--portfolio-root" in argv
+        assert argv[argv.index("--portfolio-root") + 1] == str(
+            tmp_path / "portfolio"
+        )
+    for node_id in ("build-ledger", "build-report"):
+        assert "--portfolio-root" not in argv_by_node[node_id]
     orchestration = json.loads(
         spec_path.with_name("portfolio-orchestration-contract.json").read_text(
             encoding="utf-8"
@@ -1098,6 +1113,23 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
             (output_root / "financial-mvp-bound-contract.json").read_bytes()
         ).hexdigest()
     )
+
+
+def test_financial_spec_without_a_portfolio_root_fails_before_the_dag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Omitting it used to surface four nodes in, as an opaque node failure."""
+
+    recipe_path = tmp_path / "recipe.json"
+    _write_json(recipe_path, {"schema_version": 3})
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="financial pipeline specification requires a portfolio root",
+    ):
+        materializer.build_spec(
+            recipe_path, tmp_path / "out", tmp_path / "out" / "pipeline-spec.json"
+        )
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -1837,7 +1869,10 @@ def test_create_recipe_binds_financial_mvp_authority_and_admission_receipt(
     )
     spec_path = tmp_path / "financial-mvp-dag" / "pipeline-spec.json"
 
-    materializer.build_spec(output, tmp_path / "financial-mvp-dag", spec_path)
+    materializer.build_spec(
+        output, tmp_path / "financial-mvp-dag", spec_path,
+        portfolio_root=tmp_path / "portfolio",
+    )
 
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     PipelineSpec.from_json_bytes(spec_path.read_bytes())
@@ -2009,7 +2044,10 @@ def test_schema_v9_rebinds_exact_epoch_manifest_inputs_into_every_stage(
     )
     output_root = tmp_path / "schema-v9-dag"
     spec_path = output_root / "pipeline-spec.json"
-    materializer.build_spec(pipeline_recipe, output_root, spec_path)
+    materializer.build_spec(
+        pipeline_recipe, output_root, spec_path,
+        portfolio_root=tmp_path / "portfolio",
+    )
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     nodes = {node["node_id"]: node for node in spec["nodes"]}
     expected_flags = {
@@ -2305,7 +2343,10 @@ def test_schema_v9_declares_the_authority_snapshot_it_emits(
     )
     output_root = tmp_path / "schema-v9-dag"
     spec_path = output_root / "pipeline-spec.json"
-    materializer.build_spec(pipeline_recipe, output_root, spec_path)
+    materializer.build_spec(
+        pipeline_recipe, output_root, spec_path,
+        portfolio_root=tmp_path / "portfolio",
+    )
 
     declared = next(
         node
@@ -3779,7 +3820,10 @@ def test_generated_semantic_command_declares_exact_gate_file(
     output_root = tmp_path / "dag"
     spec_path = output_root / "pipeline-spec.json"
 
-    materializer.build_spec(recipe_path, output_root, spec_path)
+    materializer.build_spec(
+        recipe_path, output_root, spec_path,
+        portfolio_root=tmp_path / "portfolio",
+    )
 
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     semantic = next(
