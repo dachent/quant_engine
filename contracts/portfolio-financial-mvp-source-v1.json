@@ -685,8 +685,8 @@
     "effective_end": null
    },
    "strategy_version": {
-    "status": "EVIDENCED",
-    "version_ref": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99"
+    "status": "UNRESOLVED",
+    "version_ref": null
    },
    "funded_membership": {
     "status": "EVIDENCED",
@@ -726,8 +726,8 @@
     "effective_end": null
    },
    "strategy_version": {
-    "status": "EVIDENCED",
-    "version_ref": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
+    "status": "UNRESOLVED",
+    "version_ref": null
    },
    "funded_membership": {
     "status": "EVIDENCED",
@@ -808,8 +808,8 @@
     "effective_end": null
    },
    "strategy_version": {
-    "status": "EVIDENCED",
-    "version_ref": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0"
+    "status": "UNRESOLVED",
+    "version_ref": null
    },
    "funded_membership": {
     "status": "EVIDENCED",
@@ -959,7 +959,7 @@
     "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "grizzlybears-vtma",
-    "strategy_version": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0"
+    "strategy_version": "UNRESOLVED"
    },
    {
     "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
@@ -1016,7 +1016,7 @@
     "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "qsi",
-    "strategy_version": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99"
+    "strategy_version": "UNRESOLVED"
    },
    {
     "calendar": "ALWAYS_ON",
@@ -1073,7 +1073,7 @@
     "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "tt-portfolio",
-    "strategy_version": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
+    "strategy_version": "UNRESOLVED"
    },
    {
     "calendar": "SOURCE_DECLARED",
@@ -2547,13 +2547,9 @@
    "source_id": "strategy-backtests",
    "source_version": "history-segment-v1",
    "strategy_version": {
-    "status": "MIXED",
+    "status": "UNRESOLVED",
     "binding": "EXACT_VERSION_COMPATIBILITY_REQUIRED",
-    "version_refs": {
-     "grizzlybears-vtma": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0",
-     "qsi": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99",
-     "tt-portfolio": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
-    }
+    "version_refs": {}
    },
    "subjects": {
     "account_scope": "NOT_APPLICABLE",
@@ -2953,10 +2949,7 @@
     "version_refs": {
      "p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
      "robuxio-crypto": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
-     "volatis-strategy": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7",
-     "grizzlybears-vtma": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0",
-     "qsi": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99",
-     "tt-portfolio": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
+     "volatis-strategy": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7"
     }
    },
    "subjects": {
