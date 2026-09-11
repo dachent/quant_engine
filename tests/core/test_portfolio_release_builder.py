@@ -1398,6 +1398,55 @@ def test_xlsx_startup_extension_rejects_unvalidated_job_shape() -> None:
         )
 
 
+def test_derived_runner_job_resolves_paths_and_keeps_type_first(
+    tmp_path: Path,
+) -> None:
+    """The supervisor needs the discriminator first and absolute paths.
+
+    `xlsx-job.json` is candidate-relative so the report generation identity
+    does not depend on the output root. The C# supervisor resolves nothing
+    and deserializes JobStep polymorphically, so the derived job must be
+    absolute AND must keep `type` as the first key of every step -- canonical
+    sorted JSON puts `read_only` first and the supervisor rejects it with
+    "must specify a type discriminator".
+    """
+
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    job = {
+        "idempotency_key": "synthetic",
+        "schema_version": "2.0",
+        "steps": [
+            {
+                "type": "open",
+                "read_only": False,
+                "workbook_path": "excel-input/portfolio-report.xlsx",
+            },
+            {"type": "recalc", "mode": "full_rebuild"},
+            {"type": "save_as", "output_path": "excel/portfolio-report.xlsx"},
+        ],
+    }
+    (candidate / "xlsx-job.json").write_text(json.dumps(job), encoding="utf-8")
+
+    runner_job = builder._xlsx_runner_job(candidate)
+    text = runner_job.read_text(encoding="utf-8")
+    resolved = json.loads(text)
+
+    for step in resolved["steps"]:
+        assert next(iter(step)) == "type"
+    assert '{"type":"open"' in text
+    assert resolved["steps"][0]["workbook_path"] == str(
+        (candidate / "excel-input" / "portfolio-report.xlsx").resolve()
+    )
+    assert resolved["steps"][2]["output_path"] == str(
+        (candidate / "excel" / "portfolio-report.xlsx").resolve()
+    )
+    # The bound job is untouched and still relative.
+    assert json.loads(
+        (candidate / "xlsx-job.json").read_text(encoding="utf-8")
+    ) == job
+
+
 def test_successful_xlsx_evidence_is_resumable_and_identity_bound(
     tmp_path: Path,
 ) -> None:

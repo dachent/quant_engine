@@ -859,7 +859,16 @@ def _xlsx_runner_job(candidate: Path) -> Path:
     steps = base_job.get("steps")
     if not isinstance(steps, list) or len(steps) != 3:
         raise VerticalBuildError("xlsx-win base job contract differs")
-    resolved = [dict(step) for step in steps]
+    resolved = []
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict) or "type" not in step:
+            raise VerticalBuildError("xlsx-win base job step differs")
+        # `type` must lead: the supervisor deserializes JobStep as a
+        # polymorphic type and System.Text.Json requires the discriminator
+        # first, so this job cannot be canonical-sorted JSON.
+        ordered = {"type": step["type"]}
+        ordered.update({k: v for k, v in step.items() if k != "type"})
+        resolved.append(ordered)
     for index, key in ((0, "workbook_path"), (2, "output_path")):
         relative = resolved[index].get(key)
         if not isinstance(relative, str) or not relative:
@@ -869,7 +878,10 @@ def _xlsx_runner_job(candidate: Path) -> Path:
         resolved[index][key] = str(candidate.joinpath(*relative.split("/")).resolve())
     runner_job = candidate / "xlsx-job-resolved.json"
     _write_disposable(
-        runner_job, canonical_json_bytes({**base_job, "steps": resolved})
+        runner_job,
+        json.dumps(
+            {**base_job, "steps": resolved}, ensure_ascii=False, separators=(",", ":")
+        ).encode("utf-8"),
     )
     return runner_job
 
