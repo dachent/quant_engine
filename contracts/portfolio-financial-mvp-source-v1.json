@@ -685,8 +685,8 @@
     "effective_end": null
    },
    "strategy_version": {
-    "status": "UNRESOLVED",
-    "version_ref": null
+    "status": "EVIDENCED",
+    "version_ref": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99"
    },
    "funded_membership": {
     "status": "EVIDENCED",
@@ -726,8 +726,8 @@
     "effective_end": null
    },
    "strategy_version": {
-    "status": "UNRESOLVED",
-    "version_ref": null
+    "status": "EVIDENCED",
+    "version_ref": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
    },
    "funded_membership": {
     "status": "EVIDENCED",
@@ -808,8 +808,8 @@
     "effective_end": null
    },
    "strategy_version": {
-    "status": "UNRESOLVED",
-    "version_ref": null
+    "status": "EVIDENCED",
+    "version_ref": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0"
    },
    "funded_membership": {
     "status": "EVIDENCED",
@@ -959,7 +959,7 @@
     "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "grizzlybears-vtma",
-    "strategy_version": "UNRESOLVED"
+    "strategy_version": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0"
    },
    {
     "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
@@ -1016,7 +1016,7 @@
     "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "qsi",
-    "strategy_version": "UNRESOLVED"
+    "strategy_version": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99"
    },
    {
     "calendar": "ALWAYS_ON",
@@ -1073,7 +1073,7 @@
     "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "tt-portfolio",
-    "strategy_version": "UNRESOLVED"
+    "strategy_version": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
    },
    {
     "calendar": "SOURCE_DECLARED",
@@ -1097,196 +1097,208 @@
   ],
   "corrections": [
    {
-    "correction_id": "robuxio-provider-track-record",
-    "strategy_id": "robuxio-crypto",
-    "source_id": "provider-track-record",
-    "evidence_layer": "PROVIDER_TRACK_RECORD",
+    "correction_id": "echotrade-event-only-account-live-rejected",
+    "strategy_id": "echotrade-growth-pivots",
+    "source_id": "owner-account-live-history",
+    "evidence_layer": "ACCOUNT_LIVE",
     "history_existence": {
      "status": "EXISTS",
-     "authority": "PROVIDER_PERFORMANCE_REPORT_EXISTENCE_AND_CURRENT_MATRIXPORT_CATALOG"
+     "authority": "HASH_BOUND_PROVIDER_LEDGER_EVENT_ONLY_RECONSTRUCTION"
     },
     "capture": {
-     "status": "NOT_CAPTURED",
-     "capture_defect": "PROVIDER_REPORT_EXISTS_WITHOUT_A_GOVERNED_TRACK_RECORD_GENERATION",
-     "generation_id": null,
-     "generation_sha256": null,
-     "as_of": null
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
+     "generation_sha256": "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db",
+     "as_of": "2026-08-16"
     },
     "strategy_version": {
      "status": "UNRESOLVED",
      "version_ref": null,
      "compatibility": "UNRESOLVED",
-     "authority": "EXACT_REPORT_TO_CURRENT_PRODUCT_VERSION_RELATIONSHIP_NOT_CAPTURED"
+     "authority": "EVENT_ONLY_RECONSTRUCTION_DOES_NOT_EVIDENCE_A_CURRENT_STRATEGY_VERSION"
     },
     "interval": {
-     "assignment_date": "2025-08-26",
-     "observed_start": null,
-     "observed_end": null,
+     "assignment_date": "2025-09-27",
+     "observed_start": "2025-10-01",
+     "observed_end": "2025-11-24",
      "effective_start": null,
      "effective_end": null
     },
     "funding_event": {
-     "status": "NOT_APPLICABLE",
+     "status": "UNRESOLVED",
      "event_date": null,
      "account_live_start": null,
-     "authority": "PROVIDER_TRACK_RECORD_IS_NOT_OWNER_FUNDING"
+     "authority": "TRACKER_ONLY_INITIAL_DEPOSIT_IS_NOT_ACCEPTED_PROVIDER_FUNDING_EVIDENCE"
     },
     "mode_admission": {
-     "LIVE_ONLY": "EXCLUDE_COMPARISON_ONLY",
-     "LIVE_PLUS_BACKTEST": "EXCLUDE_COMPARISON_ONLY"
+     "LIVE_ONLY": "EXCLUDE_EVENT_ONLY_RECONSTRUCTION",
+     "LIVE_PLUS_BACKTEST": "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
     },
     "source_receipts": [
      {
-      "artifact_role": "matrixport-current-pointer",
-      "artifact_selector": "CURRENT.json",
-      "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-      "locator_kind": "CURRENT_POINTER",
-      "manifest_artifact_id": null,
-      "sha256": "2b76a70db6ccbc9181930d94d95bfc70af61278f8145a36a7f63dfdb76cfcc0d"
-     },
-     {
-      "artifact_role": "matrixport-generation-manifest",
-      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
-      "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "artifact_role": "provider-ledger-generation-manifest",
+      "artifact_selector": "generations/07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e/generation.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
-     }
-    ],
-    "disposition_reason": "History existence is not capture. The uncaptured provider report remains comparison evidence and cannot become owner account-live or hybrid backtest input.",
-    "readiness": "REQUIRED_NOT_READY",
-    "blockers": [
-     302,
-     303
-    ]
-   },
-   {
-    "correction_id": "robuxio-provider-live-before-funding",
-    "strategy_id": "robuxio-crypto",
-    "source_id": "matrixport-account-generation",
-    "evidence_layer": "PROVIDER_LIVE",
-    "history_existence": {
-     "status": "EXISTS",
-     "authority": "HASH_BOUND_MATRIXPORT_PRODUCT_NAV"
-    },
-    "capture": {
-     "status": "CAPTURED_GOVERNED",
-     "capture_defect": null,
-     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-     "generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
-     "as_of": "2026-09-03"
-    },
-    "strategy_version": {
-     "status": "EVIDENCED",
-     "version_ref": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
-     "compatibility": "EXACT_MATCH",
-     "authority": "GENERATION_AND_PRIVATE_PRODUCT_ID_HASH"
-    },
-    "interval": {
-     "assignment_date": "2025-08-26",
-     "observed_start": "2025-08-14",
-     "observed_end": "2025-12-05",
-     "effective_start": "2025-08-14",
-     "effective_end": "2025-12-05"
-    },
-    "funding_event": {
-     "status": "NOT_APPLICABLE",
-     "event_date": null,
-     "account_live_start": null,
-     "authority": "PROVIDER_LIVE_PRECEDES_OWNER_FUNDING"
-    },
-    "mode_admission": {
-     "LIVE_ONLY": "EXCLUDE_COMPARISON_ONLY",
-     "LIVE_PLUS_BACKTEST": "EXCLUDE_COMPARISON_ONLY"
-    },
-    "source_receipts": [
-     {
-      "artifact_role": "matrixport-current-pointer",
-      "artifact_selector": "CURRENT.json",
-      "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-      "locator_kind": "CURRENT_POINTER",
-      "manifest_artifact_id": null,
-      "sha256": "2b76a70db6ccbc9181930d94d95bfc70af61278f8145a36a7f63dfdb76cfcc0d"
+      "sha256": "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db"
      },
      {
-      "artifact_role": "matrixport-generation-manifest",
-      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
-      "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-      "locator_kind": "GENERATION_MANIFEST",
-      "manifest_artifact_id": null,
-      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
+      "artifact_role": "provider-ledger-catalog",
+      "artifact_selector": "generations/07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e/provider-ledger.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "normalized/provider-ledger.json",
+      "sha256": "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
      }
     ],
-    "disposition_reason": "Product NAV before the proved held observation is provider-live comparison evidence. It is never relabeled as owner account-live.",
+    "rejected_evidence_identity": {
+     "canonicalization": "TARGET_FIELDS_CANONICAL_JSON_V1",
+     "return_observations": 13,
+     "sha256": "55d339e5299607daf72b44be72a03cc13998d34e81fc42d8e0a756152347ef4f",
+     "source_receipt_sha256": "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
+    },
+    "disposition_reason": "The captured rows occur only on transaction/fill dates and reproduce the event-to-event sparse-pool formula using last-trade marks. They are retained as rejected evidence, not admitted as daily account-live returns.",
     "readiness": "READY",
     "blockers": []
    },
    {
-    "correction_id": "robuxio-account-live-after-funding",
-    "strategy_id": "robuxio-crypto",
-    "source_id": "matrixport-account-generation",
-    "evidence_layer": "ACCOUNT_LIVE",
-    "history_existence": {
-     "status": "EXISTS",
-     "authority": "SUCCESSFUL_POSITIVE_SUBSCRIPTION_AND_HELD_PRODUCT_NAV"
-    },
+    "blockers": [],
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-     "generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
-     "as_of": "2026-09-03"
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+     "as_of": "2026-09-04"
     },
-    "strategy_version": {
-     "status": "EVIDENCED",
-     "version_ref": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
-     "compatibility": "ACCOUNT_OWNED",
-     "authority": "GENERATION_AND_PRIVATE_PRODUCT_ID_HASH"
-    },
-    "interval": {
-     "assignment_date": "2025-08-26",
-     "observed_start": "2025-12-07",
-     "observed_end": "2026-09-03",
-     "effective_start": "2025-12-06",
-     "effective_end": null
-    },
+    "correction_id": "grizzlybears-vtma-account-live",
+    "disposition_reason": "The account-live path is the selected provider-ledger generation this release admits.",
+    "evidence_layer": "ACCOUNT_LIVE",
     "funding_event": {
      "status": "EVIDENCED",
-     "event_date": "2025-12-06",
-     "account_live_start": "2025-12-06",
-     "authority": "SUCCESSFUL_POSITIVE_SUBSCRIPTION_CONFIRMATION_AND_FIRST_POSITIVE_HELD_NAV"
+     "event_date": "2026-01-02",
+     "account_live_start": "2026-01-02",
+     "authority": "OWNER_302_COMMENT_5349926811_AND_HASH_BOUND_SCHWAB_NAV"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "OWNER_302_COMMENT_5349926811_AND_HASH_BOUND_SCHWAB_NAV"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2026-01-03",
+     "observed_end": "2026-09-02",
+     "effective_start": "2026-01-02",
+     "effective_end": null
     },
     "mode_admission": {
      "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
      "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
     },
+    "readiness": "READY",
+    "source_id": "owner-account-live-history",
     "source_receipts": [
      {
-      "artifact_role": "matrixport-generation-manifest",
-      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
-      "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "artifact_role": "provider-ledger-generation-manifest",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
      },
      {
-      "artifact_role": "matrixport-subscription-details",
-      "artifact_selector": "output/20260903T051029.331Z/csv/subscription_details.csv",
-      "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-      "locator_kind": "GENERATION_ARTIFACT",
-      "manifest_artifact_id": "csv/subscription_details.csv",
-      "sha256": "5ce7c6e3780df78a3f3b684329dbf4b382265a3411b0db9b036965e2c75db800"
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "bea0b212fec25d1dc605eaf1c534de042f4c1948d4e75bb987cebd342f257621"
      }
     ],
-    "disposition_reason": "Funding becomes effective on the first confirmed held observation. The boundary return is excluded; measurable account-live returns begin the following day.",
+    "strategy_id": "grizzlybears-vtma",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0",
+     "compatibility": "ACCOUNT_OWNED",
+     "authority": "SAME_SELECTED_PROVIDER_LEDGER_ACCOUNT_PATH"
+    }
+   },
+   {
+    "blockers": [],
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+     "generation_sha256": "bea0b212fec25d1dc605eaf1c534de042f4c1948d4e75bb987cebd342f257621",
+     "as_of": "2026-09-04"
+    },
+    "correction_id": "grizzlybears-vtma-backtest",
+    "disposition_reason": "The retained vendor history is normalized into the governed strategy-backtests generation and admitted strictly before this strategy's own account-live inception.",
+    "evidence_layer": "BACKTEST",
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "BACKTEST_IS_NOT_OWNER_FUNDING"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_RETAINED_VENDOR_HISTORY_NORMALIZED_BY_PORTFOLIO_STRATEGY_HISTORY"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2009-04-20",
+     "observed_end": "2025-05-06",
+     "effective_start": null,
+     "effective_end": null
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "NOT_APPLICABLE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
+    },
     "readiness": "READY",
-    "blockers": []
+    "source_id": "strategy-backtests",
+    "source_receipts": [
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "bea0b212fec25d1dc605eaf1c534de042f4c1948d4e75bb987cebd342f257621"
+     },
+     {
+      "artifact_role": "strategy-backtests-catalog",
+      "artifact_selector": "generations/c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d/catalog.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "catalog.json",
+      "sha256": "287f439ee549f09aa49d851eb0f6f7d170e47ab5afe78eacca0c7c0aa43fcda1"
+     },
+     {
+      "artifact_role": "strategy-backtests-returns",
+      "artifact_selector": "generations/c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d/returns.csv",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "returns.csv",
+      "sha256": "2dffad35a4e2ab6fa6b623308e0813949c7f05071e0a5e968f7b4e8e31eb58be"
+     }
+    ],
+    "strategy_id": "grizzlybears-vtma",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0",
+     "compatibility": "EXACT_MATCH",
+     "authority": "EXACT_RETAINED_VENDOR_VERSION_STRICTLY_BEFORE_LIVE_INCEPTION"
+    }
    },
    {
     "correction_id": "p123-ai-backtest-candidate",
@@ -1372,6 +1384,69 @@
      302,
      303
     ]
+   },
+   {
+    "correction_id": "p123-eu-account-live",
+    "strategy_id": "p123-eu",
+    "source_id": "owner-account-live-history",
+    "evidence_layer": "ACCOUNT_LIVE",
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_IBKR_INTERNAL_TRANSFER_MEMBERSHIP_AND_ACCOUNT_RETURN_LEDGER"
+    },
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+     "as_of": "2026-09-04"
+    },
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
+     "compatibility": "ACCOUNT_OWNED",
+     "authority": "ACCEPTED_ACCOUNT_TO_CONNECTED_MODEL_MAPPING"
+    },
+    "interval": {
+     "assignment_date": "2025-11-12",
+     "observed_start": "2025-11-21",
+     "observed_end": "2026-09-02",
+     "effective_start": "2025-11-20",
+     "effective_end": null
+    },
+    "funding_event": {
+     "status": "EVIDENCED",
+     "event_date": "2025-11-20",
+     "account_live_start": "2025-11-20",
+     "authority": "FIRST_HASH_BOUND_IBKR_INTERNAL_TRANSFER_IN; MEMBERSHIP_ONLY; ZERO_AGGREGATE_INVESTED_CAPITAL_EFFECT"
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
+    },
+    "source_receipts": [
+     {
+      "artifact_role": "provider-ledger-generation-manifest",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+     },
+     {
+      "artifact_role": "provider-ledger-catalog",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/provider-ledger.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "normalized/provider-ledger.json",
+      "sha256": "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
+     }
+    ],
+    "disposition_reason": "Owner funding precedes the first measurable account return by one day. Provider-live history remains a separate comparison and never overwrites this path.",
+    "readiness": "READY",
+    "blockers": []
    },
    {
     "correction_id": "p123-eu-backtest-not-captured",
@@ -1533,13 +1608,475 @@
     ]
    },
    {
-    "correction_id": "p123-eu-account-live",
-    "strategy_id": "p123-eu",
+    "blockers": [],
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+     "as_of": "2026-09-04"
+    },
+    "correction_id": "qsi-account-live",
+    "disposition_reason": "The account-live path is the selected provider-ledger generation this release admits.",
+    "evidence_layer": "ACCOUNT_LIVE",
+    "funding_event": {
+     "status": "EVIDENCED",
+     "event_date": "2026-01-05",
+     "account_live_start": "2026-01-05",
+     "authority": "OWNER_302_COMMENT_5349926811_TT_TO_QSI_BOUNDARY"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "OWNER_302_COMMENT_5349926811_TT_TO_QSI_BOUNDARY"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2026-01-05",
+     "observed_end": "2026-09-02",
+     "effective_start": "2026-01-05",
+     "effective_end": null
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
+    },
+    "readiness": "READY",
+    "source_id": "owner-account-live-history",
+    "source_receipts": [
+     {
+      "artifact_role": "provider-ledger-generation-manifest",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+     },
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "bea0b212fec25d1dc605eaf1c534de042f4c1948d4e75bb987cebd342f257621"
+     }
+    ],
+    "strategy_id": "qsi",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99",
+     "compatibility": "ACCOUNT_OWNED",
+     "authority": "SAME_SELECTED_PROVIDER_LEDGER_ACCOUNT_PATH"
+    }
+   },
+   {
+    "blockers": [],
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+     "generation_sha256": "bea0b212fec25d1dc605eaf1c534de042f4c1948d4e75bb987cebd342f257621",
+     "as_of": "2026-09-04"
+    },
+    "correction_id": "qsi-backtest",
+    "disposition_reason": "The retained vendor history is normalized into the governed strategy-backtests generation and admitted strictly before this strategy's own account-live inception.",
+    "evidence_layer": "BACKTEST",
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "BACKTEST_IS_NOT_OWNER_FUNDING"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_RETAINED_VENDOR_HISTORY_NORMALIZED_BY_PORTFOLIO_STRATEGY_HISTORY"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2013-10-21",
+     "observed_end": "2025-12-19",
+     "effective_start": null,
+     "effective_end": null
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "NOT_APPLICABLE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
+    },
+    "readiness": "READY",
+    "source_id": "strategy-backtests",
+    "source_receipts": [
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "bea0b212fec25d1dc605eaf1c534de042f4c1948d4e75bb987cebd342f257621"
+     },
+     {
+      "artifact_role": "strategy-backtests-catalog",
+      "artifact_selector": "generations/c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d/catalog.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "catalog.json",
+      "sha256": "287f439ee549f09aa49d851eb0f6f7d170e47ab5afe78eacca0c7c0aa43fcda1"
+     },
+     {
+      "artifact_role": "strategy-backtests-returns",
+      "artifact_selector": "generations/c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d/returns.csv",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "returns.csv",
+      "sha256": "2dffad35a4e2ab6fa6b623308e0813949c7f05071e0a5e968f7b4e8e31eb58be"
+     }
+    ],
+    "strategy_id": "qsi",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99",
+     "compatibility": "EXACT_MATCH",
+     "authority": "EXACT_RETAINED_VENDOR_VERSION_STRICTLY_BEFORE_LIVE_INCEPTION"
+    }
+   },
+   {
+    "correction_id": "robuxio-account-live-after-funding",
+    "strategy_id": "robuxio-crypto",
+    "source_id": "matrixport-account-generation",
+    "evidence_layer": "ACCOUNT_LIVE",
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "SUCCESSFUL_POSITIVE_SUBSCRIPTION_AND_HELD_PRODUCT_NAV"
+    },
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+     "generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
+     "as_of": "2026-09-03"
+    },
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
+     "compatibility": "ACCOUNT_OWNED",
+     "authority": "GENERATION_AND_PRIVATE_PRODUCT_ID_HASH"
+    },
+    "interval": {
+     "assignment_date": "2025-08-26",
+     "observed_start": "2025-12-07",
+     "observed_end": "2026-09-03",
+     "effective_start": "2025-12-06",
+     "effective_end": null
+    },
+    "funding_event": {
+     "status": "EVIDENCED",
+     "event_date": "2025-12-06",
+     "account_live_start": "2025-12-06",
+     "authority": "SUCCESSFUL_POSITIVE_SUBSCRIPTION_CONFIRMATION_AND_FIRST_POSITIVE_HELD_NAV"
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
+    },
+    "source_receipts": [
+     {
+      "artifact_role": "matrixport-generation-manifest",
+      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
+      "authority_root": "MATRIXPORT",
+      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
+     },
+     {
+      "artifact_role": "matrixport-subscription-details",
+      "artifact_selector": "output/20260903T051029.331Z/csv/subscription_details.csv",
+      "authority_root": "MATRIXPORT",
+      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "csv/subscription_details.csv",
+      "sha256": "5ce7c6e3780df78a3f3b684329dbf4b382265a3411b0db9b036965e2c75db800"
+     }
+    ],
+    "disposition_reason": "Funding becomes effective on the first confirmed held observation. The boundary return is excluded; measurable account-live returns begin the following day.",
+    "readiness": "READY",
+    "blockers": []
+   },
+   {
+    "correction_id": "robuxio-provider-live-before-funding",
+    "strategy_id": "robuxio-crypto",
+    "source_id": "matrixport-account-generation",
+    "evidence_layer": "PROVIDER_LIVE",
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_MATRIXPORT_PRODUCT_NAV"
+    },
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+     "generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
+     "as_of": "2026-09-03"
+    },
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
+     "compatibility": "EXACT_MATCH",
+     "authority": "GENERATION_AND_PRIVATE_PRODUCT_ID_HASH"
+    },
+    "interval": {
+     "assignment_date": "2025-08-26",
+     "observed_start": "2025-08-14",
+     "observed_end": "2025-12-05",
+     "effective_start": "2025-08-14",
+     "effective_end": "2025-12-05"
+    },
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "PROVIDER_LIVE_PRECEDES_OWNER_FUNDING"
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "EXCLUDE_COMPARISON_ONLY",
+     "LIVE_PLUS_BACKTEST": "EXCLUDE_COMPARISON_ONLY"
+    },
+    "source_receipts": [
+     {
+      "artifact_role": "matrixport-current-pointer",
+      "artifact_selector": "CURRENT.json",
+      "authority_root": "MATRIXPORT",
+      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "locator_kind": "CURRENT_POINTER",
+      "manifest_artifact_id": null,
+      "sha256": "2b76a70db6ccbc9181930d94d95bfc70af61278f8145a36a7f63dfdb76cfcc0d"
+     },
+     {
+      "artifact_role": "matrixport-generation-manifest",
+      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
+      "authority_root": "MATRIXPORT",
+      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
+     }
+    ],
+    "disposition_reason": "Product NAV before the proved held observation is provider-live comparison evidence. It is never relabeled as owner account-live.",
+    "readiness": "READY",
+    "blockers": []
+   },
+   {
+    "correction_id": "robuxio-provider-track-record",
+    "strategy_id": "robuxio-crypto",
+    "source_id": "provider-track-record",
+    "evidence_layer": "PROVIDER_TRACK_RECORD",
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "PROVIDER_PERFORMANCE_REPORT_EXISTENCE_AND_CURRENT_MATRIXPORT_CATALOG"
+    },
+    "capture": {
+     "status": "NOT_CAPTURED",
+     "capture_defect": "PROVIDER_REPORT_EXISTS_WITHOUT_A_GOVERNED_TRACK_RECORD_GENERATION",
+     "generation_id": null,
+     "generation_sha256": null,
+     "as_of": null
+    },
+    "strategy_version": {
+     "status": "UNRESOLVED",
+     "version_ref": null,
+     "compatibility": "UNRESOLVED",
+     "authority": "EXACT_REPORT_TO_CURRENT_PRODUCT_VERSION_RELATIONSHIP_NOT_CAPTURED"
+    },
+    "interval": {
+     "assignment_date": "2025-08-26",
+     "observed_start": null,
+     "observed_end": null,
+     "effective_start": null,
+     "effective_end": null
+    },
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "PROVIDER_TRACK_RECORD_IS_NOT_OWNER_FUNDING"
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "EXCLUDE_COMPARISON_ONLY",
+     "LIVE_PLUS_BACKTEST": "EXCLUDE_COMPARISON_ONLY"
+    },
+    "source_receipts": [
+     {
+      "artifact_role": "matrixport-current-pointer",
+      "artifact_selector": "CURRENT.json",
+      "authority_root": "MATRIXPORT",
+      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "locator_kind": "CURRENT_POINTER",
+      "manifest_artifact_id": null,
+      "sha256": "2b76a70db6ccbc9181930d94d95bfc70af61278f8145a36a7f63dfdb76cfcc0d"
+     },
+     {
+      "artifact_role": "matrixport-generation-manifest",
+      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
+      "authority_root": "MATRIXPORT",
+      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
+     }
+    ],
+    "disposition_reason": "History existence is not capture. The uncaptured provider report remains comparison evidence and cannot become owner account-live or hybrid backtest input.",
+    "readiness": "REQUIRED_NOT_READY",
+    "blockers": [
+     302,
+     303
+    ]
+   },
+   {
+    "blockers": [],
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+     "as_of": "2026-09-04"
+    },
+    "correction_id": "tt-portfolio-account-live",
+    "disposition_reason": "The account-live path is the selected provider-ledger generation this release admits.",
+    "evidence_layer": "ACCOUNT_LIVE",
+    "funding_event": {
+     "status": "EVIDENCED",
+     "event_date": "2025-11-25",
+     "account_live_start": "2025-11-25",
+     "authority": "OWNER_302_COMMENT_5349926811_CONTINUOUS_MEMBERSHIP"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "OWNER_302_COMMENT_5349926811_CONTINUOUS_MEMBERSHIP"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2025-11-25",
+     "observed_end": "2026-09-02",
+     "effective_start": "2025-11-25",
+     "effective_end": null
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
+    },
+    "readiness": "READY",
+    "source_id": "owner-account-live-history",
+    "source_receipts": [
+     {
+      "artifact_role": "provider-ledger-generation-manifest",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+     },
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "bea0b212fec25d1dc605eaf1c534de042f4c1948d4e75bb987cebd342f257621"
+     }
+    ],
+    "strategy_id": "tt-portfolio",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68",
+     "compatibility": "ACCOUNT_OWNED",
+     "authority": "SAME_SELECTED_PROVIDER_LEDGER_ACCOUNT_PATH"
+    }
+   },
+   {
+    "blockers": [],
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+     "generation_sha256": "bea0b212fec25d1dc605eaf1c534de042f4c1948d4e75bb987cebd342f257621",
+     "as_of": "2026-09-04"
+    },
+    "correction_id": "tt-portfolio-backtest",
+    "disposition_reason": "The retained vendor history is normalized into the governed strategy-backtests generation and admitted strictly before this strategy's own account-live inception.",
+    "evidence_layer": "BACKTEST",
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "BACKTEST_IS_NOT_OWNER_FUNDING"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_RETAINED_VENDOR_HISTORY_NORMALIZED_BY_PORTFOLIO_STRATEGY_HISTORY"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2007-01-05",
+     "observed_end": "2025-11-24",
+     "effective_start": null,
+     "effective_end": null
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "NOT_APPLICABLE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
+    },
+    "readiness": "READY",
+    "source_id": "strategy-backtests",
+    "source_receipts": [
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "bea0b212fec25d1dc605eaf1c534de042f4c1948d4e75bb987cebd342f257621"
+     },
+     {
+      "artifact_role": "strategy-backtests-catalog",
+      "artifact_selector": "generations/c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d/catalog.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "catalog.json",
+      "sha256": "287f439ee549f09aa49d851eb0f6f7d170e47ab5afe78eacca0c7c0aa43fcda1"
+     },
+     {
+      "artifact_role": "strategy-backtests-returns",
+      "artifact_selector": "generations/c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d/returns.csv",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "returns.csv",
+      "sha256": "2dffad35a4e2ab6fa6b623308e0813949c7f05071e0a5e968f7b4e8e31eb58be"
+     }
+    ],
+    "strategy_id": "tt-portfolio",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68",
+     "compatibility": "EXACT_MATCH",
+     "authority": "EXACT_RETAINED_VENDOR_VERSION_STRICTLY_BEFORE_LIVE_INCEPTION"
+    }
+   },
+   {
+    "correction_id": "volatis-account-live",
+    "strategy_id": "volatis-strategy",
     "source_id": "owner-account-live-history",
     "evidence_layer": "ACCOUNT_LIVE",
     "history_existence": {
      "status": "EXISTS",
-     "authority": "HASH_BOUND_IBKR_INTERNAL_TRANSFER_MEMBERSHIP_AND_ACCOUNT_RETURN_LEDGER"
+     "authority": "FIRST_CAPITAL_RECONCILED_POSITIVE_NAV_AND_COST_BASIS"
     },
     "capture": {
      "status": "CAPTURED_GOVERNED",
@@ -1550,22 +2087,22 @@
     },
     "strategy_version": {
      "status": "EVIDENCED",
-     "version_ref": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
+     "version_ref": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7",
      "compatibility": "ACCOUNT_OWNED",
-     "authority": "ACCEPTED_ACCOUNT_TO_CONNECTED_MODEL_MAPPING"
+     "authority": "SAME_CURRENT_QUANTBASE_FUND_PATH"
     },
     "interval": {
-     "assignment_date": "2025-11-12",
-     "observed_start": "2025-11-21",
+     "assignment_date": "2024-07-24",
+     "observed_start": "2024-10-16",
      "observed_end": "2026-09-02",
-     "effective_start": "2025-11-20",
+     "effective_start": "2024-10-15",
      "effective_end": null
     },
     "funding_event": {
      "status": "EVIDENCED",
-     "event_date": "2025-11-20",
-     "account_live_start": "2025-11-20",
-     "authority": "FIRST_HASH_BOUND_IBKR_INTERNAL_TRANSFER_IN; MEMBERSHIP_ONLY; ZERO_AGGREGATE_INVESTED_CAPITAL_EFFECT"
+     "event_date": "2024-10-15",
+     "account_live_start": "2024-10-15",
+     "authority": "FIRST_CAPITAL_RECONCILED_POSITIVE_NAV_AND_COST_BASIS; EARLIER_PURCHASE_LACKED_ACCEPTED_EVENT_TIME_VALUE"
     },
     "mode_admission": {
      "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
@@ -1582,16 +2119,25 @@
       "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
      },
      {
-      "artifact_role": "provider-ledger-catalog",
-      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/provider-ledger.json",
-      "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "artifact_role": "quantbase-account-activity",
+      "artifact_selector": "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/account_activity.csv",
+      "authority_root": "QUANTBASE",
+      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
       "locator_kind": "GENERATION_ARTIFACT",
-      "manifest_artifact_id": "normalized/provider-ledger.json",
-      "sha256": "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
+      "manifest_artifact_id": "source/csv/account_activity.csv",
+      "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+     },
+     {
+      "artifact_role": "quantbase-dashboard-history",
+      "artifact_selector": "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+      "authority_root": "QUANTBASE",
+      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+      "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
      }
     ],
-    "disposition_reason": "Owner funding precedes the first measurable account return by one day. Provider-live history remains a separate comparison and never overwrites this path.",
+    "disposition_reason": "The earlier purchase does not establish funded membership without an accepted event-time value. Membership begins with the first capital-reconciled positive NAV and cost basis; measurable account returns begin the following day.",
     "readiness": "READY",
     "blockers": []
    },
@@ -1730,147 +2276,6 @@
      }
     ],
     "disposition_reason": "The two provider curves are equality evidence for one economic path. They are not duplicate return series and are not relabeled as backtest.",
-    "readiness": "READY",
-    "blockers": []
-   },
-   {
-    "correction_id": "volatis-account-live",
-    "strategy_id": "volatis-strategy",
-    "source_id": "owner-account-live-history",
-    "evidence_layer": "ACCOUNT_LIVE",
-    "history_existence": {
-     "status": "EXISTS",
-     "authority": "FIRST_CAPITAL_RECONCILED_POSITIVE_NAV_AND_COST_BASIS"
-    },
-    "capture": {
-     "status": "CAPTURED_GOVERNED",
-     "capture_defect": null,
-     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
-     "as_of": "2026-09-04"
-    },
-    "strategy_version": {
-     "status": "EVIDENCED",
-     "version_ref": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7",
-     "compatibility": "ACCOUNT_OWNED",
-     "authority": "SAME_CURRENT_QUANTBASE_FUND_PATH"
-    },
-    "interval": {
-     "assignment_date": "2024-07-24",
-     "observed_start": "2024-10-16",
-     "observed_end": "2026-09-02",
-     "effective_start": "2024-10-15",
-     "effective_end": null
-    },
-    "funding_event": {
-     "status": "EVIDENCED",
-     "event_date": "2024-10-15",
-     "account_live_start": "2024-10-15",
-     "authority": "FIRST_CAPITAL_RECONCILED_POSITIVE_NAV_AND_COST_BASIS; EARLIER_PURCHASE_LACKED_ACCEPTED_EVENT_TIME_VALUE"
-    },
-    "mode_admission": {
-     "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
-     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
-    },
-    "source_receipts": [
-     {
-      "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
-      "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
-      "locator_kind": "GENERATION_MANIFEST",
-      "manifest_artifact_id": null,
-      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
-     },
-     {
-      "artifact_role": "quantbase-account-activity",
-      "artifact_selector": "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/account_activity.csv",
-      "authority_root": "QUANTBASE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-      "locator_kind": "GENERATION_ARTIFACT",
-      "manifest_artifact_id": "source/csv/account_activity.csv",
-      "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
-     },
-     {
-      "artifact_role": "quantbase-dashboard-history",
-      "artifact_selector": "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
-      "authority_root": "QUANTBASE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-      "locator_kind": "GENERATION_ARTIFACT",
-      "manifest_artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
-      "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
-     }
-    ],
-    "disposition_reason": "The earlier purchase does not establish funded membership without an accepted event-time value. Membership begins with the first capital-reconciled positive NAV and cost basis; measurable account returns begin the following day.",
-    "readiness": "READY",
-    "blockers": []
-   },
-   {
-    "correction_id": "echotrade-event-only-account-live-rejected",
-    "strategy_id": "echotrade-growth-pivots",
-    "source_id": "owner-account-live-history",
-    "evidence_layer": "ACCOUNT_LIVE",
-    "history_existence": {
-     "status": "EXISTS",
-     "authority": "HASH_BOUND_PROVIDER_LEDGER_EVENT_ONLY_RECONSTRUCTION"
-    },
-    "capture": {
-     "status": "CAPTURED_GOVERNED",
-     "capture_defect": null,
-     "generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
-     "generation_sha256": "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db",
-     "as_of": "2026-08-16"
-    },
-    "strategy_version": {
-     "status": "UNRESOLVED",
-     "version_ref": null,
-     "compatibility": "UNRESOLVED",
-     "authority": "EVENT_ONLY_RECONSTRUCTION_DOES_NOT_EVIDENCE_A_CURRENT_STRATEGY_VERSION"
-    },
-    "interval": {
-     "assignment_date": "2025-09-27",
-     "observed_start": "2025-10-01",
-     "observed_end": "2025-11-24",
-     "effective_start": null,
-     "effective_end": null
-    },
-    "funding_event": {
-     "status": "UNRESOLVED",
-     "event_date": null,
-     "account_live_start": null,
-     "authority": "TRACKER_ONLY_INITIAL_DEPOSIT_IS_NOT_ACCEPTED_PROVIDER_FUNDING_EVIDENCE"
-    },
-    "mode_admission": {
-     "LIVE_ONLY": "EXCLUDE_EVENT_ONLY_RECONSTRUCTION",
-     "LIVE_PLUS_BACKTEST": "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
-    },
-    "source_receipts": [
-     {
-      "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e/generation.json",
-      "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
-      "locator_kind": "GENERATION_MANIFEST",
-      "manifest_artifact_id": null,
-      "sha256": "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db"
-     },
-     {
-      "artifact_role": "provider-ledger-catalog",
-      "artifact_selector": "generations/07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e/provider-ledger.json",
-      "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
-      "locator_kind": "GENERATION_ARTIFACT",
-      "manifest_artifact_id": "normalized/provider-ledger.json",
-      "sha256": "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
-     }
-    ],
-    "rejected_evidence_identity": {
-     "canonicalization": "TARGET_FIELDS_CANONICAL_JSON_V1",
-     "return_observations": 13,
-     "sha256": "55d339e5299607daf72b44be72a03cc13998d34e81fc42d8e0a756152347ef4f",
-     "source_receipt_sha256": "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
-    },
-    "disposition_reason": "The captured rows occur only on transaction/fill dates and reproduce the event-to-event sparse-pool formula using last-trade marks. They are retained as rejected evidence, not admitted as daily account-live returns.",
     "readiness": "READY",
     "blockers": []
    }
@@ -2547,9 +2952,13 @@
    "source_id": "strategy-backtests",
    "source_version": "history-segment-v1",
    "strategy_version": {
-    "status": "UNRESOLVED",
+    "status": "MIXED",
     "binding": "EXACT_VERSION_COMPATIBILITY_REQUIRED",
-    "version_refs": {}
+    "version_refs": {
+     "grizzlybears-vtma": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0",
+     "qsi": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99",
+     "tt-portfolio": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
+    }
    },
    "subjects": {
     "account_scope": "NOT_APPLICABLE",
@@ -2575,8 +2984,8 @@
    },
    "evidence_layer": "BACKTEST",
    "interval": {
-    "observed_start": null,
-    "observed_end": null,
+    "observed_start": "2007-01-05",
+    "observed_end": "2025-12-19",
     "effective_start": null,
     "effective_end": null,
     "splice_policy": "ONLY_VERSION_COMPATIBLE_PREHISTORY_STRICTLY_BEFORE_LIVE_INCEPTION"
@@ -2615,18 +3024,15 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": null,
-    "sha256": null,
-    "as_of": null
+    "as_of": "2026-09-04",
+    "generation_id": "c60b9a954d5b07977292a3ae4919e3d5d3e96221e60b84e3feb7c8f237c9f87d",
+    "sha256": "bea0b212fec25d1dc605eaf1c534de042f4c1948d4e75bb987cebd342f257621"
    },
-   "existence_status": "UNRESOLVED",
-   "capture_status": "UNRESOLVED",
+   "existence_status": "EXISTS",
+   "capture_status": "CAPTURED_GOVERNED",
    "absence_behavior": "LIVE_ONLY_REMAINS_REQUIRED; LIVE_PLUS_BACKTEST_FAILS_UNLESS_OWNER_ACCEPTS_NOT_APPLICABLE_FOR_THE_STRATEGY",
-   "readiness": "REQUIRED_NOT_READY",
-   "blockers": [
-    302,
-    303
-   ],
+   "readiness": "READY",
+   "blockers": [],
    "invalidated_outputs": [
     "LAYERED_HISTORY_LIVE_PLUS_BACKTEST",
     "DECOMPOSITION",
@@ -2949,7 +3355,10 @@
     "version_refs": {
      "p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
      "robuxio-crypto": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
-     "volatis-strategy": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7"
+     "volatis-strategy": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7",
+     "grizzlybears-vtma": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0",
+     "qsi": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99",
+     "tt-portfolio": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
     }
    },
    "subjects": {

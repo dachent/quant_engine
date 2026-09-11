@@ -980,7 +980,13 @@
               "artifact_role": {"$ref": "#/$defs/nonempty_string"},
               "artifact_selector": {"$ref": "#/$defs/nonempty_string"},
               "authority_root": {
-                "enum": ["MATRIXPORT", "PORTFOLIO123", "PROVIDER_LEDGER", "QUANTBASE"]
+                "enum": [
+                  "MATRIXPORT",
+                  "PORTFOLIO123",
+                  "PROVIDER_LEDGER",
+                  "QUANTBASE",
+                  "STRATEGY_BACKTESTS"
+                ]
               },
               "generation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "locator_kind": {

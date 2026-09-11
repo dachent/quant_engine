@@ -129,11 +129,18 @@ REQUIRED_ACCOUNT_PROVIDER_SOURCE_IDS: Final = frozenset(
 )
 HISTORY_CORRECTION_LAYERS: Final = {
     "echotrade-growth-pivots": frozenset({"ACCOUNT_LIVE"}),
+    # The three Schwab-sleeve strategies carry a retained vendor backtest that
+    # ends before their own account-live inception, and no provider publishes a
+    # separate live track record for them, so ACCOUNT_LIVE and BACKTEST are the
+    # only layers that can exist.
+    "grizzlybears-vtma": frozenset({"ACCOUNT_LIVE", "BACKTEST"}),
     "p123-ai-factor": frozenset({"BACKTEST"}),
     "p123-eu": frozenset({"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"}),
+    "qsi": frozenset({"ACCOUNT_LIVE", "BACKTEST"}),
     "robuxio-crypto": frozenset(
         {"ACCOUNT_LIVE", "PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"}
     ),
+    "tt-portfolio": frozenset({"ACCOUNT_LIVE", "BACKTEST"}),
     "volatis-strategy": frozenset({"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"}),
 }
 HISTORY_SPLICE_POLICY: Final = (
@@ -141,7 +148,14 @@ HISTORY_SPLICE_POLICY: Final = (
     "STRICTLY_BEFORE_LIVE_INCEPTION; NEVER_RELABEL_PROVIDER_EVIDENCE_AS_ACCOUNT_LIVE"
 )
 HISTORY_EVIDENCE_ROOTS: Final = frozenset(
-    {"BASELINE", "MATRIXPORT", "PORTFOLIO123", "PROVIDER_LEDGER", "QUANTBASE"}
+    {
+        "BASELINE",
+        "MATRIXPORT",
+        "PORTFOLIO123",
+        "PROVIDER_LEDGER",
+        "QUANTBASE",
+        "STRATEGY_BACKTESTS",
+    }
 )
 HISTORY_RECEIPT_LOCATORS: Final = frozenset(
     {"CURRENT_POINTER", "GENERATION_ARTIFACT", "GENERATION_MANIFEST"}
@@ -7546,6 +7560,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio123-root", type=Path)
     parser.add_argument("--provider-ledger-root", type=Path)
     parser.add_argument("--quantbase-root", type=Path)
+    parser.add_argument("--strategy-backtests-root", type=Path)
     parser.add_argument("--schwab-root", type=Path)
     parser.add_argument("--epoch-manifest-generation-root", type=Path)
     parser.add_argument("--epoch-manifest-generation-id")
@@ -7604,6 +7619,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "PORTFOLIO123": args.portfolio123_root,
             "PROVIDER_LEDGER": args.provider_ledger_root,
             "QUANTBASE": args.quantbase_root,
+            "STRATEGY_BACKTESTS": args.strategy_backtests_root,
         }
         missing = sorted(name for name, path in roots.items() if path is None)
         if missing:
