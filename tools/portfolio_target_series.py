@@ -3516,6 +3516,7 @@ def build_layered_history_generation(
     portfolio123_relationships_path: Path,
     strategy_history_manifest_path: Path | None = None,
     strategy_history_returns_path: Path | None = None,
+    strategy_backtests_generation_path: Path | None = None,
     portfolio_fx_rates_manifest_path: Path | None = None,
     source_selection_mode: str = "CURRENT_POINTERS",
 ) -> tuple[dict[str, bytes], bytes]:
@@ -4178,6 +4179,17 @@ def build_layered_history_generation(
         ) = _strategy_history_returns(
             strategy_history_manifest_path, strategy_history_returns_path
         )
+    # The bundle is hash-bound evidence but it is not a governed generation,
+    # so the contract's `strategy-backtests` segment names the generation
+    # staged from it instead. The segments have to cite that same generation
+    # or the source receipt will not resolve, and that generation has to be
+    # provably the one built from THIS bundle -- otherwise the citation
+    # would be a label rather than evidence.
+    strategy_backtests_generation = _strategy_backtests_generation(
+        strategy_backtests_generation_path,
+        manifest_path=strategy_history_manifest_path,
+        returns_path=strategy_history_returns_path,
+    )
 
     first_live: dict[str, date] = {}
     for strategy_id, rows in live_by_strategy.items():
@@ -4304,7 +4316,10 @@ def build_layered_history_generation(
         source_generation_id = (
             p123_generation
             if is_portfolio123_backtest
-            else str((history_proof or {}).get("bundle_id") or "NOT_CAPTURED")
+            else (
+                strategy_backtests_generation
+                or str((history_proof or {}).get("bundle_id") or "NOT_CAPTURED")
+            )
         )
         source_id = (
             "portfolio123-model-generation"
@@ -6893,6 +6908,48 @@ def _portfolio123_simulation_returns(
     }
 
 
+def _strategy_backtests_generation(
+    generation_manifest_path: Path | None,
+    *,
+    manifest_path: Path | None,
+    returns_path: Path | None,
+) -> str | None:
+    """Resolve the governed generation staged from this exact history bundle.
+
+    Citing a generation without checking it was built from the bundle in hand
+    would let any generation id stand in for the evidence. The staged
+    generation retains the bundle manifest and returns verbatim, so proving the
+    relationship is a digest comparison, not a claim.
+    """
+
+    if generation_manifest_path is None:
+        return None
+    if manifest_path is None or returns_path is None:
+        raise TargetSeriesError(
+            "strategy backtests generation requires the history bundle"
+        )
+    manifest = _load_json(generation_manifest_path, "strategy backtests generation")
+    generation_id = str(manifest.get("generation_id") or "")
+    if len(generation_id) != 64:
+        raise TargetSeriesError("strategy backtests generation identity differs")
+    artifacts = _manifest_artifacts(manifest.get("artifacts"))
+    for artifact_id, path in (
+        ("raw/strategy-history-manifest.json", manifest_path),
+        ("returns.csv", returns_path),
+    ):
+        artifact = artifacts.get(artifact_id)
+        observed_sha256, observed_size = _sha256(path)
+        if artifact is None or (artifact.sha256, artifact.size_bytes) != (
+            observed_sha256,
+            observed_size,
+        ):
+            raise TargetSeriesError(
+                "strategy backtests generation was not staged from this bundle: "
+                f"{artifact_id}"
+            )
+    return generation_id
+
+
 def _strategy_history_returns(
     manifest_path: Path,
     returns_path: Path,
@@ -7032,6 +7089,13 @@ def _strategy_history_returns(
                 in {
                     "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_NOT_ACCEPTED",
                     "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_DERIVED_NOT_ADMITTED",
+                    # A retained-but-rejected deprecated history is a declared
+                    # non-history in the same sense as the UNAVAILABLE_ family:
+                    # the bytes exist and are kept, and the builder has already
+                    # ruled they are not admissible return evidence. The
+                    # allow-list stays narrow so an available history cannot
+                    # hide inside a disposition, which this status does not.
+                    "RETAINED_REJECTED_HISTORY_DEPRECATED",
                 }
             )
             or not version
@@ -7794,6 +7858,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--quantbase-series-id")
     parser.add_argument("--portfolio123-manifest", type=Path)
     parser.add_argument("--portfolio123-equity", type=Path)
+    parser.add_argument("--strategy-backtests-generation", type=Path)
     parser.add_argument("--portfolio123-metadata", type=Path)
     parser.add_argument("--portfolio123-performance", type=Path)
     parser.add_argument("--portfolio123-returns", type=Path)
@@ -7937,6 +8002,9 @@ def main() -> int:
                 portfolio_fx_rates_manifest_path=args.portfolio_fx_rates_manifest,
                 strategy_history_manifest_path=args.strategy_history_manifest,
                 strategy_history_returns_path=args.strategy_history_returns,
+                strategy_backtests_generation_path=(
+                    args.strategy_backtests_generation
+                ),
                 source_selection_mode=(
                     "IMMUTABLE_GENERATIONS"
                     if args.immutable_generations
