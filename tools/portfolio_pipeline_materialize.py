@@ -740,13 +740,19 @@ def _financial_mvp_module() -> Any:
     return module
 
 
-def _stage_epoch_manifest_bundle_prewire(
+def _bind_epoch_manifest_bundle(
     generation_root: Path,
     generation_id: str,
     financial_contract: Mapping[str, Any],
-    output_root: Path,
-) -> tuple[dict[str, Any], dict[str, object]]:
-    """Bind and stage one verified epoch-manifest generation bundle."""
+) -> dict[str, Any]:
+    """Bind the financial contract to one verified epoch-manifest generation.
+
+    This binds and validates; it does not stage the manifest into the run
+    root. The panel command writes that file itself from the same verified
+    bundle, and `build-panel` declares the directory it writes, so seeding it
+    here made the node's own output pre-exist its pipeline receipt and every
+    plan refused the run before it started.
+    """
 
     try:
         bundle = read_generation_bundle(generation_root, generation_id)
@@ -799,9 +805,7 @@ def _stage_epoch_manifest_bundle_prewire(
     if canonical_json_bytes(validated) != canonical_json_bytes(augmented):
         raise MaterializationError("bound financial MVP contract validation differs")
 
-    staged_path = output_root / "stages" / "panel" / "account-strategy-manifest.json"
-    _write_exact(staged_path, payload)
-    return augmented, _file_definition(staged_path)
+    return augmented
 
 
 def _account_strategy_manifest_module() -> Any:
@@ -3300,13 +3304,10 @@ def build_spec(
             _absolute(contract_definition["path"], "financial MVP contract"),
             "financial MVP contract",
         )
-        bound_financial_contract, _staged_manifest_identity = (
-            _stage_epoch_manifest_bundle_prewire(
-                Path(epoch_generation["runtime_root"]),
-                epoch_generation["generation_id"],
-                financial_contract,
-                output_root,
-            )
+        bound_financial_contract = _bind_epoch_manifest_bundle(
+            Path(epoch_generation["runtime_root"]),
+            epoch_generation["generation_id"],
+            financial_contract,
         )
         bound_contract_path = output_root / "financial-mvp-bound-contract.json"
         bound_contract_bytes = canonical_json_bytes(bound_financial_contract)

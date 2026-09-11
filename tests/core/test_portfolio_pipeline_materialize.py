@@ -659,11 +659,10 @@ def test_epoch_manifest_bundle_prewire_binds_once_and_stages_exact_bytes(
     original_contract = json.loads(json.dumps(supplied_contract))
     output_root = tmp_path / "output"
 
-    augmented, staged_identity = materializer._stage_epoch_manifest_bundle_prewire(
+    augmented = materializer._bind_epoch_manifest_bundle(
         generation_root,
         manifest.generation_id,
         supplied_contract,
-        output_root,
     )
 
     literal_source = {
@@ -686,7 +685,6 @@ def test_epoch_manifest_bundle_prewire_binds_once_and_stages_exact_bytes(
             "schema": {"name": "account-strategy-manifest", "version": "8"},
         },
     }
-    staged_path = output_root / "stages" / "panel" / "account-strategy-manifest.json"
     assert reader_calls == [(generation_root, manifest.generation_id)]
     assert len(binder_calls) == 1
     assert binder_calls[0] is reader_results[0]
@@ -701,12 +699,10 @@ def test_epoch_manifest_bundle_prewire_binds_once_and_stages_exact_bytes(
     assert validator_calls[0][0] is augmented
     assert validator_calls[0][2] is reader_results[0]
     assert augmented["nested"] is not supplied_contract["nested"]
-    assert staged_path.read_bytes() == PREWIRE_MANIFEST_BYTES
-    assert staged_identity == {
-        "path": str(staged_path.resolve()),
-        "sha256": PREWIRE_MANIFEST_SHA256,
-        "size_bytes": 43,
-    }
+    # Binding stages nothing: the panel command writes the manifest itself
+    # from this same verified bundle, and `build-panel` declares that
+    # directory as its own output.
+    assert not (output_root / "stages").exists()
     augmented["nested"]["rows"][0]["value"] = "changed"
     assert supplied_contract == original_contract
 
@@ -726,11 +722,10 @@ def test_epoch_manifest_bundle_prewire_passes_real_financial_contract_validator(
         ).read_text(encoding="utf-8")
     )
 
-    bound, staged = materializer._stage_epoch_manifest_bundle_prewire(
+    bound = materializer._bind_epoch_manifest_bundle(
         generation_root,
         manifest.generation_id,
         contract,
-        tmp_path / "output",
     )
 
     assert bound["contract_schema_version"] == 7
@@ -745,7 +740,9 @@ def test_epoch_manifest_bundle_prewire_passes_real_financial_contract_validator(
         )
         == bound
     )
-    assert staged["sha256"] == PREWIRE_MANIFEST_SHA256
+    assert bound["epoch_manifest_source"]["artifact"]["sha256"] == (
+        PREWIRE_MANIFEST_SHA256
+    )
 
 
 def test_real_financial_v7_contract_rejects_shape_only_or_invented_authority(
@@ -854,11 +851,10 @@ def test_epoch_manifest_bundle_prewire_rejects_missing_detached_controls(
     output_root = tmp_path / "output"
 
     with pytest.raises(materializer.MaterializationError, match="bundle"):
-        materializer._stage_epoch_manifest_bundle_prewire(
+        materializer._bind_epoch_manifest_bundle(
             tmp_path / "broken",
             manifest.generation_id,
             {"schema_version": 3},
-            output_root,
         )
 
     assert not output_root.exists()
@@ -874,11 +870,10 @@ def test_epoch_manifest_bundle_prewire_rejects_bare_generation_manifest(
     output_root = tmp_path / "output"
 
     with pytest.raises(materializer.MaterializationError, match="bundle"):
-        materializer._stage_epoch_manifest_bundle_prewire(
+        materializer._bind_epoch_manifest_bundle(
             generation_root,
             manifest,  # type: ignore[arg-type]
             {"schema_version": 3},
-            output_root,
         )
 
     assert not output_root.exists()
@@ -904,11 +899,10 @@ def test_epoch_manifest_bundle_prewire_rejects_mutation_before_staging(
     output_root = tmp_path / "output"
 
     with pytest.raises(materializer.MaterializationError, match="bundle"):
-        materializer._stage_epoch_manifest_bundle_prewire(
+        materializer._bind_epoch_manifest_bundle(
             generation_root,
             manifest.generation_id,
             {"schema_version": 3},
-            output_root,
         )
 
     assert not output_root.exists()
@@ -931,45 +925,13 @@ def test_epoch_manifest_bundle_prewire_wraps_binder_failure_before_staging(
     output_root = tmp_path / "output"
 
     with pytest.raises(materializer.MaterializationError, match="binding"):
-        materializer._stage_epoch_manifest_bundle_prewire(
+        materializer._bind_epoch_manifest_bundle(
             generation_root,
             manifest.generation_id,
             {"schema_version": 3},
-            output_root,
         )
 
     assert not output_root.exists()
-
-
-def test_epoch_manifest_bundle_prewire_preserves_different_staged_file(
-    tmp_path: Path,
-) -> None:
-    """Replacing create-only staging with overwrite would destroy prior evidence."""
-
-    generation_root = tmp_path / "accepted"
-    manifest, _bundle = _stage_prewire_generation(generation_root)
-    staged_path = (
-        tmp_path / "output" / "stages" / "panel" / "account-strategy-manifest.json"
-    )
-    staged_path.parent.mkdir(parents=True)
-    prior_bytes = b'{"different":true}\n'
-    staged_path.write_bytes(prior_bytes)
-
-    with pytest.raises(materializer.MaterializationError, match="create-only"):
-        materializer._stage_epoch_manifest_bundle_prewire(
-            generation_root,
-            manifest.generation_id,
-            json.loads(
-                (
-                    materializer.REPOSITORY_ROOT
-                    / "contracts"
-                    / "portfolio-financial-mvp-source-v1.json"
-                ).read_text(encoding="utf-8")
-            ),
-            tmp_path / "output",
-        )
-
-    assert staged_path.read_bytes() == prior_bytes
 
 
 def test_schema10_pipeline_recipe_accepts_exact_epoch_manifest_generation(
@@ -1088,14 +1050,14 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
         financial_mvp_source_matrix=product.matrix_path,
     )
     calls: list[tuple[Path, str]] = []
-    real_prewire = materializer._stage_epoch_manifest_bundle_prewire
+    real_prewire = materializer._bind_epoch_manifest_bundle
 
     def observed_prewire(*args: object, **kwargs: object) -> object:
         calls.append((args[0], args[1]))  # type: ignore[arg-type]
         return real_prewire(*args, **kwargs)
 
     monkeypatch.setattr(
-        materializer, "_stage_epoch_manifest_bundle_prewire", observed_prewire
+        materializer, "_bind_epoch_manifest_bundle", observed_prewire
     )
     monkeypatch.setenv("QE_PIPELINE_PYTHON", sys.executable)
     monkeypatch.setattr(
@@ -1111,9 +1073,10 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
 
     materializer.build_spec(pipeline_recipe, output_root, spec_path)
 
-    staged = output_root / "stages" / "panel" / "account-strategy-manifest.json"
     assert calls == [(generation_root, epoch_manifest.generation_id)]
-    assert staged.read_bytes() == PREWIRE_MANIFEST_BYTES
+    # The panel command writes the manifest from the same verified bundle, so
+    # the spec build leaves that node's declared output untouched.
+    assert not (output_root / "stages" / "panel").exists()
     orchestration = json.loads(
         spec_path.with_name("portfolio-orchestration-contract.json").read_text(
             encoding="utf-8"
