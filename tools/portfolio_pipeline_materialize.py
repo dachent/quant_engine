@@ -3528,7 +3528,10 @@ def build_spec(
         # publication and refuse it without a portfolio root, which is what
         # proves the stage output root is disjoint from production. Every
         # financial vertical has lenses, so both roles always need it.
-        if role in _PORTFOLIO_ROOT_STAGES and portfolio_root is not None:
+        needs_portfolio_root = role in _PORTFOLIO_ROOT_STAGES or (
+            bool(governed_stage_paths) and role in _GOVERNED_OUTCOME_STAGES
+        )
+        if needs_portfolio_root and portfolio_root is not None:
             args.extend(("--portfolio-root", str(portfolio_root)))
         # The governed numerical results are stage inputs, not merely gate
         # evidence: `build_report`, `build_workbook` and `build_panel` each read

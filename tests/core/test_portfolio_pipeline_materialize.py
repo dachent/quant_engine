@@ -1108,8 +1108,11 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
         assert argv[argv.index("--portfolio-root") + 1] == str(
             tmp_path / "portfolio"
         )
-    for node_id in ("build-ledger", "build-report"):
+    for node_id in ("build-ledger", "build-baseline"):
         assert "--portfolio-root" not in argv_by_node[node_id]
+    # `build_report` also refuses a governed staging run without the root, so a
+    # run that binds the governed results has to carry it on the report node.
+    assert "--portfolio-root" in argv_by_node["build-report"]
     # The governed numerical results are stage inputs for every role that reads
     # them, and each has to be a declared absolute read or the plan refuses.
     reads_by_node = {
