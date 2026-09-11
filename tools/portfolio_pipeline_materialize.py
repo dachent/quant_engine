@@ -2736,13 +2736,19 @@ def _semantic_gate_payload(
             if financial_outcomes is not None
             else {}
         ),
-        "financial_epoch_manifest_inputs_sha256": (
-            hashlib.sha256(canonical_json_bytes(manifest_inputs)).hexdigest()
-            if manifest_inputs is not None
-            else None
-        ),
+        # Both epoch keys appear only with the raw-five inputs they describe.
+        # This one used to be emitted unconditionally as null, so a schema-10
+        # vertical -- which has no epoch-manifest input gate -- produced a
+        # semantic gate carrying a key the reader does not allow, and every
+        # run failed its last node with "post-build semantic gate keys differ
+        # from the contract".
         **(
-            {"financial_epoch_manifest_proof_sha256": proof_sha256}
+            {
+                "financial_epoch_manifest_inputs_sha256": hashlib.sha256(
+                    canonical_json_bytes(manifest_inputs)
+                ).hexdigest(),
+                "financial_epoch_manifest_proof_sha256": proof_sha256,
+            }
             if manifest_inputs is not None
             else {}
         ),
