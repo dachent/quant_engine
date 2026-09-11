@@ -4833,6 +4833,17 @@ def build_layered_history_generation(
                 ),
             ]
         )
+        if strategy_backtests_generation_path is not None:
+            inputs.append(
+                _artifact_identity(
+                    input_id="strategy-backtests-generation",
+                    artifact_role="GENERATION_MANIFEST",
+                    path=strategy_backtests_generation_path,
+                    generation_id=strategy_backtests_generation,
+                    as_of_date=str((history_proof or {}).get("as_of_date") or "")
+                    or None,
+                )
+            )
     if p123_history_receipts is not None:
         inputs.append(
             _artifact_identity(
@@ -4901,6 +4912,10 @@ def build_layered_history_generation(
     if strategy_history_manifest_path is not None:
         source_manifest_contents["strategy-history"] = (
             strategy_history_manifest_path.read_text(encoding="utf-8")
+        )
+    if strategy_backtests_generation_path is not None:
+        source_manifest_contents["strategy-backtests"] = (
+            strategy_backtests_generation_path.read_text(encoding="utf-8")
         )
     contract_sha = hashlib.sha256(canonical_json_bytes(contract)).hexdigest()
     manifest_without_id: dict[str, object] = {
@@ -5264,6 +5279,13 @@ def validate_layered_history_generation(
                 ),
             }
         )
+    # Declared only when the bundle was staged as a governed generation; the
+    # backtest segments then cite that generation rather than the bundle id.
+    if "strategy-backtests-generation" in inputs:
+        expected_input_contracts["strategy-backtests-generation"] = (
+            "GENERATION_MANIFEST",
+            None,
+        )
     if {"portfolio-fx-rates-manifest", "portfolio-fx-rates"} & set(inputs):
         expected_input_contracts.update(
             {
@@ -5334,6 +5356,10 @@ def validate_layered_history_generation(
         )
     if "strategy-history-manifest" in inputs:
         source_manifest_input_ids["strategy-history"] = "strategy-history-manifest"
+    if "strategy-backtests-generation" in inputs:
+        source_manifest_input_ids["strategy-backtests"] = (
+            "strategy-backtests-generation"
+        )
     if "portfolio-fx-rates-manifest" in inputs:
         source_manifest_input_ids["portfolio-fx-rates"] = "portfolio-fx-rates-manifest"
     if not isinstance(raw_source_manifests, dict) or set(raw_source_manifests) != set(
@@ -5459,6 +5485,8 @@ def validate_layered_history_generation(
                 "strategy-history-returns": "strategy-history",
             }
         )
+    if "strategy-backtests" in source_manifests:
+        input_source_names["strategy-backtests-generation"] = "strategy-backtests"
     if "portfolio-fx-rates" in source_manifests:
         input_source_names.update(
             {
@@ -6102,7 +6130,11 @@ def validate_layered_history_generation(
                 raise TargetSeriesError("layered history segment is not authorized")
             calendar, frequency = _source_temporal(sources[source_id])
             if source_id == "strategy-backtests":
-                generation_input_id = "strategy-history-manifest"
+                generation_input_id = (
+                    "strategy-backtests-generation"
+                    if "strategy-backtests-generation" in inputs
+                    else "strategy-history-manifest"
+                )
             else:
                 generation_input_id = source_generation_inputs[source_id]
             generation_input = inputs.get(generation_input_id)
