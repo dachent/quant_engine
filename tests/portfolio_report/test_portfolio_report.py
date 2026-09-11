@@ -777,9 +777,17 @@ def _first_table_data_cell(path: Path, sheet_name: str, table_name: str) -> str:
         workbook.close()
 
 
-def test_xlsx_result_canonicalization_preserves_distinct_raw_run_ids(
+def test_xlsx_result_canonicalization_normalizes_the_engine_run_id(
     tmp_path: Path,
 ) -> None:
+    """Two engine runs over identical content must canonicalize identically.
+
+    This reverses `..._preserves_distinct_raw_run_ids`. The engine mints
+    `run_id` at random, the canonical result is bound into the report
+    generation identity, and binding it made two builds of identical content
+    produce different report and panel identities -- the #293 mismatch. The
+    engine's value is still recorded, in the unbound `xlsx-engine-run.json`.
+    """
     first = tmp_path / "first-result.json"
     second = tmp_path / "second-result.json"
     first.write_text(
@@ -797,10 +805,17 @@ def test_xlsx_result_canonicalization_preserves_distinct_raw_run_ids(
         second, tmp_path / "second-result-evidence.json"
     )
 
-    assert first.read_bytes() != second.read_bytes()
-    assert json.loads(first.read_text(encoding="utf-8"))["run_id"] == "a" * 32
-    assert json.loads(second.read_text(encoding="utf-8"))["run_id"] == "b" * 32
-    assert first_result != second_result
+    assert first.read_bytes() == second.read_bytes()
+    assert first_result == second_result
+    derived = json.loads(first.read_text(encoding="utf-8"))["run_id"]
+    assert derived not in {"a" * 32, "b" * 32}
+    assert re.fullmatch(r"[0-9a-f]{32}", derived)
+    # The engine's own identity is preserved beside the result, unbound.
+    for path, engine_run_id in ((first, "a" * 32), (second, "b" * 32)):
+        sidecar = json.loads(
+            path.with_name(f"{path.stem}.engine-run.json").read_text(encoding="utf-8")
+        )
+        assert sidecar["engine_run_id"] == engine_run_id
     assert reporter.canonicalize_xlsx_result(first) == first_result
     failed = tmp_path / "failed-result.json"
     payload = _xlsx_result("c" * 32, r"C:\Temp\xlsx-failed")
@@ -2873,6 +2888,31 @@ def test_workbook_is_deterministic_structured_and_has_no_external_surface(
     assert job_text.index('{"type":"save_as"') < job_text.index("output_path")
 
 
+def test_candidate_evidence_is_identical_across_output_roots(
+    tmp_path: Path,
+) -> None:
+    """The same content built into two roots must produce one identity.
+
+    This is the #293 mismatch in miniature. Two full builds of the same
+    vertical differed only in `xlsx-job.json` (absolute paths carrying the
+    output root) and the engine's random `run_id`, and that moved the report
+    generation id, the dashboard payload and the panel id.
+    """
+
+    baseline_root = _published_baseline(tmp_path)
+    first = reporter.build_candidate(baseline_root, tmp_path / "reporting-a")
+    second = reporter.build_candidate(baseline_root, tmp_path / "reporting-b")
+
+    left, right = Path(first["candidate_dir"]), Path(second["candidate_dir"])
+    assert left.name == right.name
+    for name in (
+        "xlsx-job.json",
+        "portfolio-report-data.json",
+        "workbook-contract.json",
+    ):
+        assert (left / name).read_bytes() == (right / name).read_bytes(), name
+
+
 def test_excel_recalc_uses_resettable_copy_and_cannot_mutate_initial(
     tmp_path: Path,
 ) -> None:
@@ -2883,8 +2923,11 @@ def test_excel_recalc_uses_resettable_copy_and_cannot_mutate_initial(
     initial = Path(first["workbook_path"])
     canonical_bytes = initial.read_bytes()
     job = json.loads((candidate / "xlsx-job.json").read_text(encoding="utf-8"))
-    excel_input = Path(job["steps"][0]["workbook_path"])
+    # The recorded job is candidate-relative so the report generation identity
+    # does not depend on where the build ran; resolve it against the candidate.
+    excel_input = candidate / job["steps"][0]["workbook_path"]
 
+    assert job["steps"][0]["workbook_path"] == f"excel-input/{reporter.WORKBOOK_NAME}"
     assert excel_input == candidate / "excel-input" / reporter.WORKBOOK_NAME
     assert excel_input.read_bytes() == canonical_bytes
 

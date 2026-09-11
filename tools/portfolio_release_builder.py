@@ -166,6 +166,32 @@ def _write_exact(path: Path, content: bytes) -> None:
         os.fsync(handle.fileno())
 
 
+def _write_disposable(path: Path, content: bytes) -> None:
+    """Atomically write a regenerated, non-authority staging file.
+
+    `_write_exact` is create-only, which is right for anything the release
+    binds. This is for the derived runner job, which is rebuilt on every
+    attempt and bound by nothing.
+    """
+
+    target = _windows_api_path(path) if os.name == "nt" else path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and target.is_symlink():
+        raise VerticalBuildError(f"disposable output is linked: {path}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".xlsx-job-", suffix=".json", dir=str(target.parent)
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _sha(path: Path) -> tuple[str, int]:
     try:
         return hash_file(path)
@@ -820,6 +846,34 @@ def _is_xlsx_startup_deadline(result: Mapping[str, Any]) -> bool:
     )
 
 
+def _xlsx_runner_job(candidate: Path) -> Path:
+    """Materialize the absolute-path job the external supervisor executes.
+
+    `xlsx-job.json` records its two paths relative to the candidate, because
+    it is bound into the report generation identity and an absolute path made
+    that identity depend on the output root. The C# supervisor resolves
+    nothing, so it gets a disposable absolute copy that is not bound.
+    """
+
+    base_job = _load(candidate / "xlsx-job.json", "xlsx-win job")
+    steps = base_job.get("steps")
+    if not isinstance(steps, list) or len(steps) != 3:
+        raise VerticalBuildError("xlsx-win base job contract differs")
+    resolved = [dict(step) for step in steps]
+    for index, key in ((0, "workbook_path"), (2, "output_path")):
+        relative = resolved[index].get(key)
+        if not isinstance(relative, str) or not relative:
+            raise VerticalBuildError("xlsx-win base job path differs")
+        if PurePosixPath(relative).is_absolute() or "\\" in relative:
+            raise VerticalBuildError("xlsx-win base job path is not relative")
+        resolved[index][key] = str(candidate.joinpath(*relative.split("/")).resolve())
+    runner_job = candidate / "xlsx-job-resolved.json"
+    _write_disposable(
+        runner_job, canonical_json_bytes({**base_job, "steps": resolved})
+    )
+    return runner_job
+
+
 def _xlsx_job_with_startup_extension(job: Mapping[str, Any]) -> dict[str, Any]:
     if set(job) != {"idempotency_key", "schema_version", "steps"}:
         raise VerticalBuildError("xlsx-win base job keys differ")
@@ -930,7 +984,7 @@ def _xlsx_executable(project: str) -> Path:
 
 
 def _run_xlsx_startup_extension(candidate: Path) -> Path:
-    base_job = _load(candidate / "xlsx-job.json", "xlsx-win job")
+    base_job = _load(_xlsx_runner_job(candidate), "xlsx-win job")
     extended_job = candidate / "xlsx-job-startup-extension.json"
     _write_exact(
         extended_job,
@@ -4249,7 +4303,7 @@ def build_workbook(
                     str(XLSX_RUNTIME),
                     str(XLSX_CLI),
                     "run",
-                    str(candidate / "xlsx-job.json"),
+                    str(_xlsx_runner_job(candidate)),
                     "--events",
                     str(events_path),
                     "--result",

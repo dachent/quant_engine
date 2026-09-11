@@ -192,7 +192,7 @@ CAPITAL_RECONCILIATION_FORMULA: Final = (
     'tblInvestedCapitalCurrent[Strategy Id],"TOTAL"))<0.01,"PASS","FAIL")'
 )
 WORKBOOK_CANONICALIZATION_VERSION: Final = "1"
-XLSX_RESULT_CANONICALIZATION_VERSION: Final = "1"
+XLSX_RESULT_CANONICALIZATION_VERSION: Final = "2"
 WORKBOOK_EVIDENCE_BINDING_VERSION: Final = 1
 WORKBOOK_PARITY_VERSION: Final = 1
 WORKBOOK_DELIVERY_EVIDENCE_STATUS: Final = "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
@@ -6277,6 +6277,26 @@ def _write_exact(path: Path, content: bytes) -> None:
         os.fsync(handle.fileno())
 
 
+def _replace_disposable_json(path: Path, content: bytes) -> None:
+    """Atomically reset a writable, non-authority JSON sidecar."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.is_symlink():
+        raise GenerationConflictError(f"disposable sidecar is linked: {path.name}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".engine-run-", suffix=".json", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _replace_disposable(path: Path, content: bytes) -> None:
     """Atomically reset a writable, non-authority staging file."""
 
@@ -6484,6 +6504,11 @@ def build_candidate(
             ),
         ],
     }
+    # Candidate-relative, not absolute. These two fields are the only thing
+    # that differed between two builds of identical content into different
+    # output roots, and the job is bound into the report generation identity,
+    # so an absolute path made the identity depend on where the build ran.
+    # The runner receives an absolute job derived from this one.
     job = {
         "idempotency_key": f"portfolio-report-{report_id[:32]}",
         "schema_version": "2.0",
@@ -6492,10 +6517,14 @@ def build_candidate(
                 "type": "open",
                 "read_only": False,
                 "update_links": False,
-                "workbook_path": str(excel_input_path),
+                "workbook_path": excel_input_path.relative_to(candidate).as_posix(),
             },
             {"type": "recalc", "mode": "full_rebuild", "timeout_seconds": 120},
-            {"type": "save_as", "output_path": str(excel_path), "overwrite": True},
+            {
+                "type": "save_as",
+                "output_path": excel_path.relative_to(candidate).as_posix(),
+                "overwrite": True,
+            },
         ],
     }
     _write_exact(candidate / "workbook-contract.json", canonical_json_bytes(contract))
@@ -7089,7 +7118,19 @@ def canonicalize_workbook(
 def canonicalize_xlsx_result(
     path: Path, evidence_path: Path | None = None
 ) -> dict[str, Any]:
-    """Normalize volatile xlsx-win messages without changing the real run ID."""
+    """Normalize the volatile xlsx-win messages and the engine's run ID.
+
+    The engine mints `run_id` at random, so binding it made the report
+    generation identity differ between two builds of identical content --
+    the mismatch #293 was opened for. Every other `run_id` in this repository
+    is a digest of its own payload (`portfolio_current_decomposition_plan`,
+    `portfolio_public_decomposition_sources`), and this one now is too.
+
+    This reverses the earlier decision to canonicalize "without changing the
+    real run ID". The engine's value is not discarded: it is preserved beside
+    the result in `xlsx-engine-run.json`, which nothing binds, so the run
+    remains traceable to the supervisor that produced it.
+    """
     payload = _load_json(path, "xlsx-win result")
     if payload.get("schema_version") != "2.0":
         raise ReportValidationError("xlsx-win result schema differs")
@@ -7120,6 +7161,21 @@ def canonicalize_xlsx_result(
     invariants = payload.get("invariants")
     if not isinstance(invariants, list):
         raise ReportValidationError("xlsx-win result invariants are invalid")
+    engine_run_id = run_id
+    identity_payload = {key: value for key, value in payload.items() if key != "run_id"}
+    payload["run_id"] = hashlib.sha256(
+        canonical_json_bytes(identity_payload)
+    ).hexdigest()[:32]
+    _replace_disposable_json(
+        path.with_name(f"{path.stem}.engine-run.json"),
+        canonical_json_bytes(
+            {
+                "engine_run_id": engine_run_id,
+                "idempotency_key": payload["idempotency_key"],
+                "schema_version": "1",
+            }
+        ),
+    )
     content = canonical_json_bytes(payload)
     if path.read_bytes() != content:
         descriptor, temporary_name = tempfile.mkstemp(
@@ -7137,6 +7193,7 @@ def canonicalize_xlsx_result(
     result = {
         "canonicalization_version": XLSX_RESULT_CANONICALIZATION_VERSION,
         "normalized_message_count": 2,
+        "normalized_run_id": True,
         "xlsx_result_sha256": hashlib.sha256(content).hexdigest(),
     }
     if evidence_path is not None:
@@ -7235,11 +7292,14 @@ def _workbook_evidence_binding_from_snapshots(
         or not all(isinstance(item, dict) for item in job["steps"])
         or [item.get("type") for item in job["steps"] if isinstance(item, dict)]
         != ["open", "recalc", "save_as"]
-        or not isinstance(job["steps"][0].get("workbook_path"), str)
-        or Path(job["steps"][0]["workbook_path"]).resolve()
-        != (candidate_dir / "excel-input" / WORKBOOK_NAME).resolve()
-        or not isinstance(job["steps"][2].get("output_path"), str)
-        or Path(job["steps"][2]["output_path"]).resolve() != final_workbook.resolve()
+        or job["steps"][0].get("workbook_path")
+        != (candidate_dir / "excel-input" / WORKBOOK_NAME)
+        .relative_to(candidate_dir)
+        .as_posix()
+        or job["steps"][2].get("output_path")
+        != final_workbook.resolve()
+        .relative_to(candidate_dir.resolve())
+        .as_posix()
     ):
         raise ReportValidationError("xlsx-win job binding differs")
     binding: dict[str, Any] = {
