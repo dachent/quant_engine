@@ -1442,9 +1442,7 @@ def test_derived_runner_job_resolves_paths_and_keeps_type_first(
         (candidate / "excel" / "portfolio-report.xlsx").resolve()
     )
     # The bound job is untouched and still relative.
-    assert json.loads(
-        (candidate / "xlsx-job.json").read_text(encoding="utf-8")
-    ) == job
+    assert json.loads((candidate / "xlsx-job.json").read_text(encoding="utf-8")) == job
 
 
 def test_successful_xlsx_evidence_is_resumable_and_identity_bound(

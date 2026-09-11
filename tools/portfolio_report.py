@@ -7298,9 +7298,7 @@ def _workbook_evidence_binding_from_snapshots(
         .relative_to(candidate_dir)
         .as_posix()
         or job["steps"][2].get("output_path")
-        != final_workbook.resolve()
-        .relative_to(candidate_dir.resolve())
-        .as_posix()
+        != final_workbook.resolve().relative_to(candidate_dir.resolve()).as_posix()
     ):
         raise ReportValidationError("xlsx-win job binding differs")
     binding: dict[str, Any] = {

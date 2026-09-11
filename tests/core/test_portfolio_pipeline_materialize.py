@@ -1056,9 +1056,7 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
         calls.append((args[0], args[1]))  # type: ignore[arg-type]
         return real_prewire(*args, **kwargs)
 
-    monkeypatch.setattr(
-        materializer, "_bind_epoch_manifest_bundle", observed_prewire
-    )
+    monkeypatch.setattr(materializer, "_bind_epoch_manifest_bundle", observed_prewire)
     monkeypatch.setenv("QE_PIPELINE_PYTHON", sys.executable)
     monkeypatch.setattr(
         materializer,
@@ -1084,7 +1082,9 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
         )
     }
     materializer.build_spec(
-        pipeline_recipe, output_root, spec_path,
+        pipeline_recipe,
+        output_root,
+        spec_path,
         governed["as-held-hwm"],
         governed["hwm-input"],
         governed["calendar"],
@@ -1105,9 +1105,7 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
     for node_id in ("build-workbook", "build-panel"):
         argv = argv_by_node[node_id]
         assert "--portfolio-root" in argv
-        assert argv[argv.index("--portfolio-root") + 1] == str(
-            tmp_path / "portfolio"
-        )
+        assert argv[argv.index("--portfolio-root") + 1] == str(tmp_path / "portfolio")
     for node_id in ("build-ledger", "build-baseline"):
         assert "--portfolio-root" not in argv_by_node[node_id]
     # `build_report` also refuses a governed staging run without the root, so a
@@ -1957,7 +1955,9 @@ def test_create_recipe_binds_financial_mvp_authority_and_admission_receipt(
     spec_path = tmp_path / "financial-mvp-dag" / "pipeline-spec.json"
 
     materializer.build_spec(
-        output, tmp_path / "financial-mvp-dag", spec_path,
+        output,
+        tmp_path / "financial-mvp-dag",
+        spec_path,
         portfolio_root=tmp_path / "portfolio",
     )
 
@@ -2132,7 +2132,9 @@ def test_schema_v9_rebinds_exact_epoch_manifest_inputs_into_every_stage(
     output_root = tmp_path / "schema-v9-dag"
     spec_path = output_root / "pipeline-spec.json"
     materializer.build_spec(
-        pipeline_recipe, output_root, spec_path,
+        pipeline_recipe,
+        output_root,
+        spec_path,
         portfolio_root=tmp_path / "portfolio",
     )
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -2431,7 +2433,9 @@ def test_schema_v9_declares_the_authority_snapshot_it_emits(
     output_root = tmp_path / "schema-v9-dag"
     spec_path = output_root / "pipeline-spec.json"
     materializer.build_spec(
-        pipeline_recipe, output_root, spec_path,
+        pipeline_recipe,
+        output_root,
+        spec_path,
         portfolio_root=tmp_path / "portfolio",
     )
 
@@ -3908,7 +3912,9 @@ def test_generated_semantic_command_declares_exact_gate_file(
     spec_path = output_root / "pipeline-spec.json"
 
     materializer.build_spec(
-        recipe_path, output_root, spec_path,
+        recipe_path,
+        output_root,
+        spec_path,
         portfolio_root=tmp_path / "portfolio",
     )
 

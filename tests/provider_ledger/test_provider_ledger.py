@@ -5967,15 +5967,12 @@ def test_ibkr_account_with_no_assignment_yields_no_anchors(tmp_path: Path) -> No
 
     account = "account-2d0a996cf7ab4876"
     catalog = {
-        "flows": [
-            _ibkr_flow(account, "2025-10-19", "DEPOSIT_OR_WITHDRAWAL", "2674.3")
-        ],
+        "flows": [_ibkr_flow(account, "2025-10-19", "DEPOSIT_OR_WITHDRAWAL", "2674.3")],
         "nav_observations": [_ibkr_nav(account, "2025-10-20", "2741.2")],
     }
 
     assert (
-        ledger._ibkr_capital_anchors("gen-1", catalog, {account}, {"p123-eu"}, {})
-        == []
+        ledger._ibkr_capital_anchors("gen-1", catalog, {account}, {"p123-eu"}, {}) == []
     )
 
 
@@ -6021,9 +6018,9 @@ def test_ibkr_capital_after_the_opening_stays_on_the_flow_rows(
         "gen-1", catalog, {_IBKR_ACCOUNT}, {"p123-eu"}, _IBKR_ASSIGNMENTS
     )
 
-    assert [
-        (item["capital_type"], item["amount"]["value"]) for item in anchors
-    ] == [("OPENING_CAPITAL_ANCHOR", "5000")]
+    assert [(item["capital_type"], item["amount"]["value"]) for item in anchors] == [
+        ("OPENING_CAPITAL_ANCHOR", "5000")
+    ]
 
 
 def test_ibkr_opening_anchor_requires_a_positive_nav_on_recognition(
