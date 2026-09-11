@@ -248,9 +248,7 @@ def _governed_stage_paths(
         "--hwm-governed-calendar-authority": hwm_governed_calendar_authority_path,
         "--hwm-governed-admission-receipt": hwm_governed_admission_receipt_path,
         "--invested-capital-result": invested_capital_result_path,
-        "--invested-capital-input-generation": (
-            invested_capital_input_generation_path
-        ),
+        "--invested-capital-input-generation": (invested_capital_input_generation_path),
     }
     if all(value is None for value in values.values()):
         return {}
@@ -810,7 +808,10 @@ def _bind_epoch_manifest_bundle(
     financial_module = _financial_mvp_module()
     try:
         source = financial_module.epoch_manifest_source_from_bundle(bundle)
-        payload = bundle.payloads["outputs/account-strategy-manifest.json"]
+        # The lookup is the check: a bundle that verified but carries no
+        # manifest payload raises KeyError here rather than binding a source
+        # document to a generation that does not contain it.
+        _manifest_payload = bundle.payloads["outputs/account-strategy-manifest.json"]
     except (
         AttributeError,
         KeyError,
