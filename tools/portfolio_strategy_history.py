@@ -1244,7 +1244,9 @@ def _grizzly(
     }
 
 
-def _tt(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
+def _tt(
+    path: Path, *, as_of_date: date | None = None
+) -> tuple[list[dict[str, str]], dict[str, object]]:
     source = _source_identity(path, "turingtrader-current-api-workbook")
     index_rows = _xlsx_rows(path, "Index")
     components: list[tuple[str, Decimal]] = []
@@ -1300,8 +1302,16 @@ def _tt(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
             )
             values.append((_excel_date(raw_date, "TT date"), portfolio_return))
         previous = levels
+    # This guard exists to catch a truncated or broken workbook, so it reads
+    # the source history rather than the admitted window.
     if len(values) < 1_000:
         raise StrategyHistoryError("TT current-six history is unexpectedly short")
+    if as_of_date is not None:
+        # The TT sheet is a live API export and runs to the day it was pulled.
+        # Rows after the declared as-of date are provenance, not admitted
+        # returns, exactly as the QSI reader already treats them; emitting them
+        # made the bundle's own post-as-of guard reject the whole build.
+        values = [item for item in values if item[0] <= as_of_date]
     definition = {
         "components": [
             {"allocation": str(weight), "slug": slug} for slug, weight in components
@@ -1783,6 +1793,13 @@ def _qsi(
         current_archive_sources = [latest_archive_source, latest_member_source]
     else:
         weeks = [*historical, *current]
+        # The appendix carries weeks past the declared as-of date. They are
+        # provenance, not admitted returns, the same way the current archive's
+        # later weeks are on the branch above; admitting them made the bundle
+        # reject its own output against the post-as-of guard.
+        if as_of_date is not None:
+            excluded_after_as_of = sum(item["end"] > as_of_date for item in weeks)
+            weeks = [item for item in weeks if item["end"] <= as_of_date]
     ends = [week["end"] for week in weeks]
     if len(set(ends)) != len(ends):
         raise StrategyHistoryError("QSI weekly histories overlap")
@@ -1965,7 +1982,7 @@ def build_bundle(
                 accepted_as_of if grizzly_blended_trade_history is not None else None
             ),
         ),
-        _tt(tt_workbook),
+        _tt(tt_workbook, as_of_date=accepted_as_of),
         _qsi(
             qsi_subscription_archive,
             qsi_appendix_workbook,

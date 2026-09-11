@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import importlib.util
 import io
 import json
@@ -572,6 +572,44 @@ def test_qsi_current_archive_is_newer_overlap_authority(tmp_path: Path) -> None:
     assert revision["accepted_authority"] == "NEWER_CURRENT_ARCHIVE"
     assert revision["overlap_observations"] == 30
     assert revision["max_abs_return_revision"] == pytest.approx(0.001)
+
+
+def test_readers_do_not_admit_rows_after_the_as_of_date(tmp_path: Path) -> None:
+    """Both readers used to emit rows the bundle's own guard then rejected.
+
+    The TT sheet is a live API export that runs to the pull date, and the QSI
+    appendix carries weeks past the declared boundary. Neither was truncated on
+    the path this build uses, so `build_bundle` failed with "history contains
+    observations after as_of_date" and no bundle could be produced at all.
+    """
+    tt_path = tmp_path / "tt.xlsx"
+    _tt(tt_path)
+    uncapped, _definition = history._tt(tt_path)
+    # The reader still requires a substantial history, so trim only a little.
+    boundary = date.fromisoformat(max(row["date"] for row in uncapped)) - timedelta(
+        days=2
+    )
+    capped, _definition = history._tt(tt_path, as_of_date=boundary)
+    assert capped
+    assert len(capped) < len(uncapped)
+    assert max(date.fromisoformat(row["date"]) for row in capped) <= boundary
+
+    archive = tmp_path / "qsi.zip"
+    appendix = tmp_path / "qsi.xlsx"
+    prices = tmp_path / "qsi-prices"
+    _qsi_subscription_archive(archive)
+    _qsi_appendix(appendix)
+    _qsi_prices(prices)
+    qsi_uncapped, _definition = history._qsi(archive, appendix, prices)
+    qsi_boundary = date.fromisoformat(
+        max(row["date"] for row in qsi_uncapped)
+    ) - timedelta(days=14)
+    qsi_capped, _definition = history._qsi(
+        archive, appendix, prices, as_of_date=qsi_boundary
+    )
+    assert qsi_capped
+    assert len(qsi_capped) < len(qsi_uncapped)
+    assert max(date.fromisoformat(row["date"]) for row in qsi_capped) <= qsi_boundary
 
 
 def test_grizzly_manual_live_file_is_validated_as_combined_subset(
