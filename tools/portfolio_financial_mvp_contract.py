@@ -153,6 +153,7 @@ HISTORY_EVIDENCE_ROOTS: Final = frozenset(
         "MATRIXPORT",
         "PORTFOLIO123",
         "PROVIDER_LEDGER",
+        "PROVIDER_TRACK_RECORD",
         "QUANTBASE",
         "STRATEGY_BACKTESTS",
     }
@@ -216,22 +217,22 @@ _MATRIXPORT_GAP_SPAN_RECEIPTS: Final = (
         "subscription_events_in_span": 0,
     },
 )
-_HISTORY_AUTHORITY_COMMIT: Final = "41473d47dc9cba6e6a6e189b05f1268c56bd5fa4"
+_HISTORY_AUTHORITY_COMMIT: Final = "cabfbfe0d7847440365d917c027a85648154962a"
 _HISTORY_AUTHORITY_RAW_SHA256: Final = (
-    "b267305a59682e660379abb58f380209f86391e193d24c420af201b8168fbc6b"
+    "f02150ddd4a79b29265b203b5adb61de0796946502b4a0aa3d58ce1d0f2cad2a"
 )
 _HISTORY_AUTHORITY_SEMANTIC_SHA256: Final = (
-    "00309632bf3afc35f4c3582883ffa765131e75d4a2a2999b59e6eb369f939512"
+    "83fa9b69f809da0e32fdc2cd87c4275ae63bf157e940189192ae178d6c6ce0f1"
 )
 _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
     "accepted_generation_id": (
-        "4b3de4f4656c236c3334eb76fb091b73c4a1a8afdbc9f3893485ed97403e0e36"
+        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
     ),
     "accepted_manifest_sha256": (
-        "33342e04b45ab070ba21bc74884be1b7eb9c1868589e95b435fb320a33330e06"
+        "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
     ),
     "accepted_catalog_sha256": (
-        "315471b602bb4ce61cd854195162708ab188f6e08d6597deb9b9da11ca5bce44"
+        "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
     ),
     "current_generation_id": (
         "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34"
@@ -253,251 +254,22 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
     ),
     "legacy_as_of": "2026-08-16",
 }
-# Issue #374 Phase C: the direct Matrixport/Portfolio123/Quantbase lanes
-# re-pin to the refreshed provider generations.  Every re-pointed history
-# receipt is enumerated as ``accepted identity -> refreshed identity``; the
-# current contract must carry the refreshed identity and the accepted authority
-# is projected forward.  The exact Portfolio123 EU provider-live correction
-# remains frozen to its complete accepted evidence vintage.
-_HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {
-    "MATRIXPORT": {
-        (
-            "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
-            "CURRENT.json",
-            "cbd433b2c99079b26ea14ba6d541ec80ea29c74c2902759f070ae75b934edfff",
-        ): (
-            "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-            "CURRENT.json",
-            "2b76a70db6ccbc9181930d94d95bfc70af61278f8145a36a7f63dfdb76cfcc0d",
-        ),
-        (
-            "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
-            (
-                "generations/6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6"
-                "a22dc74e816a1fdc/generation.json"
-            ),
-            "325c65ddc5985094799d2abfdce6a944d5443802333f734a40a34541c4d09f79",
-        ): (
-            "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-            (
-                "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c37251"
-                "5af23a4e3225d9ccc/generation.json"
-            ),
-            "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
-        ),
-        (
-            "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
-            ("output/20260816T141010.494Z/csv/subscription_details.csv"),
-            "17c302bd8cd3400ab44fad82aa162ad5e14ca2ab6f47f60bdfba5384fa28ecc8",
-        ): (
-            "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-            ("output/20260903T051029.331Z/csv/subscription_details.csv"),
-            "5ce7c6e3780df78a3f3b684329dbf4b382265a3411b0db9b036965e2c75db800",
-        ),
-    },
-    "PORTFOLIO123": {
-        (
-            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
-            "CURRENT.json",
-            "d0d3ebc232d66518654a63dce3ca343d33b9600b539a82ae4c4fd8ea69649ba1",
-        ): (
-            "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
-            "CURRENT.json",
-            "79024a424f05eae38fcb57c0db4853359e2beaf9103a3c385436433c54422431",
-        ),
-        (
-            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
-            (
-                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
-                "de384ad4a3182af1/generation.json"
-            ),
-            "e8870a4ff2a375d2c514975ac933c858ab7afe580eb9736fad04c1a2cf6f0907",
-        ): (
-            "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
-            (
-                "generations/80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5"
-                "ebe2182aac5eef8/generation.json"
-            ),
-            "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
-        ),
-        (
-            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
-            (
-                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
-                "de384ad4a3182af1/tables/returns_daily.parquet"
-            ),
-            "ea900ebf4b6073c715922535559bded916ff9f1283cb6326cef5b1177861045e",
-        ): (
-            "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
-            (
-                "generations/80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5"
-                "ebe2182aac5eef8/tables/returns_daily.parquet"
-            ),
-            "ea900ebf4b6073c715922535559bded916ff9f1283cb6326cef5b1177861045e",
-        ),
-        (
-            "10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68bade384ad4a3182af1",
-            (
-                "generations/10215d7b46c89511f6e61f2fa0cac075dd06d2b0cc0a68ba"
-                "de384ad4a3182af1/tables/strategy_relationships.parquet"
-            ),
-            "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc",
-        ): (
-            "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
-            (
-                "generations/80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5"
-                "ebe2182aac5eef8/tables/strategy_relationships.parquet"
-            ),
-            "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc",
-        ),
-    },
-    "QUANTBASE": {
-        (
-            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
-            "CURRENT.json",
-            "10ea84966c0a20fd5520690a58c67e0e098490e4030b77e270225fd1fc4fd6b3",
-        ): (
-            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-            "CURRENT.json",
-            "1caffa0848f7da8659adc6c2206ae19dde23d497a56b192ee6febc24ded17d38",
-        ),
-        (
-            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
-            (
-                "generations/ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058"
-                "e56f615872904d4f/generation.json"
-            ),
-            "fa5a8cf49572ebb66632909662f707f0072134234425f4fa1ceee049cefdf87f",
-        ): (
-            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-            (
-                "generations/d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe/generation.json"
-            ),
-            "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c",
-        ),
-        (
-            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
-            (
-                "source-runs/legacy-20260816-4108d8b8b58d/artifacts/csv/"
-                "dashboard_Volatis_Strategy_pricehistory.csv"
-            ),
-            "c03f1ae7a8363386a388670bf66699135727be5eeeeeea9508bc83b42ac501c4",
-        ): (
-            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-            (
-                "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv"
-            ),
-            "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e",
-        ),
-        (
-            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
-            (
-                "source-runs/legacy-20260816-4108d8b8b58d/artifacts/csv/"
-                "ssg_Volatis_Strategy_pricehistory.csv"
-            ),
-            "140301858179cbb4ca56539931c3d7701c190334aafd0d4e7bde30a621186772",
-        ): (
-            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-            (
-                "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/ssg_Volatis_Strategy_pricehistory.csv"
-            ),
-            "83bab8b0828bee2d8abb51f26b6cbbf44fa5f4bab98e69a80097f5cba9b80fa2",
-        ),
-        (
-            "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
-            (
-                "source-runs/legacy-20260816-4108d8b8b58d/artifacts/csv/"
-                "account_activity.csv"
-            ),
-            "b4c5a7b23f24636a17090003b0203ee40b91703e6f0c8b3236d5884d6d1e62e0",
-        ): (
-            "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-            (
-                "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/account_activity.csv"
-            ),
-            "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0",
-        ),
-    },
-}
-# Issue #374 Phase C: materialized history segments sourced from a refreshed
-# direct provider lane follow the same admitted transition.  Each entry pins
-# the accepted (old) and required current (refreshed) source-generation
-# receipt for the segment's source segment.
-_HISTORY_PROVIDER_SOURCE_REBINDS: Final = {
-    "matrixport-account-generation": (
-        "6a4dcb3d5746df924a24249e87d15283eb5327701fd6fba6a22dc74e816a1fdc",
-        "325c65ddc5985094799d2abfdce6a944d5443802333f734a40a34541c4d09f79",
-        "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-        "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
-    ),
-    "quantbase-account-generation": (
-        "ca19707a491204b23d7b3a970bd9cf758cedf31a24c3d058e56f615872904d4f",
-        "fa5a8cf49572ebb66632909662f707f0072134234425f4fa1ceee049cefdf87f",
-        "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-        "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c",
-    ),
-}
-_HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {
-    # Issue #374: the account-return path is canonical only after provider-ledger
-    # selection, independent provider reconciliation, and elimination of the
-    # redundant one-account capital-weighting round trip.  The latter changes
-    # only the final Decimal-context digits/canonical decimal bytes; date
-    # perimeters and provider-formula values remain independently checked by
-    # the layered-history builder.
-    "grizzlybears-vtma:account-live": (
-        "4c4a15c30b3fb38e2ee8df757677d7e2f645a498026634e3abf1b36fa08b6e38",
-        "1c0bbf5915e13f08342f02298e86c9e748294933e6a6c1f46793be8b3df4c529",
-    ),
-    "p123-ai-factor:account-live": (
-        "7c854731f513fb5b6b02e7800d56e842b05a2a912b5a23aa3248c3ef20e0c0cd",
-        "68582e28bae1045494561a807f1b0db0b892cca62385f74a67daca16c101c754",
-    ),
-    "p123-eu:account-live": (
-        "a5af42de3a2aa3b2b960b60fc9880bc5a73cab286d5bd3e504d21535e74db63d",
-        "340539d1ff53a1e1386846043757e0bd6ba785bf216ade8daf820faa64e38a1b",
-    ),
-    "robuxio-crypto:account-live": (
-        "cb9609449f633b3077fd2dbfd3cd67764f61290c0d0dee682368d235cae77b13",
-        "65c115d3a915d24af57c357865f1edf887f4b68d6f8a3f1ea8782b6ac90757c0",
-    ),
-}
-_HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final = {
-    "robuxio-crypto:account-live": {
-        "observed_end": "2026-09-03",
-        "return_observations": 267,
-        "sha256": "1ea12119e24f31fc6820593af890f80026955d7de05676433db18a5d0025a529",
-    },
-    "grizzlybears-vtma:account-live": {
-        "observed_end": "2026-09-02",
-        "return_observations": 243,
-        "sha256": "a7271e772c6d21ee4b3b2ed76149ddd9639d10c5c8be371550203fc2d67c9b61",
-    },
-    "p123-ai-factor:account-live": {
-        "observed_end": "2026-09-02",
-        "return_observations": 160,
-        "sha256": "7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
-    },
-    "p123-eu:account-live": {
-        "observed_end": "2026-09-02",
-        "return_observations": 204,
-        "sha256": "63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
-    },
-    "qsi:account-live": {
-        "observed_end": "2026-09-02",
-        "return_observations": 241,
-        "sha256": "de46b08ec45f4096ae5bf501b39e6efa71ae51ae825bee63161aa804422067b3",
-    },
-    "tt-portfolio:account-live": {
-        "observed_end": "2026-09-02",
-        "return_observations": 282,
-        "sha256": "4235428716b167f3c21e2843a7e16dd8ea50d8e542cd465e0cf6887b89072435",
-    },
-    "volatis-strategy:account-live": {
-        "observed_end": "2026-09-02",
-        "return_observations": 687,
-        "sha256": "e8b3b66a38b6edfa027318496129a1e8f56bc6c29e3176e9d4c44215f01a66b4",
-    },
-}
+# Issue #374 Phase C re-pointed the direct Matrixport/Portfolio123/Quantbase
+# history receipts from their accepted identities to the refreshed provider
+# generations. The #319 authority has since been re-accepted onto the current
+# lineage, so the accepted document already carries the refreshed identities
+# and there is nothing left to re-point.
+_HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {}
+# The source-segment half of the same #374 transition, discharged by the same
+# re-acceptance.
+_HISTORY_PROVIDER_SOURCE_REBINDS: Final = {}
+# Issue #374 also moved four account-live segment digests when the redundant
+# one-account capital-weighting round trip was removed. The re-accepted
+# authority names those digests directly.
+_HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {}
+# Spans and observation counts the accepted vintage predated; the re-accepted
+# authority observes them itself.
+_HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final = {}
 EPOCH_MANIFEST_ARTIFACT_PATH: Final = "outputs/account-strategy-manifest.json"
 EPOCH_MANIFEST_ARTIFACT_SCHEMA_NAME: Final = "account-strategy-manifest"
 EPOCH_MANIFEST_ARTIFACT_SCHEMA_VERSIONS: Final = frozenset({"8", "9"})
@@ -1434,23 +1206,24 @@ def _verify_strategy_version_history_evidence(
                 "provider-ledger history receipt selector differs"
             )
 
-        expected_generation_key = (
-            "accepted_generation_id"
-            if accepted_authority
-            else (
-                "legacy_generation_id"
-                if deprecated_event_only
-                else "current_generation_id"
-            )
-        )
-        expected_sha_key = accepted_sha_key if accepted_authority else current_sha_key
         legacy_sha_key = (
             "legacy_manifest_sha256"
             if suffix == "generation.json"
             else "legacy_catalog_sha256"
         )
-        if not accepted_authority and deprecated_event_only:
+        # The deprecated event-only lane is frozen to its legacy vintage in the
+        # accepted document as well as the current one -- that freeze is what
+        # the re-acceptance carried forward -- so it is read from the legacy
+        # pins on both sides rather than only when reading the current lineage.
+        if deprecated_event_only:
+            expected_generation_key = "legacy_generation_id"
             expected_sha_key = legacy_sha_key
+        elif accepted_authority:
+            expected_generation_key = "accepted_generation_id"
+            expected_sha_key = accepted_sha_key
+        else:
+            expected_generation_key = "current_generation_id"
+            expected_sha_key = current_sha_key
         if (
             generation_id != ledger_transition[expected_generation_key]
             or projected["sha256"] != ledger_transition[expected_sha_key]
@@ -7560,6 +7333,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio123-root", type=Path)
     parser.add_argument("--provider-ledger-root", type=Path)
     parser.add_argument("--quantbase-root", type=Path)
+    parser.add_argument("--provider-track-record-root", type=Path)
     parser.add_argument("--strategy-backtests-root", type=Path)
     parser.add_argument("--schwab-root", type=Path)
     parser.add_argument("--epoch-manifest-generation-root", type=Path)
@@ -7618,6 +7392,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "MATRIXPORT": args.matrixport_root,
             "PORTFOLIO123": args.portfolio123_root,
             "PROVIDER_LEDGER": args.provider_ledger_root,
+            "PROVIDER_TRACK_RECORD": args.provider_track_record_root,
             "QUANTBASE": args.quantbase_root,
             "STRATEGY_BACKTESTS": args.strategy_backtests_root,
         }

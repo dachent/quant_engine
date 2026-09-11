@@ -36,7 +36,13 @@ RETURN_FIELDS: Final = (
     "strategy_version",
 )
 SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.5.0"
+BUILDER_VERSION: Final = "1.6.0"
+# The provider publishes the EU model's launch date on its page and the owner
+# states it as the date the model went live. Everything the provider shows
+# before it is simulated design history, not a live track record, which is the
+# split this builder has to make: the equity curve is one continuous path and
+# nothing in its bytes marks where simulation ends.
+P123_EU_PROVIDER_LAUNCH: Final = date(2024, 2, 18)
 _SHEET_NS: Final = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS: Final = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PKG_REL_NS: Final = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -461,8 +467,15 @@ def _verified_generation_artifact(
     return path, dict(expected), manifest
 
 
-def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]:
+def _p123_history_dispositions(
+    generation_root: Path,
+) -> tuple[list[dict[str, object]], tuple[list[dict[str, str]], dict[str, object]] | None]:
     """Classify the exact EU capture and retain deliberate non-history decisions.
+
+    Also returns the EU backtest part -- the prehistory strictly before the
+    provider's own launch -- in the same ``(rows, definition)`` shape the
+    vendor-workbook readers use, or ``None`` when the capture holds no such
+    history.
 
     Provider entity identifiers are used only in memory to test exact capture.
     They are never written to the bundle. Similar European books are inventoried
@@ -711,6 +724,56 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
             "transform_id": "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1",
         }
 
+    eu_backtest: tuple[list[dict[str, str]], dict[str, object]] | None = None
+    prehistory_disposition: dict[str, object] = {
+        "provider_launch": P123_EU_PROVIDER_LAUNCH.isoformat(),
+        "status": "NO_EXACT_MODEL_CAPTURE_BEFORE_PROVIDER_LAUNCH",
+    }
+    if provider_summary is not None:
+        eu_backtest = _p123_eu_backtest(
+            ordered,
+            generation_id=generation_id,
+            exact_ids=exact_ids,
+            strategy_name=str(exact.get("assetName") or ""),
+            equity_artifact=equity_artifact,
+        )
+        if eu_backtest is None:
+            # The designer model the owner subscribes to states its launch on
+            # the provider's page, and its own history runs from well before
+            # it. What this generation captured is the SUBSCRIBED COPY, whose
+            # curve begins when the copy was created, plus several similarly
+            # named European books that carry long curves but no captured
+            # relationship to the subscribed model. Splicing one of those in
+            # would be substituting a different book for the model, which is
+            # the substitution this builder exists to refuse -- so the gap is
+            # recorded as a capture gap rather than filled.
+            prehistory_disposition.update(
+                {
+                    "exact_model_observed_start": ordered[0][0].isoformat(),
+                    "exact_model_observed_end": ordered[-1][0].isoformat(),
+                    "required_capture": (
+                        "DESIGNER_MODEL_HISTORY_AND_LAUNCH_SNAPSHOT_FOR_THE_"
+                        "SUBSCRIBED_MODEL"
+                    ),
+                    "reason": (
+                        "The captured provider history for the exact connected "
+                        "model begins after the provider's stated launch, so no "
+                        "pre-launch prehistory exists to admit. Long European "
+                        "curves captured for other books are not substitutes "
+                        "without a captured version relationship."
+                    ),
+                }
+            )
+        else:
+            prehistory_disposition.update(
+                {
+                    "observed_end": eu_backtest[1]["observed_end"],
+                    "observed_start": eu_backtest[1]["observed_start"],
+                    "return_observations": eu_backtest[1]["return_observations"],
+                    "status": "ADMITTED_STRICTLY_BEFORE_PROVIDER_LAUNCH",
+                }
+            )
+
     registry = {
         str(row.get("entity_id") or ""): str(row.get("canonical_name") or "")
         for row in parquet.read_table(registry_path).to_pylist()
@@ -814,6 +877,7 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
         {
             **exact_disposition,
             "connected_model_currency": str(exact.get("currency") or ""),
+            "backtest_prehistory": prehistory_disposition,
             "connected_model_holding_count": int(
                 str(exact.get("strategyTotalHoldCount") or exact.get("posCnt") or 0)
             ),
@@ -852,7 +916,85 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
             "status": "IMMATERIAL_HISTORY_NOT_CONNECTED_BY_GOVERNANCE",
             "strategy_version": "composer-immaterial-unconnected:2026-08-08",
         },
-    ]
+    ], eu_backtest
+
+
+def _p123_eu_backtest(
+    ordered: Sequence[tuple[date, tuple[Decimal, Decimal]]],
+    *,
+    generation_id: str,
+    exact_ids: Iterable[str],
+    strategy_name: str,
+    equity_artifact: Mapping[str, object],
+) -> tuple[list[dict[str, str]], dict[str, object]] | None:
+    """Admit the EU prehistory strictly before the provider's own launch.
+
+    The provider publishes one continuous equity curve from 1999. Only the part
+    after its launch is a live track record; the rest is the design simulated
+    before the model existed, which is exactly what LIVE_PLUS_BACKTEST admits
+    and LIVE_ONLY must not see. The boundary is the last observation strictly
+    before the published launch date, so a launch that falls on a non-trading
+    day cannot pull a live session into the prehistory.
+
+    Returns are level ratios. The one funding event in the path is the
+    simulation's opening capital on its first day, which no ratio spans, so no
+    flow adjustment applies.
+    """
+
+    prehistory = [item for item in ordered if item[0] < P123_EU_PROVIDER_LAUNCH]
+    if len(prehistory) < 2:
+        return None
+    version = _version(
+        "p123-eu-connected-model",
+        {
+            "generation_id": generation_id,
+            "provider_entity_ids": sorted(exact_ids),
+            "strategy_name": strategy_name,
+        },
+    )
+    rows: list[dict[str, str]] = []
+    for (_previous_day, previous), (observed, current) in zip(
+        prehistory, prehistory[1:], strict=False
+    ):
+        period_return = current[0] / previous[0] - Decimal(1)
+        if period_return <= -1:
+            raise StrategyHistoryError("Portfolio123 exact EU backtest return is invalid")
+        rows.append(
+            {
+                "series_id": "EU [P123]",
+                "date": observed.isoformat(),
+                "return": format(period_return.normalize(), "f"),
+                "evidence_layer": "BACKTEST",
+                "strategy_version": version,
+            }
+        )
+    definition: dict[str, object] = {
+        "compatibility_basis": "EXACT_CONNECTED_MODEL_EQUITY_CURVE_IDENTITY",
+        "coverage_disposition": "COMPLETE_STRICTLY_BEFORE_PROVIDER_LAUNCH",
+        "frequency": "DAILY_TRADING",
+        "history_status": "ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
+        "implementation_reconciliation_status": (
+            "MODEL_TO_ACCOUNT_RECONCILIATION_RETAINED_SEPARATELY"
+        ),
+        "method": "PROVIDER_EQUITY_CURVE_LEVEL_TO_RETURN",
+        "observed_end": rows[-1]["date"],
+        "observed_start": rows[0]["date"],
+        "provider_launch": P123_EU_PROVIDER_LAUNCH.isoformat(),
+        "required_for_analysis": True,
+        "return_observations": len(rows),
+        "series_id": "EU [P123]",
+        "source_artifacts": [
+            {
+                "artifact_id": "tables/har_equity_curve.parquet",
+                "sha256": equity_artifact["sha256"],
+                "size_bytes": equity_artifact["size_bytes"],
+                "source_id": "portfolio123-exact-connected-eu-equity-curve",
+            }
+        ],
+        "source_rows_excluded_at_or_after_provider_launch": len(ordered) - len(prehistory),
+        "strategy_version": version,
+    }
+    return rows, definition
 
 
 def _grizzly_trade_history(
@@ -1974,6 +2116,12 @@ def build_bundle(
     volatis_disposition = _volatis_disposition(
         volatis_pricehistory_csv, accepted_as_of=accepted_as_of
     )
+    p123_dispositions: list[dict[str, object]] = []
+    p123_eu_part: tuple[list[dict[str, str]], dict[str, object]] | None = None
+    if portfolio123_generation_root is not None:
+        p123_dispositions, p123_eu_part = _p123_history_dispositions(
+            portfolio123_generation_root
+        )
     parts = (
         _grizzly(
             grizzly_workbook,
@@ -2003,6 +2151,7 @@ def build_bundle(
             price_extension_json=price_extension_json,
             as_of_date=accepted_as_of,
         ),
+        *((p123_eu_part,) if p123_eu_part is not None else ()),
     )
     rows = [row for accepted, _ in parts for row in accepted]
     definitions = [definition for _accepted, definition in parts]
@@ -2082,10 +2231,7 @@ def build_bundle(
         "verification": "VERIFIED",
     }
     history_dispositions = [volatis_disposition]
-    if portfolio123_generation_root is not None:
-        history_dispositions.extend(
-            _p123_history_dispositions(portfolio123_generation_root)
-        )
+    history_dispositions.extend(p123_dispositions)
     manifest["history_dispositions"] = history_dispositions
     manifest["bundle_id"] = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
     return returns_content, canonical_json_bytes(manifest)

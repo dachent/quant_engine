@@ -1048,8 +1048,12 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # reads, so neither published generation carried every captured family.
     # The union generation restores it, and its two admitted items are the
     # first Portfolio123 rows the product has ever admitted.
+    # Moved again when grizzlybears-vtma, qsi and tt-portfolio stopped reading
+    # UNRESOLVED: the retained vendor histories became governed generation
+    # c60b9a95, `strategy-backtests` bound to it, and each of the three gained
+    # the BACKTEST and ACCOUNT_LIVE corrections its version assertion needs.
     assert contract_tool.contract_digest(contract) == (
-        "b9dd23f8d2cf28343e33a1fc7c4b903f4af4fd06e03a7107f49e8b873a60e043"
+        "83fa9b69f809da0e32fdc2cd87c4275ae63bf157e940189192ae178d6c6ce0f1"
     )
 
 
@@ -1535,7 +1539,10 @@ def test_census_owner_digest_and_generated_views_are_one_authority() -> None:
 
 def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     baseline = _contract()
-    assert contract_tool._verify_strategy_version_history_evidence(baseline) == 3
+    # Six of the seven required strategies now carry a version backed by two
+    # captured layers; p123-ai-factor stays UNRESOLVED until its live/simulation
+    # twin version is accepted.
+    assert contract_tool._verify_strategy_version_history_evidence(baseline) == 6
     approved_digest = baseline["current_census"]["decision_payload_sha256"]
     projection = contract_tool.census_owner_decision_projection(
         baseline["current_census"], baseline["strategies"]
@@ -1932,7 +1939,7 @@ def test_p123_history_accepts_exact_eu_vintage_with_current_ai_vintage() -> None
         contract["source_segments"],
         {row["strategy_id"] for row in contract["strategies"]},
     )
-    assert contract_tool._verify_strategy_version_history_evidence(contract) == 3
+    assert contract_tool._verify_strategy_version_history_evidence(contract) == 6
 
 
 @pytest.mark.parametrize(
@@ -2105,7 +2112,7 @@ def test_two_vintage_history_accepts_current_active_and_retains_07c590_echo() ->
     assert robuxio["live_implementation_identity"]["generation_id"].startswith("3badac")
 
     _validate(contract)
-    assert contract_tool._verify_strategy_version_history_evidence(contract) == 3
+    assert contract_tool._verify_strategy_version_history_evidence(contract) == 6
 
 
 @pytest.mark.parametrize(
@@ -2868,7 +2875,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     assert history["policy_id"] == "PORT-HISTORY-TRUTH-1"
     assert history["owner_issue"] == 319
     rows = history["corrections"]
-    assert len(rows) == 11
+    assert len(rows) == 17
     segment_identities = history["materialized_segment_identities"]
     assert [row["segment_id"] for row in segment_identities] == sorted(
         row["segment_id"] for row in segment_identities
@@ -2908,6 +2915,12 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         ("volatis-strategy", "PROVIDER_LIVE"),
         ("volatis-strategy", "ACCOUNT_LIVE"),
         ("echotrade-growth-pivots", "ACCOUNT_LIVE"),
+        ("grizzlybears-vtma", "BACKTEST"),
+        ("grizzlybears-vtma", "ACCOUNT_LIVE"),
+        ("qsi", "BACKTEST"),
+        ("qsi", "ACCOUNT_LIVE"),
+        ("tt-portfolio", "BACKTEST"),
+        ("tt-portfolio", "ACCOUNT_LIVE"),
     }
 
     robux_live = _history_correction(contract, "robuxio-account-live-after-funding")
@@ -3019,8 +3032,17 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "strategy_version"
     ]["version_refs"]
     assert owner_versions == {
+        "grizzlybears-vtma": _history_correction(contract, "grizzlybears-vtma-account-live")[
+            "strategy_version"
+        ]["version_ref"],
         "p123-eu": p123_provider["strategy_version"]["version_ref"],
+        "qsi": _history_correction(contract, "qsi-account-live")["strategy_version"][
+            "version_ref"
+        ],
         "robuxio-crypto": robux_live["strategy_version"]["version_ref"],
+        "tt-portfolio": _history_correction(contract, "tt-portfolio-account-live")[
+            "strategy_version"
+        ]["version_ref"],
         "volatis-strategy": volatis_live["strategy_version"]["version_ref"],
     }
     p123_live = _history_correction(contract, "p123-eu-account-live")
@@ -3591,9 +3613,10 @@ def test_source_strategy_version_and_cost_are_explicit() -> None:
         _validate(mutated)
 
     mutated = copy.deepcopy(contract)
-    _source(mutated, "strategy-backtests")["strategy_version"]["version_refs"] = {
-        "qsi": "invented-v1"
-    }
+    # The segment now carries real version refs, so the case under test is a
+    # status that disowns them rather than a ref the product never asserted --
+    # an invented ref would trip the stronger product-authority rule first.
+    _source(mutated, "strategy-backtests")["strategy_version"]["status"] = "UNRESOLVED"
     with pytest.raises(
         contract_tool.FinancialMvpContractError, match="asserts unresolved"
     ):
@@ -4097,11 +4120,12 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
         + b"\n"
     )
     # Moved with the matrixport segment completion, the provider-ledger
-    # lineage rebind, the per-reason exclusion readiness map, and the
-    # Portfolio123 union-generation repin; each edits source_segments, which
-    # this proof hashes.
+    # lineage rebind, the per-reason exclusion readiness map, the Portfolio123
+    # union-generation repin, and the strategy-backtests segment binding onto
+    # its governed generation; each edits source_segments, which this proof
+    # hashes.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "9f14889302c0719fcbcc61dd4d69b358f5333700ed7d8533581bb85a5fab9116"
+        "bcf7177fe64f24c1b94689246df9b9f4f698109b5611f698d8c93e6c5262a81c"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4138,7 +4162,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "9f14889302c0719fcbcc61dd4d69b358f5333700ed7d8533581bb85a5fab9116"
+        "bcf7177fe64f24c1b94689246df9b9f4f698109b5611f698d8c93e6c5262a81c"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
