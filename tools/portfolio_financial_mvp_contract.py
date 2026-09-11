@@ -1280,6 +1280,16 @@ def _verify_strategy_version_history_evidence(
         raise FinancialMvpContractError(
             "accepted #319 history semantic authority differs"
         )
+    # Re-acceptance. Every table below this point exists to project an OLDER
+    # accepted authority forward onto the current lineage: the provider-ledger
+    # transition, the per-lane rebinds, the segment digest overrides and the
+    # segment projections. When the pin names the current contract itself there
+    # is nothing to project -- the accepted document and the current one are the
+    # same bytes -- and applying those bridges anyway compares the current
+    # lineage against identities it deliberately superseded. Diffing a document
+    # against itself is also vacuous, so the projections collapse to the current
+    # reading and the bridge tables stay as the record of the older vintage.
+    authority_is_current = contract_digest(accepted) == contract_digest(contract)
     accepted_versions = {
         _text(row.get("strategy_id"), "accepted #319 version strategy_id"): _object(
             row.get("strategy_version"), "accepted #319 strategy_version"
@@ -1432,7 +1442,13 @@ def _verify_strategy_version_history_evidence(
             or projected["sha256"] != ledger_transition[expected_sha_key]
         ):
             raise FinancialMvpContractError(
-                "provider-ledger history lineage differs from the admitted transition"
+                "provider-ledger history lineage differs from the admitted "
+                f"transition: role={projected.get('artifact_role')} "
+                f"selector={suffix} observed={generation_id[:16]}/"
+                f"{str(projected['sha256'])[:16]} expected="
+                f"{str(ledger_transition[expected_generation_key])[:16]}/"
+                f"{str(ledger_transition[expected_sha_key])[:16]} "
+                f"key={expected_generation_key}"
             )
         if accepted_authority:
             target_generation_key = (
@@ -1506,7 +1522,7 @@ def _verify_strategy_version_history_evidence(
     accepted_corrections = {
         _text(
             row.get("correction_id"), "accepted history correction_id"
-        ): correction_projection(row, accepted_authority=True)
+        ): correction_projection(row, accepted_authority=not authority_is_current)
         for row in _objects(
             accepted_history.get("corrections"), "accepted history corrections"
         )
@@ -1595,7 +1611,7 @@ def _verify_strategy_version_history_evidence(
 
     accepted_segments = {
         _text(row.get("segment_id"), "accepted history segment_id"): segment_projection(
-            row, accepted_authority=True
+            row, accepted_authority=not authority_is_current
         )
         for row in _objects(
             accepted_history.get("materialized_segment_identities"),
@@ -1605,7 +1621,7 @@ def _verify_strategy_version_history_evidence(
     for segment_id, (
         accepted_sha256,
         corrected_sha256,
-    ) in _HISTORY_SEGMENT_SHA256_OVERRIDES.items():
+    ) in ({} if authority_is_current else _HISTORY_SEGMENT_SHA256_OVERRIDES).items():
         accepted_segment = accepted_segments.get(segment_id)
         if accepted_segment is None or accepted_segment.get("sha256") != (
             accepted_sha256
@@ -1614,7 +1630,9 @@ def _verify_strategy_version_history_evidence(
                 f"accepted history correction authority differs: {segment_id}"
             )
         accepted_segment["sha256"] = corrected_sha256
-    for segment_id, projection in segment_projections.items():
+    for segment_id, projection in (
+        {} if authority_is_current else segment_projections
+    ).items():
         accepted_segment = accepted_segments.get(segment_id)
         if accepted_segment is None:
             raise FinancialMvpContractError(
