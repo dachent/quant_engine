@@ -1053,7 +1053,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # c60b9a95, `strategy-backtests` bound to it, and each of the three gained
     # the BACKTEST and ACCOUNT_LIVE corrections its version assertion needs.
     assert contract_tool.contract_digest(contract) == (
-        "c5fbb80d16bcb200ff94d3573313b0ce388cac41a843eb41e7d2246b557b3e89"
+        "838fce5c1e820451196217f17c60d1e7b3d25127f3bf79a8389f24bc51e47347"
     )
 
 
@@ -2882,12 +2882,15 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     )
     assert {row["segment_id"] for row in segment_identities} == {
         "grizzlybears-vtma:account-live",
+        "grizzlybears-vtma:backtest",
         "p123-ai-factor:account-live",
         "p123-eu:account-live",
         "qsi:account-live",
+        "qsi:backtest",
         "robuxio-crypto:account-live",
         "robuxio-crypto:provider-live-before-funding",
         "tt-portfolio:account-live",
+        "tt-portfolio:backtest",
         "volatis-strategy:account-live",
     }
     sources = {row["source_id"]: row for row in contract["source_segments"]}
