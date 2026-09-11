@@ -1071,9 +1071,27 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
     output_root = tmp_path / "schema10-dag"
     spec_path = output_root / "pipeline-spec.json"
 
+    governed = {
+        name: _write_json(tmp_path / "governed" / f"{name}.json", {"name": name})
+        or (tmp_path / "governed" / f"{name}.json")
+        for name in (
+            "as-held-hwm",
+            "hwm-input",
+            "calendar",
+            "admission",
+            "invested-capital",
+            "capital-input",
+        )
+    }
     materializer.build_spec(
         pipeline_recipe, output_root, spec_path,
+        governed["as-held-hwm"],
+        governed["hwm-input"],
+        governed["calendar"],
+        governed["admission"],
         portfolio_root=tmp_path / "portfolio",
+        invested_capital_result_path=governed["invested-capital"],
+        invested_capital_input_generation_path=governed["capital-input"],
     )
 
     assert calls == [(generation_root, epoch_manifest.generation_id)]
@@ -1092,6 +1110,25 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
         )
     for node_id in ("build-ledger", "build-report"):
         assert "--portfolio-root" not in argv_by_node[node_id]
+    # The governed numerical results are stage inputs for every role that reads
+    # them, and each has to be a declared absolute read or the plan refuses.
+    reads_by_node = {
+        row["node_id"]: row.get("declared_reads", []) for row in spec["nodes"]
+    }
+    for node_id in ("build-report", "build-workbook", "build-panel"):
+        argv = argv_by_node[node_id]
+        for flag, path in (
+            ("--hwm-governed-result", governed["as-held-hwm"]),
+            ("--hwm-governed-input-generation", governed["hwm-input"]),
+            ("--hwm-governed-calendar-authority", governed["calendar"]),
+            ("--hwm-governed-admission-receipt", governed["admission"]),
+            ("--invested-capital-result", governed["invested-capital"]),
+            ("--invested-capital-input-generation", governed["capital-input"]),
+        ):
+            assert argv[argv.index(flag) + 1] == str(path.resolve())
+            assert str(path.resolve()) in reads_by_node[node_id]
+    for node_id in ("build-ledger", "build-baseline"):
+        assert "--hwm-governed-result" not in argv_by_node[node_id]
     orchestration = json.loads(
         spec_path.with_name("portfolio-orchestration-contract.json").read_text(
             encoding="utf-8"
@@ -1113,6 +1150,53 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
             (output_root / "financial-mvp-bound-contract.json").read_bytes()
         ).hexdigest()
     )
+
+
+def test_governed_results_reach_every_role_that_reads_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report, workbook and panel roles each read the governed results.
+
+    Binding them into the proof but not into the pipeline's own nodes made the
+    panel node recompute a semantic validation that differed from the one the
+    proof had already written into the shared QA directory, which failed the
+    run at `build-panel` with a create-only conflict.
+    """
+
+    flags = {
+        "--hwm-governed-result": tmp_path / "as-held-hwm.json",
+        "--hwm-governed-input-generation": tmp_path / "hwm-input.json",
+        "--hwm-governed-calendar-authority": tmp_path / "calendar.json",
+        "--hwm-governed-admission-receipt": tmp_path / "admission.json",
+        "--invested-capital-result": tmp_path / "invested-capital.json",
+        "--invested-capital-input-generation": tmp_path / "capital-input.json",
+    }
+    for path in flags.values():
+        _write_json(path, {"present": True})
+
+    resolved = materializer._governed_stage_paths(*flags.values())
+    assert set(resolved) == set(flags)
+    assert all(resolved[flag] == path.resolve() for flag, path in flags.items())
+
+    assert materializer._governed_stage_paths(*([None] * 6)) == {}
+
+    partial = [*flags.values()]
+    partial[-1] = None
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="governed numerical results must be supplied together",
+    ):
+        materializer._governed_stage_paths(*partial)
+
+    missing = [*flags.values()]
+    missing[0] = tmp_path / "absent.json"
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="governed result is absent or linked",
+    ):
+        materializer._governed_stage_paths(*missing)
+
+    assert materializer._GOVERNED_OUTCOME_STAGES == ("report", "workbook", "panel")
 
 
 def test_financial_spec_without_a_portfolio_root_fails_before_the_dag(

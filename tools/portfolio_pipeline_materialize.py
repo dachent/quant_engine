@@ -109,6 +109,10 @@ RELEASE_ROLES = ("ledger", "baseline", "report", "panel")
 # Roles whose release-builder path validates the private stage target against
 # production and therefore requires --portfolio-root on a financial run.
 _PORTFOLIO_ROOT_STAGES: Final = ("workbook", "panel")
+# The roles whose staged output depends on the governed numerical results. A
+# run that binds them into one of these and not the others produces two
+# different semantic validations of the same release.
+_GOVERNED_OUTCOME_STAGES: Final = ("report", "workbook", "panel")
 ROOT_IDS = {
     "ledger": "provider-ledger",
     "baseline": "baseline",
@@ -222,6 +226,46 @@ def _hwm_binding_paths(
     if any(value is None for value in values.values()):
         raise MaterializationError("governed HWM bindings must be supplied together")
     return {key: Path(value).resolve() for key, value in values.items() if value}
+
+
+def _governed_stage_paths(
+    hwm_governed_result_path: Path | None,
+    hwm_governed_input_generation_path: Path | None,
+    hwm_governed_calendar_authority_path: Path | None,
+    hwm_governed_admission_receipt_path: Path | None,
+    invested_capital_result_path: Path | None,
+    invested_capital_input_generation_path: Path | None,
+) -> dict[str, Path]:
+    """Resolve the governed numerical results the staging roles read.
+
+    All six move together. A run that gave the report an invested-capital
+    result but not a governed HWM would publish a report the panel cannot
+    verify, so a partial set is refused rather than silently narrowed.
+    """
+    values = {
+        "--hwm-governed-result": hwm_governed_result_path,
+        "--hwm-governed-input-generation": hwm_governed_input_generation_path,
+        "--hwm-governed-calendar-authority": hwm_governed_calendar_authority_path,
+        "--hwm-governed-admission-receipt": hwm_governed_admission_receipt_path,
+        "--invested-capital-result": invested_capital_result_path,
+        "--invested-capital-input-generation": (
+            invested_capital_input_generation_path
+        ),
+    }
+    if all(value is None for value in values.values()):
+        return {}
+    if any(value is None for value in values.values()):
+        raise MaterializationError(
+            "governed numerical results must be supplied together"
+        )
+    resolved = {}
+    for flag, value in values.items():
+        assert value is not None
+        path = Path(value).resolve()
+        if path.is_symlink() or not path.is_file():
+            raise MaterializationError(f"governed result is absent or linked: {flag}")
+        resolved[flag] = path
+    return resolved
 
 
 def _production_hwm_source_paths(
@@ -3265,6 +3309,8 @@ def build_spec(
     hwm_governed_admission_receipt_path: Path | None = None,
     financial_input_contract_path: Path | None = None,
     portfolio_root: Path | None = None,
+    invested_capital_result_path: Path | None = None,
+    invested_capital_input_generation_path: Path | None = None,
 ) -> dict[str, Any]:
     if portfolio_root is None:
         # Fail here rather than four nodes into the run. `build_workbook` and
@@ -3445,6 +3491,19 @@ def build_spec(
             output_root / "stage-results" / "panel.json",
         ],
     }
+    governed_stage_paths = _governed_stage_paths(
+        hwm_governed_result_path,
+        hwm_governed_input_generation_path,
+        hwm_governed_calendar_authority_path,
+        hwm_governed_admission_receipt_path,
+        invested_capital_result_path,
+        invested_capital_input_generation_path,
+    )
+    governed_stage_args = [
+        value
+        for flag, path in governed_stage_paths.items()
+        for value in (flag, str(path))
+    ]
     previous_node = "authority-snapshot"
     previous_outputs: list[Path] = [authority_path]
     generation_nodes: dict[str, str] = {}
@@ -3471,7 +3530,17 @@ def build_spec(
         # financial vertical has lenses, so both roles always need it.
         if role in _PORTFOLIO_ROOT_STAGES and portfolio_root is not None:
             args.extend(("--portfolio-root", str(portfolio_root)))
+        # The governed numerical results are stage inputs, not merely gate
+        # evidence: `build_report`, `build_workbook` and `build_panel` each read
+        # them and each refuses to verify a candidate that was built with them
+        # when it is re-run without. Omitting them here made the pipeline's own
+        # panel node recompute a semantic validation that differed from the one
+        # the proof wrote into the shared QA directory.
+        if role in _GOVERNED_OUTCOME_STAGES:
+            args.extend(governed_stage_args)
         reads = [*previous_outputs, *source_paths]
+        if role in _GOVERNED_OUTCOME_STAGES:
+            reads.extend(governed_stage_paths.values())
         for dependency in STAGE_DEPENDENCIES[role]:
             reads.extend(stage_writes[dependency])
         if role == "panel":
@@ -3630,15 +3699,15 @@ def build_spec(
     contract_bytes = canonical_json_bytes(contract)
     _write_exact(contract_path, contract_bytes)
     product_path = spec_path.with_name("financial-mvp-product-conformance.json")
+    # The private proof run stages the governed results but does not assess
+    # them: `_hwm_input_authority_assessment` verifies the selected-source
+    # replay against generations that are pinned as artifact nodes, and only
+    # the production specification carries those. The assessment therefore
+    # stays PENDING_GOVERNED_HWM_RESULT here and becomes AVAILABLE in
+    # `build_production_spec`, which has both the bindings and the sources.
     product_gates = _product_gate_rows(
         product_authority,
         product_path,
-        hwm_bindings=_hwm_binding_paths(
-            hwm_governed_result_path,
-            hwm_governed_input_generation_path,
-            hwm_governed_calendar_authority_path,
-            hwm_governed_admission_receipt_path,
-        ),
         input_contract_path=financial_input_contract_path,
     )
     manifest_gate_path = spec_path.with_name(
@@ -4249,6 +4318,8 @@ def _parser() -> argparse.ArgumentParser:
     spec_cmd.add_argument("--hwm-governed-input-generation", type=Path)
     spec_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
     spec_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
+    spec_cmd.add_argument("--invested-capital-result", type=Path)
+    spec_cmd.add_argument("--invested-capital-input-generation", type=Path)
     spec_cmd.add_argument(
         "--financial-input-contract",
         type=Path,
@@ -4325,6 +4396,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.hwm_governed_admission_receipt,
                 args.financial_input_contract,
                 args.portfolio_root,
+                args.invested_capital_result,
+                args.invested_capital_input_generation,
             )
         else:
             result = build_production_spec(
