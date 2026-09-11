@@ -5348,11 +5348,14 @@ def _report_hybrid_mode_gate(
             in dependence_names
         ]
     )
-    globally_eligible = (
-        gate["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
-        and len(gate.get("eligible_strategies", [])) == len(dependence_names)
-        and not gate.get("blocked_strategies")
-    )
+    # Partial coverage opens the hybrid sources; the per-strategy readers below
+    # keep a blocked strategy live-only inside the mode. See the note beside
+    # the builder's gate for why requiring full coverage here stripped the mode
+    # from the whole release.
+    globally_eligible = gate["status"] in {
+        "ELIGIBLE_PROVEN_COMPATIBLE",
+        "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
+    }
     return gate, globally_eligible
 
 
@@ -5365,11 +5368,15 @@ def _govern_weekly_hybrid_modes(
         and isinstance(source_modes, list)
         and "LIVE_PLUS_BACKTEST" in source_modes
     )
-    hybrid_eligible = (
-        gate["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
-        and bool(gate.get("eligible_strategies"))
-        and not gate.get("blocked_strategies")
-    )
+    # Partial coverage is expressed per strategy below: an eligible strategy
+    # keeps its hybrid coverage and must match the registry version, and a
+    # blocked one keeps its live history with no hybrid value, calendar,
+    # metadata or coverage claim. Requiring a globally clean gate here skipped
+    # that machinery entirely and stripped the mode from every strategy.
+    hybrid_eligible = bool(gate.get("eligible_strategies")) and gate["status"] in {
+        "ELIGIBLE_PROVEN_COMPATIBLE",
+        "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
+    }
     accepted = {
         **weekly,
         "hybrid_mode_reason": (
@@ -7754,12 +7761,21 @@ def _panel_data(
         in dependence_strategy_names
     ]
     hybrid_mode_gate = _hybrid_mode_gate(dependence_strategies)
-    globally_hybrid_eligible = (
-        hybrid_mode_gate["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
-        and len(hybrid_mode_gate.get("eligible_strategies", []))
-        == len(dependence_strategy_names)
-        and not hybrid_mode_gate.get("blocked_strategies")
-    )
+    # Partial coverage publishes. `_hybrid_mode_gate` returns
+    # ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY when some strategies have an
+    # accepted version-bound history and others do not, and that is the status
+    # the published 2026-08-16 panel (control-panel generation 41f41362) shipped
+    # under: LIVE_PLUS_BACKTEST enabled for five strategy history paths, four
+    # blocked and live-only inside the hybrid mode. Requiring every dependence
+    # strategy to be eligible discarded that status and silently downgraded the
+    # whole release to LIVE_ONLY, which the contract's REQUIRED evidence_modes
+    # then refuse. A strategy without accepted prehistory is still represented;
+    # it is represented by its live-only segments, which is what the gate's
+    # blocked list records.
+    globally_hybrid_eligible = hybrid_mode_gate["status"] in {
+        "ELIGIBLE_PROVEN_COMPATIBLE",
+        "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
+    }
     evidence_by_strategy, evidence_identity = _strategy_evidence(
         report,
         report_identity,
@@ -11499,12 +11515,12 @@ def verify_candidate(
             "decomposition lens modes",
         )
     )
-    globally_hybrid_eligible = (
-        hybrid_status == "ELIGIBLE_PROVEN_COMPATIBLE"
-        and len(_objects(hybrid_gate.get("eligible_strategies"), "eligible strategies"))
-        == len(required_analysis_series)
-        and not hybrid_gate.get("blocked_strategies")
-    )
+    # The verifier has to accept exactly what the builder publishes, including
+    # partial coverage; see the note beside the builder's own gate.
+    globally_hybrid_eligible = hybrid_status in {
+        "ELIGIBLE_PROVEN_COMPATIBLE",
+        "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
+    }
     checks.append(
         _check(
             "Hybrid analytics fail closed on strategy-version compatibility",
@@ -11546,8 +11562,13 @@ def verify_candidate(
         "report_generation_id": data["meta"]["report_generation_id"],
     }
     if not result["all_passed"]:
-        failed = ", ".join(
-            str(row["check"]) for row in checks if row["status"] != "PASS"
+        # Name the observed values, not just the check. Every one of these
+        # checks already carries the detail that decided it, and printing only
+        # the title turns a one-line diagnosis into a bisect.
+        failed = "; ".join(
+            "%s %s" % (row["check"], json.dumps(row.get("evidence"), sort_keys=True))
+            for row in checks
+            if row["status"] != "PASS"
         )
         raise ControlPanelValidationError(f"candidate verification failed: {failed}")
     return result

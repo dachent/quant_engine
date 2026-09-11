@@ -4229,7 +4229,7 @@ def test_report_dependence_identity_does_not_replace_report_artifact_identity(
     assert hwm_policy_provenance["as_of_date"] == "2026-07-30"
 
 
-def test_partial_hybrid_eligibility_exposes_only_live_only_globally(
+def test_partial_hybrid_eligibility_keeps_the_hybrid_mode(
     inputs: dict[str, Path],
     tmp_path: Path,
 ) -> None:
@@ -4299,9 +4299,17 @@ def test_partial_hybrid_eligibility_exposes_only_live_only_globally(
         STRATEGY_NAMES[0]
     ]
     assert len(gate["blocked_strategies"]) == 6
-    assert list(data["dependence_modes"]) == ["LIVE_ONLY"]
+    # Partial coverage publishes the hybrid mode for the eligible paths; the
+    # blocked ones are carried live-only inside it. This is the shape the
+    # published 2026-08-16 panel shipped (generation 41f41362, five eligible,
+    # four blocked). Stripping the mode instead downgraded the release to
+    # LIVE_ONLY, which the contract's REQUIRED evidence_modes refuse.
+    assert "LIVE_PLUS_BACKTEST" in data["dependence_modes"]
+    assert "LIVE_PLUS_BACKTEST" in data["weekly_returns"]["strategy_evidence_modes"]
+    # This fixture supplies no decomposition-lens root, so that surface stays
+    # LIVE_ONLY on its own terms; the hybrid mode is carried by the surfaces
+    # that do have sources.
     assert data["decomposition_lenses"]["evidence_modes"] == ["LIVE_ONLY"]
-    assert list(data["decomposition_lenses"]["modes"]) == ["LIVE_ONLY"]
     assert data["weekly_returns"]["hybrid_mode_status"] == (
         "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
     )
@@ -4319,8 +4327,14 @@ def test_partial_hybrid_eligibility_exposes_only_live_only_globally(
                         "LIVE_ONLY": {
                             "strategy_version": f"synthetic-version:strategy-{index}"
                         },
+                        # An eligible strategy's hybrid coverage is versioned by
+                        # its backtest twin, not its live path.
                         "LIVE_PLUS_BACKTEST": {
-                            "strategy_version": f"synthetic-version:strategy-{index}"
+                            "strategy_version": (
+                                "synthetic-version:p123-ai-factor"
+                                if index == 0
+                                else f"synthetic-version:strategy-{index}"
+                            )
                         },
                     },
                     "observation_meta_by_mode": {
@@ -4340,15 +4354,28 @@ def test_partial_hybrid_eligibility_exposes_only_live_only_globally(
         },
         gate,
     )
-    assert governed_weekly["strategy_evidence_modes"] == ["LIVE_ONLY"]
+    # Partial coverage keeps the hybrid mode; the blocked strategies keep only
+    # their live rows inside it, which the per-series assertions below check.
+    assert governed_weekly["strategy_evidence_modes"] == [
+        "LIVE_ONLY",
+        "LIVE_PLUS_BACKTEST",
+    ]
     weekly_by_id = {
         row["series_id"]: row
         for row in governed_weekly["series"]
         if row["primary_group"] == "STRATEGY"
     }
-    assert list(weekly_by_id[STRATEGY_NAMES[0]]["values_by_mode"]) == ["LIVE_ONLY"]
+    # The eligible strategy keeps both modes; every blocked one keeps its live
+    # history with no hybrid value, calendar, metadata or coverage claim.
+    assert list(weekly_by_id[STRATEGY_NAMES[0]]["values_by_mode"]) == [
+        "LIVE_ONLY",
+        "LIVE_PLUS_BACKTEST",
+    ]
     assert list(weekly_by_id[STRATEGY_NAMES[1]]["values_by_mode"]) == ["LIVE_ONLY"]
     assert list(weekly_by_id[STRATEGY_NAMES[1]]["mode_coverage"]) == ["LIVE_ONLY"]
+    assert list(weekly_by_id[STRATEGY_NAMES[1]]["calendar_basis_by_mode"]) == [
+        "LIVE_ONLY"
+    ]
 
 
 def test_weekly_hybrid_rejects_a_registry_version_mismatch() -> None:
@@ -4399,6 +4426,61 @@ def test_weekly_hybrid_rejects_a_registry_version_mismatch() -> None:
         match="eligible weekly hybrid version differs from registry",
     ):
         panel._govern_weekly_hybrid_modes(weekly, gate)
+
+
+def test_partial_hybrid_coverage_still_publishes_the_hybrid_mode() -> None:
+    """Some strategies having no accepted prehistory must not strip the mode.
+
+    The published 2026-08-16 panel (control-panel generation 41f41362) shipped
+    `ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY`: LIVE_PLUS_BACKTEST enabled for
+    five strategy history paths, four blocked and live-only inside the hybrid
+    mode. A later change required every dependence strategy to be eligible,
+    which discarded that status and downgraded the whole release to LIVE_ONLY --
+    which the contract's REQUIRED evidence_modes then refuse, so nothing could
+    publish at all.
+    """
+
+    def row(strategy_id, name, accepted):
+        return {
+            "history_compatibility_status": (
+                "ACCEPTED_FOR_ECONOMIC_INFERENCE"
+                if accepted
+                else "UNAVAILABLE_NO_ACCEPTED_HISTORY"
+            ),
+            "history_version_ref": "%s:backtest" % strategy_id if accepted else None,
+            "live_plus_backtest_reason": "accepted" if accepted else "no history",
+            "live_plus_backtest_status": (
+                "ELIGIBLE_ACCEPTED_HISTORY"
+                if accepted
+                else "BLOCKED_NO_ACCEPTED_HISTORY"
+            ),
+            "strategy_id": strategy_id,
+            "strategy_name": name,
+        }
+
+    gate = panel._hybrid_mode_gate(
+        [
+            row("grizzlybears-vtma", "GrizzlyBears VTMA", True),
+            row("p123-ai-factor", "AI Factor [P123]", True),
+            row("qsi", "QSI", True),
+            row("tt-portfolio", "TT Portfolio", True),
+            row("volatis-strategy", "Volatis Strategy", True),
+            row("p123-eu", "EU [P123]", False),
+            row("robuxio-crypto", "Robuxio Crypto (High Sharpe High Vol)", False),
+        ]
+    )
+
+    assert gate["status"] == "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY"
+    assert len(gate["eligible_strategies"]) == 5
+    assert [item["strategy_id"] for item in gate["blocked_strategies"]] == [
+        "p123-eu",
+        "robuxio-crypto",
+    ]
+    # Both the builder and the verifier must treat that status as publishable.
+    assert gate["status"] in {
+        "ELIGIBLE_PROVEN_COMPATIBLE",
+        "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
+    }
 
 
 def test_hybrid_gate_binds_the_compatible_backtest_version() -> None:
