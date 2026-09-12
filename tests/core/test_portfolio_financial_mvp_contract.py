@@ -1053,7 +1053,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # c60b9a95, `strategy-backtests` bound to it, and each of the three gained
     # the BACKTEST and ACCOUNT_LIVE corrections its version assertion needs.
     assert contract_tool.contract_digest(contract) == (
-        "838fce5c1e820451196217f17c60d1e7b3d25127f3bf79a8389f24bc51e47347"
+        "f68b5ca36a7d8173ad064faf03852b8607974c9b21420d0043e90bbd18d8eb71"
     )
 
 
@@ -1539,10 +1539,9 @@ def test_census_owner_digest_and_generated_views_are_one_authority() -> None:
 
 def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     baseline = _contract()
-    # Six of the seven required strategies now carry a version backed by two
-    # captured layers; p123-ai-factor stays UNRESOLVED until its live/simulation
-    # twin version is accepted.
-    assert contract_tool._verify_strategy_version_history_evidence(baseline) == 6
+    # Every required strategy now carries a version backed by two captured
+    # evidence layers.
+    assert contract_tool._verify_strategy_version_history_evidence(baseline) == 7
     approved_digest = baseline["current_census"]["decision_payload_sha256"]
     projection = contract_tool.census_owner_decision_projection(
         baseline["current_census"], baseline["strategies"]
@@ -1593,9 +1592,33 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     }
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
-        match="design/version evidence is not independently bound",
+        match=(
+            "source strategy design/version differs from product authority: "
+            "portfolio123-model-generation/p123-ai-factor"
+        ),
     ):
         _validate(false_design)
+
+    # A version every source repeats is still not independent evidence unless
+    # at least two segments bind it, one of them the owner account path.
+    single_binding = copy.deepcopy(baseline)
+    for source in single_binding["source_segments"]:
+        refs = source["strategy_version"]["version_refs"]
+        if source["source_id"] == "owner-account-live-history":
+            continue
+        refs.pop("p123-ai-factor", None)
+        if not refs and source["strategy_version"]["status"] in {
+            "EVIDENCED",
+            "MIXED",
+        }:
+            source["strategy_version"]["status"] = "UNRESOLVED"
+    with pytest.raises(
+        contract_tool.FinancialMvpContractError,
+        match="design/version evidence is not independently bound",
+    ):
+        contract_tool._validate_strategy_version_evidence(
+            single_binding["strategies"], single_binding["source_segments"]
+        )
 
     coherently_repeated = copy.deepcopy(baseline)
     fake_version = "unapproved-design-v999"
@@ -1618,14 +1641,14 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
             source["subjects"]["strategy_ids"]
         ):
             source["strategy_version"]["status"] = "EVIDENCED"
-    p123_identity = next(
-        row
-        for row in coherently_repeated["history_corrections"][
-            "materialized_segment_identities"
-        ]
-        if row["strategy_id"] == "p123-ai-factor"
-    )
-    p123_identity["strategy_version"] = fake_version
+    for p123_identity in coherently_repeated["history_corrections"][
+        "materialized_segment_identities"
+    ]:
+        if p123_identity["strategy_id"] == "p123-ai-factor":
+            p123_identity["strategy_version"] = fake_version
+    for correction in coherently_repeated["history_corrections"]["corrections"]:
+        if correction["strategy_id"] == "p123-ai-factor":
+            correction["strategy_version"]["version_ref"] = fake_version
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match="differs from accepted history authority",
@@ -1939,7 +1962,7 @@ def test_p123_history_accepts_exact_eu_vintage_with_current_ai_vintage() -> None
         contract["source_segments"],
         {row["strategy_id"] for row in contract["strategies"]},
     )
-    assert contract_tool._verify_strategy_version_history_evidence(contract) == 6
+    assert contract_tool._verify_strategy_version_history_evidence(contract) == 7
 
 
 @pytest.mark.parametrize(
@@ -2112,7 +2135,7 @@ def test_two_vintage_history_accepts_current_active_and_retains_07c590_echo() ->
     assert robuxio["live_implementation_identity"]["generation_id"].startswith("3badac")
 
     _validate(contract)
-    assert contract_tool._verify_strategy_version_history_evidence(contract) == 6
+    assert contract_tool._verify_strategy_version_history_evidence(contract) == 7
 
 
 @pytest.mark.parametrize(
@@ -2829,6 +2852,14 @@ def test_matrixport_owner_span_receipts_and_funded_epoch_reject_coherent_rebinds
     correction["funding_event"].update(
         {"event_date": "2025-08-26", "account_live_start": "2025-08-26"}
     )
+    # The prehistory is bounded by the same boundary, so a coherent rebind
+    # moves it too; otherwise the splice rule fires before the one under test.
+    backtest = next(
+        row
+        for row in altered_epoch["history_corrections"]["corrections"]
+        if row["correction_id"] == "robuxio-crypto-backtest"
+    )
+    backtest["interval"]["observed_end"] = "2025-08-25"
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match="Robuxio owner-funded boundary differs",
@@ -2875,7 +2906,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
     assert history["policy_id"] == "PORT-HISTORY-TRUTH-1"
     assert history["owner_issue"] == 319
     rows = history["corrections"]
-    assert len(rows) == 17
+    assert len(rows) == 19
     segment_identities = history["materialized_segment_identities"]
     assert [row["segment_id"] for row in segment_identities] == sorted(
         row["segment_id"] for row in segment_identities
@@ -2884,10 +2915,13 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "grizzlybears-vtma:account-live",
         "grizzlybears-vtma:backtest",
         "p123-ai-factor:account-live",
+        "p123-ai-factor:backtest",
+        "p123-ai-factor:backtest-not-admitted",
         "p123-eu:account-live",
         "qsi:account-live",
         "qsi:backtest",
         "robuxio-crypto:account-live",
+        "robuxio-crypto:backtest",
         "robuxio-crypto:provider-live-before-funding",
         "tt-portfolio:account-live",
         "tt-portfolio:backtest",
@@ -2920,6 +2954,8 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         ("echotrade-growth-pivots", "ACCOUNT_LIVE"),
         ("grizzlybears-vtma", "BACKTEST"),
         ("grizzlybears-vtma", "ACCOUNT_LIVE"),
+        ("p123-ai-factor", "ACCOUNT_LIVE"),
+        ("robuxio-crypto", "BACKTEST"),
         ("qsi", "BACKTEST"),
         ("qsi", "ACCOUNT_LIVE"),
         ("tt-portfolio", "BACKTEST"),
@@ -2976,9 +3012,11 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "return_observations": 1598,
         "source_labels": ["api"],
     }
+    # Admitted once the producer-derived twin version was asserted; the twin
+    # is split at this strategy's own account-live inception.
     assert p123_ai_backtest["mode_admission"] == {
         "LIVE_ONLY": "NOT_APPLICABLE",
-        "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY",
+        "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY",
     }
     assert (
         b"1599 index levels / 1598 returns / 2020-05-12..2026-06-26 / "
@@ -3035,6 +3073,9 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "strategy_version"
     ]["version_refs"]
     assert owner_versions == {
+        "p123-ai-factor": _history_correction(
+            contract, "p123-ai-factor-account-live"
+        )["strategy_version"]["version_ref"],
         "grizzlybears-vtma": _history_correction(contract, "grizzlybears-vtma-account-live")[
             "strategy_version"
         ]["version_ref"],
@@ -3577,7 +3618,9 @@ def test_source_strategy_version_and_cost_are_explicit() -> None:
         "STRATEGY_COST" in row["data_classes"] for row in contract["source_segments"]
     )
     p123 = _source(contract, "portfolio123-model-generation")
-    assert p123["strategy_version"]["status"] == "MIXED"
+    # Both subjects are bound now that the twin version is asserted, so the
+    # segment is no longer a proper subset of its own subjects.
+    assert p123["strategy_version"]["status"] == "EVIDENCED"
 
     matrix = json.loads(contract_tool.render_views(contract).source_matrix_json)["rows"]
     p123_rows = [
@@ -3591,24 +3634,33 @@ def test_source_strategy_version_and_cost_are_explicit() -> None:
         }
         for strategy_id in ("p123-ai-factor", "p123-eu")
     } == {
-        "p123-ai-factor": {"UNRESOLVED"},
+        "p123-ai-factor": {"EVIDENCED"},
         "p123-eu": {"EVIDENCED"},
     }
+    # The twin version is asserted on this source now, so its rows carry the
+    # same reference the strategy does rather than an empty map.
     assert all(
-        row["strategy_version_refs"] == {}
+        set(row["strategy_version_refs"]) == {"p123-ai-factor"}
         for row in p123_rows
         if row["strategy_id"] == "p123-ai-factor"
     )
+    # A matrix row carries its own strategy's reference, not the whole map,
+    # which stopped being the same thing once both subjects were bound.
     assert all(
-        row["strategy_version_refs"] == p123["strategy_version"]["version_refs"]
+        row["strategy_version_refs"]
+        == {"p123-eu": p123["strategy_version"]["version_refs"]["p123-eu"]}
         for row in p123_rows
         if row["strategy_id"] == "p123-eu"
     )
 
+    # An EVIDENCED source must carry a reference for every subject it claims.
+    # Both are bound now, so the case drops one and keeps the claim.
     mutated = copy.deepcopy(contract)
-    _source(mutated, "portfolio123-model-generation")["strategy_version"]["status"] = (
-        "EVIDENCED"
-    )
+    mutated_version = _source(mutated, "portfolio123-model-generation")[
+        "strategy_version"
+    ]
+    mutated_version["status"] = "EVIDENCED"
+    mutated_version["version_refs"].pop("p123-ai-factor")
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match="lacks evidenced version refs for subjects.*p123-ai-factor",
@@ -3791,6 +3843,7 @@ def test_required_not_ready_needs_blocker_and_ready_needs_generation() -> None:
     )
     strategy["readiness"] = "READY"
     strategy["blockers"] = []
+    strategy["strategy_version"] = {"status": "UNRESOLVED", "version_ref": None}
     with pytest.raises(
         contract_tool.FinancialMvpContractError, match="version/membership"
     ):
@@ -4128,7 +4181,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # its governed generation; each edits source_segments, which this proof
     # hashes.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "daf2da4943e7f980ed2a7c052f0c4cccbd6509abcc89a4ac1ecd965c5c00b82f"
+        "d12d47a54166cf99a07d4d5f276259ee84b9dbb109ae34cc48342fc7ca310679"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4165,7 +4218,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "daf2da4943e7f980ed2a7c052f0c4cccbd6509abcc89a4ac1ecd965c5c00b82f"
+        "d12d47a54166cf99a07d4d5f276259ee84b9dbb109ae34cc48342fc7ca310679"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json

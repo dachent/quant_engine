@@ -4605,9 +4605,13 @@ def build_layered_history_generation(
         },
         "p123-ai-backtest": {
             **p123_ai_proof,
-            "admitted_prehistory_observations": len(p123_ai_prehistory),
+            "admitted_prehistory_observations": len(
+                admitted_backtests.get("p123-ai-factor", [])
+            ),
             "live_inception": p123_ai_live_start.isoformat(),
-            "overlap_observations_not_admitted": len(p123_ai_overlap),
+            "overlap_observations_not_admitted": len(
+                unadmitted_backtests.get("p123-ai-factor", [])
+            ),
             "status": p123_ai_disposition,
         },
         "p123-eu-provider-live": {
@@ -6451,9 +6455,12 @@ def validate_layered_history_generation(
         p123_ai_resolution,
         frozenset(
             {
+                "admitted_prehistory_observations",
                 "index_observations",
+                "live_inception",
                 "observed_end",
                 "observed_start",
+                "overlap_observations_not_admitted",
                 "relationship_type",
                 "return_observations",
                 "source_labels",
@@ -6483,7 +6490,14 @@ def validate_layered_history_generation(
         row["mode_admission"] == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
         for row in p123_ai_rows
     ):
-        expected_p123_ai_status = "ADMITTED_EXACT_VERSION_PREHISTORY"
+        expected_p123_ai_status = (
+            "ADMITTED_EXACT_VERSION_PREHISTORY_STRICTLY_BEFORE_LIVE_INCEPTION"
+            if any(
+                row["mode_admission"] == "REQUIRED_NOT_READY_OVERLAP"
+                for row in p123_ai_rows
+            )
+            else "ADMITTED_EXACT_VERSION_PREHISTORY"
+        )
     elif any(
         row["mode_admission"] == "REQUIRED_NOT_READY_OVERLAP" for row in p123_ai_rows
     ):
@@ -6498,11 +6512,35 @@ def validate_layered_history_generation(
         if isinstance(p123_ai_correction, dict)
         else None
     )
+    admitted_rows = [
+        row
+        for row in p123_ai_rows
+        if row["mode_admission"] == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+    ]
+    overlap_rows = [
+        row
+        for row in p123_ai_rows
+        if row["mode_admission"] == "REQUIRED_NOT_READY_OVERLAP"
+    ]
+    live_inception = str(p123_ai_resolution.get("live_inception") or "")
     if not isinstance(p123_ai_identity, dict) or p123_ai_resolution != {
         **p123_ai_identity,
+        "admitted_prehistory_observations": len(admitted_rows),
+        "live_inception": live_inception,
+        "overlap_observations_not_admitted": len(overlap_rows),
         "status": expected_p123_ai_status,
     }:
         raise TargetSeriesError("Portfolio123 AI backtest disposition differs")
+    # The boundary has to separate the two sides, or the counts describe nothing.
+    if admitted_rows or overlap_rows:
+        if (
+            not live_inception
+            or any(row["date"] >= live_inception for row in admitted_rows)
+            or any(row["date"] < live_inception for row in overlap_rows)
+        ):
+            raise TargetSeriesError(
+                "Portfolio123 AI backtest split does not hold its live inception"
+            )
     robuxio_resolution = resolutions.get("robuxio-account-live-after-funding")
     if not isinstance(robuxio_resolution, dict):
         raise TargetSeriesError("Matrixport source gap resolution differs")
