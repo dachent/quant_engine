@@ -1326,12 +1326,12 @@
      },
      {
       "artifact_role": "strategy-backtests-generation-manifest",
-      "artifact_selector": "generations/eb2d227f442be4097af7728b4ae6679a3aea33fe2d5b2e36f48b04bcd5579118/generation.json",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/generation.json",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "eb2d227f442be4097af7728b4ae6679a3aea33fe2d5b2e36f48b04bcd5579118",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "d9287e56e19fe933518e4a4f881836a92d940e063bca75481df0ba9a1e9906c7"
+      "sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af"
      }
     ],
     "strategy_id": "grizzlybears-vtma",
@@ -1347,8 +1347,8 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
-     "generation_sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5",
+     "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
+     "generation_sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af",
      "as_of": "2026-09-04"
     },
     "correction_id": "grizzlybears-vtma-backtest",
@@ -1380,30 +1380,30 @@
     "source_receipts": [
      {
       "artifact_role": "strategy-backtests-generation-manifest",
-      "artifact_selector": "generations/6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e/generation.json",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/generation.json",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5"
+      "sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af"
      },
      {
       "artifact_role": "strategy-backtests-catalog",
-      "artifact_selector": "generations/6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e/catalog.json",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/catalog.json",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "catalog.json",
-      "sha256": "1a7053408c8731d543e0c762e5a2d434eed02666ffb46161344886c95779dfcf"
+      "sha256": "eccffce3077303a644157c5735eef48ef408be7008f40880798e132c1b54dce9"
      },
      {
       "artifact_role": "strategy-backtests-returns",
-      "artifact_selector": "generations/6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e/returns.csv",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/returns.csv",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "returns.csv",
-      "sha256": "114bf74934cfed2afe7899569f3676a07429d643d1daabcbaaf9a634ad6a4984"
+      "sha256": "b7d66345d5223b007051b1be042b822d399267cce04af798ae75c3367c80af75"
      }
     ],
     "strategy_id": "grizzlybears-vtma",
@@ -1623,31 +1623,31 @@
     "blockers": []
    },
    {
-    "correction_id": "p123-eu-backtest-not-captured",
+    "correction_id": "p123-eu-backtest",
     "strategy_id": "p123-eu",
     "source_id": "strategy-backtests",
     "evidence_layer": "BACKTEST",
     "history_existence": {
      "status": "EXISTS",
-     "authority": "OWNER_RECORDED_LONG_BACKTEST_EXISTENCE; EXACT_CONNECTED_MODEL_CAPTURE_REQUIRED"
+     "authority": "HASH_BOUND_RETAINED_VENDOR_HISTORY_NORMALIZED_BY_PORTFOLIO_STRATEGY_HISTORY"
     },
     "capture": {
-     "status": "NOT_CAPTURED",
-     "capture_defect": "EXACT_CONNECTED_MODEL_BACKTEST_NOT_PRESENT_IN_CURRENT_GENERATION",
-     "generation_id": null,
-     "generation_sha256": null,
-     "as_of": null
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
+     "generation_sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af",
+     "as_of": "2026-09-04"
     },
     "strategy_version": {
      "status": "EVIDENCED",
      "version_ref": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
-     "compatibility": "UNRESOLVED",
-     "authority": "CURRENT_CONNECTED_MODEL_VERSION; BACKTEST_RELATIONSHIP_NOT_CAPTURED"
+     "compatibility": "EXACT_MATCH",
+     "authority": "EXACT_RETAINED_VENDOR_VERSION_STRICTLY_BEFORE_LIVE_INCEPTION"
     },
     "interval": {
      "assignment_date": "2025-11-12",
-     "observed_start": null,
-     "observed_end": null,
+     "observed_start": "2008-01-02",
+     "observed_end": "2024-02-16",
      "effective_start": null,
      "effective_end": null
     },
@@ -1659,34 +1659,40 @@
     },
     "mode_admission": {
      "LIVE_ONLY": "NOT_APPLICABLE",
-     "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"
+     "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
     },
     "source_receipts": [
      {
-      "artifact_role": "portfolio123-current-pointer",
-      "artifact_selector": "CURRENT.json",
-      "authority_root": "PORTFOLIO123",
-      "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
-      "locator_kind": "CURRENT_POINTER",
-      "manifest_artifact_id": null,
-      "sha256": "79024a424f05eae38fcb57c0db4853359e2beaf9103a3c385436433c54422431"
-     },
-     {
-      "artifact_role": "portfolio123-generation-manifest",
-      "artifact_selector": "generations/80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8/generation.json",
-      "authority_root": "PORTFOLIO123",
-      "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb"
+      "sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af"
+     },
+     {
+      "artifact_role": "strategy-backtests-catalog",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/catalog.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "catalog.json",
+      "sha256": "eccffce3077303a644157c5735eef48ef408be7008f40880798e132c1b54dce9"
+     },
+     {
+      "artifact_role": "strategy-backtests-returns",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/returns.csv",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "returns.csv",
+      "sha256": "b7d66345d5223b007051b1be042b822d399267cce04af798ae75c3367c80af75"
      }
     ],
-    "disposition_reason": "The exact provider-live model is captured, but the exact-version backtest is not. Other European books are different models and cannot be substituted.",
-    "readiness": "REQUIRED_NOT_READY",
-    "blockers": [
-     302,
-     303
-    ]
+    "disposition_reason": "The designer model the owner subscribes to publishes its own equity curve from its 2008 inception, and that capture is now a governed generation. Only the segment strictly before the provider-stated launch of 2024-02-18 is admitted; the model-live segment after it is a separate layer and the owner account path is separate again. The model publishes in EUR while the owner holds it in a USD account, so this is design history for the model, never a longer version of the owner account series.",
+    "readiness": "READY",
+    "blockers": []
    },
    {
     "correction_id": "p123-eu-provider-live",
@@ -1828,12 +1834,12 @@
      },
      {
       "artifact_role": "strategy-backtests-generation-manifest",
-      "artifact_selector": "generations/eb2d227f442be4097af7728b4ae6679a3aea33fe2d5b2e36f48b04bcd5579118/generation.json",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/generation.json",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "eb2d227f442be4097af7728b4ae6679a3aea33fe2d5b2e36f48b04bcd5579118",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "d9287e56e19fe933518e4a4f881836a92d940e063bca75481df0ba9a1e9906c7"
+      "sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af"
      }
     ],
     "strategy_id": "qsi",
@@ -1849,8 +1855,8 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
-     "generation_sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5",
+     "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
+     "generation_sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af",
      "as_of": "2026-09-04"
     },
     "correction_id": "qsi-backtest",
@@ -1882,30 +1888,30 @@
     "source_receipts": [
      {
       "artifact_role": "strategy-backtests-generation-manifest",
-      "artifact_selector": "generations/6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e/generation.json",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/generation.json",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5"
+      "sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af"
      },
      {
       "artifact_role": "strategy-backtests-catalog",
-      "artifact_selector": "generations/6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e/catalog.json",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/catalog.json",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "catalog.json",
-      "sha256": "1a7053408c8731d543e0c762e5a2d434eed02666ffb46161344886c95779dfcf"
+      "sha256": "eccffce3077303a644157c5735eef48ef408be7008f40880798e132c1b54dce9"
      },
      {
       "artifact_role": "strategy-backtests-returns",
-      "artifact_selector": "generations/6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e/returns.csv",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/returns.csv",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "returns.csv",
-      "sha256": "114bf74934cfed2afe7899569f3676a07429d643d1daabcbaaf9a634ad6a4984"
+      "sha256": "b7d66345d5223b007051b1be042b822d399267cce04af798ae75c3367c80af75"
      }
     ],
     "strategy_id": "qsi",
@@ -1984,8 +1990,8 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
-     "generation_sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5",
+     "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
+     "generation_sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af",
      "as_of": "2026-09-04"
     },
     "correction_id": "robuxio-crypto-backtest",
@@ -2017,30 +2023,30 @@
     "source_receipts": [
      {
       "artifact_role": "strategy-backtests-generation-manifest",
-      "artifact_selector": "generations/6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e/generation.json",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/generation.json",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5"
+      "sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af"
      },
      {
       "artifact_role": "strategy-backtests-catalog",
-      "artifact_selector": "generations/6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e/catalog.json",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/catalog.json",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "catalog.json",
-      "sha256": "1a7053408c8731d543e0c762e5a2d434eed02666ffb46161344886c95779dfcf"
+      "sha256": "eccffce3077303a644157c5735eef48ef408be7008f40880798e132c1b54dce9"
      },
      {
       "artifact_role": "strategy-backtests-returns",
-      "artifact_selector": "generations/6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e/returns.csv",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/returns.csv",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "returns.csv",
-      "sha256": "114bf74934cfed2afe7899569f3676a07429d643d1daabcbaaf9a634ad6a4984"
+      "sha256": "b7d66345d5223b007051b1be042b822d399267cce04af798ae75c3367c80af75"
      }
     ],
     "strategy_id": "robuxio-crypto",
@@ -2245,12 +2251,12 @@
      },
      {
       "artifact_role": "strategy-backtests-generation-manifest",
-      "artifact_selector": "generations/eb2d227f442be4097af7728b4ae6679a3aea33fe2d5b2e36f48b04bcd5579118/generation.json",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/generation.json",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "eb2d227f442be4097af7728b4ae6679a3aea33fe2d5b2e36f48b04bcd5579118",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "d9287e56e19fe933518e4a4f881836a92d940e063bca75481df0ba9a1e9906c7"
+      "sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af"
      }
     ],
     "strategy_id": "tt-portfolio",
@@ -2266,8 +2272,8 @@
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
-     "generation_sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5",
+     "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
+     "generation_sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af",
      "as_of": "2026-09-04"
     },
     "correction_id": "tt-portfolio-backtest",
@@ -2299,30 +2305,30 @@
     "source_receipts": [
      {
       "artifact_role": "strategy-backtests-generation-manifest",
-      "artifact_selector": "generations/6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e/generation.json",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/generation.json",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5"
+      "sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af"
      },
      {
       "artifact_role": "strategy-backtests-catalog",
-      "artifact_selector": "generations/6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e/catalog.json",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/catalog.json",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "catalog.json",
-      "sha256": "1a7053408c8731d543e0c762e5a2d434eed02666ffb46161344886c95779dfcf"
+      "sha256": "eccffce3077303a644157c5735eef48ef408be7008f40880798e132c1b54dce9"
      },
      {
       "artifact_role": "strategy-backtests-returns",
-      "artifact_selector": "generations/6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e/returns.csv",
+      "artifact_selector": "generations/42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c/returns.csv",
       "authority_root": "STRATEGY_BACKTESTS",
-      "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+      "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
       "locator_kind": "GENERATION_ARTIFACT",
       "manifest_artifact_id": "returns.csv",
-      "sha256": "114bf74934cfed2afe7899569f3676a07429d643d1daabcbaaf9a634ad6a4984"
+      "sha256": "b7d66345d5223b007051b1be042b822d399267cce04af798ae75c3367c80af75"
      }
     ],
     "strategy_id": "tt-portfolio",
@@ -3290,8 +3296,8 @@
    ],
    "current_generation": {
     "as_of": "2026-09-04",
-    "generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
-    "sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5"
+    "generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
+    "sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af"
    },
    "existence_status": "EXISTS",
    "capture_status": "CAPTURED_GOVERNED",
