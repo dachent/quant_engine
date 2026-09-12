@@ -1212,3 +1212,75 @@ def test_carried_holdout_prior_reproduces_the_double_solve_walk():
 
     assert np.array_equal(resolved_predictions, carried_predictions)
     assert np.array_equal(resolved_forecasts, carried_forecasts)
+
+
+def test_staging_reuses_a_solved_decomposition_for_unchanged_inputs(
+    tmp_path, monkeypatch
+):
+    """The same inputs must not be solved twice, and must not change hands.
+
+    The spec pins every source's digest, so identical spec bytes mean identical
+    inputs; the solver's own bytes are the only other variable. A second stage
+    therefore has nothing new to compute, and the release builder's separate
+    stage and publish steps used to solve the same lens twice per run.
+    """
+
+    calls = {"count": 0}
+    original = decomposition.build_decomposition
+
+    def counted(spec_path, source_root):
+        calls["count"] += 1
+        return original(spec_path, source_root)
+
+    monkeypatch.setattr(decomposition, "build_decomposition", counted)
+
+    source_root = tmp_path / "source"
+    target_path, days = _write_sources(source_root, complete_costs=True)
+    spec_path = _spec(
+        source_root,
+        target_path,
+        days,
+        models=[_model(days, cost_coverage="COMPLETE")],
+    )
+    output_root = tmp_path / "out"
+
+    first = decomposition.stage_candidate(spec_path, source_root, output_root)
+    second = decomposition.stage_candidate(spec_path, source_root, output_root)
+
+    assert first["generation_id"] == second["generation_id"]
+    assert first["reused"] is False
+    assert second["reused"] is True
+    assert calls["count"] == 1
+
+
+def test_staging_re_solves_when_the_indexed_result_does_not_verify(
+    tmp_path, monkeypatch
+):
+    """A stored result is served only while it still hashes to its manifest."""
+
+    source_root = tmp_path / "source"
+    target_path, days = _write_sources(source_root, complete_costs=True)
+    spec_path = _spec(
+        source_root,
+        target_path,
+        days,
+        models=[_model(days, cost_coverage="COMPLETE")],
+    )
+    output_root = tmp_path / "out"
+    first = decomposition.stage_candidate(spec_path, source_root, output_root)
+
+    candidate = output_root / "candidates" / str(first["generation_id"])
+    (candidate / "decomposition.json").write_text("{}", encoding="utf-8")
+
+    calls = {"count": 0}
+    original = decomposition.build_decomposition
+
+    def counted(spec_path_, source_root_):
+        calls["count"] += 1
+        return original(spec_path_, source_root_)
+
+    monkeypatch.setattr(decomposition, "build_decomposition", counted)
+
+    with pytest.raises(decomposition.DecompositionError):
+        decomposition.stage_candidate(spec_path, source_root, output_root)
+    assert calls["count"] == 1

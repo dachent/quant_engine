@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "eaeead98b65d0cf4825029d023eaa112e2fe2aa1ab600130edbbe282919dcdbd"
+        "6be237352a4c9e380e22869c9362677ea96c1c1271562f0cbc265f81c4352a95"
     )
 
 
@@ -3080,9 +3080,15 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "EARLIER_PURCHASE_LACKED_ACCEPTED_EVENT_TIME_VALUE"
         in (volatis_live["funding_event"]["authority"])
     )
+    # Volatis is model live plus funded live. There is no simulated design
+    # history behind either, so the layer is recorded as absent and settled
+    # rather than as evidence still being sought.
     volatis_backtest = _history_correction(contract, "volatis-backtest-does-not-exist")
-    assert volatis_backtest["history_existence"]["status"] == "UNRESOLVED"
+    assert volatis_backtest["history_existence"]["status"] == "DOES_NOT_EXIST"
     assert volatis_backtest["capture"]["status"] == "NOT_CAPTURED"
+    assert volatis_backtest["readiness"] == "READY"
+    assert volatis_backtest["blockers"] == []
+    assert set(volatis_backtest["mode_admission"].values()) == {"NOT_APPLICABLE"}
     owner_versions = _source(contract, "owner-account-live-history")[
         "strategy_version"
     ]["version_refs"]

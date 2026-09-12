@@ -9,6 +9,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import re
 import math
 import os
 from pathlib import Path, PurePosixPath
@@ -2755,9 +2756,94 @@ def _verify_candidate(
             raise DecompositionError(f"candidate {name} differs from the exact build")
 
 
+def _input_key(spec_path: Path) -> str:
+    """Identify the inputs a decomposition would read, without reading them.
+
+    The spec pins every source's digest and size and `_verify_source` refuses
+    anything that differs, so the spec's bytes stand for the whole input set.
+    The solver's own bytes are included because the same inputs under different
+    code are a different answer.
+    """
+
+    digest = hashlib.sha256()
+    digest.update(spec_path.read_bytes())
+    digest.update(Path(__file__).resolve().read_bytes())
+    return digest.hexdigest()
+
+
+def _indexed_generation(output_root: Path, key: str, kind: str) -> Path | None:
+    """The generation a previous run produced from these inputs, if it survives.
+
+    Returns the directory only when it still verifies against itself, so a
+    partially written or edited artifact re-solves rather than being served.
+    """
+
+    pointer = output_root.resolve() / ".decomposition-index" / f"{key}.txt"
+    if pointer.is_symlink() or not pointer.is_file():
+        return None
+    generation_id = pointer.read_text(encoding="utf-8").strip()
+    if not re.fullmatch(r"[0-9a-f]{64}", generation_id):
+        return None
+    candidate = output_root.resolve() / kind / generation_id
+    result = candidate / "decomposition.json"
+    manifest_path = candidate / "generation.json"
+    if (
+        candidate.is_symlink()
+        or not candidate.is_dir()
+        or result.is_symlink()
+        or not result.is_file()
+        or manifest_path.is_symlink()
+        or not manifest_path.is_file()
+    ):
+        return None
+    try:
+        manifest = GenerationManifest.from_json_bytes(manifest_path.read_bytes())
+    except ValueError:
+        return None
+    if manifest.generation_id != generation_id:
+        return None
+    content = result.read_bytes()
+    # The manifest names the result under its role, not its filename.
+    declared = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "analytics/decomposition.json"
+        ),
+        None,
+    )
+    if (
+        declared is None
+        or declared.sha256 != hashlib.sha256(content).hexdigest()
+        or declared.size_bytes != len(content)
+    ):
+        return None
+    return candidate
+
+
+def _record_input_key(output_root: Path, key: str, generation_id: str) -> None:
+    index = output_root.resolve() / ".decomposition-index"
+    index.mkdir(parents=True, exist_ok=True)
+    pointer = index / f"{key}.txt"
+    if pointer.is_symlink():
+        raise DecompositionError("decomposition index entry is linked")
+    pointer.write_text(generation_id, encoding="utf-8")
+
+
 def stage_candidate(
     spec_path: Path, source_root: Path, output_root: Path
 ) -> dict[str, object]:
+    key = _input_key(spec_path)
+    cached = _indexed_generation(output_root, key, "candidates")
+    if cached is not None:
+        payload = json.loads((cached / "decomposition.json").read_text("utf-8"))
+        return {
+            "analytics_hash": payload["analytics_hash"],
+            "candidate": str(cached),
+            "generation_id": cached.name,
+            "model_count": len(cast(list[object], payload["model_results"])),
+            "reused": True,
+        }
     result, manifest, result_bytes = build_decomposition(spec_path, source_root)
     candidates = output_root.resolve() / "candidates"
     if output_root.exists() and output_root.is_symlink():
@@ -2775,11 +2861,13 @@ def stage_candidate(
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
+    _record_input_key(output_root, key, manifest.generation_id)
     return {
         "analytics_hash": result["analytics_hash"],
         "candidate": str(candidate),
         "generation_id": manifest.generation_id,
         "model_count": len(cast(list[object], result["model_results"])),
+        "reused": False,
     }
 
 
@@ -2808,14 +2896,35 @@ def _publish_candidate(
 
 
 def publish(spec_path: Path, source_root: Path, output_root: Path) -> dict[str, object]:
+    # Publishing normally follows staging in a separate process, so the answer
+    # is usually already on disk. Re-reading the staged candidate is the same
+    # verification a freshly solved one receives, at none of the cost.
+    key = _input_key(spec_path)
+    cached = _indexed_generation(output_root, key, "candidates")
+    if cached is not None:
+        manifest = GenerationManifest.from_json_bytes(
+            (cached / "generation.json").read_bytes()
+        )
+        result_bytes = (cached / "decomposition.json").read_bytes()
+        payload = json.loads(result_bytes.decode("utf-8"))
+        pointer = _publish_candidate(cached, output_root, manifest, result_bytes)
+        return {
+            "analytics_hash": payload["analytics_hash"],
+            "generation_id": manifest.generation_id,
+            "model_count": len(cast(list[object], payload["model_results"])),
+            "publication_state": pointer.state.value,
+            "reused": True,
+        }
     result, manifest, result_bytes = build_decomposition(spec_path, source_root)
     candidate = output_root.resolve() / "candidates" / manifest.generation_id
     pointer = _publish_candidate(candidate, output_root, manifest, result_bytes)
+    _record_input_key(output_root, key, manifest.generation_id)
     return {
         "analytics_hash": result["analytics_hash"],
         "generation_id": manifest.generation_id,
         "model_count": len(cast(list[object], result["model_results"])),
         "publication_state": pointer.state.value,
+        "reused": False,
     }
 
 
