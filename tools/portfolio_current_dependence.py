@@ -376,6 +376,17 @@ def _verified_history(
     live_by_strategy: dict[str, list[dict[str, str]]] = {}
     selected_identities: list[dict[str, object]] = []
     expected_by_id = {str(row["segment_id"]): row for row in expected_segments}
+    prehistory_identities = _selected_prehistory_identities(contract, required_ids)
+    prehistory_by_strategy: dict[str, list[dict[str, str]]] = {}
+    for identity in prehistory_identities:
+        strategy_id = _text(identity.get("strategy_id"), "history strategy_id")
+        segment_id = _text(identity.get("segment_id"), "materialized segment_id")
+        rows = actual_by_id.get(segment_id)
+        if not rows:
+            raise CurrentDependenceError(
+                f"admitted prehistory segment is absent: {segment_id}"
+            )
+        prehistory_by_strategy[strategy_id] = rows
     for strategy in required_strategies:
         strategy_id = str(strategy["strategy_id"])
         live_identities = [
@@ -397,6 +408,13 @@ def _verified_history(
             raise CurrentDependenceError("layered history exceeds the evaluation date")
         live_by_strategy[strategy_id] = selected
         selected_identities.append(dict(expected_by_id[str(identity["segment_id"])]))
+    # The bundle packages the segments it projects, and the verifier expects
+    # exactly that set, so the admitted prehistory travels with the live
+    # selection rather than only reaching returns.csv.
+    selected_identities.extend(
+        dict(expected_by_id[str(identity["segment_id"])])
+        for identity in prehistory_identities
+    )
     common_dates = set.intersection(
         *(
             {row["date"] for row in live_by_strategy[strategy_id]}
@@ -417,7 +435,10 @@ def _verified_history(
             raise CurrentDependenceError(
                 f"dependence series differs from product authority: {strategy_id}"
             )
-        for row in live_by_strategy[strategy_id]:
+        for row in (
+            *prehistory_by_strategy.get(strategy_id, ()),
+            *live_by_strategy[strategy_id],
+        ):
             if _day(row["date"], "history observation date") <= complete_through:
                 projected.append({field: row[field] for field in RETURN_FIELDS})
     projected.sort(
@@ -527,6 +548,13 @@ def _age_evidence(
     }
     limiting_inputs: list[dict[str, Any]] = []
     for identity in selected_identities:
+        # Age describes the live path. Admitted prehistory travels in the same
+        # selection so it can be packaged, but it ends before the live segment
+        # starts and never limits freshness -- except in a fixture where the
+        # two share dates, which would make the producer and the verifier
+        # disagree depending on which list each was handed.
+        if identity.get("mode_admission") != "INCLUDE_SELECTED_LIVE":
+            continue
         if (
             _day(identity.get("observed_end"), "history observed_end")
             != complete_through
@@ -652,6 +680,55 @@ def _selected_live_identities(
     return selected
 
 
+def _hybrid_disposition(prehistory_identities: Sequence[Mapping[str, Any]]) -> str:
+    """State what the hybrid mode actually rests on.
+
+    A mode that carries no admitted prehistory is live-only however it is
+    labelled, which is what this field said unconditionally until the source
+    began projecting the prehistory segments. Where prehistory is admitted the
+    mode genuinely blends it with the live path; which individual series
+    contributed is recorded per series by the correlation this source feeds.
+    """
+
+    if not prehistory_identities:
+        return "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY"
+    return "AVAILABLE_BACKTEST_PREHISTORY_PLUS_LIVE"
+
+
+def _selected_prehistory_identities(
+    contract: Mapping[str, Any], required_ids: Sequence[str]
+) -> list[dict[str, Any]]:
+    """The version-compatible prehistory segment per strategy, where one exists.
+
+    A strategy whose backtest was never admitted contributes nothing, which is
+    not an error: the layered history records that decision per strategy, and
+    the evidence-mode split downstream degrades that series alone rather than
+    the whole mode.
+    """
+
+    identities = _objects(
+        _object(contract.get("history_corrections"), "history corrections").get(
+            "materialized_segment_identities"
+        ),
+        "materialized segment identities",
+    )
+    selected: list[dict[str, Any]] = []
+    for strategy_id in required_ids:
+        matches = [
+            row
+            for row in identities
+            if row.get("strategy_id") == strategy_id
+            and row.get("mode_admission") == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+        ]
+        if len(matches) > 1:
+            raise CurrentDependenceError(
+                "required dependence strategy has more than one admitted "
+                f"prehistory segment: {strategy_id}"
+            )
+        selected.extend(matches)
+    return selected
+
+
 def _packaged_projection(
     *,
     contract: Mapping[str, Any],
@@ -670,9 +747,10 @@ def _packaged_projection(
             "dependence policy perimeter differs from the product"
         )
     selected_identities = _selected_live_identities(contract, required_ids)
+    prehistory_identities = _selected_prehistory_identities(contract, required_ids)
     expected_by_id = {
         _text(row.get("segment_id"), "materialized segment_id"): row
-        for row in selected_identities
+        for row in (*selected_identities, *prehistory_identities)
     }
     actual_by_id: dict[str, list[dict[str, str]]] = {}
     for row in segments:
@@ -729,6 +807,17 @@ def _packaged_projection(
             )
         live_by_strategy[strategy_id] = rows
 
+    prehistory_by_strategy: dict[str, list[dict[str, str]]] = {}
+    for identity in prehistory_identities:
+        strategy_id = _text(identity.get("strategy_id"), "history strategy_id")
+        segment_id = _text(identity.get("segment_id"), "materialized segment_id")
+        rows = actual_by_id.get(segment_id)
+        if not rows:
+            raise CurrentDependenceError(
+                f"admitted prehistory segment is absent: {segment_id}"
+            )
+        prehistory_by_strategy[strategy_id] = rows
+
     common_dates = set.intersection(
         *({row["date"] for row in live_by_strategy[item]} for item in required_ids)
     )
@@ -744,7 +833,10 @@ def _packaged_projection(
             raise CurrentDependenceError(
                 f"dependence series differs from product authority: {strategy_id}"
             )
-        for row in live_by_strategy[strategy_id]:
+        for row in (
+            *prehistory_by_strategy.get(strategy_id, ()),
+            *live_by_strategy[strategy_id],
+        ):
             if _day(row["date"], "dependence observation date") <= complete_through:
                 projected.append({field: row[field] for field in RETURN_FIELDS})
     series_order = {
@@ -1095,12 +1187,15 @@ def build_source(
             "generation_id": history_manifest["generation_id"],
             "receipt_sha256": policy["history_authority"]["receipt_sha256"],
             "selected_segment_identities": sorted(
-                segment_identities, key=lambda row: str(row["strategy_id"])
+                segment_identities,
+                key=lambda row: (str(row["strategy_id"]), str(row["segment_id"])),
             ),
         },
         "mode_dispositions": {
             "LIVE_ONLY": "AVAILABLE_ACCOUNT_LIVE",
-            "LIVE_PLUS_BACKTEST": "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY",
+            "LIVE_PLUS_BACKTEST": _hybrid_disposition(
+                _selected_prehistory_identities(contract, required_ids)
+            ),
         },
         "pair_count": len(expected_pairs),
         "pair_mode_count": len(expected_pairs) * 2,
@@ -1332,12 +1427,18 @@ def verify_packaged_source(
             "generation_id": policy["history_authority"]["generation_id"],
             "receipt_sha256": policy["history_authority"]["receipt_sha256"],
             "selected_segment_identities": sorted(
-                selected_identities, key=lambda row: str(row["strategy_id"])
+                (
+                    *selected_identities,
+                    *_selected_prehistory_identities(contract, required_ids),
+                ),
+                key=lambda row: (str(row["strategy_id"]), str(row["segment_id"])),
             ),
         },
         "mode_dispositions": {
             "LIVE_ONLY": "AVAILABLE_ACCOUNT_LIVE",
-            "LIVE_PLUS_BACKTEST": "AVAILABLE_LIVE_ONLY_NO_MATCHED_BACKTEST_PREHISTORY",
+            "LIVE_PLUS_BACKTEST": _hybrid_disposition(
+                _selected_prehistory_identities(contract, required_ids)
+            ),
         },
         "pair_count": pair_count,
         "pair_mode_count": pair_count * 2,
@@ -1355,7 +1456,16 @@ def verify_packaged_source(
         "warning_after_days": age_evidence["warning_after_days"],
     }
     if source_identity != expected_identity:
-        raise CurrentDependenceError("dependence source receipt authority differs")
+        # Name the fields that moved. Which part of the receipt disagrees is
+        # the whole diagnostic, and recovering it by bisection is expensive.
+        differing = sorted(
+            key
+            for key in set(source_identity) | set(expected_identity)
+            if source_identity.get(key) != expected_identity.get(key)
+        )
+        raise CurrentDependenceError(
+            "dependence source receipt authority differs: " + ", ".join(differing)
+        )
     return {
         "bundle_id": bundle_id,
         "complete_through": complete_through.isoformat(),

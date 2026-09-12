@@ -957,9 +957,12 @@ def test_current_dependence_builds_and_verifies_from_real_synthetic_authorities(
     # admitted backtest prehistory for grizzlybears-vtma, qsi and tt-portfolio,
     # and again when robuxio-crypto and p123-eu joined them -- the latter from
     # the designer model's own published curve before its 2024-02-18 launch.
+    # Moved again when the dependence source began projecting that prehistory
+    # instead of dropping it: the hybrid mode had been live-only whatever it
+    # was labelled, because only INCLUDE_SELECTED_LIVE segments were selected.
     assert (
         receipt["returns_sha256"]
-        == "e1a662037b20b2b1f028ab288fe6c527765129f5c9517b848a69bde816620cb4"
+        == "712e27bc20a1e5cd58ac8b51946cc3b6efede0a91881e39954008a28b3c87155"
     )
     assert receipt["allocation_authority"] == {
         "as_of_date": "2026-01-02",
