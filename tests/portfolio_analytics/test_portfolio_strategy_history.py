@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta
+import hashlib
 import importlib.util
 import io
 import json
@@ -440,7 +441,7 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
 
     assert manifest["verification"] == "VERIFIED"
     assert manifest["builder"] == "portfolio-strategy-history"
-    assert manifest["builder_version"] == "1.6.0"
+    assert manifest["builder_version"] == "1.7.0"
     assert {item["series_id"] for item in manifest["series"]} == {
         "GrizzlyBears VTMA",
         "QSI",
@@ -799,3 +800,142 @@ def test_a_launch_on_a_non_trading_day_admits_only_earlier_sessions() -> None:
 
 def test_eu_prehistory_needs_two_observations_to_form_a_return() -> None:
     assert _eu_backtest(_eu_curve(history.P123_EU_PROVIDER_LAUNCH - timedelta(days=1), 5)) is None
+
+
+DESIGNER_VERSION = "p123-eu-connected-model:" + "c" * 64
+
+
+def _designer_generation(root: Path, rows: list[tuple[str, str, str]]) -> Path:
+    """A staged designer-model generation: returns bound by a manifest digest."""
+
+    body = "series_id,date,return,evidence_layer,return_basis\n" + "".join(
+        "EU multifactor microcap model,%s,%s,%s,"
+        "PROVIDER_PUBLISHED_MODEL_EQUITY_CURVE\n" % row
+        for row in rows
+    )
+    payload = body.encode("utf-8")
+    generation_id = "d" * 64
+    generation = root / generation_id
+    generation.mkdir(parents=True)
+    (generation / "returns.csv").write_bytes(payload)
+    (generation / "generation.json").write_text(
+        json.dumps(
+            {
+                "generation_id": generation_id,
+                "verification": "VERIFIED",
+                "artifacts": [
+                    {
+                        "artifact_id": "returns.csv",
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                        "size_bytes": len(payload),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (generation / "catalog.json").write_text(
+        json.dumps(
+            {
+                "series": {
+                    "currency": "EUR",
+                    "provider_launch": "2024-02-18",
+                    "provider_revision_dates": ["2025-09-06"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return generation
+
+
+def test_designer_curve_admits_only_the_pre_launch_segment(tmp_path: Path) -> None:
+    generation = _designer_generation(
+        tmp_path,
+        [
+            ("2024-02-15", "0.01", "BACKTEST"),
+            ("2024-02-16", "0.02", "BACKTEST"),
+            ("2024-02-19", "0.03", "PROVIDER_MODEL_LIVE"),
+            ("2024-02-20", "0.04", "PROVIDER_MODEL_LIVE"),
+        ],
+    )
+
+    rows, definition = history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+    assert [row["date"] for row in rows] == ["2024-02-15", "2024-02-16"]
+    assert {row["evidence_layer"] for row in rows} == {"BACKTEST"}
+    assert {row["series_id"] for row in rows} == {"EU [P123]"}
+    assert definition["return_observations"] == 2
+    assert definition["provider_model_live_observations_not_admitted"] == 2
+    assert definition["observed_end"] == "2024-02-16"
+    assert definition["provider_launch"] == "2024-02-18"
+    assert definition["strategy_version"] == DESIGNER_VERSION
+
+
+def test_designer_curve_carries_the_currency_and_revision_dates(
+    tmp_path: Path,
+) -> None:
+    """The model publishes in EUR while the owner holds it in a USD account."""
+
+    generation = _designer_generation(
+        tmp_path,
+        [("2024-02-15", "0.01", "BACKTEST"), ("2024-02-16", "0.02", "BACKTEST")],
+    )
+
+    _rows, definition = history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+    assert definition["provider_currency"] == "EUR"
+    assert definition["provider_revision_dates"] == ["2025-09-06"]
+    assert definition["implementation_reconciliation_status"] == (
+        "MODEL_TO_ACCOUNT_RECONCILIATION_RETAINED_SEPARATELY"
+    )
+
+
+def test_designer_curve_refuses_returns_that_differ_from_the_manifest(
+    tmp_path: Path,
+) -> None:
+    generation = _designer_generation(
+        tmp_path,
+        [("2024-02-15", "0.01", "BACKTEST"), ("2024-02-16", "0.02", "BACKTEST")],
+    )
+    (generation / "returns.csv").write_text("series_id,date\n", encoding="utf-8")
+
+    with pytest.raises(history.StrategyHistoryError, match="differ from the generation"):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+
+def test_designer_curve_refuses_an_unverified_generation(tmp_path: Path) -> None:
+    generation = _designer_generation(
+        tmp_path,
+        [("2024-02-15", "0.01", "BACKTEST"), ("2024-02-16", "0.02", "BACKTEST")],
+    )
+    manifest = json.loads((generation / "generation.json").read_text(encoding="utf-8"))
+    manifest["verification"] = "UNVERIFIED"
+    (generation / "generation.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(history.StrategyHistoryError, match="not verified"):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+
+def test_designer_curve_refuses_prehistory_that_reaches_the_launch(
+    tmp_path: Path,
+) -> None:
+    """A row on the launch day is live evidence, so admitting it would relabel."""
+
+    generation = _designer_generation(
+        tmp_path,
+        [("2024-02-16", "0.01", "BACKTEST"), ("2024-02-18", "0.02", "BACKTEST")],
+    )
+
+    with pytest.raises(history.StrategyHistoryError, match="reaches the provider launch"):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+
+def test_designer_curve_refuses_an_unexpected_evidence_layer(tmp_path: Path) -> None:
+    generation = _designer_generation(
+        tmp_path,
+        [("2024-02-15", "0.01", "BACKTEST"), ("2024-02-16", "0.02", "ACCOUNT_LIVE")],
+    )
+
+    with pytest.raises(history.StrategyHistoryError, match="unexpected evidence layer"):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)

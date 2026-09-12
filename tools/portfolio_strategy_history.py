@@ -36,7 +36,7 @@ RETURN_FIELDS: Final = (
     "strategy_version",
 )
 SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.6.0"
+BUILDER_VERSION: Final = "1.7.0"
 # The provider publishes the EU model's launch date on its page and the owner
 # states it as the date the model went live. Everything the provider shows
 # before it is simulated design history, not a live track record, which is the
@@ -1002,6 +1002,121 @@ def _robuxio_track_record(
                 "sha256": artifact["sha256"],
                 "size_bytes": artifact["size_bytes"],
                 "source_id": "robuxio-published-track-record-generation",
+            }
+        ],
+        "strategy_version": strategy_version,
+    }
+    return rows, definition
+
+
+def _p123_eu_designer_curve(
+    generation_root: Path, strategy_version: str
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    """Read the governed designer-model generation as the EU design history.
+
+    The generation retains the provider's own published curve for the model the
+    owner subscribes to, split at the launch the provider states on its own
+    page, with a manifest digest over the returns. Admitting it is a digest
+    check plus a relabel of the pre-launch segment -- no return is recomputed.
+
+    The model publishes in EUR and the owner holds it in a USD account, and the
+    two series differ by about one percent a day over their overlap, which is
+    implementation and currency together. That is why this is design history in
+    its own layer and not a longer version of the owner's series.
+    """
+
+    manifest_path = generation_root / "generation.json"
+    returns_path = generation_root / "returns.csv"
+    catalog_path = generation_root / "catalog.json"
+    for candidate in (manifest_path, returns_path, catalog_path):
+        if candidate.is_symlink() or not candidate.is_file():
+            raise StrategyHistoryError(
+                f"EU designer-model artifact is not a regular file: {candidate.name}"
+            )
+    manifest = json.loads(manifest_path.read_bytes())
+    if manifest.get("verification") != "VERIFIED":
+        raise StrategyHistoryError("EU designer-model generation is not verified")
+    if str(manifest.get("generation_id")) != generation_root.name:
+        raise StrategyHistoryError(
+            "EU designer-model generation identity differs from its directory"
+        )
+    artifacts = {
+        str(row.get("artifact_id")): row for row in manifest.get("artifacts") or []
+    }
+    returns_bytes = returns_path.read_bytes()
+    artifact = artifacts.get("returns.csv")
+    if (
+        not isinstance(artifact, dict)
+        or artifact.get("sha256") != hashlib.sha256(returns_bytes).hexdigest()
+        or artifact.get("size_bytes") != len(returns_bytes)
+    ):
+        raise StrategyHistoryError(
+            "EU designer-model returns differ from the generation manifest"
+        )
+    catalog = json.loads(catalog_path.read_bytes())
+    series = catalog.get("series")
+    if not isinstance(series, dict):
+        raise StrategyHistoryError("EU designer-model catalog series differs")
+
+    rows: list[dict[str, str]] = []
+    model_live = 0
+    reader = csv.DictReader(io.StringIO(returns_bytes.decode("utf-8")))
+    for row in reader:
+        layer = row.get("evidence_layer")
+        if layer == "PROVIDER_MODEL_LIVE":
+            model_live += 1
+            continue
+        if layer != "BACKTEST":
+            raise StrategyHistoryError(
+                "EU designer-model carries an unexpected evidence layer"
+            )
+        observed = _date_value(row.get("date"), "EU designer-model date")
+        value = _decimal(row.get("return"), "EU designer-model return")
+        if value <= -1:
+            raise StrategyHistoryError("EU designer-model return is invalid")
+        rows.append(
+            {
+                "series_id": "EU [P123]",
+                "date": observed.isoformat(),
+                "return": format(value.normalize(), "f"),
+                "evidence_layer": "BACKTEST",
+                "strategy_version": strategy_version,
+            }
+        )
+    if len(rows) < 2:
+        raise StrategyHistoryError("EU designer-model history is insufficient")
+    dates = [row["date"] for row in rows]
+    if dates != sorted(set(dates)):
+        raise StrategyHistoryError("EU designer-model calendar is not ordered")
+    provider_launch = str(series.get("provider_launch") or "")
+    if not provider_launch or dates[-1] >= provider_launch:
+        raise StrategyHistoryError(
+            "EU designer-model prehistory reaches the provider launch"
+        )
+    definition: dict[str, object] = {
+        "compatibility_basis": "OWNER_LAYER_RULING_DESIGNER_MODEL_IS_PRODUCT_DESIGN_HISTORY",
+        "coverage_disposition": "COMPLETE_STRICTLY_BEFORE_PROVIDER_LAUNCH",
+        "frequency": "DAILY_TRADING",
+        "history_status": "ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
+        "implementation_reconciliation_status": (
+            "MODEL_TO_ACCOUNT_RECONCILIATION_RETAINED_SEPARATELY"
+        ),
+        "method": "PROVIDER_PUBLISHED_MODEL_EQUITY_CURVE_TO_DAILY_RETURN",
+        "observed_end": dates[-1],
+        "observed_start": dates[0],
+        "provider_currency": str(series.get("currency") or ""),
+        "provider_launch": provider_launch,
+        "provider_model_live_observations_not_admitted": model_live,
+        "provider_revision_dates": list(series.get("provider_revision_dates") or []),
+        "required_for_analysis": True,
+        "return_observations": len(rows),
+        "series_id": "EU [P123]",
+        "source_artifacts": [
+            {
+                "artifact_id": "returns.csv",
+                "sha256": artifact["sha256"],
+                "size_bytes": artifact["size_bytes"],
+                "source_id": "portfolio123-designer-model-curve-generation",
             }
         ],
         "strategy_version": strategy_version,
@@ -2199,6 +2314,8 @@ def build_bundle(
     portfolio123_generation_root: Path | None = None,
     robuxio_track_record_generation: Path | None = None,
     robuxio_strategy_version: str | None = None,
+    p123_eu_designer_model_generation: Path | None = None,
+    p123_eu_strategy_version: str | None = None,
     live_inceptions: Mapping[str, str] | None = None,
 ) -> tuple[bytes, bytes]:
     try:
@@ -2217,12 +2334,31 @@ def build_bundle(
         robuxio_part = _robuxio_track_record(
             robuxio_track_record_generation, str(robuxio_strategy_version)
         )
+    p123_eu_designer_part: tuple[list[dict[str, str]], dict[str, object]] | None = (
+        None
+    )
+    if (p123_eu_designer_model_generation is None) != (
+        p123_eu_strategy_version is None
+    ):
+        raise StrategyHistoryError(
+            "EU designer-model generation and strategy version are one input"
+        )
+    if p123_eu_designer_model_generation is not None:
+        p123_eu_designer_part = _p123_eu_designer_curve(
+            p123_eu_designer_model_generation, str(p123_eu_strategy_version)
+        )
     p123_dispositions: list[dict[str, object]] = []
     p123_eu_part: tuple[list[dict[str, str]], dict[str, object]] | None = None
     if portfolio123_generation_root is not None:
         p123_dispositions, p123_eu_part = _p123_history_dispositions(
             portfolio123_generation_root
         )
+    if p123_eu_designer_part is not None:
+        # The copy-derived prehistory only ever existed as a fallback for a
+        # capture that had not been taken. Now that the designer model the
+        # copy follows is a governed generation, it is the authority for the
+        # design layer and the fallback is not used alongside it.
+        p123_eu_part = p123_eu_designer_part
     parts = (
         _grizzly(
             grizzly_workbook,
@@ -2392,6 +2528,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio123-generation-root", type=Path)
     parser.add_argument("--robuxio-track-record-generation", type=Path)
     parser.add_argument("--robuxio-strategy-version")
+    parser.add_argument("--p123-eu-designer-model-generation", type=Path)
+    parser.add_argument("--p123-eu-strategy-version")
     parser.add_argument("--as-of-date", required=True)
     parser.add_argument(
         "--live-inception",
@@ -2433,6 +2571,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             portfolio123_generation_root=args.portfolio123_generation_root,
             robuxio_track_record_generation=args.robuxio_track_record_generation,
             robuxio_strategy_version=args.robuxio_strategy_version,
+            p123_eu_designer_model_generation=(
+                args.p123_eu_designer_model_generation
+            ),
+            p123_eu_strategy_version=args.p123_eu_strategy_version,
             as_of_date=args.as_of_date,
         )
     except StrategyHistoryError as exc:
