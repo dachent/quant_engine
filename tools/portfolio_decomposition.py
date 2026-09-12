@@ -1125,6 +1125,57 @@ def _block_tridiagonal_solve(
     return solution, status
 
 
+def _block_tridiagonal_inverse_diagonal(
+    diagonal: Sequence[FloatArray],
+    off_diagonal: Sequence[FloatArray],
+) -> tuple[list[FloatArray], str]:
+    """Return the diagonal blocks of a symmetric block-tridiagonal inverse.
+
+    The forward pass is the same block Thomas elimination the solver performs,
+    so ``schur[i]`` is that block's Schur complement and ``upper[i]`` is
+    ``schur[i]^-1 @ off_diagonal[i]``. The backward pass is the Takahashi
+    recursion, which reconstructs each diagonal inverse block from the one
+    after it without ever forming the whole inverse.
+    """
+
+    count = len(diagonal)
+    if count == 0 or len(off_diagonal) != count - 1:
+        raise DecompositionError("dynamic system dimensions are invalid")
+    used_pseudoinverse = False
+    schur: list[FloatArray] = []
+    upper: list[FloatArray] = []
+    for index in range(count):
+        effective = diagonal[index].copy()
+        if index:
+            effective -= off_diagonal[index - 1].T @ upper[index - 1]
+        schur.append(cast(FloatArray, effective))
+        if index < count - 1:
+            solved_upper, fallback = _linear_solve(effective, off_diagonal[index])
+            used_pseudoinverse = used_pseudoinverse or fallback
+            upper.append(solved_upper)
+    identity = np.eye(diagonal[0].shape[0], dtype=np.float64)
+    inverse_diagonal: list[FloatArray] = [
+        cast(FloatArray, np.empty_like(identity)) for _ in range(count)
+    ]
+    last, fallback = _linear_solve(schur[-1], identity)
+    used_pseudoinverse = used_pseudoinverse or fallback
+    inverse_diagonal[-1] = last
+    for index in range(count - 2, -1, -1):
+        schur_inverse, fallback = _linear_solve(schur[index], identity)
+        used_pseudoinverse = used_pseudoinverse or fallback
+        inverse_diagonal[index] = cast(
+            FloatArray,
+            schur_inverse
+            + upper[index] @ inverse_diagonal[index + 1] @ upper[index].T,
+        )
+    status = (
+        "BLOCK_TRIDIAGONAL_PSEUDOINVERSE"
+        if used_pseudoinverse
+        else "BLOCK_TRIDIAGONAL_FULL_RANK"
+    )
+    return inverse_diagonal, status
+
+
 def _dynamic_fit(
     matrix: FloatArray,
     target: FloatArray,
@@ -1257,27 +1308,28 @@ def _dynamic_loo_score(
     off_diagonal = [
         (-smoothness * identity).copy() for _ in range(observation_count - 1)
     ]
-    right = np.zeros(
-        (observation_count, factor_count, observation_count + 1),
-        dtype=np.float64,
-    )
-    for index in range(observation_count):
-        right[index, :, index] = matrix[index]
-        right[index, :, -1] = matrix[index]
+    right = np.zeros((observation_count, factor_count, 1), dtype=np.float64)
+    right[:, :, 0] = matrix
     solved, _rank_status = _block_tridiagonal_solve(
         diagonal,
         off_diagonal,
         cast(FloatArray, right),
     )
-    influence = solved[:, :, :-1]
-    intercept_solution = solved[:, :, -1]
+    intercept_solution = solved[:, :, 0]
     denominator = float(observation_count) - float(np.sum(matrix * intercept_solution))
     if abs(denominator) <= 1e-12:
         raise DecompositionError("dynamic intercept is not identifiable")
-    projected_influence = np.einsum("tk,tkn->n", matrix, influence)
-    intercept_influence = (1.0 - projected_influence) / denominator
-    local_influence = np.einsum("ik,iki->i", matrix, influence, optimize=False)
+    inverse_diagonal, _inverse_status = _block_tridiagonal_inverse_diagonal(
+        diagonal, off_diagonal
+    )
+    local_influence = np.einsum(
+        "ik,ikl,il->i", matrix, np.stack(inverse_diagonal), matrix, optimize=True
+    )
+    # The n-th right-hand side is e_n x_n, so the n-th column sum of the hat
+    # matrix is b^T A^-1 e_n x_n = (A^-1 b)_n . x_n -- the same quantity as the
+    # local intercept projection below, computed from the one solve above.
     local_intercept_projection = np.sum(matrix * intercept_solution, axis=1)
+    intercept_influence = (1.0 - local_intercept_projection) / denominator
     leverage = local_influence + intercept_influence * (
         1.0 - local_intercept_projection
     )
