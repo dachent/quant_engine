@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "8ab4a241f0e677e2805c86de7254031fb02e696179875c11d616950400a00131"
+        "eaeead98b65d0cf4825029d023eaa112e2fe2aa1ab600130edbbe282919dcdbd"
     )
 
 
@@ -2928,6 +2928,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "p123-ai-factor:backtest",
         "p123-ai-factor:backtest-not-admitted",
         "p123-eu:account-live",
+        "p123-eu:backtest",
         "qsi:account-live",
         "qsi:backtest",
         "robuxio-crypto:account-live",
@@ -4198,7 +4199,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # hashes. Moved again when the strategy-backtests segment was restaged onto
     # the bundle carrying the EU designer-model prehistory.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "a442003b5cf8a01292f768bface309f0c638bbb23c7130c4ec0c829a3817be58"
+        "b3c8f7af6c5ad4c9e1379ff9d97de15349752eaa7b4c56a17e18a007ee443f60"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4235,7 +4236,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "a442003b5cf8a01292f768bface309f0c638bbb23c7130c4ec0c829a3817be58"
+        "b3c8f7af6c5ad4c9e1379ff9d97de15349752eaa7b4c56a17e18a007ee443f60"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
