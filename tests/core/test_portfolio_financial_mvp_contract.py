@@ -3080,7 +3080,7 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "EARLIER_PURCHASE_LACKED_ACCEPTED_EVENT_TIME_VALUE"
         in (volatis_live["funding_event"]["authority"])
     )
-    volatis_backtest = _history_correction(contract, "volatis-backtest-not-proved")
+    volatis_backtest = _history_correction(contract, "volatis-backtest-does-not-exist")
     assert volatis_backtest["history_existence"]["status"] == "UNRESOLVED"
     assert volatis_backtest["capture"]["status"] == "NOT_CAPTURED"
     owner_versions = _source(contract, "owner-account-live-history")[
@@ -3423,7 +3423,7 @@ def test_incompatible_backtest_splice_and_unbound_generation_fail() -> None:
     # Volatis is the remaining strategy whose backtest is not version-proved:
     # the public fund series is published every five days while the panel and
     # the live layer are daily, so nothing has been admitted for it.
-    backtest = _history_correction(spliced, "volatis-backtest-not-proved")
+    backtest = _history_correction(spliced, "volatis-backtest-does-not-exist")
     backtest["mode_admission"]["LIVE_PLUS_BACKTEST"] = (
         "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
     )
@@ -4356,7 +4356,7 @@ def test_generated_views_are_deterministic_and_match_authoritative_bytes(
         first.summary_markdown
     )
     assert b"p123-eu-provider-live" in first.summary_markdown
-    assert b"volatis-backtest-not-proved" in first.summary_markdown
+    assert b"volatis-backtest-does-not-exist" in first.summary_markdown
     receipts = _outcome(contract, "INVESTED_CAPITAL")["calculation_contract"][
         "owner_decision_receipts"
     ]

@@ -4281,10 +4281,25 @@ def _validate_history_corrections(
             raise FinancialMvpContractError(
                 f"history correction lacks blocker: {correction_id}"
             )
-        if readiness == "READY" and capture_status != "CAPTURED_GOVERNED":
+        if (
+            readiness == "READY"
+            and capture_status != "CAPTURED_GOVERNED"
+            # A layer the product has ruled does not exist cannot be captured,
+            # and is settled rather than pending. Requiring a capture for it
+            # would leave the correction permanently REQUIRED_NOT_READY and
+            # hold its whole evidence mode there with it.
+            and existence_status != "DOES_NOT_EXIST"
+        ):
             raise FinancialMvpContractError(
                 f"ready history correction is uncaptured: {correction_id}"
             )
+        if readiness == "READY" and existence_status == "DOES_NOT_EXIST":
+            modes = _object(row["mode_admission"], "history mode_admission")
+            if set(modes.values()) != {"NOT_APPLICABLE"}:
+                raise FinancialMvpContractError(
+                    "non-existent history layer is admitted to a mode: "
+                    f"{correction_id}"
+                )
 
     for strategy_id, expected_layers in HISTORY_CORRECTION_LAYERS.items():
         if observed_layers[strategy_id] != set(expected_layers):

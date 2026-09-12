@@ -2431,17 +2431,17 @@
     "blockers": []
    },
    {
-    "correction_id": "volatis-backtest-not-proved",
+    "correction_id": "volatis-backtest-does-not-exist",
     "strategy_id": "volatis-strategy",
     "source_id": "strategy-backtests",
     "evidence_layer": "BACKTEST",
     "history_existence": {
-     "status": "UNRESOLVED",
-     "authority": "CURRENT_QUANTBASE_GENERATION_CONTAINS_ACCOUNT_PROVIDER_PATH_NOT_A_PROVED_BACKTEST"
+     "status": "DOES_NOT_EXIST",
+     "authority": "OWNER_LAYER_RULING_MODEL_LIVE_PLUS_FUNDED_LIVE_ONLY"
     },
     "capture": {
      "status": "NOT_CAPTURED",
-     "capture_defect": "EXACT_VERSION_BACKTEST_NOT_PROVED_BY_CURRENT_GENERATION",
+     "capture_defect": "NO_BACKTEST_LAYER_EXISTS_FOR_THIS_STRATEGY",
      "generation_id": null,
      "generation_sha256": null,
      "as_of": null
@@ -2450,10 +2450,10 @@
      "status": "UNRESOLVED",
      "version_ref": null,
      "compatibility": "UNRESOLVED",
-     "authority": "BACKTEST_VERSION_RELATIONSHIP_NOT_CAPTURED"
+     "authority": "NO_BACKTEST_LAYER_EXISTS_TO_VERSION"
     },
     "interval": {
-     "assignment_date": "2024-07-24",
+     "assignment_date": null,
      "observed_start": null,
      "observed_end": null,
      "effective_start": null,
@@ -2467,7 +2467,7 @@
     },
     "mode_admission": {
      "LIVE_ONLY": "NOT_APPLICABLE",
-     "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"
+     "LIVE_PLUS_BACKTEST": "NOT_APPLICABLE"
     },
     "source_receipts": [
      {
@@ -2489,12 +2489,9 @@
       "sha256": "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c"
      }
     ],
-    "disposition_reason": "The current price path is provider/account live, not a backtest. A hybrid backtest remains unavailable until exact-version evidence is captured.",
-    "readiness": "REQUIRED_NOT_READY",
-    "blockers": [
-     302,
-     303
-    ]
+    "disposition_reason": "Volatis is model live plus funded live. Quantbase publishes the fund's own per-share track record before the owner funded it, and the owner's account path after; no simulated design history exists behind either, so there is no backtest layer to admit and none to prove. The pre-funding series is carried as PROVIDER_LIVE comparison evidence by volatis-provider-live.",
+    "readiness": "READY",
+    "blockers": []
    },
    {
     "correction_id": "volatis-provider-live",

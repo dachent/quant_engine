@@ -2125,7 +2125,7 @@ def _history_contract(
         "p123-eu-backtest",
         "p123-eu-provider-live",
         "p123-eu-account-live",
-        "volatis-backtest-not-proved",
+        "volatis-backtest-does-not-exist",
         "volatis-provider-live",
         "volatis-account-live",
     }
@@ -3487,6 +3487,31 @@ def _matrixport_account_is_unadmitted(
     return True
 
 
+def _strategies_without_a_backtest_layer(
+    corrections: Mapping[str, Mapping[str, object]]
+) -> set[str]:
+    """Strategies whose BACKTEST layer the product records as non-existent.
+
+    This is not the same as a backtest that has not been captured or proved: it
+    is a ruling that none exists to capture. Such a strategy is complete in
+    LIVE_PLUS_BACKTEST the moment its live layer is, because the mode admits
+    prehistory where prehistory exists and there is none to admit.
+    """
+
+    without: set[str] = set()
+    for row in corrections.values():
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("evidence_layer") != "BACKTEST":
+            continue
+        existence = row.get("history_existence")
+        if not isinstance(existence, Mapping):
+            continue
+        if existence.get("status") == "DOES_NOT_EXIST":
+            without.add(str(row.get("strategy_id")))
+    return without
+
+
 def build_layered_history_generation(
     *,
     contract_path: Path,
@@ -4202,6 +4227,7 @@ def build_layered_history_generation(
         if rows:
             first_live[strategy_id] = date.fromisoformat(rows[0]["date"])
     version_by_strategy: dict[str, str] = {}
+    no_backtest_layer = _strategies_without_a_backtest_layer(corrections)
     version_status_by_strategy: dict[str, str] = {}
     for strategy_id, strategy in strategies.items():
         status, version = _contract_version(strategy)
@@ -4520,6 +4546,7 @@ def build_layered_history_generation(
             exclusion_reason is None
             and hybrid_state == "AVAILABLE"
             and not backtest_rows
+            and strategy_id not in no_backtest_layer
         ):
             hybrid_state = "REQUIRED_NOT_READY"
             if strategy_id in unadmitted_backtests:
@@ -5981,6 +6008,7 @@ def validate_layered_history_generation(
         raise TargetSeriesError(
             "layered history output metadata differs: coverage.json"
         )
+    no_backtest_layer = _strategies_without_a_backtest_layer(corrections)
     expected_modes_by_strategy: dict[str, dict[str, dict[str, str | None]]] = {}
     source_generation_inputs = {
         "owner-account-live-history": "provider-ledger-manifest",
@@ -6305,6 +6333,7 @@ def validate_layered_history_generation(
             exclusion_reason is None
             and hybrid_status == "AVAILABLE"
             and not admitted_backtest
+            and strategy_id not in no_backtest_layer
         ):
             hybrid_status = "REQUIRED_NOT_READY"
             if any(
