@@ -1057,6 +1057,25 @@
     "strategy_version": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"
    },
    {
+    "calendar": "SOURCE_DECLARED_NO_COERCION",
+    "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+    "evidence_layer": "BACKTEST",
+    "frequency": "VERSION_SNAPSHOT",
+    "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+    "observed_end": "2024-02-16",
+    "observed_start": "2008-01-02",
+    "return_basis": "MODEL",
+    "return_observations": 4208,
+    "return_type": "TOTAL",
+    "segment_id": "p123-eu:backtest",
+    "sha256": "e97caac4be038f9d207e8e1c1ec886437276a4fbbe41bbc491567a69ed608356",
+    "source_generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+    "source_generation_sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+    "source_id": "strategy-backtests",
+    "strategy_id": "p123-eu",
+    "strategy_version": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"
+   },
+   {
     "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
     "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
     "evidence_layer": "ACCOUNT_LIVE",
@@ -3226,9 +3245,10 @@
     "binding": "EXACT_VERSION_COMPATIBILITY_REQUIRED",
     "version_refs": {
      "grizzlybears-vtma": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0",
+     "p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
      "qsi": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99",
-     "tt-portfolio": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68",
-     "robuxio-crypto": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041"
+     "robuxio-crypto": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
+     "tt-portfolio": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
     }
    },
    "subjects": {
