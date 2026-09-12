@@ -722,7 +722,7 @@ def _refresh_p123_eu_version(contract: dict[str, Any], generation_id: str) -> No
         if "p123-eu" in version_refs:
             version_refs["p123-eu"] = version
     for correction_id in (
-        "p123-eu-backtest-not-captured",
+        "p123-eu-backtest",
         "p123-eu-provider-live",
         "p123-eu-account-live",
     ):
@@ -1429,7 +1429,7 @@ def _history_fixture(tmp_path: Path) -> dict[str, Any]:
         if "p123-eu" in version_refs:
             version_refs["p123-eu"] = p123_version
     for correction_id in (
-        "p123-eu-backtest-not-captured",
+        "p123-eu-backtest",
         "p123-eu-provider-live",
         "p123-eu-account-live",
     ):

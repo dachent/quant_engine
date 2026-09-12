@@ -1698,14 +1698,14 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     correction = next(
         row
         for row in partial_correction_rewrite["history_corrections"]["corrections"]
-        if row["correction_id"] == "p123-eu-backtest-not-captured"
+        if row["correction_id"] == "p123-eu-backtest"
     )
     correction["strategy_version"]["version_ref"] = fake_p123_eu_version
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match=(
             "history strategy version differs from product authority: "
-            "p123-eu-backtest-not-captured"
+            "p123-eu-backtest"
         ),
     ):
         _validate(partial_correction_rewrite)
@@ -1748,7 +1748,7 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     erased_correction = next(
         row
         for row in erased_correction_assertion["history_corrections"]["corrections"]
-        if row["correction_id"] == "p123-eu-backtest-not-captured"
+        if row["correction_id"] == "p123-eu-backtest"
     )
     erased_correction["strategy_version"] = {
         "status": "UNRESOLVED",
@@ -3022,10 +3022,13 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         b"1599 index levels / 1598 returns / 2020-05-12..2026-06-26 / "
         b"live_sim_twin / sources: api" in rendered_history
     )
-    p123_backtest = _history_correction(contract, "p123-eu-backtest-not-captured")
+    p123_backtest = _history_correction(contract, "p123-eu-backtest")
     assert p123_backtest["history_existence"]["status"] == "EXISTS"
-    assert p123_backtest["capture"]["status"] == "NOT_CAPTURED"
-    assert p123_backtest["strategy_version"]["compatibility"] == "UNRESOLVED"
+    assert p123_backtest["capture"]["status"] == "CAPTURED_GOVERNED"
+    assert p123_backtest["strategy_version"]["compatibility"] == "EXACT_MATCH"
+    # The designer model's own curve, admitted strictly before the launch the
+    # provider states on its own page.
+    assert p123_backtest["interval"]["observed_end"] < "2024-02-18"
 
     volatis_live = _history_correction(contract, "volatis-account-live")
     assert volatis_live["funding_event"]["event_date"] == "2024-10-15"
@@ -3406,7 +3409,10 @@ def test_history_truth_recurrence_mutations_fail_closed() -> None:
 
 def test_incompatible_backtest_splice_and_unbound_generation_fail() -> None:
     spliced = copy.deepcopy(_contract())
-    backtest = _history_correction(spliced, "p123-eu-backtest-not-captured")
+    # Volatis is the remaining strategy whose backtest is not version-proved:
+    # the public fund series is published every five days while the panel and
+    # the live layer are daily, so nothing has been admitted for it.
+    backtest = _history_correction(spliced, "volatis-backtest-not-proved")
     backtest["mode_admission"]["LIVE_PLUS_BACKTEST"] = (
         "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
     )

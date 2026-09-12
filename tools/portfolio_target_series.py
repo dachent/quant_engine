@@ -2122,7 +2122,7 @@ def _history_contract(
         "robuxio-provider-live-before-funding",
         "robuxio-account-live-after-funding",
         "p123-ai-backtest-candidate",
-        "p123-eu-backtest-not-captured",
+        "p123-eu-backtest",
         "p123-eu-provider-live",
         "p123-eu-account-live",
         "volatis-backtest-not-proved",
