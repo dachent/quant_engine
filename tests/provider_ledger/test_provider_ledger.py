@@ -194,6 +194,40 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
                 "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
             ),
         },
+        # These four gained ACCOUNT_LIVE corrections when the three
+        # Schwab-sleeve strategies and the P123 twin were bound to
+        # governed evidence. Each reads the same accepted ledger
+        # generation as volatis above, which is the point: the retained
+        # history stayed one generation rather than becoming a second
+        # candidate authority.
+        "grizzlybears-vtma-account-live": {
+            (
+                "provider-ledger-generation-manifest",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+            ),
+        },
+        "p123-ai-factor-account-live": {
+            (
+                "provider-ledger-generation-manifest",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+            ),
+        },
+        "qsi-account-live": {
+            (
+                "provider-ledger-generation-manifest",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+            ),
+        },
+        "tt-portfolio-account-live": {
+            (
+                "provider-ledger-generation-manifest",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+            ),
+        },
         "echotrade-event-only-account-live-rejected": {
             (
                 "provider-ledger-generation-manifest",
