@@ -954,10 +954,12 @@ def test_current_dependence_builds_and_verifies_from_real_synthetic_authorities(
         "robuxio-crypto",
     ]
     # Moved when the layered history the policy names started carrying the
-    # admitted backtest prehistory for grizzlybears-vtma, qsi and tt-portfolio.
+    # admitted backtest prehistory for grizzlybears-vtma, qsi and tt-portfolio,
+    # and again when robuxio-crypto and p123-eu joined them -- the latter from
+    # the designer model's own published curve before its 2024-02-18 launch.
     assert (
         receipt["returns_sha256"]
-        == "b4e202e36dd1b2b18f18c6bcc6aa99bd2b6eaa6ac4a3caedec99efa11576a288"
+        == "e1a662037b20b2b1f028ab288fe6c527765129f5c9517b848a69bde816620cb4"
     )
     assert receipt["allocation_authority"] == {
         "as_of_date": "2026-01-02",
