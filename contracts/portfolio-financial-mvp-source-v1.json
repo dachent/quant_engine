@@ -974,8 +974,8 @@
     "return_type": "TOTAL",
     "segment_id": "grizzlybears-vtma:backtest",
     "sha256": "3e54cda040f3435a852c5dbcb7bd4eaf2e50811dae7a5f4721f23a9b8483fab5",
-    "source_generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
-    "source_generation_sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5",
+    "source_generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
+    "source_generation_sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af",
     "source_id": "strategy-backtests",
     "strategy_id": "grizzlybears-vtma",
     "strategy_version": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0"
@@ -1088,8 +1088,8 @@
     "return_type": "TOTAL",
     "segment_id": "qsi:backtest",
     "sha256": "3c8056b16764090bcf62eababd6146d35fda7731482ff1884fd7b42f2ea1fa20",
-    "source_generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
-    "source_generation_sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5",
+    "source_generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
+    "source_generation_sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af",
     "source_id": "strategy-backtests",
     "strategy_id": "qsi",
     "strategy_version": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99"
@@ -1126,8 +1126,8 @@
     "return_type": "TOTAL",
     "segment_id": "robuxio-crypto:backtest",
     "sha256": "336313dfbfb46c82f8ac2f083921e4736dd8bb77c7ef645c7976df1e733e5aaf",
-    "source_generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
-    "source_generation_sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5",
+    "source_generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
+    "source_generation_sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af",
     "source_id": "strategy-backtests",
     "strategy_id": "robuxio-crypto",
     "strategy_version": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041"
@@ -1183,8 +1183,8 @@
     "return_type": "TOTAL",
     "segment_id": "tt-portfolio:backtest",
     "sha256": "7a7edc608f13040ef4073b986f425f33192eeb2590431270efaab57e5577f3f7",
-    "source_generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
-    "source_generation_sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5",
+    "source_generation_id": "42ed6fbfe228963977885b84490040cd7bc065989476a18c317be16f3a4cf75c",
+    "source_generation_sha256": "09818772b33654467da792481e4a25ab9338aeeaefd0e6936c30ba52d4dbb6af",
     "source_id": "strategy-backtests",
     "strategy_id": "tt-portfolio",
     "strategy_version": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
