@@ -4214,17 +4214,32 @@ def build_layered_history_generation(
         version_status_by_strategy["p123-ai-factor"] == "EVIDENCED"
         and version_by_strategy["p123-ai-factor"] == p123_ai_version
     )
-    p123_ai_overlaps_live = (
-        date.fromisoformat(p123_ai_backtest[-1]["date"]) >= first_live["p123-ai-factor"]
-    )
+    # Split the twin at this strategy's own account-live inception rather than
+    # judging the series as a whole. The rows at or after it are a simulation
+    # running beside the live book, never prehistory, and they are retained as
+    # the not-admitted overlap; the rows before it are the version-matched
+    # prehistory LIVE_PLUS_BACKTEST exists to admit.
+    p123_ai_live_start = first_live["p123-ai-factor"]
+    p123_ai_prehistory = [
+        row
+        for row in p123_ai_backtest
+        if date.fromisoformat(row["date"]) < p123_ai_live_start
+    ]
+    p123_ai_overlap = p123_ai_backtest[len(p123_ai_prehistory):]
     if not p123_ai_exact_version:
         p123_ai_disposition = "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
-    elif p123_ai_overlaps_live:
+    elif not p123_ai_prehistory:
         unadmitted_backtests["p123-ai-factor"] = p123_ai_backtest
         p123_ai_disposition = "DERIVED_NOT_ADMITTED_OVERLAP"
     else:
-        admitted_backtests["p123-ai-factor"] = p123_ai_backtest
-        p123_ai_disposition = "ADMITTED_EXACT_VERSION_PREHISTORY"
+        admitted_backtests["p123-ai-factor"] = p123_ai_prehistory
+        if p123_ai_overlap:
+            unadmitted_backtests["p123-ai-factor"] = p123_ai_overlap
+            p123_ai_disposition = (
+                "ADMITTED_EXACT_VERSION_PREHISTORY_STRICTLY_BEFORE_LIVE_INCEPTION"
+            )
+        else:
+            p123_ai_disposition = "ADMITTED_EXACT_VERSION_PREHISTORY"
     for series_id, rows in history_rows.items():
         mapped_strategy_id = series_to_strategy.get(series_id)
         if mapped_strategy_id is None:
@@ -4590,6 +4605,9 @@ def build_layered_history_generation(
         },
         "p123-ai-backtest": {
             **p123_ai_proof,
+            "admitted_prehistory_observations": len(p123_ai_prehistory),
+            "live_inception": p123_ai_live_start.isoformat(),
+            "overlap_observations_not_admitted": len(p123_ai_overlap),
             "status": p123_ai_disposition,
         },
         "p123-eu-provider-live": {

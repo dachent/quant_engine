@@ -134,11 +134,11 @@ HISTORY_CORRECTION_LAYERS: Final = {
     # separate live track record for them, so ACCOUNT_LIVE and BACKTEST are the
     # only layers that can exist.
     "grizzlybears-vtma": frozenset({"ACCOUNT_LIVE", "BACKTEST"}),
-    "p123-ai-factor": frozenset({"BACKTEST"}),
+    "p123-ai-factor": frozenset({"ACCOUNT_LIVE", "BACKTEST"}),
     "p123-eu": frozenset({"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"}),
     "qsi": frozenset({"ACCOUNT_LIVE", "BACKTEST"}),
     "robuxio-crypto": frozenset(
-        {"ACCOUNT_LIVE", "PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"}
+        {"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE", "PROVIDER_TRACK_RECORD"}
     ),
     "tt-portfolio": frozenset({"ACCOUNT_LIVE", "BACKTEST"}),
     "volatis-strategy": frozenset({"ACCOUNT_LIVE", "BACKTEST", "PROVIDER_LIVE"}),
@@ -4356,13 +4356,11 @@ def _validate_history_corrections(
         or not isinstance(return_observations, int)
         or isinstance(return_observations, bool)
         or return_observations != index_observations - 1
-        or (
-            p123_ai_identity.get("observed_start"),
-            p123_ai_identity.get("observed_end"),
-        )
-        != (
-            p123_ai_interval.get("observed_start"),
-            p123_ai_interval.get("observed_end"),
+        or not (
+            str(p123_ai_identity.get("observed_start"))
+            <= str(p123_ai_interval.get("observed_start"))
+            <= str(p123_ai_interval.get("observed_end"))
+            <= str(p123_ai_identity.get("observed_end"))
         )
         or p123_ai_identity.get("relationship_type") != "live_sim_twin"
         or not isinstance(source_labels, list)
@@ -4376,13 +4374,31 @@ def _validate_history_corrections(
         for receipt in p123_ai_backtest["source_receipts"]
         if isinstance(receipt, dict) and receipt.get("manifest_artifact_id")
     }
+    p123_ai_version = _object(
+        p123_ai_backtest["strategy_version"], "P123 AI backtest strategy_version"
+    )
+    unresolved_disposition = (
+        p123_ai_backtest["readiness"] == "REQUIRED_NOT_READY"
+        and p123_ai_backtest["blockers"] == [302, 303]
+        and p123_ai_version["status"] == "UNRESOLVED"
+        and p123_ai_version["compatibility"] == "UNRESOLVED"
+        and p123_ai_backtest["mode_admission"]
+        == {"LIVE_ONLY": "NOT_APPLICABLE", "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"}
+    )
+    admitted_disposition = (
+        p123_ai_backtest["readiness"] == "READY"
+        and p123_ai_backtest["blockers"] == []
+        and p123_ai_version["status"] == "EVIDENCED"
+        and p123_ai_version["compatibility"] == "EXACT_MATCH"
+        and bool(p123_ai_version.get("version_ref"))
+        and p123_ai_backtest["mode_admission"]
+        == {
+            "LIVE_ONLY": "NOT_APPLICABLE",
+            "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY",
+        }
+    )
     if (
-        p123_ai_backtest["readiness"] != "REQUIRED_NOT_READY"
-        or p123_ai_backtest["blockers"] != [302, 303]
-        or p123_ai_backtest["strategy_version"]["status"] != "UNRESOLVED"
-        or p123_ai_backtest["strategy_version"]["compatibility"] != "UNRESOLVED"
-        or p123_ai_backtest["mode_admission"]
-        != {"LIVE_ONLY": "NOT_APPLICABLE", "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"}
+        not (unresolved_disposition or admitted_disposition)
         or {
             "tables/returns_daily.parquet",
             "tables/strategy_relationships.parquet",
