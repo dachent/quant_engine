@@ -584,7 +584,7 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
+    "version_ref": "account-live-segment:3475b976c4139a6b39ffb7ff0b536e9942846b0d474b1a5d97c23516e2796803",
     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
     "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
    },
@@ -992,10 +992,48 @@
     "return_observations": 160,
     "return_type": "TOTAL",
     "segment_id": "p123-ai-factor:account-live",
-    "sha256": "7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
+    "sha256": "3475b976c4139a6b39ffb7ff0b536e9942846b0d474b1a5d97c23516e2796803",
     "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
     "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
+    "strategy_id": "p123-ai-factor",
+    "strategy_version": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc"
+   },
+   {
+    "calendar": "MODEL_DECLARED",
+    "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+    "evidence_layer": "BACKTEST",
+    "frequency": "MODEL_CAPTURE",
+    "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+    "observed_end": "2026-01-21",
+    "observed_start": "2020-05-13",
+    "return_basis": "MODEL",
+    "return_observations": 1486,
+    "return_type": "TOTAL",
+    "segment_id": "p123-ai-factor:backtest",
+    "sha256": "84cdabd841e31a4764e47788a23ff49a89b4d753ad25ad419ad5cca0b7238057",
+    "source_generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
+    "source_generation_sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
+    "source_id": "portfolio123-model-generation",
+    "strategy_id": "p123-ai-factor",
+    "strategy_version": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc"
+   },
+   {
+    "calendar": "MODEL_DECLARED",
+    "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+    "evidence_layer": "BACKTEST",
+    "frequency": "MODEL_CAPTURE",
+    "mode_admission": "REQUIRED_NOT_READY_OVERLAP",
+    "observed_end": "2026-06-26",
+    "observed_start": "2026-01-22",
+    "return_basis": "MODEL",
+    "return_observations": 112,
+    "return_type": "TOTAL",
+    "segment_id": "p123-ai-factor:backtest-not-admitted",
+    "sha256": "bd56f55e9874d4226ee2b733eb9e52c5504e81807144a802c41113dfb5c9579e",
+    "source_generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
+    "source_generation_sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
+    "source_id": "portfolio123-model-generation",
     "strategy_id": "p123-ai-factor",
     "strategy_version": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc"
    },
@@ -1072,6 +1110,25 @@
     "source_generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
     "source_generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
     "source_id": "matrixport-account-generation",
+    "strategy_id": "robuxio-crypto",
+    "strategy_version": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041"
+   },
+   {
+    "calendar": "SOURCE_DECLARED_NO_COERCION",
+    "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+    "evidence_layer": "BACKTEST",
+    "frequency": "VERSION_SNAPSHOT",
+    "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+    "observed_end": "2025-12-05",
+    "observed_start": "2020-01-02",
+    "return_basis": "MODEL",
+    "return_observations": 2165,
+    "return_type": "TOTAL",
+    "segment_id": "robuxio-crypto:backtest",
+    "sha256": "336313dfbfb46c82f8ac2f083921e4736dd8bb77c7ef645c7976df1e733e5aaf",
+    "source_generation_id": "6929663543fec64ed2773e15821e6572682e302517291b76a0c1800458aa771e",
+    "source_generation_sha256": "8abff7236170879598c5f76cb095f61e06914bdcd51350481c9b971caf3ef1e5",
+    "source_id": "strategy-backtests",
     "strategy_id": "robuxio-crypto",
     "strategy_version": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041"
    },
@@ -3443,10 +3500,11 @@
    "source_id": "portfolio123-model-generation",
    "source_version": "portfolio123-generation-v1",
    "strategy_version": {
-    "status": "MIXED",
+    "status": "EVIDENCED",
     "binding": "EXACT_CONNECTED_MODEL_VERSION_REQUIRED",
     "version_refs": {
-     "p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"
+     "p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
+     "p123-ai-factor": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc"
     }
    },
    "subjects": {
