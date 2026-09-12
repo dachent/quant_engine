@@ -1052,8 +1052,12 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # UNRESOLVED: the retained vendor histories became governed generation
     # c60b9a95, `strategy-backtests` bound to it, and each of the three gained
     # the BACKTEST and ACCOUNT_LIVE corrections its version assertion needs.
+    # Moved again when p123-eu stopped reading NOT_CAPTURED: the designer model
+    # the owner subscribes to publishes its own curve from 2008, that capture
+    # became a governed generation, and the strategy-backtests generation was
+    # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "0613e66a6f44f65eee90e3ac90d9f522ac4bbe0a6d2916ff56032d9b8c4cc8b0"
+        "fa5325fb035ae889b9545e2cc11760817d193ee1460f74b2e131106437eee37b"
     )
 
 
@@ -1144,9 +1148,13 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
             # provider-live return route materializes and Portfolio123 admits
             # its first two items: the managed-performance table and the
             # PROVIDER_LIVE_RETURN data class it produces.
+            # The digest moved when p123-eu's BACKTEST correction stopped citing
+            # the Portfolio123 current pointer: its evidence is now the governed
+            # designer-model curve carried by the strategy-backtests generation,
+            # so Portfolio123 is no longer an authority for that layer.
             "admitted_item_count": 2,
             "admitted_item_set_sha256": (
-                "1ed305c46dc831fb820947bee3e468d3994eec9e3ef124fec88da5be42430731"
+                "c9a66669fe0cd411dee0b2d99c79f063a3c7c026bc671ce5ec97d58de6f6aa0f"
             ),
         },
     }
@@ -1490,7 +1498,7 @@ def test_p123_admitted_set_and_hwm_bind_independently_computed_contract_hashes()
     p123 = _source(contract, "portfolio123-model-generation")
     assert (
         p123["admission"]["dataset_disposition_policy"]["admitted_item_set_sha256"]
-        == "1ed305c46dc831fb820947bee3e468d3994eec9e3ef124fec88da5be42430731"
+        == "c9a66669fe0cd411dee0b2d99c79f063a3c7c026bc671ce5ec97d58de6f6aa0f"
     )
 
     raw_sha256 = hashlib.sha256(contract_bytes).hexdigest()
@@ -1745,10 +1753,12 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
         _validate(invented_source_assertion)
 
     erased_correction_assertion = copy.deepcopy(baseline)
+    # The vehicle has to be a correction the hybrid gate does not admit, or
+    # erasing its version trips that gate first and this one is never reached.
     erased_correction = next(
         row
         for row in erased_correction_assertion["history_corrections"]["corrections"]
-        if row["correction_id"] == "p123-eu-backtest"
+        if row["correction_id"] == "p123-eu-provider-live"
     )
     erased_correction["strategy_version"] = {
         "status": "UNRESOLVED",
@@ -4185,9 +4195,10 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # lineage rebind, the per-reason exclusion readiness map, the Portfolio123
     # union-generation repin, and the strategy-backtests segment binding onto
     # its governed generation; each edits source_segments, which this proof
-    # hashes.
+    # hashes. Moved again when the strategy-backtests segment was restaged onto
+    # the bundle carrying the EU designer-model prehistory.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "8742b1f2ed07d93e8f398bdb5a6567542ce694c76c5836b703a6fb47327e0870"
+        "5e2c3f73e9f416208d06f1753dcc8430d6e3300de9e7ff3bd4dc9a63e9a338c0"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4224,7 +4235,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "8742b1f2ed07d93e8f398bdb5a6567542ce694c76c5836b703a6fb47327e0870"
+        "5e2c3f73e9f416208d06f1753dcc8430d6e3300de9e7ff3bd4dc9a63e9a338c0"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
