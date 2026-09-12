@@ -953,9 +953,11 @@ def test_current_dependence_builds_and_verifies_from_real_synthetic_authorities(
         "grizzlybears-vtma",
         "robuxio-crypto",
     ]
+    # Moved when the layered history the policy names started carrying the
+    # admitted backtest prehistory for grizzlybears-vtma, qsi and tt-portfolio.
     assert (
         receipt["returns_sha256"]
-        == "0f7bce49464ae8844079403b521fcbb9ff46414c668244c0cae51cc0e4afa6b7"
+        == "b4e202e36dd1b2b18f18c6bcc6aa99bd2b6eaa6ac4a3caedec99efa11576a288"
     )
     assert receipt["allocation_authority"] == {
         "as_of_date": "2026-01-02",

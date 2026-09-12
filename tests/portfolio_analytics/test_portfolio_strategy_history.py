@@ -440,7 +440,7 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
 
     assert manifest["verification"] == "VERIFIED"
     assert manifest["builder"] == "portfolio-strategy-history"
-    assert manifest["builder_version"] == "1.5.0"
+    assert manifest["builder_version"] == "1.6.0"
     assert {item["series_id"] for item in manifest["series"]} == {
         "GrizzlyBears VTMA",
         "QSI",
@@ -729,3 +729,73 @@ def test_grizzly_manual_live_file_is_validated_as_combined_subset(
         "grizzlybulls-all-backtest-live-trade-history",
         "grizzlybulls-live-only-trade-history",
     }
+
+
+def _eu_curve(start, days, *, step="0.01"):
+    """A provider equity curve: one continuous level path, no layer marker."""
+
+    level = history.Decimal("100000")
+    ordered = []
+    for index in range(days):
+        if index:
+            level *= history.Decimal(1) + history.Decimal(step)
+        ordered.append((start + timedelta(days=index), (level, history.Decimal(0))))
+    return ordered
+
+
+EU_ARTIFACT = {"sha256": "a" * 64, "size_bytes": 4096}
+
+
+def _eu_backtest(ordered):
+    return history._p123_eu_backtest(
+        ordered,
+        generation_id="b" * 64,
+        exact_ids={"1764562", "1897754"},
+        strategy_name="EU multifactor microcap model",
+        equity_artifact=EU_ARTIFACT,
+    )
+
+
+def test_eu_prehistory_stops_strictly_before_the_provider_launch() -> None:
+    launch = history.P123_EU_PROVIDER_LAUNCH
+    ordered = _eu_curve(launch - timedelta(days=5), 11)
+
+    rows, definition = _eu_backtest(ordered)
+
+    assert definition["series_id"] == "EU [P123]"
+    assert definition["provider_launch"] == launch.isoformat()
+    # Five observations before the launch yield four returns, and the last one
+    # lands the day before it: the launch day itself is live, never prehistory.
+    assert definition["observed_end"] == (launch - timedelta(days=1)).isoformat()
+    assert definition["return_observations"] == 4
+    assert definition["source_rows_excluded_at_or_after_provider_launch"] == 6
+    assert {row["evidence_layer"] for row in rows} == {"BACKTEST"}
+    assert all(row["return"] == "0.01" for row in rows)
+    assert {row["strategy_version"] for row in rows} == {definition["strategy_version"]}
+    assert definition["source_artifacts"][0]["sha256"] == EU_ARTIFACT["sha256"]
+
+
+def test_eu_prehistory_is_absent_when_the_capture_starts_after_the_launch() -> None:
+    """The subscribed copy's curve begins when the copy was created."""
+
+    ordered = _eu_curve(history.P123_EU_PROVIDER_LAUNCH + timedelta(days=30), 40)
+
+    assert _eu_backtest(ordered) is None
+
+
+def test_a_launch_on_a_non_trading_day_admits_only_earlier_sessions() -> None:
+    launch = history.P123_EU_PROVIDER_LAUNCH
+    ordered = [
+        item
+        for item in _eu_curve(launch - timedelta(days=4), 9)
+        if item[0] != launch
+    ]
+
+    rows, definition = _eu_backtest(ordered)
+
+    assert definition["observed_end"] < launch.isoformat()
+    assert all(row["date"] < launch.isoformat() for row in rows)
+
+
+def test_eu_prehistory_needs_two_observations_to_form_a_return() -> None:
+    assert _eu_backtest(_eu_curve(history.P123_EU_PROVIDER_LAUNCH - timedelta(days=1), 5)) is None
