@@ -2358,7 +2358,36 @@ def build_bundle(
         # capture that had not been taken. Now that the designer model the
         # copy follows is a governed generation, it is the authority for the
         # design layer and the fallback is not used alongside it.
-        p123_eu_part = p123_eu_designer_part
+        #
+        # A series is either admitted history or a disposition explaining why
+        # it is not, never both, so EU's disposition stops being one. What that
+        # disposition carried about the provider-live route and the European
+        # books that were examined and refused is not a statement about the
+        # backtest, so it is kept on the admitted definition rather than
+        # dropped with it.
+        superseded = [
+            row for row in p123_dispositions if row.get("series_id") == "EU [P123]"
+        ]
+        p123_dispositions = [
+            row for row in p123_dispositions if row.get("series_id") != "EU [P123]"
+        ]
+        rows, definition = p123_eu_designer_part
+        for row in superseded:
+            definition["connected_model_currency"] = row.get(
+                "connected_model_currency"
+            )
+            definition["connected_model_inception"] = row.get(
+                "connected_model_inception"
+            )
+            definition["provider_live_route"] = row.get("provider_live")
+            definition["provider_live_status"] = row.get("history_status")
+            definition["retained_but_not_admitted"] = row.get(
+                "retained_but_not_admitted"
+            )
+            definition["superseded_prehistory_disposition"] = row.get(
+                "backtest_prehistory"
+            )
+        p123_eu_part = (rows, definition)
     parts = (
         _grizzly(
             grizzly_workbook,
