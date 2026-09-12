@@ -4210,6 +4210,12 @@ def build_layered_history_generation(
 
     admitted_backtests: dict[str, list[dict[str, str]]] = {}
     unadmitted_backtests: dict[str, list[dict[str, str]]] = {}
+    # A prehistory refused because the version it was derived under does not
+    # match the product's own assertion is a different answer from one that was
+    # simply never admitted, and the strategy-level reason has to say which.
+    # The product assertion can be EVIDENCED and still not be the version the
+    # evidence carries, so its status alone cannot distinguish them.
+    version_mismatched_backtests: set[str] = set()
     p123_ai_exact_version = (
         version_status_by_strategy["p123-ai-factor"] == "EVIDENCED"
         and version_by_strategy["p123-ai-factor"] == p123_ai_version
@@ -4227,6 +4233,7 @@ def build_layered_history_generation(
     ]
     p123_ai_overlap = p123_ai_backtest[len(p123_ai_prehistory):]
     if not p123_ai_exact_version:
+        version_mismatched_backtests.add("p123-ai-factor")
         p123_ai_disposition = "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
     elif not p123_ai_prehistory:
         unadmitted_backtests["p123-ai-factor"] = p123_ai_backtest
@@ -4519,7 +4526,10 @@ def build_layered_history_generation(
                 hybrid_reason = (
                     "REQUIRED_NOT_READY_BACKTEST_SOURCE_OVERLAPS_ACCOUNT_LIVE"
                 )
-            elif version_status_by_strategy[strategy_id] != "EVIDENCED":
+            elif (
+                version_status_by_strategy[strategy_id] != "EVIDENCED"
+                or strategy_id in version_mismatched_backtests
+            ):
                 hybrid_reason = "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED"
             else:
                 hybrid_reason = "REQUIRED_EXACT_VERSION_BACKTEST_NOT_ADMITTED"
@@ -5978,6 +5988,15 @@ def validate_layered_history_generation(
         "quantbase-account-generation": "quantbase-manifest",
         "portfolio123-model-generation": "portfolio123-manifest",
     }
+    # The twin's prehistory can be refused because the version it was derived
+    # under is not the version the product asserts, and the strategy-level
+    # reason has to say so. The product status alone cannot tell: it is
+    # EVIDENCED either way. The correction resolution already records the
+    # refusal, so the verifier reads it there rather than needing a new field.
+    raw_resolutions = coverage.get("correction_resolutions")
+    p123_ai_version_refused = isinstance(raw_resolutions, dict) and str(
+        (raw_resolutions.get("p123-ai-backtest") or {}).get("status")
+    ).endswith("VERSION_UNRESOLVED_OR_MISMATCHED")
     for strategy_id, raw in coverage_by_strategy.items():
         _require_exact_keys(
             raw,
@@ -6295,7 +6314,9 @@ def validate_layered_history_generation(
                 hybrid_reason = (
                     "REQUIRED_NOT_READY_BACKTEST_SOURCE_OVERLAPS_ACCOUNT_LIVE"
                 )
-            elif strategy_version.get("product_status") != "EVIDENCED":
+            elif strategy_version.get("product_status") != "EVIDENCED" or (
+                strategy_id == "p123-ai-factor" and p123_ai_version_refused
+            ):
                 hybrid_reason = "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED"
             else:
                 hybrid_reason = "REQUIRED_EXACT_VERSION_BACKTEST_NOT_ADMITTED"
