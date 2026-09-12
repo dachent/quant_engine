@@ -1638,13 +1638,21 @@ def _dynamic_model_result(
     test_predictions: list[float] = []
     filtered_exposures: dict[date, FloatArray] = {}
     holdout_forecasts: list[dict[str, object]] = []
+    # The posterior of one step is the prior of the next: same arrays, same
+    # smoothness, ridge and fixed intercept, and `_dynamic_fit` is pure. Only
+    # the first prior has to be solved for.
+    carried_fit: DynamicFit | None = None
     for index, observation in enumerate(test):
-        prior_fit = _dynamic_fit(
-            history_matrix,
-            history_target,
-            smoothness=selected_smoothness,
-            ridge=ridge,
-            fixed_intercept=train_fit.intercept,
+        prior_fit = (
+            carried_fit
+            if carried_fit is not None
+            else _dynamic_fit(
+                history_matrix,
+                history_target,
+                smoothness=selected_smoothness,
+                ridge=ridge,
+                fixed_intercept=train_fit.intercept,
+            )
         )
         forecast_exposure = prior_fit.exposures[-1].copy()
         prediction = float(train_fit.intercept + test_matrix[index] @ forecast_exposure)
@@ -1658,6 +1666,7 @@ def _dynamic_model_result(
             ridge=ridge,
             fixed_intercept=train_fit.intercept,
         )
+        carried_fit = posterior_fit
         filtered_exposure = posterior_fit.exposures[-1].copy()
         day = observation[0].day
         filtered_exposures[day] = filtered_exposure

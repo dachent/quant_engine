@@ -1105,3 +1105,44 @@ def test_dynamic_loo_stays_linear_in_the_series_length():
 
     assert score is not None
     assert len(predictions) == observations
+
+
+def test_dynamic_fit_repeats_exactly_so_the_holdout_prior_can_be_carried():
+    """The next step's prior is the step's posterior, bit for bit.
+
+    The holdout walk used to solve for both. They are the same call on the same
+    arrays with the same smoothness, ridge and fixed intercept, so the walk now
+    carries the posterior forward and solves once per step instead of twice.
+    If `_dynamic_fit` ever stops being pure -- an internal cache, a random
+    initialisation, an in-place write into the arrays it is handed -- that
+    optimisation would silently change published exposures, and this fails.
+    """
+
+    import numpy as np
+
+    rng = np.random.default_rng(11)
+    observations, factors = 60, 3
+    matrix = rng.normal(size=(observations, factors))
+    target = matrix @ rng.normal(size=factors) + rng.normal(
+        scale=0.05, size=observations
+    )
+    intercept = 0.004
+
+    posterior = decomposition._dynamic_fit(
+        matrix, target, smoothness=0.3, ridge=1e-6, fixed_intercept=intercept
+    )
+    matrix_after = matrix.copy()
+    target_after = target.copy()
+    next_prior = decomposition._dynamic_fit(
+        matrix, target, smoothness=0.3, ridge=1e-6, fixed_intercept=intercept
+    )
+
+    # The inputs survive the call, so the second caller really does hand over
+    # the same arrays the first one did.
+    assert np.array_equal(matrix, matrix_after)
+    assert np.array_equal(target, target_after)
+    # And the result is identical, not merely close.
+    assert next_prior.intercept == posterior.intercept
+    assert next_prior.rank_status == posterior.rank_status
+    assert np.array_equal(next_prior.exposures, posterior.exposures)
+    assert np.array_equal(next_prior.fitted, posterior.fitted)
