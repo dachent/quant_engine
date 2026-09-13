@@ -235,6 +235,105 @@ def _generation_file(generation: GenerationNode, filename: str) -> tuple[Path, b
     return path, _verified_file(path, file.sha256, file.size_bytes)
 
 
+EPOCH_MANIFEST_CALCULATION_MEMBERS = {
+    "account_strategy_ledger": "calculation_ledger",
+    "account_strategy_ledger_identity": "calculation_ledger_identity",
+    "account_strategy_classified_flows": "calculation_classified_flows",
+    "account_strategy_flow_coverage": "calculation_flow_coverage",
+}
+
+
+def _optional_gate(spec: Any, gate_id: str) -> tuple[Path, dict[str, Any]] | None:
+    """The gate if the specification carries it, rather than insisting on it."""
+
+    if not any(gate.gate_id == gate_id for gate in spec.gates):
+        return None
+    return _gate(spec, gate_id)
+
+
+def _generation_artifact_path(
+    generation_dir: Path, manifest: Any, sha256: str, size_bytes: int
+) -> Path:
+    """Find the artifact a generation pins by digest, without trusting a name."""
+
+    matches = [
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.sha256 == sha256 and artifact.size_bytes == size_bytes
+    ]
+    if len(matches) != 1:
+        raise FinancialOutcomeError("selected epoch generation artifact differs")
+    parts = matches[0].artifact_id.split("/")
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise FinancialOutcomeError("selected epoch generation artifact differs")
+    path = generation_dir.joinpath(*parts)
+    _verified_file(path, sha256, size_bytes)
+    return path
+
+
+def _epoch_manifest_profile(spec: Any) -> dict[str, Any]:
+    """Resolve the five epoch-manifest inputs for whichever profile is in force.
+
+    Schema 9 names them in the gate. Schema 10 has no gate -- by design -- and
+    the same five are projected out of the bound generation, which is exactly
+    how `_rebuild_selected_epochs` defines them.
+    """
+
+    from portfolio_pipeline_materialize import ACCOUNT_STRATEGY_CLASSIFICATION_POLICY
+
+    gate = _optional_gate(spec, "financial-epoch-manifest-input-authority")
+    if gate is not None:
+        _path, payload = gate
+        inputs = payload["inputs"]
+        selected_bytes = {
+            key: _verified_file(
+                Path(definition["path"]),
+                definition["sha256"],
+                definition["size_bytes"],
+            )
+            for key, definition in inputs.items()
+        }
+        return {
+            "selected_bytes": selected_bytes,
+            "admission_policy_path": Path(
+                inputs["account_strategy_admission_policy"]["path"]
+            ),
+            "classification_policy_path": ACCOUNT_STRATEGY_CLASSIFICATION_POLICY,
+        }
+
+    _keys, generation_dir, manifest = _selected_epoch_assignment_keys(spec)
+    _identity_path, identity_bytes = _manifest_artifact(
+        generation_dir, manifest, "authority/selected-input-identities.json"
+    )
+    identities = json.loads(identity_bytes)
+    _calculation_path, calculation_bytes = _manifest_artifact(
+        generation_dir, manifest, "authority/calculation-inputs.json"
+    )
+    calculation = json.loads(calculation_bytes)
+    selected_bytes: dict[str, bytes] = {}
+    for key, member in EPOCH_MANIFEST_CALCULATION_MEMBERS.items():
+        if member not in calculation:
+            raise FinancialOutcomeError("selected epoch calculation inputs differ")
+        selected_bytes[key] = canonical_json_bytes(calculation[member])
+    admission = identities.get("admission_policy")
+    if not isinstance(admission, Mapping):
+        raise FinancialOutcomeError("selected epoch admission policy identity differs")
+    admission_path = _generation_artifact_path(
+        generation_dir, manifest, admission["sha256"], admission["size_bytes"]
+    )
+    selected_bytes["account_strategy_admission_policy"] = admission_path.read_bytes()
+    # The classification policy stays the repository copy for both profiles:
+    # it is what the generation pins as its selected `flow_classification_policy`,
+    # and the selected-input checker verifies the file it is handed against that
+    # pin. (The bundle also carries a differently-shaped policy document of its
+    # own, which the classified flows name; that one is not this input.)
+    return {
+        "selected_bytes": selected_bytes,
+        "admission_policy_path": admission_path,
+        "classification_policy_path": ACCOUNT_STRATEGY_CLASSIFICATION_POLICY,
+    }
+
+
 def _selected_epoch_assignment_keys(
     spec: Any,
 ) -> tuple[tuple[tuple[str, str, str, str | None], ...], Path, GenerationManifest]:
@@ -348,14 +447,13 @@ def selected_hwm_source_paths(spec: Any) -> dict[str, Path]:
         if manifest.generation_id != generation.generation_id:
             raise FinancialOutcomeError("selected HWM source generation differs")
         result[key] = path
-    _, epoch_gate = _gate(spec, "financial-epoch-manifest-input-authority")
-    policy = epoch_gate["inputs"]["account_strategy_admission_policy"]
-    path = Path(policy["path"])
-    _verified_file(path, policy["sha256"], policy["size_bytes"])
-    result["account_manifest_admission_policy_path"] = path
-    result["account_manifest_flow_classification_policy_path"] = (
-        ACCOUNT_STRATEGY_CLASSIFICATION_POLICY
-    )
+    profile = _epoch_manifest_profile(spec)
+    result["account_manifest_admission_policy_path"] = profile[
+        "admission_policy_path"
+    ]
+    result["account_manifest_flow_classification_policy_path"] = profile[
+        "classification_policy_path"
+    ]
     return result
 
 
@@ -771,14 +869,7 @@ def _rebuild_selected_epochs(
 
 
 def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
-    _path, gate = _gate(spec, "financial-epoch-manifest-input-authority")
-    inputs = gate["inputs"]
-    selected_bytes = {}
-    for key, definition in inputs.items():
-        path = Path(definition["path"])
-        selected_bytes[key] = _verified_file(
-            path, definition["sha256"], definition["size_bytes"]
-        )
+    selected_bytes = _epoch_manifest_profile(spec)["selected_bytes"]
     baselines = [
         node
         for node in spec.nodes
