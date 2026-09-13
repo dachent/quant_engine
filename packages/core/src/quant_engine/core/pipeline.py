@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from typing import Any, BinaryIO, Callable, Final, Mapping, Self, cast
 
 from quant_engine.core.authority import FreshnessPolicy
@@ -690,8 +691,8 @@ def _parse_node(value: Mapping[str, Any], roots: Mapping[str, Path]) -> Pipeline
         raise PipelineValidationError(f"{node_id}.retry_limit must be 0..2")
     if (
         not isinstance(timeout_seconds, int)
+        or isinstance(timeout_seconds, bool)
         or timeout_seconds < 1
-        or timeout_seconds > 3600
     ):
         raise PipelineValidationError(f"{node_id}.timeout_seconds is invalid")
     request = value["request_identity"]
@@ -3360,12 +3361,16 @@ def _capture_bytes(value: bytes) -> _CapturedStream:
     )
 
 
-def _capture_stream(stream: BinaryIO) -> _CapturedStream:
+def _capture_stream(
+    stream: BinaryIO, on_progress: Callable[[], None] | None = None
+) -> _CapturedStream:
     digest = hashlib.sha256()
     size = 0
     for block in iter(lambda: stream.read(64 * 1024), b""):
         digest.update(block)
         size += len(block)
+        if on_progress is not None:
+            on_progress()
     return _CapturedStream(
         sha256=digest.hexdigest(),
         size_bytes=size,
@@ -3399,6 +3404,30 @@ def _stream_evidence(run: _CommandRun) -> dict[str, object]:
     return result
 
 
+_PROGRESS_POLL_SECONDS: Final = 5.0
+
+
+def _wait_for_progress(
+    process: subprocess.Popen[bytes],
+    idle_budget: int,
+    last_progress: Callable[[], float],
+) -> int:
+    """Wait for the child, killing it only once it has gone quiet for too long.
+
+    The budget is time without progress, not total runtime, so a node that keeps
+    producing output runs as long as its work takes. `TimeoutExpired` is still
+    what a kill raises, so every caller and every receipt field is unchanged.
+    """
+
+    slice_seconds = min(float(idle_budget), _PROGRESS_POLL_SECONDS)
+    while True:
+        try:
+            return process.wait(timeout=slice_seconds)
+        except subprocess.TimeoutExpired:
+            if time.monotonic() - last_progress() >= idle_budget:
+                raise
+
+
 def _default_command_runner(node: CommandNode) -> _CommandRun:
     process = subprocess.Popen(
         node.argv,
@@ -3412,10 +3441,17 @@ def _default_command_runner(node: CommandNode) -> _CommandRun:
         raise PipelineExecutionError("command output pipes are unavailable")
     captured: dict[str, _CapturedStream] = {}
     failures: list[BaseException] = []
+    last_progress = [time.monotonic()]
+
+    def note_progress() -> None:
+        # A bare store, no lock: under the GIL the float write is atomic, and
+        # the only consequence of reading a stale value is that a kill waits
+        # one more poll interval.
+        last_progress[0] = time.monotonic()
 
     def drain(name: str, stream: BinaryIO) -> None:
         try:
-            captured[name] = _capture_stream(stream)
+            captured[name] = _capture_stream(stream, note_progress)
         except BaseException as exc:
             failures.append(exc)
 
@@ -3428,7 +3464,9 @@ def _default_command_runner(node: CommandNode) -> _CommandRun:
     stdout_thread.start()
     stderr_thread.start()
     try:
-        return_code = process.wait(timeout=node.timeout_seconds)
+        return_code = _wait_for_progress(
+            process, node.timeout_seconds, lambda: last_progress[0]
+        )
     except BaseException:
         process.kill()
         process.wait()

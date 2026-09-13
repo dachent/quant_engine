@@ -797,6 +797,21 @@ def create_recipe(
     return {"pipeline_id": pipeline_id, "recipe": str(output)}
 
 
+def _note_progress(what: str) -> None:
+    """Say that a long stage is still moving.
+
+    The pipeline bounds a node by time without progress rather than by total
+    runtime, so a node that says nothing for an hour is indistinguishable from
+    one that has wedged. Decomposition is the only stage that can run that long
+    -- `_run` allows a single lens 7200s -- and it is silent throughout, because
+    `_run` captures the solver's own output and surfaces it only on failure.
+
+    This goes to stderr: stdout carries the JSON result the caller parses.
+    """
+
+    print(what, file=sys.stderr, flush=True)
+
+
 def _run(
     command: Sequence[str],
     *,
@@ -3763,6 +3778,7 @@ def _build_base_analytics(
                 f"base provenance source is missing or ambiguous: {relative}"
             )
         _write_exact(base_source / relative, matches[0].read_bytes())
+    _note_progress("decomposition base")
     _tool(
         "portfolio_decomposition.py",
         "stage",
@@ -3907,6 +3923,7 @@ def build_analytics(
         # 64-character directory plus nested provenance names, and the authoritative
         # Windows runtime may still enforce the legacy 260-character path ceiling.
         evidence_mode_root = output_root / "hybrid-inputs"
+        _note_progress("decomposition hybrid dynamic-style")
         hybrid_dynamic = _build_hybrid_decomposition(
             base_spec=base_spec,
             base_source=base_source,
@@ -3927,6 +3944,7 @@ def build_analytics(
         else:
             lens_root = lenses_root / source_key
         lens_spec = lens_bundle / _text(row.get("path"), "lens spec path")
+        _note_progress(f"decomposition lens {lens_root.name}/{lens_spec.stem}")
         _tool(
             "portfolio_decomposition.py",
             "stage",

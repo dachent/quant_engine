@@ -3236,6 +3236,14 @@ def semantic(
     return {"details": str(details_path), "state": "PASS"}
 
 
+# `timeout_seconds` bounds a node by time without progress. The analytics stage
+# reports once per decomposition lens, and `portfolio_release_builder` allows a
+# single lens 7200s, so one lens solve is the longest silence that stage can
+# legitimately produce. A smaller budget would kill a lens the layer below it
+# still considers healthy.
+ANALYTICS_SILENCE_SECONDS = 7200
+
+
 def _command(
     *,
     node_id: str,
@@ -3561,6 +3569,9 @@ def build_spec(
             reads=reads,
             writes=stage_writes[role],
             retry_limit=1 if role == "workbook" else 0,
+            timeout_seconds=(
+                ANALYTICS_SILENCE_SECONDS if role == "analytics" else 3600
+            ),
         )
         nodes.append(command)
         release_role = next(
