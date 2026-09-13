@@ -7901,6 +7901,16 @@ def _panel_data(
                             series.get("series_id"), "hybrid decomposition series_id"
                         )
                         if strategy_name in eligible_versions:
+                            # A lens the strategy is method-scoped out of still
+                            # emits a row for it, with no model and no
+                            # composition. There is no hybrid version to check
+                            # because the lens decomposed nothing, and a row
+                            # without a model cannot have consumed backtest
+                            # history.
+                            if series.get("model_id") is None and _text(
+                                series.get("status"), "hybrid decomposition status"
+                            ) == "UNAVAILABLE":
+                                continue
                             composition = _object(
                                 series.get("series_composition"),
                                 f"hybrid decomposition composition {strategy_name}",
