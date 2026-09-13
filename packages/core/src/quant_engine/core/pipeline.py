@@ -3366,7 +3366,13 @@ def _capture_stream(
 ) -> _CapturedStream:
     digest = hashlib.sha256()
     size = 0
-    for block in iter(lambda: stream.read(64 * 1024), b""):
+    # `read` on a pipe blocks until the whole request is satisfied, so output
+    # written a line at a time is not seen until 64 KB has piled up -- which
+    # made progress unobservable and turned the idle budget back into a
+    # duration budget. `read1` returns what a single syscall yields. The bytes
+    # and the digest are identical either way.
+    read = getattr(stream, "read1", stream.read)
+    for block in iter(lambda: read(64 * 1024), b""):
         digest.update(block)
         size += len(block)
         if on_progress is not None:

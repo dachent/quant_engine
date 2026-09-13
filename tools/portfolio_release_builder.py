@@ -818,6 +818,10 @@ def _run(
     timeout: int = 3600,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    # Every long step this stage takes is a subprocess, so announcing each one
+    # here covers them all -- and the only silence left is a single tool call,
+    # which is exactly what `timeout` below bounds.
+    _note_progress("run " + " ".join(Path(part).name for part in command[1:3]))
     completed = subprocess.run(
         list(command),
         cwd=REPOSITORY_ROOT,

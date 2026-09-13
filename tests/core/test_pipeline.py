@@ -1102,3 +1102,46 @@ def test_command_node_accepts_a_budget_above_the_former_ceiling(
     ]
 
     assert bounded[0].timeout_seconds == 7200
+
+
+def test_capture_stream_observes_a_trickle_before_the_pipe_fills(
+    tmp_path: Path,
+) -> None:
+    """Progress must be seen as it is written, not once 64 KB has piled up.
+
+    `read` on a pipe blocks until the full request is satisfied, so a node
+    that reports one line at a time looked completely silent and the idle
+    budget decayed into a duration budget. A blocking read sees a single
+    block at EOF; this must see several.
+    """
+
+    import subprocess
+
+    child = tmp_path / "trickle.py"
+    child.write_text(
+        "import sys, time" + chr(10)
+        + "for _ in range(5):" + chr(10)
+        + "    print('tick', file=sys.stderr, flush=True)" + chr(10)
+        + "    time.sleep(0.1)" + chr(10),
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(
+        [sys.executable, str(child)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    observed = 0
+
+    def seen() -> None:
+        nonlocal observed
+        observed += 1
+
+    try:
+        assert process.stderr is not None
+        captured = pipeline_module._capture_stream(process.stderr, seen)
+    finally:
+        process.wait()
+
+    assert process.returncode == 0
+    assert captured.size_bytes < 64 * 1024
+    assert observed > 1
