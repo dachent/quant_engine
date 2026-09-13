@@ -266,6 +266,57 @@ def _governed_stage_paths(
     return resolved
 
 
+def _generation_admission_policy(generation_root: Path) -> Path:
+    """Resolve the admission policy a schema-10 recipe binds through its generation.
+
+    A schema-9 recipe names the five epoch-manifest inputs as files, and the
+    admission policy is one of them. Schema 10 binds the verified generation
+    instead, so the policy travels inside it and there is no separate input to
+    name -- which is why demanding one refused every schema-10 release here.
+
+    Nothing trusts a file name. The generation pins the policy digest in its own
+    `selected-input-identities.json`, the manifest says which artifact carries
+    that digest, and the bytes on disk have to agree with both.
+    """
+
+    identities = _load(
+        generation_root / "authority" / "selected-input-identities.json",
+        "selected input identities",
+    )
+    declared = identities.get("admission_policy")
+    if not isinstance(declared, Mapping):
+        raise MaterializationError("selected HWM admission policy binding is absent")
+    manifest = _load(
+        generation_root / "generation.json", "account manifest generation"
+    )
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise MaterializationError("selected HWM admission policy binding differs")
+    matches = [
+        row
+        for row in artifacts
+        if isinstance(row, Mapping)
+        and row.get("sha256") == declared.get("sha256")
+        and row.get("size_bytes") == declared.get("size_bytes")
+    ]
+    if len(matches) != 1:
+        raise MaterializationError("selected HWM admission policy binding differs")
+    relative = _text(matches[0].get("artifact_id"), "admission policy artifact_id")
+    parts = relative.split("/")
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise MaterializationError("selected HWM admission policy binding differs")
+    policy = generation_root.joinpath(*parts)
+    if policy.is_symlink() or not policy.is_file():
+        raise MaterializationError("selected HWM admission policy binding is absent")
+    content = policy.read_bytes()
+    if (
+        hashlib.sha256(content).hexdigest() != declared.get("sha256")
+        or len(content) != declared.get("size_bytes")
+    ):
+        raise MaterializationError("selected HWM admission policy binding differs")
+    return policy
+
+
 def _production_hwm_source_paths(
     sources: Mapping[str, Path],
     artifact_rows: Sequence[Mapping[str, Any]],
@@ -295,12 +346,13 @@ def _production_hwm_source_paths(
         != account_path.resolve()
     ):
         raise MaterializationError("selected HWM account generation binding differs")
-    if not isinstance(manifest_inputs, Mapping):
-        raise MaterializationError("selected HWM admission policy binding is absent")
-    admission = manifest_inputs.get("account_strategy_admission_policy")
-    admission_path = _validate_file_definition(
-        admission, "account strategy admission policy"
-    )
+    if isinstance(manifest_inputs, Mapping):
+        admission_path = _validate_file_definition(
+            manifest_inputs.get("account_strategy_admission_policy"),
+            "account strategy admission policy",
+        )
+    else:
+        admission_path = _generation_admission_policy(account_path.parent)
     try:
         provider_path = sources["provider-ledger"] / "generation.json"
         baseline_path = sources["portfolio-baseline"] / "generation.json"
