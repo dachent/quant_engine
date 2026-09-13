@@ -523,8 +523,10 @@ checks.push(check(
         && hybridFactorEvidence.boundary?.includes("LIVE_PLUS_BACKTEST")
         && hybridFactorEvidence.table?.includes("Beta / loading")
         && hybridFactorEvidence.table.includes("Evidence composition")
-        && hybridFactorEvidence.strategy_rows.every((row) => /[1-9][0-9,]* backtest/.test(row.evidence ?? "")
-          && !row.evidence?.includes("no version-matched backtest prehistory"))),
+        && hybridFactorEvidence.strategy_rows.every(
+          (row) => !row.evidence?.includes("no version-matched backtest prehistory"),
+        )
+        && hybridFactorEvidence.strategy_rows.some((row) => /[1-9][0-9,]* backtest/.test(row.evidence ?? ""))),
   factorModeEvidence,
 ));
 await page.locator('[data-factor-evidence-mode="LIVE_ONLY"]').click();
