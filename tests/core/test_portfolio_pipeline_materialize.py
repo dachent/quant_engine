@@ -3026,6 +3026,9 @@ def _current_lens_release_fixture(tmp_path: Path) -> tuple[dict, dict]:
     return contract, {"decomposition_lenses": {"modes": modes}}
 
 
+DECOMPOSITION_AUTHORITY = "d" * 64
+
+
 def test_current_lens_generations_share_existing_release_roots(tmp_path: Path) -> None:
     if sys.platform == "win32":
         tmp_path = Path("\\\\?\\" + str(tmp_path.resolve()))
@@ -3037,7 +3040,7 @@ def test_current_lens_generations_share_existing_release_roots(tmp_path: Path) -
         materializer.PRODUCTION_ROOTS
     )
     assert sum(row["release_target"] for row in nodes.values()) == 12
-    materializer._verify_panel_lens_nodes(panel, nodes)
+    materializer._verify_panel_lens_nodes(panel, nodes, DECOMPOSITION_AUTHORITY)
     for (mode, surface, source_key), row in nodes.items():
         assert row["release_target"] is (surface == "STATIC")
         assert row["root_id"] == (
@@ -3048,7 +3051,9 @@ def test_current_lens_generations_share_existing_release_roots(tmp_path: Path) -
         "sources"
     ][0]["generation_id"] = "0" * 64
     with pytest.raises(materializer.MaterializationError, match="panel lens"):
-        materializer._verify_panel_lens_nodes(panel, nodes)
+        materializer._verify_panel_lens_nodes(
+            panel, nodes, DECOMPOSITION_AUTHORITY
+        )
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "pointer", "root"])
@@ -4032,3 +4037,28 @@ def test_governed_hwm_assessment_binds_the_admitted_input_contract() -> None:
     assert signature.parameters["input_contract_path"].default is None
     for entry in (materializer.build_spec, materializer.build_production_spec):
         assert "financial_input_contract_path" in inspect.signature(entry).parameters
+
+
+def test_panel_lens_authority_admits_the_dynamic_style_path(tmp_path: Path) -> None:
+    """The dynamic style path is a lens, not a surface split, so it has no surfaces.
+
+    It is bound through `meta.decomposition_generation_id`, which the caller
+    verifies separately; requiring a `surfaces` mapping from it made the gate
+    unsatisfiable for any panel that publishes it.
+    """
+
+    if sys.platform == "win32":
+        tmp_path = Path("\\\\?\\" + str(tmp_path.resolve()))
+    contract, panel = _current_lens_release_fixture(tmp_path)
+    nodes = materializer._production_lens_nodes(tmp_path, contract)
+    panel["decomposition_lenses"]["modes"]["LIVE_ONLY"].append(
+        {"lens_id": "DYNAMIC_STYLE", "generation_id": DECOMPOSITION_AUTHORITY}
+    )
+
+    materializer._verify_panel_lens_nodes(panel, nodes, DECOMPOSITION_AUTHORITY)
+
+    # The skip is not a licence to carry any unbound lens: a group with no
+    # surfaces that is not the decomposition authority is still a mismatch.
+    panel["decomposition_lenses"]["modes"]["LIVE_ONLY"][-1]["generation_id"] = "0" * 64
+    with pytest.raises(materializer.MaterializationError, match="panel lens"):
+        materializer._verify_panel_lens_nodes(panel, nodes, DECOMPOSITION_AUTHORITY)

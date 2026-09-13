@@ -3864,7 +3864,9 @@ def _production_lens_nodes(
 
 
 def _verify_panel_lens_nodes(
-    panel: Mapping[str, Any], nodes: Mapping[tuple[str, str, str], Mapping[str, Any]]
+    panel: Mapping[str, Any],
+    nodes: Mapping[tuple[str, str, str], Mapping[str, Any]],
+    decomposition_generation_id: str,
 ) -> None:
     """Require the panel to select every bound surface and evidence mode exactly."""
     lenses = panel.get("decomposition_lenses")
@@ -3878,6 +3880,17 @@ def _verify_panel_lens_nodes(
         for group in groups:
             surfaces = group.get("surfaces") if isinstance(group, dict) else None
             if not isinstance(surfaces, dict):
+                # The dynamic style path is a lens in its own right rather than
+                # a surface split of one, so it carries no `surfaces`. It is not
+                # part of the current-surface binding and must not be compared
+                # against it -- its generation is the decomposition authority
+                # the caller has already verified against `meta`, which is what
+                # makes skipping it here safe rather than merely lenient.
+                if (
+                    isinstance(group, dict)
+                    and group.get("generation_id") == decomposition_generation_id
+                ):
+                    continue
                 raise MaterializationError("prepared panel lens authority differs")
             for surface, value in surfaces.items():
                 sources = value.get("sources") if isinstance(value, dict) else None
@@ -4062,7 +4075,11 @@ def build_production_spec(
     ):
         raise MaterializationError("prepared panel analytics authority differs")
     if current_lenses:
-        _verify_panel_lens_nodes(panel_payload, current_lenses)
+        _verify_panel_lens_nodes(
+            panel_payload,
+            current_lenses,
+            generation_ids["factor-decomposition"],
+        )
         # Reuse financial inventory identities so its ArtifactNode dependencies
         # remain exact, while preventing a duplicate immutable-generation copy.
         for lens in current_lenses.values():
