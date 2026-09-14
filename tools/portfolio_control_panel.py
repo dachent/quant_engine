@@ -343,7 +343,14 @@ def _closed_frontend_resources(candidate_dir: Path) -> tuple[bool, object]:
     actual = Counter(parser.references)
     expected = Counter(_ALLOWED_FRONTEND_REFERENCES)
     for relative in (REPORT_DOWNLOAD, WORKBOOK_DOWNLOAD):
-        if _filesystem_path(candidate_dir / relative).is_file():
+        # A download is offered either as a file beside the page or as base64
+        # payload elements inside it. The workbook is only ever the latter, so
+        # presence on disk no longer decides whether its link is expected.
+        payload_prefix = _DOWNLOAD_METADATA[relative][2]
+        offered = _filesystem_path(candidate_dir / relative).is_file() or (
+            f'data-download-payload-prefix="{payload_prefix}"' in html
+        )
+        if offered:
             expected[("a", "href", relative)] += 1
     css_has_dynamic_resource = _css_has_dynamic_resource(styles)
     is_closed = (
@@ -10217,7 +10224,24 @@ def _rendered_files(
     files["index.html"] = files["index.html"].replace(
         _DOWNLOAD_PLACEHOLDER, " ".join(links).encode("utf-8")
     )
-    files.update(downloads)
+    # The workbook is served from the base64 payload inlined above, never from a
+    # file beside the page: `app.js` intercepts the click and rebuilds it from
+    # those chunks, and only reads the href as an identifier. Keeping an .xlsx in
+    # the generation directory is therefore pure liability -- the production
+    # roots live under a SharePoint sync root, and the sync client rewrites
+    # Office documents in place, injecting `customXml` document properties. That
+    # silently changes bytes inside a published, content-addressed generation:
+    # it is what left the 2026-08-16 report pointer unverifiable, and what made
+    # two byte-identical copies of this workbook diverge from each other during
+    # materialisation. Every other artifact this pipeline publishes is a format
+    # the sync client leaves alone.
+    files.update(
+        {
+            relative: content
+            for relative, content in downloads.items()
+            if relative != WORKBOOK_DOWNLOAD
+        }
+    )
     bound_inputs: dict[str, tuple[Path, str]] = {
         "report": (report_path, report_identity_values["sha256"]),
         "decomposition": (decomposition_path, decomposition_identity["sha256"]),
