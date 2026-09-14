@@ -1570,6 +1570,83 @@ def _annualize_coefficient_standard_error(
     return periodic_standard_error * periods_per_year
 
 
+class _TerminalStateRecursion:
+    """Carry the block-Thomas forward pass while a history grows one row at a time.
+
+    `_block_tridiagonal_solve` reads the terminal block straight off its forward
+    pass -- `solution[-1] = transformed_right[-1]` -- and the backward pass never
+    touches it. The walk-forward holdout below reads nothing but
+    `exposures[-1]`, so re-solving the whole path for each appended observation
+    repeats work already carried in `(transformed_upper, transformed_right)`.
+
+    Appending an observation makes the previously terminal block interior, which
+    changes only that block's own neighbour penalty -- endpoints appear in one
+    adjacent-state difference, interior states in two. Every earlier block, and
+    therefore the carried state, is untouched, so the pass resumes rather than
+    restarts: O(k^3) a step instead of O(t k^3).
+
+    The arithmetic is written to match `_dynamic_fit` and
+    `_block_tridiagonal_solve` operation for operation, because the acceptance
+    test is that every generation id stays byte-identical.
+    """
+
+    def __init__(
+        self,
+        *,
+        smoothness: float,
+        ridge: float,
+        intercept: float,
+        factor_count: int,
+    ) -> None:
+        self.smoothness = smoothness
+        self.ridge = ridge
+        self.intercept = intercept
+        self.identity = np.eye(factor_count, dtype=np.float64)
+        self.off_diagonal = (-smoothness * self.identity).copy()
+        self.transformed_upper: FloatArray | None = None
+        self.transformed_right: FloatArray | None = None
+        self.processed = 0
+
+    def _block(
+        self, factor_row: FloatArray, target_value: float, penalty: float
+    ) -> tuple[FloatArray, FloatArray]:
+        # The loop never passes observation weights, so every weight is one.
+        weight = 1.0
+        effective = cast(
+            FloatArray,
+            (
+                weight * np.outer(factor_row, factor_row)
+                + (self.ridge + self.smoothness * penalty) * self.identity
+            ).astype(np.float64),
+        )
+        rhs = (
+            weight * factor_row * target_value
+            - (weight * factor_row) * self.intercept
+        )[:, None]
+        if self.transformed_upper is not None:
+            lower = self.off_diagonal.T
+            effective = effective - lower @ self.transformed_upper
+            rhs = rhs - lower @ self.transformed_right
+        return effective, cast(FloatArray, rhs)
+
+    def advance(self, factor_row: FloatArray, target_value: float) -> None:
+        """Fold one observation in as an interior block and keep the carry."""
+
+        effective, rhs = self._block(
+            factor_row, target_value, 1.0 if self.processed == 0 else 2.0
+        )
+        self.transformed_right, _fallback = _linear_solve(effective, rhs)
+        self.transformed_upper, _fallback = _linear_solve(effective, self.off_diagonal)
+        self.processed += 1
+
+    def terminal(self, factor_row: FloatArray, target_value: float) -> FloatArray:
+        """Exposures of the final block, without disturbing the carried state."""
+
+        effective, rhs = self._block(factor_row, target_value, 1.0)
+        solved, _fallback = _linear_solve(effective, rhs)
+        return cast(FloatArray, solved[:, 0].astype(np.float64))
+
+
 def _dynamic_model_result(
     model: ModelDefinition,
     target_rows: Sequence[TargetRow],
@@ -1634,41 +1711,33 @@ def _dynamic_model_result(
         ridge=ridge,
     )
 
-    history_matrix = train_matrix.copy()
-    history_target = train_target.copy()
     test_predictions: list[float] = []
     filtered_exposures: dict[date, FloatArray] = {}
     holdout_forecasts: list[dict[str, object]] = []
-    # The posterior of one step is the prior of the next: same arrays, same
-    # smoothness, ridge and fixed intercept, and `_dynamic_fit` is pure. Only
-    # the first prior has to be solved for.
-    carried_fit: DynamicFit | None = None
+    # Nothing here reads more than `exposures[-1]`, and the block-Thomas forward
+    # pass already carries everything needed to extend a path by one row. Solving
+    # the whole history again on every step made this loop O(T^2 k^3) -- 97% of a
+    # refresh, and worse every week as history grows. Resuming the pass costs
+    # O(k^3) a step and produces the same bytes.
+    recursion = _TerminalStateRecursion(
+        smoothness=selected_smoothness,
+        ridge=ridge,
+        intercept=train_fit.intercept,
+        factor_count=train_matrix.shape[1],
+    )
+    for position in range(len(train_target) - 1):
+        recursion.advance(train_matrix[position], train_target[position])
+    forecast_exposure = recursion.terminal(train_matrix[-1], train_target[-1])
+    previous_row = train_matrix[-1]
+    previous_value = train_target[-1]
     for index, observation in enumerate(test):
-        prior_fit = (
-            carried_fit
-            if carried_fit is not None
-            else _dynamic_fit(
-                history_matrix,
-                history_target,
-                smoothness=selected_smoothness,
-                ridge=ridge,
-                fixed_intercept=train_fit.intercept,
-            )
-        )
-        forecast_exposure = prior_fit.exposures[-1].copy()
         prediction = float(train_fit.intercept + test_matrix[index] @ forecast_exposure)
         test_predictions.append(prediction)
-        history_matrix = np.vstack((history_matrix, test_matrix[index]))
-        history_target = np.append(history_target, test_target[index])
-        posterior_fit = _dynamic_fit(
-            history_matrix,
-            history_target,
-            smoothness=selected_smoothness,
-            ridge=ridge,
-            fixed_intercept=train_fit.intercept,
-        )
-        carried_fit = posterior_fit
-        filtered_exposure = posterior_fit.exposures[-1].copy()
+        # The block that was terminal becomes interior once a row follows it.
+        recursion.advance(previous_row, previous_value)
+        filtered_exposure = recursion.terminal(test_matrix[index], test_target[index])
+        previous_row = test_matrix[index]
+        previous_value = test_target[index]
         day = observation[0].day
         filtered_exposures[day] = filtered_exposure
         holdout_forecasts.append(
@@ -1682,6 +1751,8 @@ def _dynamic_model_result(
                 "predicted_excess_return": _number(prediction),
             }
         )
+        # The posterior of one step is the prior of the next.
+        forecast_exposure = filtered_exposure
     test_predicted = np.asarray(test_predictions, dtype=np.float64)
     holdout_r_squared = _r_squared(
         test_target, test_predicted, float(np.mean(train_target))
