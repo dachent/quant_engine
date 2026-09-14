@@ -205,6 +205,28 @@ def _artifact_for_digest(
     return node
 
 
+def _first_difference(actual: Any, expected: Any, path: str = "") -> str:
+    """Name the first place two projections diverge, so a failure is actionable."""
+
+    if isinstance(actual, Mapping) and isinstance(expected, Mapping):
+        for key in sorted(set(actual) | set(expected)):
+            if key not in actual:
+                return f"{path}.{key} missing from panel"
+            if key not in expected:
+                return f"{path}.{key} unexpected in panel"
+            if actual[key] != expected[key]:
+                return _first_difference(actual[key], expected[key], f"{path}.{key}")
+        return f"{path} equal"
+    if isinstance(actual, list) and isinstance(expected, list):
+        if len(actual) != len(expected):
+            return f"{path} length {len(actual)} != {len(expected)}"
+        for index, (left, right) in enumerate(zip(actual, expected)):
+            if left != right:
+                return _first_difference(left, right, f"{path}[{index}]")
+        return f"{path} equal"
+    return f"{path or 'value'} panel={actual!r} expected={expected!r}"
+
+
 def _generation(spec: Any, artifact: ArtifactNode) -> GenerationNode:
     matches = [
         node
@@ -598,7 +620,17 @@ def _replay_model(
         raise FinancialOutcomeError(
             "financial model differs from selected-source recomputation"
         )
-    return result
+    # Hand back what every consumer actually read, not the in-memory object.
+    # They all loaded the published bytes, and `canonical_json_bytes` sorts keys,
+    # so a deserialized mapping iterates its factors in sorted order while the
+    # freshly built one iterates them in `model.factor_ids` order. That only
+    # matters because a consumer sums factor contributions in iteration order
+    # (`portfolio_control_panel._factor_analysis`), and a different summand order
+    # rounds differently in the last bits -- enough to move a `.12g` string and
+    # fail the consumer comparison against a projection that is otherwise exactly
+    # equal. The bytes were just proved identical above, so this changes nothing
+    # except the iteration order the comparison inherits.
+    return cast(dict[str, Any], json.loads(result_bytes.decode("utf-8")))
 
 
 def _required_series(
@@ -781,16 +813,38 @@ def _verify_decomposition_consumers(
             "source_label": producer.DECOMPOSITION_LENS_SOURCES[source_key][1],
             "surface": surface,
         }
-        if (
-            displayed != [expected]
-            or len(source_rows) != 1
-            or source_rows[0].get("source_sha256") != node.sha256
-            or source_rows[0].get("generation_id")
-            != _generation(spec, node).generation_id
-            or source_rows[0].get("plan_spec")
-            != plan_bindings[(source_key, surface, mode)]
+        # Reported one clause at a time. As a single `or` chain this said only
+        # "values differ", which cost hours to attribute -- the tripped clause
+        # and the differing field were both invisible.
+        if displayed != [expected]:
+            raise FinancialOutcomeError(
+                f"panel decomposition values differ: {node_id}: "
+                + _first_difference(displayed, [expected])
+            )
+        if len(source_rows) != 1:
+            raise FinancialOutcomeError(
+                f"panel decomposition source rows differ: {node_id}: "
+                f"{len(source_rows)} rows for {source_key}"
+            )
+        observed_source = source_rows[0]
+        for label, actual, wanted in (
+            ("source_sha256", observed_source.get("source_sha256"), node.sha256),
+            (
+                "generation_id",
+                observed_source.get("generation_id"),
+                _generation(spec, node).generation_id,
+            ),
+            (
+                "plan_spec",
+                observed_source.get("plan_spec"),
+                plan_bindings[(source_key, surface, mode)],
+            ),
         ):
-            raise FinancialOutcomeError(f"panel decomposition values differ: {node_id}")
+            if actual != wanted:
+                raise FinancialOutcomeError(
+                    f"panel decomposition {label} differs: {node_id}: "
+                    f"panel={actual!r} expected={wanted!r}"
+                )
         checked[node_id] = hashlib.sha256(
             json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
