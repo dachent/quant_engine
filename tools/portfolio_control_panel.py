@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 from collections import Counter, defaultdict
 import copy
 from datetime import date, datetime, timedelta
@@ -1123,6 +1124,42 @@ def _report_downloads(
     files[WORKBOOK_DOWNLOAD] = workbook_bytes
     bindings["report_workbook"] = (workbook_path, workbook_sha256)
     return files, bindings
+
+
+def embedded_download_bytes(html: str, relative_path: str) -> bytes:
+    """Recover a download the page carries inline rather than as a file.
+
+    The workbook is delivered only as base64 payload elements inside
+    `index.html`, because an .xlsx written into a published generation is
+    rewritten in place by the SharePoint sync client and a sealed directory
+    cannot tolerate that. Anything that needs those bytes -- the browser, and
+    the financial-outcome validator's workbook parity receipt -- reads them from
+    here, so all of them see the same bytes by construction.
+    """
+
+    metadata = _DOWNLOAD_METADATA.get(relative_path)
+    if metadata is None:
+        raise ControlPanelValidationError("embedded download is not a known payload")
+    prefix = metadata[2]
+    pattern = re.compile(
+        r'<script type="application/octet-stream" id="'
+        + re.escape(prefix)
+        + r'-(\d{5})"[^>]*>([^<]*)</script>'
+    )
+    chunks = sorted(
+        ((int(index), payload) for index, payload in pattern.findall(html)),
+        key=lambda item: item[0],
+    )
+    if not chunks or [index for index, _ in chunks] != list(range(len(chunks))):
+        raise ControlPanelValidationError("embedded download payload is incomplete")
+    try:
+        return base64.b64decode(
+            "".join(payload for _, payload in chunks), validate=True
+        )
+    except (ValueError, binascii.Error) as exc:
+        raise ControlPanelValidationError(
+            "embedded download payload is not valid base64"
+        ) from exc
 
 
 def _report_download_link(relative_path: str, label: str, content: bytes) -> str:
@@ -7914,9 +7951,13 @@ def _panel_data(
                             # because the lens decomposed nothing, and a row
                             # without a model cannot have consumed backtest
                             # history.
-                            if series.get("model_id") is None and _text(
-                                series.get("status"), "hybrid decomposition status"
-                            ) == "UNAVAILABLE":
+                            if (
+                                series.get("model_id") is None
+                                and _text(
+                                    series.get("status"), "hybrid decomposition status"
+                                )
+                                == "UNAVAILABLE"
+                            ):
                                 continue
                             composition = _object(
                                 series.get("series_composition"),

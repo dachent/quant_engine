@@ -307,7 +307,7 @@ def _epoch_manifest_profile(spec: Any) -> dict[str, Any]:
     if gate is not None:
         _path, payload = gate
         inputs = payload["inputs"]
-        selected_bytes = {
+        selected_bytes: dict[str, bytes] = {
             key: _verified_file(
                 Path(definition["path"]),
                 definition["sha256"],
@@ -332,7 +332,7 @@ def _epoch_manifest_profile(spec: Any) -> dict[str, Any]:
         generation_dir, manifest, "authority/calculation-inputs.json"
     )
     calculation = json.loads(calculation_bytes)
-    selected_bytes: dict[str, bytes] = {}
+    selected_bytes = {}
     for key, member in EPOCH_MANIFEST_CALCULATION_MEMBERS.items():
         if member not in calculation:
             raise FinancialOutcomeError("selected epoch calculation inputs differ")
@@ -437,7 +437,6 @@ def _manifest_artifact(
 
 def selected_hwm_source_paths(spec: Any) -> dict[str, Path]:
     """Resolve the already selected account, provider and baseline authorities."""
-    from portfolio_pipeline_materialize import ACCOUNT_STRATEGY_CLASSIFICATION_POLICY
 
     account = [
         node
@@ -470,9 +469,7 @@ def selected_hwm_source_paths(spec: Any) -> dict[str, Path]:
             raise FinancialOutcomeError("selected HWM source generation differs")
         result[key] = path
     profile = _epoch_manifest_profile(spec)
-    result["account_manifest_admission_policy_path"] = profile[
-        "admission_policy_path"
-    ]
+    result["account_manifest_admission_policy_path"] = profile["admission_policy_path"]
     result["account_manifest_flow_classification_policy_path"] = profile[
         "classification_policy_path"
     ]
@@ -1083,8 +1080,14 @@ def _verify_consumers(
     )
     if downloadable_report != report_bytes:
         raise FinancialOutcomeError("downloaded report differs from selected report")
-    _path, workbook = _generation_file(
-        epochs["panel_generation"], panel_producer.WORKBOOK_DOWNLOAD
+    # The panel carries the workbook inline rather than as a file beside the
+    # page: an .xlsx inside a published generation is rewritten in place by the
+    # SharePoint sync client, and a sealed directory cannot tolerate a file that
+    # changes under it. Parity is therefore checked against the bytes the panel
+    # actually delivers, which is what the browser downloads too.
+    _index_path, index_html = _generation_file(epochs["panel_generation"], "index.html")
+    workbook = panel_producer.embedded_download_bytes(
+        index_html.decode("utf-8"), panel_producer.WORKBOOK_DOWNLOAD
     )
     parity = report_producer._workbook_parity_receipt(report_bytes, workbook)
     correlation_node = nodes["financial-outcome-dependence-live-only"]
