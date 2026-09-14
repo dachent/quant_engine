@@ -11,7 +11,9 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 MODULE_PATH = REPOSITORY_ROOT / "tools" / "portfolio_strategy_backtests.py"
-SPEC = importlib.util.spec_from_file_location("portfolio_strategy_backtests", MODULE_PATH)
+SPEC = importlib.util.spec_from_file_location(
+    "portfolio_strategy_backtests", MODULE_PATH
+)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError("unable to load portfolio strategy-backtests stager")
 backtests = importlib.util.module_from_spec(SPEC)
@@ -144,13 +146,16 @@ def test_returns_that_differ_from_the_manifest_are_refused(tmp_path) -> None:
         RETURNS.replace("0.01", "0.05"), encoding="utf-8", newline=""
     )
 
-    with pytest.raises(StrategyBacktestsError, match="returns differ from the manifest"):
+    with pytest.raises(
+        StrategyBacktestsError, match="returns differ from the manifest"
+    ):
         backtests.stage_candidate(bundle, tmp_path / "backtests")
 
 
 def test_a_non_backtest_row_is_refused(tmp_path) -> None:
     bundle = _bundle(
-        tmp_path / "bundles", returns=RETURNS.replace("BACKTEST,beta", "ACCOUNT_LIVE,beta")
+        tmp_path / "bundles",
+        returns=RETURNS.replace("BACKTEST,beta", "ACCOUNT_LIVE,beta"),
     )
 
     with pytest.raises(StrategyBacktestsError, match="non-backtest evidence layer"):
@@ -189,7 +194,9 @@ def test_a_bundle_renamed_away_from_its_identity_is_refused(tmp_path) -> None:
     renamed = bundle.parent / ("0" * 64)
     bundle.rename(renamed)
 
-    with pytest.raises(StrategyBacktestsError, match="identity differs from its directory"):
+    with pytest.raises(
+        StrategyBacktestsError, match="identity differs from its directory"
+    ):
         backtests.stage_candidate(renamed, tmp_path / "backtests")
 
 

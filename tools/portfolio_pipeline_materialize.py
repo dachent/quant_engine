@@ -286,9 +286,7 @@ def _generation_admission_policy(generation_root: Path) -> Path:
     declared = identities.get("admission_policy")
     if not isinstance(declared, Mapping):
         raise MaterializationError("selected HWM admission policy binding is absent")
-    manifest = _load(
-        generation_root / "generation.json", "account manifest generation"
-    )
+    manifest = _load(generation_root / "generation.json", "account manifest generation")
     artifacts = manifest.get("artifacts")
     if not isinstance(artifacts, list):
         raise MaterializationError("selected HWM admission policy binding differs")
@@ -309,10 +307,9 @@ def _generation_admission_policy(generation_root: Path) -> Path:
     if policy.is_symlink() or not policy.is_file():
         raise MaterializationError("selected HWM admission policy binding is absent")
     content = policy.read_bytes()
-    if (
-        hashlib.sha256(content).hexdigest() != declared.get("sha256")
-        or len(content) != declared.get("size_bytes")
-    ):
+    if hashlib.sha256(content).hexdigest() != declared.get("sha256") or len(
+        content
+    ) != declared.get("size_bytes"):
         raise MaterializationError("selected HWM admission policy binding differs")
     return policy
 

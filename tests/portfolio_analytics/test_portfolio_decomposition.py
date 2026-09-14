@@ -1039,7 +1039,9 @@ def test_dynamic_loo_matches_the_explicit_smoother(shape, smoothness):
     observations, factors = shape
     rng = np.random.default_rng(20260912)
     matrix = rng.normal(size=(observations, factors))
-    target = matrix @ rng.normal(size=factors) + rng.normal(scale=0.1, size=observations)
+    target = matrix @ rng.normal(size=factors) + rng.normal(
+        scale=0.1, size=observations
+    )
 
     score, predictions = decomposition._dynamic_loo_score(
         matrix, target, smoothness=smoothness, ridge=1e-6
@@ -1068,10 +1070,10 @@ def test_inverse_diagonal_matches_a_dense_inverse():
 
     dense = np.zeros((count * size, count * size))
     for i, block in enumerate(diagonal):
-        dense[i * size:(i + 1) * size, i * size:(i + 1) * size] = block
+        dense[i * size : (i + 1) * size, i * size : (i + 1) * size] = block
     for i, block in enumerate(off_diagonal):
-        dense[i * size:(i + 1) * size, (i + 1) * size:(i + 2) * size] = block
-        dense[(i + 1) * size:(i + 2) * size, i * size:(i + 1) * size] = block.T
+        dense[i * size : (i + 1) * size, (i + 1) * size : (i + 2) * size] = block
+        dense[(i + 1) * size : (i + 2) * size, i * size : (i + 1) * size] = block.T
     inverse = np.linalg.inv(dense)
 
     blocks, status = decomposition._block_tridiagonal_inverse_diagonal(
@@ -1080,7 +1082,7 @@ def test_inverse_diagonal_matches_a_dense_inverse():
 
     assert status == "BLOCK_TRIDIAGONAL_FULL_RANK"
     for i, block in enumerate(blocks):
-        expected = inverse[i * size:(i + 1) * size, i * size:(i + 1) * size]
+        expected = inverse[i * size : (i + 1) * size, i * size : (i + 1) * size]
         assert block == pytest.approx(expected, abs=1e-10)
 
 
@@ -1097,7 +1099,9 @@ def test_dynamic_loo_stays_linear_in_the_series_length():
     rng = np.random.default_rng(3)
     observations, factors = 6000, 8
     matrix = rng.normal(size=(observations, factors))
-    target = matrix @ rng.normal(size=factors) + rng.normal(scale=0.1, size=observations)
+    target = matrix @ rng.normal(size=factors) + rng.normal(
+        scale=0.1, size=observations
+    )
 
     score, predictions = decomposition._dynamic_loo_score(
         matrix, target, smoothness=0.2, ridge=1e-6

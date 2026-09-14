@@ -259,17 +259,19 @@ _HISTORY_PROVIDER_LEDGER_TRANSITION: Final = {
 # generations. The #319 authority has since been re-accepted onto the current
 # lineage, so the accepted document already carries the refreshed identities
 # and there is nothing left to re-point.
-_HISTORY_PROVIDER_RECEIPT_REBINDS: Final = {}
+_HISTORY_PROVIDER_RECEIPT_REBINDS: Final[
+    dict[str, dict[tuple[str, str, str], tuple[str, str, str]]]
+] = {}
 # The source-segment half of the same #374 transition, discharged by the same
 # re-acceptance.
-_HISTORY_PROVIDER_SOURCE_REBINDS: Final = {}
+_HISTORY_PROVIDER_SOURCE_REBINDS: Final[dict[str, tuple[str, str, str, str]]] = {}
 # Issue #374 also moved four account-live segment digests when the redundant
 # one-account capital-weighting round trip was removed. The re-accepted
 # authority names those digests directly.
-_HISTORY_SEGMENT_SHA256_OVERRIDES: Final = {}
+_HISTORY_SEGMENT_SHA256_OVERRIDES: Final[dict[str, tuple[str, str]]] = {}
 # Spans and observation counts the accepted vintage predated; the re-accepted
 # authority observes them itself.
-_HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final = {}
+_HISTORY_SEGMENT_PROJECTION_OVERRIDES: Final[dict[str, dict[str, object]]] = {}
 EPOCH_MANIFEST_ARTIFACT_PATH: Final = "outputs/account-strategy-manifest.json"
 EPOCH_MANIFEST_ARTIFACT_SCHEMA_NAME: Final = "account-strategy-manifest"
 EPOCH_MANIFEST_ARTIFACT_SCHEMA_VERSIONS: Final = frozenset({"8", "9"})
@@ -4297,8 +4299,7 @@ def _validate_history_corrections(
             modes = _object(row["mode_admission"], "history mode_admission")
             if set(modes.values()) != {"NOT_APPLICABLE"}:
                 raise FinancialMvpContractError(
-                    "non-existent history layer is admitted to a mode: "
-                    f"{correction_id}"
+                    f"non-existent history layer is admitted to a mode: {correction_id}"
                 )
 
     for strategy_id, expected_layers in HISTORY_CORRECTION_LAYERS.items():
@@ -4412,14 +4413,10 @@ def _validate_history_corrections(
             "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY",
         }
     )
-    if (
-        not (unresolved_disposition or admitted_disposition)
-        or {
-            "tables/returns_daily.parquet",
-            "tables/strategy_relationships.parquet",
-        }
-        - set(p123_ai_receipts)
-    ):
+    if not (unresolved_disposition or admitted_disposition) or {
+        "tables/returns_daily.parquet",
+        "tables/strategy_relationships.parquet",
+    } - set(p123_ai_receipts):
         raise FinancialMvpContractError(
             "P123 AI backtest bypasses its unresolved version disposition"
         )

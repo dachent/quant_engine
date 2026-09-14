@@ -169,9 +169,7 @@ def _series(report: Any) -> tuple[list[dict[str, str]], dict[str, Any]]:
     for entry in cumulative:
         if not isinstance(entry, dict) or PRODUCT_SERIES not in entry:
             raise ProviderTrackRecordError("track-record observation differs")
-        benchmarks.update(
-            key for key in entry if key not in {"date", PRODUCT_SERIES}
-        )
+        benchmarks.update(key for key in entry if key not in {"date", PRODUCT_SERIES})
         observations.append(
             (
                 _day(entry.get("date"), "track-record observation date"),
@@ -353,7 +351,9 @@ def stage_candidate(
     else:
         generations.mkdir(parents=True, exist_ok=True)
         temporary = Path(
-            tempfile.mkdtemp(prefix=".portfolio-provider-track-record-", dir=generations)
+            tempfile.mkdtemp(
+                prefix=".portfolio-provider-track-record-", dir=generations
+            )
         )
         try:
             for relative, content in expected.items():

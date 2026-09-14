@@ -193,7 +193,9 @@ def _curve(performance: Any) -> tuple[list[tuple[date, Decimal]], date, date]:
     return observations, start, launch
 
 
-def _series(model: Any, performance: Any) -> tuple[list[dict[str, str]], dict[str, Any]]:
+def _series(
+    model: Any, performance: Any
+) -> tuple[list[dict[str, str]], dict[str, Any]]:
     if not isinstance(model, dict):
         raise DesignerModelCurveError("model payload root differs")
     observations, start, launch = _curve(performance)

@@ -89,10 +89,9 @@ def _build(bundle: Path) -> tuple[bytes, bytes, GenerationManifest, dict[str, An
     artifact = source.get("returns_artifact")
     if not isinstance(artifact, dict):
         raise StrategyBacktestsError("bundle returns artifact is invalid")
-    if (
-        hashlib.sha256(returns_bytes).hexdigest() != artifact.get("sha256")
-        or len(returns_bytes) != artifact.get("size_bytes")
-    ):
+    if hashlib.sha256(returns_bytes).hexdigest() != artifact.get("sha256") or len(
+        returns_bytes
+    ) != artifact.get("size_bytes"):
         raise StrategyBacktestsError("bundle returns differ from the manifest")
 
     rows = list(csv.DictReader(io.StringIO(returns_bytes.decode("utf-8"))))
@@ -221,11 +220,16 @@ def _build(bundle: Path) -> tuple[bytes, bytes, GenerationManifest, dict[str, An
         ),
         verification=VerificationStatus.VERIFIED,
     )
-    return returns_bytes, catalog_bytes, manifest, {
-        "manifest_bytes": manifest_bytes,
-        "series": series,
-        "return_observations": len(rows),
-    }
+    return (
+        returns_bytes,
+        catalog_bytes,
+        manifest,
+        {
+            "manifest_bytes": manifest_bytes,
+            "series": series,
+            "return_observations": len(rows),
+        },
+    )
 
 
 def stage_candidate(bundle: Path, output_root: Path) -> dict[str, object]:

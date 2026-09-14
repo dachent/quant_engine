@@ -469,7 +469,9 @@ def _verified_generation_artifact(
 
 def _p123_history_dispositions(
     generation_root: Path,
-) -> tuple[list[dict[str, object]], tuple[list[dict[str, str]], dict[str, object]] | None]:
+) -> tuple[
+    list[dict[str, object]], tuple[list[dict[str, str]], dict[str, object]] | None
+]:
     """Classify the exact EU capture and retain deliberate non-history decisions.
 
     Also returns the EU backtest part -- the prehistory strictly before the
@@ -1163,7 +1165,9 @@ def _p123_eu_backtest(
     ):
         period_return = current[0] / previous[0] - Decimal(1)
         if period_return <= -1:
-            raise StrategyHistoryError("Portfolio123 exact EU backtest return is invalid")
+            raise StrategyHistoryError(
+                "Portfolio123 exact EU backtest return is invalid"
+            )
         rows.append(
             {
                 "series_id": "EU [P123]",
@@ -1196,7 +1200,8 @@ def _p123_eu_backtest(
                 "source_id": "portfolio123-exact-connected-eu-equity-curve",
             }
         ],
-        "source_rows_excluded_at_or_after_provider_launch": len(ordered) - len(prehistory),
+        "source_rows_excluded_at_or_after_provider_launch": len(ordered)
+        - len(prehistory),
         "strategy_version": version,
     }
     return rows, definition
@@ -2334,9 +2339,7 @@ def build_bundle(
         robuxio_part = _robuxio_track_record(
             robuxio_track_record_generation, str(robuxio_strategy_version)
         )
-    p123_eu_designer_part: tuple[list[dict[str, str]], dict[str, object]] | None = (
-        None
-    )
+    p123_eu_designer_part: tuple[list[dict[str, str]], dict[str, object]] | None = None
     if (p123_eu_designer_model_generation is None) != (
         p123_eu_strategy_version is None
     ):
@@ -2373,9 +2376,7 @@ def build_bundle(
         ]
         rows, definition = p123_eu_designer_part
         for row in superseded:
-            definition["connected_model_currency"] = row.get(
-                "connected_model_currency"
-            )
+            definition["connected_model_currency"] = row.get("connected_model_currency")
             definition["connected_model_inception"] = row.get(
                 "connected_model_inception"
             )
@@ -2441,17 +2442,20 @@ def build_bundle(
     if boundaries:
         kept: list[dict[str, str]] = []
         excluded_by_series: dict[str, int] = {}
-        for row in rows:
-            boundary = boundaries.get(row["series_id"])
-            if boundary is not None and date.fromisoformat(row["date"]) >= boundary:
-                excluded_by_series[row["series_id"]] = (
-                    excluded_by_series.get(row["series_id"], 0) + 1
+        for history_row in rows:
+            row_series_id = history_row["series_id"]
+            boundary = boundaries.get(row_series_id)
+            if boundary is not None and date.fromisoformat(history_row["date"]) >= (
+                boundary
+            ):
+                excluded_by_series[row_series_id] = (
+                    excluded_by_series.get(row_series_id, 0) + 1
                 )
                 continue
-            kept.append(row)
+            kept.append(history_row)
         rows = kept
         for definition in definitions:
-            series_id = definition["series_id"]
+            series_id = str(definition["series_id"])
             boundary = boundaries.get(series_id)
             if boundary is None:
                 continue
@@ -2580,10 +2584,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = write_bundle(
             args.output_root,
-            live_inceptions=dict(
-                (part.strip() for part in item.split("=", 1))
-                for item in args.live_inception
-            ),
+            live_inceptions={
+                series_id.strip(): value.strip()
+                for series_id, value in (
+                    item.split("=", 1) for item in args.live_inception
+                )
+            },
             grizzly_workbook=args.grizzly_workbook,
             grizzly_original_design_workbook=args.grizzly_original_design_workbook,
             grizzly_spx_workbook=args.grizzly_spx_workbook,
@@ -2600,9 +2606,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             portfolio123_generation_root=args.portfolio123_generation_root,
             robuxio_track_record_generation=args.robuxio_track_record_generation,
             robuxio_strategy_version=args.robuxio_strategy_version,
-            p123_eu_designer_model_generation=(
-                args.p123_eu_designer_model_generation
-            ),
+            p123_eu_designer_model_generation=(args.p123_eu_designer_model_generation),
             p123_eu_strategy_version=args.p123_eu_strategy_version,
             as_of_date=args.as_of_date,
         )

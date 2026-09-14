@@ -1041,9 +1041,7 @@ def test_wait_for_progress_allows_work_that_outlives_its_budget() -> None:
         stderr=subprocess.DEVNULL,
     )
     try:
-        return_code = pipeline_module._wait_for_progress(
-            process, 1, time.monotonic
-        )
+        return_code = pipeline_module._wait_for_progress(process, 1, time.monotonic)
     finally:
         if process.poll() is None:  # pragma: no cover - only on failure
             process.kill()
@@ -1097,9 +1095,7 @@ def test_command_node_accepts_a_budget_above_the_former_ceiling(
     raw, _, _, _ = _spec_dict(tmp_path, command=command)
 
     spec = _parse(raw)
-    bounded = [
-        node for node in spec.nodes if node.node_id == "local-build"
-    ]
+    bounded = [node for node in spec.nodes if node.node_id == "local-build"]
 
     assert bounded[0].timeout_seconds == 7200
 
@@ -1119,10 +1115,14 @@ def test_capture_stream_observes_a_trickle_before_the_pipe_fills(
 
     child = tmp_path / "trickle.py"
     child.write_text(
-        "import sys, time" + chr(10)
-        + "for _ in range(5):" + chr(10)
-        + "    print('tick', file=sys.stderr, flush=True)" + chr(10)
-        + "    time.sleep(0.1)" + chr(10),
+        "import sys, time"
+        + chr(10)
+        + "for _ in range(5):"
+        + chr(10)
+        + "    print('tick', file=sys.stderr, flush=True)"
+        + chr(10)
+        + "    time.sleep(0.1)"
+        + chr(10),
         encoding="utf-8",
     )
     process = subprocess.Popen(

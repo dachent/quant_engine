@@ -3051,9 +3051,7 @@ def test_current_lens_generations_share_existing_release_roots(tmp_path: Path) -
         "sources"
     ][0]["generation_id"] = "0" * 64
     with pytest.raises(materializer.MaterializationError, match="panel lens"):
-        materializer._verify_panel_lens_nodes(
-            panel, nodes, DECOMPOSITION_AUTHORITY
-        )
+        materializer._verify_panel_lens_nodes(panel, nodes, DECOMPOSITION_AUTHORITY)
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "pointer", "root"])

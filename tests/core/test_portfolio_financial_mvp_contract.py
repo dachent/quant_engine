@@ -1712,8 +1712,7 @@ def test_census_owner_projection_rejects_coherent_semantic_rewrites() -> None:
     with pytest.raises(
         contract_tool.FinancialMvpContractError,
         match=(
-            "history strategy version differs from product authority: "
-            "p123-eu-backtest"
+            "history strategy version differs from product authority: p123-eu-backtest"
         ),
     ):
         _validate(partial_correction_rewrite)
@@ -3093,12 +3092,12 @@ def test_truthful_history_corrections_bind_layers_funding_and_versions() -> None
         "strategy_version"
     ]["version_refs"]
     assert owner_versions == {
-        "p123-ai-factor": _history_correction(
-            contract, "p123-ai-factor-account-live"
-        )["strategy_version"]["version_ref"],
-        "grizzlybears-vtma": _history_correction(contract, "grizzlybears-vtma-account-live")[
+        "p123-ai-factor": _history_correction(contract, "p123-ai-factor-account-live")[
             "strategy_version"
         ]["version_ref"],
+        "grizzlybears-vtma": _history_correction(
+            contract, "grizzlybears-vtma-account-live"
+        )["strategy_version"]["version_ref"],
         "p123-eu": p123_provider["strategy_version"]["version_ref"],
         "qsi": _history_correction(contract, "qsi-account-live")["strategy_version"][
             "version_ref"

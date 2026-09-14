@@ -1149,7 +1149,7 @@ def _block_tridiagonal_inverse_diagonal(
         effective = diagonal[index].copy()
         if index:
             effective -= off_diagonal[index - 1].T @ upper[index - 1]
-        schur.append(cast(FloatArray, effective))
+        schur.append(effective)
         if index < count - 1:
             solved_upper, fallback = _linear_solve(effective, off_diagonal[index])
             used_pseudoinverse = used_pseudoinverse or fallback
@@ -1164,10 +1164,8 @@ def _block_tridiagonal_inverse_diagonal(
     for index in range(count - 2, -1, -1):
         schur_inverse, fallback = _linear_solve(schur[index], identity)
         used_pseudoinverse = used_pseudoinverse or fallback
-        inverse_diagonal[index] = cast(
-            FloatArray,
-            schur_inverse
-            + upper[index] @ inverse_diagonal[index + 1] @ upper[index].T,
+        inverse_diagonal[index] = (
+            schur_inverse + upper[index] @ inverse_diagonal[index + 1] @ upper[index].T
         )
     status = (
         "BLOCK_TRIDIAGONAL_PSEUDOINVERSE"
@@ -1620,14 +1618,13 @@ class _TerminalStateRecursion:
             ).astype(np.float64),
         )
         rhs = (
-            weight * factor_row * target_value
-            - (weight * factor_row) * self.intercept
+            weight * factor_row * target_value - (weight * factor_row) * self.intercept
         )[:, None]
-        if self.transformed_upper is not None:
+        if self.transformed_upper is not None and self.transformed_right is not None:
             lower = self.off_diagonal.T
             effective = effective - lower @ self.transformed_upper
             rhs = rhs - lower @ self.transformed_right
-        return effective, cast(FloatArray, rhs)
+        return effective, rhs
 
     def advance(self, factor_row: FloatArray, target_value: float) -> None:
         """Fold one observation in as an interior block and keep the carry."""

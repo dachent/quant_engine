@@ -3488,7 +3488,7 @@ def _matrixport_account_is_unadmitted(
 
 
 def _strategies_without_a_backtest_layer(
-    corrections: Mapping[str, Mapping[str, object]]
+    corrections: Mapping[str, Mapping[str, object]],
 ) -> set[str]:
     """Strategies whose BACKTEST layer the product records as non-existent.
 
@@ -4257,7 +4257,7 @@ def build_layered_history_generation(
         for row in p123_ai_backtest
         if date.fromisoformat(row["date"]) < p123_ai_live_start
     ]
-    p123_ai_overlap = p123_ai_backtest[len(p123_ai_prehistory):]
+    p123_ai_overlap = p123_ai_backtest[len(p123_ai_prehistory) :]
     if not p123_ai_exact_version:
         version_mismatched_backtests.add("p123-ai-factor")
         p123_ai_disposition = "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
@@ -8140,9 +8140,7 @@ def main() -> int:
                 portfolio_fx_rates_manifest_path=args.portfolio_fx_rates_manifest,
                 strategy_history_manifest_path=args.strategy_history_manifest,
                 strategy_history_returns_path=args.strategy_history_returns,
-                strategy_backtests_generation_path=(
-                    args.strategy_backtests_generation
-                ),
+                strategy_backtests_generation_path=(args.strategy_backtests_generation),
                 source_selection_mode=(
                     "IMMUTABLE_GENERATIONS"
                     if args.immutable_generations

@@ -77,7 +77,9 @@ def _model(performance: dict[str, object], **overrides: object) -> dict[str, obj
         "inceptionDt": INCEPTION.strftime("%m/%d/%Y"),
         "launchDt": LAUNCH.strftime("%m/%d/%Y"),
         "endDt": end.strftime("%m/%d/%Y"),
-        "designerModel": {"revisions": [{"revision_uid": 360, "update_dt": "2025-09-06"}]},
+        "designerModel": {
+            "revisions": [{"revision_uid": 360, "update_dt": "2025-09-06"}]
+        },
     }
     payload.update(overrides)
     return payload
@@ -144,7 +146,9 @@ def test_decodes_the_chart_calendar_from_accumulated_day_steps(tmp_path: Path) -
     generation = tmp_path / "store/generations" / str(result["generation_id"])
     dates = [
         line.split(",")[1]
-        for line in (generation / "returns.csv").read_text(encoding="utf-8").splitlines()[1:]
+        for line in (generation / "returns.csv")
+        .read_text(encoding="utf-8")
+        .splitlines()[1:]
     ]
 
     assert dates == ["2024-01-02", "2024-01-05", "2024-01-06"]

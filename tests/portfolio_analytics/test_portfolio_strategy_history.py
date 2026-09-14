@@ -787,9 +787,7 @@ def test_eu_prehistory_is_absent_when_the_capture_starts_after_the_launch() -> N
 def test_a_launch_on_a_non_trading_day_admits_only_earlier_sessions() -> None:
     launch = history.P123_EU_PROVIDER_LAUNCH
     ordered = [
-        item
-        for item in _eu_curve(launch - timedelta(days=4), 9)
-        if item[0] != launch
+        item for item in _eu_curve(launch - timedelta(days=4), 9) if item[0] != launch
     ]
 
     rows, definition = _eu_backtest(ordered)
@@ -799,7 +797,10 @@ def test_a_launch_on_a_non_trading_day_admits_only_earlier_sessions() -> None:
 
 
 def test_eu_prehistory_needs_two_observations_to_form_a_return() -> None:
-    assert _eu_backtest(_eu_curve(history.P123_EU_PROVIDER_LAUNCH - timedelta(days=1), 5)) is None
+    assert (
+        _eu_backtest(_eu_curve(history.P123_EU_PROVIDER_LAUNCH - timedelta(days=1), 5))
+        is None
+    )
 
 
 DESIGNER_VERSION = "p123-eu-connected-model:" + "c" * 64
@@ -900,7 +901,9 @@ def test_designer_curve_refuses_returns_that_differ_from_the_manifest(
     )
     (generation / "returns.csv").write_text("series_id,date\n", encoding="utf-8")
 
-    with pytest.raises(history.StrategyHistoryError, match="differ from the generation"):
+    with pytest.raises(
+        history.StrategyHistoryError, match="differ from the generation"
+    ):
         history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
 
 
@@ -927,7 +930,9 @@ def test_designer_curve_refuses_prehistory_that_reaches_the_launch(
         [("2024-02-16", "0.01", "BACKTEST"), ("2024-02-18", "0.02", "BACKTEST")],
     )
 
-    with pytest.raises(history.StrategyHistoryError, match="reaches the provider launch"):
+    with pytest.raises(
+        history.StrategyHistoryError, match="reaches the provider launch"
+    ):
         history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
 
 
