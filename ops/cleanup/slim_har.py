@@ -86,7 +86,9 @@ def main() -> int:
         (p for p in root.rglob("*.har") if not p.name.endswith(".slim.har")),
         key=lambda p: p.stat().st_size,
     )
-    print(f"{len(hars)} HAR files, {sum(p.stat().st_size for p in hars) / 2**30:.2f} GB\n")
+    print(
+        f"{len(hars)} HAR files, {sum(p.stat().st_size for p in hars) / 2**30:.2f} GB\n"
+    )
 
     before = after = 0
     for i, p in enumerate(hars, 1):

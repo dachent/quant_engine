@@ -148,7 +148,9 @@ def find_generation_dirs(portfolio: pathlib.Path):
 def sweep(portfolio: pathlib.Path, depth: int, apply: bool) -> int:
     release_id, keep = keep_set(portfolio, depth)
     keep_ids = {g for ids in keep.values() for g in ids}
-    print(f"release {release_id[:16]}  depth {depth}  keep-set {len(keep_ids)} generations\n")
+    print(
+        f"release {release_id[:16]}  depth {depth}  keep-set {len(keep_ids)} generations\n"
+    )
 
     kept = dead = 0
     kept_bytes = dead_bytes = 0
@@ -177,9 +179,13 @@ def sweep(portfolio: pathlib.Path, depth: int, apply: bool) -> int:
 
     verb = "deleted" if apply else "would delete"
     print(f"keep    {kept:5,} generations  {kept_bytes / 2**30:7.2f} GB")
-    print(f"{verb:<7} {dead - len(blocked):5,} generations  {dead_bytes / 2**30:7.2f} GB")
+    print(
+        f"{verb:<7} {dead - len(blocked):5,} generations  {dead_bytes / 2**30:7.2f} GB"
+    )
     if blocked:
-        print(f"\nblocked {len(blocked):5,} generations -- reported, not silently skipped")
+        print(
+            f"\nblocked {len(blocked):5,} generations -- reported, not silently skipped"
+        )
         for rel, err in blocked[:10]:
             print(f"    [WinError {getattr(err, 'winerror', '?')}] {rel}")
         if len(blocked) > 10:
@@ -260,8 +266,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.command == "keep-set":
         release_id, keep = keep_set(args.portfolio, args.depth)
-        json.dump({"release_id": release_id, "depth": args.depth, "keep": keep},
-                  sys.stdout, indent=1)
+        json.dump(
+            {"release_id": release_id, "depth": args.depth, "keep": keep},
+            sys.stdout,
+            indent=1,
+        )
         print()
         return 0
     return sweep(args.portfolio, args.depth, args.apply)

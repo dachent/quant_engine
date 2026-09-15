@@ -108,7 +108,9 @@ def main() -> int:
                     "total_files": count,
                     "redundant_bytes": redundant_bytes,
                     "redundant_files": redundant_files,
-                    "by_tree": {k: {"bytes": v[0], "files": v[1]} for k, v in by_tree.items()},
+                    "by_tree": {
+                        k: {"bytes": v[0], "files": v[1]} for k, v in by_tree.items()
+                    },
                 },
                 indent=1,
             ),

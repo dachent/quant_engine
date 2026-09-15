@@ -18,8 +18,17 @@ import sys
 
 IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003
 IO_REPARSE_TAG_SYMLINK = 0xA000000C
-DEP_DIRS = {"node_modules", ".venv", "venv", "__pycache__", ".pytest_cache",
-            ".ruff_cache", "site-packages", ".mypy_cache", ".uv-cache"}
+DEP_DIRS = {
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    "site-packages",
+    ".mypy_cache",
+    ".uv-cache",
+}
 
 
 def ext(p) -> str:

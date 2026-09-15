@@ -15,8 +15,14 @@ import sys
 
 W = pathlib.Path("C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine")
 TREES = ["rollforward", "release-runs", "superseded-pipeline-runs", "repairs"]
-STORES = ["dataPortfolio", "dataPortfolio123", "dataIBKR", "dataSchwab",
-          "dataMatrixport", "dataQuantbase"]
+STORES = [
+    "dataPortfolio",
+    "dataPortfolio123",
+    "dataIBKR",
+    "dataSchwab",
+    "dataMatrixport",
+    "dataQuantbase",
+]
 HEX64 = re.compile(r"\b[0-9a-f]{64}\b")
 
 

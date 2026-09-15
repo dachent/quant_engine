@@ -18,12 +18,20 @@ import sys
 PORTFOLIO = pathlib.Path(
     "C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
 )
-STORES = ["dataPortfolio", "dataPortfolio123", "dataIBKR", "dataSchwab",
-          "dataMatrixport", "dataQuantbase"]
+STORES = [
+    "dataPortfolio",
+    "dataPortfolio123",
+    "dataIBKR",
+    "dataSchwab",
+    "dataMatrixport",
+    "dataQuantbase",
+]
 HEX64 = re.compile(r"\b[0-9a-f]{64}\b")
 
 
-def live_generation_dirs(keep_path: pathlib.Path) -> tuple[list[pathlib.Path], set[str]]:
+def live_generation_dirs(
+    keep_path: pathlib.Path,
+) -> tuple[list[pathlib.Path], set[str]]:
     keep = json.loads(keep_path.read_bytes().decode("utf-8"))
     ids = {g for v in keep["keep"].values() for g in v}
     found = []
@@ -76,7 +84,9 @@ def main() -> int:
                         size += (d / f).lstat().st_size
                     except OSError:
                         pass
-            rows.append((bool(hits), size, f"{store}/source-runs/{child.name}", len(hits)))
+            rows.append(
+                (bool(hits), size, f"{store}/source-runs/{child.name}", len(hits))
+            )
             if hits:
                 total_cited += size
             else:

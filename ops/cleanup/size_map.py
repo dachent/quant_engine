@@ -58,7 +58,7 @@ def walk(root: pathlib.Path):
             except OSError:
                 continue
             # dirpath carries the \\?\ prefix, so relativise against that form.
-            yield str(p)[len(prefix):].lstrip("\\/").replace("\\", "/"), st.st_size
+            yield str(p)[len(prefix) :].lstrip("\\/").replace("\\", "/"), st.st_size
 
 
 def main() -> int:
@@ -78,7 +78,11 @@ def main() -> int:
             total += size
             count += 1
             parts = rel.split("/")
-            key = "/".join(parts[:2]) if len(parts) > 2 else (parts[0] if len(parts) > 1 else "<root files>")
+            key = (
+                "/".join(parts[:2])
+                if len(parts) > 2
+                else (parts[0] if len(parts) > 1 else "<root files>")
+            )
             b = by_depth2.setdefault(key, [0, 0])
             b[0] += size
             b[1] += 1
@@ -88,8 +92,13 @@ def main() -> int:
             if size < 20 * 2**20:
                 break
             print(f"    {size / 2**30:8.2f} GB  {n:8,}  {key}")
-        out[label] = {"total": total, "files": count,
-                      "children": {k: {"bytes": v[0], "files": v[1]} for k, v in by_depth2.items()}}
+        out[label] = {
+            "total": total,
+            "files": count,
+            "children": {
+                k: {"bytes": v[0], "files": v[1]} for k, v in by_depth2.items()
+            },
+        }
     dest = pathlib.Path(sys.argv[-1]) if sys.argv[-1].endswith(".json") else None
     if dest:
         dest.write_text(json.dumps(out, indent=1), encoding="utf-8")
