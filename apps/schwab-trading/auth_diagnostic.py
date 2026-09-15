@@ -10,6 +10,11 @@ from schwab_client import (
     SchwabClient,
     SchwabClientError,
 )
+from runtime_boundary import (
+    RUNTIME_BOUNDARY_UNAVAILABLE_RETURN_CODE,
+    RuntimeBoundaryUnavailableError,
+    require_runtime_boundary,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -117,6 +122,11 @@ def _run_auto(client: SchwabClient, timeout: float, browser: str | None) -> int:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    try:
+        require_runtime_boundary("auth_diagnostic")
+    except RuntimeBoundaryUnavailableError as exc:
+        print(exc.code)
+        return RUNTIME_BOUNDARY_UNAVAILABLE_RETURN_CODE
     setup_runner_logging(activate=True)
     parser = build_parser()
     args = parser.parse_args(argv)

@@ -10,14 +10,16 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 from urllib.parse import parse_qs, urlencode, urlparse
+from weakref import WeakKeyDictionary
 
 import httpx
 from schwab import auth
 
 from execution_guard import require_submission_authority
 from order_builders import normalize_tax_lot_method
+from runtime_boundary import require_runtime_boundary
 from schemas import AccountSnapshot, BrokerOrder, PositionSnapshot, QuoteData
 from storage import (
     CredentialStore,
@@ -57,7 +59,7 @@ class CallbackRequest:
     matched_callback: bool
 
 
-class SchwabClient:
+class _AuthenticatedSchwabTransport:
     def __init__(self, root: Path | None = None) -> None:
         self.paths = ensure_runtime_dirs(get_app_paths(root))
         self.store = CredentialStore(self.paths.credentials_path)
@@ -833,6 +835,125 @@ class SchwabClient:
                 )
             )
         return snapshots
+
+
+class _JsonResponse(Protocol):
+    status_code: int
+    reason_phrase: str
+
+    def raise_for_status(self) -> None: ...
+
+    def json(self) -> object: ...
+
+
+class _QuoteTransport(Protocol):
+    def get_quotes(self, symbols: list[str]) -> _JsonResponse: ...
+
+
+_READ_TRANSPORTS: WeakKeyDictionary[ReadOnlySchwabClient, _QuoteTransport]
+_READ_TRANSPORTS = WeakKeyDictionary()
+_CONNECT_FACTORIES: WeakKeyDictionary[SchwabClient, Callable[[], _QuoteTransport]]
+_CONNECT_FACTORIES = WeakKeyDictionary()
+
+
+def _reduced_json(response: _JsonResponse, operation: str) -> Mapping[str, object]:
+    try:
+        response.raise_for_status()
+    except Exception as exc:  # noqa: BLE001
+        raise SchwabClientError(
+            f"{operation} failed with HTTP status {response.status_code}."
+        ) from exc
+    payload = response.json()
+    if not isinstance(payload, Mapping):
+        raise SchwabClientError(f"{operation} returned an invalid provider payload.")
+    return payload
+
+
+class ReadOnlySchwabClient:
+    """Typed allowlisted Schwab reads with no raw transport attribute."""
+
+    __slots__ = ("__weakref__",)
+
+    def __init__(self, transport: _QuoteTransport) -> None:
+        _READ_TRANSPORTS[self] = transport
+
+    def get_quotes(self, symbols: Sequence[str]) -> dict[str, QuoteData]:
+        requested = sorted(
+            {str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()}
+        )
+        if not requested:
+            return {}
+        transport = _READ_TRANSPORTS[self]
+        payload = _reduced_json(transport.get_quotes(requested), "quotes")
+        quotes: dict[str, QuoteData] = {}
+        for symbol in requested:
+            row = payload.get(symbol)
+            if not isinstance(row, Mapping):
+                continue
+            nested = row.get("quote")
+            values = nested if isinstance(nested, Mapping) else row
+            quotes[symbol] = QuoteData(
+                symbol=symbol,
+                open_price=values.get("openPrice"),
+                high_price=values.get("highPrice"),
+                low_price=values.get("lowPrice"),
+                close_price=values.get("closePrice"),
+                last_price=values.get("lastPrice")
+                or values.get("mark")
+                or values.get("askPrice"),
+                mark_price=values.get("mark"),
+                bid_price=values.get("bidPrice"),
+                ask_price=values.get("askPrice"),
+            )
+        return quotes
+
+
+@dataclass(frozen=True)
+class SubmissionReceipt:
+    status: str | None
+
+
+class _GuardedSubmissionAdapter:
+    """Private mutation path; authority is checked before transport access."""
+
+    __slots__ = ("__transport",)
+
+    def __init__(self, transport: object) -> None:
+        self.__transport = transport
+
+    def place_order(
+        self, account_hash: str, payload: Mapping[str, object]
+    ) -> SubmissionReceipt:
+        require_submission_authority("place_order")
+        response = getattr(self.__transport, "place_order")(
+            account_hash, dict(payload)
+        )
+        values = _reduced_json(response, "place_order")
+        status = values.get("status")
+        return SubmissionReceipt(status=str(status) if status is not None else None)
+
+
+class SchwabClient:
+    """Factory for the reduced facade; production transport creation is disabled."""
+
+    __slots__ = ("__client", "__weakref__")
+
+    def __init__(
+        self, transport_factory: Callable[[], _QuoteTransport] | None = None
+    ) -> None:
+        if transport_factory is None:
+            require_runtime_boundary("schwab_client")
+        assert transport_factory is not None
+        _CONNECT_FACTORIES[self] = transport_factory
+        self.__client: ReadOnlySchwabClient | None = None
+
+    def connect(self) -> ReadOnlySchwabClient:
+        if self.__client is None:
+            self.__client = ReadOnlySchwabClient(_CONNECT_FACTORIES[self]())
+        return self.__client
+
+    def ensure_client(self) -> ReadOnlySchwabClient:
+        return self.connect()
 
     def get_positions_snapshot(self) -> list[PositionSnapshot]:
         nicknames = self.get_account_nickname_map()

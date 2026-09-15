@@ -26,6 +26,7 @@ from schwab_client import (
     DEFAULT_CALLBACK_TIMEOUT_SECONDS,
     SchwabClient,
 )
+from runtime_boundary import require_runtime_boundary
 from storage import (
     db_connection,
     ensure_runtime_dirs,
@@ -355,6 +356,7 @@ def _extract_order_id(location: str | None) -> str | None:
 
 
 def task_login(args: dict[str, Any]) -> dict[str, Any]:
+    require_runtime_boundary("task_login")
     client = SchwabClient()
     app_key = str(args.get("app_key", "")).strip()
     app_secret = str(args.get("app_secret", "")).strip()
@@ -380,6 +382,7 @@ def task_login(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def task_validate_import(args: dict[str, Any]) -> dict[str, Any]:
+    require_runtime_boundary("task_validate_import")
     profile = _load_profile(args)
     import_path = Path(args["import_path"]).resolve()
     rows, errors = parse_import_workbook(import_path)
@@ -394,6 +397,7 @@ def task_validate_import(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def task_refresh_quotes(args: dict[str, Any]) -> dict[str, Any]:
+    require_runtime_boundary("task_refresh_quotes")
     profile = _load_profile(args)
     import_path = Path(args["import_path"]).resolve()
     rows, errors = parse_import_workbook(import_path)
@@ -416,6 +420,7 @@ def task_refresh_quotes(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def task_place_orders(args: dict[str, Any]) -> dict[str, Any]:
+    require_runtime_boundary("task_place_orders")
     require_submission_authority("place_orders")
     profile = _load_profile(args)
     import_path = Path(args["import_path"]).resolve()
@@ -512,6 +517,7 @@ def task_place_orders(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def task_refresh_accounts(args: dict[str, Any]) -> dict[str, Any]:
+    require_runtime_boundary("task_refresh_accounts")
     client = SchwabClient()
     snapshots = client.get_accounts_snapshot()
     _persist_account_snapshots(snapshots)
@@ -519,6 +525,7 @@ def task_refresh_accounts(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def task_refresh_orders(args: dict[str, Any]) -> dict[str, Any]:
+    require_runtime_boundary("task_refresh_orders")
     profile = _load_profile(args)
     client = SchwabClient()
     rows = client.get_orders_snapshot(profile.orders_lookback_days)
@@ -527,6 +534,7 @@ def task_refresh_orders(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def task_refresh_portfolio(args: dict[str, Any]) -> dict[str, Any]:
+    require_runtime_boundary("task_refresh_portfolio")
     client = SchwabClient()
     rows = client.get_positions_snapshot()
     _persist_position_snapshots(rows)
@@ -541,6 +549,7 @@ def _load_snapshot_rows(table_name: str) -> list[dict[str, Any]]:
 
 
 def task_export_snapshot(args: dict[str, Any]) -> dict[str, Any]:
+    require_runtime_boundary("task_export_snapshot")
     paths = ensure_runtime_dirs(get_app_paths())
     export_dir_raw = str(args.get("export_dir", "")).strip()
     accounts = _load_snapshot_rows("account_snapshots")
@@ -663,6 +672,7 @@ def task_export_snapshot(args: dict[str, Any]) -> dict[str, Any]:
 
 
 def task_create_import_template(args: dict[str, Any]) -> dict[str, Any]:
+    require_runtime_boundary("task_create_import_template")
     paths = ensure_runtime_dirs(get_app_paths())
     target = args.get("template_path") or str(paths.imports_dir / "order_template.xlsx")
     path = create_import_template(target)

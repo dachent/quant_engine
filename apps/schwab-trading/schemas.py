@@ -158,7 +158,6 @@ class QuoteData(BaseModel):
     mark_price: float | None = None
     bid_price: float | None = None
     ask_price: float | None = None
-    raw: dict[str, Any] = Field(default_factory=dict)
 
 
 class PreviewRow(BaseModel):

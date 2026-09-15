@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Iterator
 from urllib.parse import urlsplit, urlunsplit
 
+from runtime_boundary import require_runtime_boundary
+
 
 class DATA_BLOB(ctypes.Structure):
     _fields_ = [("cbData", ctypes.c_uint32), ("pbData", ctypes.POINTER(ctypes.c_byte))]
@@ -43,6 +45,7 @@ def _bytes_from_blob(blob: DATA_BLOB) -> bytes:
 
 
 def dpapi_encrypt(plaintext: bytes) -> bytes:
+    require_runtime_boundary("credential_encrypt")
     if kernel32 is None or crypt32 is None:
         raise RuntimeError("Schwab credential storage requires Windows DPAPI")
     in_blob = _blob_from_bytes(plaintext)
@@ -65,6 +68,7 @@ def dpapi_encrypt(plaintext: bytes) -> bytes:
 
 
 def dpapi_decrypt(ciphertext: bytes) -> bytes:
+    require_runtime_boundary("credential_decrypt")
     if kernel32 is None or crypt32 is None:
         raise RuntimeError("Schwab credential storage requires Windows DPAPI")
     in_blob = _blob_from_bytes(ciphertext)
@@ -104,6 +108,7 @@ def _default_runtime_root() -> Path:
 
 
 def get_app_paths(root: Path | None = None) -> AppPaths:
+    require_runtime_boundary("runtime_paths")
     base = root.resolve() if root is not None else _default_runtime_root()
     return AppPaths(
         root=base,
@@ -119,6 +124,7 @@ def get_app_paths(root: Path | None = None) -> AppPaths:
 
 
 def ensure_runtime_dirs(paths: AppPaths | None = None) -> AppPaths:
+    require_runtime_boundary("runtime_directories")
     runtime = paths or get_app_paths()
     for path in (
         runtime.root,
@@ -134,6 +140,7 @@ def ensure_runtime_dirs(paths: AppPaths | None = None) -> AppPaths:
 
 
 def atomic_write_text(path: Path, text: str) -> None:
+    require_runtime_boundary("atomic_text_write")
     path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + ".tmp")
     temp.write_text(text, encoding="utf-8")
@@ -141,10 +148,12 @@ def atomic_write_text(path: Path, text: str) -> None:
 
 
 def atomic_write_json(path: Path, payload: Any) -> None:
+    require_runtime_boundary("atomic_json_write")
     atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=False))
 
 
 def read_json(path: Path, default: Any = None) -> Any:
+    require_runtime_boundary("json_read")
     if not path.exists():
         return default
     return json.loads(path.read_text(encoding="utf-8"))
@@ -152,16 +161,19 @@ def read_json(path: Path, default: Any = None) -> Any:
 
 class CredentialStore:
     def __init__(self, credentials_path: Path | None = None) -> None:
+        require_runtime_boundary("credential_store")
         self.paths = ensure_runtime_dirs()
         self.credentials_path = credentials_path or self.paths.credentials_path
 
     def load(self) -> dict[str, Any]:
+        require_runtime_boundary("credential_load")
         if not self.credentials_path.exists():
             return {}
         encrypted = base64.b64decode(self.credentials_path.read_text(encoding="utf-8"))
         return json.loads(dpapi_decrypt(encrypted).decode("utf-8"))
 
     def save(self, payload: dict[str, Any]) -> None:
+        require_runtime_boundary("credential_save")
         encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         encrypted = dpapi_encrypt(encoded)
         atomic_write_text(
@@ -169,6 +181,7 @@ class CredentialStore:
         )
 
     def merge(self, **updates: Any) -> dict[str, Any]:
+        require_runtime_boundary("credential_merge")
         payload = self.load()
         payload.update({k: v for k, v in updates.items() if v is not None})
         self.save(payload)
@@ -177,6 +190,7 @@ class CredentialStore:
 
 @contextmanager
 def db_connection(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
+    require_runtime_boundary("database_connection")
     runtime = ensure_runtime_dirs()
     path = db_path or runtime.db_path
     connection = sqlite3.connect(path)
@@ -189,6 +203,7 @@ def db_connection(db_path: Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 def init_db(db_path: Path | None = None) -> None:
+    require_runtime_boundary("database_initialization")
     with db_connection(db_path) as conn:
         conn.executescript(
             """
@@ -271,6 +286,7 @@ def init_db(db_path: Path | None = None) -> None:
 
 
 def save_setting(key: str, value: Any, db_path: Path | None = None) -> None:
+    require_runtime_boundary("setting_write")
     init_db(db_path)
     with db_connection(db_path) as conn:
         conn.execute(
@@ -280,6 +296,7 @@ def save_setting(key: str, value: Any, db_path: Path | None = None) -> None:
 
 
 def load_settings(db_path: Path | None = None) -> dict[str, Any]:
+    require_runtime_boundary("setting_read")
     init_db(db_path)
     with db_connection(db_path) as conn:
         rows = conn.execute("SELECT key, value FROM settings").fetchall()
@@ -366,6 +383,7 @@ def redact_sensitive_data(value: Any, key: str | None = None) -> Any:
 
 
 def append_audit_record(record: dict[str, Any], audit_path: Path | None = None) -> None:
+    require_runtime_boundary("audit_append")
     runtime = ensure_runtime_dirs()
     path = audit_path or runtime.logs_dir / "audit.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -376,6 +394,7 @@ def append_audit_record(record: dict[str, Any], audit_path: Path | None = None) 
 
 
 def sanitize_runtime_artifacts(paths: AppPaths | None = None) -> None:
+    require_runtime_boundary("artifact_sanitization")
     runtime = ensure_runtime_dirs(paths)
     for directory in (runtime.jobs_dir, runtime.results_dir):
         for artifact_path in directory.glob("*.json"):

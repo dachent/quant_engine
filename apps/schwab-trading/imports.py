@@ -6,6 +6,7 @@ from typing import Any
 from openpyxl import Workbook, load_workbook
 
 from schemas import ImportOrderRow, ImportValidationError
+from runtime_boundary import require_runtime_boundary
 
 
 REQUIRED_HEADERS = ("account_number", "symbol", "quantity")
@@ -37,6 +38,7 @@ def _normalize_bool(value: Any) -> bool:
 def parse_import_workbook(
     path: str | Path,
 ) -> tuple[list[ImportOrderRow], list[ImportValidationError]]:
+    require_runtime_boundary("import_workbook")
     workbook_path = Path(path)
     errors: list[ImportValidationError] = []
     rows: list[ImportOrderRow] = []
@@ -105,6 +107,7 @@ def parse_import_workbook(
 
 
 def create_import_template(path: str | Path) -> Path:
+    require_runtime_boundary("import_template")
     target = Path(path)
     workbook = Workbook()
     sheet = workbook.active

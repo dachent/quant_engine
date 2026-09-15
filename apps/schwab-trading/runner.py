@@ -9,6 +9,11 @@ from pathlib import Path
 
 from execution_guard import SUBMISSION_DISABLED_MESSAGE, SubmissionDisabledError
 from logging_setup import setup_runner_logging
+from runtime_boundary import (
+    RUNTIME_BOUNDARY_UNAVAILABLE_RETURN_CODE,
+    RuntimeBoundaryUnavailableError,
+    require_runtime_boundary,
+)
 from schemas import ErrorInfo, TaskMetrics, TaskRequest, TaskResult, TaskStatus
 from storage import (
     append_audit_record,
@@ -24,6 +29,11 @@ logger = setup_runner_logging()
 
 
 def main() -> int:
+    try:
+        require_runtime_boundary("runner")
+    except RuntimeBoundaryUnavailableError as exc:
+        print(exc.code)
+        return RUNTIME_BOUNDARY_UNAVAILABLE_RETURN_CODE
     setup_runner_logging(activate=True)
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", required=True)

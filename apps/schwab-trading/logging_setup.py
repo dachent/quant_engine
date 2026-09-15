@@ -4,6 +4,7 @@ import logging
 from logging.handlers import RotatingFileHandler
 
 from storage import ensure_runtime_dirs, get_app_paths
+from runtime_boundary import require_runtime_boundary
 
 
 def _build_logger(name: str, filename: str, *, activate: bool) -> logging.Logger:
@@ -38,8 +39,12 @@ def _build_logger(name: str, filename: str, *, activate: bool) -> logging.Logger
 
 
 def setup_ui_logging(*, activate: bool = False) -> logging.Logger:
+    if activate:
+        require_runtime_boundary("ui_logging")
     return _build_logger("ui", "ui.log", activate=activate)
 
 
 def setup_runner_logging(*, activate: bool = False) -> logging.Logger:
+    if activate:
+        require_runtime_boundary("runner_logging")
     return _build_logger("runner", "runner.log", activate=activate)

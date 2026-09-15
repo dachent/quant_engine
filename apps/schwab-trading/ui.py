@@ -37,6 +37,11 @@ from storage import (
     sanitize_runtime_artifacts,
     save_setting,
 )
+from runtime_boundary import (
+    RUNTIME_BOUNDARY_UNAVAILABLE_RETURN_CODE,
+    RuntimeBoundaryUnavailableError,
+    require_runtime_boundary,
+)
 
 
 logger = setup_ui_logging()
@@ -808,7 +813,12 @@ class SchwabToolApp:
         )
 
 
-def main() -> None:
+def main() -> int:
+    try:
+        require_runtime_boundary("ui")
+    except RuntimeBoundaryUnavailableError as exc:
+        print(exc.code)
+        return RUNTIME_BOUNDARY_UNAVAILABLE_RETURN_CODE
     setup_ui_logging(activate=True)
     root = tk.Tk()
     template_path = (
@@ -820,6 +830,7 @@ def main() -> None:
     logger.info("UI started")
     root.mainloop()
     _ = app
+    return 0
 
 
 if __name__ == "__main__":
