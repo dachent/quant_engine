@@ -43,6 +43,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import sys
 
 COORDINATION = "dataPortfolio/releases-refresh-2026"
@@ -70,6 +71,24 @@ def _is_link(p: pathlib.Path) -> bool:
 
 def _load(p: pathlib.Path):
     return json.loads(p.read_bytes().decode("utf-8"))
+
+
+def _extended(p: pathlib.Path) -> str:
+    """A \\\\?\\-prefixed path, the only form that survives past MAX_PATH.
+
+    Generation paths nest a 64-hex id under several layers and reach 370
+    characters here, against a 260 limit with LongPathsEnabled=0. Windows
+    reports that as "Access is denied", which reads as a permissions problem
+    and is not one (#419).
+    """
+    absolute = os.path.abspath(p)
+    return absolute if absolute.startswith("\\\\?\\") else "\\\\?\\" + absolute
+
+
+def _force_remove(func, path, _exc_info):
+    """Clear the read-only bit and retry. Generations are written read-only."""
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
 
 
 def keep_set(portfolio: pathlib.Path, depth: int) -> tuple[str, dict[str, list[str]]]:
@@ -133,7 +152,8 @@ def sweep(portfolio: pathlib.Path, depth: int, apply: bool) -> int:
 
     kept = dead = 0
     kept_bytes = dead_bytes = 0
-    removed = []
+    removed: list[str] = []
+    blocked: list[tuple[str, OSError]] = []
     for gd in find_generation_dirs(portfolio):
         try:
             children = sorted(c for c in gd.iterdir() if c.is_dir())
@@ -149,11 +169,25 @@ def sweep(portfolio: pathlib.Path, depth: int, apply: bool) -> int:
             dead_bytes += size
             removed.append(child.relative_to(portfolio).as_posix())
             if apply:
-                shutil.rmtree(child, ignore_errors=False)
+                try:
+                    shutil.rmtree(_extended(child), onerror=_force_remove)
+                except OSError as e:
+                    dead_bytes -= size
+                    blocked.append((child.relative_to(portfolio).as_posix(), e))
 
     verb = "deleted" if apply else "would delete"
     print(f"keep    {kept:5,} generations  {kept_bytes / 2**30:7.2f} GB")
-    print(f"{verb:<7} {dead:5,} generations  {dead_bytes / 2**30:7.2f} GB")
+    print(f"{verb:<7} {dead - len(blocked):5,} generations  {dead_bytes / 2**30:7.2f} GB")
+    if blocked:
+        print(f"\nblocked {len(blocked):5,} generations -- reported, not silently skipped")
+        for rel, err in blocked[:10]:
+            print(f"    [WinError {getattr(err, 'winerror', '?')}] {rel}")
+        if len(blocked) > 10:
+            print(f"    ... and {len(blocked) - 10} more")
+        print(
+            "  Access-denied here usually means a directory owned by a deleted\n"
+            "  sandbox account: taking ownership needs an elevated shell."
+        )
     if not apply:
         print("\nre-run with --apply to delete")
     return 0
