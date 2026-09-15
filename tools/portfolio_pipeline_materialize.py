@@ -3973,6 +3973,7 @@ def build_production_spec(
     hwm_governed_admission_receipt_path: Path | None = None,
     financial_artifacts_path: Path | None = None,
     financial_input_contract_path: Path | None = None,
+    predecessor_repair_gate_path: Path | None = None,
 ) -> dict[str, Any]:
     """Bind a verified private proof to the stable production root set."""
 
@@ -4277,6 +4278,22 @@ def build_production_spec(
         hwm_governed_calendar_authority_path,
         hwm_governed_admission_receipt_path,
     )
+    # A generation an external agent rewrote after publication can never
+    # reproduce the inventory its release sealed, which stops every successor
+    # being prepared. The pipeline already knows how to admit exactly that,
+    # under `predecessor-authority-repair`: it re-derives the drift itself and
+    # refuses a gate that does not match, or that reuses a drifted generation.
+    # This only carries the reviewed evidence through to the production spec.
+    predecessor_repair_gates: list[dict[str, Any]] = []
+    if predecessor_repair_gate_path is not None:
+        repair_bytes = predecessor_repair_gate_path.read_bytes()
+        predecessor_repair_gates.append(
+            {
+                "gate_id": "predecessor-authority-repair",
+                "path": str(predecessor_repair_gate_path),
+                "sha256": hashlib.sha256(repair_bytes).hexdigest(),
+            }
+        )
     product_gates = _product_gate_rows(
         production_product_authority,
         product_path,
@@ -4324,6 +4341,7 @@ def build_production_spec(
             },
             *product_gates,
             *manifest_gates,
+            *predecessor_repair_gates,
         ],
         "nodes": [*nodes, *artifact_rows],
         "pipeline_id": f"{recipe['pipeline_id']}-production",
@@ -4429,6 +4447,16 @@ def _parser() -> argparse.ArgumentParser:
     production_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
     production_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
     production_cmd.add_argument(
+        "--predecessor-repair-gate",
+        type=Path,
+        help=(
+            "Reviewed predecessor-authority-repair gate admitting the artifact "
+            "inventory drift of an already published generation that an external "
+            "agent rewrote. The pipeline re-derives the drift and refuses any gate "
+            "that does not match it exactly."
+        ),
+    )
+    production_cmd.add_argument(
         "--financial-input-contract",
         type=Path,
         help=(
@@ -4494,6 +4522,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.hwm_governed_admission_receipt,
                 args.financial_artifacts,
                 args.financial_input_contract,
+                args.predecessor_repair_gate,
             )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"portfolio-pipeline: FAIL: {exc}", file=sys.stderr)
