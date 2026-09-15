@@ -71,7 +71,7 @@ file again.
 
 ---
 
-## 1. Release preflight does not check the commit precondition — `OPEN`
+## 1. Release preflight does not check the commit precondition — `OPEN` (tracked as #415)
 
 `_release_preflight` validates the candidate closure and takes a production
 *snapshot*, but `_production_snapshot` only `_file_state`s each `CURRENT.json`
@@ -94,7 +94,7 @@ commit, instead of 40 minutes later.
 
 ---
 
-## 2. Orchestration is not under source control — `OPEN`
+## 2. Orchestration is not under source control — `OPEN` (tracked as #414)
 
 The whole chain is driven by unversioned bash in
 `C:\Dev\scratch\quant-engine\pl12\epoch\`: `build_vertical.sh`,
@@ -194,7 +194,7 @@ digest moved, not just that the inventory differs.
 
 ---
 
-## 8. Sealed directories must not contain sync-rewritable files — `OPEN`
+## 8. Sealed directories must not contain sync-rewritable files — `OPEN` (tracked as #416)
 
 `generation_inventory_sha256` hashes every regular file in a generation
 directory. Any `.xlsx` inside one is rewritten in place by the sync client.
@@ -213,7 +213,7 @@ directory. Any `.xlsx` inside one is rewritten in place by the sync client.
 
 ---
 
-## 9. Workstation environment — `OPEN`
+## 9. Workstation environment — `OPEN` (tracked as #419)
 
 * 5,175 of 9,775 repo files were dehydrated OneDrive placeholders; reads fail
   with `The cloud operation was not completed before the time-out period
@@ -226,7 +226,7 @@ directory. Any `.xlsx` inside one is rewritten in place by the sync client.
 
 ---
 
-## 10. Carried over from earlier sessions — `OPEN`
+## 10. Carried over from earlier sessions — `OPEN` (order-independent sum tracked as #420; P4/P7 in #408)
 
 * Producer-side order-independent sum, `tools/portfolio_control_panel.py:3807-3810`.
 * Issue #408 P4 (parallelise the 24 lenses) and P7 (parallelise validator replay).
