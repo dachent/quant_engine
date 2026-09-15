@@ -1,0 +1,61 @@
+{
+  "startingCapital": 0.0,
+  "lastRebalDt": "05/04/26",
+  "nextRebalDt": "08/17/26",
+  "maxDrift": 3.0,
+  "designer": "Marchus Wagenberg",
+  "rebalanceMethod": "R",
+  "stats": {
+    "sharpe": 0.97,
+    "correlation": 0.77,
+    "stocks": {
+      "l": 30563.51
+    },
+    "mktValLong": 30563.51,
+    "mktValShort": 0.0,
+    "chg1d": 149.12,
+    "ret": {
+      "sharpe": 0.97,
+      "maxDd": -14.82,
+      "stdDev": 33.68,
+      "w1": 2.25,
+      "m3": 1.84,
+      "m6": 17.63,
+      "ann": 42.51,
+      "total": 30.46,
+      "beta": 1.61
+    },
+    "unreal": 5418.13,
+    "bench": {
+      "maxDd": -8.88,
+      "m3": 4.24,
+      "total": 14.77
+    },
+    "annTurnover": 43.14,
+    "tradAll": 19,
+    "tradWin": 11,
+    "samples": 8,
+    "total": {
+      "l": 30563.51
+    },
+    "yield": 2.02,
+    "earnings": 6013.51,
+    "mktVal": 30563.51
+  },
+  "cost": 50.0,
+  "needsRebal": true,
+  "posCnt": 13,
+  "hasTrans": true,
+  "assetType": "DESIGNER_MODEL",
+  "tickers": "SBI:CAN|953|45403|Serabi_Gold_PLC FDEV:GBR|241|77572|Frontier_Developments_Plc IXX:DEU|26|83962|init_innovation_in_traffic_systems_SE B2I:NOR|542|84674|B2_Impact_ASA WEW:DEU|111|85503|Westwing_Group_SE HSP:GBR|189|90949|Hargreaves_Services_Plc FFARM:NLD|261|94257|ForFarmers_NV BSL:DEU|60|97726|Basler_AG ENDUR:NOR|183|101867|Endur_ASA FACC:AUT|147|102630|FACC_AG SMSN:GBR|1|103168|Samsung_Electronics_Co.,_Ltd. ZAP:NOR|605|107447|Zaptec_ASA RFX:GBR|255|113815|Ramsdens_Holdings_Plc",
+  "inceptionDt": "2025-11-12",
+  "portfolioUid": 1897754,
+  "ts": "2025-11-24T15:16:00-0600",
+  "accountUid": 10402,
+  "assetUid": 1764562,
+  "assetName": "EU multifactor microcap model",
+  "name": "Based on EU multifactor microcap model",
+  "type": "Designer Model",
+  "currency": "USD",
+  "yield": 2.02
+}

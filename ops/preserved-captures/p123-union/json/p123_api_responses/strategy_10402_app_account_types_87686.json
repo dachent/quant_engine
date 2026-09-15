@@ -1,0 +1,12 @@
+[
+  {
+    "id": "B",
+    "label": "Brokerage",
+    "more": "Select this to manage an existing or planned brokerage account. To send orders from Portfolio123 to your real account, follow the linking instructions after you've created the account."
+  },
+  {
+    "id": "P",
+    "label": "Paper",
+    "more": "Select this for testing. You can convert a Paper account to a Brokerage account (and vice versa) anytime. Paper accounts treat the holdings in a different manner in certain pages of the website."
+  }
+]

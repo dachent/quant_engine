@@ -117,3 +117,7 @@ Thumbs.db
 !tests/fixtures/synthetic/**/*.csv
 !tests/fixtures/synthetic/*.xlsx
 !tests/fixtures/synthetic/**/*.xlsx
+
+# Captured browser session cookies are credentials and never enter the repository.
+ops/preserved-captures/**/p123_cookies_*.json
+**/p123_cookies_*.json

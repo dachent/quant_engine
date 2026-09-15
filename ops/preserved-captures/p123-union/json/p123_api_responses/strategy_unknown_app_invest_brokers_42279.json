@@ -1,0 +1,55 @@
+[
+  {
+    "isTrade": true,
+    "name": "Interactive Brokers",
+    "id": 1
+  },
+  {
+    "name": "Paper",
+    "id": 19
+  },
+  {
+    "isTrade": true,
+    "name": "Tradier",
+    "id": 33
+  },
+  {
+    "name": "Ally Invest"
+  },
+  {
+    "name": "Charles Schwab"
+  },
+  {
+    "name": "E*Trade"
+  },
+  {
+    "name": "Fidelity"
+  },
+  {
+    "name": "FolioInvesting"
+  },
+  {
+    "name": "Merrill Edge"
+  },
+  {
+    "name": "Merrill Lynch"
+  },
+  {
+    "name": "OptionsXpress"
+  },
+  {
+    "name": "Portfolio123 Advisor"
+  },
+  {
+    "name": "Robinhood"
+  },
+  {
+    "name": "TDAmeritrade"
+  },
+  {
+    "name": "Tradestation"
+  },
+  {
+    "name": "Vanguard"
+  }
+]

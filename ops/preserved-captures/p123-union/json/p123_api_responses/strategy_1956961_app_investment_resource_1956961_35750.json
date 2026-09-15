@@ -1,0 +1,57 @@
+{
+  "startingCapital": 0.0,
+  "lastRebalDt": "07/16/26",
+  "nextRebalDt": "08/17/26",
+  "maxDrift": 3.0,
+  "designer": "judgetrade",
+  "rebalanceMethod": "R",
+  "stats": {
+    "sharpe": 0.0,
+    "correlation": 0.0,
+    "stocks": {
+      "l": 9381.09
+    },
+    "mktValLong": 12091.63,
+    "mktValShort": 0.0,
+    "chg1d": 56.0,
+    "ret": {
+      "maxDd": -7.46,
+      "w1": 3.58,
+      "ann": -20.66,
+      "total": -1.95
+    },
+    "unreal": 330.75,
+    "stockEtf": {
+      "l": 2710.54
+    },
+    "bench": {
+      "maxDd": -3.36,
+      "total": 3.83
+    },
+    "annTurnover": 51.46,
+    "tradAll": 40,
+    "tradWin": 24,
+    "samples": 0,
+    "total": {
+      "l": 12091.63
+    },
+    "yield": 2.1,
+    "earnings": -255.4,
+    "mktVal": 12091.63
+  },
+  "needsRebal": true,
+  "posCnt": 32,
+  "hasTrans": true,
+  "assetType": "LIVE_BOOK",
+  "tickers": "AMD:USA|1|175|Advanced_Micro_Devices,_Inc. ALL:USA|1|252|The_Allstate_Corp. IVZ:USA|10|705|Invesco_Ltd. ADI:USA|1|711|Analog_Devices,_Inc. APA:USA|8|759|APA_Corp. DVN:USA|6|2695|Devon_Energy_Corp. EOG:USA|2|3234|EOG_Resources,_Inc. HUM:USA|1|4438|Humana,_Inc. INCY:USA|2|4613|Incyte_Corp. JBL:USA|1|4988|Jabil,_Inc. KLAC:USA|1|5165|KLA_Corp. LRCX:USA|1|5245|Lam_Research_Corp. NVDA:USA|2|6480|NVIDIA_Corp. COP:USA|3|6971|Conocophillips STT:USA|1|8291|State_Street_Corp. VLO:USA|1|9258|Valero_Energy_Corp. VRSN:USA|1|9316|VeriSign,_Inc. CF:USA|3|23159|CF_Industries_Holdings,_Inc. SMCI:USA|11|25185|Super_Micro_Computer,_Inc. DAL:USA|2|25199|Delta_Air_Lines,_Inc. TEL:USA|1|26309|TE_Connectivity_Plc TWM:USA|133|28056|ProShares_UltraShort_Russell2000 CBOE:USA|1|30956|Cboe_Global_Markets,_Inc. ANET:USA|1|51755|Arista_Networks,_Inc. KEYS:USA|1|52395|Keysight_Technologies,_Inc. HPE:USA|4|53517|Hewlett_Packard_Enterprise_Co. DELL:USA|1|61892|Dell_Technologies,_Inc. DDOG:USA|1|62615|Datadog,_Inc. PLTR:USA|1|65452|Palantir_Technologies,_Inc. EXE:USA|3|67732|Expand_Energy_Corp. SOLV:USA|3|120891|Solventum_Corp. Q:USA|1|146432|Qnity_Electronics,_Inc.",
+  "inceptionDt": "2026-07-13",
+  "portfolioUid": 1956961,
+  "ts": "2026-07-14T16:36:00-0500",
+  "accountUid": 10560,
+  "assetUid": 1906462,
+  "assetName": "AI Large Cap Strategy Book Long Short TWM 25% LIVE",
+  "name": "Based on AI Large Cap Strategy Book Long Short TWM 25% LIVE",
+  "type": "Live Book",
+  "currency": "USD",
+  "yield": 2.1
+}

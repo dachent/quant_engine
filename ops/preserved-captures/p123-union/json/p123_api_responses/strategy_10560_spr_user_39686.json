@@ -1,0 +1,31 @@
+{
+  "isAuth2FactOk": true,
+  "firstName": "Boris",
+  "lastName": "Vaisman",
+  "isDesigner": true,
+  "agreements": {
+    "2": true,
+    "3": true
+  },
+  "hasApiKey": true,
+  "backtestYears": -15,
+  "minBacktestDate": "2011-01-01",
+  "hasStrategyFeatures": true,
+  "hasAiFactor": true,
+  "aiFactorEnabled": true,
+  "hasCc": true,
+  "siteBrand": "Portfolio123",
+  "userUserlevelUid": 234,
+  "apiQuota": 1000,
+  "userName": "dachent",
+  "userUid": 69561,
+  "dataVendor": 2,
+  "email": "boris.vaisman@gmail.com",
+  "regionSubBits": 1,
+  "userType": 0,
+  "allowedOffers": [],
+  "features": 50175,
+  "userLevelTitle": "Portfolio",
+  "currencyUid": 17576,
+  "actualTrialDays": -1
+}

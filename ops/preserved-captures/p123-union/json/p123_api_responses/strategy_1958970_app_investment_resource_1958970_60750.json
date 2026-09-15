@@ -1,0 +1,53 @@
+{
+  "startingCapital": 0.0,
+  "lastRebalDt": "07/24/26",
+  "nextRebalDt": "08/17/26",
+  "maxDrift": 3.0,
+  "rebalanceMethod": "R",
+  "stats": {
+    "sharpe": 0.0,
+    "correlation": 0.0,
+    "stocks": {
+      "l": 12065.93
+    },
+    "mktValLong": 12065.93,
+    "mktValShort": 0.0,
+    "chg1d": -12.92,
+    "ret": {
+      "maxDd": -1.75,
+      "w1": -0.61,
+      "ann": 11.98,
+      "total": 0.72
+    },
+    "unreal": 85.73,
+    "bench": {
+      "maxDd": -2.52,
+      "total": 3.96
+    },
+    "annTurnover": 120.01,
+    "tradAll": 0,
+    "tradWin": 0,
+    "samples": 0,
+    "total": {
+      "l": 12065.93
+    },
+    "yield": 3.68,
+    "earnings": 85.73,
+    "mktVal": 12065.93
+  },
+  "needsRebal": true,
+  "posCnt": 5,
+  "hasTrans": true,
+  "assetType": "LIVE_PORT",
+  "tickers": "SOTK:USA|452|8114|Sono-Tek_Corp. LSAK:USA|511|22548|Lesaka_Technologies,_Inc. BOTJ:USA|90|38502|Bank_of_the_James_Financial_Group,_Inc. ZDGE:USA|799|53834|Zedge,_Inc. LIEN:USA|253|71490|Chicago_Atlantic_BDC,_Inc.",
+  "inceptionDt": "2026-07-21",
+  "portfolioUid": 1958970,
+  "ts": "2026-07-22T15:20:00-0500",
+  "accountUid": 10560,
+  "assetUid": 1958744,
+  "assetName": "High Octane Microcaps [Copy, Live]",
+  "name": "Based on High Octane Microcaps [Copy, Live]",
+  "type": "Live Strategy",
+  "currency": "USD",
+  "yield": 3.68
+}

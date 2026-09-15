@@ -1,0 +1,47 @@
+[
+  {
+    "name": "United States Dollar",
+    "id": 17576,
+    "code": "USD"
+  },
+  {
+    "name": "Euro",
+    "id": 69543,
+    "code": "EUR"
+  },
+  {
+    "name": "Canadian Dollar",
+    "id": 69545,
+    "code": "CAD"
+  },
+  {
+    "name": "Swiss Franc",
+    "id": 69546,
+    "code": "CHF"
+  },
+  {
+    "name": "British Pound",
+    "id": 69544,
+    "code": "GBP"
+  },
+  {
+    "name": "Norwegian Krone",
+    "id": 117847,
+    "code": "NOK"
+  },
+  {
+    "name": "Polish Zloty",
+    "id": 117848,
+    "code": "PLN"
+  },
+  {
+    "name": "Swedish Krona",
+    "id": 117849,
+    "code": "SEK"
+  },
+  {
+    "name": "Turkish Lira",
+    "id": 117850,
+    "code": "TRY"
+  }
+]

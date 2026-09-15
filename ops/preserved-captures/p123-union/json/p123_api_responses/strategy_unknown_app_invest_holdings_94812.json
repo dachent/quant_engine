@@ -1,0 +1,3661 @@
+{
+  "holdings": [
+    {
+      "ret1wk": -4.0219378427788,
+      "ret4wk": 2.3391812865497075,
+      "exchangeCode": "OSL",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.57,
+      "name": "B2 Impact ASA",
+      "currency": "NOK",
+      "price": 26.25,
+      "ticker": "B2I:NOR",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 542.0,
+              "avgCost": 2.0605
+            }
+          }
+        }
+      },
+      "mktUid": 84674
+    },
+    {
+      "ret1wk": 0.0,
+      "ret4wk": -10.54687500000001,
+      "exchangeCode": "ETR",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.29,
+      "name": "Basler AG",
+      "currency": "EUR",
+      "price": 22.9,
+      "ticker": "BSL:DEU",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 60.0,
+              "avgCost": 18.3577
+            }
+          }
+        }
+      },
+      "mktUid": 97726
+    },
+    {
+      "ret1wk": -2.3465703971119134,
+      "ret4wk": -6.076388888888884,
+      "exchangeCode": "OSL",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.1,
+      "name": "Endur ASA",
+      "currency": "NOK",
+      "price": 108.2,
+      "ticker": "ENDUR:NOR",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 183.0,
+              "avgCost": 9.5012
+            }
+          }
+        }
+      },
+      "mktUid": 101867
+    },
+    {
+      "ret1wk": 7.051282051282048,
+      "ret4wk": -2.453271028037396,
+      "exchangeCode": "WBO",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.71,
+      "name": "FACC AG",
+      "currency": "EUR",
+      "price": 16.7,
+      "ticker": "FACC:AUT",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 147.0,
+              "avgCost": 15.6262
+            }
+          }
+        }
+      },
+      "mktUid": 102630
+    },
+    {
+      "ret1wk": -1.764705882352946,
+      "ret4wk": -2.3391812865497186,
+      "exchangeCode": "LON",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.68,
+      "name": "Frontier Developments Plc",
+      "currency": "GBP",
+      "price": 4.175,
+      "ticker": "FDEV:GBR",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 241.0,
+              "avgCost": 5.4647
+            }
+          }
+        }
+      },
+      "mktUid": 77572
+    },
+    {
+      "ret1wk": -1.384083044982698,
+      "ret4wk": -1.21317157712304,
+      "exchangeCode": "AMS",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.21,
+      "name": "ForFarmers NV",
+      "currency": "EUR",
+      "price": 5.7,
+      "ticker": "FFARM:NLD",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 261.0,
+              "avgCost": 6.4522
+            }
+          }
+        }
+      },
+      "mktUid": 94257
+    },
+    {
+      "ret1wk": 1.449275362318847,
+      "ret4wk": 4.218362282878418,
+      "exchangeCode": "LON",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.18,
+      "name": "Hargreaves Services Plc",
+      "currency": "GBP",
+      "price": 8.4,
+      "ticker": "HSP:GBR",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 189.0,
+              "avgCost": 10.6092
+            }
+          }
+        }
+      },
+      "mktUid": 90949
+    },
+    {
+      "ret1wk": -3.820960698689957,
+      "ret4wk": -7.457983193277318,
+      "exchangeCode": "ETR",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.11,
+      "name": "init innovation in traffic systems SE",
+      "currency": "EUR",
+      "price": 44.05,
+      "ticker": "IXX:DEU",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 26.0,
+              "avgCost": 54.0027
+            }
+          }
+        }
+      },
+      "mktUid": 83962
+    },
+    {
+      "ret1wk": 0.4524886877828038,
+      "ret4wk": 0.3012048192771122,
+      "exchangeCode": "LON",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.45,
+      "name": "Ramsdens Holdings Plc",
+      "currency": "GBP",
+      "price": 6.66,
+      "ticker": "RFX:GBR",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 255.0,
+              "avgCost": 4.9994
+            }
+          }
+        }
+      },
+      "mktUid": 113815
+    },
+    {
+      "ret1wk": -14.147909967845662,
+      "ret4wk": 10.559006211180112,
+      "exchangeCode": "TSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -5.65,
+      "name": "Serabi Gold PLC",
+      "currency": "CAD",
+      "price": 5.34,
+      "ticker": "SBI:CAN",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 953.0,
+              "avgCost": 4.3666
+            }
+          }
+        }
+      },
+      "mktUid": 45403
+    },
+    {
+      "ret1wk": -1.538461538461533,
+      "ret4wk": 3.6903690369036957,
+      "exchangeCode": "LON",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -3.15,
+      "name": "Samsung Electronics Co., Ltd.",
+      "currency": "USD",
+      "price": 4608.0,
+      "ticker": "SMSN:GBR",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 1.0,
+              "avgCost": 3120.0
+            }
+          }
+        }
+      },
+      "mktUid": 103168
+    },
+    {
+      "ret1wk": -4.296875,
+      "ret4wk": -14.035087719298245,
+      "exchangeCode": "ETR",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.39,
+      "name": "Westwing Group SE",
+      "currency": "EUR",
+      "price": 12.25,
+      "ticker": "WEW:DEU",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 111.0,
+              "avgCost": 17.0636
+            }
+          }
+        }
+      },
+      "mktUid": 85503
+    },
+    {
+      "ret1wk": -5.842911877394641,
+      "ret4wk": 5.698924731182786,
+      "exchangeCode": "OSL",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -3.06,
+      "name": "Zaptec ASA",
+      "currency": "NOK",
+      "price": 49.15,
+      "ticker": "ZAP:NOR",
+      "accounts": {
+        "10402": {
+          "portfolios": {
+            "1897754": {
+              "shares": 605.0,
+              "avgCost": 3.3568
+            }
+          }
+        }
+      },
+      "mktUid": 107447
+    },
+    {
+      "ret1wk": -3.3353186420488345,
+      "ret4wk": -2.756141402037149,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -5.09,
+      "name": "Ascentage Pharma Group International Co., Ltd.",
+      "currency": "USD",
+      "price": 16.23,
+      "ticker": "AAPG:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 11.0,
+              "avgCost": 18.6263
+            }
+          }
+        }
+      },
+      "mktUid": 142278
+    },
+    {
+      "ret1wk": 0.9501187648456089,
+      "ret4wk": -0.9905079761088453,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.7,
+      "name": "ACCO Brands Corp.",
+      "currency": "USD",
+      "price": 4.25,
+      "ticker": "ACCO:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 162.0,
+              "avgCost": 4.0141
+            }
+          }
+        }
+      },
+      "mktUid": 23235
+    },
+    {
+      "ret1wk": -2.6890756302521024,
+      "ret4wk": -4.7697368421052655,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.52,
+      "name": "Accel Entertainment, Inc.",
+      "currency": "USD",
+      "price": 11.58,
+      "ticker": "ACEL:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 50.0,
+              "avgCost": 12.4987
+            }
+          }
+        }
+      },
+      "mktUid": 64314
+    },
+    {
+      "ret1wk": 0.4444444444444251,
+      "ret4wk": -1.9522776572668321,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.8,
+      "name": "Acacia Research Corp.",
+      "currency": "USD",
+      "price": 4.52,
+      "ticker": "ACTG:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 105.0,
+              "avgCost": 4.5789
+            }
+          }
+        }
+      },
+      "mktUid": 18524
+    },
+    {
+      "ret1wk": 1.4188971299580633,
+      "ret4wk": 12.825112107623315,
+      "exchangeCode": "NYSEMKT",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.93,
+      "name": "Acme United Corp.",
+      "currency": "USD",
+      "price": 62.9,
+      "ticker": "ACU:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 4.0,
+              "avgCost": 58.8481
+            }
+          }
+        }
+      },
+      "mktUid": 360
+    },
+    {
+      "ret1wk": -4.833234714692869,
+      "ret4wk": -6.492378141660671,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.81,
+      "name": "Analog Devices, Inc.",
+      "currency": "USD",
+      "price": 354.52,
+      "ticker": "ADI:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 399.4
+            }
+          }
+        }
+      },
+      "mktUid": 711
+    },
+    {
+      "ret1wk": -3.745072273324579,
+      "ret4wk": -4.642022532906687,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.38,
+      "name": "Embotelladora Andina SA",
+      "currency": "USD",
+      "price": 29.3,
+      "ticker": "AKO.B:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 84.0,
+              "avgCost": 29.4007
+            }
+          }
+        }
+      },
+      "mktUid": 3112
+    },
+    {
+      "ret1wk": 0.5136310010756429,
+      "ret4wk": -1.3775075468574594,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.03,
+      "name": "The Allstate Corp.",
+      "currency": "USD",
+      "price": 257.87,
+      "ticker": "ALL:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 242.13
+            }
+          }
+        }
+      },
+      "mktUid": 252
+    },
+    {
+      "ret1wk": -4.084060269627276,
+      "ret4wk": -11.371437386709871,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.36,
+      "name": "Advanced Micro Devices, Inc.",
+      "currency": "USD",
+      "price": 459.61,
+      "ticker": "AMD:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 557.43
+            }
+          }
+        }
+      },
+      "mktUid": 175
+    },
+    {
+      "ret1wk": -0.8798575468733638,
+      "ret4wk": -0.6561335362973097,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -3.29,
+      "name": "Arista Networks, Inc.",
+      "currency": "USD",
+      "price": 189.26,
+      "ticker": "ANET:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 184.87
+            }
+          }
+        }
+      },
+      "mktUid": 51755
+    },
+    {
+      "ret1wk": -1.355140186915882,
+      "ret4wk": 7.649158592554817,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.15,
+      "name": "Anika Therapeutics, Inc.",
+      "currency": "USD",
+      "price": 21.11,
+      "ticker": "ANIK:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 11.0,
+              "avgCost": 21.8848
+            }
+          }
+        }
+      },
+      "mktUid": 736
+    },
+    {
+      "ret1wk": -5.749293119698395,
+      "ret4wk": -20.571882446386024,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -5.39,
+      "name": "American Outdoor Brands, Inc.",
+      "currency": "USD",
+      "price": 10.0,
+      "ticker": "AOUT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 19.0,
+              "avgCost": 12.4013
+            }
+          }
+        }
+      },
+      "mktUid": 64724
+    },
+    {
+      "ret1wk": 7.134220072551378,
+      "ret4wk": 23.74301675977655,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 2.67,
+      "name": "APA Corp.",
+      "currency": "USD",
+      "price": 44.3,
+      "ticker": "APA:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 8.0,
+              "avgCost": 34.3737
+            }
+          }
+        }
+      },
+      "mktUid": 759
+    },
+    {
+      "ret1wk": -12.022318138751443,
+      "ret4wk": 39.44602035708324,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 4.46,
+      "name": "Aprea Therapeutics, Inc.",
+      "currency": "USD",
+      "price": 0.8357,
+      "ticker": "APRE:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 281.0,
+              "avgCost": 0.7732
+            }
+          }
+        }
+      },
+      "mktUid": 62657
+    },
+    {
+      "ret1wk": -1.8656716417910557,
+      "ret4wk": 6.2626262626262585,
+      "exchangeCode": "NYSEMKT",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -4.54,
+      "name": "Alpha Pro Tech Ltd.",
+      "currency": "USD",
+      "price": 5.26,
+      "ticker": "APT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 134.0,
+              "avgCost": 5.487
+            }
+          }
+        }
+      },
+      "mktUid": 520
+    },
+    {
+      "ret1wk": 1.83486238532109,
+      "ret4wk": 1.5727931147418772,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.1,
+      "name": "AudioCodes Ltd.",
+      "currency": "USD",
+      "price": 9.99,
+      "ticker": "AUDC:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 14.0,
+              "avgCost": 9.4353
+            }
+          }
+        }
+      },
+      "mktUid": 980
+    },
+    {
+      "ret1wk": -2.4621212121212155,
+      "ret4wk": 0.3898635477582957,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.39,
+      "name": "Auna SA",
+      "currency": "USD",
+      "price": 5.15,
+      "ticker": "AUNA:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 58.0,
+              "avgCost": 5.219
+            }
+          }
+        }
+      },
+      "mktUid": 120872
+    },
+    {
+      "ret1wk": -0.2863864171013586,
+      "ret4wk": -17.38135593220339,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.51,
+      "name": "Bridgeline Digital, Inc.",
+      "currency": "USD",
+      "price": 0.9749,
+      "ticker": "BLIN:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 191.0,
+              "avgCost": 1.0738
+            }
+          }
+        }
+      },
+      "mktUid": 26370
+    },
+    {
+      "ret1wk": -0.5689767745546082,
+      "ret4wk": -1.2969695316176977,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.44,
+      "name": "Bank of the James Financial Group, Inc.",
+      "currency": "USD",
+      "price": 26.65,
+      "ticker": "BOTJ:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1958970": {
+              "shares": 90.0,
+              "avgCost": 26.7911
+            }
+          }
+        }
+      },
+      "mktUid": 38502
+    },
+    {
+      "ret1wk": -3.2748538011696082,
+      "ret4wk": -21.238095238095234,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 2.86,
+      "name": "BRC, Inc.",
+      "currency": "USD",
+      "price": 8.27,
+      "ticker": "BRCC:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 19.8,
+              "avgCost": 10.8105
+            }
+          }
+        }
+      },
+      "mktUid": 68377
+    },
+    {
+      "ret1wk": 4.6875,
+      "ret4wk": 27.61904761904763,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -4.96,
+      "name": "Brilliant Earth Group, Inc.",
+      "currency": "USD",
+      "price": 1.34,
+      "ticker": "BRLT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 291.0,
+              "avgCost": 1.385
+            }
+          }
+        }
+      },
+      "mktUid": 69657
+    },
+    {
+      "ret1wk": -2.518427518427535,
+      "ret4wk": -5.257071516572742,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.06,
+      "name": "Betterware de Mexico SAPI de CV",
+      "currency": "USD",
+      "price": 15.87,
+      "ticker": "BWMX:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 125.0,
+              "avgCost": 17.132
+            }
+          }
+        }
+      },
+      "mktUid": 64068
+    },
+    {
+      "ret1wk": -3.180212014134276,
+      "ret4wk": -9.27152317880794,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -3.52,
+      "name": "Baozun, Inc.",
+      "currency": "USD",
+      "price": 2.74,
+      "ticker": "BZUN:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 287.0,
+              "avgCost": 2.7304
+            }
+          }
+        }
+      },
+      "mktUid": 53123
+    },
+    {
+      "ret1wk": 1.1304347826087024,
+      "ret4wk": 8.337214718211472,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.39,
+      "name": "CrossAmerica Partners LP",
+      "currency": "USD",
+      "price": 23.26,
+      "ticker": "CAPL:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 91.0,
+              "avgCost": 21.9945
+            }
+          }
+        }
+      },
+      "mktUid": 43704
+    },
+    {
+      "ret1wk": -0.11186853150031428,
+      "ret4wk": 6.953237501220699,
+      "exchangeCode": "BATS",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 2.47,
+      "name": "Cboe Global Markets, Inc.",
+      "currency": "USD",
+      "price": 307.62,
+      "ticker": "CBOE:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 277.47
+            }
+          }
+        }
+      },
+      "mktUid": 30956
+    },
+    {
+      "ret1wk": -4.840484048404836,
+      "ret4wk": -5.875952121871586,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.26,
+      "name": "Codere Online Luxembourg SA",
+      "currency": "USD",
+      "price": 8.65,
+      "ticker": "CDRO:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 42.0,
+              "avgCost": 8.9997
+            }
+          }
+        }
+      },
+      "mktUid": 67560
+    },
+    {
+      "ret1wk": 6.553512494106539,
+      "ret4wk": 15.399770516157595,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 4.28,
+      "name": "CF Industries Holdings, Inc.",
+      "currency": "USD",
+      "price": 135.6,
+      "ticker": "CF:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 3.0,
+              "avgCost": 119.6933
+            }
+          }
+        }
+      },
+      "mktUid": 23159
+    },
+    {
+      "ret1wk": -0.8655126498002597,
+      "ret4wk": -14.004442247271044,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.22,
+      "name": "Community Healthcare Trust, Inc.",
+      "currency": "USD",
+      "price": 14.89,
+      "ticker": "CHCT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 20.0,
+              "avgCost": 18.393
+            }
+          }
+        }
+      },
+      "mktUid": 53121
+    },
+    {
+      "ret1wk": -5.148658448150822,
+      "ret4wk": -2.9673590504451064,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.38,
+      "name": "Chatham Lodging Trust",
+      "currency": "USD",
+      "price": 13.08,
+      "ticker": "CLDT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 119.0,
+              "avgCost": 13.1824
+            }
+          }
+        }
+      },
+      "mktUid": 30924
+    },
+    {
+      "ret1wk": 2.7155963302752273,
+      "ret4wk": 4.518297236743818,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.89,
+      "name": "Climb Global Solutions, Inc.",
+      "currency": "USD",
+      "price": 27.99,
+      "ticker": "CLMB:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 6.0,
+              "avgCost": 27.9129
+            }
+          }
+        }
+      },
+      "mktUid": 7218
+    },
+    {
+      "ret1wk": 3.2994538834951515,
+      "ret4wk": 16.244163039272806,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 2.79,
+      "name": "Conocophillips",
+      "currency": "USD",
+      "price": 136.19,
+      "ticker": "COP:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 3.0,
+              "avgCost": 112.84
+            }
+          }
+        }
+      },
+      "mktUid": 6971
+    },
+    {
+      "ret1wk": -2.577710386656562,
+      "ret4wk": 3.340829989533778,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.06,
+      "name": "Crawford & Co.",
+      "currency": "USD",
+      "price": 12.85,
+      "ticker": "CRD.A:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 12.0,
+              "avgCost": 13.2833
+            }
+          }
+        }
+      },
+      "mktUid": 2408
+    },
+    {
+      "ret1wk": -4.436860068259396,
+      "ret4wk": -5.723905723905731,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.71,
+      "name": "Crown Crafts, Inc.",
+      "currency": "USD",
+      "price": 2.8,
+      "ticker": "CRWS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 236.0,
+              "avgCost": 3.0158
+            }
+          }
+        }
+      },
+      "mktUid": 2459
+    },
+    {
+      "ret1wk": -4.856321839080458,
+      "ret4wk": -18.267094544556894,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.6,
+      "name": "Carriage Services, Inc.",
+      "currency": "USD",
+      "price": 33.11,
+      "ticker": "CSV:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 18.0,
+              "avgCost": 38.0614
+            }
+          }
+        }
+      },
+      "mktUid": 1702
+    },
+    {
+      "ret1wk": -2.050113895216399,
+      "ret4wk": -1.6018306636155666,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.75,
+      "name": "CTO Realty Growth, Inc.",
+      "currency": "USD",
+      "price": 21.5,
+      "ticker": "CTO:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 40.0,
+              "avgCost": 21.5436
+            }
+          }
+        }
+      },
+      "mktUid": 2285
+    },
+    {
+      "ret1wk": -6.400000000000006,
+      "ret4wk": 11.42857142857141,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 4.46,
+      "name": "Castor Maritime, Inc.",
+      "currency": "USD",
+      "price": 2.34,
+      "ticker": "CTRM:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 337.0,
+              "avgCost": 2.0313
+            }
+          }
+        }
+      },
+      "mktUid": 62071
+    },
+    {
+      "ret1wk": 0.0,
+      "ret4wk": -20.565552699228796,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.32,
+      "name": "Commercial Vehicle Group, Inc.",
+      "currency": "USD",
+      "price": 3.09,
+      "ticker": "CVGI:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 136.0,
+              "avgCost": 3.2272
+            }
+          }
+        }
+      },
+      "mktUid": 21646
+    },
+    {
+      "ret1wk": -8.658215737861763,
+      "ret4wk": -17.66734935862887,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.08,
+      "name": "Delta Air Lines, Inc.",
+      "currency": "USD",
+      "price": 76.38,
+      "ticker": "DAL:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 2.0,
+              "avgCost": 87.0539
+            }
+          }
+        }
+      },
+      "mktUid": 25199
+    },
+    {
+      "ret1wk": -5.434782608695654,
+      "ret4wk": -21.028744326777616,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -4.57,
+      "name": "Designer Brands, Inc.",
+      "currency": "USD",
+      "price": 5.22,
+      "ticker": "DBI:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 109.0,
+              "avgCost": 5.9655
+            }
+          }
+        }
+      },
+      "mktUid": 23049
+    },
+    {
+      "ret1wk": -0.7812500000000111,
+      "ret4wk": 5.833333333333335,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.24,
+      "name": "DoubleDown Interactive Co., Ltd.",
+      "currency": "USD",
+      "price": 12.7,
+      "ticker": "DDI:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 53.0,
+              "avgCost": 11.9954
+            }
+          }
+        }
+      },
+      "mktUid": 69497
+    },
+    {
+      "ret1wk": 0.3811830126911442,
+      "ret4wk": -22.318237029324994,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -5.57,
+      "name": "Datadog, Inc.",
+      "currency": "USD",
+      "price": 223.84,
+      "ticker": "DDOG:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 275.0
+            }
+          }
+        }
+      },
+      "mktUid": 62615
+    },
+    {
+      "ret1wk": -5.8693244739756345,
+      "ret4wk": -9.04616174802576,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -6.8,
+      "name": "Dell Technologies, Inc.",
+      "currency": "USD",
+      "price": 425.0,
+      "ticker": "DELL:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 461.0
+            }
+          }
+        }
+      },
+      "mktUid": 61892
+    },
+    {
+      "ret1wk": 2.054794520547931,
+      "ret4wk": 7.971014492753636,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 4.2,
+      "name": "DHI Group, Inc.",
+      "currency": "USD",
+      "price": 4.47,
+      "ticker": "DHX:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 392.0,
+              "avgCost": 3.9743
+            }
+          }
+        }
+      },
+      "mktUid": 26558
+    },
+    {
+      "ret1wk": -1.562500000000011,
+      "ret4wk": 0.9153318077803174,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.92,
+      "name": "1stdibs.com, Inc.",
+      "currency": "USD",
+      "price": 4.41,
+      "ticker": "DIBS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 42.0,
+              "avgCost": 4.3948
+            }
+          }
+        }
+      },
+      "mktUid": 68714
+    },
+    {
+      "ret1wk": 1.8817204301075252,
+      "ret4wk": 2.389528795811513,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.81,
+      "name": "Dynagas LNG Partners LP",
+      "currency": "USD",
+      "price": 3.79,
+      "ticker": "DLNG:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 191.0,
+              "avgCost": 3.6272
+            }
+          }
+        }
+      },
+      "mktUid": 45206
+    },
+    {
+      "ret1wk": 0.0,
+      "ret4wk": 10.416666666666652,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.73,
+      "name": "Diana Shipping, Inc.",
+      "currency": "USD",
+      "price": 2.75,
+      "ticker": "DSX:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 416.0,
+              "avgCost": 2.2163
+            }
+          }
+        }
+      },
+      "mktUid": 22741
+    },
+    {
+      "ret1wk": 4.561927094436147,
+      "ret4wk": 11.350737797956878,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.11,
+      "name": "Devon Energy Corp.",
+      "currency": "USD",
+      "price": 49.05,
+      "ticker": "DVN:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 6.0,
+              "avgCost": 43.4138
+            }
+          }
+        }
+      },
+      "mktUid": 2695
+    },
+    {
+      "ret1wk": -31.113370615149982,
+      "ret4wk": -35.72106261859581,
+      "exchangeCode": "NYSEMKT",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -3.11,
+      "name": "Electromed, Inc.",
+      "currency": "USD",
+      "price": 27.1,
+      "ticker": "ELMD:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 12.0,
+              "avgCost": 39.5984
+            }
+          }
+        }
+      },
+      "mktUid": 31198
+    },
+    {
+      "ret1wk": 1.0352107879860961,
+      "ret4wk": 3.3653846153846034,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 2.34,
+      "name": "EOG Resources, Inc.",
+      "currency": "USD",
+      "price": 148.35,
+      "ticker": "EOG:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 2.0,
+              "avgCost": 139.19
+            }
+          }
+        }
+      },
+      "mktUid": 3234
+    },
+    {
+      "ret1wk": 5.620114092541728,
+      "ret4wk": 8.069930584242746,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.85,
+      "name": "Expand Energy Corp.",
+      "currency": "USD",
+      "price": 99.98,
+      "ticker": "EXE:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 3.0,
+              "avgCost": 88.9945
+            }
+          }
+        }
+      },
+      "mktUid": 67732
+    },
+    {
+      "ret1wk": 2.7327070879589854,
+      "ret4wk": 18.991097922848653,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.59,
+      "name": "Fennec Pharmaceuticals, Inc.",
+      "currency": "USD",
+      "price": 12.03,
+      "ticker": "FENC:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 31.0,
+              "avgCost": 11.3213
+            }
+          }
+        }
+      },
+      "mktUid": 22109
+    },
+    {
+      "ret1wk": -9.64376053962901,
+      "ret4wk": -13.960256924929748,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -4.53,
+      "name": "Filana Therapeutics, Inc.",
+      "currency": "USD",
+      "price": 0.8573,
+      "ticker": "FLNA:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 701.0,
+              "avgCost": 1.0587
+            }
+          }
+        }
+      },
+      "mktUid": 6739
+    },
+    {
+      "ret1wk": -4.93955094991364,
+      "ret4wk": -6.235093696763205,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.65,
+      "name": "Forestar Group, Inc.",
+      "currency": "USD",
+      "price": 27.52,
+      "ticker": "FOR:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 55.0,
+              "avgCost": 29.1358
+            }
+          }
+        }
+      },
+      "mktUid": 27326
+    },
+    {
+      "ret1wk": -1.1741682974559797,
+      "ret4wk": -4.356060606060619,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.59,
+      "name": "Five Point Holdings LLC",
+      "currency": "USD",
+      "price": 5.05,
+      "ticker": "FPH:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 71.0,
+              "avgCost": 5.1339
+            }
+          }
+        }
+      },
+      "mktUid": 54507
+    },
+    {
+      "ret1wk": -2.7568922305764465,
+      "ret4wk": -4.150197628458496,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.52,
+      "name": "FrontView REIT, Inc.",
+      "currency": "USD",
+      "price": 19.4,
+      "ticker": "FVR:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 24.0,
+              "avgCost": 21.2119
+            }
+          }
+        }
+      },
+      "mktUid": 140631
+    },
+    {
+      "ret1wk": 2.6709401709401615,
+      "ret4wk": 11.744186046511619,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.52,
+      "name": "StealthGas, Inc.",
+      "currency": "USD",
+      "price": 9.61,
+      "ticker": "GASS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 279.0,
+              "avgCost": 8.667
+            }
+          }
+        }
+      },
+      "mktUid": 23220
+    },
+    {
+      "ret1wk": -4.25090720580612,
+      "ret4wk": 26.767330130404932,
+      "exchangeCode": "NYSEMKT",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.48,
+      "name": "Gencor Industries, Inc.",
+      "currency": "USD",
+      "price": 18.47,
+      "ticker": "GENC:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 34.0,
+              "avgCost": 19.2394
+            }
+          }
+        }
+      },
+      "mktUid": 3815
+    },
+    {
+      "ret1wk": 1.4925373134328401,
+      "ret4wk": -2.857142857142847,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.37,
+      "name": "Gogoro, Inc.",
+      "currency": "USD",
+      "price": 2.72,
+      "ticker": "GGR:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 68.0,
+              "avgCost": 3.2458
+            }
+          }
+        }
+      },
+      "mktUid": 67844
+    },
+    {
+      "ret1wk": -1.599015990159891,
+      "ret4wk": -15.78947368421052,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.84,
+      "name": "Giftify, Inc.",
+      "currency": "USD",
+      "price": 0.8,
+      "ticker": "GIFT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 250.0,
+              "avgCost": 0.9158
+            }
+          }
+        }
+      },
+      "mktUid": 62054
+    },
+    {
+      "ret1wk": -0.13071895424837665,
+      "ret4wk": 23.225806451612897,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 3.52,
+      "name": "Globus Maritime Ltd.",
+      "currency": "USD",
+      "price": 3.82,
+      "ticker": "GLBS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 945.0,
+              "avgCost": 3.4974
+            }
+          }
+        }
+      },
+      "mktUid": 42292
+    },
+    {
+      "ret1wk": -0.9908536585365724,
+      "ret4wk": 4.227168797232483,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.15,
+      "name": "Gladstone Commercial Corp.",
+      "currency": "USD",
+      "price": 12.99,
+      "ticker": "GOOD:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 33.0,
+              "avgCost": 12.4939
+            }
+          }
+        }
+      },
+      "mktUid": 20943
+    },
+    {
+      "ret1wk": 5.306205909416217,
+      "ret4wk": -6.363636363636371,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 5.31,
+      "name": "Grove Collaborative Holdings, Inc.",
+      "currency": "USD",
+      "price": 1.03,
+      "ticker": "GROV:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 193.0,
+              "avgCost": 1.1239
+            }
+          }
+        }
+      },
+      "mktUid": 68578
+    },
+    {
+      "ret1wk": -5.847953216374258,
+      "ret4wk": 8.053691275167797,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.0,
+      "name": "GrowGeneration Corp.",
+      "currency": "USD",
+      "price": 1.61,
+      "ticker": "GRWG:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 528.0,
+              "avgCost": 1.6616
+            }
+          }
+        }
+      },
+      "mktUid": 62526
+    },
+    {
+      "ret1wk": -5.577689243027873,
+      "ret4wk": 10.4895104895105,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.87,
+      "name": "Gray Media, Inc.",
+      "currency": "USD",
+      "price": 4.74,
+      "ticker": "GTN:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 37.0,
+              "avgCost": 4.877
+            }
+          }
+        }
+      },
+      "mktUid": 4031
+    },
+    {
+      "ret1wk": -6.219859883884982,
+      "ret4wk": 28.98230152621304,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.64,
+      "name": "Hamilton Beach Brands Holding Co.",
+      "currency": "USD",
+      "price": 30.46,
+      "ticker": "HBB:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 37.0,
+              "avgCost": 22.8222
+            }
+          }
+        }
+      },
+      "mktUid": 54848
+    },
+    {
+      "ret1wk": -2.8548123980424167,
+      "ret4wk": 2.9386343993085484,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.73,
+      "name": "HUTCHMED (China) Ltd.",
+      "currency": "USD",
+      "price": 11.91,
+      "ticker": "HCM:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 63.0,
+              "avgCost": 12.5639
+            }
+          }
+        }
+      },
+      "mktUid": 53723
+    },
+    {
+      "ret1wk": -4.80913173652695,
+      "ret4wk": -2.90131704523765,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.62,
+      "name": "Hewlett Packard Enterprise Co.",
+      "currency": "USD",
+      "price": 50.87,
+      "ticker": "HPE:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 4.0,
+              "avgCost": 46.8352
+            }
+          }
+        }
+      },
+      "mktUid": 53517
+    },
+    {
+      "ret1wk": 1.3266274922378196,
+      "ret4wk": 9.034680804064488,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 3.04,
+      "name": "Humana, Inc.",
+      "currency": "USD",
+      "price": 394.88,
+      "ticker": "HUM:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 403.04
+            }
+          }
+        }
+      },
+      "mktUid": 4438
+    },
+    {
+      "ret1wk": 2.850228556063472,
+      "ret4wk": 5.488141202426933,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.55,
+      "name": "IBEX Ltd.",
+      "currency": "USD",
+      "price": 38.25,
+      "ticker": "IBEX:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 11.0,
+              "avgCost": 32.6431
+            }
+          }
+        }
+      },
+      "mktUid": 64708
+    },
+    {
+      "ret1wk": -4.895104895104884,
+      "ret4wk": -29.89690721649484,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.63,
+      "name": "Intellicheck, Inc.",
+      "currency": "USD",
+      "price": 2.72,
+      "ticker": "IDN:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 177.0,
+              "avgCost": 3.5951
+            }
+          }
+        }
+      },
+      "mktUid": 4778
+    },
+    {
+      "ret1wk": -0.3937007874015852,
+      "ret4wk": 15.52511415525113,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.17,
+      "name": "Information Services Group, Inc.",
+      "currency": "USD",
+      "price": 5.06,
+      "ticker": "III:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 54.0,
+              "avgCost": 4.3922
+            }
+          }
+        }
+      },
+      "mktUid": 25005
+    },
+    {
+      "ret1wk": 7.058823529411762,
+      "ret4wk": 18.438177874186536,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 4.0,
+      "name": "Imperial Petroleum, Inc.",
+      "currency": "USD",
+      "price": 5.46,
+      "ticker": "IMPP:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 112.0,
+              "avgCost": 4.8612
+            }
+          }
+        }
+      },
+      "mktUid": 70314
+    },
+    {
+      "ret1wk": -3.630897317298798,
+      "ret4wk": 3.656716417910455,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.45,
+      "name": "Incyte Corp.",
+      "currency": "USD",
+      "price": 125.01,
+      "ticker": "INCY:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 2.0,
+              "avgCost": 115.7448
+            }
+          }
+        }
+      },
+      "mktUid": 4613
+    },
+    {
+      "ret1wk": -7.741935483870977,
+      "ret4wk": -15.86678485500823,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.22,
+      "name": "Summit Hotel Properties, Inc.",
+      "currency": "USD",
+      "price": 5.72,
+      "ticker": "INN:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 82.0,
+              "avgCost": 6.5413
+            }
+          }
+        }
+      },
+      "mktUid": 31601
+    },
+    {
+      "ret1wk": -2.2310513447432734,
+      "ret4wk": 0.6373852854254292,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.41,
+      "name": "Invesco Ltd.",
+      "currency": "USD",
+      "price": 31.99,
+      "ticker": "IVZ:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 10.0,
+              "avgCost": 30.4734
+            }
+          }
+        }
+      },
+      "mktUid": 705
+    },
+    {
+      "ret1wk": -15.199999999999992,
+      "ret4wk": 7.070707070707072,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -5.07,
+      "name": "Incannex Healthcare, Inc.",
+      "currency": "USD",
+      "price": 3.18,
+      "ticker": "IXHL:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 67.0,
+              "avgCost": 3.332
+            }
+          }
+        }
+      },
+      "mktUid": 119988
+    },
+    {
+      "ret1wk": -3.0905792406375587,
+      "ret4wk": -11.9986382324346,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.0,
+      "name": "Jabil, Inc.",
+      "currency": "USD",
+      "price": 299.14,
+      "ticker": "JBL:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 331.0
+            }
+          }
+        }
+      },
+      "mktUid": 4988
+    },
+    {
+      "ret1wk": 0.363636363636366,
+      "ret4wk": 14.66196355085243,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.95,
+      "name": "Jerash Holdings (US), Inc.",
+      "currency": "USD",
+      "price": 5.52,
+      "ticker": "JRSH:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 214.0,
+              "avgCost": 4.5703
+            }
+          }
+        }
+      },
+      "mktUid": 61118
+    },
+    {
+      "ret1wk": -1.0650887573964485,
+      "ret4wk": 0.9661835748792313,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.95,
+      "name": "The Joint Corp. (United States)",
+      "currency": "USD",
+      "price": 8.36,
+      "ticker": "JYNT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 25.0,
+              "avgCost": 8.42
+            }
+          }
+        }
+      },
+      "mktUid": 52451
+    },
+    {
+      "ret1wk": 1.6588685665674063,
+      "ret4wk": -11.970534069981586,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.19,
+      "name": "Kimball Electronics, Inc.",
+      "currency": "USD",
+      "price": 23.9,
+      "ticker": "KE:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 21.0,
+              "avgCost": 24.9603
+            }
+          }
+        }
+      },
+      "mktUid": 52396
+    },
+    {
+      "ret1wk": -0.26552542796451917,
+      "ret4wk": -6.438283905755493,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.06,
+      "name": "Keysight Technologies, Inc.",
+      "currency": "USD",
+      "price": 319.27,
+      "ticker": "KEYS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 331.65
+            }
+          }
+        }
+      },
+      "mktUid": 52395
+    },
+    {
+      "ret1wk": -6.790662157739725,
+      "ret4wk": -12.46704887158332,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.6,
+      "name": "KLA Corp.",
+      "currency": "USD",
+      "price": 170.89,
+      "ticker": "KLAC:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 236.96
+            }
+          }
+        }
+      },
+      "mktUid": 5165
+    },
+    {
+      "ret1wk": 4.729729729729737,
+      "ret4wk": -26.148728649289097,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.65,
+      "name": "KLX Energy Services Holdings, Inc.",
+      "currency": "USD",
+      "price": 1.55,
+      "ticker": "KLXE:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 0.7835,
+              "avgCost": 1.7094
+            }
+          }
+        }
+      },
+      "mktUid": 61534
+    },
+    {
+      "ret1wk": -0.8862097631269439,
+      "ret4wk": 16.53297135479763,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.82,
+      "name": "Kamada Ltd.",
+      "currency": "USD",
+      "price": 8.38,
+      "ticker": "KMDA:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 48.0,
+              "avgCost": 8.3404
+            }
+          }
+        }
+      },
+      "mktUid": 44160
+    },
+    {
+      "ret1wk": -5.222602739726023,
+      "ret4wk": 8.000000000000007,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.09,
+      "name": "Keros Therapeutics, Inc.",
+      "currency": "USD",
+      "price": 11.07,
+      "ticker": "KROS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 92.0,
+              "avgCost": 10.3158
+            }
+          }
+        }
+      },
+      "mktUid": 64199
+    },
+    {
+      "ret1wk": -4.564755838641188,
+      "ret4wk": 4.05092592592593,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -4.87,
+      "name": "Lifetime Brands, Inc.",
+      "currency": "USD",
+      "price": 8.99,
+      "ticker": "LCUT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 133.0,
+              "avgCost": 8.6199
+            }
+          }
+        }
+      },
+      "mktUid": 5382
+    },
+    {
+      "ret1wk": 0.7850834151128527,
+      "ret4wk": 9.95717344753746,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.68,
+      "name": "Chicago Atlantic BDC, Inc.",
+      "currency": "USD",
+      "price": 10.27,
+      "ticker": "LIEN:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1958970": {
+              "shares": 253.0,
+              "avgCost": 9.4311
+            }
+          }
+        }
+      },
+      "mktUid": 71490
+    },
+    {
+      "ret1wk": -8.789424860853433,
+      "ret4wk": 2.850418410041833,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -5.64,
+      "name": "Liquidity Services, Inc.",
+      "currency": "USD",
+      "price": 39.33,
+      "ticker": "LQDT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 10.0,
+              "avgCost": 38.6789
+            }
+          }
+        }
+      },
+      "mktUid": 23414
+    },
+    {
+      "ret1wk": -7.773469776902065,
+      "ret4wk": -8.667463964247501,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -3.74,
+      "name": "Lam Research Corp.",
+      "currency": "USD",
+      "price": 290.2,
+      "ticker": "LRCX:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 357.28
+            }
+          }
+        }
+      },
+      "mktUid": 5245
+    },
+    {
+      "ret1wk": -1.324503311258285,
+      "ret4wk": -7.644628099173556,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.97,
+      "name": "Lesaka Technologies, Inc.",
+      "currency": "USD",
+      "price": 4.47,
+      "ticker": "LSAK:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1958970": {
+              "shares": 511.0,
+              "avgCost": 4.7081
+            }
+          }
+        }
+      },
+      "mktUid": 22548
+    },
+    {
+      "ret1wk": -4.746255348183038,
+      "ret4wk": -20.461389928830553,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.15,
+      "name": "LSI Industries, Inc.",
+      "currency": "USD",
+      "price": 19.62,
+      "ticker": "LYTS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 26.0,
+              "avgCost": 25.2488
+            }
+          }
+        }
+      },
+      "mktUid": 5469
+    },
+    {
+      "ret1wk": -2.2643496577145816,
+      "ret4wk": 16.509730069052097,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.07,
+      "name": "MISTRAS Group, Inc.",
+      "currency": "USD",
+      "price": 18.56,
+      "ticker": "MG:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 24.0,
+              "avgCost": 16.08
+            }
+          }
+        }
+      },
+      "mktUid": 27926
+    },
+    {
+      "ret1wk": -5.719237435008651,
+      "ret4wk": -8.877721943048567,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.81,
+      "name": "Hello Group, Inc.",
+      "currency": "USD",
+      "price": 5.44,
+      "ticker": "MOMO:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 105.0,
+              "avgCost": 5.7079
+            }
+          }
+        }
+      },
+      "mktUid": 52508
+    },
+    {
+      "ret1wk": 9.119010819165375,
+      "ret4wk": 5.373134328358198,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.08,
+      "name": "Materialise NV",
+      "currency": "USD",
+      "price": 7.06,
+      "ticker": "MTLS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 160.0,
+              "avgCost": 6.6828
+            }
+          }
+        }
+      },
+      "mktUid": 51926
+    },
+    {
+      "ret1wk": -1.7265135699373713,
+      "ret4wk": 6.7414965986394515,
+      "exchangeCode": "NYSEMKT",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -7.25,
+      "name": "Mexco Energy Corp.",
+      "currency": "USD",
+      "price": 9.4146,
+      "ticker": "MXC:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 69.0,
+              "avgCost": 9.9536
+            }
+          }
+        }
+      },
+      "mktUid": 19974
+    },
+    {
+      "ret1wk": -11.154094132817537,
+      "ret4wk": -22.671156004489347,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -4.04,
+      "name": "Noodles & Co.",
+      "currency": "USD",
+      "price": 13.78,
+      "ticker": "NDLS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 62.0,
+              "avgCost": 17.4122
+            }
+          }
+        }
+      },
+      "mktUid": 44265
+    },
+    {
+      "ret1wk": 2.6185627000291145,
+      "ret4wk": -4.885022589998423,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.2,
+      "name": "Natural Gas Services Group, Inc.",
+      "currency": "USD",
+      "price": 35.27,
+      "ticker": "NGS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 8.0,
+              "avgCost": 39.8038
+            }
+          }
+        }
+      },
+      "mktUid": 18316
+    },
+    {
+      "ret1wk": -2.146158925819941,
+      "ret4wk": 13.621861328703556,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.66,
+      "name": "Navios Maritime Partners LP",
+      "currency": "USD",
+      "price": 88.91,
+      "ticker": "NMM:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 4.0,
+              "avgCost": 76.0707
+            }
+          }
+        }
+      },
+      "mktUid": 27225
+    },
+    {
+      "ret1wk": 2.0605491668622244,
+      "ret4wk": 2.595074077569115,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.51,
+      "name": "NVIDIA Corp.",
+      "currency": "USD",
+      "price": 217.44,
+      "ticker": "NVDA:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 2.0,
+              "avgCost": 210.4675
+            }
+          }
+        }
+      },
+      "mktUid": 6480
+    },
+    {
+      "ret1wk": -2.8897028897028942,
+      "ret4wk": -3.0081300813008194,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.29,
+      "name": "One Liberty Properties, Inc.",
+      "currency": "USD",
+      "price": 23.86,
+      "ticker": "OLP:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 77.0,
+              "avgCost": 24.5114
+            }
+          }
+        }
+      },
+      "mktUid": 6579
+    },
+    {
+      "ret1wk": 6.265177270519673,
+      "ret4wk": 1.5784586815227541,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -3.36,
+      "name": "Ooma, Inc.",
+      "currency": "USD",
+      "price": 21.88,
+      "ticker": "OOMA:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 10.0,
+              "avgCost": 20.1331
+            }
+          }
+        }
+      },
+      "mktUid": 53305
+    },
+    {
+      "ret1wk": -4.792746113989644,
+      "ret4wk": -0.3389830508474634,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.73,
+      "name": "Oatly Group AB",
+      "currency": "USD",
+      "price": 14.7,
+      "ticker": "OTLY:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 28.0,
+              "avgCost": 11.9233
+            }
+          }
+        }
+      },
+      "mktUid": 68618
+    },
+    {
+      "ret1wk": -0.8625063419584023,
+      "ret4wk": -2.4950099800399195,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.41,
+      "name": "Alpine Income Property Trust, Inc.",
+      "currency": "USD",
+      "price": 19.54,
+      "ticker": "PINE:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 21.0,
+              "avgCost": 19.9194
+            }
+          }
+        }
+      },
+      "mktUid": 64021
+    },
+    {
+      "ret1wk": -1.9742679680567865,
+      "ret4wk": 6.997578692493955,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.08,
+      "name": "Park-Ohio Holdings Corp.",
+      "currency": "USD",
+      "price": 44.19,
+      "ticker": "PKOH:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 14.0,
+              "avgCost": 46.0014
+            }
+          }
+        }
+      },
+      "mktUid": 6787
+    },
+    {
+      "ret1wk": -6.722689075630239,
+      "ret4wk": 5.714285714285716,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.91,
+      "name": "Pliant Therapeutics, Inc.",
+      "currency": "USD",
+      "price": 1.11,
+      "ticker": "PLRX:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 1322.0,
+              "avgCost": 1.1217
+            }
+          }
+        }
+      },
+      "mktUid": 64230
+    },
+    {
+      "ret1wk": 4.1625658542233435,
+      "ret4wk": 10.611090618467966,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -3.47,
+      "name": "Palantir Technologies, Inc.",
+      "currency": "USD",
+      "price": 179.92,
+      "ticker": "PLTR:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 135.17
+            }
+          }
+        }
+      },
+      "mktUid": 65452
+    },
+    {
+      "ret1wk": -2.1070811744386853,
+      "ret4wk": 23.647469458987768,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -2.17,
+      "name": "CPI Card Group, Inc.",
+      "currency": "USD",
+      "price": 28.34,
+      "ticker": "PMTS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 25.0,
+              "avgCost": 28.537
+            }
+          }
+        }
+      },
+      "mktUid": 53480
+    },
+    {
+      "ret1wk": -1.3574660633484115,
+      "ret4wk": 0.0,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.93,
+      "name": "Outdoor Holding Co.",
+      "currency": "USD",
+      "price": 2.18,
+      "ticker": "POWW:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 343.0,
+              "avgCost": 2.3049
+            }
+          }
+        }
+      },
+      "mktUid": 64567
+    },
+    {
+      "ret1wk": -0.09124087591242391,
+      "ret4wk": -4.031551270815081,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.01,
+      "name": "Public Policy Holding Co., Inc.",
+      "currency": "USD",
+      "price": 10.95,
+      "ticker": "PPHC:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 116.0,
+              "avgCost": 10.5685
+            }
+          }
+        }
+      },
+      "mktUid": 148113
+    },
+    {
+      "ret1wk": 1.775147928994092,
+      "ret4wk": -3.370786516853941,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.18,
+      "name": "Performance Shipping, Inc.",
+      "currency": "USD",
+      "price": 1.72,
+      "ticker": "PSHG:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 702.0,
+              "avgCost": 1.7303
+            }
+          }
+        }
+      },
+      "mktUid": 31664
+    },
+    {
+      "ret1wk": 15.370370370370367,
+      "ret4wk": 30.06263048016702,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 16.23,
+      "name": "Pyxis Tankers, Inc.",
+      "currency": "USD",
+      "price": 6.23,
+      "ticker": "PXS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 185.0,
+              "avgCost": 4.5414
+            }
+          }
+        }
+      },
+      "mktUid": 53547
+    },
+    {
+      "ret1wk": -8.72936501634114,
+      "ret4wk": -18.425299628496607,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -3.3,
+      "name": "Qnity Electronics, Inc.",
+      "currency": "USD",
+      "price": 115.49,
+      "ticker": "Q:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 142.77
+            }
+          }
+        }
+      },
+      "mktUid": 146432
+    },
+    {
+      "ret1wk": -1.17647058823529,
+      "ret4wk": -3.4839902901398823,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.2,
+      "name": "Quad/Graphics, Inc.",
+      "currency": "USD",
+      "price": 10.08,
+      "ticker": "QUAD:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 179.0,
+              "avgCost": 9.8442
+            }
+          }
+        }
+      },
+      "mktUid": 31174
+    },
+    {
+      "ret1wk": -4.286185295087364,
+      "ret4wk": 13.843137254901961,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.34,
+      "name": "RCI Hospitality Holdings, Inc.",
+      "currency": "USD",
+      "price": 29.03,
+      "ticker": "RICK:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 7.0,
+              "avgCost": 27.1184
+            }
+          }
+        }
+      },
+      "mktUid": 7573
+    },
+    {
+      "ret1wk": -2.262443438914019,
+      "ret4wk": -2.262443438914019,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -4.0,
+      "name": "Research Solutions, Inc.",
+      "currency": "USD",
+      "price": 2.16,
+      "ticker": "RSSS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 131.0,
+              "avgCost": 2.2434
+            }
+          }
+        }
+      },
+      "mktUid": 29865
+    },
+    {
+      "ret1wk": 0.5747126436781658,
+      "ret4wk": 14.049839474086534,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.39,
+      "name": "Safe Bulkers, Inc.",
+      "currency": "USD",
+      "price": 8.75,
+      "ticker": "SB:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 101.0,
+              "avgCost": 7.3041
+            }
+          }
+        }
+      },
+      "mktUid": 27602
+    },
+    {
+      "ret1wk": -17.08991077556623,
+      "ret4wk": -36.687631027253666,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 3.07,
+      "name": "Vivid Seats, Inc.",
+      "currency": "USD",
+      "price": 6.04,
+      "ticker": "SEAT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 37.0,
+              "avgCost": 7.0889
+            }
+          }
+        }
+      },
+      "mktUid": 69886
+    },
+    {
+      "ret1wk": -1.562500000000011,
+      "ret4wk": 45.21276595744681,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -3.65,
+      "name": "Sight Sciences, Inc.",
+      "currency": "USD",
+      "price": 8.19,
+      "ticker": "SGHT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 30.0,
+              "avgCost": 8.2549
+            }
+          }
+        }
+      },
+      "mktUid": 69192
+    },
+    {
+      "ret1wk": 1.7501988862370643,
+      "ret4wk": 0.0,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.08,
+      "name": "Star Group LP",
+      "currency": "USD",
+      "price": 12.79,
+      "ticker": "SGU:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 51.0,
+              "avgCost": 12.5113
+            }
+          }
+        }
+      },
+      "mktUid": 8268
+    },
+    {
+      "ret1wk": 0.1668520578420596,
+      "ret4wk": 4.345307068366155,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.98,
+      "name": "Seanergy Maritime Holdings Corp.",
+      "currency": "USD",
+      "price": 18.01,
+      "ticker": "SHIP:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 97.0,
+              "avgCost": 15.7491
+            }
+          }
+        }
+      },
+      "mktUid": 27112
+    },
+    {
+      "ret1wk": -1.660899653979231,
+      "ret4wk": -9.605597964376589,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -4.69,
+      "name": "Sify Technologies Ltd.",
+      "currency": "USD",
+      "price": 14.21,
+      "ticker": "SIFY:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 12.0,
+              "avgCost": 15.7752
+            }
+          }
+        }
+      },
+      "mktUid": 7771
+    },
+    {
+      "ret1wk": -7.821229050279321,
+      "ret4wk": 2.3573200992555776,
+      "exchangeCode": "NYSEMKT",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -4.4,
+      "name": "Solaris Resources, Inc.",
+      "currency": "USD",
+      "price": 8.25,
+      "ticker": "SLSR:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 25.0,
+              "avgCost": 8.2943
+            }
+          }
+        }
+      },
+      "mktUid": 65636
+    },
+    {
+      "ret1wk": -4.55018200728029,
+      "ret4wk": 15.840959293152412,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.53,
+      "name": "Super Micro Computer, Inc.",
+      "currency": "USD",
+      "price": 36.71,
+      "ticker": "SMCI:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 11.0,
+              "avgCost": 25.3948
+            }
+          }
+        }
+      },
+      "mktUid": 25185
+    },
+    {
+      "ret1wk": 0.47961630695443347,
+      "ret4wk": -7.486886832414474,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.03,
+      "name": "Standard Motor Products, Inc.",
+      "currency": "USD",
+      "price": 37.71,
+      "ticker": "SMP:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 8.0,
+              "avgCost": 39.2653
+            }
+          }
+        }
+      },
+      "mktUid": 8257
+    },
+    {
+      "ret1wk": -3.2752613240418005,
+      "ret4wk": 0.3615328994938549,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.21,
+      "name": "Sohu.com Ltd.",
+      "currency": "USD",
+      "price": 13.88,
+      "ticker": "SOHU:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 61.0,
+              "avgCost": 12.8177
+            }
+          }
+        }
+      },
+      "mktUid": 61188
+    },
+    {
+      "ret1wk": -0.7204453662263854,
+      "ret4wk": 3.422788264725951,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.12,
+      "name": "Solventum Corp.",
+      "currency": "USD",
+      "price": 90.95,
+      "ticker": "SOLV:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 3.0,
+              "avgCost": 79.876
+            }
+          }
+        }
+      },
+      "mktUid": 120891
+    },
+    {
+      "ret1wk": -5.893536121672993,
+      "ret4wk": -6.25,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -6.78,
+      "name": "Sono-Tek Corp.",
+      "currency": "USD",
+      "price": 4.95,
+      "ticker": "SOTK:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1958970": {
+              "shares": 452.0,
+              "avgCost": 5.195
+            }
+          }
+        }
+      },
+      "mktUid": 8114
+    },
+    {
+      "ret1wk": -0.28360748723766926,
+      "ret4wk": -3.5655512890839347,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.17,
+      "name": "Suburban Propane Partners LP",
+      "currency": "USD",
+      "price": 17.58,
+      "ticker": "SPH:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 19.0,
+              "avgCost": 18.3197
+            }
+          }
+        }
+      },
+      "mktUid": 8380
+    },
+    {
+      "ret1wk": -2.508960573476704,
+      "ret4wk": -4.1578576462297345,
+      "exchangeCode": "NYSEMKT",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.82,
+      "name": "Strawberry Fields REIT, Inc.",
+      "currency": "USD",
+      "price": 13.6,
+      "ticker": "STRW:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 26.0,
+              "avgCost": 14.2204
+            }
+          }
+        }
+      },
+      "mktUid": 116918
+    },
+    {
+      "ret1wk": -2.674267945063491,
+      "ret4wk": 1.3820655401392878,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.88,
+      "name": "State Street Corp.",
+      "currency": "USD",
+      "price": 187.79,
+      "ticker": "STT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 186.11
+            }
+          }
+        }
+      },
+      "mktUid": 8291
+    },
+    {
+      "ret1wk": 0.8902077151335286,
+      "ret4wk": -9.090909090909104,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 2.62,
+      "name": "TransAct Technologies, Inc.",
+      "currency": "USD",
+      "price": 5.1,
+      "ticker": "TACT:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 85.0,
+              "avgCost": 5.2648
+            }
+          }
+        }
+      },
+      "mktUid": 8869
+    },
+    {
+      "ret1wk": 3.2719328732436326,
+      "ret4wk": -3.6933056869608683,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.34,
+      "name": "TE Connectivity Plc",
+      "currency": "USD",
+      "price": 208.0,
+      "ticker": "TEL:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 203.84
+            }
+          }
+        }
+      },
+      "mktUid": 26309
+    },
+    {
+      "ret1wk": -2.774274905422447,
+      "ret4wk": 0.5215123859191761,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.26,
+      "name": "Tredegar Corp.",
+      "currency": "USD",
+      "price": 7.71,
+      "ticker": "TG:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 80.0,
+              "avgCost": 7.8716
+            }
+          }
+        }
+      },
+      "mktUid": 8912
+    },
+    {
+      "ret1wk": 5.882352941176472,
+      "ret4wk": -6.8235294117647065,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 1.02,
+      "name": "Tilly's, Inc.",
+      "currency": "USD",
+      "price": 3.96,
+      "ticker": "TLYS:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 55.0,
+              "avgCost": 4.0953
+            }
+          }
+        }
+      },
+      "mktUid": 38840
+    },
+    {
+      "ret1wk": -4.347826086956507,
+      "ret4wk": -3.9999999999999925,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -4.0,
+      "name": "Grupo Televisa SAB",
+      "currency": "USD",
+      "price": 2.64,
+      "ticker": "TV:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 418.0,
+              "avgCost": 2.8353
+            }
+          }
+        }
+      },
+      "mktUid": 4087
+    },
+    {
+      "ret1wk": 6.056270863137825,
+      "ret4wk": 8.066083576287664,
+      "exchangeCode": "NYSEArca",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 2.25,
+      "name": "ProShares UltraShort Russell2000",
+      "currency": "USD",
+      "price": 22.24,
+      "ticker": "TWM:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 133.0,
+              "avgCost": 21.4325
+            }
+          }
+        }
+      },
+      "mktUid": 28056
+    },
+    {
+      "ret1wk": -12.845010615711239,
+      "ret4wk": -9.97807017543858,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -5.63,
+      "name": "Upland Software, Inc.",
+      "currency": "USD",
+      "price": 4.105,
+      "ticker": "UPLD:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 63.0,
+              "avgCost": 4.6858
+            }
+          }
+        }
+      },
+      "mktUid": 52441
+    },
+    {
+      "ret1wk": -0.7042253521126751,
+      "ret4wk": 5.617977528089879,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 2.17,
+      "name": "United Maritime Corp.",
+      "currency": "USD",
+      "price": 2.82,
+      "ticker": "USEA:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 512.0,
+              "avgCost": 2.6661
+            }
+          }
+        }
+      },
+      "mktUid": 72867
+    },
+    {
+      "ret1wk": -0.03208213025345241,
+      "ret4wk": 14.727540500736369,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.71,
+      "name": "VEON Ltd.",
+      "currency": "USD",
+      "price": 62.32,
+      "ticker": "VEON:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 29.0,
+              "avgCost": 51.518
+            }
+          }
+        }
+      },
+      "mktUid": 31321
+    },
+    {
+      "ret1wk": 6.33941423577451,
+      "ret4wk": 17.251319923557794,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.86,
+      "name": "Valero Energy Corp.",
+      "currency": "USD",
+      "price": 361.99,
+      "ticker": "VLO:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 299.61
+            }
+          }
+        }
+      },
+      "mktUid": 9258
+    },
+    {
+      "ret1wk": -1.831489361702121,
+      "ret4wk": -3.3367252815999504,
+      "exchangeCode": "NASDAQ",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.03,
+      "name": "VeriSign, Inc.",
+      "currency": "USD",
+      "price": 288.37,
+      "ticker": "VRSN:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1956961": {
+              "shares": 1.0,
+              "avgCost": 269.61
+            }
+          }
+        }
+      },
+      "mktUid": 9316
+    },
+    {
+      "ret1wk": -0.2762430939226568,
+      "ret4wk": -18.51015801354402,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.28,
+      "name": "VTEX (Cayman Islands)",
+      "currency": "USD",
+      "price": 3.61,
+      "ticker": "VTEX:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 87.0,
+              "avgCost": 3.8421
+            }
+          }
+        }
+      },
+      "mktUid": 69234
+    },
+    {
+      "ret1wk": -2.6734926052332186,
+      "ret4wk": 0.26369762672133756,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -0.58,
+      "name": "Corporación Inmobiliaria Vesta SAB de CV",
+      "currency": "USD",
+      "price": 34.22,
+      "ticker": "VTMX:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 70.0,
+              "avgCost": 33.9178
+            }
+          }
+        }
+      },
+      "mktUid": 118051
+    },
+    {
+      "ret1wk": -0.1040943789035409,
+      "ret4wk": -1.1562597566458055,
+      "exchangeCode": "OTC",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -4.98,
+      "name": "G. Willi Food International Ltd.",
+      "currency": "USD",
+      "price": 28.79,
+      "ticker": "WILCF:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 14.0,
+              "avgCost": 29.0714
+            }
+          }
+        }
+      },
+      "mktUid": 3767
+    },
+    {
+      "ret1wk": 0.5087881591119281,
+      "ret4wk": 4.246420439512955,
+      "exchangeCode": "NYSE",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": 0.42,
+      "name": "Westlake Chemical Partners LP",
+      "currency": "USD",
+      "price": 21.73,
+      "ticker": "WLKP:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1913284": {
+              "shares": 41.0,
+              "avgCost": 22.3602
+            }
+          }
+        }
+      },
+      "mktUid": 52110
+    },
+    {
+      "ret1wk": 2.0408163265306145,
+      "ret4wk": 0.6711409395973256,
+      "exchangeCode": "NYSEMKT",
+      "priceDt": 1788321599999,
+      "noteSummary": {},
+      "ret1d": -1.32,
+      "name": "Zedge, Inc.",
+      "currency": "USD",
+      "price": 3.0,
+      "ticker": "ZDGE:USA",
+      "accounts": {
+        "10560": {
+          "portfolios": {
+            "1958970": {
+              "shares": 799.0,
+              "avgCost": 3.04
+            }
+          }
+        }
+      },
+      "mktUid": 53834
+    }
+  ]
+}
