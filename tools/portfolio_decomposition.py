@@ -1889,9 +1889,31 @@ def _dynamic_model_result(
     gross_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     net_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     annualized_observed = train_fit.intercept * model.periods_per_year
+    live_basis = next(
+        (row.return_basis for row in target_rows if row.evidence_layer != "BACKTEST"),
+        None,
+    )
+    # A return stream that mixes realized and model-basis rows has no observed
+    # alpha, so this is never published as one. But withholding it entirely left
+    # the hybrid mode with no alpha at all for every strategy that actually has
+    # backtest history -- 42 of 52 series -- while the only populated hybrid
+    # alphas belonged to the one strategy whose hybrid path is exactly
+    # live-only. The fitted intercept is a real estimate of a real model; it is
+    # published as a diagnostic, named by what makes it one.
+    #
+    # The basis it is attributed to is the LIVE basis, not `target_rows[0]`:
+    # the target loader already proves live rows carry exactly one basis and
+    # that it is never MODEL, whereas the first row of a hybrid series is the
+    # earliest, which is backtest and may itself be MODEL.
     if has_model_basis:
         gross_status = "UNAVAILABLE_MODEL_RETURN_BASIS"
         net_status = "UNAVAILABLE_MODEL_RETURN_BASIS"
+        if live_basis == "GROSS":
+            gross_alpha = annualized_observed
+            gross_status = "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
+        elif live_basis is not None:
+            net_alpha = annualized_observed
+            net_status = "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
     elif observed_basis == "GROSS":
         gross_alpha = annualized_observed
         gross_status = "AVAILABLE_OBSERVED_BASIS"
@@ -2416,9 +2438,31 @@ def _model_result(
     gross_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     net_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     annualized_observed = fit.intercept * model.periods_per_year
+    live_basis = next(
+        (row.return_basis for row in target_rows if row.evidence_layer != "BACKTEST"),
+        None,
+    )
+    # A return stream that mixes realized and model-basis rows has no observed
+    # alpha, so this is never published as one. But withholding it entirely left
+    # the hybrid mode with no alpha at all for every strategy that actually has
+    # backtest history -- 42 of 52 series -- while the only populated hybrid
+    # alphas belonged to the one strategy whose hybrid path is exactly
+    # live-only. The fitted intercept is a real estimate of a real model; it is
+    # published as a diagnostic, named by what makes it one.
+    #
+    # The basis it is attributed to is the LIVE basis, not `target_rows[0]`:
+    # the target loader already proves live rows carry exactly one basis and
+    # that it is never MODEL, whereas the first row of a hybrid series is the
+    # earliest, which is backtest and may itself be MODEL.
     if has_model_basis:
         gross_status = "UNAVAILABLE_MODEL_RETURN_BASIS"
         net_status = "UNAVAILABLE_MODEL_RETURN_BASIS"
+        if live_basis == "GROSS":
+            gross_alpha = annualized_observed
+            gross_status = "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
+        elif live_basis is not None:
+            net_alpha = annualized_observed
+            net_status = "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
     elif observed_basis == "GROSS":
         gross_alpha = annualized_observed
         gross_status = "AVAILABLE_OBSERVED_BASIS"

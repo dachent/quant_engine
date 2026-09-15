@@ -894,10 +894,15 @@ def test_live_plus_backtest_accepts_declared_model_return_basis(
 
     assert model["evidence_layer"] == "BACKTEST"
     assert model["alpha"]["periodic_intercept"] is not None
+    # A stream that mixes realized and model-basis rows has no observed alpha,
+    # so neither side may claim one. The intercept is still published, on the
+    # live basis, named by what makes it a diagnostic: withholding it left the
+    # hybrid mode with no alpha at all for every strategy carrying backtest
+    # history, which is the only reason anyone builds the hybrid mode.
+    assert model["alpha"]["net_annualized"] is not None
+    assert model["alpha"]["net_status"] == "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
     assert model["alpha"]["gross_annualized"] is None
-    assert model["alpha"]["net_annualized"] is None
     assert model["alpha"]["gross_status"] == "UNAVAILABLE_MODEL_RETURN_BASIS"
-    assert model["alpha"]["net_status"] == "UNAVAILABLE_MODEL_RETURN_BASIS"
 
 
 def test_canonical_live_series_digest_has_a_literal_live_series_oracle(
