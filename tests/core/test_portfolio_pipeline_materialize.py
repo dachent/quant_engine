@@ -3246,6 +3246,31 @@ def test_production_spec_binds_stable_twenty_root_authority(
             *supplied_lenses,
         ],
     )
+    # A published generation an external agent rewrote can only be superseded
+    # through the pipeline's own `predecessor-authority-repair` gate, and the
+    # production specification is the only place that gate can enter. The gate
+    # id has to be the one the pipeline verifies, so it is asserted against
+    # that constant rather than against a copy of the string.
+    repair_gate_path = tmp_path / "predecessor-authority-repair.json"
+    repair_gate_path.write_bytes(
+        canonical_json_bytes(
+            {
+                "authority_sha256": "a" * 64,
+                "disposition": "SUPERSEDE_WITH_VERIFIED_GENERATIONS",
+                "expected_inventory_drifts": [
+                    {
+                        "generation_id": "b" * 64,
+                        "observed_inventory_sha256": "c" * 64,
+                        "recorded_inventory_sha256": "d" * 64,
+                        "root_id": "portfolio-report",
+                    }
+                ],
+                "release_id": "e" * 64,
+                "release_manifest_sha256": "f" * 64,
+                "schema_version": 1,
+            }
+        )
+    )
     result = materializer.build_production_spec(
         recipe_path,
         prepared_root,
@@ -3254,9 +3279,45 @@ def test_production_spec_binds_stable_twenty_root_authority(
         tmp_path / "production-state",
         spec_path,
         financial_artifacts_path=financial_artifacts,
+        predecessor_repair_gate_path=repair_gate_path,
     )
 
     spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
+    repair_gates = [
+        gate
+        for gate in spec.gates
+        if gate.gate_id == core_pipeline._PREDECESSOR_REPAIR_GATE
+    ]
+    assert len(repair_gates) == 1
+    assert repair_gates[0].path == repair_gate_path
+    assert (
+        repair_gates[0].sha256
+        == hashlib.sha256(repair_gate_path.read_bytes()).hexdigest()
+    )
+
+    # Omitting it must leave the gate list exactly as it was; the repair is an
+    # explicit, evidenced act and never a default.
+    plain_spec_path = tmp_path / "production-spec-no-repair.json"
+    materializer.build_production_spec(
+        recipe_path,
+        prepared_root,
+        prepared_root / "evidence" / "post-build-semantic.json",
+        production_root,
+        tmp_path / "production-state-no-repair",
+        plain_spec_path,
+        financial_artifacts_path=financial_artifacts,
+    )
+    plain = PipelineSpec.from_json_bytes(plain_spec_path.read_bytes())
+    assert not [
+        gate
+        for gate in plain.gates
+        if gate.gate_id == core_pipeline._PREDECESSOR_REPAIR_GATE
+    ]
+    assert [gate.gate_id for gate in spec.gates] == [
+        *[gate.gate_id for gate in plain.gates],
+        core_pipeline._PREDECESSOR_REPAIR_GATE,
+    ]
+
     assert result["root_count"] == 20
     assert set(spec.roots) == set(materializer.PRODUCTION_ROOTS)
     if current_surfaces:

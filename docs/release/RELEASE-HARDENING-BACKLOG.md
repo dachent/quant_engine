@@ -9,7 +9,7 @@ Status legend: `OPEN` / `DECISION` (needs owner ruling) / `DONE`.
 
 ---
 
-## 0. Blocker: corrupted predecessor generation — `DECISION`
+## 0. Blocker: corrupted predecessor generation — `RESOLVED`
 
 `prepare_release` -> `read_current_release` -> `_validate_committed_state`
 requires the predecessor graph to be byte-identical to what its committed
@@ -44,6 +44,23 @@ chain intact and auditable.
 **Option B.** Owner-authorised authority reset so `prepare_release` starts from
 current state. Faster, but discards the release-authority chain and loses the
 record that this happened.
+
+**Resolved 2026-09-14 by Option A.** The mechanism already existed in the product and was
+merely unreachable from the production specification: `_verify_predecessor_repair_gate` in
+`pipeline.py` re-derives the drift from disk, refuses a gate that does not match it exactly,
+refuses one where no drift exists, and refuses one whose new release reuses a drifted
+generation; it then sets `allow_invalid_previous_artifact_inventory` on `prepare_release`.
+Commit `6e6bd86` exposed it through `--predecessor-repair-gate`; the wiring is covered by
+`test_production_spec_binds_stable_twenty_root_authority`.
+
+One precondition is easy to destroy and worth recording: the repair path is entered from
+`except PointerIntegrityError`, so it only engages while the pointer still holds the value its
+release sealed and the directory has drifted. Re-pinning the pointer to the observed inventory
+makes `read_current` succeed and the guard raise `ReleaseConflictError` instead, which is not
+caught — the repair then cannot run. That re-pin is what made this look unsolvable for several
+hours.
+
+Released as `244da8fce80446f4` (COMMITTED), 20/20 pointers moved.
 
 Not acceptable: editing the pointer or the authority record to paper over the
 difference. That forges history.
