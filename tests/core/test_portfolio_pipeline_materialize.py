@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import copy
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 import hashlib
@@ -2594,6 +2596,160 @@ def test_financial_mvp_authority_rejects_receipt_outside_manifest(
                 "panel": "d" * 64,
             },
         )
+
+
+def test_current_admission_reopens_sources_and_rejects_coherent_omissions(
+    tmp_path: Path,
+) -> None:
+    """Real small stage output crosses the materializer's independent boundary."""
+    fixture_spec = importlib.util.spec_from_file_location(
+        "current_source_stage_fixture",
+        ROOT / "tests/provider_ledger/test_admit_or_declare.py",
+    )
+    assert fixture_spec is not None and fixture_spec.loader is not None
+    fixture = importlib.util.module_from_spec(fixture_spec)
+    fixture_spec.loader.exec_module(fixture)
+    generation, authority, _ = fixture._source_bound_stage(tmp_path)
+    arguments = {
+        key: authority[key]
+        for key in ("contract_raw_sha256", "contract_semantic_sha256", "census_sha256")
+    }
+    accepted = materializer._provider_admission_authority(
+        generation, authority["contract"], **arguments
+    )
+    assert accepted["provider_count"] == 7
+    assert accepted["inventory_count"] == accepted["disposition_count"]
+    original_receipt = json.loads(
+        (generation / "admit-or-declare-receipt.json").read_bytes()
+    )
+    original_catalog = json.loads((generation / "provider-ledger.json").read_bytes())
+    original_manifest = GenerationManifest.from_json_bytes(
+        (generation / "generation.json").read_bytes()
+    )
+    provider_generations = {
+        row["provider_id"]: row for row in original_receipt["provider_generations"]
+    }
+    inventory, _ = fixture.ledger.validate_admit_or_declare_receipt(
+        original_receipt,
+        product_authority=authority,
+        source_segments=authority["sources"],
+        provider_generations=provider_generations,
+    )
+    for attack in (
+        "omitted_dataset", "changed_materialized_nav", "changed_finality",
+        "unselected_provider_return",
+        "future_effective_date", "future_nav_recognition_date",
+        "provider_future_nav_recognition_date",
+    ):
+        receipt = copy.deepcopy(original_receipt)
+        catalog = copy.deepcopy(original_catalog)
+        if attack == "omitted_dataset":
+            omitted = next(
+                item
+                for item in inventory
+                if item.provider_id == "schwab"
+                and item.item_id == "unreferenced_collection"
+            )
+            for field in ("inventory", "dispositions"):
+                receipt[field] = [
+                    row
+                    for row in receipt[field]
+                    if not (
+                        row["provider_id"] == omitted.provider_id
+                        and row["item_kind"] == omitted.item_kind.value
+                        and row["item_id"] == omitted.item_id
+                    )
+                ]
+            observed = next(
+                row
+                for row in receipt["run_observation"]["providers"]
+                if row["provider_id"] == "schwab"
+            )
+            observed["observed_inventory_count"] -= 1
+            observed["observed_inventory_sha256"] = fixture.ledger._inventory_digest(
+                [
+                    item
+                    for item in inventory
+                    if item.provider_id == "schwab" and item != omitted
+                ]
+            )
+            fixture._rehash_receipt(receipt)
+        elif attack == "changed_materialized_nav":
+            row = next(
+                row
+                for row in catalog["nav_observations"]
+                if row["provider_id"] == "matrixport"
+            )
+            row["nav"]["value"] = "101"
+        elif attack == "unselected_provider_return":
+            catalog["provider_strategy_returns"].append({
+                "provider_id": "synthetic-unselected-provider",
+                "strategy_id": "synthetic-unselected-strategy",
+                "date": "2026-08-14", "return": "0.99",
+            })
+        elif "future_" in attack:
+            row = next(
+                row
+                for row in catalog["capital_anchors"]
+                if row["provider_id"] == "quantbase"
+            )
+            field = attack.removeprefix("provider_").removeprefix("future_")
+            row[field] = (
+                "2026-08-15" if attack.startswith("provider_") else "2026-09-18"
+            )
+        else:
+            observed = next(
+                row
+                for row in receipt["run_observation"]["providers"]
+                if row["provider_id"] == "schwab"
+            )
+            observed["finalized_through"] = "2026-08-13"
+        # All candidate-only receipt checks still pass. Rehash both emitted
+        # artifacts and the outer generation so rejection must use the selected
+        # source bytes and the actual materialized rows, not a stale outer hash.
+        fixture.ledger.validate_admit_or_declare_receipt(
+            receipt,
+            product_authority=authority,
+            source_segments=authority["sources"],
+            provider_generations=provider_generations,
+        )
+        contents = {
+            "normalized/admit-or-declare-receipt.json": canonical_json_bytes(receipt),
+            "normalized/provider-ledger.json": canonical_json_bytes(catalog),
+        }
+        manifest = GenerationManifest.build(
+            as_of_date=original_manifest.as_of_date,
+            adapter=original_manifest.adapter,
+            coverage=original_manifest.coverage,
+            verification=original_manifest.verification,
+            artifacts=tuple(
+                replace(
+                    artifact,
+                    sha256=hashlib.sha256(contents[artifact.artifact_id]).hexdigest(),
+                    size_bytes=len(contents[artifact.artifact_id]),
+                )
+                if artifact.artifact_id in contents
+                else artifact
+                for artifact in original_manifest.artifacts
+            ),
+        )
+        forged = tmp_path / attack / manifest.generation_id
+        forged.mkdir(parents=True)
+        (forged / "generation.json").write_bytes(manifest.to_json_bytes())
+        for artifact_id, content in contents.items():
+            (forged / Path(artifact_id).name).write_bytes(content)
+        reason = (
+            "materialized provider fact scope differs"
+            if attack == "unselected_provider_return"
+            else "materialized provider fact cutoff or generation differs"
+            if "future_" in attack
+            else "independent source inventory or materialized facts"
+        )
+        with pytest.raises(materializer.MaterializationError, match=reason):
+            materializer._provider_admission_authority(
+                forged, authority["contract"], **arguments
+            )
+    assert not (tmp_path / "staged/CURRENT.json").exists()
 
 
 def _runtime_registry(
