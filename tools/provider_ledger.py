@@ -2339,6 +2339,7 @@ _IBKR_CAPITAL_FLOW_TYPES: Final = (
     "TRANSFER:INTERNAL:IN",
     "TRANSFER:INTERNAL:OUT",
 )
+_IBKR_CHANGE_IN_NAV_MAX_SOURCE_PRECISION: Final = Decimal("0.01")
 
 
 def _assignable_strategies(
@@ -2403,6 +2404,105 @@ def _capital_anchor_epoch_strategy(
     return opening.pop(), "MAPPED"
 
 
+def _ibkr_pre_epoch_change_in_nav(
+    catalog: Mapping[str, Any], account_id: str, first_start: date
+) -> tuple[Decimal, Decimal, dict[str, Any] | None]:
+    """Validate source-bound pre-epoch ChangeInNAV intervals for one account.
+
+    ``ChangeInNAV`` is the provider's accounting identity.  The normalized
+    observation retains the source component keys and accounting date, so this
+    function never turns an otherwise unexplained NAV difference into cash.
+    """
+
+    raw_rows = _objects(
+        catalog.get("change_in_nav_observations") or [],
+        "ibkr.change_in_nav_observations",
+    )
+    intervals: list[tuple[date, dict[str, Any], dict[str, Decimal]]] = []
+    for row in raw_rows:
+        if _text(row.get("account_id"), "ibkr change account_id") != account_id:
+            continue
+        accounting_date = _day(
+            row.get("accounting_date"), "ibkr change accounting_date"
+        )
+        if accounting_date >= first_start:
+            continue
+        _text(row.get("source_artifact_id"), "ibkr change source_artifact_id")
+        _text(row.get("source_record_id"), "ibkr change source_record_id")
+        _text(row.get("currency"), "ibkr change currency")
+        opening = _decimal(row.get("opening_nav"), "ibkr change opening_nav")
+        ending = _decimal(row.get("ending_nav"), "ibkr change ending_nav")
+        tolerance = (
+            _decimal(row.get("identity_tolerance"), "ibkr change identity_tolerance")
+            if row.get("identity_tolerance") is not None
+            else Decimal(0)
+        )
+        if tolerance < 0:
+            raise ProviderLedgerError("IBKR_PRE_EPOCH_INVALID_IDENTITY_TOLERANCE")
+        if tolerance > _IBKR_CHANGE_IN_NAV_MAX_SOURCE_PRECISION:
+            raise ProviderLedgerError("IBKR_PRE_EPOCH_INVALID_IDENTITY_TOLERANCE")
+        components: dict[str, Decimal] = {}
+        for component in _objects(
+            row.get("components") or [], "ibkr change components"
+        ):
+            key = _text(
+                component.get("source_component_key"), "ibkr change component key"
+            )
+            if key in components:
+                raise ProviderLedgerError("IBKR_PRE_EPOCH_DUPLICATE_COMPONENT")
+            if key == "twr":
+                raise ProviderLedgerError("IBKR_PRE_EPOCH_NONADDITIVE_COMPONENT")
+            components[key] = _decimal(
+                component.get("value"), "ibkr change component value"
+            )
+        if abs(opening + sum(components.values(), Decimal(0)) - ending) > tolerance:
+            raise ProviderLedgerError("IBKR_PRE_EPOCH_UNRECONCILED_INTERVAL")
+        intervals.append((accounting_date, row, components))
+
+    intervals.sort(key=lambda item: item[0])
+    if len({item[0] for item in intervals}) != len(intervals):
+        raise ProviderLedgerError("IBKR_PRE_EPOCH_DUPLICATE_ACCOUNTING_DATE")
+    for previous, current in zip(intervals, intervals[1:]):
+        if current[0] not in {
+            previous[0] + timedelta(days=1),
+            _ibkr_next_weekday(previous[0]),
+        }:
+            raise ProviderLedgerError("IBKR_PRE_EPOCH_ACCOUNTING_GAP")
+        prior_ending = _decimal(previous[1].get("ending_nav"), "ibkr change ending_nav")
+        current_opening = _decimal(
+            current[1].get("opening_nav"), "ibkr change opening_nav"
+        )
+        if prior_ending != current_opening:
+            raise ProviderLedgerError("IBKR_PRE_EPOCH_ACCOUNTING_GAP")
+    if not intervals:
+        return Decimal(0), Decimal(0), None
+    source_cash = sum(
+        (
+            components.get("depositsWithdrawals", Decimal(0))
+            + components.get("internalCashTransfers", Decimal(0))
+            for _day_value, _row, components in intervals
+        ),
+        Decimal(0),
+    )
+    in_kind = sum(
+        (
+            components.get("assetTransfers", Decimal(0))
+            for _day_value, _row, components in intervals
+        ),
+        Decimal(0),
+    )
+    return source_cash, in_kind, intervals[-1][1]
+
+
+def _ibkr_next_weekday(day: date) -> date:
+    """Match the Flex history producer's declared weekday source calendar."""
+
+    candidate = day + timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
+
+
 def _ibkr_capital_anchors(
     generation_id: str,
     catalog: Mapping[str, Any],
@@ -2410,7 +2510,7 @@ def _ibkr_capital_anchors(
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> list[dict[str, Any]]:
-    """Net each statement account's capital events on their own event date.
+    """Reconcile pre-epoch IBKR capital, then retain later flow behavior.
 
     A single flow row is not a capital event, and the date a row is entered is
     not the date its capital exists.  IBKR credits a deposit advance against a
@@ -2427,9 +2527,12 @@ def _ibkr_capital_anchors(
     by its sibling is funded.  The external/internal distinction stays on the
     flow rows, which carry ``capital_disposition``.
 
-    An account whose capital history contains an amount-less event -- an
-    in-kind ACATS transfer -- has no arithmetic that could net its days, so it
-    yields no anchors at all rather than a series with a hole in it.
+    Before an epoch begins, net capital is reconciled over the entire source
+    interval.  Its governed final account NAV is distinct from capital: a
+    covered source P-and-L component may change NAV, but never contribution.
+    An in-kind contribution is admitted only at the normalized
+    ``assetTransfers`` market value.  The existing per-recognition-date flow
+    behavior begins at the epoch boundary and remains unchanged.
     """
 
     flow_rows = _objects(catalog.get("flows") or [], "ibkr.flows")
@@ -2482,9 +2585,97 @@ def _ibkr_capital_anchors(
             )
         by_day[account_id][recognition_day].append((row, currency, amount, event_day))
 
+    source_accounts = {
+        _text(row.get("account_id"), "ibkr change account_id")
+        for row in _objects(
+            catalog.get("change_in_nav_observations") or [],
+            "ibkr.change_in_nav_observations",
+        )
+    }
+
+    def first_epoch(account_id: str) -> tuple[date, str] | None:
+        starts = [
+            (_day(item["effective_start"], "assignment.effective_start"), strategy)
+            for item in assignments.get(account_id, ())
+            for strategy in (item.get("strategy_id"),)
+            if isinstance(strategy, str)
+            and strategy in strategies
+            and item.get("effective_start") not in {None, ""}
+        ]
+        if not starts:
+            return None
+        first_start = min(start for start, _strategy in starts)
+        opening = {strategy for start, strategy in starts if start == first_start}
+        return (first_start, opening.pop()) if len(opening) == 1 else None
+
+    def anchor(
+        account_id: str,
+        rows: Sequence[tuple[Mapping[str, Any], str, Decimal, date]],
+        currency: str,
+        amount: Decimal,
+        recognition_day: date,
+        event_day: date,
+        strategy_id: str | None,
+        mapping_status: str,
+        *,
+        opening_nav: Decimal | None = None,
+        opening_source: Mapping[str, Any] | None = None,
+        mapping_basis: str = "NET_STATEMENT_ACCOUNT_CAPITAL_ON_PROVIDER_EVENT_DATE",
+    ) -> dict[str, Any]:
+        source_record_id = (
+            _text(
+                opening_source.get("source_record_id"), "ibkr change source_record_id"
+            )
+            if opening_source is not None
+            else f"{account_id}:{recognition_day.isoformat()}"
+        )
+        source_artifact_id = (
+            _text(
+                opening_source.get("source_artifact_id"),
+                "ibkr change source_artifact_id",
+            )
+            if opening_source is not None
+            else _text(
+                rows[0][0].get("source_artifact_id"), "ibkr flow source_artifact_id"
+            )
+        )
+        result: dict[str, Any] = {
+            "account_id": account_id,
+            "amount": {
+                "currency": currency,
+                "status": "AVAILABLE",
+                "value": format(amount.normalize(), "f"),
+            },
+            "capital_type": "OPENING_CAPITAL_ANCHOR",
+            "event_date": event_day.isoformat(),
+            "evidence_layer": "ACCOUNT_LIVE",
+            "generation_id": generation_id,
+            "mapping_basis": mapping_basis,
+            "mapping_status": mapping_status,
+            "nav_recognition_date": recognition_day.isoformat(),
+            "provider_id": "ibkr",
+            "record_id": f"ibkr-capital-anchor:{source_record_id}",
+            "source_artifact_id": source_artifact_id,
+            "source_record_id": source_record_id,
+            "strategy_id": strategy_id,
+            "nav_source_artifact_id": "normalized/ibkr-catalog.json",
+        }
+        if opening_nav is not None:
+            result["opening_nav"] = {
+                "currency": currency,
+                "status": "AVAILABLE",
+                "value": format(opening_nav.normalize(), "f"),
+            }
+        if opening_source is not None:
+            result["opening_nav_accounting_date"] = _text(
+                opening_source.get("accounting_date"), "ibkr change accounting_date"
+            )
+            result["opening_nav_source_record_id"] = source_record_id
+        return result
+
     anchors: list[dict[str, Any]] = []
-    for account_id in sorted(by_day):
-        if account_id in unquantified:
+    for account_id in sorted(set(by_day) | source_accounts):
+        if account_id in unquantified and account_id not in source_accounts:
             continue
         # An anchor names the strategy it funds.  An account the product never
         # assigns to a strategy has no epoch to name, so it yields no anchors
@@ -2492,7 +2683,94 @@ def _ibkr_capital_anchors(
         if not _assignable_strategies(account_id, accounts, strategies, assignments):
             continue
         opened = False
+        epoch = first_epoch(account_id)
+        if epoch is not None:
+            first_start, opening_strategy = epoch
+            pre_rows = [
+                item
+                for day in sorted(by_day[account_id])
+                if day < first_start
+                for item in by_day[account_id][day]
+            ]
+            source_cash, in_kind, opening_source = _ibkr_pre_epoch_change_in_nav(
+                catalog, account_id, first_start
+            )
+            pre_currencies = {currency for _row, currency, _amount, _event in pre_rows}
+            if len(pre_currencies) > 1:
+                raise ProviderLedgerError("ibkr pre-epoch capital mixes currencies")
+            currency = (
+                pre_currencies.pop()
+                if pre_currencies
+                else _text(opening_source.get("currency"), "ibkr change currency")
+                if opening_source is not None
+                else None
+            )
+            cash_capital = sum(
+                (
+                    amount
+                    for row, _currency, amount, _event in pre_rows
+                    if row.get("flow_type") != "TRANSFER:ACATS:IN"
+                ),
+                Decimal(0),
+            )
+            if opening_source is not None and cash_capital != source_cash:
+                raise ProviderLedgerError("IBKR_PRE_EPOCH_CAPITAL_SOURCE_MISMATCH")
+            reconciled_capital = cash_capital + in_kind
+            if reconciled_capital < 0:
+                raise ProviderLedgerError(
+                    "ibkr account returns capital before it is funded"
+                )
+            if reconciled_capital > 0:
+                final_navs = [
+                    (day, value)
+                    for (nav_account, day), value in nav_by_account_day.items()
+                    if nav_account == account_id and day < first_start
+                ]
+                if not final_navs:
+                    raise ProviderLedgerError("IBKR_OPENING_NAV_UNAVAILABLE")
+                opening_day, opening_nav = max(final_navs)
+                if opening_nav <= 0:
+                    raise ProviderLedgerError("IBKR_OPENING_NAV_UNAVAILABLE")
+                if opening_source is None:
+                    if opening_nav != reconciled_capital:
+                        raise ProviderLedgerError(
+                            "IBKR_PRE_EPOCH_UNEXPLAINED_OPENING_VALUE"
+                        )
+                else:
+                    source_day = _day(
+                        opening_source.get("accounting_date"),
+                        "ibkr change accounting_date",
+                    )
+                    source_nav = _decimal(
+                        opening_source.get("ending_nav"), "ibkr change ending_nav"
+                    )
+                    if source_day != opening_day or source_nav != opening_nav:
+                        raise ProviderLedgerError("IBKR_PRE_EPOCH_ACCOUNTING_GAP")
+                if currency is None:
+                    raise ProviderLedgerError("IBKR_PRE_EPOCH_CURRENCY_UNAVAILABLE")
+                event_day = max(
+                    (event for _row, _currency, _amount, event in pre_rows),
+                    default=opening_day,
+                )
+                anchors.append(
+                    anchor(
+                        account_id,
+                        pre_rows,
+                        currency,
+                        reconciled_capital,
+                        opening_day,
+                        event_day,
+                        opening_strategy,
+                        "MAPPED",
+                        opening_nav=opening_nav,
+                        opening_source=opening_source,
+                        mapping_basis="RECONCILED_PRE_EPOCH_STATEMENT_CAPITAL",
+                    )
+                )
+                opened = True
         for day in sorted(by_day[account_id]):
+            if epoch is not None and day < epoch[0]:
+                continue
             rows = by_day[account_id][day]
             currencies = {currency for _row, currency, _amount, _event in rows}
             if len(currencies) != 1:
@@ -2522,38 +2800,6 @@ def _ibkr_capital_anchors(
             strategy_id, mapping_status = _capital_anchor_epoch_strategy(
                 account_id, recognition_day, accounts, strategies, assignments
             )
-            source_record_id = f"{account_id}:{recognition_day.isoformat()}"
-            anchor: dict[str, Any] = {
-                "account_id": account_id,
-                "amount": {
-                    "currency": currency,
-                    "status": "AVAILABLE",
-                    "value": format(net.normalize(), "f"),
-                },
-                "capital_type": (
-                    "OPENING_CAPITAL_ANCHOR"
-                    if not opened
-                    else "STRATEGY_CAPITAL_ALLOCATION"
-                ),
-                "event_date": event_day.isoformat(),
-                "evidence_layer": "ACCOUNT_LIVE",
-                "generation_id": generation_id,
-                "mapping_basis": "NET_STATEMENT_ACCOUNT_CAPITAL_ON_PROVIDER_EVENT_DATE",
-                "mapping_status": mapping_status,
-                "nav_recognition_date": recognition_day.isoformat(),
-                "provider_id": "ibkr",
-                "record_id": f"ibkr-capital-anchor:{source_record_id}",
-                "source_artifact_id": _text(
-                    rows[0][0].get("source_artifact_id"),
-                    "ibkr flow source_artifact_id",
-                ),
-                "source_record_id": source_record_id,
-                "strategy_id": strategy_id,
-                # Every anchor names the artifact its NAV evidence comes from,
-                # opening or not: the manifest requires the provenance on the
-                # allocation rows too.
-                "nav_source_artifact_id": "normalized/ibkr-catalog.json",
-            }
             if not opened and net > 0:
                 opening_nav = nav_by_account_day.get((account_id, recognition_day))
                 if opening_nav is None or opening_nav <= 0:
@@ -2561,13 +2807,20 @@ def _ibkr_capital_anchors(
                         "IBKR_OPENING_NAV_UNAVAILABLE: the account holds no "
                         "positive NAV on the day its capital is recognized"
                     )
-                anchor["opening_nav"] = {
-                    "currency": currency,
-                    "status": "AVAILABLE",
-                    "value": format(opening_nav.normalize(), "f"),
-                }
+                anchors.append(
+                    anchor(
+                        account_id,
+                        rows,
+                        currency,
+                        net,
+                        recognition_day,
+                        event_day,
+                        strategy_id,
+                        mapping_status,
+                        opening_nav=opening_nav,
+                    )
+                )
                 opened = True
-            anchors.append(anchor)
     anchors.sort(
         key=lambda item: (str(item["nav_recognition_date"]), str(item["record_id"]))
     )

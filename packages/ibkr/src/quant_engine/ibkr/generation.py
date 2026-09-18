@@ -50,6 +50,7 @@ from quant_engine.portfolio_ledger import (
 SPEC_SCHEMA_VERSION = 3
 CATALOG_SCHEMA_VERSION = 4
 ADAPTER_VERSION = "0.4.0"
+_CHANGE_IN_NAV_SOURCE_PRECISION = Decimal("0.01")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _SOURCE_ROLES = {
@@ -367,6 +368,19 @@ def _statements_equal(left: FlexDailyStatement, right: FlexDailyStatement) -> bo
         and left.base_currency == right.base_currency
         and left.nav == right.nav
         and left.change_in_nav_ending_value == right.change_in_nav_ending_value
+        and left.change_in_nav_accounting_date == right.change_in_nav_accounting_date
+        and left.change_in_nav_starting_value == right.change_in_nav_starting_value
+        and (
+            left.change_in_nav_deposits_withdrawals
+            == right.change_in_nav_deposits_withdrawals
+        )
+        and left.change_in_nav_asset_transfers == right.change_in_nav_asset_transfers
+        and (
+            left.change_in_nav_internal_cash_transfers
+            == right.change_in_nav_internal_cash_transfers
+        )
+        and left.change_in_nav_mtm == right.change_in_nav_mtm
+        and left.change_in_nav_components == right.change_in_nav_components
         and Counter(left.positions) == Counter(right.positions)
         and Counter(left.trades) == Counter(right.trades)
         and Counter(left.cash_transactions) == Counter(right.cash_transactions)
@@ -737,6 +751,7 @@ def _normalize(
     assignments = _objects(baseline.get("assignments"), "baseline.assignments")
     securities: dict[str, dict[str, Any]] = {}
     nav: list[dict[str, Any]] = []
+    change_in_nav_observations: list[dict[str, Any]] = []
     positions: list[dict[str, Any]] = []
     transactions: list[dict[str, Any]] = []
     flows: list[dict[str, Any]] = []
@@ -782,6 +797,30 @@ def _normalize(
             "value_basis": "ACCOUNT_TOTAL",
         }
         nav.append({"record_id": _record_id("nav", nav_payload), **nav_payload})
+        if statement.change_in_nav_starting_value is not None:
+            source_record_id = (
+                f"change-in-nav:{account_id}:"
+                f"{statement.change_in_nav_accounting_date.isoformat()}"
+            )
+            change_in_nav_observations.append(
+                {
+                    "account_id": account_id,
+                    "accounting_date": statement.change_in_nav_accounting_date.isoformat(),
+                    "components": [
+                        {
+                            "source_component_key": key,
+                            "value": decimal_text(value),
+                        }
+                        for key, value in statement.change_in_nav_components
+                    ],
+                    "currency": statement.base_currency,
+                    "ending_nav": decimal_text(statement.change_in_nav_ending_value),
+                    "identity_tolerance": decimal_text(_CHANGE_IN_NAV_SOURCE_PRECISION),
+                    "opening_nav": decimal_text(statement.change_in_nav_starting_value),
+                    "source_artifact_id": statement.artifact_id,
+                    "source_record_id": source_record_id,
+                }
+            )
         for position in statement.positions:
             security_id = security(position.conid, position.currency)
             assert security_id is not None
@@ -1266,6 +1305,10 @@ def _normalize(
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
         "corporate_actions": _dedupe(corporate_actions, "corporate action"),
         "crosswalk_proof": list(proof),
+        "change_in_nav_observations": sorted(
+            change_in_nav_observations,
+            key=lambda item: (item["account_id"], item["accounting_date"]),
+        ),
         "fact_coverage": [
             dict(flex_history_coverage)
             if flex_history_coverage is not None

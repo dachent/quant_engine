@@ -6075,6 +6075,380 @@ def test_ibkr_opening_anchor_requires_a_positive_nav_on_recognition(
         )
 
 
+def _ibkr_change_in_nav(
+    account_id: str,
+    accounting_date: str,
+    starting_value: str,
+    ending_value: str,
+    *components: tuple[str, str],
+) -> dict[str, object]:
+    """Synthetic, source-bound ChangeInNAV interval for B1 regressions."""
+
+    return {
+        "account_id": account_id,
+        "accounting_date": accounting_date,
+        "components": [
+            {"source_component_key": key, "value": value} for key, value in components
+        ],
+        "currency": "USD",
+        "ending_nav": ending_value,
+        "opening_nav": starting_value,
+        "source_artifact_id": "synthetic/b1-change-in-nav.xml",
+        "source_record_id": f"synthetic-change-in-nav-{accounting_date}",
+    }
+
+
+def _ibkr_b1_assignments(account: str) -> dict[str, list[dict[str, str]]]:
+    return {
+        account: [
+            {
+                "effective_start": "2026-01-22",
+                "mapping_status": "MAPPED",
+                "strategy_id": "synthetic-b1-strategy",
+            }
+        ]
+    }
+
+
+def test_ibkr_offsetting_pre_epoch_capital_does_not_open_epoch() -> None:
+    """A fully returned synthetic pre-epoch contribution creates no anchor."""
+
+    account = "synthetic-b1-offsetting-account"
+    catalog = {
+        "flows": [
+            _ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "35000"),
+            _ibkr_flow(account, "2026-01-12", "DEPOSIT_OR_WITHDRAWAL", "-35000"),
+        ],
+        "nav_observations": [
+            _ibkr_nav(account, "2026-01-05", "35000"),
+            _ibkr_nav(account, "2026-01-12", "0"),
+        ],
+    }
+
+    assert (
+        ledger._ibkr_capital_anchors(
+            "synthetic-b1-generation",
+            catalog,
+            {account},
+            {"synthetic-b1-strategy"},
+            _ibkr_b1_assignments(account),
+        )
+        == []
+    )
+
+
+def test_ibkr_pre_epoch_net_capital_matches_opening_nav() -> None:
+    """Synthetic net pre-epoch capital, not the first deposit, opens the epoch."""
+
+    account = "synthetic-b1-net-account"
+    catalog = {
+        "flows": [
+            _ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "35000"),
+            _ibkr_flow(account, "2026-01-12", "DEPOSIT_OR_WITHDRAWAL", "-5000"),
+        ],
+        "nav_observations": [
+            _ibkr_nav(account, "2026-01-05", "35000"),
+            _ibkr_nav(account, "2026-01-12", "30000"),
+        ],
+    }
+
+    anchors = ledger._ibkr_capital_anchors(
+        "synthetic-b1-generation",
+        catalog,
+        {account},
+        {"synthetic-b1-strategy"},
+        _ibkr_b1_assignments(account),
+    )
+
+    assert [
+        (item["amount"]["value"], item["opening_nav"]["value"]) for item in anchors
+    ] == [("30000", "30000")]
+
+
+@pytest.mark.parametrize(("ending_nav", "mtm"), [("38000", "3000"), ("32000", "-3000")])
+def test_ibkr_pre_epoch_pnl_does_not_change_contributed_capital(
+    ending_nav: str, mtm: str
+) -> None:
+    """Covered synthetic P&L changes governed NAV, never contributed capital."""
+
+    account = "synthetic-b1-pnl-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "35000")],
+        "nav_observations": [_ibkr_nav(account, "2026-01-06", ending_nav)],
+        "change_in_nav_observations": [
+            _ibkr_change_in_nav(
+                account,
+                "2026-01-05",
+                "0",
+                "35000",
+                ("depositsWithdrawals", "35000"),
+            ),
+            _ibkr_change_in_nav(
+                account,
+                "2026-01-06",
+                "35000",
+                ending_nav,
+                ("mtm", mtm),
+            ),
+        ],
+    }
+
+    anchor = ledger._ibkr_capital_anchors(
+        "synthetic-b1-generation",
+        catalog,
+        {account},
+        {"synthetic-b1-strategy"},
+        _ibkr_b1_assignments(account),
+    )[0]
+
+    assert anchor["amount"]["value"] == "35000"
+    assert anchor["opening_nav"]["value"] == ending_nav
+
+
+def test_ibkr_pre_epoch_friday_to_monday_preserves_statement_continuity() -> None:
+    """Synthetic weekday coverage admits a Friday-to-Monday NAV bridge."""
+
+    account = "synthetic-b1-weekday-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-09", "DEPOSIT_OR_WITHDRAWAL", "35000")],
+        "nav_observations": [_ibkr_nav(account, "2026-01-12", "35000")],
+        "change_in_nav_observations": [
+            _ibkr_change_in_nav(
+                account,
+                "2026-01-09",
+                "0",
+                "35000",
+                ("depositsWithdrawals", "35000"),
+            ),
+            _ibkr_change_in_nav(account, "2026-01-12", "35000", "35000"),
+        ],
+    }
+
+    anchors = ledger._ibkr_capital_anchors(
+        "synthetic-b1-generation",
+        catalog,
+        {account},
+        {"synthetic-b1-strategy"},
+        _ibkr_b1_assignments(account),
+    )
+
+    assert [
+        (item["amount"]["value"], item["opening_nav"]["value"]) for item in anchors
+    ] == [("35000", "35000")]
+
+
+def test_ibkr_pre_epoch_missing_weekday_statement_interval_is_rejected() -> None:
+    """Synthetic Tuesday omission remains a source-coverage failure."""
+
+    account = "synthetic-b1-missing-weekday-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-09", "DEPOSIT_OR_WITHDRAWAL", "35000")],
+        "nav_observations": [_ibkr_nav(account, "2026-01-13", "35000")],
+        "change_in_nav_observations": [
+            _ibkr_change_in_nav(
+                account,
+                "2026-01-09",
+                "0",
+                "35000",
+                ("depositsWithdrawals", "35000"),
+            ),
+            _ibkr_change_in_nav(account, "2026-01-13", "35000", "35000"),
+        ],
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="IBKR_PRE_EPOCH_ACCOUNTING_GAP"
+    ):
+        ledger._ibkr_capital_anchors(
+            "synthetic-b1-generation",
+            catalog,
+            {account},
+            {"synthetic-b1-strategy"},
+            _ibkr_b1_assignments(account),
+        )
+
+
+def test_ibkr_pre_epoch_source_precision_is_not_unexplained_residual() -> None:
+    """Synthetic source-display precision is distinct from an unclassified residual."""
+
+    account = "synthetic-b1-precision-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "100")],
+        "nav_observations": [_ibkr_nav(account, "2026-01-05", "100.005")],
+        "change_in_nav_observations": [
+            {
+                **_ibkr_change_in_nav(
+                    account,
+                    "2026-01-05",
+                    "0",
+                    "100.005",
+                    ("depositsWithdrawals", "100"),
+                    ("fxTranslation", "0"),
+                ),
+                "identity_tolerance": "0.01",
+            }
+        ],
+    }
+
+    anchor = ledger._ibkr_capital_anchors(
+        "synthetic-b1-generation",
+        catalog,
+        {account},
+        {"synthetic-b1-strategy"},
+        _ibkr_b1_assignments(account),
+    )[0]
+
+    assert anchor["amount"]["value"] == "100"
+    assert anchor["opening_nav"]["value"] == "100.005"
+
+
+def test_ibkr_pre_epoch_rejects_excess_identity_tolerance() -> None:
+    """Synthetic residuals cannot be hidden behind a broader tolerance."""
+
+    account = "synthetic-b1-excess-tolerance-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "100")],
+        "nav_observations": [_ibkr_nav(account, "2026-01-05", "100.015")],
+        "change_in_nav_observations": [
+            {
+                **_ibkr_change_in_nav(
+                    account,
+                    "2026-01-05",
+                    "0",
+                    "100.015",
+                    ("depositsWithdrawals", "100"),
+                ),
+                "identity_tolerance": "0.02",
+            }
+        ],
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="IBKR_PRE_EPOCH_INVALID_IDENTITY_TOLERANCE"
+    ):
+        ledger._ibkr_capital_anchors(
+            "synthetic-b1-generation",
+            catalog,
+            {account},
+            {"synthetic-b1-strategy"},
+            _ibkr_b1_assignments(account),
+        )
+
+
+def test_ibkr_pre_epoch_nonadditive_twr_component_is_rejected() -> None:
+    """Synthetic TWR is informational and cannot be used in the NAV identity."""
+
+    account = "synthetic-b1-nonadditive-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "100")],
+        "nav_observations": [_ibkr_nav(account, "2026-01-05", "100")],
+        "change_in_nav_observations": [
+            _ibkr_change_in_nav(
+                account,
+                "2026-01-05",
+                "0",
+                "100",
+                ("depositsWithdrawals", "100"),
+                ("twr", "0"),
+            )
+        ],
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="IBKR_PRE_EPOCH_NONADDITIVE_COMPONENT"
+    ):
+        ledger._ibkr_capital_anchors(
+            "synthetic-b1-generation",
+            catalog,
+            {account},
+            {"synthetic-b1-strategy"},
+            _ibkr_b1_assignments(account),
+        )
+
+
+def test_ibkr_pre_epoch_governed_in_kind_market_value_opens_epoch() -> None:
+    """A synthetic source-valued in-kind transfer is capital exactly once."""
+
+    account = "synthetic-b1-in-kind-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-05", "TRANSFER:ACATS:IN", None)],
+        "nav_observations": [_ibkr_nav(account, "2026-01-05", "15000")],
+        "change_in_nav_observations": [
+            _ibkr_change_in_nav(
+                account,
+                "2026-01-05",
+                "0",
+                "15000",
+                ("assetTransfers", "15000"),
+            )
+        ],
+    }
+
+    anchor = ledger._ibkr_capital_anchors(
+        "synthetic-b1-generation",
+        catalog,
+        {account},
+        {"synthetic-b1-strategy"},
+        _ibkr_b1_assignments(account),
+    )[0]
+
+    assert anchor["amount"]["value"] == "15000"
+    assert anchor["opening_nav"]["value"] == "15000"
+
+
+@pytest.mark.parametrize(
+    "intervals",
+    [
+        [
+            _ibkr_change_in_nav(
+                "synthetic-b1-reject-account",
+                "2026-01-05",
+                "0",
+                "38000",
+                ("depositsWithdrawals", "35000"),
+            )
+        ],
+        [
+            _ibkr_change_in_nav(
+                "synthetic-b1-reject-account",
+                "2026-01-05",
+                "0",
+                "35000",
+                ("depositsWithdrawals", "35000"),
+            ),
+            _ibkr_change_in_nav(
+                "synthetic-b1-reject-account",
+                "2026-01-07",
+                "35000",
+                "35000",
+            ),
+        ],
+    ],
+)
+def test_ibkr_pre_epoch_unexplained_residual_or_gap_is_rejected(
+    intervals: list[dict[str, object]],
+) -> None:
+    """Synthetic P&L/transfer rows cannot hide a residual or source-day gap."""
+
+    account = "synthetic-b1-reject-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "35000")],
+        "nav_observations": [
+            _ibkr_nav(account, intervals[-1]["accounting_date"], "38000")
+        ],
+        "change_in_nav_observations": intervals,
+    }
+
+    with pytest.raises(ledger.ProviderLedgerError, match="IBKR_PRE_EPOCH"):
+        ledger._ibkr_capital_anchors(
+            "synthetic-b1-generation",
+            catalog,
+            {account},
+            {"synthetic-b1-strategy"},
+            _ibkr_b1_assignments(account),
+        )
+
+
 def test_matrixport_pre_funding_assignment_cannot_be_promoted_to_owner_account() -> (
     None
 ):
