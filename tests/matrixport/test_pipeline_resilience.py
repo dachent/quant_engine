@@ -211,3 +211,103 @@ def test_incremental_run_copies_forward_prior_canonical_history(tmp_path: Path) 
         assert len(lineage) == 1
         assert lineage[0]["base_run_id"] == prior_run_id
         assert lineage[0]["policy"] == "copy_forward_then_overlay_30d_history_7d_nav"
+
+
+def test_incremental_run_rederives_current_run_derived_tables(
+    tmp_path: Path,
+) -> None:
+    prior_run_id = "20260725T120300.000Z"
+    prior = MatrixportExtractor(
+        tmp_path,
+        mode="full",
+        run_id=prior_run_id,
+        transport=CountingTransport(),
+    )
+    prior_rows = {
+        "holding_reconciliation": {
+            "product_id": "product-1",
+            "reconciliation_class": "matched",
+        },
+        "wallet_currency_dispositions": {
+            "dataset": "wallet_deposits",
+            "currency": "OLD",
+            "request_id": "old-request",
+        },
+    }
+    try:
+        for dataset, row in prior_rows.items():
+            prior.storage.upsert_canonical_rows(
+                prior_run_id,
+                dataset,
+                [(stable_key(dataset, row), row, None)],
+            )
+        prior.storage.finish_run(prior_run_id, status="COMPLETED")
+    finally:
+        prior.close()
+
+    reports = tmp_path / "output" / prior_run_id / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    (reports / "verification.json").write_text(
+        '{"ok":true,"status":"PASS"}\n', encoding="utf-8"
+    )
+
+    run_id = "20260725T120400.000Z"
+    incremental = MatrixportExtractor(
+        tmp_path,
+        mode="incremental",
+        run_id=run_id,
+        transport=CountingTransport(),
+    )
+    try:
+        _disable_network_extractors(incremental)
+        incremental._store_rows(
+            "holding_reconciliation",
+            [
+                {
+                    "product_id": "product-1",
+                    "reconciliation_class": "unavailable",
+                }
+            ],
+            request_id=None,
+        )
+        incremental._store_rows(
+            "wallet_currency_dispositions",
+            [
+                {
+                    "dataset": "wallet_deposits",
+                    "currency": "NEW",
+                    "request_id": "new-request",
+                }
+            ],
+            request_id=None,
+        )
+    finally:
+        incremental.close()
+
+    current_db = tmp_path / "output" / run_id / "state" / DATABASE_NAME
+    with RunStorage(current_db) as storage:
+        reconciliation = [
+            item["row"]
+            for item in storage.iter_canonical_rows(run_id, "holding_reconciliation")
+        ]
+        dispositions = [
+            item["row"]
+            for item in storage.iter_canonical_rows(
+                run_id, "wallet_currency_dispositions"
+            )
+        ]
+    assert reconciliation == [
+        {
+            "product_id": "product-1",
+            "reconciliation_class": "unavailable",
+            "source_endpoint": "derived",
+        }
+    ]
+    assert dispositions == [
+        {
+            "dataset": "wallet_deposits",
+            "currency": "NEW",
+            "request_id": "new-request",
+            "source_endpoint": "derived",
+        }
+    ]
