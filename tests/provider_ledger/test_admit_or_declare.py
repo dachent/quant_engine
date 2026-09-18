@@ -1035,7 +1035,9 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
         lambda provider_id, *_args, **_kwargs: (provider_facts[provider_id], []),
     )
     monkeypatch.setattr(
-        ledger, "_complete_schwab_security_transfer_values", lambda *_args: None
+        ledger,
+        "_complete_schwab_security_transfer_values",
+        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         ledger,
