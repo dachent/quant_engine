@@ -302,6 +302,7 @@ STABLE_KEY_FIELDS: dict[str, tuple[tuple[str, ...], ...]] = {
     "daily_currency_subtotals": (("utc_date",), ("currency",)),
     "daily_portfolio_totals": (("utc_date",),),
     "reconciliation": (("product_id",),),
+    "holding_reconciliation": (("product_id",),),
     "coverage": (("endpoint",),),
     "request_manifest": (("request_hash",),),
     "request_page_audit": (("request_id",),),
@@ -484,12 +485,14 @@ class MatrixportExtractor:
             "coverage",
             "data_dictionary",
             "endpoint_catalog",
+            "holding_reconciliation",
             "incremental_lineage",
             "quality_checks",
             "request_manifest",
             "request_page_audit",
             "schema_drift",
             "valuation_quality_issues",
+            "wallet_currency_dispositions",
         }
         prior_id = self.previous_run_dir.name
         with RunStorage(self.previous_run_dir / "state" / DATABASE_NAME) as previous:
