@@ -34,6 +34,20 @@ _REQUIRED_SECTIONS = {
     "Trades",
     "Transfers",
 }
+_CHANGE_IN_NAV_NONADDITIVE_ATTRIBUTES = frozenset(
+    {
+        "accountAlias",
+        "accountId",
+        "acctAlias",
+        "currency",
+        "endingValue",
+        "fromDate",
+        "model",
+        "startingValue",
+        "toDate",
+        "twr",
+    }
+)
 
 
 class FlexValidationError(ValueError):
@@ -209,6 +223,13 @@ class FlexDailyStatement:
     base_currency: str
     nav: Decimal
     change_in_nav_ending_value: Decimal
+    change_in_nav_accounting_date: date
+    change_in_nav_starting_value: Decimal | None
+    change_in_nav_deposits_withdrawals: Decimal | None
+    change_in_nav_asset_transfers: Decimal | None
+    change_in_nav_internal_cash_transfers: Decimal | None
+    change_in_nav_mtm: Decimal | None
+    change_in_nav_components: tuple[tuple[str, Decimal], ...]
     positions: tuple[FlexPosition, ...]
     trades: tuple[FlexTrade, ...]
     cash_transactions: tuple[FlexCashTransaction, ...]
@@ -389,6 +410,18 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
     ending_value = _decimal(change.attrib.get("endingValue"), "change.endingValue")
     if nav_value != ending_value:
         raise FlexValidationError("NAV total differs from ChangeInNAV endingValue")
+    change_accounting_date = (
+        _day(change.attrib.get("toDate"), "change.toDate")
+        if _optional(change.attrib.get("toDate")) is not None
+        else report_date
+    )
+    if change_accounting_date != report_date:
+        raise FlexValidationError("ChangeInNAV toDate differs from statement date")
+    change_components: list[tuple[str, Decimal]] = []
+    for key, value in sorted(change.attrib.items()):
+        if key in _CHANGE_IN_NAV_NONADDITIVE_ATTRIBUTES:
+            continue
+        change_components.append((key, _decimal(value, f"change.{key}")))
 
     positions = tuple(
         _position(item, raw_account_id)
@@ -407,6 +440,23 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         base_currency=_text(account.attrib.get("currency"), "account.currency"),
         nav=nav_value,
         change_in_nav_ending_value=ending_value,
+        change_in_nav_accounting_date=change_accounting_date,
+        change_in_nav_starting_value=_optional_decimal(
+            change.attrib.get("startingValue"), "change.startingValue"
+        ),
+        change_in_nav_deposits_withdrawals=_optional_decimal(
+            change.attrib.get("depositsWithdrawals"),
+            "change.depositsWithdrawals",
+        ),
+        change_in_nav_asset_transfers=_optional_decimal(
+            change.attrib.get("assetTransfers"), "change.assetTransfers"
+        ),
+        change_in_nav_internal_cash_transfers=_optional_decimal(
+            change.attrib.get("internalCashTransfers"),
+            "change.internalCashTransfers",
+        ),
+        change_in_nav_mtm=_optional_decimal(change.attrib.get("mtm"), "change.mtm"),
+        change_in_nav_components=tuple(change_components),
         positions=positions,
         trades=trades,
         cash_transactions=tuple(

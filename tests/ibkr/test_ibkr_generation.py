@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+import provider_ledger as ledger
 
 import quant_engine.ibkr.generation as ibkr_generation
 from quant_engine.core import (
@@ -49,6 +50,7 @@ def _xml(
     cash_rows: str | None = None,
     omit_section: str | None = None,
     change_nav: str | None = None,
+    change_attributes: str = "",
 ) -> str:
     observed = day.isoformat().replace("-", "")
     sections = {
@@ -70,7 +72,8 @@ def _xml(
             + "</CashTransactions>"
         ),
         "ChangeInNAV": (
-            f'<ChangeInNAV accountId="{account}" endingValue="{change_nav or nav}" />'
+            f'<ChangeInNAV accountId="{account}" endingValue="{change_nav or nav}" '
+            f"{change_attributes}/>"
         ),
         "ConversionRates": (
             "<ConversionRates>"
@@ -383,6 +386,164 @@ def test_parser_rejects_missing_section_nav_mismatch_and_truncation(
     )
     with pytest.raises(FlexValidationError, match="DTD and entity"):
         parse_flex_file(declaration, artifact_id="synthetic/declaration.xml")
+
+
+def test_change_in_nav_accounting_components_are_normalized_with_source_keys(
+    tmp_path: Path,
+) -> None:
+    """Synthetic ChangeInNAV facts retain their source accounting identity."""
+
+    path = tmp_path / "b1-change-in-nav.xml"
+    path.write_text(
+        _xml(
+            "SYNTH-RAW",
+            date(2026, 1, 5),
+            "38000",
+            change_attributes=(
+                'toDate="20260105" startingValue="35000" '
+                'depositsWithdrawals="0" assetTransfers="0" '
+                'internalCashTransfers="0" mtm="3000" interest="10" '
+                'advisorFees="-5" commissions="-3" dividends="2" '
+                'changeInDividendAccruals="1" fxTranslation="-5" '
+                'twr="0.0857142857" '
+            ),
+        ),
+        encoding="utf-8",
+    )
+    statement = parse_flex_file(
+        path, artifact_id="synthetic/b1-change-in-nav.xml"
+    ).statements[0]
+
+    catalog = ibkr_generation._normalize(
+        [statement],
+        {
+            "accounts": [
+                {
+                    "account_id": "account-ibkr-synthetic",
+                    "base_currency": "USD",
+                    "role": "INVESTMENT",
+                }
+            ],
+            "assignments": [],
+        },
+        {"SYNTH-RAW": "account-ibkr-synthetic"},
+        [],
+        frozenset(),
+        0,
+        None,
+    )
+
+    assert catalog["change_in_nav_observations"] == [
+        {
+            "account_id": "account-ibkr-synthetic",
+            "accounting_date": "2026-01-05",
+            "components": [
+                {"source_component_key": "advisorFees", "value": "-5"},
+                {"source_component_key": "assetTransfers", "value": "0"},
+                {
+                    "source_component_key": "changeInDividendAccruals",
+                    "value": "1",
+                },
+                {"source_component_key": "commissions", "value": "-3"},
+                {"source_component_key": "depositsWithdrawals", "value": "0"},
+                {"source_component_key": "dividends", "value": "2"},
+                {"source_component_key": "fxTranslation", "value": "-5"},
+                {"source_component_key": "interest", "value": "10"},
+                {
+                    "source_component_key": "internalCashTransfers",
+                    "value": "0",
+                },
+                {"source_component_key": "mtm", "value": "3000"},
+            ],
+            "currency": "USD",
+            "ending_nav": "38000",
+            "identity_tolerance": "0.01",
+            "opening_nav": "35000",
+            "source_artifact_id": "synthetic/b1-change-in-nav.xml",
+            "source_record_id": "change-in-nav:account-ibkr-synthetic:2026-01-05",
+        }
+    ]
+
+
+def test_change_in_nav_normalization_reaches_pre_epoch_ledger(
+    tmp_path: Path,
+) -> None:
+    """Synthetic weekday statements carry source components into B1 anchors."""
+
+    account = "account-ibkr-synthetic"
+    strategy = "synthetic-b1-strategy"
+    friday = tmp_path / "b1-friday.xml"
+    friday.write_text(
+        _xml(
+            "SYNTH-RAW",
+            date(2026, 1, 9),
+            "38000",
+            cash_rows=(
+                '<CashTransaction accountId="SYNTH-RAW" levelOfDetail="DETAIL" '
+                'dateTime="20260109;120000" reportDate="20260109" '
+                'transactionID="synthetic-b1-deposit" type="Deposits/Withdrawals" '
+                'amount="35000" currency="USD" />'
+            ),
+            change_attributes=(
+                'toDate="20260109" startingValue="0" '
+                'depositsWithdrawals="35000" interest="10" advisorFees="-5" '
+                'commissions="-3" dividends="2" changeInDividendAccruals="1" '
+                'fxTranslation="-5" mtm="3000" twr="0.0857142857" '
+            ),
+        ),
+        encoding="utf-8",
+    )
+    monday = tmp_path / "b1-monday.xml"
+    monday.write_text(
+        _xml(
+            "SYNTH-RAW",
+            date(2026, 1, 12),
+            "38000",
+            change_attributes='toDate="20260112" startingValue="38000" ',
+        ),
+        encoding="utf-8",
+    )
+    baseline = {
+        "accounts": [
+            {"account_id": account, "base_currency": "USD", "role": "INVESTMENT"}
+        ],
+        "assignments": [
+            {
+                "account_id": account,
+                "effective_start": "2026-01-22",
+                "mapping_status": "MAPPED",
+                "strategy_id": strategy,
+            }
+        ],
+    }
+    catalog = ibkr_generation._normalize(
+        [
+            parse_flex_file(friday, artifact_id="synthetic/b1-friday.xml").statements[
+                0
+            ],
+            parse_flex_file(monday, artifact_id="synthetic/b1-monday.xml").statements[
+                0
+            ],
+        ],
+        baseline,
+        {"SYNTH-RAW": account},
+        [],
+        frozenset(),
+        0,
+        None,
+    )
+
+    anchors = ledger._ibkr_capital_anchors(
+        "synthetic-b1-generation",
+        catalog,
+        {account},
+        {strategy},
+        {account: baseline["assignments"]},
+    )
+
+    assert [
+        (item["amount"]["value"], item["opening_nav"]["value"]) for item in anchors
+    ] == [("35000", "38000")]
 
 
 def test_summary_cash_observations_are_excluded_without_dropping_detail_flows(
