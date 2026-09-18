@@ -3855,7 +3855,8 @@ def _project_account_facts(
             if provider_id == "schwab" and source_fact == "transactions":
                 mapping_row = {
                     "account_id": account_id,
-                    "effective_date": row.get("effective_date") or row.get("event_date"),
+                    "effective_date": row.get("effective_date")
+                    or row.get("event_date"),
                 }
             day = _row_day(mapping_row)
             if (

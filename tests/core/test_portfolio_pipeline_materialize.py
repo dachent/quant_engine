@@ -2636,9 +2636,12 @@ def test_current_admission_reopens_sources_and_rejects_coherent_omissions(
         provider_generations=provider_generations,
     )
     for attack in (
-        "omitted_dataset", "changed_materialized_nav", "changed_finality",
+        "omitted_dataset",
+        "changed_materialized_nav",
+        "changed_finality",
         "unselected_provider_return",
-        "future_effective_date", "future_nav_recognition_date",
+        "future_effective_date",
+        "future_nav_recognition_date",
         "provider_future_nav_recognition_date",
     ):
         receipt = copy.deepcopy(original_receipt)
@@ -2682,11 +2685,14 @@ def test_current_admission_reopens_sources_and_rejects_coherent_omissions(
             )
             row["nav"]["value"] = "101"
         elif attack == "unselected_provider_return":
-            catalog["provider_strategy_returns"].append({
-                "provider_id": "synthetic-unselected-provider",
-                "strategy_id": "synthetic-unselected-strategy",
-                "date": "2026-08-14", "return": "0.99",
-            })
+            catalog["provider_strategy_returns"].append(
+                {
+                    "provider_id": "synthetic-unselected-provider",
+                    "strategy_id": "synthetic-unselected-strategy",
+                    "date": "2026-08-14",
+                    "return": "0.99",
+                }
+            )
         elif "future_" in attack:
             row = next(
                 row
