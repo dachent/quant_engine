@@ -2698,7 +2698,7 @@ def _ibkr_capital_anchors(
             pre_currencies = {currency for _row, currency, _amount, _event in pre_rows}
             if len(pre_currencies) > 1:
                 raise ProviderLedgerError("ibkr pre-epoch capital mixes currencies")
-            currency = (
+            pre_currency = (
                 pre_currencies.pop()
                 if pre_currencies
                 else _text(opening_source.get("currency"), "ibkr change currency")
@@ -2746,7 +2746,7 @@ def _ibkr_capital_anchors(
                     )
                     if source_day != opening_day or source_nav != opening_nav:
                         raise ProviderLedgerError("IBKR_PRE_EPOCH_ACCOUNTING_GAP")
-                if currency is None:
+                if pre_currency is None:
                     raise ProviderLedgerError("IBKR_PRE_EPOCH_CURRENCY_UNAVAILABLE")
                 event_day = max(
                     (event for _row, _currency, _amount, event in pre_rows),
@@ -2756,7 +2756,7 @@ def _ibkr_capital_anchors(
                     anchor(
                         account_id,
                         pre_rows,
-                        currency,
+                        pre_currency,
                         reconciled_capital,
                         opening_day,
                         event_day,
@@ -2801,8 +2801,8 @@ def _ibkr_capital_anchors(
                 account_id, recognition_day, accounts, strategies, assignments
             )
             if not opened and net > 0:
-                opening_nav = nav_by_account_day.get((account_id, recognition_day))
-                if opening_nav is None or opening_nav <= 0:
+                recognized_nav = nav_by_account_day.get((account_id, recognition_day))
+                if recognized_nav is None or recognized_nav <= 0:
                     raise ProviderLedgerError(
                         "IBKR_OPENING_NAV_UNAVAILABLE: the account holds no "
                         "positive NAV on the day its capital is recognized"
@@ -2817,7 +2817,7 @@ def _ibkr_capital_anchors(
                         event_day,
                         strategy_id,
                         mapping_status,
-                        opening_nav=opening_nav,
+                        opening_nav=recognized_nav,
                     )
                 )
                 opened = True
