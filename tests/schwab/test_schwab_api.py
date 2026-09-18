@@ -467,10 +467,10 @@ def _assert_holdings_v2_cli_uses_receipt_clock_and_rejects_spec_date_mismatch(
                 "as_of_date": "2026-09-18",
                 "crosswalk": [
                     {
-                        "external_account_id": external,
+                        "external_account_id": ext,
                         "internal_account_id": internal,
                     }
-                    for external, internal in _holdings_v2_crosswalk().items()
+                    for ext, internal in _holdings_v2_crosswalk().items()
                 ],
             }
         ),
@@ -537,10 +537,10 @@ def _assert_existing_web_current_cli_remains_available(tmp_path: Path) -> None:
             {
                 "crosswalk": [
                     {
-                        "external_account_id": external,
+                        "external_account_id": ext,
                         "internal_account_id": internal,
                     }
-                    for external, internal in _crosswalk().items()
+                    for ext, internal in _crosswalk().items()
                 ]
             }
         ),
