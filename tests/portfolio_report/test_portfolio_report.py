@@ -816,13 +816,58 @@ def test_xlsx_result_canonicalization_normalizes_the_engine_run_id(
             path.with_name(f"{path.stem}.engine-run.json").read_text(encoding="utf-8")
         )
         assert sidecar["engine_run_id"] == engine_run_id
+    first_sidecar = first.with_name(f"{first.stem}.engine-run.json")
+    first_sidecar_bytes = first_sidecar.read_bytes()
     assert reporter.canonicalize_xlsx_result(first) == first_result
+    assert first_sidecar.read_bytes() == first_sidecar_bytes
     failed = tmp_path / "failed-result.json"
     payload = _xlsx_result("c" * 32, r"C:\Temp\xlsx-failed")
     payload["steps"][1]["status"] = "failed"
     failed.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(reporter.ReportValidationError, match="outcome differs"):
         reporter.canonicalize_xlsx_result(failed)
+
+
+def test_xlsx_result_canonicalization_rejects_a_different_original_sidecar(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "result.json"
+    path.write_text(
+        json.dumps(_xlsx_result("a" * 32, r"C:\Temp\xlsx-original")),
+        encoding="utf-8",
+    )
+    reporter.canonicalize_xlsx_result(path)
+    sidecar = path.with_name(f"{path.stem}.engine-run.json")
+    original_sidecar = sidecar.read_bytes()
+
+    path.write_text(
+        json.dumps(_xlsx_result("b" * 32, r"C:\Temp\xlsx-retry")),
+        encoding="utf-8",
+    )
+    conflicting_result = path.read_bytes()
+    with pytest.raises(reporter.ReportValidationError, match="original engine run"):
+        reporter.canonicalize_xlsx_result(path)
+
+    assert path.read_bytes() == conflicting_result
+    assert sidecar.read_bytes() == original_sidecar
+
+
+def test_xlsx_result_canonicalization_rejects_canonical_result_without_sidecar(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "result.json"
+    path.write_text(
+        json.dumps(_xlsx_result("a" * 32, r"C:\Temp\xlsx-original")),
+        encoding="utf-8",
+    )
+    reporter.canonicalize_xlsx_result(path)
+    canonical_result = path.read_bytes()
+    path.with_name(f"{path.stem}.engine-run.json").unlink()
+
+    with pytest.raises(reporter.ReportValidationError, match="sidecar"):
+        reporter.canonicalize_xlsx_result(path)
+
+    assert path.read_bytes() == canonical_result
 
 
 def test_provider_coverage_retains_declared_out_of_boundary_limitations() -> None:

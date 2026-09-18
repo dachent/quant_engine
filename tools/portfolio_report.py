@@ -7164,19 +7164,40 @@ def canonicalize_xlsx_result(
         raise ReportValidationError("xlsx-win result invariants are invalid")
     engine_run_id = run_id
     identity_payload = {key: value for key, value in payload.items() if key != "run_id"}
-    payload["run_id"] = hashlib.sha256(
+    canonical_run_id = hashlib.sha256(
         canonical_json_bytes(identity_payload)
     ).hexdigest()[:32]
-    _replace_disposable_json(
-        path.with_name(f"{path.stem}.engine-run.json"),
-        canonical_json_bytes(
-            {
-                "engine_run_id": engine_run_id,
-                "idempotency_key": payload["idempotency_key"],
-                "schema_version": "1",
-            }
-        ),
+    sidecar_path = path.with_name(f"{path.stem}.engine-run.json")
+    sidecar_content = canonical_json_bytes(
+        {
+            "engine_run_id": engine_run_id,
+            "idempotency_key": payload["idempotency_key"],
+            "schema_version": "1",
+        }
     )
+    if run_id == canonical_run_id:
+        if not sidecar_path.exists():
+            raise ReportValidationError("original engine run sidecar is missing")
+        existing_sidecar = _load_json(sidecar_path, "original engine run sidecar")
+        if (
+            existing_sidecar.get("schema_version") != "1"
+            or existing_sidecar.get("idempotency_key") != payload["idempotency_key"]
+            or re.fullmatch(r"[0-9a-f]{32}", str(existing_sidecar.get("engine_run_id")))
+            is None
+        ):
+            raise ReportValidationError("original engine run sidecar conflicts")
+    else:
+        if sidecar_path.exists():
+            existing_sidecar = _load_json(sidecar_path, "original engine run sidecar")
+            if (
+                existing_sidecar.get("schema_version") != "1"
+                or existing_sidecar.get("idempotency_key") != payload["idempotency_key"]
+                or existing_sidecar.get("engine_run_id") != engine_run_id
+            ):
+                raise ReportValidationError("original engine run sidecar conflicts")
+        else:
+            _write_exact(sidecar_path, sidecar_content)
+    payload["run_id"] = canonical_run_id
     content = canonical_json_bytes(payload)
     if path.read_bytes() != content:
         descriptor, temporary_name = tempfile.mkstemp(
