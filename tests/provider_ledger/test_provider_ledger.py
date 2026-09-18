@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import csv
 from datetime import date
 from decimal import Decimal, ROUND_DOWN, localcontext
 import hashlib
@@ -41,6 +42,78 @@ if SPEC is None or SPEC.loader is None:
 ledger = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = ledger
 SPEC.loader.exec_module(ledger)
+
+
+def test_ibkr_future_unquantified_capital_cannot_erase_cutoff_anchor() -> None:
+    catalog = {
+        "flows": [
+            _ibkr_flow(_IBKR_ACCOUNT, "2025-09-14", "DEPOSIT_OR_WITHDRAWAL", "100"),
+            _ibkr_flow(_IBKR_ACCOUNT, "2025-09-30", "TRANSFER:ACATS:IN", None),
+        ],
+        "nav_observations": [_ibkr_nav(_IBKR_ACCOUNT, "2025-09-14", "100")],
+        "positions": [],
+        "corporate_actions": [],
+        "transactions": [],
+    }
+    facts, findings = ledger._project_account_facts(
+        "ibkr",
+        "synthetic-generation",
+        catalog,
+        {_IBKR_ACCOUNT},
+        {"p123-eu"},
+        _IBKR_ASSIGNMENTS,
+        financial_cutoff=date(2025, 9, 14),
+    )
+    assert len(facts["capital_anchors"]) == 1
+    assert facts["capital_anchors"][0]["amount"]["value"] == "100"
+    assert any(row.get("original_source_date") == "2025-09-30" for row in findings)
+
+
+def test_retained_csv_cutoff_keeps_model_history_and_source_evidence(
+    tmp_path: Path,
+) -> None:
+    returns = tmp_path / "returns.csv"
+    returns.write_text(
+        "series_id,date,return,evidence_layer\n"
+        "Synthetic,2026-09-16,0.01,ACCOUNT_LIVE\n"
+        "Synthetic,2026-09-17,0.99,ACCOUNT_LIVE\n"
+        "Synthetic,2026-09-17,0.02,BACKTEST\n",
+        encoding="utf-8",
+    )
+    evidence = tmp_path / "evidence.json"
+    evidence.write_text(json.dumps({"as_of_date": "2026-09-17", "strategies": []}))
+    findings: list[dict[str, Any]] = []
+    rows, _, artifacts = ledger._strategy_inputs(
+        {
+            "returns_path": str(returns),
+            "returns_sha256": hash_file(returns)[0],
+            "strategy_evidence_path": str(evidence),
+            "strategy_evidence_sha256": hash_file(evidence)[0],
+        },
+        {
+            "strategies": [{"strategy_id": "synthetic", "name": "Synthetic"}],
+            "assignments": [
+                {
+                    "account_id": "synthetic-account",
+                    "strategy_id": "synthetic",
+                    "mapping_status": "MAPPED",
+                    "effective_start": "2026-01-01",
+                }
+            ],
+        },
+        date(2026, 9, 17),
+        {"synthetic": "alpaca"},
+        financial_cutoffs={"alpaca": date(2026, 9, 16)},
+        cutoff_findings=findings,
+    )
+    assert [(r["date"], r["return"], r["evidence_layer"]) for r in rows] == [
+        ("2026-09-16", "0.01", "ACCOUNT_LIVE"),
+        ("2026-09-17", "0.02", "BACKTEST"),
+    ]
+    assert artifacts[0].sha256 == hash_file(returns)[0]
+    assert len(findings) == 1
+    assert findings[0]["original_source_date"] == "2026-09-17"
+    assert findings[0]["financial_cutoff"] == "2026-09-16"
 
 
 def _current_census_provider_fixture() -> tuple[
@@ -98,6 +171,37 @@ def test_candidate_provider_inputs_match_every_frozen_current_census_lane() -> N
     ledger._validate_current_census_provider_generations(
         authority, identities, manifests
     )
+
+
+def test_observed_ibkr_statement_label_binds_partial_generation_without_utc_capture(
+    tmp_path: Path,
+) -> None:
+    """A native statement day is finality evidence, not a made-up UTC time."""
+
+    spec = importlib.util.spec_from_file_location(
+        "native_admission_fixture",
+        REPOSITORY_ROOT / "tests/provider_ledger/test_admit_or_declare.py",
+    )
+    assert spec is not None and spec.loader is not None
+    fixtures = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixtures)
+    _, identities, manifests, catalogs, _ = fixtures._fixture()
+    refs, selections = fixtures._staged_observation(
+        tmp_path, identities, manifests, catalogs
+    )
+    observation = {
+        "financial_cutoff": fixtures.DAY.isoformat(),
+        "providers": selections,
+    }
+    identity, manifest, *_ = ledger._provider(
+        "ibkr", refs["ibkr"], fixtures.DAY, run_observation=observation
+    )
+    assert identity.qualification is GenerationQualification.ACCEPTED_PARTIAL
+    assert manifest.generation_id == refs["ibkr"]["generation_id"]
+    finality = ledger._validate_observed_finality_evidence("ibkr", selections["ibkr"])
+    assert finality["native_timezone"] is None
+    assert finality["capture_start_utc"] is None
+    assert finality["provider_finality_guarantee"] is False
 
 
 @pytest.mark.parametrize("mutation", ("generation", "manifest", "as_of"))
@@ -2264,6 +2368,204 @@ def test_projected_provider_nav_preserves_source_proven_value_basis(
     assert projected["nav_observations"][0]["value_basis"] == value_basis
 
 
+def test_financial_cutoff_excludes_future_schwab_nav_with_source_lineage() -> None:
+    """A capture can contain a later NAV without changing the financial cutoff."""
+
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    catalog["nav_observations"] = [
+        {
+            "account_id": "synthetic-cutoff-account",
+            "as_of_date": "2026-09-17",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+            "record_id": "cutoff-nav",
+            "source_artifact_id": "synthetic/nav.json",
+            "value_basis": "ACCOUNT_VALUE",
+        },
+        {
+            "account_id": "synthetic-cutoff-account",
+            "as_of_date": "2026-09-18",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "999"},
+            "record_id": "future-nav",
+            "source_artifact_id": "synthetic/nav.json",
+            "value_basis": "ACCOUNT_VALUE",
+        },
+    ]
+
+    projected, findings = ledger._project_account_facts(
+        "schwab",
+        "a" * 64,
+        catalog,
+        {"synthetic-cutoff-account"},
+        {"synthetic-cutoff-strategy"},
+        {
+            "synthetic-cutoff-account": [
+                {
+                    "effective_start": "2026-01-01",
+                    "effective_end": None,
+                    "strategy_id": "synthetic-cutoff-strategy",
+                }
+            ]
+        },
+        financial_cutoff=date(2026, 9, 17),
+    )
+
+    assert [row["nav"]["value"] for row in projected["nav_observations"]] == ["100"]
+    assert {
+        "financial_cutoff": "2026-09-17",
+        "fact_type": "nav_observations",
+        "original_record_id": "future-nav",
+        "original_source_date": "2026-09-18",
+        "provider_id": "schwab",
+        "record_id": "schwab:future-nav",
+        "source_record_id": "future-nav",
+        "status": "OUTSIDE_FINANCIAL_CUTOFF",
+    } in findings
+
+
+@pytest.mark.parametrize(
+    "future_dates, future_kind",
+    [
+        ({"event_date": "2026-09-17", "effective_date": "2026-09-18"}, "MoneyLink Transfer"),
+        (
+            {
+                "event_date": "2026-09-17",
+                "effective_date": "2026-09-17",
+                "nav_recognition_date": "2026-09-18",
+            },
+            "MoneyLink Transfer",
+        ),
+        ({"event_date": "2026-09-17", "effective_date": "2026-09-18"}, "Journaled Shares"),
+        ({"event_date": "2026-09-18", "effective_date": "2026-09-17"}, "Journaled Shares"),
+    ],
+)
+def test_schwab_cutoff_precedes_pairing_and_preserves_effective_mapping(
+    future_dates: dict[str, str], future_kind: str,
+) -> None:
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    receipt = {
+        "account_id": "synthetic-sleeve",
+        "record_id": "prior-receipt",
+        "kind": "Journaled Shares",
+        "event_date": "2026-09-16",
+        "effective_date": "2026-09-17",
+        "amount": {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+        "quantity": "2",
+        "execution_price": "25",
+        "security_id": "SYNTHETIC",
+        "source_artifact_id": "synthetic/transactions.json",
+    }
+    catalog["transactions"] = [receipt, {
+        **receipt,
+        "account_id": "synthetic-reserve",
+        "record_id": "prior-delivery",
+        "quantity": "-2",
+    }]
+    assignments = {
+        "synthetic-sleeve": [
+            {
+                "effective_start": "2026-01-01",
+                "effective_end": "2026-09-16",
+                "strategy_id": "prior-strategy",
+            },
+            {"effective_start": "2026-09-17", "strategy_id": "current-strategy"},
+        ],
+    }
+    arguments = (
+        "schwab", "a" * 64, catalog,
+        {"synthetic-sleeve", "synthetic-reserve"},
+        {"prior-strategy", "current-strategy"}, assignments,
+    )
+    prior, prior_findings = ledger._project_account_facts(
+        *arguments, financial_cutoff=date(2026, 9, 17),
+    )
+    future = {
+        **receipt, **future_dates,
+        "account_id": "synthetic-future",
+        "record_id": "future-transfer",
+        "kind": future_kind,
+        "quantity": "invalid-future-quantity",
+        "execution_price": "invalid-future-price",
+    }
+    if future_kind == "MoneyLink Transfer":
+        future["amount"] = {
+            "currency": "USD", "status": "AVAILABLE", "value": "15000",
+        }
+    catalog["transactions"].append(future)
+    original = json.dumps(catalog, sort_keys=True)
+    projected, findings = ledger._project_account_facts(
+        *arguments, financial_cutoff=date(2026, 9, 17),
+    )
+    assert projected == prior
+    assert json.dumps(catalog, sort_keys=True) == original
+    flow = next(row for row in projected["flows"] if row["account_id"] == "synthetic-sleeve")
+    assert (flow["event_date"], flow["effective_date"], flow["nav_recognition_date"]) == (
+        "2026-09-16", "2026-09-17", "2026-09-17",
+    )
+    assert flow["strategy_id"] == "current-strategy"
+    assert flow["mapping_status"] == "MAPPED"
+    assert flow["flow_type"] == "ACCOUNT_TRANSFER"
+    assert flow["amount"] == {"currency": "USD", "status": "AVAILABLE", "value": "50"}
+    excluded = [row for row in findings if row["status"] == "OUTSIDE_FINANCIAL_CUTOFF"]
+    assert [row for row in findings if row not in excluded] == prior_findings
+    assert excluded == [{
+        "financial_cutoff": "2026-09-17",
+        "fact_type": "transactions",
+        "original_record_id": "future-transfer",
+        "original_source_date": future_dates["event_date"],
+        "original_source_dates": future_dates,
+        "provider_id": "schwab",
+        "record_id": "schwab:future-transfer",
+        "source_artifact_id": "synthetic/transactions.json",
+        "source_record_id": "future-transfer",
+        "source_row_sha256": hashlib.sha256(ledger.canonical_json_bytes(future)).hexdigest(),
+        "status": "OUTSIDE_FINANCIAL_CUTOFF",
+    }]
+
+
+def test_schwab_cutoff_precedes_cross_provider_security_valuation() -> None:
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    receipt = {
+        "account_id": "synthetic-schwab",
+        "record_id": "prior-receipt",
+        "kind": "Security Transfer",
+        "event_date": "2026-09-17",
+        "effective_date": "2026-09-17",
+        "quantity": "2",
+        "symbol": "SYNTHETIC",
+        "amount": {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+        "source_artifact_id": "synthetic/transactions.json",
+    }
+    catalog["transactions"] = [receipt, {
+        **receipt,
+        "record_id": "future-receipt",
+        "effective_date": "2026-09-18",
+        "quantity": "invalid-future-quantity",
+    }]
+    facts, _ = ledger._project_account_facts(
+        "schwab", "a" * 64, catalog, {"synthetic-schwab"}, set(), {},
+        financial_cutoff=date(2026, 9, 17),
+    )
+    ledger._complete_schwab_security_transfer_values(
+        facts["flows"], catalog,
+        {"corporate_actions": [{
+            "record_id": "synthetic-fidelity-delivery",
+            "kind": "ASSET_TRANSFER",
+            "event_date": "2026-09-17",
+            "quantity": "-2",
+            "symbol": "SYNTHETIC",
+            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-50"},
+        }]},
+        "b" * 64, {"synthetic-schwab"}, financial_cutoff=date(2026, 9, 17),
+    )
+    assert len(facts["flows"]) == 1
+    flow = facts["flows"][0]
+    assert flow["amount"] == {"currency": "USD", "status": "AVAILABLE", "value": "50"}
+    assert flow["recorded_amount"] == receipt["amount"]
+    assert flow["transfer_valuation"]["receipt_record_sha256"] == hashlib.sha256(
+        ledger.canonical_json_bytes(receipt)
+    ).hexdigest()
+
+
 def test_projected_ibkr_flow_retains_activity_identity_and_zero_noncapital_semantics() -> (
     None
 ):
@@ -3751,6 +4053,51 @@ def test_matrixport_daily_holdings_use_selected_daily_fx_without_parity(
     ]
 
 
+def test_matrixport_cutoff_excludes_future_holdings_before_fx_valuation(
+    tmp_path: Path,
+) -> None:
+    """An excluded capture tail must not require unavailable future-day FX."""
+
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    totals_path = output_root / "csv/daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-09-17,100,100,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_matrixport_manifest(
+        totals_path,
+        component_date="2026-09-17",
+        component_usd_values=("100",),
+        additional_components=(("2026-09-18", "999"),),
+    )
+    findings: list[dict[str, Any]] = []
+    rows = ledger._matrixport_nav_observations(
+        "gen-1",
+        manifest,
+        {
+            "catalog_schema_version": 2,
+            "observed_boundary_date": "2026-09-18",
+            "source_run_id": run_id,
+        },
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        {},
+        fx_rates=("f" * 64, {("USDT", date(2026, 9, 17)): Decimal("1")}, ()),
+        financial_cutoff=date(2026, 9, 17),
+        cutoff_findings=findings,
+    )
+
+    assert [row["as_of_date"] for row in rows] == ["2026-09-17"]
+    assert len(findings) == 1
+    assert findings[0]["original_source_date"] == "2026-09-18"
+    assert findings[0]["source_artifact_id"] == "csv/daily_holdings.csv"
+    assert findings[0]["status"] == "OUTSIDE_FINANCIAL_CUTOFF"
+
+
 def test_quantbase_dashboard_nav_declares_account_total_basis(
     tmp_path: Path,
 ) -> None:
@@ -4666,6 +5013,68 @@ def test_quantbase_dispatch_projects_fund_anchors_account_flows_and_nav(
             "status": "UNMAPPED",
         }
     ]
+
+
+@pytest.mark.parametrize("future_defect", ["duplicate", "units", "linked_account"])
+def test_quantbase_cutoff_precedes_transfer_validation(
+    tmp_path: Path, future_defect: str,
+) -> None:
+    root, catalog, price_path, activity_path = _quantbase_fixture(tmp_path)
+    artifacts = {
+        "source/csv/dashboard_Volatis_Strategy_pricehistory.csv": price_path,
+        "source/csv/account_activity.csv": activity_path,
+    }
+    account_id = ledger._CSV_FACT_ACCOUNT["quantbase"]
+    assignments = {account_id: [{
+        "effective_start": "2024-10-01", "strategy_id": "volatis-strategy",
+    }]}
+    prior, prior_findings = ledger._project_account_facts(
+        "quantbase", "gen-1", catalog, {account_id}, {"volatis-strategy"},
+        assignments, _make_two_artifact_manifest(artifacts), root,
+        financial_cutoff=date(2026, 9, 17),
+    )
+    with activity_path.open(encoding="utf-8-sig", newline="") as stream:
+        source_rows = list(csv.DictReader(stream))
+    future = {
+        **source_rows[-1], "created_at": "2026-09-18T20:01:00Z",
+        "id": "future-transfer",
+    }
+    if future_defect == "duplicate":
+        future["id"] = "deposit-1"
+    elif future_defect == "units":
+        future["amount_cents"] = "1"
+    else:
+        future["destination_account_id"] = "different-synthetic-account"
+    with activity_path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(source_rows[0]))
+        writer.writeheader()
+        writer.writerows([*source_rows, future])
+    source_hash = hash_file(activity_path)
+    projected, findings = ledger._project_account_facts(
+        "quantbase", "gen-1", catalog, {account_id}, {"volatis-strategy"},
+        assignments, _make_two_artifact_manifest(artifacts), root,
+        financial_cutoff=date(2026, 9, 17),
+    )
+    assert projected == prior
+    assert hash_file(activity_path) == source_hash
+    assert projected["flows"][0]["amount"]["value"] == "2000"
+    assert projected["flows"][0]["provider_account_scope"] == "ACCOUNT_ONLY"
+    assert projected["flows"][0]["strategy_id"] is None
+    excluded = [row for row in findings if row["status"] == "OUTSIDE_FINANCIAL_CUTOFF"]
+    assert [row for row in findings if row not in excluded] == prior_findings
+    assert excluded == [{
+        "financial_cutoff": "2026-09-17",
+        "fact_type": "flows",
+        "original_record_id": future["id"],
+        "original_source_date": "2026-09-18",
+        "original_source_dates": {"created_at": "2026-09-18T20:01:00Z"},
+        "provider_id": "quantbase",
+        "record_id": f"quantbase:{future['id']}",
+        "source_artifact_id": "source/csv/account_activity.csv",
+        "source_record_id": future["id"],
+        "source_row_sha256": hashlib.sha256(ledger.canonical_json_bytes(future)).hexdigest(),
+        "status": "OUTSIDE_FINANCIAL_CUTOFF",
+    }]
 
 
 def test_quantbase_completed_transfers_project_as_signed_usd_account_flows(

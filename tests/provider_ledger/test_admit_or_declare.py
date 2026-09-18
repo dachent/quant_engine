@@ -186,6 +186,7 @@ def _fixture(
     policy_effective_end: date | None = None,
     readiness_by_reason: dict[str, str] | None = None,
     unreferenced_dataset: bool = False,
+    native_source_inventory: bool = False,
 ) -> tuple[
     dict[str, Any],
     list[ProviderGenerationIdentity],
@@ -301,6 +302,21 @@ def _fixture(
             },
             "units": {"currency": "USD", "measurement": "NAV"},
         }
+        if native_source_inventory:
+            # The native-format fixture also enumerates empty account fact
+            # families. Declare those families in this synthetic authority;
+            # its only required product class remains ACCOUNT_NAV.
+            sources[source_id]["admission"]["facts"] = sorted(
+                {
+                    "NAV_OBSERVATION",
+                    *(
+                        ledger._TARGET_ADMISSION_FACT[
+                            "flows" if fact == "cash_flows" else fact
+                        ]
+                        for fact in ledger._ACCOUNT_FACTS[provider_id]
+                    ),
+                }
+            )
         if missing_product_class and provider_id == "schwab":
             sources[source_id]["data_classes"].append("FINANCING_LIABILITY")
             sources[source_id]["admission"]["facts"].append("FINANCING_LIABILITY")
@@ -379,6 +395,792 @@ def _receipt(
         for row in receipt["provider_generations"]
     }
     return receipt, receipt_bytes, authority, provider_generations
+
+
+def _staged_observation(
+    tmp_path: Path,
+    identities: list[ProviderGenerationIdentity],
+    manifests: dict[str, GenerationManifest],
+    catalogs: dict[str, dict[str, Any]],
+    *,
+    cutoff: date = DAY,
+) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+    """Small synthetic sources using native formats, no asserted finality flag."""
+    from datetime import datetime, timedelta, timezone
+    from quant_engine.core.publication import CurrentPointer
+
+    refs, selections = {}, {}
+    for index, identity in enumerate(list(identities)):
+        provider_id = identity.provider_id
+        root = tmp_path / provider_id
+        root.mkdir(parents=True)
+        catalog_name, versions = ledger._PROVIDER_CATALOGS[provider_id]
+        catalog = {**catalogs[provider_id], "catalog_schema_version": min(versions)}
+        catalog.pop("nav_observations", None)
+        artifacts = list(manifests[provider_id].artifacts)
+        for artifact in artifacts:
+            source_path = root / artifact.artifact_id
+            source_path.parent.mkdir(parents=True, exist_ok=True)
+            source_path.write_bytes(f"synthetic-{provider_id}".encode())
+        for fact_name in ledger._ACCOUNT_FACTS[provider_id]:
+            catalog.setdefault(fact_name, [])
+        evidence_path = root / "finality.json"
+        account = "synthetic-" + provider_id
+        nav_artifact = "native/nav.csv"
+
+        def bind(
+            artifact_id: str,
+            path: Path,
+            content: bytes,
+            schema: str = "synthetic-source",
+        ) -> None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(content)
+            artifacts.append(
+                SourceArtifact(
+                    artifact_id=artifact_id,
+                    sha256=hashlib.sha256(content).hexdigest(),
+                    size_bytes=len(content),
+                    as_of_date=DAY,
+                    schema_name=schema,
+                    schema_version="1",
+                )
+            )
+
+        def nav(artifact_id: str) -> dict[str, Any]:
+            return {
+                "account_id": account,
+                "as_of_date": cutoff.isoformat(),
+                "record_id": "synthetic-nav",
+                "source_artifact_id": artifact_id,
+                "nav": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+                "value_basis": "ACCOUNT_VALUE"
+                if provider_id == "schwab"
+                else "ACCOUNT_TOTAL",
+            }
+
+        if provider_id == "ibkr":
+            native_day = cutoff.strftime("%Y%m%d")
+            xml = (
+                '<FlexQueryResponse type="AF" queryName="SYNTHETIC"><FlexStatements>'
+                f'<FlexStatement accountId="SYNTHETIC" fromDate="{native_day}" toDate="{native_day}" whenGenerated="20260814;120000">'
+                '<AccountInformation accountId="SYNTHETIC" currency="USD"/>'
+                f'<EquitySummaryByReportDateInBase reportDate="{native_day}" total="100"/>'
+                '<ChangeInNAV endingValue="100"/><CashTransactions/><ConversionRates/>'
+                "<CorporateActions/><OpenPositions/><Trades/><Transfers/>"
+                "</FlexStatement></FlexStatements></FlexQueryResponse>"
+            ).encode()
+            evidence_path = root / "statement.xml"
+            bind("native/current.xml", evidence_path, xml, "activity-flex")
+            catalog.update(
+                accounts=[{"account_id": account}],
+                nav_observations=[nav("native/current.xml")],
+                fact_coverage=[
+                    {
+                        "fact_type": "FLEX_FINALIZED_HISTORY",
+                        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+                        "status": "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+                        "known_gaps": [],
+                        "accounts": [
+                            {
+                                "account_id": account,
+                                "statement_count": 1,
+                                "intervals": [
+                                    {
+                                        "effective_start": cutoff.isoformat(),
+                                        "effective_end": cutoff.isoformat(),
+                                        "source_artifact_ids": ["native/current.xml"],
+                                    }
+                                ],
+                            }
+                        ],
+                    }
+                ],
+            )
+        elif provider_id == "matrixport":
+            run_id = "synthetic-current"
+            capture = datetime.combine(
+                cutoff + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc
+            )
+            summary = {
+                "run_id": run_id,
+                "status": "COMPLETED",
+                "run_end_ms": int(capture.timestamp() * 1000),
+            }
+            evidence_path = root / "output" / run_id / "reports/extraction_summary.json"
+            bind(
+                "reports/extraction_summary.json",
+                evidence_path,
+                canonical_json_bytes(summary),
+            )
+            nav_time = capture - timedelta(days=1)
+            bind(
+                "csv/nav_daily.csv",
+                root / "output" / run_id / "csv/nav_daily.csv",
+                (
+                    "day_timestamp_ms,day_timestamp_utc,product_id\n"
+                    f"{int(nav_time.timestamp() * 1000)},{nav_time.isoformat()},SYNTHETIC\n"
+                ).encode(),
+            )
+            prior = (cutoff - timedelta(days=1)).isoformat()
+            last = cutoff.isoformat()
+            contents = {
+                "csv/daily_portfolio_totals.csv": "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+                + f"{prior},100,100,true\n{last},100,100,true\n",
+                "csv/daily_holdings.csv": "utc_date,product_id,share,currency,native_value,valuation_source,value_usd_api_rate,value_usd_api_reported,value_usd_strict_component\n"
+                + f"{prior},P1,1,USD,100,api_reported_usd_value,1,100,100\n{last},P1,1,USD,100,api_reported_usd_value,1,100,100\n",
+                "csv/valuation_quality_issues.csv": "source_index,source_table,reason\n",
+                "csv/subscription_details.csv": "actual_subscription_amount,confirm_nav_time_utc,order_id,product_id,subscription_amount,subscription_currency,subscription_time_utc\n"
+                + f"100,{prior}T00:00:00Z,{ledger._MATRIXPORT_ROBUXIO_ORDER_ID},{ledger._MATRIXPORT_ROBUXIO_PRODUCT_ID},100,USD,{prior}T00:00:00Z\n",
+            }
+            for artifact_id, text in contents.items():
+                bind(artifact_id, root / "output" / run_id / artifact_id, text.encode())
+            catalog.update(
+                source_run_id=run_id, observed_boundary_date=cutoff.isoformat()
+            )
+        elif provider_id == "quantbase":
+            run_id = "synthetic-current"
+            relative = "csv/dashboard_Volatis_Strategy_pricehistory.csv"
+            content = (
+                "time,value,cost_basis\n"
+                + cutoff.strftime("%m/%d/%Y")
+                + ",100,100\n"
+                + (cutoff + timedelta(days=1)).strftime("%m/%d/%Y")
+                + ",999,100\n"
+            ).encode()
+            bind(
+                "source/" + relative,
+                root / "source-runs" / run_id / "artifacts" / relative,
+                content,
+            )
+            original = root / "conversion/artifacts" / relative
+            original.parent.mkdir(parents=True)
+            original.write_bytes(content)
+            evidence_path = root / "conversion/conversion-receipt.json"
+            evidence_path.write_bytes(
+                canonical_json_bytes(
+                    {
+                        "refreshed_datasets": [Path(relative).name],
+                        "preserved_companions": [],
+                        "latest_complete_daily_cutoff": cutoff.isoformat(),
+                        "intraday_unfinalized_dates": [
+                            (cutoff + timedelta(days=1)).isoformat()
+                        ],
+                    }
+                )
+            )
+            activity = (
+                "activity_type,amount,fund,is_rebalance,time,type,amount_cents,created_at,destination_account_id,id,origin_account_id,status\n"
+                + f"filled_txn,100,107,False,{cutoff.isoformat()}T00:00:00Z,BUY,10000,,,synthetic-buy,,C\n"
+            )
+            activity_relative = "csv/account_activity.csv"
+            bind(
+                "source/" + activity_relative,
+                root / "source-runs" / run_id / "artifacts" / activity_relative,
+                activity.encode(),
+            )
+            (root / "conversion/artifacts" / activity_relative).write_bytes(
+                activity.encode()
+            )
+            conversion = json.loads(evidence_path.read_bytes())
+            conversion["refreshed_datasets"].append("account_activity.csv")
+            evidence_path.write_bytes(canonical_json_bytes(conversion))
+            catalog.update(
+                legacy_lineage={"run_id": run_id},
+                datasets=[
+                    {
+                        "relative_path": rel,
+                        "sha256": hashlib.sha256(raw).hexdigest(),
+                        "bytes": len(raw),
+                    }
+                    for rel, raw in (
+                        (relative, content),
+                        (activity_relative, activity.encode()),
+                    )
+                ],
+            )
+        elif provider_id == "schwab":
+            content = f"date,account_value\n{cutoff.isoformat()},100\n".encode()
+            bind(
+                nav_artifact,
+                root / nav_artifact,
+                content,
+                "schwab-wch-historical-balance",
+            )
+            catalog.update(
+                accounts=[{"account_id": account}], nav_observations=[nav(nav_artifact)]
+            )
+            evidence_path.write_bytes(
+                canonical_json_bytes(
+                    {
+                        "as_of_date": DAY.isoformat(),
+                        "roots": {"native": str(root)},
+                        "sources": [
+                            {
+                                "role": "WCH_NAV_CSV",
+                                "artifact_id": nav_artifact,
+                                "account_id": account,
+                                "root_id": "native",
+                                "relative_path": nav_artifact,
+                                "expected_sha256": hashlib.sha256(content).hexdigest(),
+                                "expected_size_bytes": len(content),
+                            }
+                        ],
+                    }
+                )
+            )
+        catalog_bytes = canonical_json_bytes(catalog)
+        bind(
+            catalog_name,
+            root / catalog_name,
+            catalog_bytes,
+            provider_id + "-generation-catalog",
+        )
+        qualification = {
+            "alpaca": "PUBLISHED_COMPLETE",
+            "fidelity": "FINITE_STATIC",
+            "ibkr": "ACCEPTED_PARTIAL",
+            "matrixport": "ACCEPTED_PARTIAL",
+            "portfolio123": "STAGED_COMPLETE",
+            "quantbase": "STAGED_COMPLETE",
+            "schwab": "STAGED_COMPLETE",
+        }[provider_id]
+        coverage = replace(
+            manifests[provider_id].coverage,
+            fact_types=ledger._ACCOUNT_FACTS[provider_id] or ("model_evidence",),
+            status=CoverageStatus.PARTIAL
+            if qualification == "ACCEPTED_PARTIAL"
+            else CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            known_gaps=("synthetic historical gap",)
+            if qualification == "ACCEPTED_PARTIAL"
+            else (),
+        )
+        manifest = GenerationManifest.build(
+            as_of_date=DAY,
+            adapter=manifests[provider_id].adapter,
+            coverage=coverage,
+            artifacts=artifacts,
+            verification=VerificationStatus.VERIFIED,
+        )
+        generation = root / "generations" / manifest.generation_id
+        generation.mkdir(parents=True)
+        manifest_bytes = manifest.to_json_bytes()
+        (generation / "generation.json").write_bytes(manifest_bytes)
+        (generation / catalog_name).write_bytes(catalog_bytes)
+        if provider_id in {"alpaca", "fidelity", "portfolio123"}:
+            evidence_path = generation / "generation.json"
+        if qualification == "PUBLISHED_COMPLETE":
+            # Use the existing pointer constructor, same as provider publication.
+            (root / "CURRENT.json").write_bytes(
+                CurrentPointer(
+                    manifest.generation_id, hashlib.sha256(manifest_bytes).hexdigest()
+                ).to_json_bytes()
+            )
+        ref = {
+            "catalog_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+            "generation_id": manifest.generation_id,
+            "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "qualification": qualification,
+            "root": str(root),
+        }
+        refs[provider_id] = ref
+        evidence_bytes = evidence_path.read_bytes()
+        selections[provider_id] = {
+            **ref,
+            "finality_evidence": {
+                "path": str(evidence_path),
+                "sha256": hashlib.sha256(evidence_bytes).hexdigest(),
+                "size_bytes": len(evidence_bytes),
+            },
+            "finalized_through": cutoff.isoformat(),
+            "generation_as_of_date": DAY.isoformat(),
+        }
+        manifests[provider_id] = manifest
+        catalogs[provider_id] = catalog
+        identities[index] = ProviderGenerationIdentity(
+            provider_id=provider_id,
+            generation_id=manifest.generation_id,
+            manifest_sha256=ref["manifest_sha256"],
+            catalog_sha256=ref["catalog_sha256"],
+            qualification=GenerationQualification(qualification),
+        )
+    return refs, selections
+
+
+def _source_bound_stage(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
+    """Real stage, real financial contract/schema/registry, tiny synthetic inputs."""
+    _, identities, manifests, catalogs, _ = _fixture(unreferenced_dataset=True)
+    refs, selections = _staged_observation(
+        tmp_path / "sources", identities, manifests, catalogs
+    )
+    contract_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
+    schema_path = ROOT / "schemas/portfolio/financial-mvp-source-contract.schema.json"
+    registry_path = ROOT / "docs/analytics/current-strategy-decomposition-plan.json"
+    financial = {
+        key + "_path": str(path)
+        for key, path in (
+            ("contract", contract_path),
+            ("schema", schema_path),
+            ("registry", registry_path),
+        )
+    }
+    financial.update(
+        {
+            key + "_sha256": hashlib.sha256(
+                Path(financial[key + "_path"]).read_bytes()
+            ).hexdigest()
+            for key in ("contract", "schema", "registry")
+        }
+    )
+    observation = {
+        "schema_version": 1,
+        "captured_at_utc": "2026-09-18T12:00:00Z",
+        "financial_cutoff": "2026-09-17",
+        "policy_contract_sha256": financial["contract_sha256"],
+        "providers": selections,
+    }
+
+    def write(name: str, value: object) -> tuple[Path, str]:
+        path = tmp_path / name
+        content = canonical_json_bytes(value)
+        path.write_bytes(content)
+        return path, hashlib.sha256(content).hexdigest()
+
+    observation_path, observation_sha = write("observation.json", observation)
+    contract = json.loads(contract_path.read_bytes())
+    strategies = [
+        {"strategy_id": row["strategy_id"], "name": row["strategy_id"]}
+        for row in contract["strategies"]
+    ]
+    provider_map = {
+        "p123-ai-factor": "schwab",
+        "p123-eu": "ibkr",
+        "qsi": "schwab",
+        "tt-portfolio": "schwab",
+        "volatis-strategy": "quantbase",
+        "grizzlybears-vtma": "schwab",
+        "robuxio-crypto": "matrixport",
+    }
+    provenance_path, provenance_sha = write(
+        "provenance.json",
+        {
+            "as_of_date": DAY.isoformat(),
+            "accounts": [
+                {"account_id": account}
+                for account in (
+                    ledger._CSV_FACT_ACCOUNT["matrixport"],
+                    ledger._CSV_FACT_ACCOUNT["quantbase"],
+                    "synthetic-ibkr",
+                    "synthetic-schwab",
+                )
+            ],
+            "strategies": strategies,
+            "assignments": [
+                {
+                    "account_id": ledger._CSV_FACT_ACCOUNT[provider_id],
+                    "strategy_id": strategy_id,
+                    "mapping_status": "MAPPED",
+                    "effective_start": "2025-12-06",
+                    "source_classification": "financial_mvp_funded_membership_reconciled",
+                }
+                for provider_id, strategy_id in (
+                    ("matrixport", "robuxio-crypto"),
+                    ("quantbase", "volatis-strategy"),
+                )
+            ],
+        },
+    )
+    evidence = []
+    for strategy_id in ledger._provider_native_account_return_strategy_ids(contract):
+        provider_id = provider_map[strategy_id]
+        artifact = next(
+            a
+            for a in manifests[provider_id].artifacts
+            if a.artifact_id == ledger._PROVIDER_CATALOGS[provider_id][0]
+        )
+        evidence.append(
+            {
+                "strategy_id": strategy_id,
+                "provider_id": provider_id,
+                "generation_id": manifests[provider_id].generation_id,
+                "sources": {
+                    "native": {
+                        "artifact_id": artifact.artifact_id,
+                        "sha256": artifact.sha256,
+                        "size_bytes": artifact.size_bytes,
+                    }
+                },
+            }
+        )
+    evidence_path, evidence_sha = write(
+        "strategy-evidence.json",
+        {"as_of_date": DAY.isoformat(), "strategies": evidence},
+    )
+    returns_path = tmp_path / "returns.csv"
+    returns_path.write_text(
+        "series_id,date,return,evidence_layer\nrobuxio-crypto,2026-08-14,0,BACKTEST\n",
+        encoding="utf-8",
+    )
+    spec_path, _ = write(
+        "spec.json",
+        {
+            "schema_version": 2,
+            "as_of_date": "2026-09-17",
+            "financial_mvp": financial,
+            "output_root": str(tmp_path / "staged"),
+            "providers": refs,
+            "provenance": {
+                "catalog_path": str(provenance_path),
+                "catalog_sha256": provenance_sha,
+                "generation_id": "1" * 64,
+            },
+            "strategy_inputs": {
+                "returns_path": str(returns_path),
+                "returns_sha256": hashlib.sha256(returns_path.read_bytes()).hexdigest(),
+                "strategy_evidence_path": str(evidence_path),
+                "strategy_evidence_sha256": evidence_sha,
+            },
+            "strategy_provider_map": provider_map,
+            "run_observation": {
+                "path": str(observation_path),
+                "sha256": observation_sha,
+                "size_bytes": observation_path.stat().st_size,
+            },
+        },
+    )
+    authority = ledger._financial_mvp_authority(ledger._load_spec(spec_path))
+    staged = ledger.stage_candidate(spec_path)
+    return (
+        tmp_path / "staged/generations" / str(staged["generation_id"]),
+        authority,
+        spec_path,
+    )
+
+
+def test_source_bound_stage_runs_without_replacing_validators(tmp_path: Path) -> None:
+    policy_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
+    policy_before = policy_path.read_bytes()
+    generation, authority, spec_path = _source_bound_stage(tmp_path)
+    catalog = json.loads((generation / "provider-ledger.json").read_bytes())
+    receipt = json.loads((generation / "admit-or-declare-receipt.json").read_bytes())
+    assert len(receipt["provider_generations"]) == 7
+    assert len(receipt["inventory"]) == len(receipt["dispositions"])
+    assert {
+        row["nav"]["value"]
+        for row in catalog["nav_observations"]
+        if row["provider_id"] == "matrixport"
+    } == {"100"}
+    assert {
+        (row["strategy_id"], row["return"])
+        for row in catalog["strategy_returns"]
+        if row["evidence_layer"] == "ACCOUNT_LIVE"
+    } == {("robuxio-crypto", "0")}
+    # Quantbase has one finalized NAV: its opening anchor is valid capital,
+    # but only a later finalized NAV can establish a return interval.
+    anchor = next(
+        row for row in catalog["capital_anchors"] if row["provider_id"] == "quantbase"
+    )
+    assert (anchor["strategy_id"], anchor["amount"]["value"], anchor["event_date"]) == (
+        "volatis-strategy",
+        "100",
+        DAY.isoformat(),
+    )
+    assert any(
+        row["status"] == "OUTSIDE_FINANCIAL_CUTOFF"
+        and row["provider_id"] == "quantbase"
+        for row in catalog["quality_findings"]
+    )
+    assert authority["contract_raw_sha256"] == hashlib.sha256(policy_before).hexdigest()
+    assert policy_path.read_bytes() == policy_before
+    assert not (tmp_path / "staged/CURRENT.json").exists()
+    ledger.verify_candidate(spec_path, generation.name)
+
+
+def test_finality_requires_selected_native_sources_and_account_scope(
+    tmp_path: Path,
+) -> None:
+    _, identities, manifests, catalogs, _ = _fixture()
+    _, selections = _staged_observation(
+        tmp_path / "sources", identities, manifests, catalogs
+    )
+    asserted = tmp_path / "unrelated-finality.json"
+    asserted.write_bytes(
+        canonical_json_bytes(
+            {
+                "status": "COMPLETED",
+                "as_of_date": DAY.isoformat(),
+                "finalized_through": DAY.isoformat(),
+                "native_timezone": "UTC",
+                "native_calendar": "SYNTHETIC_DAILY",
+                "finality_basis": "asserted",
+            }
+        )
+    )
+    for provider_id, selection in selections.items():
+        interpreted = ledger._validate_observed_finality_evidence(
+            provider_id, selection
+        )
+        assert interpreted["provider_finality_guarantee"] is False
+        if provider_id != "matrixport":
+            assert interpreted["native_timezone"] is None
+        substituted = {
+            **selection,
+            "finality_evidence": {
+                "path": str(asserted),
+                "sha256": hashlib.sha256(asserted.read_bytes()).hexdigest(),
+                "size_bytes": asserted.stat().st_size,
+            },
+        }
+        with pytest.raises(ledger.ProviderLedgerError):
+            ledger._validate_observed_finality_evidence(provider_id, substituted)
+    selected = selections["schwab"]
+    source_spec = json.loads(Path(selected["finality_evidence"]["path"]).read_bytes())
+    source_spec["sources"][0]["account_id"] = "synthetic-unselected-account"
+    asserted.write_bytes(canonical_json_bytes(source_spec))
+    substituted = {
+        **selected,
+        "finality_evidence": {
+            "path": str(asserted),
+            "sha256": hashlib.sha256(asserted.read_bytes()).hexdigest(),
+            "size_bytes": asserted.stat().st_size,
+        },
+    }
+    with pytest.raises(ledger.ProviderLedgerError, match="account scope differs"):
+        ledger._validate_observed_finality_evidence("schwab", substituted)
+
+
+def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the real stage/verify producer seam with existing synthetic inputs.
+
+    The fixture supplies only source-bound provider facts; the test keeps the
+    owner-policy source objects byte-identical while the producer independently
+    derives the observed inventory and disposition digests.
+    """
+
+    authority, identities, manifests, catalogs, provider_facts = _fixture(
+        unreferenced_dataset=True, native_source_inventory=True
+    )
+    refs, selections = _staged_observation(
+        tmp_path / "sources", identities, manifests, catalogs
+    )
+    observation = {
+        "captured_at_utc": "2026-08-14T12:00:00Z",
+        "financial_cutoff": DAY.isoformat(),
+        "policy_contract_sha256": authority["contract_raw_sha256"],
+        "providers": selections,
+        "schema_version": 1,
+    }
+    observation_bytes = canonical_json_bytes(observation)
+    observation_path = tmp_path / "run-observation.json"
+    observation_path.write_bytes(observation_bytes)
+    authority["run_observation"] = observation
+    authority["run_observation_path"] = str(tmp_path / "run-observation.json")
+    authority["run_observation_size_bytes"] = len(observation_bytes)
+    (tmp_path / "run-observation.json").write_bytes(observation_bytes)
+    authority["run_observation_sha256"] = hashlib.sha256(observation_bytes).hexdigest()
+    policy_before = canonical_json_bytes(authority["sources"])
+    spec = {
+        "as_of_date": DAY.isoformat(),
+        "financial_mvp": {},
+        "output_root": str(tmp_path / "staged"),
+        "provenance": {},
+        "providers": refs,
+        "run_observation": {
+            "path": str(observation_path),
+            "sha256": authority["run_observation_sha256"],
+            "size_bytes": len(observation_bytes),
+        },
+        "schema_version": 2,
+        "strategy_inputs": {},
+        "strategy_provider_map": {},
+    }
+    spec_path = tmp_path / "spec.json"
+    spec_path.write_bytes(canonical_json_bytes(spec))
+    provenance_artifact = SourceArtifact(
+        artifact_id="synthetic/provenance.json",
+        sha256="a" * 64,
+        size_bytes=1,
+        as_of_date=DAY,
+        schema_name="synthetic-provenance",
+        schema_version="1",
+    )
+    strategy_artifact = SourceArtifact(
+        artifact_id="synthetic/strategy.csv",
+        sha256="b" * 64,
+        size_bytes=1,
+        as_of_date=DAY,
+        schema_name="synthetic-strategy",
+        schema_version="1",
+    )
+    evidence_artifact = SourceArtifact(
+        artifact_id="synthetic/strategy-evidence.json",
+        sha256="c" * 64,
+        size_bytes=1,
+        as_of_date=DAY,
+        schema_name="synthetic-strategy-evidence",
+        schema_version="1",
+    )
+    monkeypatch.setattr(ledger, "_financial_mvp_authority", lambda _spec: authority)
+    monkeypatch.setattr(
+        ledger,
+        "_provenance",
+        lambda _spec: ({"assignments": [], "strategies": []}, provenance_artifact),
+    )
+    monkeypatch.setattr(ledger, "_assignment_index", lambda *_args: (set(), set(), {}))
+    monkeypatch.setattr(
+        ledger,
+        "_project_account_facts",
+        lambda provider_id, *_args, **_kwargs: (provider_facts[provider_id], []),
+    )
+    monkeypatch.setattr(
+        ledger, "_complete_schwab_security_transfer_values", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        ledger,
+        "_validate_current_census_provider_generations",
+        lambda *_args: None,
+    )
+    monkeypatch.setattr(
+        ledger,
+        "_strategy_inputs",
+        lambda *_args, **_kwargs: ([], [], (strategy_artifact, evidence_artifact)),
+    )
+    monkeypatch.setattr(
+        ledger, "_declared_nav_gap_dates_by_provider", lambda *_args: {}
+    )
+    monkeypatch.setattr(
+        ledger, "_provider_native_account_return_strategy_ids", lambda *_args: set()
+    )
+    monkeypatch.setattr(
+        ledger, "_validate_provider_native_strategy_evidence", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        ledger, "_validate_nav_observation_value_bases", lambda *_args: None
+    )
+    monkeypatch.setattr(ledger, "_validate_nav_observation_moves", lambda *_args: None)
+    monkeypatch.setattr(
+        ledger, "_broker_strategy_returns", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(ledger, "_merge_account_returns", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(ledger, "_funded_account_live_boundaries", lambda *_args: {})
+    monkeypatch.setattr(
+        ledger,
+        "_account_live_returns_within_funded_boundaries",
+        lambda rows, *_args: rows,
+    )
+    monkeypatch.setattr(
+        ledger, "_strategy_return_overlap_checks", lambda *_args, **_kwargs: []
+    )
+    monkeypatch.setattr(ledger, "_portfolio123_provider_returns", lambda *_args: [])
+    monkeypatch.setattr(ledger, "_refresh_strategy_evidence", lambda *_args: [])
+    monkeypatch.setattr(ledger, "_admissions", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(ledger, "_ibkr_flow_coverage", lambda *_args: {})
+    monkeypatch.setattr(ledger, "_matrixport_flow_coverage", lambda *_args: {})
+    monkeypatch.setattr(ledger, "_quantbase_flow_coverage", lambda *_args: {})
+
+    staged = ledger.stage_candidate(spec_path)
+    assert staged["state"] == "STAGED"
+    assert not (tmp_path / "staged" / "CURRENT.json").exists()
+    assert canonical_json_bytes(authority["sources"]) == policy_before
+
+    generation = tmp_path / "staged" / "generations" / str(staged["generation_id"])
+    receipt = json.loads((generation / "admit-or-declare-receipt.json").read_bytes())
+    assert receipt["run_observation"]["financial_cutoff"] == DAY.isoformat()
+    assert {
+        row["provider_id"] for row in receipt["run_observation"]["providers"]
+    } == set(ledger._PROVIDER_CATALOGS)
+    assert any(
+        row["item_id"] == "unreferenced_collection" and row["action"] == "EXCLUDE"
+        for row in receipt["dispositions"]
+    )
+    ledger.verify_candidate(spec_path, str(staged["generation_id"]))
+
+    tampered = copy.deepcopy(receipt)
+    tampered["run_observation"]["providers"][0]["observed_inventory_count"] += 1
+    with pytest.raises(ProviderAdmissionError, match="counts or digests"):
+        ledger.validate_admit_or_declare_receipt(
+            tampered,
+            product_authority=authority,
+            source_segments=authority["sources"],
+            provider_generations={
+                str(row["provider_id"]): row for row in receipt["provider_generations"]
+            },
+        )
+
+
+def test_observed_receipt_keeps_each_provider_original_qualification(
+    tmp_path: Path,
+) -> None:
+    """An observation binds all selected providers; it does not restage them.
+
+    The production current selection intentionally combines published, finite,
+    partial, and staged generations.  Receipt verification must bind each
+    observed identity and finality evidence without rewriting that qualification
+    into ``STAGED_COMPLETE``.
+    """
+
+    authority, identities, manifests, catalogs, provider_facts = _fixture(
+        native_source_inventory=True
+    )
+    qualifications = {
+        "alpaca": GenerationQualification.PUBLISHED_COMPLETE,
+        "fidelity": GenerationQualification.FINITE_STATIC,
+        "ibkr": GenerationQualification.ACCEPTED_PARTIAL,
+        "matrixport": GenerationQualification.ACCEPTED_PARTIAL,
+        "portfolio123": GenerationQualification.STAGED_COMPLETE,
+        "quantbase": GenerationQualification.STAGED_COMPLETE,
+        "schwab": GenerationQualification.STAGED_COMPLETE,
+    }
+    requested_identities = [
+        replace(identity, qualification=qualifications[identity.provider_id])
+        for identity in identities
+    ]
+    refs, selections = _staged_observation(
+        tmp_path / "sources", requested_identities, manifests, catalogs
+    )
+    for provider_id, qualification in qualifications.items():
+        selections[provider_id]["qualification"] = qualification.value
+    identities = [
+        ProviderGenerationIdentity(
+            provider_id=provider_id,
+            generation_id=refs[provider_id]["generation_id"],
+            manifest_sha256=refs[provider_id]["manifest_sha256"],
+            catalog_sha256=refs[provider_id]["catalog_sha256"],
+            qualification=qualification,
+        )
+        for provider_id, qualification in qualifications.items()
+    ]
+    observation = {
+        "captured_at_utc": "2026-08-14T12:00:00Z",
+        "financial_cutoff": DAY.isoformat(),
+        "policy_contract_sha256": authority["contract_raw_sha256"],
+        "providers": selections,
+        "schema_version": 1,
+    }
+    observation_bytes = canonical_json_bytes(observation)
+    authority["run_observation"] = observation
+    authority["run_observation_path"] = str(tmp_path / "run-observation.json")
+    authority["run_observation_size_bytes"] = len(observation_bytes)
+    (tmp_path / "run-observation.json").write_bytes(observation_bytes)
+    authority["run_observation_sha256"] = hashlib.sha256(observation_bytes).hexdigest()
+
+    receipt, _ = ledger._admit_or_declare_receipt(
+        authority,
+        identities,
+        manifests,
+        catalogs,
+        provider_facts,
+        (),
+    )
+    assert {
+        row["provider_id"]: row["qualification"]
+        for row in receipt["run_observation"]["providers"]
+    } == {
+        provider_id: qualification.value
+        for provider_id, qualification in qualifications.items()
+    }
 
 
 @pytest.mark.skipif(

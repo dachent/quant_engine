@@ -13,7 +13,7 @@ import argparse
 import base64
 from collections import defaultdict
 import csv
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from functools import wraps
 import hashlib
@@ -554,6 +554,56 @@ def _verified_json(
     return value, digest, len(content)
 
 
+def _verified_evidence_bytes(
+    path: Path, expected: object, name: str
+) -> tuple[bytes, str, int]:
+    """Hash-verify one finality input before adapter-specific interpretation."""
+
+    if path.is_symlink() or not path.is_file():
+        raise ProviderLedgerError(f"{name} must be a regular file")
+    try:
+        content = path.read_bytes()
+    except OSError as exc:
+        raise ProviderLedgerError(f"{name} is not readable") from exc
+    digest = hashlib.sha256(content).hexdigest()
+    if digest != _text(expected, f"{name}.sha256"):
+        raise ProviderLedgerError(f"{name} hash differs")
+    return content, digest, len(content)
+
+
+def _absolute_path(value: object, name: str) -> Path:
+    """Resolve one explicitly absolute, non-linked local source path."""
+
+    path = Path(_text(value, name))
+    if not path.is_absolute():
+        raise ProviderLedgerError(f"{name} must be absolute")
+    if path.is_symlink():
+        raise ProviderLedgerError(f"{name} must not be linked")
+    return path.resolve()
+
+
+def _absolute_regular_path(value: object, name: str) -> Path:
+    """Resolve one explicitly absolute, non-linked local evidence file."""
+
+    resolved = _absolute_path(value, name)
+    if resolved.is_symlink() or not resolved.is_file():
+        raise ProviderLedgerError(f"{name} must be a regular file")
+    return resolved
+
+
+def _utc_timestamp(value: object, name: str) -> str:
+    """Accept a timezone-aware UTC timestamp without assigning a timezone."""
+
+    text = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ProviderLedgerError(f"{name} is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ProviderLedgerError(f"{name} must be timezone-aware UTC")
+    return text
+
+
 def _verified_csv_rows(
     path: Path, expected: object, required: set[str], name: str
 ) -> list[dict[str, str]]:
@@ -774,6 +824,47 @@ def _daily_fx_evidence(
     }
 
 
+def _excluded_source_row(
+    findings: list[dict[str, Any]] | None,
+    provider_id: str,
+    fact_type: str,
+    artifact_id: str,
+    row: Mapping[str, Any],
+    observed: date,
+    cutoff: date,
+    *,
+    original_source_dates: Mapping[str, str] | None = None,
+) -> None:
+    """Retain the identity of a native row excluded before derivation."""
+    if findings is None:
+        return
+    row_hash = hashlib.sha256(canonical_json_bytes(dict(row))).hexdigest()
+    source_id = str(
+        row.get("record_id")
+        or row.get("transaction_id")
+        or row.get("order_id")
+        or row.get("id")
+        or row.get("time")
+        or row_hash
+    )
+    finding: dict[str, Any] = {
+        "financial_cutoff": cutoff.isoformat(),
+        "fact_type": fact_type,
+        "original_record_id": source_id,
+        "original_source_date": observed.isoformat(),
+        "provider_id": provider_id,
+        "record_id": f"{provider_id}:{source_id}",
+        "source_artifact_id": artifact_id,
+        "source_record_id": source_id,
+        "source_row_sha256": row_hash,
+        "status": "OUTSIDE_FINANCIAL_CUTOFF",
+    }
+    if original_source_dates is not None:
+        finding["original_source_dates"] = dict(original_source_dates)
+    if finding not in findings:
+        findings.append(finding)
+
+
 def _matrixport_daily_fx_totals(
     manifest: GenerationManifest,
     run_root: Path,
@@ -782,6 +873,8 @@ def _matrixport_daily_fx_totals(
         Mapping[tuple[str, date], Decimal],
         tuple[SourceArtifact, SourceArtifact],
     ],
+    financial_cutoff: date | None = None,
+    cutoff_findings: list[dict[str, Any]] | None = None,
 ) -> dict[date, tuple[Decimal, list[dict[str, Any]]]]:
     """Convert every active native holding using its exact daily Close."""
 
@@ -802,6 +895,17 @@ def _matrixport_daily_fx_totals(
         context.prec = 80
         for row in rows:
             day = _day(row.get("utc_date"), "matrixport daily holdings utc_date")
+            if financial_cutoff is not None and day > financial_cutoff:
+                _excluded_source_row(
+                    cutoff_findings,
+                    "matrixport",
+                    "nav_observations",
+                    artifact_id,
+                    row,
+                    day,
+                    financial_cutoff,
+                )
+                continue
             share = _observed_decimal(
                 row.get("share"), "matrixport daily holdings share"
             )
@@ -843,6 +947,7 @@ def _matrixport_daily_fx_totals(
 def _matrixport_daily_native_totals(
     manifest: GenerationManifest,
     run_root: Path,
+    financial_cutoff: date | None = None,
 ) -> dict[date, dict[str, Decimal]]:
     """Total each day's active native holdings in their own currency.
 
@@ -868,6 +973,8 @@ def _matrixport_daily_native_totals(
         context.prec = 80
         for row in rows:
             day = _day(row.get("utc_date"), "matrixport daily holdings utc_date")
+            if financial_cutoff is not None and day > financial_cutoff:
+                continue
             share = _observed_decimal(
                 row.get("share"), "matrixport daily holdings share"
             )
@@ -901,6 +1008,8 @@ def _matrixport_flows(
         Mapping[tuple[str, date], Decimal],
         tuple[SourceArtifact, SourceArtifact],
     ],
+    financial_cutoff: date | None = None,
+    cutoff_findings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Project confirmed wallet deposits and withdrawals in their native units."""
 
@@ -966,6 +1075,17 @@ def _matrixport_flows(
                 or timestamp.utcoffset() != timedelta(0)
             ):
                 raise ProviderLedgerError("matrixport wallet timestamp is not UTC")
+            if financial_cutoff is not None and timestamp.date() > financial_cutoff:
+                _excluded_source_row(
+                    cutoff_findings,
+                    "matrixport",
+                    "flows",
+                    artifact_id,
+                    row,
+                    timestamp.date(),
+                    financial_cutoff,
+                )
+                continue
             currency = _text(row.get("currency"), "matrixport wallet currency")
             signed = amount * sign
             projected.append(
@@ -1014,18 +1134,27 @@ def _matrixport_nav_observations(
         tuple[SourceArtifact, SourceArtifact],
     ]
     | None = None,
+    financial_cutoff: date | None = None,
+    cutoff_findings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Admit Matrixport daily portfolio totals as account NAV observations."""
     account_id = _CSV_FACT_ACCOUNT["matrixport"]
     source_run_id = _run_id(catalog.get("source_run_id"), "matrixport.source_run_id")
     run_root = root / "output" / source_run_id
     if fx_rates is not None:
-        daily_totals = _matrixport_daily_fx_totals(manifest, run_root, fx_rates)
+        daily_totals = _matrixport_daily_fx_totals(
+            manifest, run_root, fx_rates, financial_cutoff, cutoff_findings
+        )
         snapshot_date = _day(
             catalog.get("observed_boundary_date"),
             "matrixport observed_boundary_date",
         )
-        if max(daily_totals) != snapshot_date:
+        expected_snapshot = (
+            min(snapshot_date, financial_cutoff)
+            if financial_cutoff is not None
+            else snapshot_date
+        )
+        if max(daily_totals) != expected_snapshot:
             raise ProviderLedgerError(
                 "MATRIXPORT_ACCOUNT_SNAPSHOT_DATE_MISMATCH: latest native holding "
                 "is not aligned with the declared boundary"
@@ -1086,6 +1215,18 @@ def _matrixport_nav_observations(
     source_backed_dates = _matrixport_source_backed_usd_dates(manifest, run_root)
     observations: list[dict[str, Any]] = []
     for row in rows:
+        day = _day(row["utc_date"], "matrixport portfolio utc_date")
+        if financial_cutoff is not None and day > financial_cutoff:
+            _excluded_source_row(
+                cutoff_findings,
+                "matrixport",
+                "nav_observations",
+                artifact_id,
+                row,
+                day,
+                financial_cutoff,
+            )
+            continue
         if row.get("strict_complete") != "true":
             # A partial sum over products with missing NAV/FX evidence is not
             # an authoritative portfolio total: never admit it as an account
@@ -1107,7 +1248,6 @@ def _matrixport_nav_observations(
         if value <= 0:
             # A non-positive total is not a plausible portfolio NAV.
             continue
-        day = _day(row["utc_date"], "matrixport portfolio utc_date")
         if day not in source_backed_dates:
             continue
         strategy_id, mapping_status = _mapped_strategy_for_account(
@@ -1154,13 +1294,18 @@ def _matrixport_nav_observations(
             "matrixport observed_boundary_date",
         )
         latest = max(observations, key=lambda item: str(item["as_of_date"]))
-        if latest["as_of_date"] != snapshot_date.isoformat():
+        expected_snapshot = (
+            min(snapshot_date, financial_cutoff)
+            if financial_cutoff is not None
+            else snapshot_date
+        )
+        if latest["as_of_date"] != expected_snapshot.isoformat():
             raise ProviderLedgerError(
                 "MATRIXPORT_ACCOUNT_SNAPSHOT_DATE_MISMATCH: latest strict "
                 "account total is not aligned with the daily-holdings boundary"
             )
         component_total = _matrixport_daily_component_total(
-            manifest, run_root, snapshot_date
+            manifest, run_root, expected_snapshot
         )
         latest_total = _observed_decimal(
             latest["nav"], "matrixport latest account total"
@@ -1194,6 +1339,8 @@ def _matrixport_capital_anchors(
         tuple[SourceArtifact, SourceArtifact],
     ]
     | None = None,
+    financial_cutoff: date | None = None,
+    cutoff_findings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Admit exact strategy subscriptions without allocating wallet deposits.
 
@@ -1261,8 +1408,12 @@ def _matrixport_capital_anchors(
     if fx_rates is None:
         source_backed_dates = _matrixport_source_backed_usd_dates(manifest, run_root)
     else:
-        fx_daily_totals = _matrixport_daily_fx_totals(manifest, run_root, fx_rates)
-        native_totals = _matrixport_daily_native_totals(manifest, run_root)
+        fx_daily_totals = _matrixport_daily_fx_totals(
+            manifest, run_root, fx_rates, financial_cutoff, cutoff_findings
+        )
+        native_totals = _matrixport_daily_native_totals(
+            manifest, run_root, financial_cutoff
+        )
 
     def timestamp_day(value: object, name: str) -> date:
         try:
@@ -1304,6 +1455,19 @@ def _matrixport_capital_anchors(
         recognition_day = timestamp_day(
             row["confirm_nav_time_utc"], "matrixport subscription confirmation time"
         )
+        if financial_cutoff is not None and (
+            event_day > financial_cutoff or recognition_day > financial_cutoff
+        ):
+            _excluded_source_row(
+                cutoff_findings,
+                "matrixport",
+                "capital_anchors",
+                artifact_id,
+                row,
+                event_day,
+                financial_cutoff,
+            )
+            continue
         qualified = (
             recognition_day in source_backed_dates
             if fx_daily_totals is None
@@ -1434,6 +1598,8 @@ def _quantbase_nav_observations(
     accounts: set[str],
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+    financial_cutoff: date | None = None,
+    cutoff_findings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Admit Quantbase Volatis daily dashboard values as account NAV observations."""
     account_id = _CSV_FACT_ACCOUNT["quantbase"]
@@ -1462,6 +1628,17 @@ def _quantbase_nav_observations(
         if value is None or value <= 0:
             continue
         day = _quantbase_day(row["time"], "quantbase Volatis time")
+        if financial_cutoff is not None and day > financial_cutoff:
+            _excluded_source_row(
+                cutoff_findings,
+                "quantbase",
+                "nav_observations",
+                artifact_id,
+                row,
+                day,
+                financial_cutoff,
+            )
+            continue
         strategy_id, mapping_status = _mapped_strategy_for_account(
             account_id, day, accounts, strategies, assignments
         )
@@ -1500,6 +1677,8 @@ def _quantbase_capital_anchors(
     accounts: set[str],
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+    financial_cutoff: date | None = None,
+    cutoff_findings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Admit Quantbase strategy funding without inventing external cash flow.
 
@@ -1554,6 +1733,17 @@ def _quantbase_capital_anchors(
             raise ProviderLedgerError(
                 "quantbase activity timestamp is invalid"
             ) from exc
+        if financial_cutoff is not None and observed.date() > financial_cutoff:
+            _excluded_source_row(
+                cutoff_findings,
+                "quantbase",
+                "capital_anchors",
+                activity_artifact.artifact_id,
+                row,
+                observed.date(),
+                financial_cutoff,
+            )
+            continue
         contributions.append((observed, amount))
     contributions.sort(key=lambda item: item[0])
 
@@ -1562,9 +1752,21 @@ def _quantbase_capital_anchors(
         cost_basis = _observed_decimal(row.get("cost_basis"), "quantbase cost basis")
         if cost_basis is None or cost_basis < 0:
             continue
+        day = _quantbase_day(row["time"], "quantbase Volatis time")
+        if financial_cutoff is not None and day > financial_cutoff:
+            _excluded_source_row(
+                cutoff_findings,
+                "quantbase",
+                "nav_observations",
+                price_artifact.artifact_id,
+                row,
+                day,
+                financial_cutoff,
+            )
+            continue
         history.append(
             (
-                _quantbase_day(row["time"], "quantbase Volatis time"),
+                day,
                 cost_basis,
                 _observed_decimal(row.get("value"), "quantbase Volatis value"),
             )
@@ -1661,6 +1863,9 @@ def _quantbase_flows(
     accounts: set[str],
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    financial_cutoff: date | None = None,
+    cutoff_findings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Project completed linked-Alpaca cash transfers as account flows.
 
@@ -1702,7 +1907,7 @@ def _quantbase_flows(
         },
         "quantbase account activity",
     )
-    selected: dict[str, tuple[str, Mapping[str, str]]] = {}
+    selected: dict[str, tuple[str, Mapping[str, str], datetime]] = {}
     for row in rows:
         transfer_type = str(row.get("type") or "").upper()
         if (
@@ -1711,6 +1916,30 @@ def _quantbase_flows(
             or row.get("status") != "C"
         ):
             continue
+        try:
+            timestamp = datetime.fromisoformat(
+                _text(row.get("created_at"), "quantbase transfer created_at").replace(
+                    "Z", "+00:00"
+                )
+            )
+        except ValueError as exc:
+            raise ProviderLedgerError(
+                "quantbase transfer timestamp is invalid"
+            ) from exc
+        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+            raise ProviderLedgerError("quantbase transfer timestamp is invalid")
+        if financial_cutoff is not None and timestamp.date() > financial_cutoff:
+            _excluded_source_row(
+                cutoff_findings,
+                "quantbase",
+                "flows",
+                artifact.artifact_id,
+                row,
+                timestamp.date(),
+                financial_cutoff,
+                original_source_dates={"created_at": row["created_at"]},
+            )
+            continue
         source_id = _text(row.get("id"), "quantbase transfer id")
         row_sha256 = hashlib.sha256(canonical_json_bytes(dict(row))).hexdigest()
         duplicate = selected.get(source_id)
@@ -1718,11 +1947,11 @@ def _quantbase_flows(
             if duplicate[0] != row_sha256:
                 raise ProviderLedgerError("conflicting duplicate Quantbase transfer id")
             continue
-        selected[source_id] = (row_sha256, row)
+        selected[source_id] = (row_sha256, row, timestamp)
 
     projected: list[dict[str, Any]] = []
     linked_account_ids: set[str] = set()
-    for source_id, (row_sha256, selected_row) in selected.items():
+    for source_id, (row_sha256, selected_row, timestamp) in selected.items():
         transfer_type = str(selected_row["type"]).upper()
         amount = _observed_decimal(
             selected_row.get("amount"), "quantbase transfer amount"
@@ -1738,19 +1967,6 @@ def _quantbase_flows(
             or cents != amount * 100
         ):
             raise ProviderLedgerError("quantbase transfer amount units differ")
-        try:
-            timestamp = datetime.fromisoformat(
-                _text(
-                    selected_row.get("created_at"),
-                    "quantbase transfer created_at",
-                ).replace("Z", "+00:00")
-            )
-        except ValueError as exc:
-            raise ProviderLedgerError(
-                "quantbase transfer timestamp is invalid"
-            ) from exc
-        if timestamp.tzinfo is None or timestamp.utcoffset() is None:
-            raise ProviderLedgerError("quantbase transfer timestamp is invalid")
         provider_account_id = _text(
             selected_row.get(
                 "destination_account_id"
@@ -1812,7 +2028,16 @@ def _load_spec(path: Path) -> dict[str, Any]:
     expected = base_keys | ({"financial_mvp"} if version == SCHEMA_VERSION else set())
     allowed = {frozenset(expected)}
     if version == SCHEMA_VERSION:
-        allowed.add(frozenset({*expected, "portfolio_fx_rates"}))
+        optional = ("portfolio_fx_rates", "run_observation")
+        allowed.update(
+            frozenset({*expected, *subset})
+            for subset in (
+                (),
+                (optional[0],),
+                (optional[1],),
+                optional,
+            )
+        )
     if frozenset(spec) not in allowed or version not in {1, SCHEMA_VERSION}:
         raise ProviderLedgerError("provider-ledger spec keys or version differ")
     if version == 1:
@@ -1918,7 +2143,7 @@ def _financial_mvp_authority(spec: Mapping[str, Any]) -> dict[str, Any]:
     }
     if not set(_PROVIDER_SOURCE_SEGMENTS.values()).issubset(sources):
         raise ProviderLedgerError("financial MVP provider source set differs")
-    return {
+    authority = {
         "census_id": _text(
             _object(contract["current_census"], "current_census").get("census_id"),
             "current_census.census_id",
@@ -1933,6 +2158,97 @@ def _financial_mvp_authority(spec: Mapping[str, Any]) -> dict[str, Any]:
         ),
         "sources": sources,
     }
+    if "run_observation" in spec:
+        observation_ref = _object(spec["run_observation"], "run_observation")
+        if set(observation_ref) != {"path", "sha256", "size_bytes"}:
+            raise ProviderLedgerError("run observation reference keys differ")
+        if (
+            isinstance(observation_ref["size_bytes"], bool)
+            or not isinstance(observation_ref["size_bytes"], int)
+            or observation_ref["size_bytes"] < 1
+        ):
+            raise ProviderLedgerError("run observation size is invalid")
+        observation_path = _absolute_regular_path(
+            observation_ref["path"], "run_observation.path"
+        )
+        observation, observation_sha256, observation_size = _verified_json(
+            observation_path,
+            observation_ref["sha256"],
+            "run observation",
+        )
+        if observation_size != observation_ref["size_bytes"]:
+            raise ProviderLedgerError("run observation size differs")
+        if (
+            set(observation)
+            != {
+                "schema_version",
+                "policy_contract_sha256",
+                "financial_cutoff",
+                "captured_at_utc",
+                "providers",
+            }
+            or observation.get("schema_version") != 1
+        ):
+            raise ProviderLedgerError("run observation keys or version differ")
+        if observation.get("policy_contract_sha256") != contract_sha256:
+            raise ProviderLedgerError("run observation policy contract differs")
+        if _day(observation.get("financial_cutoff"), "run observation cutoff") != _day(
+            spec["as_of_date"], "spec.as_of_date"
+        ):
+            raise ProviderLedgerError("run observation cutoff differs from ledger")
+        _utc_timestamp(observation.get("captured_at_utc"), "run observation capture")
+        selected = _object(observation.get("providers"), "run observation providers")
+        configured = _object(spec["providers"], "providers")
+        if set(selected) != set(_PROVIDER_CATALOGS):
+            raise ProviderLedgerError("run observation provider set differs")
+        for provider_id in sorted(_PROVIDER_CATALOGS):
+            selection = _object(selected[provider_id], f"{provider_id} observation")
+            expected_selection = {
+                "root",
+                "generation_id",
+                "manifest_sha256",
+                "catalog_sha256",
+                "qualification",
+                "generation_as_of_date",
+                "finalized_through",
+                "finality_evidence",
+            }
+            if set(selection) != expected_selection:
+                raise ProviderLedgerError(
+                    f"{provider_id} run observation selection keys differ"
+                )
+            provider_ref = _object(configured[provider_id], f"providers.{provider_id}")
+            if {
+                key: selection[key]
+                for key in (
+                    "root",
+                    "generation_id",
+                    "manifest_sha256",
+                    "catalog_sha256",
+                    "qualification",
+                )
+            } != provider_ref:
+                raise ProviderLedgerError(
+                    f"{provider_id} run observation selection differs"
+                )
+            _absolute_path(selection["root"], f"{provider_id} observation root")
+            _run_id(selection["generation_id"], f"{provider_id} observation generation")
+            _day(
+                selection["generation_as_of_date"],
+                f"{provider_id} observation generation date",
+            )
+            _day(selection["finalized_through"], f"{provider_id} observation finality")
+            _observed_provider_selection(
+                observation,
+                provider_id,
+                provider_ref,
+                _day(spec["as_of_date"], "spec.as_of_date"),
+            )
+        authority["run_observation"] = observation
+        authority["run_observation_path"] = str(observation_path)
+        authority["run_observation_sha256"] = observation_sha256
+        authority["run_observation_size_bytes"] = observation_size
+    return authority
 
 
 def _provenance(spec: Mapping[str, Any]) -> tuple[dict[str, Any], SourceArtifact]:
@@ -1957,8 +2273,470 @@ def _provenance(spec: Mapping[str, Any]) -> tuple[dict[str, Any], SourceArtifact
     return catalog, artifact
 
 
+def _selected_finality_sources(
+    provider_id: str, selected: Mapping[str, Any]
+) -> tuple[GenerationManifest, dict[str, Any], Path]:
+    root = _absolute_path(selected["root"], "selected provider root")
+    generation = root / "generations" / _run_id(selected["generation_id"], "generation")
+    manifest, _, _ = _manifest(
+        _absolute_regular_path(
+            str(generation / "generation.json"), "selected manifest"
+        ),
+        selected["manifest_sha256"],
+        "selected manifest",
+    )
+    catalog, digest, size = _verified_json(
+        _absolute_regular_path(
+            str(generation / _PROVIDER_CATALOGS[provider_id][0]), "selected catalog"
+        ),
+        selected["catalog_sha256"],
+        "selected catalog",
+    )
+    if (
+        manifest.generation_id != selected["generation_id"]
+        or manifest.as_of_date.isoformat() != selected["generation_as_of_date"]
+        or manifest.verification is not VerificationStatus.VERIFIED
+        or not any(
+            a.sha256 == digest and a.size_bytes == size for a in manifest.artifacts
+        )
+    ):
+        raise ProviderLedgerError("selected finality generation binding differs")
+    return manifest, catalog, root
+
+
+def _bound_source_bytes(
+    manifest: GenerationManifest, artifact_id: str, path: Path
+) -> bytes:
+    artifact = _find_manifest_artifact(manifest, artifact_id, "finality source")
+    content, _, size = _verified_evidence_bytes(
+        _absolute_regular_path(str(path), "finality source"),
+        artifact.sha256,
+        "finality source",
+    )
+    if size != artifact.size_bytes:
+        raise ProviderLedgerError("finality source size differs")
+    return content
+
+
+def _schwab_finality_values(
+    catalog: Mapping[str, Any],
+    artifact_id: str,
+    account_id: str | None = None,
+) -> dict[date, Decimal]:
+    rows = [
+        row
+        for row in _objects(catalog.get("nav_observations"), "Schwab NAV")
+        if row.get("source_artifact_id") == artifact_id
+    ]
+    accounts = {str(row.get("account_id")) for row in rows}
+    if len(accounts) != 1 or (account_id is not None and accounts != {account_id}):
+        raise ProviderLedgerError("schwab finality account scope differs")
+    values = {
+        _day(row["as_of_date"], "Schwab NAV date"): _decimal(
+            _object(row["nav"], "Schwab NAV")["value"], "Schwab NAV value"
+        )
+        for row in rows
+    }
+    if len(values) != len(rows):
+        raise ProviderLedgerError("schwab finality duplicate native labels")
+    return values
+
+
+def _validate_observed_finality_evidence(
+    provider_id: str, selected: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Derive selection evidence from the selected bytes, never a PASS bundle.
+
+    Finalized-through is a policy-selected usable label, not a provider promise
+    against restatement. Missing native timezone or capture time stays unknown.
+    """
+    ref = _object(selected["finality_evidence"], "finality evidence")
+    if (
+        set(ref) != {"path", "sha256", "size_bytes"}
+        or type(ref["size_bytes"]) is not int
+        or ref["size_bytes"] < 1
+    ):
+        raise ProviderLedgerError("finality evidence binding differs")
+    path = _absolute_regular_path(ref["path"], "finality evidence")
+    content, digest, size = _verified_evidence_bytes(
+        path, ref["sha256"], "finality evidence"
+    )
+    if size != ref["size_bytes"]:
+        raise ProviderLedgerError("finality evidence size differs")
+    manifest, catalog, root = _selected_finality_sources(provider_id, selected)
+    end = _day(selected["finalized_through"], "observation finality")
+    if manifest.coverage.observed_end is None or end > manifest.coverage.observed_end:
+        raise ProviderLedgerError("finality exceeds selected source boundary")
+    result: dict[str, Any] = {
+        "basis": "SELECTED_SOURCE_DATE_LABELS",
+        "provider_finality_guarantee": False,
+        "native_timezone": None,
+        "native_calendar": None,
+        "capture_start_utc": None,
+        "capture_end_utc": None,
+    }
+    if provider_id in {"alpaca", "fidelity", "portfolio123"}:
+        if digest != selected["manifest_sha256"]:
+            raise ProviderLedgerError("finite finality must bind the selected manifest")
+        result["basis"] = "FINITE_SELECTED_MANIFEST_BOUNDARY"
+        return result
+    if provider_id == "ibkr":
+        from quant_engine.ibkr.flex import parse_flex_file
+
+        artifacts = [
+            a for a in manifest.artifacts if a.sha256 == digest and a.size_bytes == size
+        ]
+        if len(artifacts) != 1:
+            raise ProviderLedgerError(
+                "ibkr finality statement is not a selected source artifact"
+            )
+        try:
+            document = parse_flex_file(path, artifact_id=artifacts[0].artifact_id)
+        except ValueError as exc:
+            raise ProviderLedgerError(
+                "ibkr finality native statement is invalid"
+            ) from exc
+        statements = document.statements
+        rows = [
+            r
+            for r in _objects(catalog.get("nav_observations"), "ibkr NAV")
+            if r.get("source_artifact_id") == artifacts[0].artifact_id
+        ]
+        if (
+            not rows
+            or len({(s.raw_account_id, s.report_date) for s in statements})
+            != len(statements)
+            or any(s.report_date != end for s in statements)
+            or len({r.get("account_id") for r in rows}) != len(rows)
+            or any(_day(r.get("as_of_date"), "ibkr NAV date") != end for r in rows)
+        ):
+            raise ProviderLedgerError(
+                "ibkr finality statement account/date scope differs"
+            )
+        native = sorted((s.base_currency, s.nav) for s in statements)
+        normalized = sorted(
+            (str(r["nav"]["currency"]), _decimal(r["nav"]["value"], "ibkr NAV"))
+            for r in rows
+        )
+        source_accounts = {
+            r["account_id"] for r in _objects(catalog.get("accounts"), "ibkr accounts")
+        }
+        if native != normalized or not {r["account_id"] for r in rows}.issubset(
+            source_accounts
+        ):
+            raise ProviderLedgerError(
+                "ibkr finality native NAV/account binding differs"
+            )
+        result["basis"] = "NATIVE_FLEX_STATEMENT_LABEL"
+        return result
+    try:
+        evidence = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProviderLedgerError("native finality evidence is invalid JSON") from exc
+    if not isinstance(evidence, dict):
+        raise ProviderLedgerError("native finality evidence must be a source object")
+    if provider_id == "matrixport":
+        run_id = _run_id(catalog.get("source_run_id"), "matrixport source run")
+        run_root = root / "output" / run_id
+        if (
+            _bound_source_bytes(
+                manifest,
+                "reports/extraction_summary.json",
+                run_root / "reports/extraction_summary.json",
+            )
+            != content
+        ):
+            raise ProviderLedgerError(
+                "matrixport finality capture differs from selected run"
+            )
+        captured = datetime.fromtimestamp(
+            int(evidence["run_end_ms"]) / 1000, tz=timezone.utc
+        )
+        if (
+            evidence.get("status") != "COMPLETED"
+            or evidence.get("run_id") != run_id
+            or end >= captured.date()
+        ):
+            raise ProviderLedgerError(
+                "matrixport finality does not support prior UTC daily label"
+            )
+        nav_bytes = _bound_source_bytes(
+            manifest, "csv/nav_daily.csv", run_root / "csv/nav_daily.csv"
+        )
+        labels = set()
+        for row in csv.DictReader(io.StringIO(nav_bytes.decode("utf-8-sig"))):
+            timestamp = datetime.fromtimestamp(
+                int(row["day_timestamp_ms"]) / 1000, tz=timezone.utc
+            )
+            if timestamp.isoformat().replace("+00:00", "Z") != row[
+                "day_timestamp_utc"
+            ].replace("+00:00", "Z"):
+                raise ProviderLedgerError("matrixport native UTC label differs")
+            labels.add(timestamp.date())
+        if end not in labels:
+            raise ProviderLedgerError(
+                "matrixport selected finality daily label is absent"
+            )
+        result.update(
+            basis="PRIOR_UTC_DAILY_LABEL_SELECTION",
+            native_timezone="UTC",
+            native_calendar="ALWAYS_ON",
+        )
+        # run_end_ms freezes the request boundary; it is not capture finish time.
+        return result
+    if provider_id == "quantbase":
+        run_id = _run_id(
+            _object(catalog.get("legacy_lineage"), "quantbase lineage")["run_id"],
+            "quantbase run",
+        )
+        datasets = _objects(catalog.get("datasets"), "quantbase datasets")
+        observed_paths = {str(r["relative_path"]) for r in datasets}
+        refreshed = _strings(
+            evidence.get("refreshed_datasets"), "quantbase refreshed datasets"
+        )
+        preserved = _strings(
+            evidence.get("preserved_companions"), "quantbase preserved datasets"
+        )
+        if (
+            len(set((*refreshed, *preserved))) != len(refreshed) + len(preserved)
+            or {"csv/" + name for name in (*refreshed, *preserved)} != observed_paths
+        ):
+            raise ProviderLedgerError(
+                "quantbase finality inventory differs from selected datasets"
+            )
+        # The conversion receipt's outputs must be the exact files selected by
+        # the generation. Its literal cutoff is disclosed policy, never native
+        # timezone or a provider finality guarantee.
+        for item in datasets:
+            relative = _relative(item["relative_path"], "quantbase dataset")
+            artifact_id = "source/" + relative.as_posix()
+            selected_bytes = _bound_source_bytes(
+                manifest,
+                artifact_id,
+                root / "source-runs" / run_id / "artifacts" / relative,
+            )
+            original_bytes = _bound_source_bytes(
+                manifest, artifact_id, path.parent / "artifacts" / relative
+            )
+            if (
+                selected_bytes != original_bytes
+                or hashlib.sha256(selected_bytes).hexdigest() != item["sha256"]
+                or len(selected_bytes) != item["bytes"]
+            ):
+                raise ProviderLedgerError("quantbase finality dataset binding differs")
+        daily = _bound_source_bytes(
+            manifest,
+            "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+            path.parent / "artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+        )
+        labels = {
+            _quantbase_day(r["time"], "Quantbase native label")
+            for r in csv.DictReader(io.StringIO(daily.decode("utf-8-sig")))
+        }
+        intraday = {
+            _day(d, "quantbase intraday label")
+            for d in _strings(
+                evidence.get("intraday_unfinalized_dates"), "quantbase intraday dates"
+            )
+        }
+        if (
+            not labels
+            or not intraday
+            or not intraday.issubset(labels)
+            or min(intraday) <= end
+            or not labels - intraday
+            or max(labels - intraday) != end
+            or evidence.get("latest_complete_daily_cutoff") != end.isoformat()
+        ):
+            raise ProviderLedgerError(
+                "quantbase finality selection differs from actual daily labels"
+            )
+        result["basis"] = "CONVERSION_RECEIPT_POLICY_SELECTED_NATIVE_LABEL"
+        return result
+    if provider_id == "schwab":
+        historical = {
+            a.artifact_id: a
+            for a in manifest.artifacts
+            if a.schema_name == "schwab-wch-historical-balance"
+        }
+        if not historical:
+            raise ProviderLedgerError(
+                "schwab finality lacks selected historical NAV sources"
+            )
+        if "receipt_path" in evidence:
+            # Existing recovered native NAV binding proof. Recheck its original
+            # receipt and histories; the proof's PASS string is not authority.
+            receipt_path = _absolute_regular_path(
+                evidence["receipt_path"], "Schwab NAV capture receipt"
+            )
+            receipt_bytes, _, receipt_size = _verified_evidence_bytes(
+                receipt_path, evidence["receipt_sha256"], "Schwab NAV capture receipt"
+            )
+            if receipt_size != evidence["receipt_size_bytes"]:
+                raise ProviderLedgerError("schwab capture receipt size differs")
+            captures = _objects(json.loads(receipt_bytes), "Schwab NAV captures")
+            checks = _objects(evidence.get("checks"), "Schwab native binding checks")
+            used: set[str] = set()
+            times = []
+            for capture in captures:
+                matches = [
+                    c for c in checks if c["native_sha256"] == capture["nav_sha256"]
+                ]
+                if capture.get("http_status") != 200 or len(matches) != 1:
+                    raise ProviderLedgerError("schwab native capture binding differs")
+                artifacts = [
+                    a
+                    for a in historical.values()
+                    if a.sha256 == matches[0]["normalized_sha256"]
+                ]
+                if len(artifacts) != 1 or artifacts[0].artifact_id in used:
+                    raise ProviderLedgerError(
+                        "schwab capture selected account scope differs"
+                    )
+                artifact_id = artifacts[0].artifact_id
+                used.add(artifact_id)
+                native_path = receipt_path.parent / (
+                    _run_id(capture["alias"], "capture alias") + "-nav.json"
+                )
+                native_payload, _, _ = _verified_json(
+                    _absolute_regular_path(str(native_path), "Schwab native NAV"),
+                    capture["nav_sha256"],
+                    "Schwab native NAV",
+                )
+                values = {
+                    _quantbase_day(day, "Schwab native date"): _decimal(
+                        value["AccountValue"], "Schwab native NAV"
+                    )
+                    for day, value in _object(
+                        native_payload.get("histories"), "Schwab histories"
+                    ).items()
+                }
+                selected_values = _schwab_finality_values(catalog, artifact_id)
+                if (
+                    not values
+                    or len(values) != capture["date_count"]
+                    or any(
+                        selected_values.get(day) != value
+                        for day, value in values.items()
+                    )
+                    or end not in values
+                    or max(values) != end
+                ):
+                    raise ProviderLedgerError(
+                        "schwab native-to-selected NAV values or labels differ"
+                    )
+                times.append(
+                    _utc_timestamp(capture["captured_at_utc"], "Schwab NAV capture")
+                )
+            if used != set(historical) or len(checks) != len(captures):
+                raise ProviderLedgerError("schwab native capture inventory differs")
+            result.update(
+                capture_start_utc=min(times),
+                capture_end_utc=max(times),
+                basis="CAPTURED_NATIVE_HISTORICAL_NAV_LABEL",
+            )
+            return result
+        roots = _object(evidence.get("roots"), "Schwab source roots")
+        sources = [
+            r
+            for r in _objects(evidence.get("sources"), "Schwab sources")
+            if r.get("role") == "WCH_NAV_CSV"
+        ]
+        if {r.get("artifact_id") for r in sources} != set(historical) or len(
+            sources
+        ) != len(historical):
+            raise ProviderLedgerError("schwab source finality inventory differs")
+        account_ids = {
+            r["account_id"]
+            for r in _objects(catalog.get("accounts"), "Schwab accounts")
+        }
+        if {r.get("account_id") for r in sources} != account_ids:
+            raise ProviderLedgerError("schwab source finality account scope differs")
+        for source in sources:
+            artifact_id = source["artifact_id"]
+            artifact = historical[artifact_id]
+            if (
+                source.get("expected_sha256") != artifact.sha256
+                or source.get("expected_size_bytes") != artifact.size_bytes
+            ):
+                raise ProviderLedgerError("schwab source finality artifact differs")
+            source_path = _absolute_path(
+                roots[source["root_id"]], "Schwab source root"
+            ) / _relative(source["relative_path"], "Schwab source path")
+            nav_bytes = _bound_source_bytes(manifest, artifact_id, source_path)
+            values = {
+                _day(r["date"], "Schwab historical label"): _decimal(
+                    r["account_value"], "Schwab historical NAV"
+                )
+                for r in csv.DictReader(io.StringIO(nav_bytes.decode("utf-8-sig")))
+            }
+            if (
+                values
+                != _schwab_finality_values(catalog, artifact_id, source["account_id"])
+                or end not in values
+                or max(values) != end
+            ):
+                raise ProviderLedgerError(
+                    "schwab source finality labels or values differ"
+                )
+        result["basis"] = "SELECTED_HISTORICAL_NAV_LABEL_CAPTURE_TIME_UNKNOWN"
+        return result
+    raise ProviderLedgerError("provider finality convention is unsupported")
+
+
+def _observed_provider_selection(
+    run_observation: Mapping[str, Any],
+    provider_id: str,
+    reference: Mapping[str, Any],
+    baseline_as_of: date,
+) -> Mapping[str, Any]:
+    """Return one hash-bound staged selection without consulting CURRENT."""
+
+    if (
+        _day(run_observation.get("financial_cutoff"), "run observation cutoff")
+        != baseline_as_of
+    ):
+        raise ProviderLedgerError("run observation cutoff differs from ledger")
+    selected = _object(
+        _object(run_observation.get("providers"), "run observation providers").get(
+            provider_id
+        ),
+        f"{provider_id} run observation",
+    )
+    if set(selected) != {
+        "root",
+        "generation_id",
+        "manifest_sha256",
+        "catalog_sha256",
+        "qualification",
+        "generation_as_of_date",
+        "finalized_through",
+        "finality_evidence",
+    }:
+        raise ProviderLedgerError(
+            f"{provider_id} run observation selection keys differ"
+        )
+    selection_keys = (
+        "root",
+        "generation_id",
+        "manifest_sha256",
+        "catalog_sha256",
+        "qualification",
+    )
+    if {key: selected.get(key) for key in selection_keys} != {
+        key: reference.get(key) for key in selection_keys
+    }:
+        raise ProviderLedgerError(f"{provider_id} run observation selection differs")
+    _validate_observed_finality_evidence(provider_id, selected)
+    return selected
+
+
 def _provider(
-    provider_id: str, value: object, baseline_as_of: date
+    provider_id: str,
+    value: object,
+    baseline_as_of: date,
+    *,
+    run_observation: Mapping[str, Any] | None = None,
 ) -> tuple[
     ProviderGenerationIdentity,
     GenerationManifest,
@@ -1989,7 +2767,9 @@ def _provider(
     manifest, manifest_hash, manifest_size = _manifest(
         manifest_path, ref["manifest_sha256"], f"{provider_id} manifest"
     )
-    if manifest.generation_id != generation_id or manifest.as_of_date > baseline_as_of:
+    if manifest.generation_id != generation_id or (
+        run_observation is None and manifest.as_of_date > baseline_as_of
+    ):
         raise ProviderLedgerError(f"{provider_id} generation identity or date differs")
     catalog, catalog_hash, catalog_size = _verified_json(
         catalog_path, ref["catalog_sha256"], f"{provider_id} catalog"
@@ -2012,8 +2792,41 @@ def _provider(
         raise ProviderLedgerError(
             f"{provider_id} qualification is unsupported"
         ) from exc
-    current_path = root / "CURRENT.json"
-    if qualification is GenerationQualification.PUBLISHED_COMPLETE:
+    selection = (
+        _observed_provider_selection(run_observation, provider_id, ref, baseline_as_of)
+        if run_observation is not None
+        else None
+    )
+    if selection is not None and (
+        _day(
+            selection.get("generation_as_of_date"),
+            f"{provider_id} observation generation date",
+        )
+        != manifest.as_of_date
+        or manifest.coverage.observed_end is None
+        or _day(
+            selection.get("finalized_through"),
+            f"{provider_id} observation finality",
+        )
+        > manifest.coverage.observed_end
+    ):
+        raise ProviderLedgerError(
+            f"{provider_id} observed finality or generation differs"
+        )
+    if qualification is GenerationQualification.STAGED_COMPLETE:
+        if selection is None:
+            raise ProviderLedgerError(
+                f"{provider_id} staged qualification requires a run observation"
+            )
+        if (
+            manifest.coverage.status
+            is not CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+        ):
+            raise ProviderLedgerError(
+                f"{provider_id} staged finality or coverage differs"
+            )
+    elif qualification is GenerationQualification.PUBLISHED_COMPLETE:
+        current_path = root / "CURRENT.json"
         if not current_path.is_file() or current_path.is_symlink():
             raise ProviderLedgerError(f"{provider_id} published pointer is missing")
         try:
@@ -2827,6 +3640,40 @@ def _ibkr_capital_anchors(
     return anchors
 
 
+def _schwab_transactions_within_cutoff(
+    rows: Sequence[dict[str, Any]],
+    financial_cutoff: date | None,
+    cutoff_findings: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Bound native transactions before mapping, pairing or valuing them."""
+    if financial_cutoff is None:
+        return list(rows)
+    retained = []
+    for row in rows:
+        source_dates = {
+            field: row[field]
+            for field in _DATE_FIELDS
+            if row.get(field) not in {None, ""}
+        }
+        if any(
+            _day(value, field) > financial_cutoff
+            for field, value in source_dates.items()
+        ):
+            _excluded_source_row(
+                cutoff_findings,
+                "schwab",
+                "transactions",
+                str(row.get("source_artifact_id", "")),
+                row,
+                _day(next(iter(source_dates.values())), "Schwab source date"),
+                financial_cutoff,
+                original_source_dates=source_dates,
+            )
+        else:
+            retained.append(row)
+    return retained
+
+
 def _project_account_facts(
     provider_id: str,
     generation_id: str,
@@ -2842,11 +3689,44 @@ def _project_account_facts(
         tuple[SourceArtifact, SourceArtifact],
     ]
     | None = None,
+    financial_cutoff: date | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     projections: dict[str, list[dict[str, Any]]] = defaultdict(list)
     exceptions: list[dict[str, Any]] = []
     if provider_id not in _ACCOUNT_FACTS:
         raise ProviderLedgerError(f"unknown provider fact mapping: {provider_id}")
+    if provider_id == "ibkr" and financial_cutoff is not None:
+        # Anchors consume NAV, recognition-dated flows and ChangeInNAV. Cut all
+        # three before reconciliation; a future unquantified flow must not erase
+        # an otherwise evidenced opening anchor.
+        bounded = dict(catalog)
+        for fact_type in ("flows", "nav_observations", "change_in_nav_observations"):
+            retained_source = []
+            for row in _objects(catalog.get(fact_type, []), f"ibkr.{fact_type}"):
+                dates = [
+                    _day(row[key], key)
+                    for key in (
+                        *_DATE_FIELDS,
+                        "accounting_date",
+                        "report_date",
+                        "nav_recognition_date",
+                    )
+                    if row.get(key) not in {None, ""}
+                ]
+                if dates and max(dates) > financial_cutoff:
+                    _excluded_source_row(
+                        exceptions,
+                        provider_id,
+                        fact_type,
+                        str(row.get("source_artifact_id", "")),
+                        row,
+                        _row_day(row) or max(dates),
+                        financial_cutoff,
+                    )
+                else:
+                    retained_source.append(row)
+            bounded[fact_type] = retained_source
+        catalog = bounded
     for source_fact in _ACCOUNT_FACTS[provider_id]:
         target_fact = "flows" if source_fact == "cash_flows" else source_fact
         if provider_id == "ibkr" and source_fact == "capital_anchors":
@@ -2887,6 +3767,8 @@ def _project_account_facts(
                         strategies,
                         assignments,
                         fx_rates=fx_rates,
+                        financial_cutoff=financial_cutoff,
+                        cutoff_findings=exceptions,
                     )
                     if source_fact == "capital_anchors"
                     else _matrixport_nav_observations(
@@ -2898,6 +3780,8 @@ def _project_account_facts(
                         strategies,
                         assignments,
                         fx_rates=fx_rates,
+                        financial_cutoff=financial_cutoff,
+                        cutoff_findings=exceptions,
                     )
                 )
             elif source_fact == "flows":
@@ -2909,6 +3793,8 @@ def _project_account_facts(
                     accounts,
                     strategies,
                     assignments,
+                    financial_cutoff=financial_cutoff,
+                    cutoff_findings=exceptions,
                 )
             elif source_fact == "capital_anchors":
                 rows = _quantbase_capital_anchors(
@@ -2919,6 +3805,8 @@ def _project_account_facts(
                     accounts,
                     strategies,
                     assignments,
+                    financial_cutoff=financial_cutoff,
+                    cutoff_findings=exceptions,
                 )
             elif source_fact == "nav_observations":
                 rows = _quantbase_nav_observations(
@@ -2929,6 +3817,8 @@ def _project_account_facts(
                     accounts,
                     strategies,
                     assignments,
+                    financial_cutoff=financial_cutoff,
+                    cutoff_findings=exceptions,
                 )
             else:
                 raise ProviderLedgerError(
@@ -2955,9 +3845,19 @@ def _project_account_facts(
                 f"{provider_id}.{source_fact}"
             )
         rows = _objects(catalog[source_fact], f"{provider_id}.{source_fact}")
+        if provider_id == "schwab" and source_fact == "transactions":
+            rows = _schwab_transactions_within_cutoff(
+                rows, financial_cutoff, exceptions
+            )
         for row in rows:
-            day = _row_day(row)
             account_id = str(row.get("account_id") or "")
+            mapping_row = row
+            if provider_id == "schwab" and source_fact == "transactions":
+                mapping_row = {
+                    "account_id": account_id,
+                    "effective_date": row.get("effective_date") or row.get("event_date"),
+                }
+            day = _row_day(mapping_row)
             if (
                 provider_id == "ibkr"
                 and source_fact == "flows"
@@ -2966,7 +3866,7 @@ def _project_account_facts(
                 strategy_id, mapping_status = None, "UNMAPPED"
             else:
                 strategy_id, mapping_status = _mapped_strategy(
-                    row, accounts, strategies, assignments
+                    mapping_row, accounts, strategies, assignments
                 )
             source_id = _text(
                 row.get("record_id"), f"{provider_id}.{source_fact}.record_id"
@@ -3086,6 +3986,8 @@ def _project_account_facts(
             root,
             accounts,
             fx_rates,
+            financial_cutoff,
+            exceptions,
         )
         projections["flows"].extend(flow_rows)
         for row in flow_rows:
@@ -3100,6 +4002,28 @@ def _project_account_facts(
                 }
             )
 
+    if financial_cutoff is not None:
+        for fact_type, rows in projections.items():
+            retained = []
+            for row in rows:
+                observed = _row_day(row)
+                if observed is None or observed <= financial_cutoff:
+                    retained.append(row)
+                    continue
+                exceptions.append(
+                    {
+                        "financial_cutoff": financial_cutoff.isoformat(),
+                        "fact_type": fact_type,
+                        "original_record_id": row.get("source_record_id")
+                        or row.get("record_id"),
+                        "original_source_date": observed.isoformat(),
+                        "provider_id": provider_id,
+                        "record_id": row.get("record_id"),
+                        "source_record_id": row.get("source_record_id"),
+                        "status": "OUTSIDE_FINANCIAL_CUTOFF",
+                    }
+                )
+            projections[fact_type] = retained
     for rows in projections.values():
         rows.sort(
             key=lambda item: (
@@ -3114,12 +4038,46 @@ def _project_account_facts(
     return dict(projections), exceptions
 
 
+def _returns_within_financial_cutoff(
+    rows: Sequence[Mapping[str, Any]],
+    provider_id: str,
+    financial_cutoff: date,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Keep dated provider returns from extending a staged capture past cutoff."""
+
+    retained: list[dict[str, Any]] = []
+    findings: list[dict[str, Any]] = []
+    for raw in rows:
+        row = dict(raw)
+        observed = _day(row.get("date"), "provider return date")
+        if observed <= financial_cutoff:
+            retained.append(row)
+            continue
+        findings.append(
+            {
+                "financial_cutoff": financial_cutoff.isoformat(),
+                "fact_type": "provider_strategy_returns",
+                "original_record_id": row.get("record_id")
+                or f"{provider_id}:{row.get('strategy_id')}:{observed.isoformat()}",
+                "original_source_date": observed.isoformat(),
+                "provider_id": provider_id,
+                "record_id": row.get("record_id")
+                or f"{provider_id}:{row.get('strategy_id')}:{observed.isoformat()}",
+                "source_record_id": row.get("record_id"),
+                "status": "OUTSIDE_FINANCIAL_CUTOFF",
+            }
+        )
+    return retained, findings
+
+
 def _complete_schwab_security_transfer_values(
     flows: Sequence[dict[str, Any]],
     schwab_catalog: Mapping[str, Any],
     fidelity_catalog: Mapping[str, Any],
     fidelity_generation_id: str,
     required_account_ids: set[str],
+    *,
+    financial_cutoff: date | None = None,
 ) -> None:
     """Carry the recorded USD value across a unique, exact security delivery.
 
@@ -3127,7 +4085,10 @@ def _complete_schwab_security_transfer_values(
     This values the receipt; it does not infer prior contributed basis, move
     an event date, or classify the two accounts as one product perimeter.
     """
-    receipts = _objects(schwab_catalog.get("transactions"), "Schwab transactions")
+    receipts = _schwab_transactions_within_cutoff(
+        _objects(schwab_catalog.get("transactions"), "Schwab transactions"),
+        financial_cutoff,
+    )
     deliveries = _objects(
         fidelity_catalog.get("corporate_actions"), "Fidelity corporate actions"
     )
@@ -3509,6 +4470,9 @@ def _strategy_inputs(
     provenance: Mapping[str, Any],
     as_of: date,
     strategy_provider_map: Mapping[str, Any],
+    *,
+    financial_cutoffs: Mapping[str, date] | None = None,
+    cutoff_findings: list[dict[str, Any]] | None = None,
 ) -> tuple[
     list[dict[str, Any]], list[dict[str, Any]], tuple[SourceArtifact, SourceArtifact]
 ]:
@@ -3574,11 +4538,13 @@ def _strategy_inputs(
         if strategy_id is None:
             raise ProviderLedgerError("strategy returns contain an unknown series")
         day = _day(row["date"], "strategy return date")
-        if day > as_of:
-            raise ProviderLedgerError("strategy return is newer than the ledger")
         provider_id, layer_override = provider_policies[strategy_id]
         source_layer = EvidenceLayer(row["evidence_layer"])
         layer = layer_override or source_layer
+        if day > as_of and not (
+            financial_cutoffs is not None and layer is EvidenceLayer.ACCOUNT_LIVE
+        ):
+            raise ProviderLedgerError("strategy return is newer than the ledger")
         identity = (strategy_id, day.isoformat(), layer.value)
         if identity in seen:
             raise ProviderLedgerError("strategy return identity is duplicated")
@@ -3655,6 +4621,24 @@ def _strategy_inputs(
     if not evidence_ids <= set(strategies):
         raise ProviderLedgerError("strategy evidence contains an unknown strategy")
     _validate_selected_strategy_evidence(selected_identity_rows, evidence_rows)
+    if financial_cutoffs is not None:
+        retained = []
+        for row in normalized:
+            cutoff = min(as_of, financial_cutoffs[str(row["provider_id"])])
+            day = _day(row["date"], "strategy return date")
+            if row["evidence_layer"] == "ACCOUNT_LIVE" and day > cutoff:
+                _excluded_source_row(
+                    cutoff_findings,
+                    str(row["provider_id"]),
+                    "strategy_returns",
+                    returns_artifact.artifact_id,
+                    row,
+                    day,
+                    cutoff,
+                )
+            else:
+                retained.append(row)
+        normalized = retained
     evidence_artifact = SourceArtifact(
         artifact_id="portfolio/strategy-provider-evidence.json",
         sha256=evidence_hash,
@@ -5709,14 +6693,37 @@ def _source_segment(
         _object(authority["sources"], "financial MVP sources")[source_id],
         f"source segment {source_id}",
     )
-    generation = _object(source.get("current_generation"), f"{source_id}.generation")
-    if generation != {
-        "as_of": manifest.as_of_date.isoformat(),
-        "generation_id": identity.generation_id,
-        "sha256": identity.manifest_sha256,
-    }:
-        raise ProviderLedgerError(
-            f"{provider_id} generation differs from financial MVP authority"
+    if authority.get("run_observation") is None:
+        generation = _object(
+            source.get("current_generation"), f"{source_id}.generation"
+        )
+        if generation != {
+            "as_of": manifest.as_of_date.isoformat(),
+            "generation_id": identity.generation_id,
+            "sha256": identity.manifest_sha256,
+        }:
+            raise ProviderLedgerError(
+                f"{provider_id} generation differs from financial MVP authority"
+            )
+    else:
+        _observed_provider_selection(
+            _object(authority["run_observation"], "run observation"),
+            provider_id,
+            identity.to_dict()
+            | {
+                "root": _object(
+                    _object(authority["run_observation"], "run observation")[
+                        "providers"
+                    ],
+                    "run observation providers",
+                )[provider_id]["root"]
+            },
+            _day(
+                _object(authority["run_observation"], "run observation")[
+                    "financial_cutoff"
+                ],
+                "run observation cutoff",
+            ),
         )
     admission = _object(source.get("admission"), f"{source_id}.admission")
     if not str(admission.get("transform") or "").startswith("provider-ledger"):
@@ -5783,6 +6790,23 @@ def _validate_current_census_provider_generations(
     for provider_id, generation in expected.items():
         identity = selected[provider_id]
         manifest = manifests[provider_id]
+        if authority.get("run_observation") is not None:
+            observation = _object(authority["run_observation"], "run observation")
+            _observed_provider_selection(
+                observation,
+                provider_id,
+                identity.to_dict()
+                | {
+                    "root": _object(
+                        _object(observation["providers"], "run observation providers")[
+                            provider_id
+                        ],
+                        f"{provider_id} observation",
+                    )["root"]
+                },
+                _day(observation["financial_cutoff"], "run observation cutoff"),
+            )
+            continue
         if (
             identity.generation_id != generation.get("generation_id")
             or identity.manifest_sha256 != generation.get("manifest_sha256")
@@ -6213,6 +7237,8 @@ def _admit_or_declare_receipt(
     inventory: list[ProviderDatasetInventoryItem] = []
     dispositions: list[ProviderDatasetDisposition] = []
     providers = []
+    observed_receipt_providers: list[dict[str, Any]] = []
+    run_observation = authority.get("run_observation")
     by_provider = {item.provider_id: item for item in identities}
     for provider_id in sorted(_PROVIDER_CATALOGS):
         identity = by_provider[provider_id]
@@ -6222,7 +7248,11 @@ def _admit_or_declare_receipt(
         provider_items = _provider_inventory(
             provider_id, manifest, catalogs[provider_id], source
         )
-        if _inventory_digest(provider_items) != policy["upstream_inventory_sha256"]:
+        observed_inventory_digest = _inventory_digest(provider_items)
+        if (
+            run_observation is None
+            and observed_inventory_digest != policy["upstream_inventory_sha256"]
+        ):
             raise ProviderLedgerError(
                 f"{provider_id} upstream dataset inventory differs from authority"
             )
@@ -6244,8 +7274,16 @@ def _admit_or_declare_receipt(
             if policy.get("effective_end") is None
             else _day(policy["effective_end"], "provider disposition effective_end")
         )
-        if policy_start > manifest.as_of_date or (
-            policy_end is not None and policy_end < manifest.as_of_date
+        policy_day = (
+            _day(
+                _object(run_observation, "run observation")["financial_cutoff"],
+                "run observation cutoff",
+            )
+            if run_observation is not None
+            else manifest.as_of_date
+        )
+        if policy_start > policy_day or (
+            policy_end is not None and policy_end < policy_day
         ):
             raise ProviderLedgerError(
                 f"{provider_id} dataset disposition policy does not cover generation"
@@ -6257,6 +7295,11 @@ def _admit_or_declare_receipt(
             raise ProviderLedgerError(
                 f"{provider_id} manifest lacks dataset disposition interval"
             )
+        # Source coverage is a capture-envelope fact.  The producer has already
+        # applied the run observation cutoff to the materialized facts, whose
+        # observed_* bounds are carried separately by each disposition.  Never
+        # rewrite a later capture envelope into a reversed source interval.
+        source_observed_end = manifest.coverage.observed_end
         inventory.extend(provider_items)
         provider_dispositions = [
             _dataset_disposition(
@@ -6264,7 +7307,7 @@ def _admit_or_declare_receipt(
                 source,
                 policy,
                 manifest.coverage.observed_start,
-                manifest.coverage.observed_end,
+                source_observed_end,
                 provider_facts[provider_id],
                 provider_strategy_returns,
                 str(authority["contract_semantic_sha256"]),
@@ -6274,7 +7317,7 @@ def _admit_or_declare_receipt(
         admitted_count, admitted_digest = _admitted_item_set_digest(
             provider_dispositions
         )
-        if (
+        if run_observation is None and (
             admitted_count != policy["admitted_item_count"]
             or admitted_digest != policy["admitted_item_set_sha256"]
         ):
@@ -6300,6 +7343,35 @@ def _admit_or_declare_receipt(
                         f"{provider_id} dataset exclusion readiness differs"
                     )
         dispositions.extend(provider_dispositions)
+        if run_observation is not None:
+            selection = _object(
+                _object(run_observation, "run observation")["providers"],
+                "run observation providers",
+            )[provider_id]
+            observed_receipt_providers.append(
+                {
+                    "catalog_sha256": identity.catalog_sha256,
+                    "finality_evidence": selection["finality_evidence"],
+                    "finality_interpretation": _validate_observed_finality_evidence(
+                        provider_id, selection
+                    ),
+                    "finalized_through": selection["finalized_through"],
+                    "generation_as_of_date": manifest.as_of_date.isoformat(),
+                    "generation_id": identity.generation_id,
+                    "historical_admitted_item_count": policy["admitted_item_count"],
+                    "historical_admitted_item_set_sha256": policy[
+                        "admitted_item_set_sha256"
+                    ],
+                    "historical_inventory_sha256": policy["upstream_inventory_sha256"],
+                    "manifest_sha256": identity.manifest_sha256,
+                    "observed_admitted_item_count": admitted_count,
+                    "observed_admitted_item_set_sha256": admitted_digest,
+                    "observed_inventory_count": len(provider_items),
+                    "observed_inventory_sha256": observed_inventory_digest,
+                    "provider_id": provider_id,
+                    "qualification": identity.qualification.value,
+                }
+            )
         providers.append(
             {
                 **identity.to_dict(),
@@ -6353,6 +7425,17 @@ def _admit_or_declare_receipt(
         "receipt_type": "PROVIDER_ADMIT_OR_DECLARE_V1",
         "schema_version": ADMIT_OR_DECLARE_SCHEMA_VERSION,
     }
+    if run_observation is not None:
+        observation = _object(run_observation, "run observation")
+        receipt["run_observation"] = {
+            "captured_at_utc": observation["captured_at_utc"],
+            "financial_cutoff": observation["financial_cutoff"],
+            "path": authority["run_observation_path"],
+            "policy_contract_sha256": authority["contract_raw_sha256"],
+            "providers": observed_receipt_providers,
+            "sha256": authority["run_observation_sha256"],
+            "size_bytes": authority["run_observation_size_bytes"],
+        }
     validate_admit_or_declare_receipt(
         receipt,
         product_authority=authority,
@@ -6371,6 +7454,7 @@ def build_catalog(
     spec = _load_spec(spec_path)
     authority = _financial_mvp_authority(spec)
     as_of = _day(spec["as_of_date"], "spec.as_of_date")
+    run_observation = authority.get("run_observation")
     fx_rates = (
         _portfolio_fx_rates(spec["portfolio_fx_rates"], as_of)
         if "portfolio_fx_rates" in spec
@@ -6392,8 +7476,16 @@ def build_catalog(
     provider_roots: dict[str, Path] = {}
     provider_facts: dict[str, dict[str, list[dict[str, Any]]]] = {}
     for provider_id in sorted(_PROVIDER_CATALOGS):
+        provider_ref = _object(spec["providers"], "providers")[provider_id]
         identity, manifest, provider_catalog, artifacts, root = _provider(
-            provider_id, _object(spec["providers"], "providers")[provider_id], as_of
+            provider_id,
+            provider_ref,
+            as_of,
+            run_observation=(
+                _object(run_observation, "run observation")
+                if run_observation is not None
+                else None
+            ),
         )
         identities.append(identity)
         catalogs[provider_id] = provider_catalog
@@ -6421,6 +7513,20 @@ def build_catalog(
             manifest=manifest,
             root=root,
             fx_rates=fx_rates if provider_id == "matrixport" else None,
+            financial_cutoff=(
+                min(
+                    as_of,
+                    _day(
+                        _object(
+                            _object(run_observation, "run observation")["providers"],
+                            "run observation providers",
+                        )[provider_id]["finalized_through"],
+                        f"{provider_id} observation finality",
+                    ),
+                )
+                if run_observation is not None
+                else as_of
+            ),
         )
         provider_facts[provider_id] = facts
         for fact_type, rows in facts.items():
@@ -6446,6 +7552,19 @@ def build_catalog(
                 for assignment in account_assignments
             )
         },
+        financial_cutoff=(
+            min(
+                as_of,
+                _day(
+                    _object(run_observation, "run observation")["providers"]["schwab"][
+                        "finalized_through"
+                    ],
+                    "schwab observation finality",
+                ),
+            )
+            if run_observation is not None
+            else as_of
+        ),
     )
     _validate_current_census_provider_generations(authority, identities, manifests)
 
@@ -6454,6 +7573,15 @@ def build_catalog(
         provenance,
         as_of,
         _object(spec["strategy_provider_map"], "strategy_provider_map"),
+        financial_cutoffs=(
+            {
+                provider_id: _day(selection["finalized_through"], "provider cutoff")
+                for provider_id, selection in run_observation["providers"].items()
+            }
+            if run_observation is not None
+            else None
+        ),
+        cutoff_findings=exceptions if run_observation is not None else None,
     )
     source_strategy_returns: Sequence[Mapping[str, Any]] = strategy_return_rows
     declared_nav_gaps = _declared_nav_gap_dates_by_provider(manifests)
@@ -6559,6 +7687,22 @@ def build_catalog(
         manifests["portfolio123"],
         evidence_rows,
     )
+    if run_observation is not None:
+        provider_strategy_returns, cutoff_findings = _returns_within_financial_cutoff(
+            provider_strategy_returns,
+            "portfolio123",
+            min(
+                as_of,
+                _day(
+                    _object(
+                        _object(run_observation, "run observation")["providers"],
+                        "run observation providers",
+                    )["portfolio123"]["finalized_through"],
+                    "portfolio123 observation finality",
+                ),
+            ),
+        )
+        exceptions.extend(cutoff_findings)
     evidence_rows = _refresh_strategy_evidence(
         [*strategy_returns, *provider_strategy_returns],
         evidence_rows,

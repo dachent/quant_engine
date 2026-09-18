@@ -174,7 +174,7 @@
         "generation_id": {"$ref": "#/$defs/sha256"},
         "manifest_sha256": {"$ref": "#/$defs/sha256"},
         "provider_id": {"type": "string", "minLength": 1},
-        "qualification": {"enum": ["PUBLISHED_COMPLETE", "ACCEPTED_PARTIAL", "FINITE_STATIC"]}
+        "qualification": {"enum": ["PUBLISHED_COMPLETE", "STAGED_COMPLETE", "ACCEPTED_PARTIAL", "FINITE_STATIC"]}
       }
     }
   }
