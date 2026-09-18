@@ -2425,7 +2425,10 @@ def test_financial_cutoff_excludes_future_schwab_nav_with_source_lineage() -> No
 @pytest.mark.parametrize(
     "future_dates, future_kind",
     [
-        ({"event_date": "2026-09-17", "effective_date": "2026-09-18"}, "MoneyLink Transfer"),
+        (
+            {"event_date": "2026-09-17", "effective_date": "2026-09-18"},
+            "MoneyLink Transfer",
+        ),
         (
             {
                 "event_date": "2026-09-17",
@@ -2434,12 +2437,19 @@ def test_financial_cutoff_excludes_future_schwab_nav_with_source_lineage() -> No
             },
             "MoneyLink Transfer",
         ),
-        ({"event_date": "2026-09-17", "effective_date": "2026-09-18"}, "Journaled Shares"),
-        ({"event_date": "2026-09-18", "effective_date": "2026-09-17"}, "Journaled Shares"),
+        (
+            {"event_date": "2026-09-17", "effective_date": "2026-09-18"},
+            "Journaled Shares",
+        ),
+        (
+            {"event_date": "2026-09-18", "effective_date": "2026-09-17"},
+            "Journaled Shares",
+        ),
     ],
 )
 def test_schwab_cutoff_precedes_pairing_and_preserves_effective_mapping(
-    future_dates: dict[str, str], future_kind: str,
+    future_dates: dict[str, str],
+    future_kind: str,
 ) -> None:
     catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
     receipt = {
@@ -2454,12 +2464,15 @@ def test_schwab_cutoff_precedes_pairing_and_preserves_effective_mapping(
         "security_id": "SYNTHETIC",
         "source_artifact_id": "synthetic/transactions.json",
     }
-    catalog["transactions"] = [receipt, {
-        **receipt,
-        "account_id": "synthetic-reserve",
-        "record_id": "prior-delivery",
-        "quantity": "-2",
-    }]
+    catalog["transactions"] = [
+        receipt,
+        {
+            **receipt,
+            "account_id": "synthetic-reserve",
+            "record_id": "prior-delivery",
+            "quantity": "-2",
+        },
+    ]
     assignments = {
         "synthetic-sleeve": [
             {
@@ -2471,15 +2484,20 @@ def test_schwab_cutoff_precedes_pairing_and_preserves_effective_mapping(
         ],
     }
     arguments = (
-        "schwab", "a" * 64, catalog,
+        "schwab",
+        "a" * 64,
+        catalog,
         {"synthetic-sleeve", "synthetic-reserve"},
-        {"prior-strategy", "current-strategy"}, assignments,
+        {"prior-strategy", "current-strategy"},
+        assignments,
     )
     prior, prior_findings = ledger._project_account_facts(
-        *arguments, financial_cutoff=date(2026, 9, 17),
+        *arguments,
+        financial_cutoff=date(2026, 9, 17),
     )
     future = {
-        **receipt, **future_dates,
+        **receipt,
+        **future_dates,
         "account_id": "synthetic-future",
         "record_id": "future-transfer",
         "kind": future_kind,
@@ -2488,18 +2506,29 @@ def test_schwab_cutoff_precedes_pairing_and_preserves_effective_mapping(
     }
     if future_kind == "MoneyLink Transfer":
         future["amount"] = {
-            "currency": "USD", "status": "AVAILABLE", "value": "15000",
+            "currency": "USD",
+            "status": "AVAILABLE",
+            "value": "15000",
         }
     catalog["transactions"].append(future)
     original = json.dumps(catalog, sort_keys=True)
     projected, findings = ledger._project_account_facts(
-        *arguments, financial_cutoff=date(2026, 9, 17),
+        *arguments,
+        financial_cutoff=date(2026, 9, 17),
     )
     assert projected == prior
     assert json.dumps(catalog, sort_keys=True) == original
-    flow = next(row for row in projected["flows"] if row["account_id"] == "synthetic-sleeve")
-    assert (flow["event_date"], flow["effective_date"], flow["nav_recognition_date"]) == (
-        "2026-09-16", "2026-09-17", "2026-09-17",
+    flow = next(
+        row for row in projected["flows"] if row["account_id"] == "synthetic-sleeve"
+    )
+    assert (
+        flow["event_date"],
+        flow["effective_date"],
+        flow["nav_recognition_date"],
+    ) == (
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-17",
     )
     assert flow["strategy_id"] == "current-strategy"
     assert flow["mapping_status"] == "MAPPED"
@@ -2507,19 +2536,23 @@ def test_schwab_cutoff_precedes_pairing_and_preserves_effective_mapping(
     assert flow["amount"] == {"currency": "USD", "status": "AVAILABLE", "value": "50"}
     excluded = [row for row in findings if row["status"] == "OUTSIDE_FINANCIAL_CUTOFF"]
     assert [row for row in findings if row not in excluded] == prior_findings
-    assert excluded == [{
-        "financial_cutoff": "2026-09-17",
-        "fact_type": "transactions",
-        "original_record_id": "future-transfer",
-        "original_source_date": future_dates["event_date"],
-        "original_source_dates": future_dates,
-        "provider_id": "schwab",
-        "record_id": "schwab:future-transfer",
-        "source_artifact_id": "synthetic/transactions.json",
-        "source_record_id": "future-transfer",
-        "source_row_sha256": hashlib.sha256(ledger.canonical_json_bytes(future)).hexdigest(),
-        "status": "OUTSIDE_FINANCIAL_CUTOFF",
-    }]
+    assert excluded == [
+        {
+            "financial_cutoff": "2026-09-17",
+            "fact_type": "transactions",
+            "original_record_id": "future-transfer",
+            "original_source_date": future_dates["event_date"],
+            "original_source_dates": future_dates,
+            "provider_id": "schwab",
+            "record_id": "schwab:future-transfer",
+            "source_artifact_id": "synthetic/transactions.json",
+            "source_record_id": "future-transfer",
+            "source_row_sha256": hashlib.sha256(
+                ledger.canonical_json_bytes(future)
+            ).hexdigest(),
+            "status": "OUTSIDE_FINANCIAL_CUTOFF",
+        }
+    ]
 
 
 def test_schwab_cutoff_precedes_cross_provider_security_valuation() -> None:
@@ -2535,35 +2568,55 @@ def test_schwab_cutoff_precedes_cross_provider_security_valuation() -> None:
         "amount": {"currency": "USD", "status": "UNAVAILABLE", "value": None},
         "source_artifact_id": "synthetic/transactions.json",
     }
-    catalog["transactions"] = [receipt, {
-        **receipt,
-        "record_id": "future-receipt",
-        "effective_date": "2026-09-18",
-        "quantity": "invalid-future-quantity",
-    }]
+    catalog["transactions"] = [
+        receipt,
+        {
+            **receipt,
+            "record_id": "future-receipt",
+            "effective_date": "2026-09-18",
+            "quantity": "invalid-future-quantity",
+        },
+    ]
     facts, _ = ledger._project_account_facts(
-        "schwab", "a" * 64, catalog, {"synthetic-schwab"}, set(), {},
+        "schwab",
+        "a" * 64,
+        catalog,
+        {"synthetic-schwab"},
+        set(),
+        {},
         financial_cutoff=date(2026, 9, 17),
     )
     ledger._complete_schwab_security_transfer_values(
-        facts["flows"], catalog,
-        {"corporate_actions": [{
-            "record_id": "synthetic-fidelity-delivery",
-            "kind": "ASSET_TRANSFER",
-            "event_date": "2026-09-17",
-            "quantity": "-2",
-            "symbol": "SYNTHETIC",
-            "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-50"},
-        }]},
-        "b" * 64, {"synthetic-schwab"}, financial_cutoff=date(2026, 9, 17),
+        facts["flows"],
+        catalog,
+        {
+            "corporate_actions": [
+                {
+                    "record_id": "synthetic-fidelity-delivery",
+                    "kind": "ASSET_TRANSFER",
+                    "event_date": "2026-09-17",
+                    "quantity": "-2",
+                    "symbol": "SYNTHETIC",
+                    "amount": {
+                        "currency": "USD",
+                        "status": "AVAILABLE",
+                        "value": "-50",
+                    },
+                }
+            ]
+        },
+        "b" * 64,
+        {"synthetic-schwab"},
+        financial_cutoff=date(2026, 9, 17),
     )
     assert len(facts["flows"]) == 1
     flow = facts["flows"][0]
     assert flow["amount"] == {"currency": "USD", "status": "AVAILABLE", "value": "50"}
     assert flow["recorded_amount"] == receipt["amount"]
-    assert flow["transfer_valuation"]["receipt_record_sha256"] == hashlib.sha256(
-        ledger.canonical_json_bytes(receipt)
-    ).hexdigest()
+    assert (
+        flow["transfer_valuation"]["receipt_record_sha256"]
+        == hashlib.sha256(ledger.canonical_json_bytes(receipt)).hexdigest()
+    )
 
 
 def test_projected_ibkr_flow_retains_activity_identity_and_zero_noncapital_semantics() -> (
@@ -5017,7 +5070,8 @@ def test_quantbase_dispatch_projects_fund_anchors_account_flows_and_nav(
 
 @pytest.mark.parametrize("future_defect", ["duplicate", "units", "linked_account"])
 def test_quantbase_cutoff_precedes_transfer_validation(
-    tmp_path: Path, future_defect: str,
+    tmp_path: Path,
+    future_defect: str,
 ) -> None:
     root, catalog, price_path, activity_path = _quantbase_fixture(tmp_path)
     artifacts = {
@@ -5025,18 +5079,30 @@ def test_quantbase_cutoff_precedes_transfer_validation(
         "source/csv/account_activity.csv": activity_path,
     }
     account_id = ledger._CSV_FACT_ACCOUNT["quantbase"]
-    assignments = {account_id: [{
-        "effective_start": "2024-10-01", "strategy_id": "volatis-strategy",
-    }]}
+    assignments = {
+        account_id: [
+            {
+                "effective_start": "2024-10-01",
+                "strategy_id": "volatis-strategy",
+            }
+        ]
+    }
     prior, prior_findings = ledger._project_account_facts(
-        "quantbase", "gen-1", catalog, {account_id}, {"volatis-strategy"},
-        assignments, _make_two_artifact_manifest(artifacts), root,
+        "quantbase",
+        "gen-1",
+        catalog,
+        {account_id},
+        {"volatis-strategy"},
+        assignments,
+        _make_two_artifact_manifest(artifacts),
+        root,
         financial_cutoff=date(2026, 9, 17),
     )
     with activity_path.open(encoding="utf-8-sig", newline="") as stream:
         source_rows = list(csv.DictReader(stream))
     future = {
-        **source_rows[-1], "created_at": "2026-09-18T20:01:00Z",
+        **source_rows[-1],
+        "created_at": "2026-09-18T20:01:00Z",
         "id": "future-transfer",
     }
     if future_defect == "duplicate":
@@ -5051,8 +5117,14 @@ def test_quantbase_cutoff_precedes_transfer_validation(
         writer.writerows([*source_rows, future])
     source_hash = hash_file(activity_path)
     projected, findings = ledger._project_account_facts(
-        "quantbase", "gen-1", catalog, {account_id}, {"volatis-strategy"},
-        assignments, _make_two_artifact_manifest(artifacts), root,
+        "quantbase",
+        "gen-1",
+        catalog,
+        {account_id},
+        {"volatis-strategy"},
+        assignments,
+        _make_two_artifact_manifest(artifacts),
+        root,
         financial_cutoff=date(2026, 9, 17),
     )
     assert projected == prior
@@ -5062,19 +5134,23 @@ def test_quantbase_cutoff_precedes_transfer_validation(
     assert projected["flows"][0]["strategy_id"] is None
     excluded = [row for row in findings if row["status"] == "OUTSIDE_FINANCIAL_CUTOFF"]
     assert [row for row in findings if row not in excluded] == prior_findings
-    assert excluded == [{
-        "financial_cutoff": "2026-09-17",
-        "fact_type": "flows",
-        "original_record_id": future["id"],
-        "original_source_date": "2026-09-18",
-        "original_source_dates": {"created_at": "2026-09-18T20:01:00Z"},
-        "provider_id": "quantbase",
-        "record_id": f"quantbase:{future['id']}",
-        "source_artifact_id": "source/csv/account_activity.csv",
-        "source_record_id": future["id"],
-        "source_row_sha256": hashlib.sha256(ledger.canonical_json_bytes(future)).hexdigest(),
-        "status": "OUTSIDE_FINANCIAL_CUTOFF",
-    }]
+    assert excluded == [
+        {
+            "financial_cutoff": "2026-09-17",
+            "fact_type": "flows",
+            "original_record_id": future["id"],
+            "original_source_date": "2026-09-18",
+            "original_source_dates": {"created_at": "2026-09-18T20:01:00Z"},
+            "provider_id": "quantbase",
+            "record_id": f"quantbase:{future['id']}",
+            "source_artifact_id": "source/csv/account_activity.csv",
+            "source_record_id": future["id"],
+            "source_row_sha256": hashlib.sha256(
+                ledger.canonical_json_bytes(future)
+            ).hexdigest(),
+            "status": "OUTSIDE_FINANCIAL_CUTOFF",
+        }
+    ]
 
 
 def test_quantbase_completed_transfers_project_as_signed_usd_account_flows(

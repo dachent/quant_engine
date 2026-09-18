@@ -1159,7 +1159,9 @@ def _provider_admission_authority(
                         days = [
                             date.fromisoformat(row[field])
                             for field in (
-                                "as_of_date", "event_date", "effective_date",
+                                "as_of_date",
+                                "event_date",
+                                "effective_date",
                                 "nav_recognition_date",
                             )
                             if row.get(field) not in {None, ""}
