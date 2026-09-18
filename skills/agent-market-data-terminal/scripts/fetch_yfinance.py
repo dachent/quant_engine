@@ -276,13 +276,22 @@ def history_cache_path(
         "history",
         {
             "tickers": tickers,
-            "start": args.start,
-            "end": args.end,
+            "start": parse_date_token(args.start, "--start").isoformat(),
+            "end": parse_date_token(args.end, "--end").isoformat(),
             "interval": args.interval,
             "prepost": args.prepost,
         },
     )
     return cache_dir / f"history_{key}.csv"
+
+
+def history_selected_cache_path(
+    cache_dir: Path | None, tickers: list[str], args: argparse.Namespace
+) -> Path | None:
+    raw_path = history_cache_path(cache_dir, tickers, args)
+    if raw_path is None:
+        return None
+    return raw_path.with_name(f"{raw_path.stem}_selected.csv")
 
 
 def snapshot_cache_path(cache_dir: Path | None, tickers: list[str]) -> Path | None:
@@ -412,20 +421,195 @@ def download_history_frame(yf, tickers: list[str], args: argparse.Namespace):
     )
 
 
+def configure_yfinance_cache(yf, cache_dir: Path | None) -> None:
+    if cache_dir is None:
+        raise ValueError("Yahoo history requires --cache-dir for task-local caching.")
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    cache = getattr(yf, "cache", None)
+    setter = getattr(cache, "set_cache_location", None)
+    if not callable(setter):
+        raise RuntimeError("yfinance cache API is unavailable.")
+    setter(str(cache_dir))
+
+
+def filter_history_window_with_exclusions(frame, args: argparse.Namespace):
+    pandas = import_pandas()
+    if frame.empty:
+        return frame, []
+    start_date = pandas.Timestamp(parse_date_token(args.start, "--start"))
+    end_date = pandas.Timestamp(parse_date_token(args.end, "--end"))
+    filtered = frame.copy()
+    parsed_dates = pandas.to_datetime(filtered["Date"], errors="coerce")
+    if parsed_dates.dt.tz is not None:
+        parsed_dates = parsed_dates.dt.tz_localize(None)
+    exclusions = []
+    for index, parsed_date in parsed_dates.items():
+        if pandas.isna(parsed_date):
+            reason = "invalid_date"
+        elif parsed_date < start_date:
+            reason = "out_of_window_before_start"
+        elif parsed_date >= end_date:
+            reason = "out_of_window_end_exclusive"
+        else:
+            continue
+        exclusions.append(
+            {
+                "ticker": str(filtered.loc[index, "Ticker"]),
+                "date": serialize_nested(filtered.loc[index, "Date"]),
+                "reason": reason,
+            }
+        )
+    filtered["Date"] = parsed_dates
+    return (
+        filtered.loc[
+            (filtered["Date"] >= start_date) & (filtered["Date"] < end_date)
+        ].reset_index(drop=True),
+        exclusions,
+    )
+
+
+def filter_history_window(frame, args: argparse.Namespace):
+    filtered, _ = filter_history_window_with_exclusions(frame, args)
+    return filtered
+
+
+def validate_source_dates(frame, tickers: list[str]) -> None:
+    pandas = import_pandas()
+    parsed_dates = pandas.to_datetime(frame["Date"], errors="coerce")
+    invalid_tickers = sorted(
+        str(ticker)
+        for ticker in tickers
+        if bool(parsed_dates.loc[frame["Ticker"] == ticker].isna().any())
+    )
+    if invalid_tickers:
+        raise ValueError(f"invalid required date: {', '.join(invalid_tickers)}")
+
+
+def invalid_history_tickers(
+    frame, tickers: list[str], price_column: str = "Close"
+) -> tuple[list[str], list[str]]:
+    pandas = import_pandas()
+    missing: list[str] = []
+    invalid: list[str] = []
+    for ticker in tickers:
+        subset = frame.loc[frame["Ticker"] == ticker]
+        if subset.empty:
+            missing.append(ticker)
+            continue
+        prices = pandas.to_numeric(subset[price_column], errors="coerce")
+        valid = prices.notna() & prices.map(math.isfinite) & (prices > 0)
+        if not bool(valid.all()):
+            invalid.append(ticker)
+    return missing, invalid
+
+
+def validate_history_frame(frame, tickers: list[str], price_column: str = "Close"):
+    missing, invalid = invalid_history_tickers(frame, tickers, price_column)
+    if missing:
+        raise ValueError(f"missing required ticker data: {', '.join(missing)}")
+    if invalid:
+        raise ValueError(f"invalid in-window price: {', '.join(invalid)}")
+    return frame
+
+
+def history_source_evidence(frame, exclusions: list[dict[str, object]]):
+    rows = frame_to_rows(frame[HISTORY_COLUMNS])
+    encoded = json.dumps(rows, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    return {
+        "row_count": len(rows),
+        "sha256": sha256(encoded).hexdigest(),
+        "rows": rows,
+    }, exclusions
+
+
+def write_history_failure_receipt(
+    cache_dir: Path,
+    cache_path: Path | None,
+    raw_frames: list,
+    exclusions: list[dict[str, object]],
+    reason: str,
+) -> None:
+    pandas = import_pandas()
+    raw_frame = (
+        pandas.concat(raw_frames, ignore_index=True)[HISTORY_COLUMNS]
+        if raw_frames
+        else pandas.DataFrame(columns=HISTORY_COLUMNS)
+    )
+    evidence, exclusions = history_source_evidence(raw_frame, exclusions)
+    receipt = {
+        "schema_version": 1,
+        "status": "REJECTED",
+        "reason": reason,
+        "source_raw_artifact": evidence,
+        "exclusions": exclusions,
+    }
+    receipt_bytes = json.dumps(
+        receipt, ensure_ascii=False, indent=2, sort_keys=True
+    ).encode("utf-8")
+    receipt_digest = sha256(receipt_bytes).hexdigest()[:20]
+    cache_prefix = (
+        cache_path.stem.removeprefix("history_")
+        if cache_path is not None
+        else "uncached"
+    )
+    receipt_name = f"history_failure_{cache_prefix}_{receipt_digest}.json"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    receipt_path = cache_dir / receipt_name
+    if not receipt_path.exists():
+        receipt_path.write_bytes(receipt_bytes + b"\n")
+
+
 def fetch_history_frame(
-    tickers: list[str], args: argparse.Namespace, cache_dir: Path | None
+    tickers: list[str],
+    args: argparse.Namespace,
+    cache_dir: Path | None,
+    yf=None,
 ):
     pandas = import_pandas()
-    yf = import_yfinance()
+    yf = yf or import_yfinance()
+    configure_yfinance_cache(yf, cache_dir)
     cache_path = history_cache_path(cache_dir, tickers, args)
+    selected_cache_path = history_selected_cache_path(cache_dir, tickers, args)
+    price_column = "Adj Close" if args.dataset == "history_adjusted" else "Close"
     if cache_path is not None and cache_path.exists():
-        frame = pandas.read_csv(cache_path, parse_dates=["Date"])
-        for column in HISTORY_COLUMNS:
-            if column not in frame.columns:
-                frame[column] = pandas.NA
-        return frame[HISTORY_COLUMNS]
+        try:
+            selected_path = (
+                selected_cache_path
+                if selected_cache_path is not None and selected_cache_path.exists()
+                else cache_path
+            )
+            frame = pandas.read_csv(selected_path, parse_dates=["Date"])
+            for column in HISTORY_COLUMNS:
+                if column not in frame.columns:
+                    frame[column] = pandas.NA
+            frame = frame[HISTORY_COLUMNS]
+            validate_source_dates(frame, tickers)
+            raw_frame = pandas.read_csv(cache_path, parse_dates=["Date"])
+            for column in HISTORY_COLUMNS:
+                if column not in raw_frame.columns:
+                    raw_frame[column] = pandas.NA
+            raw_frame = raw_frame[HISTORY_COLUMNS]
+            validate_source_dates(raw_frame, tickers)
+            _, exclusions = filter_history_window_with_exclusions(raw_frame, args)
+            frame, _ = filter_history_window_with_exclusions(frame, args)
+            validate_history_frame(frame, tickers, price_column)
+            frame.attrs["source_raw_artifact"], frame.attrs["exclusions"] = (
+                history_source_evidence(raw_frame, exclusions)
+            )
+            return frame
+        except (OSError, ValueError, pandas.errors.ParserError) as exc:
+            warn(f"Ignoring unusable cached Yahoo history: {exc}")
 
     frames = []
+    raw_frames = []
+    exclusions = []
+
+    def reject(exc: ValueError):
+        write_history_failure_receipt(
+            cache_dir, cache_path, raw_frames, exclusions, str(exc)
+        )
+        raise exc
+
     for batch in batched(tickers, args.batch_size):
 
         def fetch_batch():
@@ -441,9 +625,20 @@ def fetch_history_frame(
             warn(f"Batch history fetch failed for {batch}: {exc}")
             batch_frame = pandas.DataFrame(columns=HISTORY_COLUMNS)
 
-        batch_tickers = set(batch_frame["Ticker"]) if not batch_frame.empty else set()
-        missing_tickers = [ticker for ticker in batch if ticker not in batch_tickers]
-        for ticker in missing_tickers:
+        raw_frames.append(batch_frame.copy())
+        try:
+            validate_source_dates(batch_frame, batch)
+        except ValueError as exc:
+            reject(exc)
+        batch_frame, batch_exclusions = filter_history_window_with_exclusions(
+            batch_frame, args
+        )
+        exclusions.extend(batch_exclusions)
+        missing_tickers, invalid_tickers = invalid_history_tickers(
+            batch_frame, batch, price_column
+        )
+        unusable_tickers = missing_tickers + invalid_tickers
+        for ticker in unusable_tickers:
             try:
                 single_frame = fetch_with_retries(
                     lambda ticker=ticker: normalize_download_result(
@@ -452,7 +647,17 @@ def fetch_history_frame(
                     args.retry_attempts,
                     args.retry_backoff_seconds,
                 )
+                raw_frames.append(single_frame.copy())
+                try:
+                    validate_source_dates(single_frame, [ticker])
+                except ValueError as exc:
+                    reject(exc)
+                single_frame, single_exclusions = filter_history_window_with_exclusions(
+                    single_frame, args
+                )
+                exclusions.extend(single_exclusions)
                 if not single_frame.empty:
+                    batch_frame = batch_frame.loc[batch_frame["Ticker"] != ticker]
                     batch_frame = pandas.concat(
                         [batch_frame, single_frame], ignore_index=True
                     )
@@ -471,9 +676,23 @@ def fetch_history_frame(
     else:
         combined = pandas.DataFrame(columns=HISTORY_COLUMNS)
 
+    combined = combined[HISTORY_COLUMNS]
+    try:
+        validate_history_frame(combined, tickers, price_column)
+    except ValueError as exc:
+        reject(exc)
+    raw_frame = (
+        pandas.concat(raw_frames, ignore_index=True)[HISTORY_COLUMNS]
+        if raw_frames
+        else pandas.DataFrame(columns=HISTORY_COLUMNS)
+    )
+    combined.attrs["source_raw_artifact"], combined.attrs["exclusions"] = (
+        history_source_evidence(raw_frame, exclusions)
+    )
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        combined.to_csv(cache_path, index=False)
+        raw_frame.to_csv(cache_path, index=False)
+        combined.to_csv(selected_cache_path, index=False)
     return combined[HISTORY_COLUMNS]
 
 
@@ -925,7 +1144,7 @@ def build_coverage(frame, requested_tickers: list[str]) -> dict[str, object]:
                     item["observed_start"] = dates.min().isoformat()
                     item["observed_end"] = dates.max().isoformat()
             per_ticker[ticker] = item
-    return {
+    coverage = {
         "claim": "PARTIAL",
         "reason": "Provider response is not silently expanded or exchange-calendar-imputed.",
         "requested_tickers": requested_tickers,
@@ -933,6 +1152,11 @@ def build_coverage(frame, requested_tickers: list[str]) -> dict[str, object]:
         "missing_tickers": sorted(set(requested_tickers) - set(observed_tickers)),
         "per_ticker": per_ticker,
     }
+    source_raw_artifact = frame.attrs.get("source_raw_artifact")
+    if source_raw_artifact is not None:
+        coverage["source_raw_artifact"] = source_raw_artifact
+        coverage["exclusions"] = frame.attrs.get("exclusions", [])
+    return coverage
 
 
 def build_request_payload(
