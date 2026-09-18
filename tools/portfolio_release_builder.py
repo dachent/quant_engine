@@ -48,9 +48,30 @@ ACCOUNT_STRATEGY_CLASSIFICATION_POLICY = (
 ACCOUNT_STRATEGY_PANEL_TEMPLATE_ROOT = (
     REPOSITORY_ROOT / "apps" / "portfolio-control-panel"
 )
-XLSX_SKILL_ROOT = Path(r"C:\Users\BorisVaisman\.codex\skills\xlsx-win")
-XLSX_RUNTIME = Path(r"C:\Tools\xlsx-win\.venv\Scripts\python.exe")
-XLSX_CLI = XLSX_SKILL_ROOT / "control_plane" / "cli.py"
+WORKBOOK_RUNTIME_RECEIPT = "workbook-runtime-execution.json"
+
+
+class _WorkbookRuntime:
+    def __init__(
+        self,
+        *,
+        descriptor_path: Path,
+        descriptor_sha256: str,
+        python_executable: Path,
+        adapter_root: Path,
+        cli: Path,
+        supervisor_executable: Path,
+        worker_executable: Path,
+        identity: dict[str, Any],
+    ) -> None:
+        self.descriptor_path = descriptor_path
+        self.descriptor_sha256 = descriptor_sha256
+        self.python_executable = python_executable
+        self.adapter_root = adapter_root
+        self.cli = cli
+        self.supervisor_executable = supervisor_executable
+        self.worker_executable = worker_executable
+        self.identity = identity
 
 
 def _governed_hwm_arguments(
@@ -197,6 +218,357 @@ def _sha(path: Path) -> tuple[str, int]:
         return hash_file(path)
     except (OSError, ValueError) as exc:
         raise VerticalBuildError(f"source artifact is unavailable: {path}") from exc
+
+
+def _runtime_failure(detail: str) -> VerticalBuildError:
+    return VerticalBuildError(
+        f"workbook runtime configuration {detail}; supply --workbook-runtime PATH"
+    )
+
+
+def _runtime_regular_file(path: Path, field: str) -> Path:
+    if path.is_symlink() or not path.is_file():
+        raise _runtime_failure(f"field {field!r} must name an existing regular file")
+    return path.resolve()
+
+
+def _runtime_path(value: object, field: str, descriptor: Path) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise _runtime_failure(f"field {field!r} must be non-empty text")
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        candidate = descriptor.parent / candidate
+    return candidate.resolve()
+
+
+def _runtime_inventory(paths: Sequence[tuple[str, Path]]) -> list[dict[str, object]]:
+    inventory: list[dict[str, object]] = []
+    for relative, path in sorted(paths):
+        try:
+            digest, size = _sha(path)
+        except VerticalBuildError as exc:
+            raise _runtime_failure("runtime component content is unavailable") from exc
+        inventory.append({"path": relative, "sha256": digest, "size_bytes": size})
+    return inventory
+
+
+def _runtime_identity(
+    *,
+    descriptor_sha256: str,
+    python_executable: Path,
+    adapter_root: Path,
+    supervisor_executable: Path,
+    worker_executable: Path,
+    python_metadata: Mapping[str, object],
+    dependencies: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    adapter_files: list[tuple[str, Path]] = []
+    for root_name, pattern in (("control_plane", "*.py"), ("schemas", "*.json")):
+        root = adapter_root / root_name
+        if root.is_symlink() or not root.is_dir():
+            raise _runtime_failure(f"adapter_root is missing {root_name} files")
+        for path in sorted(root.rglob(pattern)):
+            if (
+                path.is_file()
+                and not path.is_symlink()
+                and "__pycache__" not in path.parts
+            ):
+                adapter_files.append((path.relative_to(adapter_root).as_posix(), path))
+    if not adapter_files:
+        raise _runtime_failure("adapter_root has no control-plane implementation")
+
+    binaries: list[tuple[str, Path]] = []
+    for label, executable in (
+        ("supervisor", supervisor_executable),
+        ("worker", worker_executable),
+    ):
+        stem = executable.stem
+        for suffix in (".exe", ".dll", ".deps.json", ".runtimeconfig.json"):
+            path = executable.with_name(stem + suffix)
+            _runtime_regular_file(path, f"{label}_executable sibling")
+            binaries.append((f"{label}/{path.name}", path))
+        contracts = executable.with_name("XlsxWinContracts.dll")
+        _runtime_regular_file(contracts, f"{label}_executable sibling")
+        binaries.append((f"{label}/{contracts.name}", contracts))
+
+    try:
+        python_digest, python_size = _sha(python_executable)
+    except VerticalBuildError as exc:
+        raise _runtime_failure("configured Python content is unavailable") from exc
+    return {
+        "descriptor_sha256": descriptor_sha256,
+        "python": {
+            "sha256": python_digest,
+            "size_bytes": python_size,
+            "metadata": dict(python_metadata),
+            "dependencies": dict(dependencies or {}),
+        },
+        "adapter": _runtime_inventory(adapter_files),
+        "binaries": _runtime_inventory(binaries),
+    }
+
+
+def _resolve_workbook_runtime(descriptor_path: Path | None) -> _WorkbookRuntime:
+    if descriptor_path is None:
+        raise _runtime_failure("descriptor is missing")
+    descriptor = Path(descriptor_path).resolve()
+    try:
+        if descriptor.is_symlink() or not descriptor.is_file():
+            raise _runtime_failure("descriptor is missing or not a regular file")
+        descriptor_bytes = descriptor.read_bytes()
+        config = json.loads(descriptor_bytes.decode("utf-8"))
+    except VerticalBuildError:
+        raise
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _runtime_failure("descriptor is not readable JSON") from exc
+    if not isinstance(config, dict):
+        raise _runtime_failure("descriptor root must be an object")
+    expected = {
+        "schema_version",
+        "adapter",
+        "python_executable",
+        "adapter_root",
+        "supervisor_executable",
+        "worker_executable",
+    }
+    if set(config) != expected:
+        raise _runtime_failure("descriptor fields are not the required schema")
+    if config["schema_version"] != 1:
+        raise _runtime_failure("field 'schema_version' is unsupported")
+    if config["adapter"] != "xlsx-win":
+        raise _runtime_failure("field 'adapter' is unsupported")
+    try:
+        python_executable = _runtime_regular_file(
+            _runtime_path(config["python_executable"], "python_executable", descriptor),
+            "python_executable",
+        )
+        adapter_root = _runtime_path(config["adapter_root"], "adapter_root", descriptor)
+        if adapter_root.is_symlink() or not adapter_root.is_dir():
+            raise _runtime_failure(
+                "field 'adapter_root' must name an existing directory"
+            )
+        cli = _runtime_regular_file(
+            adapter_root / "control_plane" / "cli.py", "adapter_root"
+        )
+        supervisor = _runtime_regular_file(
+            _runtime_path(
+                config["supervisor_executable"], "supervisor_executable", descriptor
+            ),
+            "supervisor_executable",
+        )
+        worker = _runtime_regular_file(
+            _runtime_path(config["worker_executable"], "worker_executable", descriptor),
+            "worker_executable",
+        )
+        for schema_name in (
+            "job.schema.json",
+            "result.schema.json",
+            "validation_contract.schema.json",
+        ):
+            _runtime_regular_file(
+                adapter_root / "schemas" / schema_name, "adapter_root"
+            )
+        schemas = {
+            name: _load(adapter_root / "schemas" / name, name)
+            for name in ("job.schema.json", "result.schema.json")
+        }
+        if any(
+            schema.get("properties", {}).get("schema_version", {}).get("const") != "2.0"
+            for schema in schemas.values()
+        ):
+            raise _runtime_failure(
+                "adapter schemas do not implement schema version 2.0"
+            )
+        # Check the complete immutable runtime layout before launching even the
+        # harmless configured-interpreter probe.  In particular, a missing
+        # native sibling is a descriptor error, not a child-process failure.
+        _runtime_identity(
+            descriptor_sha256="0" * 64,
+            python_executable=python_executable,
+            adapter_root=adapter_root,
+            supervisor_executable=supervisor,
+            worker_executable=worker,
+            python_metadata={},
+        )
+        metadata_command = (
+            str(python_executable),
+            "-I",
+            "-c",
+            "import importlib.metadata,json,platform; "
+            "names=('jsonschema','openpyxl','xlsxwriter'); "
+            "versions={name:importlib.metadata.version(name) for name in names}; "
+            "print(json.dumps({'implementation':platform.python_implementation(),'version':platform.python_version(),'dependencies':versions}))",
+        )
+        metadata = subprocess.run(
+            metadata_command,
+            cwd=REPOSITORY_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if metadata.returncode != 0:
+            raise _runtime_failure("configured Python metadata probe failed")
+        python_metadata = json.loads(metadata.stdout.strip())
+        if not isinstance(python_metadata, dict):
+            raise _runtime_failure("configured Python metadata is invalid")
+        dependencies = python_metadata.get("dependencies")
+        if (
+            not isinstance(dependencies, dict)
+            or set(dependencies)
+            != {
+                "jsonschema",
+                "openpyxl",
+                "xlsxwriter",
+            }
+            or not all(
+                isinstance(value, str) and value for value in dependencies.values()
+            )
+        ):
+            raise _runtime_failure(
+                "configured Python is missing required adapter dependencies; "
+                "install the adapter requirements into the configured interpreter"
+            )
+        descriptor_sha256 = hashlib.sha256(descriptor_bytes).hexdigest()
+        identity = _runtime_identity(
+            descriptor_sha256=descriptor_sha256,
+            python_executable=python_executable,
+            adapter_root=adapter_root,
+            supervisor_executable=supervisor,
+            worker_executable=worker,
+            python_metadata=python_metadata,
+            dependencies=dependencies,
+        )
+    except VerticalBuildError:
+        raise
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        json.JSONDecodeError,
+        subprocess.SubprocessError,
+    ) as exc:
+        raise _runtime_failure("descriptor validation failed") from exc
+    return _WorkbookRuntime(
+        descriptor_path=descriptor,
+        descriptor_sha256=descriptor_sha256,
+        python_executable=python_executable,
+        adapter_root=adapter_root,
+        cli=cli,
+        supervisor_executable=supervisor,
+        worker_executable=worker,
+        identity=identity,
+    )
+
+
+def _current_workbook_runtime(runtime: _WorkbookRuntime) -> _WorkbookRuntime:
+    return _resolve_workbook_runtime(runtime.descriptor_path)
+
+
+def _runtime_receipt_path(candidate: Path) -> Path:
+    return candidate / WORKBOOK_RUNTIME_RECEIPT
+
+
+def _record_workbook_runtime_execution(
+    candidate: Path, runtime: _WorkbookRuntime
+) -> None:
+    current = _current_workbook_runtime(runtime)
+    if current.identity != runtime.identity:
+        raise _runtime_failure(
+            "runtime changed after execution; rerun the workbook phase"
+        )
+    result_path = _successful_xlsx_result_path(candidate)
+    if result_path is None:
+        raise _runtime_failure("successful workbook result is unavailable for receipt")
+    artifacts: dict[str, dict[str, object]] = {}
+    for name in (
+        "xlsx-job.json",
+        "workbook-validation.json",
+        "workbook-contract.json",
+        "workbook-evidence-binding.json",
+    ):
+        path = candidate / name
+        if path.is_file() and not path.is_symlink():
+            digest, size = _sha(path)
+            artifacts[name] = {"sha256": digest, "size_bytes": size}
+    workbook = candidate / "excel" / "portfolio-report.xlsx"
+    if workbook.is_file() and not workbook.is_symlink():
+        digest, size = _sha(workbook)
+        artifacts["excel/portfolio-report.xlsx"] = {
+            "sha256": digest,
+            "size_bytes": size,
+        }
+    digest, size = _sha(result_path)
+    artifacts[result_path.name] = {"sha256": digest, "size_bytes": size}
+    required = {
+        "xlsx-job.json",
+        result_path.name,
+        "workbook-validation.json",
+        "workbook-contract.json",
+        "workbook-evidence-binding.json",
+        "excel/portfolio-report.xlsx",
+    }
+    if set(artifacts) != required:
+        raise _runtime_failure(
+            "complete workbook artifacts are unavailable for receipt"
+        )
+    receipt = {
+        "schema_version": 1,
+        "runtime_identity": runtime.identity,
+        "result_name": result_path.name,
+        "artifacts": artifacts,
+    }
+    _write_disposable(_runtime_receipt_path(candidate), canonical_json_bytes(receipt))
+
+
+def _runtime_receipt_matches(candidate: Path, runtime: _WorkbookRuntime) -> bool:
+    try:
+        current = _current_workbook_runtime(runtime)
+        if current.identity != runtime.identity:
+            return False
+        receipt = _load(
+            _runtime_receipt_path(candidate), "workbook runtime execution receipt"
+        )
+        if (
+            receipt.get("schema_version") != 1
+            or receipt.get("runtime_identity") != current.identity
+        ):
+            return False
+        artifacts = receipt.get("artifacts")
+        result_name = receipt.get("result_name")
+        if (
+            not isinstance(result_name, str)
+            or result_name
+            not in {
+                "xlsx-result.json",
+                "xlsx-result-startup-extension.json",
+            }
+            or not isinstance(artifacts, dict)
+        ):
+            return False
+        if set(artifacts) != {
+            "xlsx-job.json",
+            result_name,
+            "workbook-validation.json",
+            "workbook-contract.json",
+            "workbook-evidence-binding.json",
+            "excel/portfolio-report.xlsx",
+        }:
+            return False
+        for name, expected in artifacts.items():
+            path = candidate / name
+            if (
+                not isinstance(expected, dict)
+                or not path.is_file()
+                or path.is_symlink()
+            ):
+                return False
+            digest, size = _sha(path)
+            if expected.get("sha256") != digest or expected.get("size_bytes") != size:
+                return False
+        return True
+    except (OSError, RuntimeError, ValueError, VerticalBuildError):
+        return False
 
 
 def _is_link_or_reparse_point(path: Path) -> bool:
@@ -865,6 +1237,105 @@ def _is_xlsx_startup_deadline(result: Mapping[str, Any]) -> bool:
     )
 
 
+def _validate_workbook_runtime_job(
+    workbook_runtime: _WorkbookRuntime, job_path: Path
+) -> None:
+    for command in ("validate", "dry-run"):
+        result = _run_workbook_runtime_command(
+            workbook_runtime,
+            command,
+            (str(job_path),),
+            phase="job preflight",
+            timeout=60,
+        )
+        if result.get("valid") is not True and command == "validate":
+            raise VerticalBuildError("xlsx-win runtime rejected the workbook job")
+        if command == "dry-run" and not isinstance(result.get("states"), list):
+            raise VerticalBuildError("xlsx-win runtime dry-run response is invalid")
+
+
+def _run_workbook_runtime_command(
+    runtime: _WorkbookRuntime,
+    command: str,
+    arguments: Sequence[str],
+    *,
+    phase: str,
+    timeout: int,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    try:
+        return _run(
+            (str(runtime.python_executable), str(runtime.cli), command, *arguments),
+            timeout=timeout,
+            env=env,
+        )
+    except (VerticalBuildError, OSError, subprocess.SubprocessError) as exc:
+        raise _runtime_failure(
+            f"{phase} via configured adapter failed; inspect the configured "
+            "runtime dependencies and rerun"
+        ) from exc
+
+
+def _run_workbook_runtime_process(
+    command: Sequence[str],
+    *,
+    phase: str,
+    timeout: int,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    try:
+        return _run(command, timeout=timeout, env=env)
+    except (VerticalBuildError, OSError, subprocess.SubprocessError) as exc:
+        raise _runtime_failure(
+            f"{phase} via configured adapter failed; inspect the configured "
+            "runtime dependencies and rerun"
+        ) from exc
+
+
+def _successful_xlsx_result_path(candidate: Path) -> Path | None:
+    preferred: list[str] = []
+    try:
+        receipt = _load(
+            _runtime_receipt_path(candidate), "workbook runtime execution receipt"
+        )
+        result_name = receipt.get("result_name")
+        if isinstance(result_name, str):
+            preferred.append(result_name)
+    except (OSError, ValueError, VerticalBuildError):
+        pass
+    for name in ("xlsx-result.json", "xlsx-result-startup-extension.json"):
+        if name not in preferred:
+            preferred.append(name)
+    for name in preferred:
+        path = candidate / name
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            result = _load(path, "xlsx-win result")
+        except (OSError, ValueError, VerticalBuildError):
+            continue
+        if (
+            result.get("schema_version") == "2.0"
+            and result.get("ok") is True
+            and result.get("final_state") == "SUCCEEDED"
+        ):
+            return path
+    return None
+
+
+def _bound_xlsx_result_path(candidate: Path, binding: Mapping[str, Any]) -> Path:
+    for name in ("xlsx-result-startup-extension.json", "xlsx-result.json"):
+        path = candidate / name
+        if path.is_file() and not path.is_symlink():
+            digest, size = _sha(path)
+            if (
+                binding.get("xlsx_result_sha256") == digest
+                and binding.get("xlsx_result_size_bytes") == size
+            ):
+                return path
+    return candidate / "xlsx-result.json"
+
+
 def _xlsx_runner_job(candidate: Path) -> Path:
     """Materialize the absolute-path job the external supervisor executes.
 
@@ -927,9 +1398,13 @@ def _xlsx_job_with_startup_extension(job: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _accepted_xlsx_evidence(candidate: Path) -> bool:
+def _accepted_xlsx_evidence(
+    candidate: Path, *, workbook_runtime: _WorkbookRuntime | None = None
+) -> bool:
     job_path = candidate / "xlsx-job.json"
-    result_path = candidate / "xlsx-result.json"
+    result_path = (
+        _successful_xlsx_result_path(candidate) or candidate / "xlsx-result.json"
+    )
     workbook_path = candidate / "excel" / "portfolio-report.xlsx"
     if any(
         path.is_symlink() or not path.is_file()
@@ -939,7 +1414,7 @@ def _accepted_xlsx_evidence(candidate: Path) -> bool:
     job = _load(job_path, "xlsx-win job")
     result = _load(result_path, "xlsx-win result")
     steps = result.get("steps")
-    return (
+    accepted = (
         result.get("schema_version") == "2.0"
         and result.get("idempotency_key") == job.get("idempotency_key")
         and result.get("final_state") == "SUCCEEDED"
@@ -951,9 +1426,18 @@ def _accepted_xlsx_evidence(candidate: Path) -> bool:
             for step in steps
         )
     )
+    return accepted and (
+        workbook_runtime is None
+        or _runtime_receipt_matches(candidate, workbook_runtime)
+    )
 
 
-def _accepted_workbook_validation(path: Path, candidate: Path) -> dict[str, Any] | None:
+def _accepted_workbook_validation(
+    path: Path,
+    candidate: Path,
+    *,
+    workbook_runtime: _WorkbookRuntime | None = None,
+) -> dict[str, Any] | None:
     if path.is_symlink() or not path.is_file():
         return None
     result = _load(path, "workbook validation")
@@ -972,14 +1456,16 @@ def _accepted_workbook_validation(path: Path, candidate: Path) -> dict[str, Any]
     if binding_path.is_symlink() or not binding_path.is_file():
         return None
     binding = _load(binding_path, "workbook evidence binding")
-    if (
-        binding.get("binding_schema_version") != 1
-        or binding.get("validation_all_passed") is not True
-    ):
+    nested_validation = binding.get("workbook_delivery", {}).get("validation", {})
+    binding_passed = binding.get("validation_all_passed") is True or (
+        isinstance(nested_validation, dict)
+        and nested_validation.get("all_passed") is True
+    )
+    if binding.get("binding_schema_version") != 1 or not binding_passed:
         return None
     evidence_paths = {
         "workbook": candidate / "excel" / "portfolio-report.xlsx",
-        "xlsx_result": candidate / "xlsx-result.json",
+        "xlsx_result": _bound_xlsx_result_path(candidate, binding),
         "validation_result": path,
         "workbook_contract": candidate / "workbook-contract.json",
         "xlsx_job": candidate / "xlsx-job.json",
@@ -995,26 +1481,16 @@ def _accepted_workbook_validation(path: Path, candidate: Path) -> dict[str, Any]
             or binding.get(f"{name}_size_bytes") != size
         ):
             return None
+    if workbook_runtime is not None and not _runtime_receipt_matches(
+        candidate, workbook_runtime
+    ):
+        return None
     return result
 
 
-def _xlsx_executable(project: str) -> Path:
-    root = XLSX_SKILL_ROOT / "supervisor" / project / "bin"
-    matches = sorted(
-        (
-            path
-            for path in root.rglob(f"{project}.exe")
-            if path.is_file() and not path.is_symlink()
-        ),
-        key=lambda path: path.stat().st_mtime_ns,
-        reverse=True,
-    )
-    if not matches:
-        raise VerticalBuildError(f"xlsx-win {project} executable is unavailable")
-    return matches[0]
-
-
-def _run_xlsx_startup_extension(candidate: Path) -> Path:
+def _run_xlsx_startup_extension(
+    candidate: Path, workbook_runtime: _WorkbookRuntime
+) -> Path:
     base_job = _load(_xlsx_runner_job(candidate), "xlsx-win job")
     extended_job = candidate / "xlsx-job-startup-extension.json"
     _write_exact(
@@ -1023,21 +1499,27 @@ def _run_xlsx_startup_extension(candidate: Path) -> Path:
     )
     events_path = candidate / "xlsx-events-startup-extension.jsonl"
     result_path = candidate / "xlsx-result-startup-extension.json"
-    supervisor = _xlsx_executable("XlsxWinSupervisor")
-    worker = _xlsx_executable("XlsxWinWorker")
+    supervisor = workbook_runtime.supervisor_executable
+    worker = workbook_runtime.worker_executable
     environment = dict(os.environ)
     environment["XLSXWIN_WORKER_EXE_PATH"] = str(worker)
-    _run(
+    _run_workbook_runtime_process(
         (
             str(supervisor),
             str(extended_job),
             str(events_path),
             str(result_path),
         ),
+        phase="xlsx-win startup recovery",
         timeout=600,
         env=environment,
     )
-    result = _load(result_path, "xlsx-win startup-extension result")
+    try:
+        result = _load(result_path, "xlsx-win startup-extension result")
+    except (OSError, ValueError, VerticalBuildError) as exc:
+        raise _runtime_failure(
+            "xlsx-win startup recovery did not produce a readable result"
+        ) from exc
     if result.get("ok") is not True or result.get("final_state") != "SUCCEEDED":
         raise VerticalBuildError("xlsx-win startup extension did not succeed")
     return result_path
@@ -4266,7 +4748,9 @@ def build_workbook(
     invested_capital_result_path: Path | None = None,
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
+    workbook_runtime_path: Path | None = None,
 ) -> dict[str, Any]:
+    workbook_runtime = _resolve_workbook_runtime(workbook_runtime_path)
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
         input_generation=hwm_governed_input_generation_path,
@@ -4326,18 +4810,30 @@ def build_workbook(
             "--baseline-generation-id",
             _published_generation(baseline_root)[0],
         )
-    if not XLSX_RUNTIME.is_file() or not XLSX_CLI.is_file():
-        raise VerticalBuildError("xlsx-win durable runtime is unavailable")
     result_path = candidate / "xlsx-result.json"
     events_path = candidate / "xlsx-events.jsonl"
-    if not _accepted_xlsx_evidence(candidate):
+    accepted_xlsx_evidence = _accepted_xlsx_evidence(
+        candidate, workbook_runtime=workbook_runtime
+    )
+    if accepted_xlsx_evidence:
+        accepted_result_path = _successful_xlsx_result_path(candidate)
+        if accepted_result_path is None:
+            raise VerticalBuildError("accepted workbook result is unavailable")
+        result_path = accepted_result_path
+    else:
+        runner_job = _xlsx_runner_job(candidate)
+        _validate_workbook_runtime_job(workbook_runtime, runner_job)
+        environment = dict(os.environ)
+        environment["XLSXWIN_SUPERVISOR_EXE_PATH"] = str(
+            workbook_runtime.supervisor_executable
+        )
+        environment["XLSXWIN_WORKER_EXE_PATH"] = str(workbook_runtime.worker_executable)
         try:
-            _run(
+            _run_workbook_runtime_command(
+                workbook_runtime,
+                "run",
                 (
-                    str(XLSX_RUNTIME),
-                    str(XLSX_CLI),
-                    "run",
-                    str(_xlsx_runner_job(candidate)),
+                    str(runner_job),
                     "--events",
                     str(events_path),
                     "--result",
@@ -4345,13 +4841,33 @@ def build_workbook(
                     "--hard-timeout-seconds",
                     "300",
                 ),
+                phase="xlsx-win execution",
                 timeout=420,
+                env=environment,
             )
         except VerticalBuildError:
-            failed = _load(result_path, "xlsx-win failed result")
+            try:
+                failed = _load(result_path, "xlsx-win failed result")
+            except (OSError, ValueError, VerticalBuildError) as exc:
+                raise _runtime_failure(
+                    "xlsx-win execution failed before a readable result was written"
+                ) from exc
             if not _is_xlsx_startup_deadline(failed):
                 raise
-            result_path = _run_xlsx_startup_extension(candidate)
+            result_path = _run_xlsx_startup_extension(candidate, workbook_runtime)
+        if result_path.name == "xlsx-result-startup-extension.json":
+            recovered = _load(result_path, "xlsx-win startup-extension result")
+            if (
+                recovered.get("ok") is not True
+                or recovered.get("final_state") != "SUCCEEDED"
+            ):
+                raise VerticalBuildError(
+                    "xlsx-win execution did not produce accepted evidence"
+                )
+        elif not _accepted_xlsx_evidence(candidate):
+            raise VerticalBuildError(
+                "xlsx-win execution did not produce accepted evidence"
+            )
     result_canonicalization = _tool(
         "portfolio_report.py",
         "canonicalize-xlsx-result",
@@ -4370,16 +4886,15 @@ def build_workbook(
         str(candidate / "workbook-canonicalization.json"),
     )
     validation_path = candidate / "workbook-validation.json"
-    validation = _accepted_workbook_validation(validation_path, candidate)
+    validation = _accepted_workbook_validation(
+        validation_path, candidate, workbook_runtime=workbook_runtime
+    )
     if validation is None:
-        validation = _run(
-            (
-                str(XLSX_RUNTIME),
-                str(XLSX_CLI),
-                "validate-contract",
-                str(excel_workbook),
-                str(candidate / "workbook-contract.json"),
-            ),
+        validation = _run_workbook_runtime_command(
+            workbook_runtime,
+            "validate-contract",
+            (str(excel_workbook), str(candidate / "workbook-contract.json")),
+            phase="workbook contract validation",
             timeout=180,
         )
         _write_exact(validation_path, canonical_json_bytes(validation))
@@ -4399,6 +4914,7 @@ def build_workbook(
         "--evidence",
         str(binding_path),
     )
+    _record_workbook_runtime_execution(candidate, workbook_runtime)
     _tool(
         "portfolio_report.py",
         "verify",
@@ -4584,7 +5100,9 @@ def build_report(
     invested_capital_result_path: Path | None = None,
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
+    workbook_runtime_path: Path | None = None,
 ) -> dict[str, Any]:
+    _resolve_workbook_runtime(workbook_runtime_path)
     hwm_paths = (
         {
             "hwm_governed_result_path": hwm_governed_result_path,
@@ -4664,6 +5182,7 @@ def build_report(
         **hwm_paths,
         **portfolio_paths,
         **capital_paths,
+        workbook_runtime_path=workbook_runtime_path,
     )
 
 
@@ -5642,8 +6161,12 @@ def build_stage(
     invested_capital_result_path: Path | None = None,
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
+    workbook_runtime_path: Path | None = None,
 ) -> dict[str, Any]:
     """Build exactly one source-to-panel stage from its predecessor outputs."""
+
+    if role == "workbook":
+        _resolve_workbook_runtime(workbook_runtime_path)
 
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
@@ -5803,6 +6326,7 @@ def build_stage(
             **hwm_paths,
             **portfolio_paths,
             **capital_paths,
+            workbook_runtime_path=workbook_runtime_path,
         )
     elif role in {"panel-candidate", "panel"}:
         ledger = _stage_result(output_root, "ledger")
@@ -5922,7 +6446,9 @@ def build_all(
     invested_capital_result_path: Path | None = None,
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
+    workbook_runtime_path: Path | None = None,
 ) -> dict[str, Any]:
+    _resolve_workbook_runtime(workbook_runtime_path)
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
         input_generation=hwm_governed_input_generation_path,
@@ -6032,6 +6558,7 @@ def build_all(
         **hwm_paths,
         **portfolio_paths,
         **capital_paths,
+        workbook_runtime_path=workbook_runtime_path,
     )
     panel = build_stage(
         recipe_path,
@@ -6072,6 +6599,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--invested-capital-result", type=Path)
     build.add_argument("--invested-capital-input-generation", type=Path)
     build.add_argument("--portfolio-root", type=Path)
+    build.add_argument("--workbook-runtime", type=Path)
     inventory = commands.add_parser("inventory")
     inventory.add_argument("--path", type=Path, required=True)
     recipe = commands.add_parser("recipe")
@@ -6128,6 +6656,7 @@ def _parser() -> argparse.ArgumentParser:
     stage.add_argument("--invested-capital-result", type=Path)
     stage.add_argument("--invested-capital-input-generation", type=Path)
     stage.add_argument("--portfolio-root", type=Path)
+    stage.add_argument("--workbook-runtime", type=Path)
     return parser
 
 
@@ -6151,6 +6680,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.invested_capital_input_generation
                 ),
                 portfolio_root=args.portfolio_root,
+                workbook_runtime_path=args.workbook_runtime,
             )
         elif args.command == "inventory":
             result = _directory_inventory(args.path.resolve())
@@ -6207,6 +6737,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.invested_capital_input_generation
                 ),
                 portfolio_root=args.portfolio_root,
+                workbook_runtime_path=args.workbook_runtime,
             )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"portfolio-release-builder: FAIL: {exc}", file=sys.stderr)
