@@ -26,7 +26,14 @@ from .raw_store import RawStore
 from .schema import DATASET_DESCRIPTIONS
 from .storage import RunStorage
 from .transport import ReadOnlyTransport, TransportError, TransportHTTPError
-from .util import atomic_write, canonical_json, sha256_text, utc_now_ms, utc_run_id
+from .util import (
+    atomic_write,
+    canonical_json,
+    sha256_bytes,
+    sha256_text,
+    utc_now_ms,
+    utc_run_id,
+)
 from .valuation import build_daily_valuation
 
 
@@ -44,10 +51,21 @@ class ExtractionError(RuntimeError):
 
 
 class ApiResponseError(ExtractionError):
-    def __init__(self, endpoint: str, code: str) -> None:
+    def __init__(
+        self,
+        endpoint: str,
+        code: str,
+        *,
+        status_code: int | None = None,
+        content: bytes = b"",
+        request_id: str = "",
+    ) -> None:
         super().__init__(f"Matrixport API error at {endpoint} (code={code})")
         self.endpoint = endpoint
         self.code = code
+        self.status_code = status_code
+        self.content = bytes(content)
+        self.request_id = request_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +113,35 @@ def _data(payload: Any) -> Any:
         if isinstance(payload, Mapping) and "data" in payload
         else payload
     )
+
+
+def _structured_rejection_details(error: BaseException) -> dict[str, Any] | None:
+    """Return evidence only for the retained wallet limitation shape."""
+    if not isinstance(error, (TransportHTTPError, ApiResponseError)):
+        return None
+    status_code = getattr(error, "status_code", None)
+    if status_code not in {200, 400}:
+        return None
+    content = getattr(error, "content", b"")
+    try:
+        payload = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+    code = payload.get("code")
+    message = payload.get("message")
+    if isinstance(code, bool) or not isinstance(code, int) or code != 18100410:
+        return None
+    if message != "Invalid params":
+        return None
+    return {
+        "status_code": status_code,
+        "api_error_code": code,
+        "api_message": message,
+        "response_sha256": sha256_bytes(content),
+        "request_id": str(getattr(error, "request_id", "")),
+    }
 
 
 def _mapping_rows(value: Mapping[str, Any], *, key_name: str) -> list[dict[str, Any]]:
@@ -560,7 +607,14 @@ class MatrixportExtractor:
             payload = _json_loads(stored.response_path.read_bytes())
             code = _api_code(payload)
             if code is not None:
-                raise ApiResponseError(path, code)
+                envelope = json.loads(stored.envelope_path.read_text(encoding="utf-8"))
+                raise ApiResponseError(
+                    path,
+                    code,
+                    status_code=int(envelope["status_code"]),
+                    content=stored.response_path.read_bytes(),
+                    request_id=stored.request_id,
+                )
             return ApiCall(endpoint, payload, stored.request_id, True)
 
         try:
@@ -622,7 +676,13 @@ class MatrixportExtractor:
         )
         code = _api_code(payload)
         if code is not None:
-            raise ApiResponseError(path, code)
+            raise ApiResponseError(
+                path,
+                code,
+                status_code=response.status_code,
+                content=response.content,
+                request_id=stored.request_id,
+            )
         return ApiCall(endpoint, payload, stored.request_id, stored.resumed)
 
     def _safe_call(
@@ -632,10 +692,13 @@ class MatrixportExtractor:
         *,
         core: bool = False,
         observed_bounds: Mapping[str, Any] | None = None,
+        error_sink: list[BaseException] | None = None,
     ) -> ApiCall | None:
         try:
             return self._call(path, params, observed_bounds=observed_bounds)
         except (ApiResponseError, TransportError, ExtractionError) as error:
+            if error_sink is not None:
+                error_sink.append(error)
             self.quality_issues.append(
                 {
                     "source_table": "request",
@@ -760,6 +823,7 @@ class MatrixportExtractor:
         core: bool = False,
         set_coverage: bool = True,
         page_size: int = OFFSET_PAGE_SIZE,
+        error_sink: list[BaseException] | None = None,
     ) -> tuple[list[dict[str, Any]], str, bool]:
         output: list[dict[str, Any]] = []
         seen_pages: set[str] = set()
@@ -769,7 +833,7 @@ class MatrixportExtractor:
             offset = page_number * page_size
             params = dict(base_params or {})
             params.update({"limit": page_size, "offset": offset})
-            call = self._safe_call(path, params, core=core)
+            call = self._safe_call(path, params, core=core, error_sink=error_sink)
             if call is None:
                 terminal = "request_failed"
                 break
@@ -1521,35 +1585,73 @@ class MatrixportExtractor:
             ("/mapi/v1/wallet/deposits", "wallet_deposits"),
             ("/mapi/v1/wallet/withdrawals", "wallet_withdrawals"),
         ):
-            all_complete = True
             raw_rows = 0
+            completed_currencies: list[str] = []
             failed_currencies: list[str] = []
+            dispositions: list[dict[str, Any]] = []
             for index, currency in enumerate(codes, start=1):
                 if index == 1 or index % 50 == 0 or index == len(codes):
                     self.reporter(
                         f"wallet history: {dataset} currency {index}/{len(codes)}"
                     )
+                error_sink: list[BaseException] = []
                 rows, _terminal, complete = self._offset(
                     path,
                     dataset,
                     base_params={"currency": currency},
                     candidates=("items", "records", "deposits", "withdrawals", "list"),
                     set_coverage=False,
+                    error_sink=error_sink,
                 )
-                all_complete = all_complete and complete
-                if not complete:
-                    failed_currencies.append(currency)
                 raw_rows += len(rows)
+                if complete:
+                    completed_currencies.append(currency)
+                    continue
+                rejection = next(
+                    (
+                        details
+                        for error in error_sink
+                        if (details := _structured_rejection_details(error)) is not None
+                    ),
+                    None,
+                )
+                if rejection is None:
+                    failed_currencies.append(currency)
+                    continue
+                dispositions.append(
+                    {
+                        "dataset": dataset,
+                        "currency": currency,
+                        "disposition": "structured_parameter_rejection_terminal",
+                        **rejection,
+                    }
+                )
+            if dispositions:
+                self._store_rows(
+                    "wallet_currency_dispositions",
+                    dispositions,
+                    request_id=None,
+                    endpoint=path,
+                )
+            all_complete = not failed_currencies
+            terminal_reason = (
+                "enumerated_currency_failures"
+                if not all_complete
+                else (
+                    "structured_parameter_rejections_dispositioned"
+                    if dispositions
+                    else "all_enumerated_currencies"
+                )
+            )
             self._coverage(
                 path,
                 "complete_to_observed_boundary" if all_complete else "partial",
-                terminal_reason=(
-                    "all_enumerated_currencies"
-                    if all_complete
-                    else "enumerated_currency_parameter_rejections"
-                ),
+                terminal_reason=terminal_reason,
                 details={
                     "currency_count": len(codes),
+                    "completed_currency_count": len(completed_currencies),
+                    "rejected_currency_count": len(dispositions),
+                    "dispositions": dispositions,
                     "raw_rows": raw_rows,
                     "failed_currency_count": len(failed_currencies),
                     "failed_currencies": failed_currencies,
