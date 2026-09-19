@@ -5420,7 +5420,7 @@ def _attended_stage_financial_inputs(
     }
 
 
-def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Path | str]:
+def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
     """Validate the runner environment before source admission can have effects."""
 
     repo_root = Path(args.repo_root).resolve()
@@ -5536,7 +5536,9 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
         raise MaterializationError("attended data clock differs")
     if data_clock is not None:
         try:
-            date.fromisoformat(_text(data_clock["latest_common_eod"], "attended latest common EOD"))
+            date.fromisoformat(
+                _text(data_clock["latest_common_eod"], "attended latest common EOD")
+            )
         except ValueError as exc:
             raise MaterializationError("attended data clock differs") from exc
     source_clock = attended.get("source_clock")
@@ -5688,6 +5690,122 @@ def _attended_source_phase_receipt(output_root: Path) -> Path:
     return output_root / "source-phase-qc.json"
 
 
+def _attended_execution_observations_receipt(output_root: Path) -> Path:
+    return output_root / "attended-execution-observations.json"
+
+
+def _execution_timestamp() -> str:
+    """Record the actual UTC instant without contributing to financial identity."""
+
+    return datetime.now(UTC).isoformat()
+
+
+def _attended_execution_observations(
+    output_root: Path,
+) -> list[dict[str, Any]]:
+    """Read prior operational attempts, rejecting malformed timing evidence."""
+
+    receipt = _attended_execution_observations_receipt(output_root)
+    if not receipt.exists():
+        return []
+    value = _load(receipt, "attended execution observations")
+    attempts = value.get("attempts")
+    if (
+        set(value) != {"attempts", "schema_version"}
+        or value.get("schema_version") != 1
+        or not isinstance(attempts, list)
+    ):
+        raise MaterializationError("attended execution observations differ")
+    validated: list[dict[str, Any]] = []
+    for expected_attempt, attempt in enumerate(attempts, start=1):
+        if not isinstance(attempt, dict) or attempt.get("attempt") != expected_attempt:
+            raise MaterializationError("attended execution observations differ")
+        status = attempt.get("status")
+        required = (
+            {"attempt", "started_at", "status"}
+            if status in {"RUNNING", "INCOMPLETE"}
+            else {"attempt", "ended_at", "started_at", "status"}
+        )
+        if (
+            set(attempt) != required
+            or status not in {"RUNNING", "INCOMPLETE", "COMPLETED", "FAILED"}
+            or not isinstance(attempt.get("started_at"), str)
+        ):
+            raise MaterializationError("attended execution observations differ")
+        try:
+            started = datetime.fromisoformat(cast(str, attempt["started_at"]))
+            ended = (
+                datetime.fromisoformat(cast(str, attempt["ended_at"]))
+                if "ended_at" in attempt
+                else None
+            )
+        except ValueError as exc:
+            raise MaterializationError(
+                "attended execution observations differ"
+            ) from exc
+        if started.tzinfo is None or (ended is not None and ended.tzinfo is None):
+            raise MaterializationError("attended execution observations differ")
+        validated.append(dict(attempt))
+    return validated
+
+
+def _attended_replace_execution_observations(
+    output_root: Path, attempts: Sequence[Mapping[str, Any]]
+) -> None:
+    """Atomically preserve every operational attempt outside financial cache state."""
+
+    receipt = _attended_execution_observations_receipt(output_root)
+    value = {"attempts": [dict(attempt) for attempt in attempts], "schema_version": 1}
+    if not receipt.exists():
+        _write_exact(receipt, canonical_json_bytes(value))
+        return
+    if receipt.is_symlink() or not receipt.is_file():
+        raise MaterializationError(
+            "attended execution observations are not a regular file"
+        )
+    temporary = receipt.with_name(f".{receipt.name}.update")
+    _write_exact(temporary, canonical_json_bytes(value))
+    try:
+        os.replace(temporary, receipt)
+    except OSError as exc:
+        raise MaterializationError(
+            "attended execution observations cannot be updated"
+        ) from exc
+
+
+def _attended_start_execution_attempt(output_root: Path) -> int:
+    """Begin a new attempt and classify any previously interrupted attempt."""
+
+    attempts = _attended_execution_observations(output_root)
+    if attempts and attempts[-1]["status"] == "RUNNING":
+        attempts[-1]["status"] = "INCOMPLETE"
+    attempt = len(attempts) + 1
+    attempts.append(
+        {"attempt": attempt, "started_at": _execution_timestamp(), "status": "RUNNING"}
+    )
+    _attended_replace_execution_observations(output_root, attempts)
+    return attempt
+
+
+def _attended_finish_execution_attempt(
+    output_root: Path, attempt: int, status: str
+) -> None:
+    """Terminal outcomes receive a real ending instant; interruption remains open."""
+
+    if status not in {"COMPLETED", "FAILED"}:
+        raise MaterializationError("attended execution status differs")
+    attempts = _attended_execution_observations(output_root)
+    if (
+        not attempts
+        or attempts[-1].get("attempt") != attempt
+        or attempts[-1].get("status") != "RUNNING"
+    ):
+        raise MaterializationError("attended execution attempt differs")
+    attempts[-1]["ended_at"] = _execution_timestamp()
+    attempts[-1]["status"] = status
+    _attended_replace_execution_observations(output_root, attempts)
+
+
 def _attended_bind_qa(
     preflight: Mapping[str, Any], output_root: Path, completed: Sequence[str]
 ) -> None:
@@ -5759,11 +5877,15 @@ def _attended_start_or_resume(
     if output_root.exists():
         handoff = output_root / "preparation-handoff.json"
         if handoff.is_symlink() or not handoff.is_file():
-            raise MaterializationError("attended output root already exists; use --resume")
+            raise MaterializationError(
+                "attended output root already exists; use --resume"
+            )
         expected_stage = {
             flag: _file_definition(path)
             for flag, path in sorted(
-                cast(Mapping[str, Path], preflight.get("financial_stage_inputs", {})).items()
+                cast(
+                    Mapping[str, Path], preflight.get("financial_stage_inputs", {})
+                ).items()
             )
         }
         value = _load(handoff, "attended preparation handoff")
@@ -5773,7 +5895,9 @@ def _attended_start_or_resume(
             "source_run": _file_definition(source_run),
             "financial_stage_inputs": expected_stage,
             "source_phase": preflight["source_phase"],
-            "data_clock": _load(source_run, "attended prepared source run")["attended"]["data_clock"],
+            "data_clock": _load(source_run, "attended prepared source run")["attended"][
+                "data_clock"
+            ],
         }
         if value != expected:
             raise MaterializationError("attended preparation handoff differs")
@@ -5919,49 +6043,57 @@ def _attended_execute(
     preflight: Mapping[str, Any], output_root: Path, *, resume: bool
 ) -> tuple[int, dict[str, Any]]:
     failed_stage = _attended_start_or_resume(preflight, output_root, resume=resume)
-    if failed_stage is not None:
-        _attended_preserve_failed_stage(output_root, failed_stage)
-    completed = _attended_completed_stages(
-        output_root, preflight["required_stages"], failed_stage=failed_stage
-    )
-    for role in preflight["required_stages"]:
-        if role in completed:
-            continue
-        command = _attended_stage_command(preflight, output_root, role)
-        result = subprocess.run(
-            command,
-            cwd=cast(Path, preflight["repo_root"]),
-            capture_output=True,
-            text=True,
-            check=False,
+    attempt = _attended_start_execution_attempt(output_root)
+    try:
+        if failed_stage is not None:
+            _attended_preserve_failed_stage(output_root, failed_stage)
+        completed = _attended_completed_stages(
+            output_root, preflight["required_stages"], failed_stage=failed_stage
         )
-        if result.stdout:
-            print(result.stdout, end="")
-        if result.stderr:
-            print(result.stderr, end="", file=sys.stderr)
-        if result.returncode != 0:
-            _attended_record_failed_stage(
-                output_root, preflight["request_identity"], role, result.returncode
+        for role in preflight["required_stages"]:
+            if role in completed:
+                continue
+            command = _attended_stage_command(preflight, output_root, role)
+            result = subprocess.run(
+                command,
+                cwd=cast(Path, preflight["repo_root"]),
+                capture_output=True,
+                text=True,
+                check=False,
             )
-            return result.returncode, _attended_view(
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
+            if result.returncode != 0:
+                _attended_record_failed_stage(
+                    output_root, preflight["request_identity"], role, result.returncode
+                )
+                _attended_finish_execution_attempt(output_root, attempt, "FAILED")
+                return result.returncode, _attended_view(
+                    output_root,
+                    preflight["required_stages"],
+                    preflight["request_identity"],
+                    completed,
+                )
+            completed = _attended_completed_stages(
                 output_root,
                 preflight["required_stages"],
-                preflight["request_identity"],
-                completed,
             )
-        completed = _attended_completed_stages(
-            output_root, preflight["required_stages"]
+            if role not in completed:
+                raise MaterializationError(
+                    f"attended {role} child returned success without completed artifacts"
+                )
+            if failed_stage == role:
+                _attended_clear_failed_stage(output_root, preflight["request_identity"])
+                failed_stage = None
+        _attended_finish_execution_attempt(output_root, attempt, "COMPLETED")
+        return 0, _attended_view(
+            output_root, preflight["required_stages"], preflight["request_identity"]
         )
-        if role not in completed:
-            raise MaterializationError(
-                f"attended {role} child returned success without completed artifacts"
-            )
-        if failed_stage == role:
-            _attended_clear_failed_stage(output_root, preflight["request_identity"])
-            failed_stage = None
-    return 0, _attended_view(
-        output_root, preflight["required_stages"], preflight["request_identity"]
-    )
+    except Exception:
+        _attended_finish_execution_attempt(output_root, attempt, "FAILED")
+        raise
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -6112,12 +6244,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 source_run = prepared.get("source_run")
                 financial = prepared.get("financial_stage_inputs")
-                if not isinstance(source_run, Path) or not isinstance(financial, Mapping):
+                if not isinstance(source_run, Path) or not isinstance(
+                    financial, Mapping
+                ):
                     raise MaterializationError("attended preparation handoff differs")
                 args.source_run = source_run
                 for flag, path in financial.items():
-                    if flag not in {*ATTENDED_HWM_INPUTS, *ATTENDED_CAPITAL_INPUTS} or not isinstance(path, Path):
-                        raise MaterializationError("attended preparation financial bindings differ")
+                    if flag not in {
+                        *ATTENDED_HWM_INPUTS,
+                        *ATTENDED_CAPITAL_INPUTS,
+                    } or not isinstance(path, Path):
+                        raise MaterializationError(
+                            "attended preparation financial bindings differ"
+                        )
                     setattr(args, flag[2:].replace("-", "_"), path)
             preflight = _attended_preflight(args)
             if args.execute:

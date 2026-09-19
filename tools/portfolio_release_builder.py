@@ -227,7 +227,8 @@ def _write_disposable(path: Path, content: bytes) -> None:
 
 def _sha(path: Path) -> tuple[str, int]:
     try:
-        return hash_file(path)
+        digest: tuple[str, int] = hash_file(path)
+        return digest
     except (OSError, ValueError) as exc:
         raise VerticalBuildError(f"source artifact is unavailable: {path}") from exc
 
@@ -744,9 +745,17 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
         ) from exc
     if not isinstance(catalog, dict):
         raise VerticalBuildError("reusable provider-ledger root must be an object")
-    if (
-        catalog.get("as_of_date") != manifest.as_of_date.isoformat()
-        or catalog.get("catalog_schema_version") != 2
+    try:
+        financial_cutoff = date.fromisoformat(
+            _text(catalog.get("as_of_date"), "provider ledger cutoff")
+        )
+    except (TypeError, ValueError) as exc:
+        raise VerticalBuildError(
+            "reusable provider-ledger catalog contract differs"
+        ) from exc
+    if catalog.get("catalog_schema_version") != 2 or any(
+        artifact_by_id[artifact_id].as_of_date != financial_cutoff
+        for artifact_id in required_artifacts
     ):
         raise VerticalBuildError("reusable provider-ledger catalog contract differs")
     try:
@@ -759,6 +768,12 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
         raise VerticalBuildError(
             "reusable provider-ledger admission receipt root must be an object"
         )
+    observation = receipt.get("run_observation")
+    if observation is not None and (
+        not isinstance(observation, dict)
+        or observation.get("financial_cutoff") != catalog["as_of_date"]
+    ):
+        raise VerticalBuildError("reusable provider-ledger catalog contract differs")
     if (
         receipt.get("receipt_type") != "PROVIDER_ADMIT_OR_DECLARE_V1"
         or receipt.get("schema_version") != 1
@@ -994,7 +1009,9 @@ def _recipe(path: Path) -> dict[str, Any]:
     if "source_clock" in recipe:
         definition = recipe["source_clock"]
         if not isinstance(definition, dict) or set(definition) != {
-            "path", "sha256", "size_bytes"
+            "path",
+            "sha256",
+            "size_bytes",
         }:
             raise VerticalBuildError("source_clock definition differs")
         artifact = _path(definition["path"], "source_clock.path")
@@ -5004,7 +5021,11 @@ def build_report_candidate(
             if dependence_selected_inputs_path is not None
             else ()
         ),
-        *(("--source-clock", str(source_clock_path)) if source_clock_path is not None else ()),
+        *(
+            ("--source-clock", str(source_clock_path))
+            if source_clock_path is not None
+            else ()
+        ),
         "--implementation-reconciliation",
         str(implementation_reconciliation),
         "--implementation-return-attribution",
@@ -5582,7 +5603,11 @@ def build_report(
             if dependence_selected_inputs_path is not None
             else ()
         ),
-        *(("--source-clock", str(source_clock_path)) if source_clock_path is not None else ()),
+        *(
+            ("--source-clock", str(source_clock_path))
+            if source_clock_path is not None
+            else ()
+        ),
         *(
             (
                 "--decomposition-lenses-root",
@@ -6738,7 +6763,11 @@ def build_stage(
         else {}
     )
     source_clock_paths = (
-        {"source_clock_path": _path(recipe["source_clock"]["path"], "source_clock.path")}
+        {
+            "source_clock_path": _path(
+                recipe["source_clock"]["path"], "source_clock.path"
+            )
+        }
         if isinstance(recipe.get("source_clock"), dict)
         else {}
     )

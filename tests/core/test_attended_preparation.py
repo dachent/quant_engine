@@ -95,8 +95,10 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
         ),
         encoding="utf-8",
     )
+
     def pin(name: str) -> dict[str, object]:
         return {"path": name, "sha256": "x", "size_bytes": 1}
+
     modes = {
         mode: {
             key: pin(f"{mode}-{key}.json")
@@ -127,7 +129,9 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
                 "financial_input_contract": pin("contract.json"),
                 "source_selection": pin(selection_path.name),
                 "provider_ledger_generation_root": str(tmp_path / "ledger"),
-                "retained_verified_generations": {"history": {"root": str(tmp_path / "history")}},
+                "retained_verified_generations": {
+                    "history": {"root": str(tmp_path / "history")}
+                },
                 "plans": modes,
             }
         ),
@@ -168,13 +172,17 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
         lambda *_args, **kwargs: history_calls.append(kwargs) or {},
     )
     monkeypatch.setattr(
-        plans, "build_bundle", lambda **kwargs: plan_calls.append(kwargs) or ({}, {}),
+        plans,
+        "build_bundle",
+        lambda **kwargs: plan_calls.append(kwargs) or ({}, {}),
     )
 
     preparation._validated_inputs(config_path, "2026-09-17", "2026-09-19")
 
     expected = {name: tmp_path / f"{name}.json" for name in authority_names}
-    assert [{name: call[name] for name in authority_names} for call in history_calls] == [
+    assert [
+        {name: call[name] for name in authority_names} for call in history_calls
+    ] == [
         expected,
         expected,
     ]
@@ -215,11 +223,13 @@ def test_selected_dependence_handoff_replaces_every_stale_authority(
         preparation, "_pin", lambda _value, _label: tmp_path / "template.json"
     )
     monkeypatch.setattr(
-        preparation, "_selected_history_authorities", lambda _files: {
+        preparation,
+        "_selected_history_authorities",
+        lambda _files: {
             "provider_admission_receipt_path": tmp_path / "new-receipt",
             "financial_input_contract_path": tmp_path / "new-contract",
             "portfolio123_version_evidence_path": tmp_path / "new-p123",
-        }
+        },
     )
 
     actual = preparation._selected_dependence_handoff(
@@ -276,9 +286,12 @@ def test_history_dependency_mismatch_requires_rebuild_but_source_failure_does_no
         )
 
     monkeypatch.setattr(history, "verify_layered_history_generation", changed)
-    assert preparation._retained_history_requires_rebuild(
-        tmp_path / "history", tmp_path / "contract.json", {}
-    ) is True
+    assert (
+        preparation._retained_history_requires_rebuild(
+            tmp_path / "history", tmp_path / "contract.json", {}
+        )
+        is True
+    )
     assert calls == ["LIVE_ONLY"]
 
     def corrupted(*_args: object, **_kwargs: object) -> dict[str, object]:
@@ -321,58 +334,98 @@ def test_rebuild_layered_history_uses_selected_builder_kwargs_and_current_commit
         lambda *_args, **kwargs: verified.append(str(kwargs["require_mode"])) or {},
     )
 
-    assert preparation._rebuild_layered_history(
-        {"builder_kwargs": {"as_of_date": "2026-09-17", "contract_path": str(source), "repository_sha": "old"}},
-        tmp_path / "prepared-history",
-        "b" * 40,
-        source,
-        {},
-    ) == destination
+    assert (
+        preparation._rebuild_layered_history(
+            {
+                "builder_kwargs": {
+                    "as_of_date": "2026-09-17",
+                    "contract_path": str(source),
+                    "repository_sha": "old",
+                }
+            },
+            tmp_path / "prepared-history",
+            "b" * 40,
+            source,
+            {},
+        )
+        == destination
+    )
     assert built["repository_sha"] == "b" * 40
     assert built["contract_path"] == source
     assert verified == ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]
 
 
-def test_attended_preparation_resume_reuses_verified_handoff_before_producers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_reusable_preparation_handoff_preserves_verified_complete_output(
+    tmp_path: Path,
 ) -> None:
-    """An unchanged complete handoff is returned without starting a producer."""
+    """A fully bound handoff remains reusable after its checkpoints validate it."""
 
     root = tmp_path / "prepared"
-    root.mkdir()
-    identity = {"schema_version": 1}
-    plan = {"source_phase": {"status": "PASS"}, "data_clock": {"eod": "2026-09-17"}}
-    expected = {
-        "source_run": root / "preparation" / "source-run.json",
-        "financial_stage_inputs": {},
-        "data_clock": plan["data_clock"],
+    preparation_dir = root / "preparation"
+    preparation_dir.mkdir(parents=True)
+    data_clock = {"latest_common_eod": "2026-09-17"}
+    identity = {
+        "financial_data_cutoff": "2026-09-17",
+        "release_commit": "a" * 40,
+        "schema_version": 1,
     }
-    calls: list[str] = []
+    (root / "preparation-input-identity.json").write_bytes(
+        preparation.canonical_json_bytes(identity)
+    )
+    source_run = preparation_dir / "source-run.json"
+    source_run.write_bytes(
+        preparation.canonical_json_bytes(
+            {
+                "artifacts": [],
+                "as_of_date": "2026-09-17",
+                "attended": {"data_clock": data_clock},
+                "release_commit": "a" * 40,
+                "schema_version": 1,
+            }
+        )
+    )
+    financial: dict[str, Path] = {}
+    for flag in (
+        "--hwm-governed-result",
+        "--hwm-governed-input-generation",
+        "--hwm-governed-calendar-authority",
+        "--hwm-governed-admission-receipt",
+        "--invested-capital-result",
+        "--invested-capital-input-generation",
+    ):
+        path = root / f"{flag[2:]}.json"
+        path.write_text("{}", encoding="utf-8")
+        financial[flag] = path
+    handoff = {
+        "data_clock": data_clock,
+        "financial_stage_inputs": {
+            flag: preparation._definition(path)
+            for flag, path in sorted(financial.items())
+        },
+        "schema_version": 1,
+        "source_phase": {"status": "PASS"},
+        "source_run": preparation._definition(source_run),
+    }
+    (root / "preparation-handoff.json").write_bytes(
+        preparation.canonical_json_bytes(handoff)
+    )
 
-    monkeypatch.setattr(preparation, "_validated_inputs", lambda *_args: ({}, plan))
-    monkeypatch.setattr(
-        preparation, "_preparation_input_identity", lambda **_kwargs: identity
-    )
-    monkeypatch.setattr(
-        preparation,
-        "_reusable_preparation_handoff",
-        lambda **_kwargs: calls.append("reuse") or expected,
-    )
-    monkeypatch.setattr(
-        preparation,
-        "_capital_input_builder",
-        lambda: (_ for _ in ()).throw(AssertionError("resume started capital producer")),
+    actual = preparation._reusable_preparation_handoff(
+        root=root,
+        config={
+            "calendar_authority": preparation._definition(
+                financial["--hwm-governed-calendar-authority"]
+            )
+        },
+        identity=identity,
+        plan={"data_clock": data_clock, "source_phase": {"status": "PASS"}},
     )
 
-    assert preparation.prepare_attended_inputs(
-        preparation_spec_path=tmp_path / "config.json",
-        output_root=root,
-        requested_as_of="2026-09-17",
-        evaluated_on="2026-09-19",
-        release_commit="a" * 40,
-        resume=True,
-    ) == expected
-    assert calls == ["reuse"]
+    assert actual == {
+        "data_clock": data_clock,
+        "financial_stage_inputs": financial,
+        "source_run": source_run,
+    }
 
 
 def test_attended_preparation_resume_rejects_changed_identity_before_producers(
@@ -398,7 +451,9 @@ def test_attended_preparation_resume_rejects_changed_identity_before_producers(
         lambda: (_ for _ in ()).throw(AssertionError("changed input rebuilt capital")),
     )
 
-    with pytest.raises(preparation.AttendedPreparationError, match="input identity differs"):
+    with pytest.raises(
+        preparation.AttendedPreparationError, match="input identity differs"
+    ):
         preparation.prepare_attended_inputs(
             preparation_spec_path=tmp_path / "config.json",
             output_root=root,
@@ -408,6 +463,459 @@ def test_attended_preparation_resume_rejects_changed_identity_before_producers(
             resume=True,
         )
     assert (root / "preparation-input-identity.json").is_file()
+
+
+def test_preparation_checkpoint_never_accepts_partially_rewritten_output(
+    tmp_path: Path,
+) -> None:
+    """A missing receipt or changed producer file cannot be resumed as complete."""
+
+    root = tmp_path / "prepared"
+    output = root / "preparation" / "history"
+    output.mkdir(parents=True)
+    (output / "selected.json").write_text('{"selected":"verified"}', encoding="utf-8")
+    run_identity = {"schema_version": 1, "source": "pinned"}
+    full_identity = {
+        "code": {"attended_preparation": {}, "target_series": {}},
+        "policy": {},
+    }
+    identity = preparation._stage_identity(
+        "selected-history-normalization", run_identity, full_identity, {}
+    )
+
+    assert (
+        preparation._load_checkpoint(
+            root=root,
+            stage="selected-history-normalization",
+            identity=identity,
+        )
+        is None
+    )
+    preparation._record_checkpoint(
+        root=root,
+        stage="selected-history-normalization",
+        identity=identity,
+        result={"history_source": str(output.parent)},
+        outputs={"history_source": output},
+    )
+    (output / "selected.json").write_text('{"selected":"partial"}', encoding="utf-8")
+
+    assert (
+        preparation._load_checkpoint(
+            root=root,
+            stage="selected-history-normalization",
+            identity=identity,
+        )
+        is None
+    )
+
+
+def test_preparation_checkpoint_dependencies_are_not_inferred_from_stage_order() -> (
+    None
+):
+    """The executable declaration rejects a ledger receipt without all producers."""
+
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="dependency is incomplete",
+    ):
+        preparation._stage_identity(
+            "ledger", {"schema_version": 1}, {"code": {}, "policy": {}}, {}
+        )
+
+
+def test_preparation_checkpoint_rejects_missing_declared_output(
+    tmp_path: Path,
+) -> None:
+    """A receipt cannot omit a real stage output and still suppress its producer."""
+
+    root = tmp_path / "prepared"
+    output = root / "preparation" / "history"
+    output.mkdir(parents=True)
+    (output / "selected.json").write_text('{"selected":"verified"}', encoding="utf-8")
+    identity = preparation._stage_identity(
+        "selected-history-normalization",
+        {"schema_version": 1},
+        {"code": {"attended_preparation": {}, "target_series": {}}, "policy": {}},
+        {},
+    )
+    checkpoint = (
+        root / "preparation" / "checkpoints" / "selected-history-normalization.json"
+    )
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(
+        preparation.canonical_json_bytes(
+            {
+                "input_identity": identity,
+                "outputs": {},
+                "result": {"history_source": str(output)},
+                "schema_version": 1,
+                "stage": "selected-history-normalization",
+            }
+        )
+    )
+
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="checkpoint output differs",
+    ):
+        preparation._load_checkpoint(
+            root=root,
+            stage="selected-history-normalization",
+            identity=identity,
+        )
+
+
+def _preparation_function_fixture(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, dict[str, int], dict[str, object]]:
+    """Keep checkpoint control flow real while replacing only numerical producers."""
+
+    import portfolio_current_decomposition_plan as plans
+    import portfolio_current_dependence as dependence
+    import portfolio_financial_outcomes as outcomes
+    import portfolio_hwm_selected_inputs as hwm_inputs
+    import portfolio_invested_capital as capital
+    import portfolio_release_builder as release
+    import static_snapshot_coverage_receipts as snapshots
+    import stage_current_epoch_manifest as epoch_stage
+    from quant_engine.portfolio_ledger import hwm_governed_execution as hwm
+    import rebind_current_epoch_crosswalk as rebind
+
+    source_selection = tmp_path / "selection.json"
+    source_selection.write_text('{"files":{}}', encoding="utf-8")
+    contract = tmp_path / "contract.json"
+    contract.write_text("{}", encoding="utf-8")
+    calendar = tmp_path / "calendar.json"
+    calendar.write_text(
+        '{"authority_evidence_sha256":"calendar","hwm_policy_sha256":"policy"}',
+        encoding="utf-8",
+    )
+    history_root = tmp_path / "history"
+    history_root.mkdir()
+    baseline_source = tmp_path / "baseline-source"
+    baseline_source.mkdir()
+    attribution_source = tmp_path / "attribution-source" / "generations" / ("a" * 64)
+    attribution_source.mkdir(parents=True)
+    config: dict[str, object] = {
+        "base_factor_file": str(tmp_path / "factors.csv"),
+        "baseline_spec_template": str(tmp_path / "baseline-spec.json"),
+        "calendar_authority": str(calendar),
+        "capital_account_crosswalk": str(tmp_path / "capital-crosswalk.json"),
+        "dependence_selection_template": str(tmp_path / "dependence.json"),
+        "epoch_admission_policy": str(tmp_path / "epoch-policy.json"),
+        "epoch_crosswalk_template": str(tmp_path / "crosswalk.json"),
+        "financial_input_contract": str(contract),
+        "financial_data_cutoff": "2026-09-17",
+        "implementation_reconciliation": str(tmp_path / "reconciliation.json"),
+        "implementation_return_attribution": str(tmp_path / "return-attribution.json"),
+        "legacy_panel_root": str(tmp_path / "legacy-panel"),
+        "plans": {
+            mode: {
+                "base_factor_manifest": str(tmp_path / f"{mode}-base-factor.json"),
+                "base_source_template_root": str(tmp_path / f"{mode}-base-source"),
+                "base_spec_template": str(tmp_path / f"{mode}-base-spec.json"),
+                "catalog": str(tmp_path / f"{mode}-catalog.json"),
+                "europe_factors": str(tmp_path / f"{mode}-europe.csv"),
+                "plan": str(tmp_path / f"{mode}-plan.json"),
+                "public_factor_manifest": str(tmp_path / f"{mode}-public.json"),
+                "sector_manifest": str(tmp_path / f"{mode}-sector.json"),
+                "sector_returns": str(tmp_path / f"{mode}-sectors.csv"),
+                "style_manifest": str(tmp_path / f"{mode}-style.json"),
+                "style_returns": str(tmp_path / f"{mode}-style.csv"),
+                "us_factors": str(tmp_path / f"{mode}-us.csv"),
+                "us_industries": str(tmp_path / f"{mode}-industries.csv"),
+            }
+            for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
+        },
+        "provider_ledger_generation_root": str(tmp_path / "ledger-source"),
+        "provider_ledger_spec": str(tmp_path / "provider-ledger-spec.json"),
+        "retained_verified_generations": {
+            "attribution": {"root": str(attribution_source)},
+            "baseline": {"root": str(baseline_source)},
+            "history": {"root": str(history_root)},
+        },
+        "source_selection": str(source_selection),
+    }
+    plan = {
+        "data_clock": {"latest_common_eod": "2026-09-17"},
+        "history_rebuild_required": False,
+        "source_phase": {"status": "PASS"},
+    }
+    identity = {
+        "code": {
+            name: {}
+            for name in (
+                "attended_preparation",
+                "capital_input",
+                "current_dependence",
+                "current_plan",
+                "financial_outcomes",
+                "hwm_inputs",
+                "invested_capital",
+                "release_builder",
+                "target_series",
+            )
+        },
+        "financial_data_cutoff": "2026-09-17",
+        "policy": {
+            name: {}
+            for name in (
+                "dependence",
+                "flow_classification",
+                "hwm_current",
+                "hwm_legacy",
+                "performance",
+            )
+        },
+        "release_commit": "a" * 40,
+        "schema_version": 1,
+        "source_phase": plan["source_phase"],
+        "source_selection": preparation._definition(source_selection),
+    }
+    calls = {"dependence": 0, "plan": 0}
+
+    monkeypatch.setattr(preparation, "_validated_inputs", lambda *_args: (config, plan))
+    monkeypatch.setattr(
+        preparation, "_preparation_input_identity", lambda **_kwargs: identity.copy()
+    )
+    monkeypatch.setattr(preparation, "_selected_history_authorities", lambda _files: {})
+    monkeypatch.setattr(
+        preparation,
+        "_selected_dependence_handoff",
+        lambda **_kwargs: {"schema_version": 1},
+    )
+    monkeypatch.setattr(preparation, "_pin", lambda value, _label: Path(str(value)))
+    monkeypatch.setattr(preparation, "_maximum_age_days", lambda _contract: 1)
+
+    def write_dependence(output: Path, **_kwargs: object) -> dict[str, str]:
+        calls["dependence"] += 1
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "source.json").write_text("{}", encoding="utf-8")
+        return {"destination": str(output)}
+
+    monkeypatch.setattr(dependence, "write_source", write_dependence)
+    monkeypatch.setattr(
+        dependence, "verify_packaged_source", lambda *_args, **_kwargs: None
+    )
+
+    def write_bundle(output: Path, **_kwargs: object) -> dict[str, str]:
+        calls["plan"] += 1
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "bundle.json").write_text("{}", encoding="utf-8")
+        return {"destination": str(output)}
+
+    monkeypatch.setattr(plans, "write_bundle", write_bundle)
+    monkeypatch.setattr(
+        release,
+        "create_recipe",
+        lambda **kwargs: preparation._write(kwargs["output"], {}),
+    )
+
+    def staged_generation(output: Path, label: str) -> dict[str, str]:
+        generation = output / "generations" / (label * 64)
+        generation.mkdir(parents=True, exist_ok=True)
+        (generation / "generation.json").write_text("{}", encoding="utf-8")
+        if label == "l":
+            (generation / "admit-or-declare-receipt.json").write_text(
+                "{}", encoding="utf-8"
+            )
+        return {"generation_id": generation.name}
+
+    monkeypatch.setattr(
+        release, "build_ledger", lambda _recipe, output: staged_generation(output, "l")
+    )
+    monkeypatch.setattr(
+        release,
+        "build_baseline",
+        lambda _recipe, _ledger, output: staged_generation(output, "b"),
+    )
+    monkeypatch.setattr(
+        release,
+        "_record_stage",
+        lambda root, role, _result: preparation._write(
+            root / "stage-results" / f"{role}.json", {"role": role}
+        ),
+    )
+    monkeypatch.setattr(
+        rebind,
+        "rebind_current_epoch_crosswalk",
+        lambda **kwargs: preparation._write(kwargs["output_path"], {}),
+    )
+    monkeypatch.setattr(
+        snapshots, "issue_static_snapshot_receipts", lambda **_kwargs: ({}, {})
+    )
+
+    def stage_epoch(**kwargs: object) -> dict[str, str]:
+        output = (
+            Path(str(kwargs["output_generation_root"])) / "generations" / ("e" * 64)
+        )
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "generation.json").write_text("{}", encoding="utf-8")
+        return {"generation_id": output.name}
+
+    monkeypatch.setattr(epoch_stage, "stage_current_epoch_manifest", stage_epoch)
+    monkeypatch.setattr(capital, "governed_hwm_input_policy", lambda *_args: b"policy")
+    monkeypatch.setattr(
+        hwm_inputs,
+        "build_selected_hwm_inputs",
+        lambda **_kwargs: {
+            "component_periods": [],
+            "memberships": [{"effective_start": "2026-09-16"}],
+        },
+    )
+    monkeypatch.setattr(
+        hwm, "compute_governed_as_held_composite_hwm", lambda *_args, **_kwargs: {}
+    )
+    monkeypatch.setattr(
+        hwm, "verify_governed_hwm_result", lambda *_args, **_kwargs: None
+    )
+    monkeypatch.setattr(
+        preparation,
+        "_capital_input_builder",
+        lambda: lambda **_kwargs: {},
+    )
+    monkeypatch.setattr(capital, "build_governed_capital_result", lambda *_args: {})
+    monkeypatch.setattr(capital, "verify_governed_capital_result", lambda *_args: None)
+    monkeypatch.setattr(outcomes, "verify_selected_capital_ledger", lambda *_args: None)
+
+    def build_attribution(_recipe: Path, output: Path) -> dict[str, str]:
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "bundle.json").write_text("{}", encoding="utf-8")
+        return {"destination": str(output)}
+
+    monkeypatch.setattr(release, "build_attribution", build_attribution)
+    return tmp_path / "preparation-spec.json", calls, identity
+
+
+def test_preparation_resume_skips_completed_dependence_after_plan_interruption(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The real preparation function resumes after an interrupted later producer."""
+
+    spec, calls, _identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "prepared"
+    import portfolio_current_decomposition_plan as plans
+
+    original = plans.write_bundle
+
+    def interrupted_plan(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise RuntimeError("interrupt after dependence")
+
+    monkeypatch.setattr(plans, "write_bundle", interrupted_plan)
+    with pytest.raises(RuntimeError, match="interrupt after dependence"):
+        preparation.prepare_attended_inputs(
+            preparation_spec_path=spec,
+            output_root=output,
+            requested_as_of="2026-09-17",
+            evaluated_on="2026-09-19",
+            release_commit="a" * 40,
+        )
+    assert calls["dependence"] == 1
+
+    monkeypatch.setattr(plans, "write_bundle", original)
+    result = preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+        resume=True,
+    )
+
+    assert calls["dependence"] == 1
+    assert result["data_clock"] == {"latest_common_eod": "2026-09-17"}
+
+
+def test_preparation_resume_archives_partially_written_dependence_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A producer that stops before its receipt is never accepted as complete."""
+
+    spec, calls, _identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "prepared"
+    import portfolio_current_dependence as dependence
+
+    original = dependence.write_source
+
+    def partial_dependence(destination: Path, **_kwargs: object) -> dict[str, str]:
+        calls["dependence"] += 1
+        destination.mkdir(parents=True)
+        (destination / "partial.json").write_text("partial", encoding="utf-8")
+        raise RuntimeError("interrupt during dependence")
+
+    monkeypatch.setattr(dependence, "write_source", partial_dependence)
+    with pytest.raises(RuntimeError, match="interrupt during dependence"):
+        preparation.prepare_attended_inputs(
+            preparation_spec_path=spec,
+            output_root=output,
+            requested_as_of="2026-09-17",
+            evaluated_on="2026-09-19",
+            release_commit="a" * 40,
+        )
+    assert calls["dependence"] == 1
+
+    monkeypatch.setattr(dependence, "write_source", original)
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+        resume=True,
+    )
+
+    assert calls["dependence"] == 2
+    assert any(
+        path.read_text(encoding="utf-8") == "partial"
+        for path in (output / "preparation" / "partial" / "dependence").rglob(
+            "partial.json"
+        )
+    )
+
+
+def test_preparation_full_handoff_rejects_changed_hwm_policy_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Full-handoff reuse cannot bypass a current HWM policy identity change."""
+
+    spec, _calls, identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "prepared"
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+    old_hwm = preparation._read(
+        output / "preparation" / "checkpoints" / "hwm.json", "old HWM checkpoint"
+    )
+    old_final = preparation._read(
+        output / "preparation" / "checkpoints" / "final-handoff.json",
+        "old final checkpoint",
+    )
+    assert isinstance(identity["policy"], dict)
+    identity["policy"]["performance"] = {"sha256": "changed"}
+
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+        resume=True,
+    )
+
+    new_hwm = preparation._read(
+        output / "preparation" / "checkpoints" / "hwm.json", "new HWM checkpoint"
+    )
+    new_final = preparation._read(
+        output / "preparation" / "checkpoints" / "final-handoff.json",
+        "new final checkpoint",
+    )
+    assert new_hwm["input_identity"] != old_hwm["input_identity"]
+    assert new_final["input_identity"] != old_final["input_identity"]
 
 
 def test_source_clock_excludes_finite_history_from_live_common_eod() -> None:
@@ -430,8 +938,12 @@ def test_source_clock_excludes_finite_history_from_live_common_eod() -> None:
                     "fidelity": row("2025-02-01", "FINITE_SELECTED_MANIFEST_BOUNDARY"),
                     "ibkr": row("2026-09-18", "NATIVE_FLEX_STATEMENT_LABEL"),
                     "matrixport": row("2026-09-17", "PRIOR_UTC_DAILY_LABEL_SELECTION"),
-                    "portfolio123": row("2024-01-01", "FINITE_SELECTED_MANIFEST_BOUNDARY"),
-                    "quantbase": row("2026-09-17", "CONVERSION_RECEIPT_POLICY_SELECTED_NATIVE_LABEL"),
+                    "portfolio123": row(
+                        "2024-01-01", "FINITE_SELECTED_MANIFEST_BOUNDARY"
+                    ),
+                    "quantbase": row(
+                        "2026-09-17", "CONVERSION_RECEIPT_POLICY_SELECTED_NATIVE_LABEL"
+                    ),
                     "schwab": row("2026-09-17", "CAPTURED_NATIVE_HISTORICAL_NAV_LABEL"),
                 }
             }
@@ -473,7 +985,10 @@ def test_hwm_warning_age_uses_required_dated_hwm_sources_only() -> None:
                 "capture_status": "CAPTURED_GOVERNED",
                 "existence_status": "EXISTS",
                 "consumers": ["AS_HELD_COMPOSITE_HWM"],
-                "freshness": {"max_age_days": 0, "rule": "REVALIDATE_ON_PRODUCT_VERSION_CHANGE"},
+                "freshness": {
+                    "max_age_days": 0,
+                    "rule": "REVALIDATE_ON_PRODUCT_VERSION_CHANGE",
+                },
             },
             {
                 "source_id": "live-a",
@@ -481,7 +996,10 @@ def test_hwm_warning_age_uses_required_dated_hwm_sources_only() -> None:
                 "capture_status": "CAPTURED_GOVERNED",
                 "existence_status": "EXISTS",
                 "consumers": ["AS_HELD_COMPOSITE_HWM"],
-                "freshness": {"max_age_days": 3, "rule": "THROUGH_ACCEPTED_LIVE_BOUNDARY"},
+                "freshness": {
+                    "max_age_days": 3,
+                    "rule": "THROUGH_ACCEPTED_LIVE_BOUNDARY",
+                },
             },
             {
                 "source_id": "live-b",
@@ -489,7 +1007,10 @@ def test_hwm_warning_age_uses_required_dated_hwm_sources_only() -> None:
                 "capture_status": "CAPTURED_GOVERNED",
                 "existence_status": "EXISTS",
                 "consumers": ["AS_HELD_COMPOSITE_HWM"],
-                "freshness": {"max_age_days": 2, "rule": "THROUGH_ACCEPTED_PROVIDER_BOUNDARY"},
+                "freshness": {
+                    "max_age_days": 2,
+                    "rule": "THROUGH_ACCEPTED_PROVIDER_BOUNDARY",
+                },
             },
         ]
     }
@@ -571,7 +1092,9 @@ def test_attended_execute_binds_prepared_handoff_before_native_stages(
             assert getattr(args, flag[2:].replace("-", "_")) == path
         return preflight
 
-    def execute(actual: object, actual_root: Path, *, resume: bool) -> tuple[int, dict[str, object]]:
+    def execute(
+        actual: object, actual_root: Path, *, resume: bool
+    ) -> tuple[int, dict[str, object]]:
         events.append("execute")
         assert actual is preflight
         assert actual_root == output
@@ -587,7 +1110,9 @@ def test_attended_execute_binds_prepared_handoff_before_native_stages(
     assert events == ["prepare", "preflight", "execute"]
 
 
-@pytest.mark.parametrize("failure", ["missing source QC", "tampered source QC", "wrong cutoff"])
+@pytest.mark.parametrize(
+    "failure", ["missing source QC", "tampered source QC", "wrong cutoff"]
+)
 def test_attended_execute_rejects_bad_preparation_before_output_or_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:

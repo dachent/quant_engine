@@ -259,25 +259,37 @@ def _file_definition(path: Path) -> dict[str, object]:
     }
 
 
-def _provider_ledger_generation(tmp_path: Path) -> Path:
+def _provider_ledger_generation(
+    tmp_path: Path,
+    *,
+    catalog_as_of: str = "2026-08-03",
+    manifest_as_of: str | None = None,
+    artifact_as_of: str | None = None,
+    receipt_cutoff: str | None = None,
+) -> Path:
+    """Build a hash-bound ledger with independently declared financial/provenance dates."""
+
+    manifest_as_of = manifest_as_of or catalog_as_of
+    artifact_as_of = artifact_as_of or catalog_as_of
     catalog = (
         json.dumps(
-            {"as_of_date": "2026-08-03", "catalog_schema_version": 2},
+            {"as_of_date": catalog_as_of, "catalog_schema_version": 2},
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
         + b"\n"
     )
-    receipt = canonical_json_bytes(
-        {
-            "admission_gate_status": "PASS",
-            "product_readiness": "REQUIRED_NOT_READY",
-            "receipt_type": "PROVIDER_ADMIT_OR_DECLARE_V1",
-            "schema_version": 1,
-        }
-    )
+    receipt_value: dict[str, object] = {
+        "admission_gate_status": "PASS",
+        "product_readiness": "REQUIRED_NOT_READY",
+        "receipt_type": "PROVIDER_ADMIT_OR_DECLARE_V1",
+        "schema_version": 1,
+    }
+    if receipt_cutoff is not None:
+        receipt_value["run_observation"] = {"financial_cutoff": receipt_cutoff}
+    receipt = canonical_json_bytes(receipt_value)
     manifest = GenerationManifest.build(
-        as_of_date=builder.date.fromisoformat("2026-08-03"),
+        as_of_date=builder.date.fromisoformat(manifest_as_of),
         adapter=AdapterIdentity("quant-engine-provider-ledger", "5"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
@@ -291,7 +303,7 @@ def _provider_ledger_generation(tmp_path: Path) -> Path:
                 artifact_id="normalized/admit-or-declare-receipt.json",
                 sha256=hashlib.sha256(receipt).hexdigest(),
                 size_bytes=len(receipt),
-                as_of_date=builder.date.fromisoformat("2026-08-03"),
+                as_of_date=builder.date.fromisoformat(artifact_as_of),
                 schema_name="provider-admission-receipt",
                 schema_version="1",
             ),
@@ -299,7 +311,7 @@ def _provider_ledger_generation(tmp_path: Path) -> Path:
                 artifact_id="normalized/provider-ledger.json",
                 sha256=hashlib.sha256(catalog).hexdigest(),
                 size_bytes=len(catalog),
-                as_of_date=builder.date.fromisoformat("2026-08-03"),
+                as_of_date=builder.date.fromisoformat(artifact_as_of),
                 schema_name="provider-ledger-catalog",
                 schema_version="2",
             ),
@@ -311,6 +323,42 @@ def _provider_ledger_generation(tmp_path: Path) -> Path:
     builder._write_exact(generation / "admit-or-declare-receipt.json", receipt)
     builder._write_exact(generation / "provider-ledger.json", catalog)
     return generation
+
+
+def test_reusable_provider_ledger_accepts_later_generation_provenance(
+    tmp_path: Path,
+) -> None:
+    """A later provenance generation must not relabel the governed cutoff."""
+
+    generation = _provider_ledger_generation(
+        tmp_path,
+        catalog_as_of="2026-09-17",
+        manifest_as_of="2026-09-18",
+        artifact_as_of="2026-09-17",
+        receipt_cutoff="2026-09-17",
+    )
+
+    generation_id, accepted = builder._validated_reusable_provider_ledger(generation)
+
+    assert generation_id == generation.name
+    assert accepted == generation / "provider-ledger.json"
+
+
+def test_reusable_provider_ledger_rejects_receipt_cutoff_that_differs_from_catalog(
+    tmp_path: Path,
+) -> None:
+    """Provenance may be later, but the receipt must retain the catalog cutoff."""
+
+    generation = _provider_ledger_generation(
+        tmp_path,
+        catalog_as_of="2026-09-17",
+        manifest_as_of="2026-09-18",
+        artifact_as_of="2026-09-17",
+        receipt_cutoff="2026-09-18",
+    )
+
+    with pytest.raises(builder.VerticalBuildError, match="catalog contract differs"):
+        builder._validated_reusable_provider_ledger(generation)
 
 
 def _recipe(tmp_path: Path) -> Path:
