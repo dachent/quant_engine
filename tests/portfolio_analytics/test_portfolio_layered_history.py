@@ -1732,6 +1732,39 @@ def test_layered_history_immutable_generations_builds_without_current_pointers(
     )
 
 
+def test_current_admission_requires_paired_explicit_authority_inputs(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+) -> None:
+    """Selecting a current receipt cannot silently fall back to old contract pins."""
+
+    fixture = _history_fixture(tmp_path)
+    immutable_inputs = dict(fixture)
+    for key in (
+        "provider_ledger_pointer_path",
+        "matrixport_pointer_path",
+        "quantbase_pointer_path",
+        "portfolio123_pointer_path",
+    ):
+        immutable_inputs.pop(key)
+
+    with pytest.raises(
+        TargetSeriesError,
+        match="financial input contract requires provider admission receipt",
+    ):
+        build_layered_history_generation(
+            repository_sha=target_series._trusted_layered_history_code_identity()[0],
+            source_selection_mode="IMMUTABLE_GENERATIONS",
+            provider_ledger_pointer_path=None,
+            matrixport_pointer_path=None,
+            quantbase_pointer_path=None,
+            portfolio123_pointer_path=None,
+            provider_admission_receipt_path=None,
+            financial_input_contract_path=fixture["contract_path"],
+            **immutable_inputs,
+        )
+
+
 def _matrixport_unadmitted_account_fixture(
     tmp_path: Path, contradiction: str | None = None, *, missing_target: bool = False
 ) -> dict[str, Any]:
