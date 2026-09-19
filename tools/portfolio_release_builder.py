@@ -4330,16 +4330,28 @@ def _current_release_plan_specs(
                 f"attribution plan series composition differs: {spec_id}"
             )
         target_source = specification.get("target_source")
+        selected_series_interval_policies = {
+            series_id: series_interval_policies[series_id]
+            for series_id in sorted(expected_series)
+            if series_id in series_interval_policies
+        }
+        missing_interval_policies = expected_series.difference(series_interval_policies)
         expected_target_interval_policy = {
             "currency": reporting_currency,
             "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
-            "series_policies": {
-                series_id: series_interval_policies[series_id]
-                for series_id in sorted(expected_series)
-            },
+            "series_policies": selected_series_interval_policies,
         }
         if (
-            not expected_series.issubset(series_interval_policies)
+            any(
+                series_id not in expected_series
+                for series_id in series_interval_policies
+            )
+            or any(
+                not isinstance(layered_composition.get(series_id), dict)
+                or layered_composition[series_id].get("interval_association_status")
+                != "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY"
+                for series_id in missing_interval_policies
+            )
             or not isinstance(target_source, dict)
             or target_source.get("interval_policy") != expected_target_interval_policy
         ):
