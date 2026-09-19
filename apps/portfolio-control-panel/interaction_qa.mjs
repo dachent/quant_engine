@@ -33,6 +33,47 @@ function acceptedCutoff(value) {
   return value;
 }
 
+function optionalExpectedCommonEod(value) {
+  if (value == null) return null;
+  if (!isCalendarDate(value)) throw new Error("--expected-common-eod must be an ISO calendar date");
+  return value;
+}
+
+function sourceClockEvidence(clock, expectedCutoff, expectedCommonEod, renderedLines) {
+  if (clock == null) return { applicable: false, valid: true, reason: "legacy input without source_clock" };
+  const rows = Array.isArray(clock.source_data_as_of) ? clock.source_data_as_of : [];
+  const applicable = rows.filter((row) => row?.applies_to_latest_common_eod === true);
+  const dates = applicable.map((row) => row?.provider_data_date);
+  const latest = dates.length && dates.every(isCalendarDate) ? [...dates].sort()[0] : null;
+  const limiting = latest == null ? [] : applicable.filter((row) => row.provider_data_date === latest).map((row) => row.source_id).sort();
+  const sourceIds = rows.map((row) => row?.source_id);
+  const expectedHeadline = `Source clock — selected financial cutoff ${clock.selected_financial_cutoff}; latest common finalized EOD ${clock.latest_common_eod}; limiting inputs ${(clock.limiting_inputs || []).join(", ")}.`;
+  const sourceLines = rows.map((row) => renderedLines.find((line) => line.startsWith(`Source clock — ${row?.source_id}:`)) || "");
+  const dateOnlySafe = rows.every((row, index) => row?.native_observed_at != null || !sourceLines[index].includes("T00:00:00"));
+  return {
+    applicable: true,
+    valid: isCalendarDate(clock.selected_financial_cutoff)
+      && isCalendarDate(clock.latest_common_eod)
+      && clock.selected_financial_cutoff === expectedCutoff
+      && (expectedCommonEod == null || clock.latest_common_eod === expectedCommonEod)
+      && clock.latest_common_eod >= clock.selected_financial_cutoff
+      && sourceIds.length > 0
+      && sourceIds.every((sourceId) => typeof sourceId === "string" && sourceId.length > 0)
+      && rows.every((row) => typeof row?.timezone === "string" && row.timezone.length > 0 && typeof row?.precision === "string" && row.precision.length > 0)
+      && JSON.stringify(sourceIds) === JSON.stringify([...new Set(sourceIds)].sort())
+      && latest === clock.latest_common_eod
+      && JSON.stringify(clock.limiting_inputs) === JSON.stringify(limiting)
+      && renderedLines.includes(expectedHeadline)
+      && sourceLines.every(Boolean)
+      && dateOnlySafe
+      && renderedLines.some((line) => line.includes("Actual execution timestamp is not declared")),
+    selected_financial_cutoff: clock.selected_financial_cutoff,
+    latest_common_eod: clock.latest_common_eod,
+    limiting_inputs: clock.limiting_inputs,
+    rendered_lines: sourceLines,
+  };
+}
+
 function calculationDateFacts(manifest) {
   const facts = [];
   for (const row of manifest?.rows || []) {
@@ -71,6 +112,7 @@ if (!options.html || !options.output || !process.env.PLAYWRIGHT_MODULE) {
   throw new Error("--html, --output, and PLAYWRIGHT_MODULE are required");
 }
 const expectedCalculationCutoff = acceptedCutoff(options["expected-calculation-cutoff"]);
+const expectedCommonEod = optionalExpectedCommonEod(options["expected-common-eod"]);
 const moduleUrl = pathToFileURL(path.resolve(process.env.PLAYWRIGHT_MODULE)).href;
 const { chromium } = await import(moduleUrl);
 const html = path.resolve(options.html);
@@ -107,6 +149,17 @@ await page.goto(pathToFileURL(html).href, { waitUntil: "load" });
 await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
 
 const checks = [];
+const sourceClock = sourceClockEvidence(
+  dashboardData.meta?.source_clock,
+  expectedCalculationCutoff,
+  expectedCommonEod,
+  (await page.locator("#limitations-list li").allTextContents()).map((line) => line.trim()),
+);
+checks.push(check(
+  "Source clock preserves selected/common EOD, limiting inputs, and native source disclosures",
+  sourceClock.valid,
+  sourceClock,
+));
 if (!epochOnly) {
   await page.keyboard.press("Tab");
   const firstKeyboardTarget = await page.evaluate(() => ({
