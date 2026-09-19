@@ -7765,8 +7765,7 @@ def _materialized_rows(
     elif item.item_kind is DatasetItemKind.COVERAGE_FACT_TYPE:
         target = _SOURCE_FACT_TARGET.get(item.item_id)
         if target is not None and (
-            target not in _NATIVE_LEVERAGE_OBSERVATION_FACTS
-            or target in provider_facts
+            target not in _NATIVE_LEVERAGE_OBSERVATION_FACTS or target in provider_facts
         ):
             target_facts = (target,)
             rows = provider_facts.get(target, ())
