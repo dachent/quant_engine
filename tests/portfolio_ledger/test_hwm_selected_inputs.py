@@ -541,6 +541,11 @@ def _selected_inputs(
                 )
             ] = record_ids
 
+    # These fixtures generate whole synthetic account values, including cash.
+    # Declare that perimeter before binding the ledger and calculation receipts.
+    for observation in navs.values():
+        observation["value_basis"] = "ACCOUNT_TOTAL"
+
     provider_ids = sorted({row["provider"] for row in specs})
     provider_generations = {
         provider: {
