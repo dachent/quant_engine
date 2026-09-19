@@ -1,0 +1,217 @@
+{
+  "baseline_commit": "4b1c494",
+  "audit_lane": {
+    "selected": "glm",
+    "justification": "This is a multi-module, historical control-path analysis spanning prior RCCA/plan artifacts, the attended materializer, core pipeline, release dispatch, task-local preparation, and acceptance logs. The model-proctor lane table assigns multi-module or unfamiliar substantial work to glm. The runtime was not operated."
+  },
+  "scope": "Read-only causal audit of the 4b1c494 production baseline and named historical/control evidence. M5 is treated only as active, unaccepted integration evidence; M7 is not treated as a delivered repair. No numerical-algorithm, financial-result, provider, source-capture, Office, or publication conclusion is made.",
+  "findings": [
+    {
+      "classification": "DEMONSTRATED",
+      "claim": "The recurring control failure is not absence of a controller or absence of a prior RCCA. It is an acceptance-boundary coverage gap: the earlier terminal cutover control governed candidate-to-stable-launcher release, while preparation and the supported source-to-product run could still proceed under task-local/manual integration without that controller's transition predicates.",
+      "causal_mechanism": "The 2026-09-01 RCCA correctly added a terminal release/actual-launcher receipt, but that receipt is reached only after a candidate exists. The present incident occurred earlier: code-patch acceptance was governed by model-proctor while the parent used task-specific scripts for integration/preparation. Therefore the terminal release guard could not prevent an unsupported date/workbook/preparation path from being selected before a real supported run existed. A control that starts after preparation cannot make preparation source-first by itself.",
+      "counterfactual": "Had the existing attended path required its own source-QC/run-identity transition before preparation, a task-local component receipt or wrapper could not have authorized downstream preparation. This would have exposed the execution-boundary defect before consumer work; it would not have fabricated source data or implied a financial release.",
+      "corrective_control": "Extend the existing attended controller's start/resume state, rather than adding a framework, with an explicit prerequisite that is satisfied only by its bound EOD17 source/input-QC identity. Make the handoff record distinguish component acceptance from a supported-run checkpoint and keep downstream stages unavailable until that checkpoint is verified by the same controller.",
+      "effectiveness_proof": "Use the supported command with a valid retained EOD17 input identity and separately with a missing, changed, mismatched, or post-cutoff identity. In every negative case, assert no downstream child launch and unchanged accepted pointers. Present an accepted D414 component receipt alone: it must not satisfy the supported-run checkpoint. Then prove the positive checkpoint retains the selected cutoff and declares source clocks before any dependent stage.",
+      "history": "The original RCCA's terminal action was sound but intentionally release-focused. The September 19 incident found an earlier lifecycle segment outside that action's coverage; this is a coverage gap in an existing controller, not evidence that the original release control never existed.",
+      "decisionpoint": "Do not advance from patch/component acceptance to preparation because the patch receipt is green. Advance only when the general runner has recorded the current source-QC/run-identity checkpoint for the same candidate.",
+      "effectiveness_status": "Not operationalized at baseline. The owner-required general-runner enforcement is still an acceptance requirement; no M5/M7 candidate is treated as proof.",
+      "evidence": [
+        {
+          "path": "docs/analytics/mvp2-control-panel-rcca-2026-09-01.md",
+          "quote": "The repository already had a release-builder authorization receipt, strict"
+        },
+        {
+          "path": "docs/analytics/mvp2-control-panel-rcca-2026-09-01.md",
+          "quote": "and launcher-QA receipt so the governing issue cannot reach a delivered or"
+        },
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/run-controller-rcca-20260919.md",
+          "quote": "The failure was not absence of every runner. A governed pipeline materializer already existed (`40a088a`), and the attended CLI was added in `6f34c32`."
+        },
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/fixed-cutoff-rcca-20260919.md",
+          "quote": "The code-patch lifecycle used installed model-proctor dispatch/verify/accept, but the parent launched integration/preparation through task-specific scripts."
+        }
+      ]
+    },
+    {
+      "classification": "DEMONSTRATED",
+      "claim": "Task/agent acceptance semantics were insufficiently bound to product-run acceptance. The D414 proctor receipt is a valid acceptance of its verifier, but the verifier and its own contract explicitly exclude full native completion; treating that receipt as a forward-progress substitute leaves the product acceptance predicate unmet.",
+      "causal_mechanism": "Model-proctor objectively accepted the sealed D414 verifier at dispatch sequence 9. That verifier intentionally stops at component checks and prints that native completion remains separate. Its green state therefore proves the bounded code contract, not successful financial/report/panel execution. If the next decision is manual integration rather than a required whole-run proof, the system accumulates truthful component successes while the governing outcome remains untested.",
+      "counterfactual": "If acceptance consumers were required to preserve the verifier's declared scope, the same D414 receipt could authorize code integration but could not satisfy a decision labeled full supported-run, financial acceptance, or delivery. The receipt itself would remain valid; only the invalid implication would be blocked.",
+      "corrective_control": "At the existing integration handoff, require two non-interchangeable evidence references: the proctor's patch-verifier receipt and the general runner's product-run receipt. The receipt consumer must reject a product transition when only the former is present. This is a contract at the existing handoff, not a second proctor or acceptance framework.",
+      "effectiveness_proof": "Replay the exact accepted D414 receipt as the only acceptance input and assert that product-run transition is refused while code integration remains admissible. Supply a supported-run receipt with the required source identity, stage outcomes, report/panel proof, and no-publication condition; assert that only this second case can satisfy the product transition. Mutate either receipt identity and assert refusal before any pointer effect.",
+      "history": "This repeats the September 1 diagnosis that component/candidate proof and terminal product proof were separate. The current evidence is stronger because the accepted task's verifier announces its own non-terminal scope.",
+      "decisionpoint": "A green proctor receipt answers whether the sealed engineering verifier passed. It does not answer whether the owner-selected workflow ran; the parent must keep that second question open until independently evidenced.",
+      "effectiveness_status": "Demonstrated distinction; control is not yet evidenced as enforced by the supported product runner.",
+      "evidence": [
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/d414-parent-final-accept.log",
+          "quote": "\"accepted\": true,"
+        },
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/d414-native-verify.py",
+          "quote": "print('PASS_D414_COMPONENT_ONLY_NATIVE_COMPLETION_REMAINS_SEPARATE',flush=True)"
+        },
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/d414-native-contract.md",
+          "quote": "Candidate PASS means only `PASS_NATIVE_INITIAL_PREFLIGHT_AND_FIRST_STAGE_ROUTING_ONLY`."
+        },
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/d414-promotion-review.md",
+          "quote": "Successful completed-stage resume, committed predecessor, financial/report/workbook/panel parity, cold/warm/delta and second-root proofs remain required before full acceptance."
+        }
+      ]
+    },
+    {
+      "classification": "DEMONSTRATED",
+      "claim": "Owner authority and configuration change control were procedural rather than enforced at the executable boundary. Historical task-local preparation code could simultaneously encode a September 19 as-of date and a workbook stage after the owner fixed EOD17 and permanently held workbook work. This demonstrates drift in the preparation path, not a claim that baseline 4b1c494 produced invalid financial results.",
+      "causal_mechanism": "A written correction can coexist with old executable arguments when those arguments are assembled outside the general runner. The wrapper copied an eight-stage list and assigned its own as-of date; the file also labels itself as non-executing and non-publishing, so its local assertions did not establish the controlled workflow. Without a preflight that derives and validates those fields from the owner-selected contract, stale configuration can survive review and drive late discovery or wrong attempted routing.",
+      "counterfactual": "If the supported runner had been the sole constructor of the source-run identity, the stale wrapper's date and held-workbook stage would have been rejected before a child stage. The retained EOD17 inputs would remain usable; no new login, calendar advance, or source rewrite would follow from that rejection.",
+      "corrective_control": "Make the existing general runner derive cutoff, source clocks, required stages, and held-workbook exclusion from the bound delivery contract. Reject a supplied source-run when any of those disagree, including on resume. Retain task-local scripts only as diagnostics that cannot mint a runnable source-run identity.",
+      "effectiveness_proof": "Construct otherwise hash-consistent inputs with (a) the old 2026-09-19 as-of value, (b) a workbook stage, and (c) a valid EOD17/held-workbook-free identity. The first two must fail preflight with zero stage children; the third must reach only its permitted next stage. Repeat after a changed input and assert that the cutoff remains EOD17 while actual consumers, rather than all work, invalidate.",
+      "history": "The M3 producer/reader repair closed a date-admission defect and preserved the EOD17 capture/QC boundary. It did not by itself move preparation into the general runner, which is why its own RCCA records the remaining control gap.",
+      "decisionpoint": "Treat a change in owner-selected cutoff or held-workbook status as executable configuration authority, not as a prose-only correction to be reconciled later by a parent script.",
+      "effectiveness_status": "The intended control is specified in AGENTS.md and the current RCCA, but its general-runner effectiveness has not been accepted on the baseline; M7 policy-format work is not counted as implementation proof.",
+      "evidence": [
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/prepare_current_recipe_v16.py",
+          "quote": "extension=dict(schema_version=1,release_recipe=materializer._file_definition(O/'input-recipe.json'),history_generation=materializer._directory_definition(Path(history['generation_root'])),allocation_generation=materializer._directory_definition(Path(baseline['generation_root'])),financial_input_contract=materializer._file_definition(Path(selection['builder_kwargs']['financial_input_contract_path'])),predecessor_spec=None,required_stages=['ledger','baseline','attribution','analytics','report','workbook','panel-candidate','panel'])"
+        },
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/prepare_current_recipe_v16.py",
+          "quote": "source_run=dict(schema_version=1,as_of_date='2026-09-19',release_commit=head,artifacts=sorted(artifacts,key=lambda item:item['path']),attended=extension)"
+        },
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/fixed-cutoff-rcca-20260919.md",
+          "quote": "Written AGENTS instructions and a hand-written closure receipt do not remedy that execution-control gap."
+        },
+        {
+          "path": "AGENTS.md",
+          "quote": "PASS summaries are not substitutes. Verify retained capture and input evidence"
+        }
+      ]
+    },
+    {
+      "classification": "SUPPORTED_INFERENCE",
+      "claim": "The planning process specified integrated completion experiments, but scheduled them as a late aggregate proof after packet-level work. Combined with independently maintained stage contracts and a report dispatch that builds a candidate instead of the verified report path, this made cross-module integration failures discoverable late. M5's unaccepted failures demonstrate this failure mode; they do not establish a delivered baseline regression.",
+      "causal_mechanism": "The September 17 plan says to run cold/warm/changed-source executions only after all packet tests and source receipts. That sequencing permits individual packets to be accepted before the real dispatch composition is exercised. At baseline, the attended materializer and core pipeline each own stage order/dependencies, while release-builder dispatch selects `build_report_candidate` for the report role. A no-workbook change must therefore be propagated through several representations. The M5 log records that a changed materializer route omitted workbook while the shared path still disagreed, producing `financial MVP invalidation routes differ` before later validation could even check its intended HWM condition.",
+      "counterfactual": "An early, non-financial contract-composition check after each shared-graph change would have stopped the no-workbook/report-dispatch mismatch before additional component packets accumulated. It would not replace the later full cold/warm/changed-input evidence or relax source-first ordering.",
+      "corrective_control": "Add one focused conformance check at the existing materializer/core/release-builder seam whenever stage order, dependencies, or report/panel dispatch changes. It must compare the derived stage route across those existing surfaces and assert that a held-workbook configuration has no workbook predecessor while the report role uses the verified report route required by the panel. Do not create a new orchestration graph or duplicate financial calculations.",
+      "effectiveness_proof": "Apply the check to the active M5 no-workbook change: it must fail while materializer/core/release-builder disagree, then pass only after all affected contracts agree. Independently invoke the existing report-stage command under the same selection and assert it consumes the verified-report predecessor expected by panel dispatch. This is a component seam proof only; the required supported cold/warm/changed-input product runs remain separate.",
+      "history": "This is a sequencing and integration-closure inference, not a claim that decomposition itself was wrong. The plans repeatedly named the later whole-product experiments, but their placement allowed the same class of gap to survive local acceptance.",
+      "decisionpoint": "After any shared execution-graph or consumer-dispatch edit, require the seam check before accepting the packet or opening the next dependent packet; reserve the full supported run for product acceptance after source/input closure.",
+      "effectiveness_status": "M5 is active corrective work. Its logged failure is evidence of the seam defect; no candidate or policy-format M7 work is credited as an effective repair.",
+      "evidence": [
+        {
+          "path": "C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/docs/code-review/2026-09-17-codex/deep/IMPLEMENTATION-PACKETS.md",
+          "quote": "Only after all packet tests and source receipts pass, run one cold candidate, one unchanged warm candidate from a distinct output root, then one controlled source refresh."
+        },
+        {
+          "path": "tools/portfolio_pipeline_materialize.py@4b1c494",
+          "quote": "ATTENDED_STAGES: Final = ("
+        },
+        {
+          "path": "packages/core/src/quant_engine/core/pipeline.py@4b1c494",
+          "quote": "_PORTFOLIO_STAGE_ORDER: Final = ("
+        },
+        {
+          "path": "tools/portfolio_release_builder.py@4b1c494",
+          "quote": "        result = build_report_candidate("
+        },
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/m5-parent-controls-3.log",
+          "quote": "E           quant_engine.core.pipeline.PipelineValidationError: financial MVP invalidation routes differ"
+        }
+      ]
+    }
+  ],
+  "rejected_explanations": [
+    {
+      "classification": "REJECTED",
+      "claim": "There was no controller.",
+      "reason": "Contrary evidence shows both a governed materializer and an attended CLI. The demonstrated issue is that their coverage began too late and diverged from manual preparation, not their nonexistence.",
+      "evidence": [
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/run-controller-rcca-20260919.md",
+          "quote": "The failure was not absence of every runner. A governed pipeline materializer already existed (`40a088a`), and the attended CLI was added in `6f34c32`."
+        }
+      ]
+    },
+    {
+      "classification": "REJECTED",
+      "claim": "Unavailable September 18 tails or inability to access data is the root cause of the current EOD17 recurrence.",
+      "reason": "The current fixed-cutoff record says original captures were retained and EOD17 input closure is complete. That does not prove final product acceptance, but it removes missing original capture/login as the explanation for controller/configuration defects.",
+      "evidence": [
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/fixed-cutoff-rcca-20260919.md",
+          "quote": "September 17 delivery needs no replacement login."
+        },
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/fixed-cutoff-rcca-20260919.md",
+          "quote": "`delivery-sep17-capture-input-qc-closure.json` records the now-complete capture and initial QC scope at the owner's EOD17 boundary."
+        }
+      ]
+    },
+    {
+      "classification": "REJECTED",
+      "claim": "Wrong decomposition alone caused recurrence.",
+      "reason": "Bounded components are legitimate and D414 states their limits. The causal failure occurs when their scope is not preserved at the integration decision, not merely because work was decomposed.",
+      "evidence": [
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/d414-native-contract.md",
+          "quote": "This is the smallest native **initial-preflight/first-child component**; it is not an attended financial-completion gate."
+        },
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/d414-promotion-review.md",
+          "quote": "Parent-owned sealed native exam proves initial preflight, explicit argument forwarding and first-child failure behavior."
+        }
+      ]
+    },
+    {
+      "classification": "UNPROVEN_RISK",
+      "claim": "Policy overload is the root cause.",
+      "reason": "The evidence proves that written policy was not sufficient at an executable boundary; it does not measure that policy volume or complexity caused the decision failures. The narrower demonstrated cause is missing enforcement/coverage.",
+      "evidence": [
+        {
+          "path": "AGENTS.md",
+          "quote": "PASS summaries are not substitutes. Verify retained capture and input evidence"
+        }
+      ]
+    },
+    {
+      "classification": "UNPROVEN_RISK",
+      "claim": "Incentives or proxy metrics caused the recurrence.",
+      "reason": "Prior evidence supports the possibility that intermediate controls increased confidence, but contains no observed decision motive or incentive mechanism sufficient to classify it as a root cause. Receipt/status misuse is addressed as an acceptance-semantics defect instead.",
+      "evidence": [
+        {
+          "path": "docs/analytics/mvp2-control-panel-rcca-2026-09-01.md",
+          "quote": "acceptance. The high volume of intermediate control work increased confidence"
+        }
+      ]
+    },
+    {
+      "classification": "REJECTED",
+      "claim": "Model-proctor or a particular model caused the technical recurrence.",
+      "reason": "The proctor receipt correctly reports a bounded verifier, while the historical forensic audit rejects a quantitative model-attribution claim. The causal defect is the unimplemented product-run handoff semantics, not the model identity.",
+      "evidence": [
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/run-controller-rcca-20260919.md",
+          "quote": "The model-proctor runner controls coding delegation and patch acceptance. It is not the financial product's run controller."
+        },
+        {
+          "path": "C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/audit/coding/2026-09-05_codex_mvp2-rcca/AUDIT_RCCA.md",
+          "quote": "No defensible percentage of delay can be attributed to any model from file counts or retained logs."
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "Static read-only audit only. No pytest, native exam, financial calculation, provider call, source capture, Office/OneDrive action, model-proctor action, or external-system call was run.",
+    "Baseline code claims are pinned to 4b1c494. M5 log evidence is an unaccepted active-candidate failure and is not a claim about a released financial product; M7 is not credited as an implementation.",
+    "The audit did not inspect live GitHub issue comments or remote CI because the scope forbids network/external calls. It relies on the named retained local evidence and read-only Git history.",
+    "Code-mapper artifacts were read from the actual repository-root .codex-bootstrap location. Their static inferred relationships support caller/contract tracing but cannot prove runtime order, source finality, numerical correctness, or side-effect absence.",
+    "No claim is made that any accepted or released financial result was invalid. The retained current evidence instead says no invalid accepted release or unauthorized publication was established."
+  ]
+}
