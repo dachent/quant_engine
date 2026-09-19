@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-            "331fdb96872ebdbc6a54073cfe47e69c9229a2fa7a1eff1230a885a1db758cd8"
+        "331fdb96872ebdbc6a54073cfe47e69c9229a2fa7a1eff1230a885a1db758cd8"
     )
 
 
@@ -3780,7 +3780,13 @@ def test_public_factor_run_and_publication_timing_propagate_to_every_view() -> N
         for row in matrix["rows"]
         if row["source_id"] == "public-economic-and-industry-factors"
     ]
-    assert len(rows) == 105
+    assert len(rows) == 7 * 3 * 4
+    assert {row["consumer"] for row in rows} == {
+        "DECOMPOSITION",
+        "REPORT",
+        "PANEL",
+        "RELEASE_RECEIPT",
+    }
     assert all(
         row["cadence"] == expected_cadence
         and row["max_age_days"] == 0
