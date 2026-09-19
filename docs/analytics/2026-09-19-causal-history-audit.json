@@ -109,16 +109,19 @@
           "quote": "Only after all packet tests and source receipts pass, run one cold candidate, one unchanged warm candidate from a distinct output root, then one controlled source refresh."
         },
         {
-          "path": "tools/portfolio_pipeline_materialize.py@4b1c494",
-          "quote": "ATTENDED_STAGES: Final = ("
+          "path": "tools/portfolio_pipeline_materialize.py",
+          "quote": "ATTENDED_STAGES: Final = (",
+          "git_reference": "tools/portfolio_pipeline_materialize.py@4b1c494"
         },
         {
-          "path": "packages/core/src/quant_engine/core/pipeline.py@4b1c494",
-          "quote": "_PORTFOLIO_STAGE_ORDER: Final = ("
+          "path": "packages/core/src/quant_engine/core/pipeline.py",
+          "quote": "_PORTFOLIO_STAGE_ORDER: Final = (",
+          "git_reference": "packages/core/src/quant_engine/core/pipeline.py@4b1c494"
         },
         {
-          "path": "tools/portfolio_release_builder.py@4b1c494",
-          "quote": "        result = build_report_candidate("
+          "path": "tools/portfolio_release_builder.py",
+          "quote": "        result = build_report_candidate(",
+          "git_reference": "tools/portfolio_release_builder.py@4b1c494"
         },
         {
           "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/m5-parent-controls-3.log",
