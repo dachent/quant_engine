@@ -26,6 +26,7 @@ from quant_engine.portfolio_ledger import (
     GenerationQualification,
     ProviderAdmissionError,
     ProviderGenerationIdentity,
+    provider_admission,
 )
 
 
@@ -1452,6 +1453,76 @@ def test_observed_receipt_keeps_each_provider_original_qualification(
         provider_id: qualification.value
         for provider_id, qualification in qualifications.items()
     }
+
+    provider_generations = {
+        str(row["provider_id"]): row for row in receipt["provider_generations"]
+    }
+    inventory, dispositions = provider_admission.validate_admit_or_declare_receipt(
+        receipt,
+        product_authority=authority,
+        source_segments=authority["sources"],
+        provider_generations=provider_generations,
+    )
+    rewritten = copy.deepcopy(receipt)
+    rewritten["inventory"] = [
+        row
+        for row in rewritten["inventory"]
+        if not (
+            row["provider_id"] == "schwab"
+            and row["item_kind"] == "PRODUCT_DATA_CLASS"
+            and row["item_id"] == "ACCOUNT_NAV"
+        )
+    ]
+    rewritten["dispositions"] = [
+        row
+        for row in rewritten["dispositions"]
+        if not (
+            row["provider_id"] == "schwab"
+            and row["item_kind"] == "PRODUCT_DATA_CLASS"
+            and row["item_id"] == "ACCOUNT_NAV"
+        )
+    ]
+    schwab_inventory = tuple(
+        item
+        for item in inventory
+        if item.provider_id == "schwab"
+        and not (
+            item.item_kind.value == "PRODUCT_DATA_CLASS"
+            and item.item_id == "ACCOUNT_NAV"
+        )
+    )
+    schwab_dispositions = tuple(
+        item
+        for item in dispositions
+        if item.provider_id == "schwab"
+        and not (
+            item.item_kind.value == "PRODUCT_DATA_CLASS"
+            and item.item_id == "ACCOUNT_NAV"
+        )
+    )
+    observation = next(
+        row
+        for row in rewritten["run_observation"]["providers"]
+        if row["provider_id"] == "schwab"
+    )
+    observation["observed_inventory_count"] = len(schwab_inventory)
+    observation["observed_inventory_sha256"] = (
+        provider_admission.provider_upstream_inventory_digest(schwab_inventory)
+    )
+    admitted_count, admitted_digest = provider_admission.admitted_binding_set_digest(
+        schwab_dispositions
+    )
+    observation["observed_admitted_item_count"] = admitted_count
+    observation["observed_admitted_item_set_sha256"] = admitted_digest
+    _rehash_receipt(rewritten)
+
+    with pytest.raises(ProviderAdmissionError, match="product data-class set"):
+        provider_admission.validate_admit_or_declare_receipt(
+            rewritten,
+            product_authority=authority,
+            source_segments=authority["sources"],
+            provider_generations=provider_generations,
+        )
 
 
 @pytest.mark.skipif(

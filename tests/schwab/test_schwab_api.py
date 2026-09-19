@@ -350,6 +350,30 @@ def test_holdings_v2_accepts_recognized_etf_groups() -> None:
     assert snapshot.positions[0]["symbol"] == "SYNTH-1"
 
 
+@pytest.mark.parametrize("group_index", (0, 1))
+def test_holdings_v2_rejects_truncated_declared_groups(group_index: int) -> None:
+    """A declared group count must bind both equity and cash rows."""
+
+    document = _holdings_v2_document()
+    accounts = document["accounts"]
+    assert isinstance(accounts, list)
+    groups = accounts[0]["groupedPositions"]
+    assert isinstance(groups, list)
+    group = groups[group_index]
+    assert isinstance(group, dict)
+    rows = group["holdingsRows"]
+    assert isinstance(rows, list)
+    assert group["positionsCount"] == 1
+    rows.clear()
+
+    with pytest.raises(SchwabReadError, match="declared count differs"):
+        read_holdings_v2_current_snapshot(
+            document,
+            crosswalk=_holdings_v2_crosswalk(),
+            captured_at="2026-09-18T20:00:00Z",
+        )
+
+
 def test_holdings_v2_rejects_unrecognized_or_contradictory_groups() -> None:
     unsupported = _holdings_v2_document()
     unsupported_accounts = unsupported["accounts"]
@@ -397,6 +421,7 @@ def test_holdings_v2_rejects_unsafe_identity_quantity_and_clock() -> None:
     rows = equity["holdingsRows"]
     assert isinstance(rows, list)
     rows.append(dict(rows[0]))
+    equity["positionsCount"] = len(rows)
     with pytest.raises(SchwabReadError, match="identity is duplicated"):
         read_holdings_v2_current_snapshot(
             duplicate,
