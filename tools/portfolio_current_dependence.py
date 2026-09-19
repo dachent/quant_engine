@@ -196,6 +196,92 @@ def _load_authorities(
     return contract, policy, identities
 
 
+def _target_series_module() -> Any:
+    module_path = Path(__file__).resolve().with_name("portfolio_target_series.py")
+    module_name = "portfolio_target_series_for_current_dependence"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise CurrentDependenceError("layered history verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:
+        sys.modules.pop(module_name, None)
+        raise CurrentDependenceError(
+            "layered history verifier cannot be loaded"
+        ) from exc
+    return module
+
+
+def _selected_inputs(path: Path) -> dict[str, Path]:
+    content = _regular_file(path, "selected dependence inputs")
+    payload = _json_bytes(content, "selected dependence inputs")
+    required = {
+        "schema_version",
+        "history_generation_root",
+        "allocation_generation_root",
+        "provider_ledger_generation_root",
+        "financial_input_contract_path",
+        "provider_admission_receipt_path",
+    }
+    optional = {"portfolio123_version_evidence_path"}
+    if set(payload) - optional != required or payload.get("schema_version") != 1:
+        raise CurrentDependenceError("selected dependence inputs schema differs")
+    resolved: dict[str, Path] = {}
+    for key in sorted((required | optional) - {"schema_version"}):
+        value = payload.get(key)
+        if value is None and key in optional:
+            continue
+        resolved[key] = Path(
+            _text(value, f"selected dependence inputs.{key}")
+        ).resolve()
+    for key in (
+        "financial_input_contract_path",
+        "provider_admission_receipt_path",
+    ):
+        _regular_file(resolved[key], f"selected dependence inputs.{key}")
+    if "portfolio123_version_evidence_path" in resolved:
+        _regular_file(
+            resolved["portfolio123_version_evidence_path"],
+            "selected dependence inputs.portfolio123_version_evidence_path",
+        )
+    return resolved
+
+
+def _selected_input_authority(selected: Mapping[str, Path]) -> dict[str, Any]:
+    ledger_root = selected["provider_ledger_generation_root"]
+    manifest = _regular_file(
+        ledger_root / "generation.json", "selected ledger manifest"
+    )
+    catalog = _regular_file(
+        ledger_root / "provider-ledger.json", "selected ledger catalog"
+    )
+    result: dict[str, Any] = {
+        "financial_input_contract_sha256": _sha256(
+            _regular_file(
+                selected["financial_input_contract_path"],
+                "selected financial input contract",
+            )
+        ),
+        "provider_admission_receipt_sha256": _sha256(
+            _regular_file(
+                selected["provider_admission_receipt_path"],
+                "selected provider admission receipt",
+            )
+        ),
+        "provider_ledger_catalog_sha256": _sha256(catalog),
+        "provider_ledger_generation_id": ledger_root.name,
+        "provider_ledger_manifest_sha256": _sha256(manifest),
+    }
+    evidence = selected.get("portfolio123_version_evidence_path")
+    if evidence is not None:
+        result["portfolio123_version_evidence_sha256"] = _sha256(
+            _regular_file(evidence, "selected Portfolio123 version evidence")
+        )
+    return result
+
+
 def _csv_rows(
     content: bytes, fields: tuple[str, ...], name: str
 ) -> list[dict[str, str]]:
@@ -235,6 +321,9 @@ def _verified_history(
     policy: Mapping[str, Any],
     contract: Mapping[str, Any],
     evaluated_on: date,
+    *,
+    history_authority: Mapping[str, Any] | None = None,
+    segment_authorities: Sequence[Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, str]], list[dict[str, object]], date, dict[str, Any], bytes]:
     root = generation_root.resolve()
     if root.is_symlink() or not root.is_dir():
@@ -242,7 +331,11 @@ def _verified_history(
     names = {path.name for path in root.iterdir()}
     if names != REQUIRED_HISTORY_FILES:
         raise CurrentDependenceError("layered history generation inventory differs")
-    authority = _object(policy.get("history_authority"), "history authority")
+    authority = (
+        _object(history_authority, "selected history authority")
+        if history_authority is not None
+        else _object(policy.get("history_authority"), "history authority")
+    )
     manifest_content = _regular_file(
         root / "generation.json", "layered history receipt"
     )
@@ -310,11 +403,15 @@ def _verified_history(
     segments = _csv_rows(segment_content, SEGMENT_FIELDS, "layered history segments")
     if segment_content != _csv_content(SEGMENT_FIELDS, segments):
         raise CurrentDependenceError("layered history segments are not canonical")
-    expected_segments = _objects(
-        _object(contract.get("history_corrections"), "history corrections").get(
-            "materialized_segment_identities"
-        ),
-        "materialized segment identities",
+    expected_segments = (
+        [dict(row) for row in segment_authorities]
+        if segment_authorities is not None
+        else _objects(
+            _object(contract.get("history_corrections"), "history corrections").get(
+                "materialized_segment_identities"
+            ),
+            "materialized segment identities",
+        )
     )
     actual_by_id: dict[str, list[dict[str, str]]] = {}
     for row in segments:
@@ -376,17 +473,19 @@ def _verified_history(
     live_by_strategy: dict[str, list[dict[str, str]]] = {}
     selected_identities: list[dict[str, object]] = []
     expected_by_id = {str(row["segment_id"]): row for row in expected_segments}
-    prehistory_identities = _selected_prehistory_identities(contract, required_ids)
+    prehistory_identities = _selected_prehistory_identities_from(
+        expected_segments, required_ids
+    )
     prehistory_by_strategy: dict[str, list[dict[str, str]]] = {}
     for identity in prehistory_identities:
         strategy_id = _text(identity.get("strategy_id"), "history strategy_id")
         segment_id = _text(identity.get("segment_id"), "materialized segment_id")
-        rows = actual_by_id.get(segment_id)
-        if not rows:
+        prehistory_rows = actual_by_id.get(segment_id)
+        if prehistory_rows is None or not prehistory_rows:
             raise CurrentDependenceError(
                 f"admitted prehistory segment is absent: {segment_id}"
             )
-        prehistory_by_strategy[strategy_id] = rows
+        prehistory_by_strategy[strategy_id] = prehistory_rows
     for strategy in required_strategies:
         strategy_id = str(strategy["strategy_id"])
         live_identities = [
@@ -461,17 +560,114 @@ def _verified_history(
     return projected, selected_identities, complete_through, manifest, coverage_content
 
 
+def _selected_history(
+    *,
+    generation_root: Path,
+    contract_path: Path,
+    contract: Mapping[str, Any],
+    policy: Mapping[str, Any],
+    evaluated_on: date,
+    selected: Mapping[str, Path],
+) -> tuple[list[dict[str, str]], list[dict[str, object]], date, dict[str, Any], bytes]:
+    if selected.get("history_generation_root") != generation_root.resolve():
+        raise CurrentDependenceError("selected history generation differs")
+    history_module = _target_series_module()
+    ledger_root = selected["provider_ledger_generation_root"]
+    try:
+        verified = history_module.verify_layered_history_generation(
+            generation_root,
+            selected["financial_input_contract_path"],
+            provider_admission_receipt_path=selected["provider_admission_receipt_path"],
+            financial_input_contract_path=selected["financial_input_contract_path"],
+            provider_ledger_manifest_path=ledger_root / "generation.json",
+            provider_ledger_catalog_path=ledger_root / "provider-ledger.json",
+            portfolio123_version_evidence_path=selected.get(
+                "portfolio123_version_evidence_path"
+            ),
+            require_mode="LIVE_PLUS_BACKTEST",
+        )
+    except Exception as exc:
+        raise CurrentDependenceError(
+            "selected layered history authority differs"
+        ) from exc
+    mode_status = _object(verified.get("mode_status"), "selected history mode status")
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        if (
+            _object(mode_status.get(mode), f"selected history {mode}").get("status")
+            != "AVAILABLE"
+        ):
+            raise CurrentDependenceError(
+                f"selected history mode is not available: {mode}"
+            )
+    manifest_content = _regular_file(
+        generation_root / "generation.json", "selected history receipt"
+    )
+    manifest = _json_bytes(manifest_content, "selected history receipt")
+    outputs = _object(manifest.get("outputs"), "selected history outputs")
+    source_manifests = _object(
+        manifest.get("source_manifests"), "selected history source manifests"
+    )
+    generations: dict[str, str] = {}
+    for raw in source_manifests.values():
+        if not isinstance(raw, str):
+            raise CurrentDependenceError("selected history source manifest differs")
+        source = _json_bytes(raw.encode("utf-8"), "selected history source manifest")
+        generation_id = source.get("generation_id") or source.get("bundle_id")
+        if isinstance(generation_id, str):
+            generations[generation_id] = _sha256(raw.encode("utf-8"))
+    segments = _csv_rows(
+        _regular_file(generation_root / "segments.csv", "selected history segments"),
+        SEGMENT_FIELDS,
+        "selected history segments",
+    )
+    sources = {
+        row["source_id"]: {
+            "current_generation": {
+                "generation_id": row["source_generation_id"],
+                "sha256": generations.get(row["source_generation_id"]),
+            }
+        }
+        for row in segments
+    }
+    try:
+        identities = history_module._materialized_segment_identities(segments, sources)
+    except Exception as exc:
+        raise CurrentDependenceError(
+            "selected history segment authority differs"
+        ) from exc
+    authority = {
+        "generation_id": _hash(
+            manifest.get("generation_id"), "selected history generation_id"
+        ),
+        "outputs": outputs,
+        "receipt_sha256": _sha256(manifest_content),
+    }
+    return _verified_history(
+        generation_root,
+        policy,
+        contract,
+        evaluated_on,
+        history_authority=authority,
+        segment_authorities=identities,
+    )
+
+
 def _verified_allocations(
     generation_root: Path,
     policy: Mapping[str, Any],
     required_ids: Sequence[str],
     evaluated_on: date,
+    *,
+    selected_input_authority: Mapping[str, Any] | None = None,
 ) -> tuple[dict[str, str], dict[str, Any]]:
     root = generation_root.resolve()
     if (
         root.is_symlink()
         or not root.is_dir()
-        or root.name != policy["allocation_authority"]["generation_id"]
+        or (
+            selected_input_authority is None
+            and root.name != policy["allocation_authority"]["generation_id"]
+        )
     ):
         raise CurrentDependenceError("allocation generation identity differs")
     manifest_content = _regular_file(root / "generation.json", "allocation manifest")
@@ -479,18 +675,34 @@ def _verified_allocations(
         root / "portfolio-baseline.json", "allocation catalog"
     )
     authority = _object(policy.get("allocation_authority"), "allocation authority")
-    if _sha256(manifest_content) != authority.get("manifest_sha256"):
+    expected_manifest = (
+        selected_input_authority.get("allocation_manifest_sha256")
+        if selected_input_authority is not None
+        else authority.get("manifest_sha256")
+    )
+    expected_catalog = (
+        selected_input_authority.get("allocation_catalog_sha256")
+        if selected_input_authority is not None
+        else authority.get("catalog_sha256")
+    )
+    if _sha256(manifest_content) != expected_manifest:
         raise CurrentDependenceError("allocation manifest identity differs")
-    if _sha256(catalog_content) != authority.get("catalog_sha256"):
+    if _sha256(catalog_content) != expected_catalog:
         raise CurrentDependenceError("allocation catalog identity differs")
     try:
         manifest = GenerationManifest.from_json_bytes(manifest_content)
     except ValueError as exc:
         raise CurrentDependenceError(f"allocation manifest is invalid: {exc}") from exc
     if (
-        manifest.generation_id != authority.get("generation_id")
+        (
+            selected_input_authority is None
+            and manifest.generation_id != authority.get("generation_id")
+        )
         or manifest.verification.value != "VERIFIED"
-        or manifest.as_of_date.isoformat() != authority.get("as_of_date")
+        or (
+            selected_input_authority is None
+            and manifest.as_of_date.isoformat() != authority.get("as_of_date")
+        )
     ):
         raise CurrentDependenceError("allocation manifest authority differs")
     if manifest.as_of_date > evaluated_on:
@@ -504,6 +716,24 @@ def _verified_allocations(
         raise CurrentDependenceError("allocation catalog is not manifest-bound")
     catalog = _json_bytes(catalog_content, "allocation catalog")
     allocations = _objects(catalog.get("allocations"), "allocation catalog allocations")
+    if selected_input_authority is not None:
+        expected_ledger = {
+            "generation-manifest": selected_input_authority[
+                "provider_ledger_manifest_sha256"
+            ],
+            "provider-ledger-catalog": selected_input_authority[
+                "provider_ledger_catalog_sha256"
+            ],
+        }
+        actual_ledger = {
+            str(row.get("schema_name")): str(row.get("sha256"))
+            for row in _objects(
+                catalog.get("source_artifacts"), "allocation source artifacts"
+            )
+            if row.get("source_key") == "provider-ledger-generation"
+        }
+        if actual_ledger != expected_ledger:
+            raise CurrentDependenceError("allocation provider ledger identity differs")
     weights: dict[str, str] = {}
     for row in allocations:
         strategy_id = row.get("strategy_id")
@@ -516,14 +746,21 @@ def _verified_allocations(
         if parsed < 0 or parsed > 1:
             raise CurrentDependenceError("systematic allocation weight is invalid")
         weights[str(strategy_id)] = weight
+        if selected_input_authority is not None and row.get(
+            "valuation_date"
+        ) != authority.get("as_of_date"):
+            raise CurrentDependenceError("allocation valuation date differs")
     if set(weights) != set(required_ids):
         raise CurrentDependenceError("allocation catalog lacks the required perimeter")
-    return weights, {
+    result = {
         "as_of_date": manifest.as_of_date.isoformat(),
         "catalog_sha256": _sha256(catalog_content),
         "generation_id": manifest.generation_id,
         "manifest_sha256": _sha256(manifest_content),
     }
+    if selected_input_authority is not None:
+        result["allocation_valuation_date"] = authority["as_of_date"]
+    return weights, result
 
 
 def _age_evidence(
@@ -663,6 +900,12 @@ def _selected_live_identities(
         ),
         "materialized segment identities",
     )
+    return _selected_live_identities_from(identities, required_ids)
+
+
+def _selected_live_identities_from(
+    identities: Sequence[Mapping[str, Any]], required_ids: Sequence[str]
+) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     for strategy_id in required_ids:
         matches = [
@@ -676,7 +919,7 @@ def _selected_live_identities(
                 "required dependence strategy lacks one selected live segment: "
                 f"{strategy_id}"
             )
-        selected.append(matches[0])
+        selected.append(dict(matches[0]))
     return selected
 
 
@@ -712,6 +955,12 @@ def _selected_prehistory_identities(
         ),
         "materialized segment identities",
     )
+    return _selected_prehistory_identities_from(identities, required_ids)
+
+
+def _selected_prehistory_identities_from(
+    identities: Sequence[Mapping[str, Any]], required_ids: Sequence[str]
+) -> list[dict[str, Any]]:
     selected: list[dict[str, Any]] = []
     for strategy_id in required_ids:
         matches = [
@@ -725,7 +974,7 @@ def _selected_prehistory_identities(
                 "required dependence strategy has more than one admitted "
                 f"prehistory segment: {strategy_id}"
             )
-        selected.extend(matches)
+        selected.extend(dict(match) for match in matches)
     return selected
 
 
@@ -811,12 +1060,12 @@ def _packaged_projection(
     for identity in prehistory_identities:
         strategy_id = _text(identity.get("strategy_id"), "history strategy_id")
         segment_id = _text(identity.get("segment_id"), "materialized segment_id")
-        rows = actual_by_id.get(segment_id)
-        if not rows:
+        prehistory_rows = actual_by_id.get(segment_id)
+        if prehistory_rows is None or not prehistory_rows:
             raise CurrentDependenceError(
                 f"admitted prehistory segment is absent: {segment_id}"
             )
-        prehistory_by_strategy[strategy_id] = rows
+        prehistory_by_strategy[strategy_id] = prehistory_rows
 
     common_dates = set.intersection(
         *({row["date"] for row in live_by_strategy[item]} for item in required_ids)
@@ -994,19 +1243,92 @@ def build_source(
     history_generation_root: Path,
     allocation_generation_root: Path,
     evaluated_on: date,
+    selected_inputs_path: Path | None = None,
 ) -> dict[str, bytes | dict[str, Any]]:
     contract, policy, identities = _load_authorities(contract_path, policy_path)
-    (
-        projection,
-        segment_identities,
-        complete_through,
-        history_manifest,
-        history_coverage_content,
-    ) = _verified_history(history_generation_root, policy, contract, evaluated_on)
+    selected = (
+        _selected_inputs(selected_inputs_path)
+        if selected_inputs_path is not None
+        else None
+    )
+    if selected is None:
+        (
+            projection,
+            segment_identities,
+            complete_through,
+            history_manifest,
+            history_coverage_content,
+        ) = _verified_history(history_generation_root, policy, contract, evaluated_on)
+        selected_authority = None
+    else:
+        selected_contract, selected_policy, selected_identities = _load_authorities(
+            selected["financial_input_contract_path"], policy_path
+        )
+        if selected_contract != contract or selected_policy != policy:
+            raise CurrentDependenceError(
+                "selected financial input contract differs from the product contract"
+            )
+        # The selected contract is the physical authority consumed by the
+        # admitted history. Preserve its raw identity only after proving it
+        # carries the complete same product contract as the repository input.
+        contract, policy, identities = (
+            selected_contract,
+            selected_policy,
+            selected_identities,
+        )
+        if (
+            selected.get("allocation_generation_root")
+            != allocation_generation_root.resolve()
+        ):
+            raise CurrentDependenceError("selected allocation generation differs")
+        if "portfolio123_version_evidence_path" not in selected:
+            raise CurrentDependenceError(
+                "selected Portfolio123 version evidence is required"
+            )
+        selected_authority = _selected_input_authority(selected)
+        selected_authority.update(
+            {
+                "allocation_catalog_sha256": _sha256(
+                    _regular_file(
+                        allocation_generation_root / "portfolio-baseline.json",
+                        "selected allocation catalog",
+                    )
+                ),
+                "allocation_manifest_sha256": _sha256(
+                    _regular_file(
+                        allocation_generation_root / "generation.json",
+                        "selected allocation manifest",
+                    )
+                ),
+            }
+        )
+        (
+            projection,
+            segment_identities,
+            complete_through,
+            history_manifest,
+            history_coverage_content,
+        ) = _selected_history(
+            generation_root=history_generation_root,
+            contract_path=contract_path,
+            contract=contract,
+            policy=policy,
+            evaluated_on=evaluated_on,
+            selected=selected,
+        )
     policy_series = _objects(policy.get("series"), "dependence policy series")
     required_ids = [str(row["strategy_id"]) for row in policy_series]
+    allocation_args = (
+        {"selected_input_authority": selected_authority}
+        if selected_authority is not None
+        else {}
+    )
     weights, allocation_identity = _verified_allocations(
-        allocation_generation_root, policy, required_ids, evaluated_on
+        allocation_generation_root,
+        policy,
+        required_ids,
+        evaluated_on,
+        **allocation_args,
     )
     policy_weights = {
         str(row["strategy_id"]): str(row["allocation_weight"]) for row in policy_series
@@ -1158,6 +1480,9 @@ def build_source(
         complete_through=complete_through,
         evaluated_on=evaluated_on,
     )
+    prehistory_identities = _selected_prehistory_identities_from(
+        segment_identities, required_ids
+    )
     source_identity = {
         "age_evidence": age_evidence,
         "allocation_authority": allocation_identity,
@@ -1185,7 +1510,16 @@ def build_source(
                 "size_bytes": len(history_coverage_content),
             },
             "generation_id": history_manifest["generation_id"],
-            "receipt_sha256": policy["history_authority"]["receipt_sha256"],
+            "receipt_sha256": (
+                _sha256(
+                    _regular_file(
+                        history_generation_root / "generation.json",
+                        "selected history receipt",
+                    )
+                )
+                if selected_authority is not None
+                else policy["history_authority"]["receipt_sha256"]
+            ),
             "selected_segment_identities": sorted(
                 segment_identities,
                 key=lambda row: (str(row["strategy_id"]), str(row["segment_id"])),
@@ -1193,16 +1527,14 @@ def build_source(
         },
         "mode_dispositions": {
             "LIVE_ONLY": "AVAILABLE_ACCOUNT_LIVE",
-            "LIVE_PLUS_BACKTEST": _hybrid_disposition(
-                _selected_prehistory_identities(contract, required_ids)
-            ),
+            "LIVE_PLUS_BACKTEST": _hybrid_disposition(prehistory_identities),
         },
         "pair_count": len(expected_pairs),
         "pair_mode_count": len(expected_pairs) * 2,
         "policy_id": POLICY_ID,
         "policy_sha256": identities["policy_sha256"],
         "required_strategy_ids": required_ids,
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": 2 if selected_authority is not None else SCHEMA_VERSION,
         "spec_sha256": _sha256(spec_content),
         "spec_size_bytes": len(spec_content),
         "returns_sha256": _sha256(returns_content),
@@ -1212,6 +1544,8 @@ def build_source(
         "source_age_status": age_evidence["status"],
         "warning_after_days": age_evidence["warning_after_days"],
     }
+    if selected_authority is not None:
+        source_identity["selected_input_authority"] = selected_authority
     bundle_id = _sha256(canonical_json_bytes(source_identity))
     receipt = {"bundle_id": bundle_id, **source_identity}
     return {
@@ -1306,6 +1640,7 @@ def verify_packaged_source(
     *,
     contract_path: Path,
     policy_path: Path,
+    selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     root = source_root.resolve()
     expected_files = {
@@ -1356,6 +1691,51 @@ def verify_packaged_source(
     epoch_hpr_receipts = history_coverage.get("epoch_hpr_receipts", [])
     if not isinstance(epoch_hpr_receipts, list):
         raise CurrentDependenceError("dependence history epoch HPR receipts differ")
+
+    if receipt.get("schema_version") == 2:
+        if selected_inputs_path is None:
+            raise CurrentDependenceError(
+                "selected dependence source requires selected inputs"
+            )
+        selected = _selected_inputs(selected_inputs_path)
+        if "portfolio123_version_evidence_path" not in selected:
+            raise CurrentDependenceError(
+                "selected Portfolio123 version evidence is required"
+            )
+        expected = build_source(
+            contract_path=contract_path,
+            policy_path=policy_path,
+            history_generation_root=selected["history_generation_root"],
+            allocation_generation_root=selected["allocation_generation_root"],
+            evaluated_on=_day(receipt.get("evaluated_on"), "dependence evaluated_on"),
+            selected_inputs_path=selected_inputs_path,
+        )
+        expected_receipt = _object(expected["receipt"], "selected dependence receipt")
+        if receipt != expected_receipt:
+            raise CurrentDependenceError(
+                "selected dependence receipt authority differs"
+            )
+        for name in expected_files:
+            content = expected[name]
+            assert isinstance(content, bytes)
+            if contents[name] != content:
+                raise CurrentDependenceError(
+                    f"selected dependence source differs: {name}"
+                )
+        return {
+            "bundle_id": bundle_id,
+            "complete_through": _text(
+                receipt.get("complete_through"), "complete_through"
+            ),
+            "epoch_hpr_receipts": epoch_hpr_receipts,
+            "pair_count": receipt.get("pair_count"),
+            "pair_mode_count": receipt.get("pair_mode_count"),
+            "verification": "VALID",
+        }
+    if selected_inputs_path is not None:
+        raise CurrentDependenceError(
+            "legacy dependence source does not accept selected inputs"
+        )
 
     contract, policy, identities = _load_authorities(contract_path, policy_path)
     evaluated_on = _day(receipt.get("evaluated_on"), "dependence evaluated_on")
@@ -1487,6 +1867,7 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--allocation-generation", required=True, type=Path)
         item.add_argument("--evaluated-on", required=True, type=date.fromisoformat)
         item.add_argument("--output-root", required=True, type=Path)
+        item.add_argument("--selected-inputs", type=Path)
         if command == "verify":
             item.add_argument("--source-root", required=True, type=Path)
     return parser
@@ -1500,6 +1881,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "history_generation_root": args.history_generation,
         "allocation_generation_root": args.allocation_generation,
         "evaluated_on": args.evaluated_on,
+        "selected_inputs_path": args.selected_inputs,
     }
     if args.command == "build":
         result = write_source(args.output_root, **kwargs)

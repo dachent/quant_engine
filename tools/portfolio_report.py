@@ -2690,6 +2690,7 @@ def _history_contract(
     *,
     portfolio_as_of: str,
     strategy_names: set[str],
+    dependence_selected_inputs_path: Path | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     payload = _load_json(path, "strategy history compatibility contract")
     if payload.get("builder") == "portfolio-current-dependence-source":
@@ -2708,6 +2709,7 @@ def _history_contract(
                 path.parent,
                 contract_path=_PORTABLE_HWM_PRODUCT_CONTRACT,
                 policy_path=DEPENDENCE_POLICY,
+                selected_inputs_path=dependence_selected_inputs_path,
             )
         except Exception as exc:
             raise ReportValidationError(
@@ -5206,6 +5208,7 @@ def build_report_data(
     decomposition_plan_bundle: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -5373,6 +5376,7 @@ def build_report_data(
             history_contract_path,
             portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
             strategy_names=strategy_names,
+            dependence_selected_inputs_path=dependence_selected_inputs_path,
         )
         if (
             calculation_cutoff_date is not None
@@ -6803,6 +6807,7 @@ def build_candidate(
     decomposition_plan_bundle: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -6820,6 +6825,7 @@ def build_candidate(
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         epoch_manifest_path=epoch_manifest_path,
@@ -9601,6 +9607,7 @@ def verify_candidate(
     decomposition_plan_bundle: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     epoch_snapshots = _epoch_manifest_workbook_snapshots(
         candidate_dir,
@@ -9657,6 +9664,7 @@ def verify_candidate(
         decomposition_plan_bundle=decomposition_plan_bundle,
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         attribution_generation_id=attribution_generation_id,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
@@ -10338,6 +10346,7 @@ def publish_report(
     portfolio_root: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     governed_hwm_supplied = any(
         value is not None
@@ -10662,6 +10671,7 @@ def publish_report(
         decomposition_plan_bundle=snapshot_decomposition_plan_bundle,
         hybrid_decomposition_plan_bundle=snapshot_hybrid_decomposition_plan_bundle,
         attribution_generation_id=snapshot_attribution_generation_id,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
     )
     snapshot_workbook = snapshot_root / WORKBOOK_NAME
     _write_exact(snapshot_workbook, evidence_snapshots["workbook"][1])
@@ -11059,6 +11069,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--attribution-root", type=Path)
     build.add_argument("--attribution-generation-id")
     build.add_argument("--history-contract", type=Path)
+    build.add_argument("--dependence-selected-inputs", type=Path)
     build.add_argument("--implementation-reconciliation", type=Path)
     build.add_argument("--implementation-return-attribution", type=Path)
     build.add_argument("--correlation-root", type=Path)
@@ -11078,6 +11089,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--attribution-root", type=Path)
     verify.add_argument("--attribution-generation-id")
     verify.add_argument("--history-contract", type=Path)
+    verify.add_argument("--dependence-selected-inputs", type=Path)
     verify.add_argument("--implementation-reconciliation", type=Path)
     verify.add_argument("--implementation-return-attribution", type=Path)
     verify.add_argument("--correlation-root", type=Path)
@@ -11128,6 +11140,7 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--attribution-root", type=Path)
     publish.add_argument("--attribution-generation-id")
     publish.add_argument("--history-contract", type=Path)
+    publish.add_argument("--dependence-selected-inputs", type=Path)
     publish.add_argument("--implementation-reconciliation", type=Path)
     publish.add_argument("--implementation-return-attribution", type=Path)
     publish.add_argument("--correlation-root", type=Path)
@@ -11212,6 +11225,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 attribution_generation_id=args.attribution_generation_id,
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )
@@ -11238,6 +11252,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 attribution_generation_id=args.attribution_generation_id,
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )
@@ -11285,6 +11300,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 attribution_generation_id=args.attribution_generation_id,
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
                 **(

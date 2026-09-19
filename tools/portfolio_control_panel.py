@@ -1189,7 +1189,9 @@ def _report_download_link(relative_path: str, label: str, content: bytes) -> str
 
 
 def _verified_strategy_history_contract(
-    source_path: Path, report_contract: Mapping[str, Any]
+    source_path: Path,
+    report_contract: Mapping[str, Any],
+    dependence_selected_inputs_path: Path | None = None,
 ) -> tuple[dict[str, Any], tuple[Path, str]]:
     """Verify the report-bound dependence source needed for HPR HWM parity."""
 
@@ -1221,6 +1223,7 @@ def _verified_strategy_history_contract(
             source_path.parent,
             contract_path=FINANCIAL_MVP_CONTRACT,
             policy_path=DEPENDENCE_POLICY,
+            selected_inputs_path=dependence_selected_inputs_path,
         )
     except current_dependence.CurrentDependenceError as exc:
         raise ControlPanelValidationError(
@@ -9953,6 +9956,7 @@ def _rendered_files(
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -10001,6 +10005,7 @@ def _rendered_files(
                         report.get("strategy_history_contract"),
                         "report.strategy_history_contract",
                     ),
+                    dependence_selected_inputs_path,
                 )
             )
     else:
@@ -10016,6 +10021,7 @@ def _rendered_files(
                     report.get("strategy_history_contract"),
                     "report.strategy_history_contract",
                 ),
+                dependence_selected_inputs_path,
             )
         )
     report_identity_values = {
@@ -10731,6 +10737,7 @@ def build_candidate(
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -10769,6 +10776,7 @@ def build_candidate(
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -10859,6 +10867,7 @@ def verify_candidate(
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -10897,6 +10906,7 @@ def verify_candidate(
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -12212,6 +12222,7 @@ def publish_panel(
     portfolio_root: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     strategy_history_contract_path: Path | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     governed_hwm_supplied = any(
         value is not None
@@ -12279,6 +12290,7 @@ def publish_panel(
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         strategy_history_contract_path=strategy_history_contract_path,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
     )
     if verification.get("all_passed") is not True:
         raise ControlPanelValidationError(
@@ -12309,6 +12321,7 @@ def publish_panel(
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
         account_manifest_path=account_manifest_path,
         financial_mode=financial_mode,
         manifest_ledger_path=manifest_ledger_path,
@@ -12743,6 +12756,7 @@ def _parser() -> argparse.ArgumentParser:
                 "and verify, and needs that source's epoch HPR receipts."
             ),
         )
+        command.add_argument("--dependence-selected-inputs", type=Path)
         command.add_argument("--legacy-panel", type=Path, required=True)
         command.add_argument(
             "--template-root", type=Path, default=DEFAULT_TEMPLATE_ROOT
@@ -12967,6 +12981,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
             )
         elif args.command == "verify":
             if (args.report_root is None) == (args.report_candidate is None):
@@ -13015,6 +13030,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -13074,6 +13090,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 strategy_history_contract_path=args.strategy_history_contract,
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)
