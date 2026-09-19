@@ -1147,8 +1147,7 @@ def test_release_stages_route_recipe_hybrid_plan_to_all_consumers(
             "decomposition_lenses_root": str(tmp_path / "lenses-output"),
             "weekly_root": str(tmp_path / "weekly-output"),
         },
-        "report": {"candidate_dir": str(tmp_path / "report-candidate")},
-        "workbook": {},
+        "report": {"root": str(tmp_path / "report")},
     }
     for role, value in stage_values.items():
         (stage_results / f"{role}.json").write_bytes(canonical_json_bytes(value))
@@ -1161,8 +1160,8 @@ def test_release_stages_route_recipe_hybrid_plan_to_all_consumers(
     ) -> Callable[..., dict[str, object]]:
         def called(*_args: object, **kwargs: object) -> dict[str, object]:
             routed.append((name, kwargs.get("hybrid_decomposition_plan_bundle")))
-            if name in {"report", "workbook"}:
-                index = 9 if name == "report" else 10
+            if name == "report":
+                index = 9
                 routed_lenses.append((name, _args[index]))
             return result
 
@@ -1171,16 +1170,8 @@ def test_release_stages_route_recipe_hybrid_plan_to_all_consumers(
     panel_result = {"candidate_dir": str(candidate)}
     monkeypatch.setattr(
         builder,
-        "build_report_candidate",
-        capture("report", {"candidate_dir": str(tmp_path / "report-candidate")}),
-    )
-    monkeypatch.setattr(builder, "build_workbook", capture("workbook", {}))
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(
-        builder,
-        "_resolve_workbook_runtime",
-        lambda _path: SimpleNamespace(identity={"synthetic": True}),
+        "build_report",
+        capture("report", {"root": str(tmp_path / "report")}),
     )
     monkeypatch.setattr(
         builder, "build_panel_candidate", capture("panel-candidate", panel_result)
@@ -1195,25 +1186,17 @@ def test_release_stages_route_recipe_hybrid_plan_to_all_consumers(
     )
 
     builder.build_stage(recipe_path, output_root, "report")
-    builder.build_stage(
-        recipe_path,
-        output_root,
-        "workbook",
-        workbook_runtime_path=runtime,
-    )
     builder.build_stage(recipe_path, output_root, "panel-candidate")
     builder.build_stage(recipe_path, output_root, "panel", qa_dir=tmp_path / "qa")
 
     assert routed == [
         ("report", hybrid_plan),
-        ("workbook", hybrid_plan),
         ("panel-candidate", hybrid_plan),
         ("panel-candidate", hybrid_plan),
         ("panel", hybrid_plan),
     ]
     assert routed_lenses == [
         ("report", tmp_path / "lenses-output"),
-        ("workbook", tmp_path / "lenses-output"),
     ]
 
 
@@ -1462,51 +1445,41 @@ def test_derived_runner_job_resolves_paths_and_keeps_type_first(
     assert json.loads((candidate / "xlsx-job.json").read_text(encoding="utf-8")) == job
 
 
-def test_workbook_runtime_is_an_explicit_cli_argument_and_missing_config_is_redacted(
+def test_held_workbook_runtime_is_rejected_before_runtime_resolution(
     tmp_path: Path,
 ) -> None:
-    for command, tail in (("build", ()), ("stage", ("--role", "workbook"))):
-        args = builder._parser().parse_args(
-            [
-                command,
-                "--recipe",
-                "recipe.json",
-                "--output-root",
-                "output",
-                *tail,
-                "--workbook-runtime",
-                "runtime.json",
-            ]
-        )
-        assert args.workbook_runtime == Path("runtime.json")
-
     missing = tmp_path / "PRIVATE-MISSING-RUNTIME.json"
-    with pytest.raises(builder.VerticalBuildError) as error:
-        builder._resolve_workbook_runtime(missing)
-    message = str(error.value)
-    assert "runtime" in message.lower()
-    assert str(missing) not in message
+    with pytest.raises(builder.VerticalBuildError, match="permanently held"):
+        builder.build_report(
+            tmp_path / "baseline",
+            tmp_path / "ledger",
+            tmp_path / "freshness.json",
+            tmp_path / "history.json",
+            tmp_path / "implementation.json",
+            tmp_path / "return-attribution.json",
+            None,
+            tmp_path / "report",
+            workbook_runtime_path=missing,
+        )
+    with pytest.raises(builder.VerticalBuildError, match="permanently held"):
+        builder.build_stage(
+            tmp_path / "recipe.json",
+            tmp_path / "output",
+            "ledger",
+            workbook_runtime_path=missing,
+        )
+    with pytest.raises(builder.VerticalBuildError, match="permanently held"):
+        builder.build_all(
+            tmp_path / "recipe.json",
+            tmp_path / "output",
+            workbook_runtime_path=missing,
+        )
 
 
-def test_public_build_and_stage_forward_workbook_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[dict[str, object]] = []
-
-    def fake_build_all(*_args: object, **kwargs: object) -> dict[str, object]:
-        calls.append(kwargs)
-        return {"state": "synthetic"}
-
-    def fake_build_stage(*_args: object, **kwargs: object) -> dict[str, object]:
-        calls.append(kwargs)
-        return {"state": "synthetic"}
-
-    monkeypatch.setattr(builder, "build_all", fake_build_all)
-    monkeypatch.setattr(builder, "build_stage", fake_build_stage)
-    runtime = tmp_path / "runtime.json"
-
-    assert (
-        builder.main(
+def test_active_cli_does_not_admit_a_workbook_runtime() -> None:
+    parser = builder._parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
             [
                 "build",
                 "--recipe",
@@ -1514,13 +1487,11 @@ def test_public_build_and_stage_forward_workbook_runtime(
                 "--output-root",
                 "output",
                 "--workbook-runtime",
-                str(runtime),
+                "runtime.json",
             ]
         )
-        == 0
-    )
-    assert (
-        builder.main(
+    with pytest.raises(SystemExit):
+        parser.parse_args(
             [
                 "stage",
                 "--recipe",
@@ -1529,13 +1500,8 @@ def test_public_build_and_stage_forward_workbook_runtime(
                 "output",
                 "--role",
                 "workbook",
-                "--workbook-runtime",
-                str(runtime),
             ]
         )
-        == 0
-    )
-    assert [call["workbook_runtime_path"] for call in calls] == [runtime, runtime]
 
 
 def test_runtime_contract_validation_uses_configured_python_and_cli(
@@ -4834,13 +4800,13 @@ def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
 
 @pytest.mark.parametrize("select_attribution", [False, True])
 @pytest.mark.parametrize("select_dependence", [False, True])
-def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
+def test_build_report_routes_schema10_epoch_binding_to_data_only_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     select_attribution: bool,
     select_dependence: bool,
 ) -> None:
-    """The wrapper keeps the same epoch authority through both report stages."""
+    """The wrapper keeps epoch authority through data-only report publication."""
 
     candidate = tmp_path / "candidate"
     calls: dict[str, object] = {}
@@ -4850,20 +4816,14 @@ def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
         calls["candidate_kwargs"] = kwargs
         return {"candidate_dir": str(candidate)}
 
-    def fake_workbook(*args: object, **kwargs: object) -> dict[str, object]:
-        calls["workbook_args"] = args
-        calls["workbook_kwargs"] = kwargs
-        return {"generation_id": "a" * 64}
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.setdefault("tool_calls", []).append(args)
+        if args[1] == "publish":
+            return {"generation_id": "a" * 64}
+        return {"status": "PASS"}
 
     monkeypatch.setattr(builder, "build_report_candidate", fake_candidate)
-    monkeypatch.setattr(builder, "build_workbook", fake_workbook)
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(
-        builder,
-        "_resolve_workbook_runtime",
-        lambda _path: SimpleNamespace(identity={"synthetic": True}),
-    )
+    monkeypatch.setattr(builder, "_tool", fake_tool)
     generation_root = tmp_path / "epoch-generation"
     result = builder.build_report(
         tmp_path / "baseline",
@@ -4877,14 +4837,18 @@ def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
         tmp_path / "correlation",
         epoch_manifest_generation_root=generation_root,
         epoch_manifest_generation_id="b" * 64,
-        workbook_runtime_path=runtime,
         attribution_generation_id="c" * 64 if select_attribution else None,
         dependence_selected_inputs_path=(
             tmp_path / "selected-inputs.json" if select_dependence else None
         ),
     )
 
-    assert result == {"generation_id": "a" * 64}
+    assert result == {
+        "candidate_dir": str(candidate),
+        "generation_id": "a" * 64,
+        "root": str(tmp_path / "report"),
+        "verification": {"status": "PASS"},
+    }
     expected_epoch = {
         "epoch_manifest_generation_root": generation_root,
         "epoch_manifest_generation_id": "b" * 64,
@@ -4901,15 +4865,18 @@ def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
         **expected_selection,
         "hybrid_decomposition_plan_bundle": None,
     }
-    assert calls["workbook_kwargs"] == {
-        **expected_epoch,
-        **expected_selection,
-        "hybrid_decomposition_plan_bundle": None,
-        "workbook_runtime_path": runtime,
-    }
+    report_calls = calls["tool_calls"]
+    assert [call[1] for call in report_calls] == ["verify", "publish"]
+    for call in report_calls:
+        assert "--excel-workbook" not in call
+        assert "--xlsx-result" not in call
+        assert "--validation-result" not in call
+        assert call[call.index("--epoch-manifest") + 1] == str(
+            candidate / "account-strategy-manifest.json"
+        )
 
 
-def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
+def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_data_only_publish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The wrapper consumes a real producer CLI candidate before workbook binding."""
@@ -4948,20 +4915,14 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
         }
         return real_candidate
 
-    def workbook_boundary(*args: object, **kwargs: object) -> dict[str, object]:
-        calls["candidate"] = args[7]
-        calls["epoch"] = kwargs
-        return {"generation_id": "c" * 64}
+    def report_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.setdefault("report_calls", []).append(args)
+        if args[1] == "publish":
+            return {"generation_id": "c" * 64}
+        return {"status": "PASS"}
 
     monkeypatch.setattr(builder, "build_report_candidate", real_candidate_boundary)
-    monkeypatch.setattr(builder, "build_workbook", workbook_boundary)
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(
-        builder,
-        "_resolve_workbook_runtime",
-        lambda _path: SimpleNamespace(identity={"synthetic": True}),
-    )
+    monkeypatch.setattr(builder, "_tool", report_tool)
     result = builder.build_report(
         baseline_root,
         tmp_path / "ledger",
@@ -4973,18 +4934,21 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
         tmp_path / "report",
         epoch_manifest_generation_root=epoch_root,
         epoch_manifest_generation_id="d" * 64,
-        workbook_runtime_path=runtime,
     )
 
-    assert result == {"generation_id": "c" * 64}
-    assert Path(str(calls["candidate"])).resolve() == candidate_path.resolve()
-    assert (candidate_path / "portfolio-report-data.json").is_file()
-    assert calls["epoch"] == {
-        "hybrid_decomposition_plan_bundle": None,
-        "epoch_manifest_generation_root": epoch_root,
-        "epoch_manifest_generation_id": "d" * 64,
-        "workbook_runtime_path": runtime,
+    assert result == {
+        "candidate_dir": str(candidate_path),
+        "generation_id": "c" * 64,
+        "root": str(tmp_path / "report"),
+        "verification": {"status": "PASS"},
     }
+    assert (candidate_path / "portfolio-report-data.json").is_file()
+    report_calls = calls["report_calls"]
+    assert [call[1] for call in report_calls] == ["verify", "publish"]
+    for call in report_calls:
+        assert "--excel-workbook" not in call
+        assert "--xlsx-result" not in call
+        assert "--validation-result" not in call
 
 
 @pytest.mark.parametrize(
