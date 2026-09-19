@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Any, Final, Mapping, Sequence, cast
+from zoneinfo import ZoneInfo
 
 from quant_engine.core import (
     CoverageStatus,
@@ -1015,6 +1016,9 @@ def _schwab_selected_point_positions(
             or transport not in {"WEB_CONTRACT", "DEVELOPER_API"}
         ):
             raise ValueError("point clock/date/transport differs")
+        financial_observation_date = captured.astimezone(
+            ZoneInfo("America/New_York")
+        ).date()
         artifact = artifacts[0]
         if (
             artifact["as_of_date"] != day.isoformat()
@@ -1103,7 +1107,7 @@ def _schwab_selected_point_positions(
             raise ValueError("point position account count differs")
     except (KeyError, ValueError, TypeError, AttributeError) as exc:
         raise MaterializationError("Schwab selected point authority differs") from exc
-    return expected if day <= requested_as_of else None
+    return expected if financial_observation_date <= requested_as_of else None
 
 
 def _provider_admission_authority(
@@ -1443,6 +1447,11 @@ def _provider_admission_authority(
                 raise MaterializationError(
                     "provider ledger selected generations differ"
                 )
+            expected_generation_as_of = reader._generation_as_of_date(
+                cutoff, tuple(manifest.artifacts)
+            )
+            if manifest.as_of_date != expected_generation_as_of:
+                raise MaterializationError("provider ledger generation date differs")
         except MaterializationError:
             raise
         except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:

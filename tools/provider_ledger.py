@@ -27,6 +27,7 @@ import sys
 import tempfile
 from typing import Any, Callable, Final, Mapping, NamedTuple, Sequence
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -3783,6 +3784,7 @@ class _SchwabPositionObservation(NamedTuple):
     """One selected holdings point, never an extension of daily finality."""
 
     observed_at: datetime
+    financial_observation_date: date
     artifact: SourceArtifact
     record_ids: frozenset[str]
 
@@ -3811,7 +3813,13 @@ def _schwab_position_observation(
         raise ProviderLedgerError(f"{label} clock is invalid") from exc
     if observed_at.tzinfo is None or observed_at.utcoffset() is None:
         raise ProviderLedgerError(f"{label} clock must be timezone-aware")
+    # Keep the native UTC capture date for generation/catalog/artifact identity.
+    # Schwab's financial observation day is the established New York business
+    # calendar, so selection at the midnight boundary uses that separately.
     day = observed_at.date()
+    financial_observation_date = observed_at.astimezone(
+        ZoneInfo("America/New_York")
+    ).date()
     if (
         manifest.verification is not VerificationStatus.VERIFIED
         or manifest.adapter.name != "quant-engine-schwab"
@@ -3920,9 +3928,11 @@ def _schwab_position_observation(
         position_accounts.add(account_id)
     if catalog.get("current_position_account_count") != len(position_accounts):
         raise ProviderLedgerError(f"{label} position account count differs")
-    if day > requested_as_of:
+    if financial_observation_date > requested_as_of:
         return None
-    return _SchwabPositionObservation(observed_at, artifact, frozenset(record_ids))
+    return _SchwabPositionObservation(
+        observed_at, financial_observation_date, artifact, frozenset(record_ids)
+    )
 
 
 def _project_account_facts(
@@ -4405,7 +4415,7 @@ def _project_account_facts(
                         and position_observation is not None
                         and row.get("source_record_id")
                         in position_observation.record_ids
-                        and observed == position_observation.observed_at.date()
+                        and observed == position_observation.financial_observation_date
                     )
                 ):
                     retained.append(row)
@@ -8362,11 +8372,12 @@ def _admit_or_declare_receipt(
 def _generation_as_of_date(
     financial_cutoff: date, artifacts: Sequence[SourceArtifact]
 ) -> date:
-    """Return native generation provenance, separate from financial cutoff.
+    """Return source-generation provenance, separate from financial cutoff.
 
-    The cutoff is the owner-selected financial boundary.  A retained source
-    capture may have a later native date; that capture date is provenance, not
-    a request to advance the financial projection or the execution clock.
+    The cutoff is the owner-selected financial boundary.  A selected source
+    generation may have a later as-of date; that generation date is provenance,
+    not necessarily a native capture timestamp and not a request to advance
+    the financial projection or the execution clock.
     """
 
     return max(financial_cutoff, *(artifact.as_of_date for artifact in artifacts))
