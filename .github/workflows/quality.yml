@@ -61,18 +61,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           PULL_REQUEST_BASE: ${{ github.event.pull_request.base.sha }}
           PUSH_BASE: ${{ github.event.before }}
-        run: |
-          if [ "$EVENT_NAME" = "pull_request" ]; then
-            base="$PULL_REQUEST_BASE"
-          else
-            base="$PUSH_BASE"
-          fi
-          if [ -z "$base" ] || [[ "$base" =~ ^0+$ ]]; then
-            base="EMPTY_TREE"
-          else
-            git cat-file -e "$base^{commit}"
-          fi
-          echo "base=$base" >> "$GITHUB_OUTPUT"
+        run: python -c "import os, pathlib, subprocess; base = os.getenv('PULL_REQUEST_BASE') if os.environ['EVENT_NAME'] == 'pull_request' else os.getenv('PUSH_BASE'); base = base if base and set(base) != {'0'} else 'EMPTY_TREE'; subprocess.run(['git', 'cat-file', '-e', base + '^{commit}'], check=True) if base != 'EMPTY_TREE' else None; pathlib.Path(os.environ['GITHUB_OUTPUT']).open('a', encoding='utf-8').write('base=' + base + '\n')"
       - name: Validate source-bound controller graph
         run: uv run --frozen --no-sync python tools/portfolio_controller_graph.py --repo-root . --changed-from "${{ steps.controller_graph_range.outputs.base }}" --changed-to "${{ github.sha }}"
       - name: Verify pinned Gitleaks suppression provenance
