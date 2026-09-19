@@ -364,6 +364,28 @@ def _manifest_artifacts(value: object) -> dict[str, VerifiedArtifact]:
     return result
 
 
+def _manifest_artifact_dates(value: object) -> dict[str, date]:
+    """Return the immutable artifact dates used to derive a manifest date."""
+
+    if not isinstance(value, list):
+        raise TargetSeriesError("manifest artifacts must be an array")
+    result: dict[str, date] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            raise TargetSeriesError("manifest artifact must be an object")
+        artifact_id = str(item.get("artifact_id", ""))
+        try:
+            as_of_date = date.fromisoformat(str(item.get("as_of_date", "")))
+        except ValueError as exc:
+            raise TargetSeriesError("manifest artifact as-of date is invalid") from exc
+        if not artifact_id or artifact_id in result:
+            raise TargetSeriesError("manifest artifact identity is invalid")
+        result[artifact_id] = as_of_date
+    if not result:
+        raise TargetSeriesError("manifest artifacts must not be empty")
+    return result
+
+
 def _inventory_sha256(files: list[dict[str, object]]) -> str:
     files.sort(key=lambda item: str(item["relative_path"]))
     return hashlib.sha256(
@@ -1832,6 +1854,7 @@ def build_provider_ledger_targets(
     if len(generation_id) != 64:
         raise TargetSeriesError("provider-ledger generation identity is invalid")
     artifacts = _manifest_artifacts(manifest.get("artifacts"))
+    artifact_dates = _manifest_artifact_dates(manifest.get("artifacts"))
     catalog_artifact = _verify_artifact(
         catalog_path, artifacts, "normalized/provider-ledger.json"
     )
@@ -1851,8 +1874,13 @@ def build_provider_ledger_targets(
         manifest_as_of = date.fromisoformat(str(manifest.get("as_of_date", "")))
     except ValueError as exc:
         raise TargetSeriesError("provider-ledger as-of date is invalid") from exc
-    if accepted_as_of != manifest_as_of:
-        raise TargetSeriesError("provider-ledger manifest and catalog dates differ")
+    catalog_artifact_as_of = artifact_dates.get("normalized/provider-ledger.json")
+    if catalog_artifact_as_of != accepted_as_of:
+        raise TargetSeriesError("provider-ledger catalog financial date differs")
+    if manifest_as_of != max(artifact_dates.values()):
+        raise TargetSeriesError(
+            "provider-ledger generation date is not artifact-derived"
+        )
 
     raw_rows = catalog.get("strategy_returns")
     if not isinstance(raw_rows, list) or not raw_rows:

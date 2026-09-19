@@ -33,7 +33,9 @@ sys.modules[SPEC.name] = attribution
 SPEC.loader.exec_module(attribution)
 
 
-def _baseline(tmp_path: Path) -> Path:
+def _baseline(
+    tmp_path: Path, *, generation_as_of_date: date = date(2026, 1, 3)
+) -> Path:
     root = tmp_path / "baseline"
     strategies = [
         {"name": f"Strategy {index}", "strategy_id": f"strategy-{index}"}
@@ -73,8 +75,16 @@ def _baseline(tmp_path: Path) -> Path:
         schema_name="portfolio-baseline-catalog",
         schema_version="1",
     )
+    retained_source = SourceArtifact(
+        artifact_id="source/retained-baseline-provenance.json",
+        sha256=hashlib.sha256(b"retained-baseline-provenance").hexdigest(),
+        size_bytes=len(b"retained-baseline-provenance"),
+        as_of_date=generation_as_of_date,
+        schema_name="retained-baseline-provenance",
+        schema_version="1",
+    )
     manifest = GenerationManifest.build(
-        as_of_date=date(2026, 1, 3),
+        as_of_date=generation_as_of_date,
         adapter=AdapterIdentity("synthetic", "1"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
@@ -83,7 +93,7 @@ def _baseline(tmp_path: Path) -> Path:
             observed_start=date(2026, 1, 1),
             observed_end=date(2026, 1, 3),
         ),
-        artifacts=(source,),
+        artifacts=(source, retained_source),
         verification=VerificationStatus.VERIFIED,
     )
     manifest_path = stage_generation(root, manifest)
@@ -92,7 +102,9 @@ def _baseline(tmp_path: Path) -> Path:
     return root
 
 
-def _inputs(tmp_path: Path) -> tuple[Path, Path]:
+def _inputs(
+    tmp_path: Path, *, source_manifest_as_of_date: str = "2026-01-03"
+) -> tuple[Path, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
     returns = tmp_path / "returns.csv"
     returns.write_text(
@@ -107,7 +119,14 @@ def _inputs(tmp_path: Path) -> tuple[Path, Path]:
     )
     manifest = tmp_path / "source-manifest.json"
     manifest.write_text(
-        json.dumps({"artifacts": [], "verification": "VERIFIED"}), encoding="utf-8"
+        json.dumps(
+            {
+                "artifacts": [],
+                "as_of_date": source_manifest_as_of_date,
+                "verification": "VERIFIED",
+            }
+        ),
+        encoding="utf-8",
     )
     benchmarks = [
         {
@@ -256,3 +275,31 @@ def test_stage_and_publish_are_content_addressed(tmp_path: Path) -> None:
         baseline, spec, output, staged["generation_id"]
     )
     assert published["publication_state"] == "PUBLISHED"
+
+
+def test_attribution_preserves_baseline_financial_cutoff_with_later_provenance(
+    tmp_path: Path,
+) -> None:
+    """Attribution receives the baseline's provenance date without relabeling its catalog."""
+
+    baseline_root = _baseline(tmp_path, generation_as_of_date=date(2026, 1, 4))
+    spec, _ = _inputs(tmp_path, source_manifest_as_of_date="2026-01-05")
+    output = tmp_path / "attribution"
+
+    staged = attribution.stage_catalog(baseline_root, spec, output)
+    generation = json.loads(
+        (
+            output / "generations" / staged["generation_id"] / "generation.json"
+        ).read_text(encoding="utf-8")
+    )
+    catalog = json.loads(
+        (
+            output
+            / "generations"
+            / staged["generation_id"]
+            / "strategy-attribution.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert catalog["as_of_date"] == "2026-01-03"
+    assert generation["as_of_date"] == "2026-01-05"
