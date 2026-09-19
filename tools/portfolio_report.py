@@ -388,6 +388,33 @@ def _public_report_value(value: object) -> object:
     return value
 
 
+def _validated_source_clock(path: Path | None) -> dict[str, Any] | None:
+    """Admit only the pinned source-QC clock receipt, never a free-form dict."""
+
+    if path is None:
+        return None
+    receipt = _load_json(path, "source clock receipt")
+    if set(receipt) != {"schema_version", "source_phase", "data_clock"} or receipt.get(
+        "schema_version"
+    ) != 1:
+        raise ReportValidationError("source clock receipt differs")
+    phase = receipt.get("source_phase")
+    clock = receipt.get("data_clock")
+    if not isinstance(phase, Mapping) or phase.get("status") != "PASS" or not isinstance(
+        clock, dict
+    ):
+        raise ReportValidationError("source clock receipt differs")
+    try:
+        from portfolio_attended_preparation import _source_clock
+
+        expected = _source_clock(phase, str(clock.get("selected_financial_cutoff")))
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ReportValidationError("source clock source authority differs") from exc
+    if clock != expected:
+        raise ReportValidationError("source clock source authority differs")
+    return dict(clock)
+
+
 def _load_json(path: Path, field_name: str) -> dict[str, Any]:
     try:
         decoded = json.loads(path.read_text(encoding="utf-8"))
@@ -5209,9 +5236,11 @@ def build_report_data(
     hybrid_decomposition_plan_bundle: Path | None = None,
     attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
+    source_clock = _validated_source_clock(source_clock_path)
     catalog, baseline_ref, baseline_catalog_path = _baseline(
         baseline_root, baseline_generation_id
     )
@@ -5933,6 +5962,7 @@ def build_report_data(
             catalog, baseline_root, baseline_ref, provider_ledger_root
         ),
         "report_schema_version": REPORT_SCHEMA_VERSION,
+        **({"source_clock": source_clock} if source_clock is not None else {}),
         "strategy_summary": strategy_summary,
         "attribution_dispositions": catalog.get("attribution_dispositions", []),
         "leverage_disclosures": _leverage_disclosures(
@@ -6808,6 +6838,7 @@ def build_candidate(
     hybrid_decomposition_plan_bundle: Path | None = None,
     attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
     include_workbook: bool = False,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
@@ -6827,6 +6858,7 @@ def build_candidate(
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
+        source_clock_path=source_clock_path,
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         epoch_manifest_path=epoch_manifest_path,
@@ -9643,6 +9675,7 @@ def verify_candidate(
     hybrid_decomposition_plan_bundle: Path | None = None,
     attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
 ) -> dict[str, Any]:
     epoch_snapshots = _epoch_manifest_workbook_snapshots(
         candidate_dir,
@@ -9700,6 +9733,7 @@ def verify_candidate(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         attribution_generation_id=attribution_generation_id,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
+        source_clock_path=source_clock_path,
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
@@ -11136,6 +11170,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--attribution-generation-id")
     build.add_argument("--history-contract", type=Path)
     build.add_argument("--dependence-selected-inputs", type=Path)
+    build.add_argument("--source-clock", type=Path)
     build.add_argument("--implementation-reconciliation", type=Path)
     build.add_argument("--implementation-return-attribution", type=Path)
     build.add_argument("--correlation-root", type=Path)
@@ -11156,6 +11191,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--attribution-generation-id")
     verify.add_argument("--history-contract", type=Path)
     verify.add_argument("--dependence-selected-inputs", type=Path)
+    verify.add_argument("--source-clock", type=Path)
     verify.add_argument("--implementation-reconciliation", type=Path)
     verify.add_argument("--implementation-return-attribution", type=Path)
     verify.add_argument("--correlation-root", type=Path)
@@ -11292,6 +11328,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 attribution_generation_id=args.attribution_generation_id,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
+                source_clock_path=args.source_clock,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )
@@ -11319,6 +11356,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 attribution_generation_id=args.attribution_generation_id,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
+                source_clock_path=args.source_clock,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )
