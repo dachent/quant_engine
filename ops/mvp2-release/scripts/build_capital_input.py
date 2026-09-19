@@ -22,6 +22,7 @@ script got wrong fails closed rather than shipping.
 import argparse
 import hashlib
 import json
+import sys
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -373,6 +374,16 @@ def build_input_generation(
 
 
 def main(argv=None):
+    repository_root = Path(__file__).resolve().parents[3]
+    cli_import_roots = [
+        repository_root / "tools",
+        *sorted(repository_root.glob("packages/*/src")),
+    ]
+    for import_root in reversed(cli_import_roots):
+        import_root_text = str(import_root)
+        if import_root_text not in sys.path:
+            sys.path.insert(0, import_root_text)
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--provider-ledger-generation-root", type=Path, required=True)
     parser.add_argument("--epoch-manifest-generation-root", type=Path, required=True)
