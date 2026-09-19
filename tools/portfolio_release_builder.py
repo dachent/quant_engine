@@ -1869,6 +1869,9 @@ def build_ledger(recipe_path: Path, output_root: Path) -> dict[str, Any]:
         _validated_reusable_provider_ledger(destination)
         source_mode = "REUSED_VERIFIED_IMMUTABLE_GENERATION"
     pointer = publish_generation(output_root, generation_id)
+    _, catalog = _validated_reusable_provider_ledger(
+        output_root / "generations" / generation_id
+    )
     freshness = output_root / "freshness-health.json"
     _tool(
         "portfolio_freshness.py",
@@ -1882,6 +1885,7 @@ def build_ledger(recipe_path: Path, output_root: Path) -> dict[str, Any]:
         str(freshness),
     )
     return {
+        "catalog_sha256": _sha(catalog)[0],
         "freshness_health": str(freshness),
         "generation_id": generation_id,
         "publication_state": pointer.state.value,

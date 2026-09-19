@@ -4763,6 +4763,34 @@ def _attended_stage_root(output_root: Path, role: str) -> Path:
     return output_root / "stages" / roots[role]
 
 
+def _attended_completed_ledger(receipt: Mapping[str, Any], stage_root: Path) -> None:
+    """Verify the stage-owned ledger generation before resume may skip it."""
+
+    try:
+        root = _absolute(receipt.get("root"), "attended completed ledger root")
+        generation_id = _text(
+            receipt.get("generation_id"), "attended completed ledger generation_id"
+        )
+        catalog_sha256 = _text(
+            receipt.get("catalog_sha256"), "attended completed ledger catalog_sha256"
+        )
+        if len(generation_id) != 64 or len(catalog_sha256) != 64:
+            raise ValueError("ledger identity length differs")
+        if root != stage_root.resolve():
+            raise ValueError("ledger root differs")
+        import portfolio_release_builder as release
+
+        verified_id, catalog = release._validated_reusable_provider_ledger(  # noqa: SLF001
+            stage_root / "generations" / generation_id
+        )
+        if verified_id != generation_id or _sha(catalog)[0] != catalog_sha256:
+            raise ValueError("ledger catalog identity differs")
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "attended completed ledger artifact identity differs"
+        ) from exc
+
+
 def _attended_completed_stages(
     output_root: Path, required_stages: Sequence[str]
 ) -> list[str]:
@@ -4787,11 +4815,13 @@ def _attended_completed_stages(
             raise MaterializationError(
                 f"attended completed {role} artifact set is incomplete"
             )
-        _load(receipt, f"attended {role} stage result")
+        result = _load(receipt, f"attended {role} stage result")
         if stage_root.is_symlink() or not stage_root.is_dir():
             raise MaterializationError(
                 f"attended completed {role} stage root is invalid"
             )
+        if role == "ledger":
+            _attended_completed_ledger(result, stage_root)
         completed.append(role)
     return completed
 
@@ -5042,7 +5072,7 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
         "portfolio_root": portfolio_root,
         "predecessor_spec": predecessor,
         "python": python,
-        "qa_dir": _validate_directory_definition(recipe["qa_dir"], "panel QA"),
+        "qa_dir": None,
         "recipe": recipe_path,
         "repo_root": repo_root,
         "request_identity": request_identity,
@@ -5118,7 +5148,12 @@ def _attended_stage_command(
         if key in financial_inputs:
             command.extend((flag, str(financial_inputs[key])))
     if role == "panel":
-        command.extend(("--qa-dir", str(cast(Path, preflight["qa_dir"]))))
+        qa_dir = cast(Path | None, preflight["qa_dir"])
+        if qa_dir is None:
+            raise MaterializationError(
+                "attended panel requires produced browser QA evidence"
+            )
+        command.extend(("--qa-dir", str(qa_dir)))
     return command
 
 
