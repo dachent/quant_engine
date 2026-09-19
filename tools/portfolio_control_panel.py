@@ -3007,6 +3007,17 @@ def _suppress_unmatched_report_performance(
             "flow_count",
             "flow_timing",
             "mwr_xirr",
+            "mwr_opening_date",
+            "mwr_opening_value",
+            "mwr_terminal_date",
+            "mwr_terminal_value",
+            "mwr_currency",
+            "mwr_label",
+            "mwr_value_basis",
+            "mwr_valuation_timing",
+            "mwr_day_count",
+            "mwr_unit",
+            "mwr_source_binding",
             "nav_observations",
             "observed_start",
             "observed_end",
@@ -3023,10 +3034,71 @@ def _suppress_unmatched_report_performance(
             "twr",
         ):
             row[field] = None
+        row["mwr_reason"] = "SOURCE_LINEAGE_MISMATCH"
+        row["mwr_coverage_status"] = "BLOCKED"
+        row["mwr_cashflows"] = []
         for field in ("twr_status", "mwr_status", "return_path_status"):
             row[field] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         suppressed.append(row)
     return suppressed
+
+
+def _validate_mwr_perimeter(rows: Sequence[Mapping[str, Any]]) -> None:
+    """Keep the panel a strict projection of governed report MWR facts."""
+    for row in rows:
+        status = row.get("mwr_status")
+        if status == "AVAILABLE":
+            required = (
+                "mwr_xirr",
+                "mwr_opening_date",
+                "mwr_opening_value",
+                "mwr_terminal_date",
+                "mwr_terminal_value",
+                "mwr_currency",
+                "mwr_coverage_status",
+                "mwr_cashflows",
+                "mwr_label",
+                "mwr_value_basis",
+                "mwr_valuation_timing",
+                "mwr_day_count",
+                "mwr_unit",
+                "mwr_source_binding",
+            )
+            if any(row.get(field) is None for field in required):
+                raise ControlPanelValidationError("available MWR payload is incomplete")
+            if row.get("mwr_coverage_status") != "COMPLETE":
+                raise ControlPanelValidationError(
+                    "available MWR coverage is incomplete"
+                )
+            basis = row.get("mwr_value_basis")
+            label = row.get("mwr_label")
+            if (basis == "STRATEGY_NAV") != (label == "STRATEGY_EPOCH_MWR"):
+                raise ControlPanelValidationError(
+                    "MWR label differs from valuation perimeter"
+                )
+            cashflows = _objects(row.get("mwr_cashflows"), "MWR cashflows")
+            if not cashflows or any(
+                not isinstance(flow.get("source_record_ids"), list)
+                or not flow["source_record_ids"]
+                or not all(
+                    isinstance(source_id, str) and source_id
+                    for source_id in flow["source_record_ids"]
+                )
+                for flow in cashflows
+            ):
+                raise ControlPanelValidationError(
+                    "MWR cashflow source identities are absent"
+                )
+        elif status not in {
+            "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
+            "BLOCKED_ADMISSION",
+        }:
+            if row.get("mwr_xirr") is not None or not isinstance(
+                row.get("mwr_reason"), str
+            ):
+                raise ControlPanelValidationError(
+                    "unavailable MWR must retain reason and null rate"
+                )
 
 
 def _suppress_unmatched_strategy_performance(
@@ -7775,6 +7847,7 @@ def _panel_data(
         # rejected-lineage representation; otherwise a post-cutoff value could
         # be erased and silently admitted.
         performance = _suppress_unmatched_report_performance(performance)
+    _validate_mwr_perimeter(performance)
     referenced_account_ids = _referenced_current_account_ids((*performance, *positions))
     missing_account_ids = referenced_account_ids - set(account_ids)
     if missing_account_ids:
@@ -8686,7 +8759,7 @@ def _panel_data(
                 if position_count
                 else "Positions and FX remain unavailable; the panel does not infer either."
             ),
-            "MWR remains unavailable when complete external-flow coverage is absent.",
+            "MWR is annualized ACTUAL_365 and remains unavailable unless its declared valuation perimeter and complete dated source-bound flows are present.",
             *(
                 [
                     "Report-derived performance is unavailable because its provider-ledger lineage differs from the verified epoch manifest."

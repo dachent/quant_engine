@@ -1546,14 +1546,17 @@ def _c3_ledger(
         nav = _c3_money(row.get("nav"), f"NAV {index}", allow_unavailable_reason=True)
         if nav["status"] == "AVAILABLE":
             available_currencies.add(str(nav["currency"]))
-        normalized_navs.append(
-            {
-                "record_id": record_id,
-                "account_id": account_id,
-                "as_of_date": as_of_date,
-                "nav": nav,
-            }
-        )
+        normalized_nav: dict[str, object] = {
+            "record_id": record_id,
+            "account_id": account_id,
+            "as_of_date": as_of_date,
+            "nav": nav,
+        }
+        if "value_basis" in row:
+            normalized_nav["value_basis"] = _nonempty_text(
+                row.get("value_basis"), f"NAV {record_id} value_basis"
+            )
+        normalized_navs.append(normalized_nav)
     if enforce_global_accounting_currency:
         if len(available_currencies) != 1:
             raise AccountAssignmentPerimeterError(

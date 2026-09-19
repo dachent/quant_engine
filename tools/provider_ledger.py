@@ -324,7 +324,7 @@ _DATE_FIELDS: Final = (
 _NAV_VALUE_BASIS_BY_PROVIDER: Final = {
     "ibkr": "ACCOUNT_TOTAL",
     "matrixport": "ACCOUNT_TOTAL",
-    "quantbase": "ACCOUNT_TOTAL",
+    "quantbase": "STRATEGY_NAV",
     "schwab": "ACCOUNT_VALUE",
 }
 _NAV_SOURCE_SCHEMA_NAMES_BY_PROVIDER: Final = {
@@ -1435,7 +1435,7 @@ def _quantbase_nav_observations(
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> list[dict[str, Any]]:
-    """Admit Quantbase Volatis daily dashboard values as account NAV observations."""
+    """Admit Quantbase Volatis daily dashboard values as strategy NAV observations."""
     account_id = _CSV_FACT_ACCOUNT["quantbase"]
     run_id = _run_id(
         _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
@@ -1483,10 +1483,10 @@ def _quantbase_nav_observations(
                 "source_artifact_id": artifact_id,
                 "source_record_id": source_id,
                 "strategy_id": strategy_id,
-                # The Volatis dashboard value is the strict account total for
-                # the mapped account: declare the basis so authoritative-NAV
-                # admission can verify it (#359/#361 contract class).
-                "value_basis": "ACCOUNT_TOTAL",
+                # This is fund NAV, not the linked brokerage account total.
+                # Brokerage transfers therefore remain ACCOUNT_ONLY evidence
+                # until an independently matching brokerage valuation exists.
+                "value_basis": "STRATEGY_NAV",
             }
         )
     return observations
@@ -1536,6 +1536,23 @@ def _quantbase_capital_anchors(
         {"activity_type", "amount", "fund", "is_rebalance", "time", "type"},
         "quantbase account activity",
     )
+
+    for row in activity_rows:
+        if (
+            row.get("activity_type") != "filled_txn"
+            or row.get("fund") != _QUANTBASE_FUND_ID
+            or str(row.get("is_rebalance") or "").lower() != "false"
+            or str(row.get("type") or "").upper() != "SELL"
+        ):
+            continue
+        # Fee-funded sales are retained strategy costs, already reflected in
+        # net fund NAV.  A different sale may be an investor withdrawal, but
+        # the current anchor contract has no source-typed withdrawal fact: it
+        # must stop rather than silently become a zero flow.
+        if str(row.get("created_to_cover_fees") or "").strip().lower() != "true":
+            raise ProviderLedgerError(
+                "quantbase non-fee fund sell requires admitted withdrawal"
+            )
 
     contributions: list[tuple[datetime, Decimal]] = []
     for row in activity_rows:
