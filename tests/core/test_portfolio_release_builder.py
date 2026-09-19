@@ -1718,6 +1718,7 @@ def test_hybrid_decomposition_uses_shared_version_bound_history_contract(
         correlation_source=correlation_source,
         bundle_root=bundle_root,
         output_root=output_root,
+        retained_cache_root=tmp_path / "retained-decomposition",
     )
 
     assert result["bundle_id"] == "b" * 64
@@ -1737,6 +1738,14 @@ def test_hybrid_decomposition_uses_shared_version_bound_history_contract(
     )
     assert calls[1][0][0:2] == ("portfolio_decomposition.py", "stage")
     assert calls[2][0][0:2] == ("portfolio_decomposition.py", "publish")
+    assert calls[1][0][-2:] == (
+        "--retained-cache-root",
+        str(tmp_path / "retained-decomposition"),
+    )
+    assert calls[2][0][-2:] == (
+        "--retained-cache-root",
+        str(tmp_path / "retained-decomposition"),
+    )
 
 
 def _legacy_plan_manifest(specs: list[dict[str, object]]) -> dict[str, object]:
