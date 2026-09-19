@@ -28,6 +28,28 @@ from quant_engine.core import (
 ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_panel_schema_accepts_native_clock_and_rejects_malformed_dates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    admitted = fixture.build_financial_mvp_fixture(tmp_path / "native", ready=True)
+    phase = _validated_native_phase(admitted, monkeypatch)
+    clock = preparation._source_clock(phase, "2026-08-14")
+    schema = json.loads(panel.PANEL_DATA_SCHEMA.read_bytes())
+    clock_schema = schema["properties"]["meta"]["properties"]["source_clock"]
+    validator = Draft202012Validator(clock_schema, format_checker=FormatChecker())
+    assert validator.is_valid(clock)
+    assert validator.is_valid(None)
+    bad = deepcopy(clock)
+    bad["latest_common_eod"] = "not-a-date"
+    assert not validator.is_valid(bad)
+    missing = deepcopy(clock)
+    del missing["source_data_as_of"]
+    assert not validator.is_valid(missing)
+    assert schema["properties"]["meta"]["additionalProperties"] is False
+
+
 def _load(name: str, relative: str) -> Any:
     spec = importlib.util.spec_from_file_location(name, ROOT / relative)
     assert spec is not None and spec.loader is not None
