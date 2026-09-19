@@ -1170,7 +1170,7 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
 def test_governed_results_reach_every_role_that_reads_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The report, workbook and panel roles each read the governed results.
+    """The report and panel roles each read the governed results.
 
     Binding them into the proof but not into the pipeline's own nodes made the
     panel node recompute a semantic validation that differed from the one the
@@ -1211,7 +1211,7 @@ def test_governed_results_reach_every_role_that_reads_them(
     ):
         materializer._governed_stage_paths(*missing)
 
-    assert materializer._GOVERNED_OUTCOME_STAGES == ("report", "workbook", "panel")
+    assert materializer._GOVERNED_OUTCOME_STAGES == ("report", "panel")
 
 
 def test_financial_spec_without_a_portfolio_root_fails_before_the_dag(
@@ -2959,7 +2959,7 @@ def test_correction_identity_invalidates_only_its_dag_closure(tmp_path: Path) ->
         stage
         for stage in materializer.STAGES
         if baseline_ids[stage] != changed_ids[stage]
-    ] == ["report", "workbook", "panel"]
+    ] == ["report", "panel"]
     assert all(
         baseline_ids[stage] == changed_ids[stage]
         for stage in ("ledger", "baseline", "attribution", "analytics")
@@ -4293,29 +4293,20 @@ def test_generated_semantic_command_declares_exact_gate_file(
             str(output_root / "stages" / "baseline")
             in nodes[f"build-{role}"]["declared_reads"]
         )
-    report_id = next(
-        row["sha256"]
-        for row in nodes["report-generation"]["files"]
-        if row["relative_path"] == "portfolio-report-data.json"
-    )
-    report_candidate = (
-        output_root / "stages" / "report-candidate" / "candidates" / report_id
-    )
     assert (
-        str(output_root / "stages" / "report-candidate")
-        not in nodes["build-report"]["declared_writes"]
+        str(output_root / "stages" / "report")
+        in nodes["build-report"]["declared_writes"]
     )
-    assert {
-        str(report_candidate / "portfolio-report-data.json"),
-    } <= set(nodes["build-report"]["declared_writes"])
+    assert str(output_root / "stages" / "report") in set(
+        nodes["build-report"]["declared_writes"]
+    )
     report_generation_paths = {
         row["relative_path"] for row in nodes["report-generation"]["files"]
     }
     assert "portfolio-report.xlsx" not in report_generation_paths
     assert not any(path.startswith("deliveries/") for path in report_generation_paths)
     assert (
-        str(output_root / "stages" / "report-candidate")
-        in nodes["build-panel"]["declared_reads"]
+        str(output_root / "stages" / "report") in nodes["build-panel"]["declared_reads"]
     )
     assert (
         str(output_root / "stage-results" / "report.json")

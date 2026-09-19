@@ -56,7 +56,6 @@ STAGES = (
     "attribution",
     "analytics",
     "report",
-    "workbook",
     "panel",
 )
 
@@ -242,7 +241,7 @@ def _portfolio_spec(
                 depends_on=[previous_node],
                 reads=[previous_output],
                 writes=[output],
-                retry_limit=1 if role == "workbook" else 0,
+                retry_limit=0,
             )
         )
         previous_node = command_id
@@ -538,7 +537,7 @@ def test_portfolio_pipeline_builds_and_resumes_from_command_receipts(
     assert plan["node_count"] == len(raw["nodes"])
     assert first["release_state"] == "PREPARED"
     assert second["release_id"] == first["release_id"]
-    assert len(calls) == 10
+    assert len(calls) == 9
     assert (Path(outputs["target"]) / "generations" / proposed.generation_id).is_dir()
 
 
@@ -898,7 +897,7 @@ def test_financial_mvp_rejects_coherent_invalidation_route_rewrite(
         plan_pipeline(PipelineSpec.from_json_bytes(json.dumps(raw).encode()))
 
 
-def test_portfolio_pipeline_allows_one_workbook_resume_attempt(
+def test_portfolio_pipeline_never_schedules_a_workbook_stage(
     tmp_path: Path,
 ) -> None:
     raw, outputs, _ = _portfolio_spec(tmp_path)
@@ -906,24 +905,11 @@ def test_portfolio_pipeline_allows_one_workbook_resume_attempt(
     spec = PipelineSpec.from_json_bytes(json.dumps(raw).encode())
     calls: list[str] = []
     successful_runner = _runner(outputs, calls)
-    workbook_attempts = 0
-
-    def fail_workbook_once(node: object) -> tuple[int, bytes, bytes]:
-        nonlocal workbook_attempts
-        if str(getattr(node, "node_id")) == "build-workbook":
-            workbook_attempts += 1
-            if workbook_attempts == 1:
-                calls.append("build-workbook")
-                return 1, b"", b"desktop handoff required"
-        return successful_runner(node)
-
-    with pytest.raises(PipelineExecutionError, match="build-workbook"):
-        execute_pipeline(spec, command_runner=fail_workbook_once)
-    resumed = execute_pipeline(spec, command_runner=fail_workbook_once)
+    assert all(node.node_id != "build-workbook" for node in spec.nodes)
+    resumed = execute_pipeline(spec, command_runner=successful_runner)
 
     assert resumed["release_state"] == "PREPARED"
-    assert workbook_attempts == 2
-    assert calls.count("build-workbook") == 2
+    assert "build-workbook" not in calls
 
 
 def test_portfolio_pipeline_rejects_a_prebuilt_generation(tmp_path: Path) -> None:

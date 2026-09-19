@@ -6639,6 +6639,10 @@ def build_stage(
 ) -> dict[str, Any]:
     """Build exactly one source-to-panel stage from its predecessor outputs."""
 
+    if workbook_runtime_path is not None:
+        raise VerticalBuildError(
+            "workbook runtime is permanently held and excluded from the financial MVP"
+        )
     if role == "workbook":
         raise VerticalBuildError(
             "workbook stage is permanently held and excluded from the financial MVP"
@@ -6756,7 +6760,7 @@ def build_stage(
         ledger = _stage_result(output_root, "ledger")
         analytics = _stage_result(output_root, "analytics")
         epoch_identity = _epoch_manifest_panel_identity(recipe)
-        result = build_report_candidate(
+        result = build_report(
             stages / "baseline",
             stages / "ledger",
             _path(ledger.get("freshness_health"), "freshness health"),
@@ -6764,7 +6768,7 @@ def build_stage(
             implementation_reconciliation,
             implementation_return_attribution,
             strategy_attribution_root,
-            stages / "report-candidate",
+            stages / "report",
             _path(analytics.get("correlation_root"), "correlation root"),
             _path(
                 analytics.get("decomposition_lenses_root"), "decomposition lenses root"
@@ -6906,6 +6910,10 @@ def build_all(
     retained_cache_root: Path | None = None,
     workbook_runtime_path: Path | None = None,
 ) -> dict[str, Any]:
+    if workbook_runtime_path is not None:
+        raise VerticalBuildError(
+            "workbook runtime is permanently held and excluded from the financial MVP"
+        )
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
         input_generation=hwm_governed_input_generation_path,
@@ -6999,7 +7007,7 @@ def build_all(
         **portfolio_paths,
         retained_cache_root=retained_cache_root,
     )
-    report_candidate = build_stage(
+    report = build_stage(
         recipe_path,
         output_root,
         "report",
@@ -7024,8 +7032,7 @@ def build_all(
         "ledger": ledger,
         "panel": panel,
         "release_commit": recipe["release_commit"],
-        "report": report_candidate,
-        "report_candidate": report_candidate,
+        "report": report,
         "schema_version": 1,
         "state": "PANEL_CANDIDATE_REQUIRES_BROWSER_QA",
     }

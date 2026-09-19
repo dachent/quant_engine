@@ -3986,18 +3986,6 @@ def build_spec(
         }
     )
 
-    report_data_file = next(
-        row
-        for row in recipe["expected_generations"]["report"]["files"]
-        if row["relative_path"] == "portfolio-report-data.json"
-    )
-    report_candidate = (
-        output_root
-        / "stages"
-        / "report-candidate"
-        / "candidates"
-        / report_data_file["sha256"]
-    )
     stage_writes = {
         "ledger": [
             output_root / "stages" / "ledger",
@@ -4017,16 +4005,8 @@ def build_spec(
             retained_cache_root,
         ],
         "report": [
-            report_candidate / "portfolio-report-data.json",
-            report_candidate / "portfolio-report.xlsx",
-            report_candidate / "workbook-contract.json",
-            report_candidate / "xlsx-job.json",
-            output_root / "stage-results" / "report.json",
-        ],
-        "workbook": [
-            output_root / "stages" / "report-candidate",
             output_root / "stages" / "report",
-            output_root / "stage-results" / "workbook.json",
+            output_root / "stage-results" / "report.json",
         ],
         "panel": [
             output_root / "stages" / "panel",
@@ -4067,7 +4047,7 @@ def build_spec(
             args.extend(("--qa-dir", str(qa_dir)))
         if role == "analytics":
             args.extend(("--retained-cache-root", str(retained_cache_root)))
-        # `build_workbook` and `build_panel` treat any run carrying governed
+        # `build_report` and `build_panel` treat any run carrying governed
         # HWM, invested capital or decomposition lenses as a financial
         # publication and refuse it without a portfolio root, which is what
         # proves the stage output root is disjoint from production. Every
@@ -4078,7 +4058,7 @@ def build_spec(
         if needs_portfolio_root and portfolio_root is not None:
             args.extend(("--portfolio-root", str(portfolio_root)))
         # The governed numerical results are stage inputs, not merely gate
-        # evidence: `build_report`, `build_workbook` and `build_panel` each read
+        # evidence: `build_report` and `build_panel` each read
         # them and each refuses to verify a candidate that was built with them
         # when it is re-run without. Omitting them here made the pipeline's own
         # panel node recompute a semantic validation that differed from the one
