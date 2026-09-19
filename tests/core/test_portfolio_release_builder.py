@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import importlib.util
 import io
@@ -234,11 +235,14 @@ def _stub_current_plan_upstream_verification(
             if path.is_file()
         )
         first_spec = json.loads(specification_path.read_text(encoding="utf-8"))
+        target_policy = first_spec["target_source"]["interval_policy"]
         return {
             "layered_composition": {
                 "Strategy 0": {"authority": "SYNTHETIC_LAYERED_HISTORY"}
             },
+            "series_interval_policies": target_policy["series_policies"],
             "provenance_sources": first_spec["provenance_sources"],
+            "reporting_currency": target_policy["currency"],
         }
 
     monkeypatch.setattr(
@@ -2071,9 +2075,11 @@ def _current_plan_bundle(
                         "currency": "USD",
                         "finality": "COMPLETE_SELECTED_SNAPSHOT",
                         "native_calendar": "SOURCE_LABELLED_DAILY",
-                        "native_label_convention": "PUBLISHED_DAILY_LABEL",
-                        "return_basis": "NET",
-                        "source_vintage": "SELECTED_SNAPSHOT",
+                        "native_label_convention": "SOURCE_PUBLISHED_DAILY_LABEL",
+                        "return_basis": "SOURCE_PUBLISHED",
+                        "source_vintage": hashlib.sha256(
+                            model_sources[source_key]["factor_content"]
+                        ).hexdigest(),
                     },
                     "date_column": "date",
                     "expected_sha256": hashlib.sha256(
@@ -2124,13 +2130,17 @@ def _current_plan_bundle(
                     "interval_policy": {
                         "currency": "USD",
                         "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
-                        "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
-                        "finalized_through": "2026-08-03",
-                        "gap_disposition": "REJECT_BUCKET",
-                        "native_calendar": "CALENDAR_DAY_24_7",
-                        "native_label_convention": "SYNTHETIC_CALENDAR_DAY",
-                        "return_basis": "NET",
-                        "source_vintage": "SELECTED_SNAPSHOT",
+                        "series_policies": {
+                            series_id: {
+                                "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
+                                "finalized_through": "2026-08-03",
+                                "gap_disposition": "REJECT_BUCKET",
+                                "native_calendar": "CALENDAR_DAY_24_7",
+                                "native_label_convention": "SYNTHETIC_CALENDAR_DAY",
+                                "return_basis": "NET",
+                                "source_vintage": "SELECTED_SNAPSHOT",
+                            }
+                        },
                     },
                     "expected_sha256": hashlib.sha256(
                         model_sources[source_key]["target_content"]
@@ -3053,6 +3063,9 @@ def test_current_surface_plan_admits_leading_incomplete_ordinary_factor_row(
             expected_sha256=projected_binding["sha256"],
             expected_size_bytes=projected_binding["size_bytes"],
         )
+        specification["factor_source"]["interval_policy"]["source_vintage"] = (
+            projected_binding["sha256"]
+        )
         specification["factor_source"]["factors"][0]["effective_start"] = "2026-07-26"
         content = builder.canonical_json_bytes(specification)
         (bundle / relative).write_bytes(content)
@@ -3067,6 +3080,58 @@ def test_current_surface_plan_admits_leading_incomplete_ordinary_factor_row(
     bundle, manifest = _rebind_current_bundle(bundle, manifest)
 
     assert len(builder._current_release_plan_specs(bundle, manifest)) == 2
+
+
+def test_current_surface_plan_rejects_rehashed_source_interval_policy_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Self-consistent copied specs cannot erase a governed source gap."""
+
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    first_path = bundle / str(manifest["specs"][0]["path"])
+    original = json.loads(first_path.read_text(encoding="utf-8"))
+    original_policies = copy.deepcopy(
+        original["target_source"]["interval_policy"]["series_policies"]
+    )
+    for row in manifest["specs"]:
+        relative = str(row["path"])
+        path = bundle / relative
+        specification = json.loads(path.read_text(encoding="utf-8"))
+        specification["target_source"]["interval_policy"]["series_policies"][
+            "Strategy 0"
+        ].pop("gap_disposition")
+        content = builder.canonical_json_bytes(specification)
+        path.write_bytes(content)
+        binding = {"sha256": hashlib.sha256(content).hexdigest(), "size_bytes": len(content)}
+        row.update(binding)
+        next(item for item in manifest["outputs"] if item["path"] == relative).update(
+            binding
+        )
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    def authoritative_evidence(
+        attribution_bundle: Path, _inputs: object, _plan: object, **_kwargs: object
+    ) -> dict[str, object]:
+        specification = json.loads(
+            next((attribution_bundle / "specs").glob("*.json")).read_text(
+                encoding="utf-8"
+            )
+        )
+        return {
+            "layered_composition": {
+                "Strategy 0": {"authority": "SYNTHETIC_LAYERED_HISTORY"}
+            },
+            "series_interval_policies": original_policies,
+            "provenance_sources": specification["provenance_sources"],
+            "reporting_currency": "USD",
+        }
+
+    monkeypatch.setattr(
+        builder, "_verify_current_plan_upstream_evidence", authoritative_evidence
+    )
+    with pytest.raises(builder.VerticalBuildError, match="interval policy differs"):
+        builder._current_release_plan_specs(bundle, manifest)
 
 
 def test_current_surface_plan_rejects_governed_model_identity_substitution(
