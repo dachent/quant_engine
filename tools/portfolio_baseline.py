@@ -653,11 +653,12 @@ def _provider_ledger(
             "provider-ledger catalog manifest binding differs"
         )
     provider_as_of = _date(catalog.get("as_of_date"), "provider-ledger as_of_date")
-    if (
-        manifest.as_of_date != provider_as_of
-        or catalog_artifacts[0].as_of_date != provider_as_of
-    ):
+    if catalog_artifacts[0].as_of_date != provider_as_of:
         raise BaselineValidationError("provider-ledger catalog as-of binding differs")
+    if manifest.as_of_date != max(item.as_of_date for item in manifest.artifacts):
+        raise BaselineValidationError(
+            "provider-ledger generation date is not artifact-derived"
+        )
     if provider_as_of > baseline_as_of:
         raise BaselineValidationError("provider-ledger is newer than baseline")
     provider_ids = {
@@ -681,7 +682,7 @@ def _provider_ledger(
             artifact_id="providers/provider-ledger/generation.json",
             sha256=actual_manifest_hash,
             size_bytes=manifest_size,
-            as_of_date=provider_as_of,
+            as_of_date=manifest.as_of_date,
             schema_name="generation-manifest",
             schema_version="1",
         ),
@@ -697,7 +698,7 @@ def _provider_ledger(
     links = [
         {
             "artifact_id": item.artifact_id,
-            "as_of_date": provider_as_of.isoformat(),
+            "as_of_date": item.as_of_date.isoformat(),
             "schema_name": item.schema_name,
             "schema_version": item.schema_version,
             "sha256": item.sha256,
@@ -3745,7 +3746,17 @@ def build_catalog(
     )
     observed_dates = [_date(item["as_of_date"], "nav.as_of_date") for item in nav]
     manifest = GenerationManifest.build(
-        as_of_date=as_of,
+        as_of_date=max(
+            item.as_of_date
+            for item in (
+                *source_artifacts,
+                *([hwm_inputs_artifact] if hwm_inputs_artifact is not None else []),
+                *provider_artifacts,
+                provenance_artifact,
+                spec_artifact,
+                catalog_artifact,
+            )
+        ),
         adapter=AdapterIdentity("portfolio-baseline-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,

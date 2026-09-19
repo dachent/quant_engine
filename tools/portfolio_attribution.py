@@ -101,26 +101,10 @@ def _verify_hash(path: Path, expected: object, name: str) -> tuple[str, int]:
 
 def _baseline(
     root: Path, baseline_generation_id: str | None = None
-) -> tuple[dict[str, Any], dict[str, str], Path]:
+) -> tuple[dict[str, Any], dict[str, str], Path, date]:
     if baseline_generation_id is None:
         pointer = read_current(root)
-        generation = root / "generations" / pointer.generation_id
-        manifest_path = generation / "generation.json"
-        catalog_path = generation / "portfolio-baseline.json"
-        manifest_payload = _load_json(manifest_path, "baseline manifest")
-        if manifest_payload.get("verification") != "VERIFIED":
-            raise AttributionValidationError("baseline generation is not verified")
-        catalog = _load_json(catalog_path, "baseline catalog")
-        if catalog.get("baseline_schema_version") != 1:
-            raise AttributionValidationError("baseline schema is unsupported")
-        return (
-            catalog,
-            {
-                "generation_id": pointer.generation_id,
-                "catalog_sha256": hashlib.sha256(catalog_path.read_bytes()).hexdigest(),
-            },
-            catalog_path,
-        )
+        baseline_generation_id = pointer.generation_id
     if re.fullmatch(r"[0-9a-f]{64}", baseline_generation_id) is None:
         raise AttributionValidationError("baseline generation identity differs")
     try:
@@ -142,6 +126,14 @@ def _baseline(
     catalog = _load_json(catalog_path, "baseline catalog")
     if catalog.get("baseline_schema_version") != 1:
         raise AttributionValidationError("baseline schema is unsupported")
+    try:
+        catalog_as_of = date.fromisoformat(
+            _text(catalog.get("as_of_date"), "baseline.as_of_date")
+        )
+    except ValueError as exc:
+        raise AttributionValidationError(
+            "baseline catalog as-of date is invalid"
+        ) from exc
     catalog_sha256, catalog_size_bytes = _hash(catalog_path, "baseline catalog")
     artifact = next(
         (
@@ -154,11 +146,13 @@ def _baseline(
     if artifact is None or (
         artifact.sha256,
         artifact.size_bytes,
+        artifact.as_of_date,
         artifact.schema_name,
         artifact.schema_version,
     ) != (
         catalog_sha256,
         catalog_size_bytes,
+        catalog_as_of,
         "portfolio-baseline-catalog",
         "1",
     ):
@@ -170,6 +164,7 @@ def _baseline(
             "catalog_sha256": catalog_sha256,
         },
         catalog_path,
+        manifest.as_of_date,
     )
 
 
@@ -390,7 +385,7 @@ def build_catalog(
     if spec.get("schema_version") != SCHEMA_VERSION:
         raise AttributionValidationError("attribution spec schema is unsupported")
     as_of = date.fromisoformat(_text(spec.get("as_of_date"), "spec.as_of_date"))
-    baseline, baseline_identity, baseline_path = _baseline(
+    baseline, baseline_identity, baseline_path, baseline_generation_as_of = _baseline(
         baseline_root, baseline_generation_id
     )
     if baseline.get("as_of_date") != as_of.isoformat():
@@ -422,6 +417,14 @@ def build_catalog(
     source_manifest = _load_json(manifest_path, "source manifest")
     if source_manifest.get("verification") != "VERIFIED":
         raise AttributionValidationError("source manifest is not verified")
+    try:
+        source_manifest_as_of = date.fromisoformat(
+            _text(source_manifest.get("as_of_date"), "source_manifest.as_of_date")
+        )
+    except ValueError as exc:
+        raise AttributionValidationError(
+            "source manifest as-of date is invalid"
+        ) from exc
     series = _rows(source_path)
     benchmark_rows = spec.get("benchmark_assignments")
     benchmark_comparison_rows = spec.get("benchmark_comparisons")
@@ -565,7 +568,7 @@ def build_catalog(
         SourceArtifact.from_path(
             baseline_path,
             artifact_id="input/portfolio-baseline.json",
-            as_of_date=as_of,
+            as_of_date=baseline_generation_as_of,
             schema_name="portfolio-baseline-catalog",
             schema_version="1",
         ),
@@ -581,7 +584,7 @@ def build_catalog(
             artifact_id="input/source-manifest.json",
             sha256=manifest_hash,
             size_bytes=manifest_size,
-            as_of_date=as_of,
+            as_of_date=source_manifest_as_of,
             schema_name="strategy-attribution-source-manifest",
             schema_version="1",
         ),
@@ -609,7 +612,7 @@ def stage_catalog(
         schema_version=str(CATALOG_SCHEMA_VERSION),
     )
     manifest = GenerationManifest.build(
-        as_of_date=as_of,
+        as_of_date=max(item.as_of_date for item in [*artifacts, catalog_artifact]),
         adapter=AdapterIdentity("portfolio-attribution-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,

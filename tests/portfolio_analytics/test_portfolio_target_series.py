@@ -1426,6 +1426,7 @@ def _provider_ledger_fixture(tmp_path: Path) -> tuple[Path, Path]:
                 "artifacts": [
                     {
                         "artifact_id": "normalized/provider-ledger.json",
+                        "as_of_date": "2026-07-31",
                         "sha256": hashlib.sha256(catalog.read_bytes()).hexdigest(),
                         "size_bytes": catalog.stat().st_size,
                     }
@@ -1467,6 +1468,79 @@ def test_provider_ledger_targets_preserve_one_canonical_series_contract(
     }
     assert json.loads(evidence)["provider_ledger_generation_id"] == "b" * 64
     assert manifest_bytes == manifest.read_bytes()
+
+
+def test_provider_ledger_targets_accept_later_retained_provenance_for_fixed_financial_cutoff(
+    tmp_path: Path,
+) -> None:
+    """A later source generation must not relabel the selected financial cutoff."""
+
+    manifest, catalog = _provider_ledger_fixture(tmp_path)
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["as_of_date"] = "2026-08-01"
+    value["artifacts"].append(
+        {
+            "artifact_id": "source/retained-provider-observation.json",
+            "as_of_date": "2026-08-01",
+            "sha256": "c" * 64,
+            "size_bytes": 1,
+        }
+    )
+    manifest.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+
+    targets, _evidence, proof, _manifest_bytes = build_provider_ledger_targets(
+        manifest, catalog
+    )
+
+    assert [
+        row["date"] for row in csv.DictReader(io.StringIO(targets.decode("utf-8")))
+    ] == [
+        "2026-07-30",
+        "2026-07-31",
+    ]
+    assert json.loads(proof)["as_of_date"] == "2026-07-31"
+
+
+def test_provider_ledger_targets_reject_catalog_financial_date_binding_drift(
+    tmp_path: Path,
+) -> None:
+    """Changing the catalog artifact date cannot move the catalog's cutoff."""
+
+    manifest, catalog = _provider_ledger_fixture(tmp_path)
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["as_of_date"] = "2026-08-01"
+    value["artifacts"][0]["as_of_date"] = "2026-08-01"
+    manifest.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(
+        TargetSeriesError, match="provider-ledger catalog financial date differs"
+    ):
+        build_provider_ledger_targets(manifest, catalog)
+
+
+def test_provider_ledger_targets_reject_outer_generation_date_not_derived_from_artifacts(
+    tmp_path: Path,
+) -> None:
+    """An arbitrary later outer provenance date is not a valid source binding."""
+
+    manifest, catalog = _provider_ledger_fixture(tmp_path)
+    value = json.loads(manifest.read_text(encoding="utf-8"))
+    value["as_of_date"] = "2026-08-02"
+    value["artifacts"].append(
+        {
+            "artifact_id": "source/retained-provider-observation.json",
+            "as_of_date": "2026-08-01",
+            "sha256": "c" * 64,
+            "size_bytes": 1,
+        }
+    )
+    manifest.write_text(json.dumps(value, sort_keys=True), encoding="utf-8")
+
+    with pytest.raises(
+        TargetSeriesError,
+        match="provider-ledger generation date is not artifact-derived",
+    ):
+        build_provider_ledger_targets(manifest, catalog)
 
 
 def _refresh_provider_ledger_fixture_manifest(manifest: Path, catalog: Path) -> None:
