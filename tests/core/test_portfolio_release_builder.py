@@ -361,6 +361,98 @@ def test_reusable_provider_ledger_rejects_receipt_cutoff_that_differs_from_catal
         builder._validated_reusable_provider_ledger(generation)
 
 
+def _reused_ledger_recipe(
+    tmp_path: Path, *, evaluated_on: str
+) -> tuple[Path, Path]:
+    recipe_path = _recipe(tmp_path)
+    payload = json.loads(recipe_path.read_text(encoding="utf-8"))
+    generation = _provider_ledger_generation(
+        tmp_path,
+        catalog_as_of="2026-09-17",
+        manifest_as_of="2026-09-18",
+        artifact_as_of="2026-09-17",
+        receipt_cutoff="2026-09-17",
+    )
+    payload.pop("provider_ledger_spec")
+    payload.update(
+        {
+            "as_of_date": "2026-09-17",
+            "evaluated_on": evaluated_on,
+            "provider_ledger_generation": {
+                "path": str(generation),
+                **builder._directory_inventory(generation),
+            },
+            "schema_version": 7,
+        }
+    )
+    recipe_path.write_bytes(canonical_json_bytes(payload))
+    return recipe_path, generation
+
+
+def test_build_ledger_forwards_later_evaluation_without_relabeling_financial_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropping the explicit evaluation date would fail the freshness handoff."""
+
+    recipe_path, generation = _reused_ledger_recipe(
+        tmp_path, evaluated_on="2026-09-19"
+    )
+    monkeypatch.setattr(
+        builder,
+        "_history_contract_path",
+        lambda recipe: Path(recipe["correlation_source_root"]["path"])
+        / "dependence-source.json",
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def freshness_tool(name: str, *args: str, **_kwargs: object) -> dict[str, object]:
+        assert name == "portfolio_freshness.py"
+        calls.append(args)
+        return {}
+
+    monkeypatch.setattr(builder, "_tool", freshness_tool)
+
+    result = builder.build_ledger(recipe_path, tmp_path / "ledger-output")
+
+    assert calls == [
+        (
+            "--provider-ledger-root",
+            str(tmp_path / "ledger-output"),
+            "--provider-ledger-generation-id",
+            generation.name,
+            "--evaluation-date",
+            "2026-09-19",
+            "--output",
+            str(tmp_path / "ledger-output" / "freshness-health.json"),
+        )
+    ]
+    copied_catalog = (
+        tmp_path / "ledger-output" / "generations" / generation.name / "provider-ledger.json"
+    )
+    assert copied_catalog.read_bytes() == (generation / "provider-ledger.json").read_bytes()
+    assert json.loads(copied_catalog.read_text(encoding="utf-8"))["as_of_date"] == "2026-09-17"
+    assert result["source_mode"] == "REUSED_VERIFIED_IMMUTABLE_GENERATION"
+
+
+def test_recipe_rejects_evaluation_before_financial_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Freshness cannot be assessed before the selected financial cutoff."""
+
+    recipe_path, _generation = _reused_ledger_recipe(tmp_path, evaluated_on="2026-09-16")
+    monkeypatch.setattr(
+        builder,
+        "_history_contract_path",
+        lambda recipe: Path(recipe["correlation_source_root"]["path"])
+        / "dependence-source.json",
+    )
+
+    with pytest.raises(
+        builder.VerticalBuildError, match="evaluation date precedes financial cutoff"
+    ):
+        builder._recipe(recipe_path)
+
+
 def _recipe(tmp_path: Path) -> Path:
     provider = tmp_path / "provider.json"
     baseline = tmp_path / "baseline.json"
