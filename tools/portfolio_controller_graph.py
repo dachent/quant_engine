@@ -23,6 +23,7 @@ class ControllerGraphError(ValueError):
 _CORE = "packages/core/src/quant_engine/core/pipeline.py"
 _MATERIALIZER = "tools/portfolio_pipeline_materialize.py"
 _RELEASE = "tools/portfolio_release_builder.py"
+_FRESHNESS = "tools/portfolio_freshness.py"
 _REPORT = "tools/portfolio_report.py"
 _PANEL = "tools/portfolio_control_panel.py"
 _PREPARATION = "tools/portfolio_attended_preparation.py"
@@ -240,6 +241,33 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "stages": _STAGE_ORDER,
         "tests": ("tests/core/test_portfolio_release_builder.py",),
         "sinks": ("report-json-html", "panel-json-html", "coordinated-publication-pointers"),
+    },
+    {
+        "id": "provider-ledger-freshness-health",
+        "source_paths": (_RELEASE, _FRESHNESS, _REPORT, _PANEL),
+        "contracts": ("schemas/portfolio/provider-ledger.schema.json",),
+        "producer": (_FRESHNESS, "build_health"),
+        "artifacts": ("freshness-health.json",),
+        "consumers": (
+            (_REPORT, "_freshness_assessments"),
+            (_PANEL, "_freshness_health"),
+        ),
+        "validators": (
+            (_REPORT, "_freshness_assessments"),
+            (_PANEL, "_freshness_health"),
+        ),
+        "writers": ((_FRESHNESS, "write_health"),),
+        "stages": ("ledger",),
+        "tests": (
+            "tests/core/test_portfolio_controller_graph.py",
+            "tests/portfolio_control_panel/test_portfolio_freshness.py",
+            "tests/portfolio_report/test_portfolio_report.py",
+        ),
+        "sinks": (
+            "report-json-html",
+            "panel-json-html",
+            "coordinated-publication-pointers",
+        ),
     },
     {
         "id": "baseline-generation",
@@ -841,6 +869,14 @@ def _critical_relationships(
         "provider-ledger verify CLI target/subcommand",
     )
     _require_tool_call(
+        ledger_builder,
+        "portfolio_freshness.py",
+        "--provider-ledger-root",
+        "freshness producer CLI target",
+    )
+    _require_calls(repo_root, _FRESHNESS, "main", {"write_health"})
+    _require_calls(repo_root, _FRESHNESS, "write_health", {"build_health"})
+    _require_tool_call(
         baseline_builder,
         "portfolio_baseline.py",
         "stage",
@@ -882,6 +918,18 @@ def _critical_relationships(
     _top_level_function(report_tree, "verify_candidate")
     _top_level_function(panel_tree, "build_candidate")
     _top_level_function(panel_tree, "verify_candidate")
+    _require_local_route_calls(
+        report_tree,
+        "build_candidate",
+        {"_freshness_assessments"},
+        "report freshness consumer route",
+    )
+    _require_local_route_calls(
+        panel_tree,
+        "build_candidate",
+        {"_freshness_health"},
+        "panel freshness consumer route",
+    )
     core_tree = _tree(repo_root, _CORE)
     _require_local_route_calls(
         core_tree,
@@ -922,6 +970,41 @@ def _critical_relationships(
             "caller": "tools.portfolio_release_builder.build_stage",
             "callee": "tools.portfolio_release_builder.build_report",
             "kind": "report-producer",
+        },
+        {
+            "caller": "tools.portfolio_release_builder.build_ledger",
+            "callee": "tools/portfolio_freshness.py --provider-ledger-root",
+            "kind": "freshness-producer-cli",
+        },
+        {
+            "caller": "tools.portfolio_freshness.main",
+            "callee": "tools.portfolio_freshness.write_health",
+            "kind": "freshness-write-command",
+        },
+        {
+            "caller": "tools.portfolio_freshness.write_health",
+            "callee": "tools.portfolio_freshness.build_health",
+            "kind": "freshness-health-producer",
+        },
+        {
+            "caller": "tools.portfolio_report.build_candidate",
+            "callee": "tools.portfolio_report.build_report_data",
+            "kind": "report-freshness-build-route",
+        },
+        {
+            "caller": "tools.portfolio_report.build_report_data",
+            "callee": "tools.portfolio_report._freshness_assessments",
+            "kind": "report-freshness-consumer",
+        },
+        {
+            "caller": "tools.portfolio_control_panel.build_candidate",
+            "callee": "tools.portfolio_control_panel._rendered_files",
+            "kind": "panel-freshness-build-route",
+        },
+        {
+            "caller": "tools.portfolio_control_panel._rendered_files",
+            "callee": "tools.portfolio_control_panel._freshness_health",
+            "kind": "panel-freshness-consumer",
         },
         {
             "caller": "tools.portfolio_attended_preparation.prepare_attended_inputs",

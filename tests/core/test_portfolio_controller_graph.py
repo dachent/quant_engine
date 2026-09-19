@@ -34,6 +34,7 @@ def _isolated_projection_root(tmp_path: Path) -> Path:
             "packages/core/src/quant_engine/core/pipeline.py",
             "tools/portfolio_pipeline_materialize.py",
             "tools/portfolio_release_builder.py",
+            "tools/portfolio_freshness.py",
             "tools/portfolio_report.py",
             "tools/portfolio_control_panel.py",
             "tools/portfolio_attended_preparation.py",
@@ -179,6 +180,29 @@ def test_build_rejects_removed_panel_consumer_call(tmp_path: Path) -> None:
     )
 
     with pytest.raises(ControllerGraphError, match="panel candidate build CLI target"):
+        build_controller_graph(root)
+
+
+def test_build_rejects_altered_actual_freshness_producer_cli_edge(
+    tmp_path: Path,
+) -> None:
+    """The ledger producer must retain its literal freshness CLI route."""
+
+    root = _isolated_projection_root(tmp_path)
+    release_builder = root / "tools/portfolio_release_builder.py"
+    _replace_function_literal(
+        release_builder,
+        "build_ledger",
+        '"portfolio_freshness.py"',
+        '"missing_freshness_producer.py"',
+    )
+    release_builder.write_text(
+        release_builder.read_text(encoding="utf-8")
+        + '\nstr("portfolio_freshness.py")\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ControllerGraphError, match="freshness producer CLI target"):
         build_controller_graph(root)
 
 

@@ -43,9 +43,15 @@ The same source-bound projection carries maintained `artifact_flows`, not a
 separate mapper or diagram. Each flow has one native producer, its output
 inventory, bound contracts and source hashes, consumers, native validators,
 writers, linked tests, downstream stages and terminal sink(s). Layered history,
-dependence, plan, ledger, baseline, epoch manifest, HWM, capital, attribution,
-decomposition, report and panel artifacts remain separate records. Report and
-panel candidates are distinct producer records, and `publish_catalog`,
+dependence, plan, ledger, ledger freshness, baseline, epoch manifest, HWM,
+capital, attribution, decomposition, report and panel artifacts remain separate
+records. The ledger freshness flow binds `build_ledger`'s literal
+`portfolio_freshness.py` command, `write_health`/`build_health`, its
+`freshness-health.json` output, and the report/panel freshness consumers. Its
+provider-ledger input contract is bound; the existing core freshness schema is
+not listed as the output contract because it declares schema version 2 while
+the native producer and consumers use version 3. Report and panel candidates
+are distinct producer records, and `publish_catalog`,
 `publish_report`, and `publish_panel` are writers rather than relabelled
 validators. The actual delivery change range is resolved through these records,
 so an unlisted relevant producer, contract or consumer fails reconciliation
