@@ -452,7 +452,12 @@ def test_public_manifest_predicate_rejects_rebound_static_fact_count(
 
 @pytest.mark.parametrize(
     ("nav_ends_before_receipt", "policy_after_data", "later_provider_provenance"),
-    [(False, False, False), (True, False, False), (True, True, False), (False, False, True)],
+    [
+        (False, False, False),
+        (True, False, False),
+        (True, True, False),
+        (False, False, True),
+    ],
 )
 def test_static_receipts_pass_the_public_producer_and_independent_verifier(
     receipts_module: object,
