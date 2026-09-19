@@ -549,10 +549,6 @@ def _bound_catalog_identity(
         raise AccountAssignmentPerimeterError(
             "selected manifest generation_id is invalid"
         )
-    if manifest.as_of_date != source_date:
-        raise AccountAssignmentPerimeterError(
-            "selected manifest and catalog as_of_date differ"
-        )
     matching = [
         artifact
         for artifact in manifest.artifacts
@@ -579,7 +575,7 @@ def _bound_catalog_identity(
         "generation_manifest": _generation_manifest_identity(
             selected_manifest,
             artifact_id=manifest_identity_artifact_id,
-            as_of_date=source_date,
+            as_of_date=manifest.as_of_date,
         ),
     }
 
