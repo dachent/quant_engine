@@ -474,12 +474,65 @@ def _baseline(
 
 
 def _attribution(
-    root: Path, baseline_ref: Mapping[str, Any]
+    root: Path | None,
+    baseline_ref: Mapping[str, Any],
+    *,
+    attribution_generation_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, str], Path]:
-    pointer = read_current(root)
-    catalog_path = (
-        root / "generations" / pointer.generation_id / "strategy-attribution.json"
-    )
+    if root is None:
+        if attribution_generation_id is not None:
+            raise ReportValidationError(
+                "attribution root and generation identity are required together"
+            )
+        raise ReportValidationError("strategy attribution root is required")
+    if attribution_generation_id is None:
+        try:
+            pointer = read_current(root)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ReportValidationError(
+                "strategy attribution pointer is not accepted"
+            ) from exc
+        catalog_path = (
+            root / "generations" / pointer.generation_id / "strategy-attribution.json"
+        )
+        if catalog_path.is_symlink() or not catalog_path.is_file():
+            raise ReportValidationError(
+                "strategy attribution catalog is missing or linked"
+            )
+        catalog = _load_json(catalog_path, "strategy attribution catalog")
+        if catalog.get("catalog_schema_version") not in {1, 2}:
+            raise ReportValidationError("strategy attribution schema is unsupported")
+        attribution_baseline = _object(catalog.get("baseline"), "attribution.baseline")
+        if attribution_baseline != dict(baseline_ref):
+            raise ReportValidationError(
+                "strategy attribution baseline identity differs"
+            )
+        sha256, _ = hash_file(catalog_path)
+        return (
+            catalog,
+            {"catalog_sha256": sha256, "generation_id": pointer.generation_id},
+            catalog_path,
+        )
+    if re.fullmatch(r"[0-9a-f]{64}", attribution_generation_id) is None:
+        raise ReportValidationError("strategy attribution generation identity differs")
+    try:
+        manifest = read_generation(root, attribution_generation_id)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ReportValidationError(
+            "strategy attribution generation is not accepted"
+        ) from exc
+    generation_root = root / "generations" / attribution_generation_id
+    manifest_path = generation_root / "generation.json"
+    if (
+        manifest.generation_id != attribution_generation_id
+        or manifest.verification is not VerificationStatus.VERIFIED
+        or _regular_file_bytes(
+            manifest_path, "strategy attribution generation manifest"
+        )
+        != manifest.to_json_bytes()
+    ):
+        raise ReportValidationError("strategy attribution generation contract differs")
+    catalog_path = generation_root / "strategy-attribution.json"
     if catalog_path.is_symlink() or not catalog_path.is_file():
         raise ReportValidationError("strategy attribution catalog is missing or linked")
     catalog = _load_json(catalog_path, "strategy attribution catalog")
@@ -488,10 +541,30 @@ def _attribution(
     attribution_baseline = _object(catalog.get("baseline"), "attribution.baseline")
     if attribution_baseline != dict(baseline_ref):
         raise ReportValidationError("strategy attribution baseline identity differs")
-    sha256, _ = hash_file(catalog_path)
+    sha256, size_bytes = hash_file(catalog_path)
+    artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "normalized/strategy-attribution.json"
+        ),
+        None,
+    )
+    if artifact is None or (
+        artifact.sha256,
+        artifact.size_bytes,
+        artifact.schema_name,
+        artifact.schema_version,
+    ) != (
+        sha256,
+        size_bytes,
+        "strategy-attribution",
+        str(catalog["catalog_schema_version"]),
+    ):
+        raise ReportValidationError("strategy attribution artifact identity differs")
     return (
         catalog,
-        {"catalog_sha256": sha256, "generation_id": pointer.generation_id},
+        {"catalog_sha256": sha256, "generation_id": attribution_generation_id},
         catalog_path,
     )
 
@@ -5132,6 +5205,7 @@ def build_report_data(
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    attribution_generation_id: str | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
@@ -5395,9 +5469,15 @@ def build_report_data(
         )
     attribution_catalog: dict[str, Any] | None = None
     attribution_ref: dict[str, str] | None = None
+    if attribution_generation_id is not None and attribution_root is None:
+        raise ReportValidationError(
+            "attribution root and generation identity are required together"
+        )
     if attribution_root is not None:
         attribution_catalog, attribution_ref, _ = _attribution(
-            attribution_root, baseline_ref
+            attribution_root,
+            baseline_ref,
+            attribution_generation_id=attribution_generation_id,
         )
         strategy_summary = _merge_attribution(strategy_summary, attribution_catalog)
     allocation_history = _allocations(catalog, strategy_product_controls)
@@ -6722,6 +6802,7 @@ def build_candidate(
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    attribution_generation_id: str | None = None,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -6750,6 +6831,7 @@ def build_candidate(
         decomposition_lenses_root=decomposition_lenses_root,
         decomposition_plan_bundle=decomposition_plan_bundle,
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+        attribution_generation_id=attribution_generation_id,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -9518,6 +9600,7 @@ def verify_candidate(
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    attribution_generation_id: str | None = None,
 ) -> dict[str, Any]:
     epoch_snapshots = _epoch_manifest_workbook_snapshots(
         candidate_dir,
@@ -9573,6 +9656,7 @@ def verify_candidate(
         decomposition_lenses_root=decomposition_lenses_root,
         decomposition_plan_bundle=decomposition_plan_bundle,
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+        attribution_generation_id=attribution_generation_id,
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
@@ -10253,6 +10337,7 @@ def publish_report(
     private_stage_root: Path | None = None,
     portfolio_root: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    attribution_generation_id: str | None = None,
 ) -> dict[str, Any]:
     governed_hwm_supplied = any(
         value is not None
@@ -10401,16 +10486,31 @@ def publish_report(
         if provider_ledger_root is not None
         else None
     )
-    snapshot_attribution_root = (
-        _snapshot_current_root(
+    if attribution_generation_id is not None and attribution_root is None:
+        raise ReportValidationError(
+            "attribution root and generation identity are required together"
+        )
+    snapshot_attribution_generation_id: str | None = None
+    if attribution_root is None:
+        snapshot_attribution_root = None
+    elif attribution_generation_id is None:
+        snapshot_attribution_root = _snapshot_current_root(
             attribution_root,
             snapshot_root / "attribution",
             originals,
             inventories,
         )
-        if attribution_root is not None
-        else None
-    )
+    else:
+        (
+            snapshot_attribution_root,
+            _snapshot_attribution_generation_dir,
+        ) = _snapshot_selected_generation_root(
+            attribution_root / "generations" / attribution_generation_id,
+            snapshot_root / "attribution",
+            originals,
+            inventories,
+        )
+        snapshot_attribution_generation_id = attribution_generation_id
     snapshot_correlation_generation_dir: Path | None = None
     if correlation_generation_dir is not None:
         (
@@ -10561,6 +10661,7 @@ def publish_report(
         decomposition_lenses_root=snapshot_decomposition_lenses_root,
         decomposition_plan_bundle=snapshot_decomposition_plan_bundle,
         hybrid_decomposition_plan_bundle=snapshot_hybrid_decomposition_plan_bundle,
+        attribution_generation_id=snapshot_attribution_generation_id,
     )
     snapshot_workbook = snapshot_root / WORKBOOK_NAME
     _write_exact(snapshot_workbook, evidence_snapshots["workbook"][1])
@@ -10695,7 +10796,9 @@ def publish_report(
         )
     if snapshot_attribution_root is not None:
         _attribution_catalog, _attribution_ref, attribution_catalog_path = _attribution(
-            snapshot_attribution_root, report["baseline"]
+            snapshot_attribution_root,
+            report["baseline"],
+            attribution_generation_id=snapshot_attribution_generation_id,
         )
         artifact_specs.append(
             (
@@ -10954,6 +11057,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--freshness-health", type=Path)
     build.add_argument("--provider-ledger-root", type=Path)
     build.add_argument("--attribution-root", type=Path)
+    build.add_argument("--attribution-generation-id")
     build.add_argument("--history-contract", type=Path)
     build.add_argument("--implementation-reconciliation", type=Path)
     build.add_argument("--implementation-return-attribution", type=Path)
@@ -10972,6 +11076,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--freshness-health", type=Path)
     verify.add_argument("--provider-ledger-root", type=Path)
     verify.add_argument("--attribution-root", type=Path)
+    verify.add_argument("--attribution-generation-id")
     verify.add_argument("--history-contract", type=Path)
     verify.add_argument("--implementation-reconciliation", type=Path)
     verify.add_argument("--implementation-return-attribution", type=Path)
@@ -11021,6 +11126,7 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--freshness-health", type=Path)
     publish.add_argument("--provider-ledger-root", type=Path)
     publish.add_argument("--attribution-root", type=Path)
+    publish.add_argument("--attribution-generation-id")
     publish.add_argument("--history-contract", type=Path)
     publish.add_argument("--implementation-reconciliation", type=Path)
     publish.add_argument("--implementation-return-attribution", type=Path)
@@ -11105,6 +11211,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 decomposition_lenses_root=args.decomposition_lenses_root,
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                attribution_generation_id=args.attribution_generation_id,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )
@@ -11130,6 +11237,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 decomposition_lenses_root=args.decomposition_lenses_root,
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                attribution_generation_id=args.attribution_generation_id,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )
@@ -11176,6 +11284,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 decomposition_lenses_root=args.decomposition_lenses_root,
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                attribution_generation_id=args.attribution_generation_id,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
                 **(
