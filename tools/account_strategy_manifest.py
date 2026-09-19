@@ -53,7 +53,7 @@ from decimal import Context, Decimal, getcontext, localcontext
 from functools import wraps
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Mapping, cast
+from typing import Any, Mapping, Sequence, cast
 
 from quant_engine.core import InputSnapshot
 from quant_engine.core.contracts import (
@@ -1846,6 +1846,10 @@ def parse_capital_anchors(ledger: Mapping[str, Any]) -> list[dict[str, Any]]:
                     f"capital anchor {record_id}.nav_recognition_date",
                 ),
                 "amount": basis_amount,
+                "source_record_id": _require_nonempty_text(
+                    raw.get("source_record_id"),
+                    f"capital anchor {record_id}.source_record_id",
+                ),
             }
         )
         if anchors[-1]["nav_recognition_date"] < anchors[-1]["event_date"]:
@@ -2258,6 +2262,48 @@ def xirr(cashflows: list[tuple[date, Decimal]]) -> Decimal | None:
     # Bisection around an exact zero can leave a vanishing numerical residue.
     # Canonicalize that residue so JSON never carries an exponent-form pseudo-rate.
     return Decimal(0) if abs(rate) < Decimal("1e-30") else rate
+
+
+@_isolated_decimal_context
+def classify_xirr(cashflows: list[tuple[date, Decimal]]) -> dict[str, object]:
+    """Classify the existing conservative ACTUAL_365 Decimal XIRR result.
+
+    ``xirr`` intentionally returns ``None`` for several fail-closed outcomes.
+    Keep that numerical method unchanged and make the admission reason explicit
+    for the producer/consumer contract.
+    """
+    by_date: dict[date, Decimal] = defaultdict(Decimal)
+    for cashflow_date, amount in cashflows:
+        by_date[cashflow_date] += amount
+    ordered = [(day, amount) for day, amount in sorted(by_date.items()) if amount]
+    if not ordered:
+        return {
+            "status": "INDETERMINATE",
+            "reason": "ALL_CASHFLOWS_ZERO",
+            "rate": None,
+        }
+    signs = [amount > 0 for _, amount in ordered]
+    sign_changes = sum(left != right for left, right in zip(signs, signs[1:]))
+    if sign_changes == 0:
+        return {
+            "status": "NO_ROOT",
+            "reason": "NO_CHRONOLOGICAL_SIGN_CHANGE",
+            "rate": None,
+        }
+    if sign_changes > 1:
+        return {
+            "status": "UNIQUENESS_NOT_PROVED",
+            "reason": "MULTIPLE_CHRONOLOGICAL_SIGN_CHANGES",
+            "rate": None,
+        }
+    rate = xirr(ordered)
+    if rate is None:
+        return {
+            "status": "NUMERICAL_SEARCH_UNRESOLVED",
+            "reason": "UNIQUE_ROOT_SEARCH_UNRESOLVED",
+            "rate": None,
+        }
+    return {"status": "AVAILABLE", "reason": None, "rate": rate}
 
 
 def _assignment_key(assignment: Mapping[str, Any]) -> tuple[str, str, str, str | None]:
@@ -3488,7 +3534,25 @@ def _assemble_manifest_impl(
                     raise ManifestError(
                         "successor continuity cannot also consume an opening capital anchor"
                     )
-            local_internal_in = dict(buckets["internal_in"].get(aid, {}))
+            # Quantbase's dashboard is fund-scoped STRATEGY_NAV.  Linked
+            # brokerage deposits/withdrawals share an account identifier but
+            # do not cross this valuation perimeter; only reconciled fund
+            # allocation anchors enter the strategy epoch.
+            strategy_nav_perimeter = provider == "quantbase"
+            local_external_in = (
+                {} if strategy_nav_perimeter else buckets["external_in"].get(aid, {})
+            )
+            local_external_out = (
+                {} if strategy_nav_perimeter else buckets["external_out"].get(aid, {})
+            )
+            local_internal_in = (
+                {}
+                if strategy_nav_perimeter
+                else dict(buckets["internal_in"].get(aid, {}))
+            )
+            local_internal_out = (
+                {} if strategy_nav_perimeter else buckets["internal_out"].get(aid, {})
+            )
             allocation_legs: dict[tuple[str, str], Decimal] = {}
             for anchor in allocation_anchors:
                 leg = (
@@ -3500,10 +3564,10 @@ def _assemble_manifest_impl(
                 )
             stats = analyze_epoch(
                 window,
-                buckets["external_in"].get(aid, {}),
-                buckets["external_out"].get(aid, {}),
+                local_external_in,
+                local_external_out,
                 local_internal_in,
-                buckets["internal_out"].get(aid, {}),
+                local_internal_out,
                 prev_closing,
                 w0,
                 w1,
@@ -3596,6 +3660,304 @@ def _assemble_manifest_impl(
         },
         "rows": rows,
     }
+
+
+def _mwr_payloads_from_governed_inputs(
+    manifest: Mapping[str, Any],
+    ledger: Mapping[str, Any],
+    events: Sequence[Mapping[str, Any]],
+    capital_anchors: Sequence[Mapping[str, Any]],
+) -> None:
+    """Attach source-bound annualized MWR to existing manifest rows.
+
+    This deliberately consumes the same classified-flow and NAV records that
+    the existing epoch calculation has already reconciled.  It does not infer
+    a cash flow from a cost-basis movement or reuse RONC as an MWR substitute.
+    """
+    nav_sources: dict[tuple[str, str], list[tuple[str, str, str]]] = defaultdict(list)
+    for nav in ledger.get("nav_observations", []):
+        if not isinstance(nav, Mapping):
+            raise ManifestError("MWR NAV observation is invalid")
+        account_id = _require_nonempty_text(nav.get("account_id"), "MWR NAV account")
+        nav_date = _iso_date(nav.get("as_of_date"), "MWR NAV date")
+        record_id = _require_nonempty_text(nav.get("record_id"), "MWR NAV record")
+        value_basis = _require_nonempty_text(nav.get("value_basis"), "MWR NAV basis")
+        nav_value = nav.get("nav")
+        if not isinstance(nav_value, Mapping):
+            raise ManifestError("MWR NAV value is invalid")
+        currency = _require_nonempty_text(nav_value.get("currency"), "MWR NAV currency")
+        nav_sources[(account_id, nav_date)].append((record_id, value_basis, currency))
+
+    flow_sources: dict[tuple[str, str, str, str], list[str]] = defaultdict(list)
+    for event in events:
+        account_id = _require_nonempty_text(event.get("account_id"), "MWR flow account")
+        event_date = _iso_date(event.get("event_date"), "MWR flow date")
+        recognition_date = _iso_date(
+            event.get("nav_recognition_date", event_date), "MWR flow recognition"
+        )
+        amount = event.get("amount")
+        if not isinstance(amount, Decimal) or amount == 0:
+            raise ManifestError("MWR flow amount is invalid")
+        disposition = _require_nonempty_text(
+            event.get("disposition"), "MWR flow disposition"
+        )
+        if disposition not in {"EXTERNAL", "INTERNAL"}:
+            raise ManifestError("MWR flow disposition is invalid")
+        direction = "IN" if amount > 0 else "OUT"
+        flow_sources[
+            (account_id, f"{disposition}_{direction}", event_date, recognition_date)
+        ].append(
+            _require_nonempty_text(event.get("source_record_id"), "MWR flow source")
+        )
+
+    anchor_sources: dict[tuple[str, str, str, str], list[str]] = defaultdict(list)
+    opening_anchor_sources: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    for anchor in capital_anchors:
+        if not isinstance(anchor, Mapping):
+            raise ManifestError("MWR capital anchor is invalid")
+        account_id = _require_nonempty_text(
+            anchor.get("account_id"), "MWR anchor account"
+        )
+        strategy_id = _require_nonempty_text(
+            anchor.get("strategy_id"), "MWR anchor strategy"
+        )
+        event_date = _iso_date(anchor.get("event_date"), "MWR anchor date")
+        recognition_date = _iso_date(
+            anchor.get("nav_recognition_date"), "MWR anchor recognition"
+        )
+        source_id = _require_nonempty_text(
+            anchor.get("source_record_id"), "MWR anchor source"
+        )
+        if anchor.get("capital_type") == "STRATEGY_CAPITAL_ALLOCATION":
+            anchor_sources[
+                (account_id, strategy_id, event_date, recognition_date)
+            ].append(source_id)
+        elif anchor.get("capital_type") == "OPENING_CAPITAL_ANCHOR":
+            # The source capital date is the investor cash-flow date.  Its
+            # separately retained recognition date identifies the first NAV
+            # that reflects that capital; it must not manufacture a same-day
+            # NAV requirement for the opening leg.
+            opening_anchor_sources[(account_id, strategy_id, event_date)].append(
+                source_id
+            )
+
+    rows = manifest.get("rows")
+    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
+        raise ManifestError("MWR manifest rows are invalid")
+    for row in rows:
+        status = row.get("status")
+        if status != "OK":
+            row.update(
+                {
+                    "mwr_status": (
+                        "INCOMPLETE_FLOW_COVERAGE"
+                        if status == "BLOCKED_UNPROVABLE_OPENING_FLOWS"
+                        else "BLOCKED_ADMISSION"
+                    ),
+                    "mwr_reason": row.get("blocking_reason")
+                    or "EPOCH_OUTPUT_NOT_ADMITTED",
+                    "mwr_xirr": None,
+                    "mwr_opening_date": None,
+                    "mwr_opening_value": None,
+                    "mwr_terminal_date": None,
+                    "mwr_terminal_value": None,
+                    "mwr_currency": None,
+                    "mwr_coverage_status": "BLOCKED",
+                    "mwr_cashflows": [],
+                    "mwr_label": None,
+                    "mwr_value_basis": None,
+                    "mwr_valuation_timing": None,
+                    "mwr_day_count": "ACTUAL_365",
+                    "mwr_unit": "ANNUALIZED_RETURN",
+                    "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+                }
+            )
+            continue
+
+        account_id = _require_nonempty_text(row.get("account_id"), "MWR row account")
+        strategy_id = _require_nonempty_text(row.get("strategy_id"), "MWR row strategy")
+        end = _iso_date(row.get("end"), "MWR row end")
+        trace = row.get("observation_trace")
+        if not isinstance(trace, Mapping):
+            raise ManifestError("MWR observation trace is invalid")
+        links = trace.get("links")
+        if (
+            not isinstance(links, list)
+            or not links
+            or not isinstance(links[0], Mapping)
+        ):
+            raise ManifestError("MWR observation links are invalid")
+        opening_date = _iso_date(links[0].get("start_date"), "MWR opening date")
+        # This producer runs before json_ready(), while the existing epoch
+        # assembler still holds governed monetary facts as Decimal values.
+        opening_value = _money(row.get("opening_capital"), "MWR opening value")
+        terminal_value = _money(row.get("current_value"), "MWR terminal value")
+        opening_nav_sources = nav_sources.get((account_id, opening_date), [])
+        terminal_nav_sources = nav_sources.get((account_id, end), [])
+        opening_anchor_ids = set(
+            opening_anchor_sources[(account_id, strategy_id, opening_date)]
+        )
+        if (
+            not opening_nav_sources and not opening_anchor_ids
+        ) or not terminal_nav_sources:
+            row.update(
+                {
+                    "mwr_status": "BLOCKED_ADMISSION",
+                    "mwr_reason": "NAV_SOURCE_IDENTITY_UNAVAILABLE",
+                    "mwr_xirr": None,
+                    "mwr_opening_date": None,
+                    "mwr_opening_value": None,
+                    "mwr_terminal_date": None,
+                    "mwr_terminal_value": None,
+                    "mwr_currency": None,
+                    "mwr_coverage_status": "COMPLETE",
+                    "mwr_cashflows": [],
+                    "mwr_label": None,
+                    "mwr_value_basis": None,
+                    "mwr_valuation_timing": None,
+                    "mwr_day_count": "ACTUAL_365",
+                    "mwr_unit": "ANNUALIZED_RETURN",
+                    "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+                }
+            )
+            continue
+        nav_metadata = {*opening_nav_sources, *terminal_nav_sources}
+        bases = {item[1] for item in nav_metadata}
+        currencies = {item[2] for item in nav_metadata}
+        if (
+            len(bases) != 1
+            or len(currencies) != 1
+            or next(iter(bases))
+            not in {"ACCOUNT_TOTAL", "ACCOUNT_VALUE", "STRATEGY_NAV"}
+        ):
+            row.update(
+                {
+                    "mwr_status": "BLOCKED_ADMISSION",
+                    "mwr_reason": "NAV_PERIMETER_OR_CURRENCY_MISMATCH",
+                    "mwr_xirr": None,
+                    "mwr_opening_date": None,
+                    "mwr_opening_value": None,
+                    "mwr_terminal_date": None,
+                    "mwr_terminal_value": None,
+                    "mwr_currency": None,
+                    "mwr_coverage_status": "COMPLETE",
+                    "mwr_cashflows": [],
+                    "mwr_label": None,
+                    "mwr_value_basis": None,
+                    "mwr_valuation_timing": None,
+                    "mwr_day_count": "ACTUAL_365",
+                    "mwr_unit": "ANNUALIZED_RETURN",
+                    "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+                }
+            )
+            continue
+        basis = next(iter(bases))
+        opening_ids = {item[0] for item in opening_nav_sources}
+        opening_ids.update(opening_anchor_ids)
+        terminal_ids = {item[0] for item in terminal_nav_sources}
+        grouped: dict[str, dict[str, Any]] = {}
+
+        def add_leg(day: str, amount: Decimal, source_ids: set[str]) -> bool:
+            if not source_ids:
+                return False
+            target = grouped.setdefault(
+                day, {"date": day, "amount": Decimal(0), "source_record_ids": set()}
+            )
+            target["amount"] += amount
+            target["source_record_ids"].update(source_ids)
+            return True
+
+        complete_sources = add_leg(opening_date, -opening_value, opening_ids)
+        capital_flow_trace = row.get("capital_flow_trace")
+        if not isinstance(capital_flow_trace, list) or not all(
+            isinstance(flow, Mapping) for flow in capital_flow_trace
+        ):
+            raise ManifestError("MWR capital flow trace is invalid")
+        for flow in capital_flow_trace:
+            flow_class = _require_nonempty_text(flow.get("class"), "MWR flow class")
+            event_date = _iso_date(flow.get("event_date"), "MWR flow event date")
+            recognition_date = _iso_date(
+                flow.get("nav_recognition_date"), "MWR flow recognition date"
+            )
+            amount = _money(flow.get("amount"), "MWR flow amount")
+            source_ids = set(
+                flow_sources[(account_id, flow_class, event_date, recognition_date)]
+            )
+            if flow_class == "INTERNAL_IN":
+                source_ids.update(
+                    anchor_sources[
+                        (account_id, strategy_id, event_date, recognition_date)
+                    ]
+                )
+            investor_amount = (
+                -amount if flow_class in {"EXTERNAL_IN", "INTERNAL_IN"} else amount
+            )
+            complete_sources = (
+                add_leg(event_date, investor_amount, source_ids) and complete_sources
+            )
+        complete_sources = (
+            add_leg(end, terminal_value, terminal_ids) and complete_sources
+        )
+        if not complete_sources:
+            row.update(
+                {
+                    "mwr_status": "BLOCKED_ADMISSION",
+                    "mwr_reason": "FLOW_SOURCE_IDENTITY_UNAVAILABLE",
+                    "mwr_xirr": None,
+                    "mwr_opening_date": None,
+                    "mwr_opening_value": None,
+                    "mwr_terminal_date": None,
+                    "mwr_terminal_value": None,
+                    "mwr_currency": None,
+                    "mwr_coverage_status": "COMPLETE",
+                    "mwr_cashflows": [],
+                    "mwr_label": None,
+                    "mwr_value_basis": None,
+                    "mwr_valuation_timing": None,
+                    "mwr_day_count": "ACTUAL_365",
+                    "mwr_unit": "ANNUALIZED_RETURN",
+                    "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+                }
+            )
+            continue
+        cashflows = [
+            (date.fromisoformat(day), cast(Decimal, leg["amount"]))
+            for day, leg in sorted(grouped.items())
+            if leg["amount"]
+        ]
+        result = classify_xirr(cashflows)
+        row.update(
+            {
+                "mwr_status": result["status"],
+                "mwr_reason": result["reason"],
+                "mwr_xirr": result["rate"],
+                "mwr_opening_date": opening_date,
+                "mwr_opening_value": opening_value,
+                "mwr_terminal_date": end,
+                "mwr_terminal_value": terminal_value,
+                "mwr_currency": next(iter(currencies)),
+                "mwr_coverage_status": "COMPLETE",
+                "mwr_cashflows": [
+                    {
+                        "date": day,
+                        "amount": leg["amount"],
+                        "source_record_ids": sorted(leg["source_record_ids"]),
+                    }
+                    for day, leg in sorted(grouped.items())
+                    if leg["amount"]
+                ],
+                "mwr_label": (
+                    "STRATEGY_EPOCH_MWR"
+                    if basis == "STRATEGY_NAV"
+                    else "ACCOUNT_EPOCH_MWR"
+                ),
+                "mwr_value_basis": basis,
+                "mwr_valuation_timing": "ECONOMIC_DATE_WITH_SEPARATE_NAV_RECOGNITION_DATE",
+                "mwr_day_count": "ACTUAL_365",
+                "mwr_unit": "ANNUALIZED_RETURN",
+                "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+            }
+        )
 
 
 MONEY_FIELDS = (
@@ -4544,6 +4906,9 @@ def _build_manifest_candidate_from_snapshots_impl(
         capital_anchors=capital_anchors,
     )
     if manifest_schema_version == _CURRENT_MANIFEST_SCHEMA_VERSION:
+        _mwr_payloads_from_governed_inputs(
+            manifest, ledger, reconciled_events, capital_anchors
+        )
         manifest["calculation_cutoff_date"] = _iso_date(
             ledger.get("calculation_cutoff_date"), "ledger calculation_cutoff_date"
         )

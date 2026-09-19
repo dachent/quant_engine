@@ -373,10 +373,45 @@
             "BLOCKED_ADMISSION"
           ]
         },
-        "mwr_xirr": {"type": "null"},
+        "mwr_xirr": {"type": ["string", "null"]},
         "mwr_status": {
-          "enum": ["UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE", "BLOCKED_ADMISSION"]
+          "enum": [
+            "AVAILABLE",
+            "NO_ROOT",
+            "INDETERMINATE",
+            "UNIQUENESS_NOT_PROVED",
+            "NUMERICAL_SEARCH_UNRESOLVED",
+            "INCOMPLETE_FLOW_COVERAGE",
+            "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
+            "BLOCKED_ADMISSION"
+          ]
         },
+        "mwr_reason": {"type": ["string", "null"]},
+        "mwr_opening_date": {"type": ["string", "null"], "format": "date"},
+        "mwr_opening_value": {"type": ["string", "null"]},
+        "mwr_terminal_date": {"type": ["string", "null"], "format": "date"},
+        "mwr_terminal_value": {"type": ["string", "null"]},
+        "mwr_currency": {"type": ["string", "null"], "pattern": "^[A-Z]{3}$"},
+        "mwr_coverage_status": {"enum": ["COMPLETE", "BLOCKED", null]},
+        "mwr_cashflows": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["date", "amount", "source_record_ids"],
+            "properties": {
+              "date": {"type": "string", "format": "date"},
+              "amount": {"type": "string"},
+              "source_record_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+            }
+          }
+        },
+        "mwr_label": {"enum": ["STRATEGY_EPOCH_MWR", "ACCOUNT_EPOCH_MWR", null]},
+        "mwr_value_basis": {"enum": ["STRATEGY_NAV", "ACCOUNT_TOTAL", "ACCOUNT_VALUE", null]},
+        "mwr_valuation_timing": {"enum": ["ECONOMIC_DATE_WITH_SEPARATE_NAV_RECOGNITION_DATE", null]},
+        "mwr_day_count": {"enum": ["ACTUAL_365", null]},
+        "mwr_unit": {"enum": ["ANNUALIZED_RETURN", null]},
+        "mwr_source_binding": {"enum": ["GOVERNED_SOURCE_IDENTITIES", null]},
         "flow_timing": {
           "type": ["string", "null"],
           "enum": ["DATE_ONLY_END_OF_DAY_INFERRED_TIMING", null]

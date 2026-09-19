@@ -2628,7 +2628,7 @@
      "current_policy_path": "docs/decisions/0002-portfolio-performance-policy.md",
      "current_policy_sha256": "8543c3281a6d37c3506ebe90bdcf25902d641a4974c53553ed76b0bf60f820cb",
      "conformance_vectors_path": "contracts/portfolio-performance-policy-v1.json",
-     "conformance_vectors_sha256": "b9153ddb6bbaff9d707b0d160d88bf7d43383ce1880ea27339103adc74040809",
+     "conformance_vectors_sha256": "12862e2f53604807a338f027394d10ed50983365b9a91a2cc82adc5c0efe5c14",
      "extension_authority_issue": 324,
      "extension_status": "REQUIRED_NOT_READY"
     },
