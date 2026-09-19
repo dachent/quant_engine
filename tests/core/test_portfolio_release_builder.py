@@ -3103,7 +3103,10 @@ def test_current_surface_plan_rejects_rehashed_source_interval_policy_drift(
         ].pop("gap_disposition")
         content = builder.canonical_json_bytes(specification)
         path.write_bytes(content)
-        binding = {"sha256": hashlib.sha256(content).hexdigest(), "size_bytes": len(content)}
+        binding = {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        }
         row.update(binding)
         next(item for item in manifest["outputs"] if item["path"] == relative).update(
             binding

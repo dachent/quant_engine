@@ -4900,9 +4900,7 @@ def _attended_published_generation(
         raise ValueError(f"{label} generation identity differs")
 
 
-def _attended_completed_analytics(
-    receipt: Mapping[str, Any], stage_root: Path
-) -> None:
+def _attended_completed_analytics(receipt: Mapping[str, Any], stage_root: Path) -> None:
     """Re-read every result bound by the current analytics producer."""
 
     if receipt.get("schema_version") != 2:
@@ -4950,7 +4948,11 @@ def _attended_completed_analytics(
     )
     bindings = receipt.get("lens_generation_bindings")
     plan_bundles = receipt.get("plan_bundle_ids")
-    if not isinstance(bindings, list) or not bindings or not isinstance(plan_bundles, dict):
+    if (
+        not isinstance(bindings, list)
+        or not bindings
+        or not isinstance(plan_bundles, dict)
+    ):
         raise ValueError("analytics lens bindings differ")
     seen: set[tuple[str, str]] = set()
     for binding in bindings:
@@ -4988,9 +4990,7 @@ def _attended_completed_analytics(
         )
 
 
-def _attended_completed_report(
-    receipt: Mapping[str, Any], stage_root: Path
-) -> None:
+def _attended_completed_report(receipt: Mapping[str, Any], stage_root: Path) -> None:
     """Validate the report producer's candidate before workbook normalization."""
 
     root = _absolute(receipt.get("root"), "attended completed report root")
@@ -5563,9 +5563,7 @@ def _attended_clear_failed_stage(
     )
 
 
-def _attended_replace_checkpoint(
-    output_root: Path, value: Mapping[str, Any]
-) -> None:
+def _attended_replace_checkpoint(output_root: Path, value: Mapping[str, Any]) -> None:
     """Atomically update the one mutable attended-run checkpoint."""
 
     receipt = _attended_run_receipt(output_root)
@@ -5579,9 +5577,7 @@ def _attended_replace_checkpoint(
         raise MaterializationError("attended run checkpoint cannot be updated") from exc
 
 
-def _attended_preserve_failed_stage(
-    output_root: Path, role: str
-) -> None:
+def _attended_preserve_failed_stage(output_root: Path, role: str) -> None:
     """Move failed-stage bytes aside before a create-only producer retries."""
 
     stage_root = _attended_stage_root(output_root, role)
@@ -5591,7 +5587,9 @@ def _attended_preserve_failed_stage(
     if stage_root.is_symlink() or (stage_root.exists() and not stage_root.is_dir()):
         raise MaterializationError("attended failed stage root is not a directory")
     if receipt.is_symlink() or (receipt.exists() and not receipt.is_file()):
-        raise MaterializationError("attended failed stage receipt is not a regular file")
+        raise MaterializationError(
+            "attended failed stage receipt is not a regular file"
+        )
 
     evidence_root = output_root / "failed-stage-evidence" / role
     evidence_root.mkdir(parents=True, exist_ok=True)
