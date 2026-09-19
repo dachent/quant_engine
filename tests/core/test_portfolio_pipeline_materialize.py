@@ -4362,7 +4362,23 @@ def _record_attended_stage(output_root: Path, role: str) -> None:
         )
     )
     stage_root.mkdir(parents=True, exist_ok=True)
-    _write_json(output_root / "stage-results" / f"{role}.json", {"role": role})
+    result: dict[str, object] = {"role": role}
+    if role == "ledger":
+        product = financial_fixture.build_financial_mvp_fixture(
+            output_root / "attended-ledger-source"
+        )
+        generation = stage_root / "generations" / product.generation.name
+        shutil.copytree(product.generation, generation)
+        result.update(
+            {
+                "catalog_sha256": hashlib.sha256(
+                    (generation / "provider-ledger.json").read_bytes()
+                ).hexdigest(),
+                "generation_id": product.generation.name,
+                "root": str(stage_root),
+            }
+        )
+    _write_json(output_root / "stage-results" / f"{role}.json", result)
 
 
 def _attended_argv(
@@ -4415,6 +4431,32 @@ def test_attended_view_separates_plan_from_verified_completed_artifacts(
     assert view["planned_stages"] == list(materializer.ATTENDED_STAGES)
     assert view["verified_completed_stages"] == ["ledger"]
     assert view["post_proof_pipeline_spec"] is None
+
+
+def test_attended_completed_ledger_requires_a_bound_verified_generation(
+    tmp_path: Path,
+) -> None:
+    """A receipt alone is not a completed ledger artifact for resume purposes."""
+
+    output_root = tmp_path / "output"
+    ledger_root = output_root / "stages" / "ledger"
+    ledger_root.mkdir(parents=True)
+    _write_json(
+        output_root / "stage-results" / "ledger.json",
+        {
+            "catalog_sha256": "0" * 64,
+            "generation_id": "0" * 64,
+            "root": str(ledger_root),
+        },
+    )
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="attended completed ledger",
+    ):
+        materializer._attended_completed_stages(
+            output_root, materializer.ATTENDED_STAGES
+        )
 
 
 def test_attended_execute_never_starts_a_coordinated_publication_child(
@@ -4472,7 +4514,7 @@ def test_attended_resume_skips_only_verified_completed_stages(
         == 0
     )
 
-    (output_root / "stages" / "ledger").rmdir()
+    shutil.rmtree(output_root / "stages" / "ledger")
     assert (
         materializer.main(
             _attended_argv(preflight, output_root, execute=True, resume=True)
