@@ -164,6 +164,12 @@ def _objects(value: object, name: str) -> list[dict[str, Any]]:
     return [_object(item, f"{name}[]") for item in value]
 
 
+def _strings(value: object, name: str) -> list[str]:
+    if not isinstance(value, list):
+        raise CurrentPlanError(f"{name} must be an array")
+    return [_text(item, f"{name}[]") for item in value]
+
+
 def _text(value: object, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise CurrentPlanError(f"{name} must be non-empty text")
@@ -358,6 +364,16 @@ def _layered_history_targets(
 ) -> dict[str, Any]:
     if assurance_profile not in ASSURANCE_PROFILES:
         raise CurrentPlanError("assurance_profile is unsupported")
+    source_period_authority = all(
+        path is not None
+        for path in (
+            provider_admission_receipt_path,
+            financial_input_contract_path,
+            provider_ledger_manifest_path,
+            provider_ledger_catalog_path,
+            portfolio123_version_evidence_path,
+        )
+    )
     planned = [
         (
             _text(strategy.get("strategy_id"), "strategy_id"),
@@ -420,6 +436,24 @@ def _layered_history_targets(
         if source_id in contract_sources:
             raise CurrentPlanError("financial MVP source identity is duplicated")
         contract_sources[source_id] = source
+    provider_manifest_sha256: dict[str, str] = {}
+    if provider_ledger_manifest_path is not None:
+        provider_manifest, _ = _load_json(
+            provider_ledger_manifest_path, "provider ledger generation"
+        )
+        if provider_manifest.get("verification") != "VERIFIED":
+            raise CurrentPlanError("provider ledger generation is not verified")
+        for artifact in _objects(
+            provider_manifest.get("artifacts"), "provider artifacts"
+        ):
+            artifact_id = _text(artifact.get("artifact_id"), "provider artifact ID")
+            if artifact_id.startswith("providers/") and artifact_id.endswith(
+                "/generation.json"
+            ):
+                provider = artifact_id.split("/", 2)[1]
+                provider_manifest_sha256[provider] = _text(
+                    artifact.get("sha256"), "provider generation manifest SHA"
+                )
     receipt_outputs = _object(manifest.get("outputs"), "layered generation outputs")
     receipt_schemas: dict[str, dict[str, str]] = {}
     layered_output_contents: dict[str, bytes] = {}
@@ -466,6 +500,7 @@ def _layered_history_targets(
     planned_series: dict[str, str] = {}
     composition: dict[str, dict[str, object]] = {}
     source_age_dispositions: list[dict[str, object]] = []
+    selected_source_summaries: dict[str, list[dict[str, Any]]] = {}
     selected_admissions = (
         {"INCLUDE_SELECTED_LIVE"}
         if evidence_mode == "LIVE_ONLY"
@@ -511,6 +546,12 @@ def _layered_history_targets(
             raise CurrentPlanError(
                 f"layered history has no selected segment for {strategy_id}"
             )
+        selected_source_summaries[series_id] = sorted(
+            selected_summaries,
+            key=lambda summary: _day(
+                summary.get("observed_start"), "layered segment observed_start"
+            ),
+        )
         if no_matched_prehistory and any(
             summary.get("evidence_layer") != "ACCOUNT_LIVE"
             for summary in selected_summaries
@@ -676,6 +717,109 @@ def _layered_history_targets(
             row["strategy_version"],
         )
         segment_index.setdefault(segment_key, []).append(row)
+    source_period_labels: dict[str, list[str]] = {}
+    source_period_segments: dict[str, list[dict[str, str]]] = {}
+    source_period_unavailable: dict[str, list[dict[str, object]]] = {}
+    for series_id, summaries in selected_source_summaries.items():
+        periods: list[dict[str, str]] = []
+        labels: list[str] = []
+        prior_end: date | None = None
+        for summary in summaries:
+            segment_id = _text(summary.get("segment_id"), "layered source segment ID")
+            observed_start = _day(summary.get("observed_start"), "layered source start")
+            observed_end = _day(summary.get("observed_end"), "layered source end")
+            source_vintage = _text(
+                summary.get("source_generation_id"), "layered source vintage"
+            )
+            if observed_start > observed_end or (
+                prior_end is not None and observed_start <= prior_end
+            ):
+                raise CurrentPlanError(
+                    "layered source periods overlap or are unordered"
+                )
+            prior_end = observed_end
+            matched = [
+                row
+                for row in segment_rows
+                if row["series_id"] == series_id
+                and row["segment_id"] == segment_id
+                and row["source_generation_id"] == source_vintage
+            ]
+            dates = sorted(_day(row["date"], "layered source label") for row in matched)
+            if (
+                not dates
+                or dates[0] != observed_start
+                or dates[-1] != observed_end
+                or len(set(dates)) != len(dates)
+                or len(dates)
+                != _integer(
+                    summary.get("return_observations"), "source period observations", 1
+                )
+            ):
+                raise CurrentPlanError(
+                    "layered source period labels differ from coverage"
+                )
+            periods.append(
+                {
+                    "segment_id": segment_id,
+                    "observed_start": observed_start.isoformat(),
+                    "observed_end": observed_end.isoformat(),
+                    "source_vintage": source_vintage,
+                }
+            )
+            labels.extend(day.isoformat() for day in dates)
+            source_id = _text(summary.get("source_id"), "layered source ID")
+            contract_source = contract_sources.get(source_id)
+            if contract_source is None or "declared_gap_policy" not in contract_source:
+                continue
+            provider = source_id.removesuffix("-account-generation")
+            manifest_sha256 = provider_manifest_sha256.get(provider)
+            gap_policy = _object(
+                contract_source["declared_gap_policy"], "declared source gap policy"
+            )
+            missing_dates = [
+                _day(value, "declared missing source date")
+                for value in _strings(
+                    gap_policy.get("declared_missing_source_dates"),
+                    "declared missing source dates",
+                )
+            ]
+            unavailable_dates = [
+                _day(value, "declared unavailable return date")
+                for value in _strings(
+                    gap_policy.get("unavailable_return_dates"),
+                    "declared unavailable return dates",
+                )
+            ]
+            if not manifest_sha256 or set(unavailable_dates) != {
+                item for day in missing_dates for item in (day, day + timedelta(days=1))
+            }:
+                raise CurrentPlanError("declared source gap authority is incomplete")
+            labels.extend(
+                day.isoformat()
+                for day in unavailable_dates
+                if observed_start <= day <= observed_end
+            )
+            for day in unavailable_dates:
+                if not observed_start <= day <= observed_end:
+                    continue
+                missing_day = day if day in missing_dates else day - timedelta(days=1)
+                source_period_unavailable.setdefault(series_id, []).append(
+                    {
+                        "date": day.isoformat(),
+                        "reason": _text(
+                            gap_policy.get("reason"), "declared source gap reason"
+                        ),
+                        "source_reference": {
+                            "source_id": provider,
+                            "generation_id": source_vintage,
+                            "manifest_sha256": manifest_sha256,
+                            "declared_exclusion_item": f"nav_missing_date:{missing_day.isoformat()}",
+                        },
+                    }
+                )
+        source_period_segments[series_id] = periods
+        source_period_labels[series_id] = sorted(set(labels))
     calculation_complete_through = common_complete_through.isoformat()
     target_rows: list[dict[str, str]] = []
     interval_segments: dict[str, list[dict[str, str]]] = {
@@ -719,7 +863,7 @@ def _layered_history_targets(
         )
         interval_segments[row["series_id"]].append(segment)
     target_rows.sort(key=lambda item: (item["series_id"], item["date"]))
-    series_interval_policies: dict[str, dict[str, str]] = {}
+    series_interval_policies: dict[str, dict[str, object]] = {}
     for series_id, value in composition.items():
         value.pop("expected_observations", None)
         value["accepted_history_complete_through"] = max(
@@ -728,43 +872,86 @@ def _layered_history_targets(
         value["calculation_observations_used"] = sum(
             row["series_id"] == series_id for row in target_rows
         )
-        segments = interval_segments[series_id]
-        source_ids = {segment["source_id"] for segment in segments}
-        calendars = {segment["calendar"] for segment in segments}
-        frequencies = {segment["frequency"] for segment in segments}
-        source_temporal_matches = True
-        for segment in segments:
-            contract_source = contract_sources.get(segment["source_id"])
-            if contract_source is None:
-                source_temporal_matches = False
-                break
-            temporal = _object(contract_source.get("temporal"), "source temporal")
-            if (
-                temporal["calendar"] != segment["calendar"]
-                or temporal["cadence"] != segment["frequency"]
-            ):
-                source_temporal_matches = False
-                break
-        if (
-            calendars == {"ALWAYS_ON"}
-            and frequencies == {"DAILY"}
-            and source_temporal_matches
-            and {segment["return_type"] for segment in segments} == {"TOTAL"}
-        ):
-            series_interval_policies[series_id] = {
-                "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
-                "finalized_through": calculation_complete_through,
-                "gap_disposition": "REJECT_BUCKET",
-                "native_calendar": "CALENDAR_DAY_24_7",
-                "native_label_convention": "SOURCE_DECLARED_DAILY_LABEL",
-                "return_basis": "MIXED_NET_MODEL",
-                "source_vintage": _sha256("|".join(sorted(source_ids)).encode("utf-8")),
-            }
-            value["interval_association_status"] = "AVAILABLE_SOURCE_LABELLED"
-        else:
-            value["interval_association_status"] = (
-                "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY"
+        if not source_period_authority:
+            segments = interval_segments[series_id]
+            source_ids = {segment["source_id"] for segment in segments}
+            calendars = {segment["calendar"] for segment in segments}
+            frequencies = {segment["frequency"] for segment in segments}
+            source_temporal_matches = all(
+                (
+                    (contract_source := contract_sources.get(segment["source_id"]))
+                    is not None
+                    and _object(contract_source.get("temporal"), "source temporal")[
+                        "calendar"
+                    ]
+                    == segment["calendar"]
+                    and _object(contract_source.get("temporal"), "source temporal")[
+                        "cadence"
+                    ]
+                    == segment["frequency"]
+                )
+                for segment in segments
             )
+            if (
+                calendars == {"ALWAYS_ON"}
+                and frequencies == {"DAILY"}
+                and source_temporal_matches
+                and {segment["return_type"] for segment in segments} == {"TOTAL"}
+            ):
+                series_interval_policies[series_id] = {
+                    "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
+                    "finalized_through": calculation_complete_through,
+                    "gap_disposition": "REJECT_BUCKET",
+                    "native_calendar": "CALENDAR_DAY_24_7",
+                    "native_label_convention": "SOURCE_DECLARED_DAILY_LABEL",
+                    "return_basis": "MIXED_NET_MODEL",
+                    "source_vintage": _sha256(
+                        "|".join(sorted(source_ids)).encode("utf-8")
+                    ),
+                }
+                value["interval_association_status"] = "AVAILABLE_SOURCE_LABELLED"
+            else:
+                value["interval_association_status"] = (
+                    "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY"
+                )
+            continue
+        source_segments = source_period_segments.get(series_id)
+        source_labels = source_period_labels.get(series_id)
+        if not source_segments or not source_labels:
+            raise CurrentPlanError("layered source period authority is absent")
+        unavailable = source_period_unavailable.get(series_id, [])
+        if unavailable and any(
+            declaration["date"] not in source_labels for declaration in unavailable
+        ):
+            raise CurrentPlanError(
+                "declared unavailable label is outside source period"
+            )
+        source_calendar = (
+            "CALENDAR_DAY_24_7"
+            if evidence_mode == "LIVE_ONLY"
+            and all(
+                summary.get("calendar") == "ALWAYS_ON"
+                and summary.get("frequency") == "DAILY"
+                for summary in selected_source_summaries[series_id]
+            )
+            else "SESSION_LABELLED"
+        )
+        series_interval_policies[series_id] = {
+            "declared_unavailable_labels": unavailable,
+            "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
+            "finalized_through": calculation_complete_through,
+            "gap_disposition": "REJECT_BUCKET",
+            "native_calendar": source_calendar,
+            "native_label_convention": "SOURCE_DECLARED_DAILY_PERIOD_LABELS_WITHIN_EACH_ADMITTED_SEGMENT_NO_OPENING_DAY_RETURN",
+            "return_basis": "MIXED_NET_MODEL",
+            "source_segments": source_segments,
+            "source_vintage": _sha256(_canonical_json(source_segments)),
+        }
+        if source_calendar == "SESSION_LABELLED":
+            series_interval_policies[series_id]["session_schedule_labels"] = {
+                series_id: source_labels
+            }
+        value["interval_association_status"] = "AVAILABLE_SOURCE_LABELLED"
     target_content = _csv_bytes(
         TARGET_HEADERS,
         [[row[header] for header in TARGET_HEADERS] for row in target_rows],
@@ -1703,7 +1890,7 @@ def build_bundle(
     )
     target_rows = cast(list[dict[str, str]], layered_history["rows"])
     series_interval_policies = cast(
-        dict[str, dict[str, str]], layered_history["series_interval_policies"]
+        dict[str, dict[str, object]], layered_history["series_interval_policies"]
     )
     targets_by_series = _target_dates(target_rows)
 
