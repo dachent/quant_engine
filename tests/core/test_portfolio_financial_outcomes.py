@@ -405,6 +405,48 @@ def test_semantic_payload_requires_real_completion_proof():
         )
 
 
+def test_semantic_gate_ignores_only_financial_invocation_counters():
+    """A receipt reuse is execution evidence, not a new financial outcome."""
+
+    import portfolio_pipeline_materialize as materializer
+
+    recipe = {
+        "schema_version": 3,
+        "as_of_date": "2026-09-05",
+        "release_commit": "a" * 40,
+    }
+    cold = {
+        "artifact_sha256s": {"decomposition": "b" * 64},
+        "consumers": {"report": {"status": "PASS"}},
+        "outcome_ids": ["DECOMPOSITION"],
+        "selected_cells": {"decomposition": {"status": "AVAILABLE"}},
+        "status": "PASS",
+        "work_counters": {
+            "correlation_build_calls": 0,
+            "full_rederivation_count": 1,
+            "grid_search_calls": 1,
+            "model_fit_calls": 6,
+            "receipt_reuse_count": 0,
+        },
+    }
+    warm = json.loads(json.dumps(cold))
+    warm["work_counters"] = {
+        "correlation_build_calls": 0,
+        "full_rederivation_count": 0,
+        "grid_search_calls": 0,
+        "model_fit_calls": 0,
+        "receipt_reuse_count": 1,
+    }
+
+    cold_gate = materializer._semantic_gate_payload(recipe, {}, financial_outcomes=cold)
+    warm_gate = materializer._semantic_gate_payload(recipe, {}, financial_outcomes=warm)
+
+    assert (
+        cold_gate["financial_outcomes_sha256"] == warm_gate["financial_outcomes_sha256"]
+    )
+    assert cold["work_counters"] != warm["work_counters"]
+
+
 def _staged_ledger(root: Path, generation_id: str) -> Path:
     """Stage one provider-ledger file inside its own generation directory."""
     ledger = root / "generations" / generation_id / "normalized/provider-ledger.json"

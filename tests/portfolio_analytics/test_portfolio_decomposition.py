@@ -8,12 +8,13 @@ import json
 import math
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
 import pytest
 
-from quant_engine.core import read_current
+from quant_engine.core import pipeline, read_current
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -1577,9 +1578,9 @@ def test_staging_reuses_a_solved_decomposition_for_unchanged_inputs(
     calls = {"count": 0}
     original = decomposition.build_decomposition
 
-    def counted(spec_path, source_root):
+    def counted(spec_path, source_root, **kwargs):
         calls["count"] += 1
-        return original(spec_path, source_root)
+        return original(spec_path, source_root, **kwargs)
 
     monkeypatch.setattr(decomposition, "build_decomposition", counted)
 
@@ -1600,6 +1601,388 @@ def test_staging_reuses_a_solved_decomposition_for_unchanged_inputs(
     assert first["reused"] is False
     assert second["reused"] is True
     assert calls["count"] == 1
+
+
+def test_staging_reuses_verified_generation_from_retained_root(tmp_path, monkeypatch):
+    """A second disposable output root must reuse the retained verified result."""
+
+    calls = {"count": 0}
+    original = decomposition.build_decomposition
+
+    def counted(spec_path, source_root, **kwargs):
+        calls["count"] += 1
+        return original(spec_path, source_root, **kwargs)
+
+    monkeypatch.setattr(decomposition, "build_decomposition", counted)
+    source_root = tmp_path / "source"
+    target_path, days = _write_sources(source_root, complete_costs=True)
+    spec_path = _spec(
+        source_root,
+        target_path,
+        days,
+        models=[_model(days, cost_coverage="COMPLETE")],
+    )
+    retained_root = tmp_path / "retained"
+
+    first = decomposition.stage_candidate(
+        spec_path,
+        source_root,
+        tmp_path / "first-output",
+        retained_cache_root=retained_root,
+    )
+    second = decomposition.stage_candidate(
+        spec_path,
+        source_root,
+        tmp_path / "second-output",
+        retained_cache_root=retained_root,
+    )
+
+    assert first["reused"] is False
+    assert second["reused"] is True
+    assert first["generation_id"] == second["generation_id"]
+    assert calls["count"] == 1
+
+
+def test_publish_reuses_retained_candidate_across_output_roots(tmp_path):
+    """Stage and publish share the retained candidate while outputs stay distinct."""
+
+    source_root = tmp_path / "source"
+    target_path, days = _write_sources(source_root, complete_costs=True)
+    spec_path = _spec(
+        source_root,
+        target_path,
+        days,
+        models=[_model(days, cost_coverage="COMPLETE")],
+    )
+    retained_root = tmp_path / "retained"
+    first_root = tmp_path / "first-output"
+    second_root = tmp_path / "second-output"
+
+    first_stage = decomposition.stage_candidate(
+        spec_path, source_root, first_root, retained_cache_root=retained_root
+    )
+    first_publish = decomposition.publish(
+        spec_path, source_root, first_root, retained_cache_root=retained_root
+    )
+    second_stage = decomposition.stage_candidate(
+        spec_path, source_root, second_root, retained_cache_root=retained_root
+    )
+    second_publish = decomposition.publish(
+        spec_path, source_root, second_root, retained_cache_root=retained_root
+    )
+
+    assert first_stage["reused"] is False
+    assert second_stage["reused"] is True
+    assert first_publish["generation_id"] == second_publish["generation_id"]
+    assert (first_root / "CURRENT.json").is_file()
+    assert (second_root / "CURRENT.json").is_file()
+
+
+def test_staging_rejects_valid_generation_b_for_requested_identity_a(
+    tmp_path, monkeypatch
+):
+    """A matching result hash cannot substitute a different requested spec."""
+
+    source_root = tmp_path / "source"
+    target_path, days = _write_sources(source_root, complete_costs=True)
+    spec_a = _spec(
+        source_root,
+        target_path,
+        days,
+        models=[_model(days, cost_coverage="COMPLETE")],
+    )
+    spec_b_payload = json.loads(spec_a.read_text(encoding="utf-8"))
+    spec_b_payload["analysis_lens"] = "ETF_STYLE"
+    spec_b = tmp_path / "spec-b.json"
+    spec_b.write_text(
+        json.dumps(spec_b_payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    retained_root = tmp_path / "retained"
+    staged_b = decomposition.stage_candidate(
+        spec_b,
+        source_root,
+        tmp_path / "b-output",
+        retained_cache_root=retained_root,
+    )
+    key_a = decomposition._input_key(spec_a, source_root)
+    b_bytes = (Path(staged_b["candidate"]) / "decomposition.json").read_bytes()
+    (retained_root / ".decomposition-index" / f"{key_a}.json").write_bytes(
+        decomposition.canonical_json_bytes(
+            {
+                "generation_id": staged_b["generation_id"],
+                "key": key_a,
+                "result_sha256": hashlib.sha256(b_bytes).hexdigest(),
+                "result_size_bytes": len(b_bytes),
+            }
+        )
+    )
+    calls = {"count": 0}
+    original = decomposition.build_decomposition
+
+    def counted(spec_path, source_root):
+        calls["count"] += 1
+        return original(spec_path, source_root)
+
+    monkeypatch.setattr(decomposition, "build_decomposition", counted)
+
+    with pytest.raises(
+        decomposition.DecompositionError, match="different requested identity"
+    ):
+        decomposition.stage_candidate(
+            spec_a,
+            source_root,
+            tmp_path / "a-output",
+            retained_cache_root=retained_root,
+        )
+    assert calls["count"] == 0
+
+
+def test_dynamic_grid_reuses_each_candidate_fit_for_sensitivity_and_winner(
+    tmp_path, monkeypatch
+):
+    """Removing the retained candidate fit would restore the old 2G+1 work."""
+
+    source = tmp_path / "dynamic"
+    target_path, days, _truth = _write_dynamic_sources(source)
+    model = _dynamic_model(days)
+    spec_path = _spec(source, target_path, days, models=[model])
+    calls = {"count": 0}
+    original = decomposition._dynamic_fit
+
+    def counted(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(decomposition, "_dynamic_fit", counted)
+
+    decomposition.build_decomposition(spec_path, source)
+
+    assert calls["count"] == len(model["smoothness_candidates"])
+
+
+def test_staging_rejects_extra_cached_candidate_before_numerical_build(
+    tmp_path, monkeypatch
+):
+    """Candidate inventory failure is a rejection, never a refit fallback."""
+
+    source_root = tmp_path / "source"
+    target_path, days = _write_sources(source_root, complete_costs=True)
+    spec_path = _spec(
+        source_root,
+        target_path,
+        days,
+        models=[_model(days, cost_coverage="COMPLETE")],
+    )
+    output_root = tmp_path / "output"
+    staged = decomposition.stage_candidate(spec_path, source_root, output_root)
+    (Path(staged["candidate"]) / "unexpected.txt").write_text(
+        "not manifest-bound", encoding="utf-8"
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("invalid candidate reached numerical build")
+
+    monkeypatch.setattr(decomposition, "build_decomposition", forbidden)
+    with pytest.raises(decomposition.DecompositionError, match="candidate file set"):
+        decomposition.stage_candidate(spec_path, source_root, output_root)
+
+
+def test_retained_dynamic_training_reuses_fit_for_evaluation_only_change(
+    tmp_path, monkeypatch
+):
+    """Changing only a holdout row recalculates it without another dynamic fit."""
+
+    source_root = tmp_path / "source"
+    target_path, days, _truth = _write_dynamic_sources(source_root)
+    model = _dynamic_model(days)
+    spec_path = _spec(source_root, target_path, days, models=[model])
+    retained_root = tmp_path / "retained"
+    original = decomposition._dynamic_fit
+    calls = {"count": 0}
+
+    def counted(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(decomposition, "_dynamic_fit", counted)
+    first = decomposition.stage_candidate(
+        spec_path,
+        source_root,
+        tmp_path / "first",
+        retained_cache_root=retained_root,
+    )
+    first_row = next(
+        row
+        for row in json.loads(
+            (Path(first["candidate"]) / "decomposition.json").read_text("utf-8")
+        )["model_results"]
+        if row["selected_for_series"]
+    )
+    calls["count"] = 0
+    rows = list(csv.reader(target_path.open(newline="", encoding="utf-8")))
+    rows[-1][2] = format(float(rows[-1][2]) + 0.000001, ".17g")
+    with target_path.open("w", newline="", encoding="utf-8") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source_root, target_path, days, models=[model])
+
+    second = decomposition.stage_candidate(
+        spec_path,
+        source_root,
+        tmp_path / "second",
+        retained_cache_root=retained_root,
+    )
+    second_row = next(
+        row
+        for row in json.loads(
+            (Path(second["candidate"]) / "decomposition.json").read_text("utf-8")
+        )["model_results"]
+        if row["selected_for_series"]
+    )
+    assert calls["count"] == 0
+    assert second["generation_id"] != first["generation_id"]
+    assert second_row["diagnostics"]["holdout"] != first_row["diagnostics"]["holdout"]
+
+
+def test_retained_dynamic_training_rejects_modified_cached_fit_values(
+    tmp_path, monkeypatch
+):
+    """A shape-valid altered fit cannot change an evaluation-only result."""
+
+    source_root = tmp_path / "source"
+    target_path, days, _truth = _write_dynamic_sources(source_root)
+    model = _dynamic_model(days)
+    spec_path = _spec(source_root, target_path, days, models=[model])
+    retained_root = tmp_path / "retained"
+    decomposition.stage_candidate(
+        spec_path,
+        source_root,
+        tmp_path / "cold",
+        retained_cache_root=retained_root,
+    )
+    receipt = next((retained_root / ".decomposition-training").glob("*.json"))
+    value = json.loads(receipt.read_bytes())
+    for fit in value["candidate_fits"].values():
+        fit["exposures"] = [
+            [float(float.fromhex(item) + 0.5).hex() for item in row]
+            for row in fit["exposures"]
+        ]
+    receipt.write_bytes(decomposition.canonical_json_bytes(value))
+
+    evaluation_model = dict(model)
+    evaluation_model["test_start"] = days[106].isoformat()
+    evaluation_spec = _spec(source_root, target_path, days, models=[evaluation_model])
+    calls = {"count": 0}
+    original = decomposition._dynamic_fit
+
+    def counted(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(decomposition, "_dynamic_fit", counted)
+    changed = decomposition.stage_candidate(
+        evaluation_spec,
+        source_root,
+        tmp_path / "changed",
+        retained_cache_root=retained_root,
+    )
+    assert calls["count"] == len(model["smoothness_candidates"])
+    fresh = decomposition.stage_candidate(
+        evaluation_spec, source_root, tmp_path / "fresh"
+    )
+
+    changed_result = json.loads(
+        (Path(changed["candidate"]) / "decomposition.json").read_bytes()
+    )
+    fresh_result = json.loads(
+        (Path(fresh["candidate"]) / "decomposition.json").read_bytes()
+    )
+    assert changed_result == fresh_result
+
+
+def test_financial_replay_rederives_after_consumed_methodology_changes(
+    tmp_path, monkeypatch
+):
+    """A retained replay receipt must not survive changed producer methodology."""
+
+    import portfolio_financial_outcomes as outcomes
+
+    source_root = tmp_path / "source"
+    target_path, days, _truth = _write_dynamic_sources(source_root)
+    spec_path = _spec(source_root, target_path, days, models=[_dynamic_model(days)])
+    output_root = tmp_path / "output"
+    staged = decomposition.stage_candidate(spec_path, source_root, output_root)
+    candidate = Path(staged["candidate"])
+    candidate_files = tuple(
+        pipeline.FileExpectation(path.name, *_hash(path))
+        for path in sorted(candidate.iterdir())
+        if path.is_file()
+    )
+    generation = pipeline.GenerationNode(
+        "decomposition-generation",
+        (),
+        "analytics",
+        str(staged["generation_id"]),
+        _hash(candidate / "generation.json")[0],
+        candidate_files,
+        candidate,
+        False,
+    )
+    result = candidate / "decomposition.json"
+    artifact = pipeline.ArtifactNode(
+        "selected-decomposition", (generation.node_id,), result, *_hash(result)
+    )
+    nodes = (
+        generation,
+        artifact,
+        *(
+            pipeline.ArtifactNode(name, (), path, *_hash(path))
+            for name, path in (
+                ("spec", spec_path),
+                ("target", target_path),
+                ("factor", source_root / "factors.csv"),
+            )
+        ),
+    )
+    invocation = SimpleNamespace(
+        nodes=nodes,
+        roots={"analytics": output_root},
+        state_root=tmp_path / "financial-state",
+    )
+    cold = {
+        "correlation_build_calls": 0,
+        "full_rederivation_count": 0,
+        "grid_search_calls": 0,
+        "model_fit_calls": 0,
+        "receipt_reuse_count": 0,
+    }
+    outcomes._replay_model(
+        invocation,
+        artifact,
+        "DECOMPOSITION",
+        source_root=source_root,
+        work_counters=cold,
+    )
+    methodology = json.loads(decomposition.METHODOLOGY_PATH.read_bytes())
+    methodology["test_consumed_methodology_revision"] = "changed"
+    changed_methodology = tmp_path / "changed-methodology.json"
+    changed_methodology.write_bytes(decomposition.canonical_json_bytes(methodology))
+    monkeypatch.setattr(decomposition, "METHODOLOGY_PATH", changed_methodology)
+    warm = {key: 0 for key in cold}
+
+    with pytest.raises(
+        outcomes.FinancialOutcomeError,
+        match="financial model differs from selected-source recomputation",
+    ):
+        outcomes._replay_model(
+            invocation,
+            artifact,
+            "DECOMPOSITION",
+            source_root=source_root,
+            work_counters=warm,
+        )
+    assert warm["full_rederivation_count"] == 1
+    assert warm["receipt_reuse_count"] == 0
 
 
 def test_staging_re_solves_when_the_indexed_result_does_not_verify(
