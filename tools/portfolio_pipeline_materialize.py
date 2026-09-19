@@ -97,6 +97,16 @@ EPOCH_MANIFEST_INPUTS = {
     "account_strategy_flow_coverage": "--manifest-flow-coverage",
     "account_strategy_admission_policy": "--manifest-admission-policy",
 }
+ATTENDED_HWM_INPUTS = {
+    "--hwm-governed-result": "hwm_governed_result",
+    "--hwm-governed-input-generation": "hwm_governed_input_generation",
+    "--hwm-governed-calendar-authority": "hwm_governed_calendar_authority",
+    "--hwm-governed-admission-receipt": "hwm_governed_admission_receipt",
+}
+ATTENDED_CAPITAL_INPUTS = {
+    "--invested-capital-result": "invested_capital_result",
+    "--invested-capital-input-generation": "invested_capital_input_generation",
+}
 SCHEMA_9_VERTICAL_RECIPE_KEYS = frozenset(
     {
         "as_of_date",
@@ -4791,6 +4801,36 @@ def _attended_completed_ledger(receipt: Mapping[str, Any], stage_root: Path) -> 
         ) from exc
 
 
+def _attended_completed_baseline(receipt: Mapping[str, Any], stage_root: Path) -> None:
+    """Verify the staged baseline through its existing generation reader."""
+
+    try:
+        root = _absolute(receipt.get("root"), "attended completed baseline root")
+        generation_id = _text(
+            receipt.get("generation_id"), "attended completed baseline generation_id"
+        )
+        catalog_sha256 = _text(
+            receipt.get("catalog_sha256"), "attended completed baseline catalog_sha256"
+        )
+        if len(generation_id) != 64 or len(catalog_sha256) != 64:
+            raise ValueError("baseline identity length differs")
+        if root != stage_root.resolve():
+            raise ValueError("baseline root differs")
+        import portfolio_report
+
+        _catalog, identity, _catalog_path = portfolio_report._baseline(  # noqa: SLF001
+            stage_root, generation_id=generation_id
+        )
+        if identity.get("generation_id") != generation_id or (
+            identity.get("catalog_sha256") != catalog_sha256
+        ):
+            raise ValueError("baseline catalog identity differs")
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "attended completed baseline artifact identity differs"
+        ) from exc
+
+
 def _attended_completed_stages(
     output_root: Path, required_stages: Sequence[str]
 ) -> list[str]:
@@ -4808,10 +4848,14 @@ def _attended_completed_stages(
         # root is already a valid predecessor artifact.
         if role == "panel" and not receipt_exists and "panel-candidate" in completed:
             root_exists = False
-        if not receipt_exists and not root_exists:
+        if not receipt_exists:
+            if root_exists and (stage_root.is_symlink() or not stage_root.is_dir()):
+                raise MaterializationError(
+                    f"attended completed {role} stage root is invalid"
+                )
             missing_seen = True
             continue
-        if missing_seen or not receipt_exists or not root_exists:
+        if missing_seen or not root_exists:
             raise MaterializationError(
                 f"attended completed {role} artifact set is incomplete"
             )
@@ -4822,6 +4866,8 @@ def _attended_completed_stages(
             )
         if role == "ledger":
             _attended_completed_ledger(result, stage_root)
+        elif role == "baseline":
+            _attended_completed_baseline(result, stage_root)
         completed.append(role)
     return completed
 
@@ -4914,9 +4960,14 @@ def _attended_request_identity(
     source_run: Path,
     runtime_descriptor: Path,
     runtime_identity: Mapping[str, Any],
+    financial_stage_inputs: Mapping[str, Path],
 ) -> dict[str, Any]:
     return {
         "output_root": str(output_root),
+        "financial_stage_inputs": {
+            flag: _file_definition(path)
+            for flag, path in sorted(financial_stage_inputs.items())
+        },
         "python": _file_definition(python),
         "repo_root": str(repo_root),
         "requested_as_of": requested_as_of,
@@ -4927,6 +4978,43 @@ def _attended_request_identity(
         },
         "source_run": _file_definition(source_run),
         "workspace_root": str(workspace_root),
+    }
+
+
+def _attended_stage_financial_inputs(
+    args: argparse.Namespace, release: Any
+) -> dict[str, Path]:
+    """Validate the release builder's governed input families before a child."""
+
+    supplied = {
+        flag: getattr(args, attribute)
+        for flag, attribute in {
+            **ATTENDED_HWM_INPUTS,
+            **ATTENDED_CAPITAL_INPUTS,
+        }.items()
+    }
+    try:
+        release._governed_hwm_arguments(  # noqa: SLF001
+            result=supplied["--hwm-governed-result"],
+            input_generation=supplied["--hwm-governed-input-generation"],
+            calendar_authority=supplied["--hwm-governed-calendar-authority"],
+            admission_receipt=supplied["--hwm-governed-admission-receipt"],
+        )
+        release._invested_capital_arguments(  # noqa: SLF001
+            result=supplied["--invested-capital-result"],
+            input_generation=supplied["--invested-capital-input-generation"],
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError("attended financial input family differs") from exc
+    return {
+        flag: _validate_file_definition(
+            _file_definition(Path(path).resolve()), f"attended {attribute}"
+        )
+        for flag, attribute in {
+            **ATTENDED_HWM_INPUTS,
+            **ATTENDED_CAPITAL_INPUTS,
+        }.items()
+        if (path := supplied[flag]) is not None
     }
 
 
@@ -5055,6 +5143,14 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
     resolved_runtime = release._resolve_workbook_runtime(runtime_descriptor)  # noqa: SLF001
     predecessor = _attended_predecessor(attended["predecessor_spec"], portfolio_root)
     financial_inputs = release._financial_epoch_inputs(recipe)  # noqa: SLF001
+    financial_stage_inputs = _attended_stage_financial_inputs(args, release)
+    qa_dir = (
+        _validate_directory_definition(
+            _directory_definition(Path(args.qa_dir).resolve()), "attended panel QA"
+        )
+        if args.qa_dir is not None
+        else None
+    )
     request_identity = _attended_request_identity(
         repo_root=repo_root,
         python=python,
@@ -5065,13 +5161,15 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
         source_run=source_run,
         runtime_descriptor=runtime_descriptor,
         runtime_identity=resolved_runtime.identity,
+        financial_stage_inputs=financial_stage_inputs,
     )
     return {
         "financial_inputs": financial_inputs or {},
+        "financial_stage_inputs": financial_stage_inputs,
         "portfolio_root": portfolio_root,
         "predecessor_spec": predecessor,
         "python": python,
-        "qa_dir": None,
+        "qa_dir": qa_dir,
         "recipe": recipe_path,
         "repo_root": repo_root,
         "request_identity": request_identity,
@@ -5090,6 +5188,33 @@ def _attended_run_receipt(output_root: Path) -> Path:
     return output_root / "attended-run.json"
 
 
+def _attended_qa_receipt(output_root: Path) -> Path:
+    return output_root / "attended-qa.json"
+
+
+def _attended_bind_qa(
+    preflight: Mapping[str, Any], output_root: Path, completed: Sequence[str]
+) -> None:
+    """Bind QA when it is available, without rewriting an incomplete run's inputs."""
+
+    qa_dir = cast(Path | None, preflight["qa_dir"])
+    receipt = _attended_qa_receipt(output_root)
+    expected = _directory_definition(qa_dir) if qa_dir is not None else None
+    if receipt.exists():
+        observed = _load(receipt, "attended QA receipt")
+        if expected is None or canonical_json_bytes(observed) != canonical_json_bytes(
+            expected
+        ):
+            raise MaterializationError("attended QA identity differs")
+        _validate_directory_definition(observed, "attended QA receipt")
+        return
+    if expected is None:
+        return
+    if "panel" in completed:
+        raise MaterializationError("attended QA identity cannot follow completed panel")
+    _write_exact(receipt, canonical_json_bytes(expected))
+
+
 def _attended_start_or_resume(
     preflight: Mapping[str, Any], output_root: Path, *, resume: bool
 ) -> None:
@@ -5106,7 +5231,10 @@ def _attended_start_or_resume(
             != canonical_json_bytes(request_identity)
         ):
             raise MaterializationError("attended resume identity differs")
-        _attended_completed_stages(output_root, preflight["required_stages"])
+        completed = _attended_completed_stages(
+            output_root, preflight["required_stages"]
+        )
+        _attended_bind_qa(preflight, output_root, completed)
         return
     if output_root.exists():
         raise MaterializationError("attended output root already exists; use --resume")
@@ -5117,6 +5245,7 @@ def _attended_start_or_resume(
             {"schema_version": 1, "request_identity": request_identity}
         ),
     )
+    _attended_bind_qa(preflight, output_root, ())
 
 
 def _attended_stage_command(
@@ -5146,6 +5275,20 @@ def _attended_stage_command(
     for key, flag in EPOCH_MANIFEST_INPUTS.items():
         if key in financial_inputs:
             command.extend((flag, str(financial_inputs[key])))
+    financial_stage_inputs = cast(
+        Mapping[str, Path], preflight.get("financial_stage_inputs", {})
+    )
+    hwm = [financial_stage_inputs.get(flag) for flag in ATTENDED_HWM_INPUTS]
+    capital = [financial_stage_inputs.get(flag) for flag in ATTENDED_CAPITAL_INPUTS]
+    if any(path is not None for path in hwm) and any(path is None for path in hwm):
+        raise MaterializationError("attended financial input family differs")
+    if any(path is not None for path in capital) and any(
+        path is None for path in capital
+    ):
+        raise MaterializationError("attended financial input family differs")
+    for flag in (*ATTENDED_HWM_INPUTS, *ATTENDED_CAPITAL_INPUTS):
+        if (path := financial_stage_inputs.get(flag)) is not None:
+            command.extend((flag, str(path)))
     if role == "panel":
         qa_dir = cast(Path | None, preflight["qa_dir"])
         if qa_dir is None:
@@ -5214,6 +5357,13 @@ def _parser() -> argparse.ArgumentParser:
     attended_cmd.add_argument("--requested-as-of", required=True)
     attended_cmd.add_argument("--source-run", type=Path, required=True)
     attended_cmd.add_argument("--workbook-runtime", type=Path, required=True)
+    attended_cmd.add_argument("--hwm-governed-result", type=Path)
+    attended_cmd.add_argument("--hwm-governed-input-generation", type=Path)
+    attended_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
+    attended_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
+    attended_cmd.add_argument("--invested-capital-result", type=Path)
+    attended_cmd.add_argument("--invested-capital-input-generation", type=Path)
+    attended_cmd.add_argument("--qa-dir", type=Path)
     attended_cmd.add_argument("--resume", action="store_true")
     attended_cmd.add_argument("--execute", action="store_true")
     semantic_cmd = commands.add_parser("semantic")
