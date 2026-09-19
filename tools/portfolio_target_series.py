@@ -3517,25 +3517,30 @@ def _gap_disposition(
     return "REQUIRED_NOT_READY_UNEXPLAINED_INTERIOR_GAP"
 
 
-def _p123_ai_backtest(
-    *,
-    evidence: Mapping[str, Any],
-    returns_path: Path,
-    relationships_path: Path,
-    generation_id: str,
-    relationships_sha256: str,
-    strategy_evidence_sha256: str,
-    series_id: str,
-) -> tuple[list[dict[str, str]], str, dict[str, object]]:
+_PORTFOLIO123_VERSION_EVIDENCE_ARTIFACT_IDS = frozenset(
+    {
+        "tables/entities.parquet",
+        "tables/general_info.parquet",
+        "tables/book_assets.parquet",
+        "tables/strategy_registry.parquet",
+        "tables/strategy_relationships.parquet",
+        "tables/manual_trading_system_config.parquet",
+        "tables/har_trading_system_settings.parquet",
+        "tables/har_buy_rules.parquet",
+        "tables/har_sell_rules.parquet",
+        "tables/returns_daily.parquet",
+        "source/har-workspace/csv/strategy_1853536_trading_system_settings.csv",
+        "source/har-workspace/csv/strategy_1853549_trading_system_settings.csv",
+    }
+)
+
+
+def _portfolio123_ai_relationship_ids(
+    evidence: Mapping[str, Any], relationships_path: Path
+) -> tuple[str, str]:
     provider = evidence.get("provider")
     if not isinstance(provider, dict) or provider.get("provider_id") != "portfolio123":
         raise TargetSeriesError("Portfolio123 AI provider evidence is absent")
-    # Portfolio123 keeps two identifier spaces.  har_managed_performance is
-    # keyed by the managed portfolio id, which the provider-live return route
-    # needs; strategy_relationships and returns_daily are keyed by the model id
-    # behind it, which the live/simulation twin route needs.  A managed
-    # portfolio therefore names its model explicitly rather than being looked
-    # up in a table it does not appear in.
     provider_entity_id = str(
         provider.get("model_entity_id") or provider.get("entity_id", "")
     ).strip()
@@ -3557,7 +3562,305 @@ def _p123_ai_backtest(
             twins.add(left)
     if len(twins) != 1:
         raise TargetSeriesError("Portfolio123 AI live/simulation twin is not unique")
-    simulation_entity_id = next(iter(twins))
+    return provider_entity_id, next(iter(twins))
+
+
+def _portfolio123_version_equivalence(
+    *,
+    evidence_path: Path,
+    policy_source: Mapping[str, Any],
+    strategy: Mapping[str, Any],
+    current_manifest_content: bytes,
+    current_manifest: Mapping[str, Any],
+    current_artifacts: Mapping[str, VerifiedArtifact],
+    ai_evidence: Mapping[str, Any],
+    strategy_evidence_sha256: str,
+) -> dict[str, object]:
+    """Reverify the bounded, captured-source AI version equivalence.
+
+    This deliberately binds only the recorded definition/twin perimeter.  The
+    historical account-evidence preimage is not part of that perimeter.
+    """
+    if evidence_path.is_symlink() or not evidence_path.is_file():
+        raise TargetSeriesError("Portfolio123 version evidence is unreadable")
+    evidence_content = evidence_path.read_bytes()
+    try:
+        evidence = json.loads(evidence_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TargetSeriesError("Portfolio123 version evidence is invalid") from exc
+    if (
+        not isinstance(evidence, dict)
+        or canonical_json_bytes(evidence) != evidence_content
+    ):
+        raise TargetSeriesError("Portfolio123 version evidence is not canonical")
+    _require_exact_keys(
+        evidence,
+        frozenset(
+            {
+                "accepted_source_manifest_path",
+                "accepted_strategy_version",
+                "current_artifacts",
+                "historical_coverage_path",
+                "historical_generation_manifest_path",
+                "provider_entity_id",
+                "schema_version",
+                "simulation_entity_id",
+                "strategy_id",
+            }
+        ),
+        "Portfolio123 version evidence",
+    )
+    product_version = _contract_version(strategy)[1]
+    if (
+        evidence.get("schema_version") != 1
+        or evidence.get("strategy_id") != "p123-ai-factor"
+        or evidence.get("accepted_strategy_version") != product_version
+    ):
+        raise TargetSeriesError("Portfolio123 accepted strategy version differs")
+    current_generation = policy_source.get("current_generation")
+    if not isinstance(current_generation, dict):
+        raise TargetSeriesError("Portfolio123 version policy generation is absent")
+    if (
+        canonical_json_bytes(current_manifest) != current_manifest_content
+        or not isinstance(current_manifest.get("generation_id"), str)
+        or len(str(current_manifest["generation_id"])) != 64
+    ):
+        raise TargetSeriesError("Portfolio123 current source manifest differs")
+
+    old_path = Path(str(evidence.get("accepted_source_manifest_path") or ""))
+    if old_path.is_symlink() or not old_path.is_file():
+        raise TargetSeriesError("Portfolio123 accepted source manifest is unreadable")
+    old_content = old_path.read_bytes()
+    try:
+        old_manifest = json.loads(old_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TargetSeriesError(
+            "Portfolio123 accepted source manifest is invalid"
+        ) from exc
+    if (
+        not isinstance(old_manifest, dict)
+        or canonical_json_bytes(old_manifest) != old_content
+        or hashlib.sha256(old_content).hexdigest() != current_generation.get("sha256")
+        or old_manifest.get("generation_id") != current_generation.get("generation_id")
+    ):
+        raise TargetSeriesError("Portfolio123 accepted source manifest differs")
+    old_artifacts = _manifest_artifacts(old_manifest.get("artifacts"))
+    evidence_artifacts = evidence.get("current_artifacts")
+    if not isinstance(evidence_artifacts, list):
+        raise TargetSeriesError("Portfolio123 version evidence artifacts are absent")
+    selected: list[dict[str, object]] = []
+    selected_ids: set[str] = set()
+    selected_paths: dict[str, Path] = {}
+    for item in evidence_artifacts:
+        if not isinstance(item, dict):
+            raise TargetSeriesError("Portfolio123 version evidence artifact is invalid")
+        _require_exact_keys(
+            item,
+            frozenset({"artifact_id", "path"}),
+            "Portfolio123 version evidence artifact",
+        )
+        artifact_id = str(item.get("artifact_id") or "")
+        path = Path(str(item.get("path") or ""))
+        if (
+            artifact_id in selected_ids
+            or path.is_symlink()
+            or not path.is_file()
+            or artifact_id not in _PORTFOLIO123_VERSION_EVIDENCE_ARTIFACT_IDS
+        ):
+            raise TargetSeriesError("Portfolio123 version evidence artifact differs")
+        selected_ids.add(artifact_id)
+        selected_paths[artifact_id] = path
+        old_artifact = old_artifacts.get(artifact_id)
+        current_artifact = current_artifacts.get(artifact_id)
+        actual_sha256, actual_size = _sha256(path)
+        if (
+            old_artifact is None
+            or current_artifact is None
+            or (old_artifact.sha256, old_artifact.size_bytes)
+            != (current_artifact.sha256, current_artifact.size_bytes)
+            or (actual_sha256, actual_size)
+            != (old_artifact.sha256, old_artifact.size_bytes)
+        ):
+            raise TargetSeriesError("Portfolio123 version evidence artifact differs")
+        selected.append(
+            {
+                "artifact_id": artifact_id,
+                "sha256": actual_sha256,
+                "size_bytes": actual_size,
+            }
+        )
+    if selected_ids != _PORTFOLIO123_VERSION_EVIDENCE_ARTIFACT_IDS:
+        raise TargetSeriesError("Portfolio123 version evidence artifact set differs")
+    provider_entity_id, simulation_entity_id = _portfolio123_ai_relationship_ids(
+        ai_evidence, selected_paths["tables/strategy_relationships.parquet"]
+    )
+    if (
+        evidence.get("provider_entity_id"),
+        evidence.get("simulation_entity_id"),
+    ) != (provider_entity_id, simulation_entity_id):
+        raise TargetSeriesError("Portfolio123 version evidence twin differs")
+    observation_strategy_version = _strategy_version(
+        "p123-live-sim-twin",
+        {
+            "generation_id": current_manifest["generation_id"],
+            "provider_entity_id": provider_entity_id,
+            "relationship_sha256": current_artifacts[
+                "tables/strategy_relationships.parquet"
+            ].sha256,
+            "relationship_type": "live_sim_twin",
+            "simulation_entity_id": simulation_entity_id,
+            "strategy_evidence_sha256": strategy_evidence_sha256,
+        },
+    )
+
+    historical_path = Path(
+        str(evidence.get("historical_generation_manifest_path") or "")
+    )
+    coverage_path = Path(str(evidence.get("historical_coverage_path") or ""))
+    if any(
+        path.is_symlink() or not path.is_file()
+        for path in (historical_path, coverage_path)
+    ):
+        raise TargetSeriesError(
+            "Portfolio123 historical version evidence is unreadable"
+        )
+    historical_content = historical_path.read_bytes()
+    coverage_content = coverage_path.read_bytes()
+    try:
+        historical = json.loads(historical_content)
+        coverage = json.loads(coverage_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TargetSeriesError(
+            "Portfolio123 historical version evidence is invalid"
+        ) from exc
+    if (
+        not isinstance(historical, dict)
+        or not isinstance(coverage, dict)
+        or canonical_json_bytes(historical) != historical_content
+        or canonical_json_bytes(coverage) != coverage_content
+    ):
+        raise TargetSeriesError(
+            "Portfolio123 historical version evidence is not canonical"
+        )
+    historical_without_id = dict(historical)
+    historical_id = historical_without_id.pop("generation_id", None)
+    if (
+        not isinstance(historical_id, str)
+        or historical_id
+        != hashlib.sha256(canonical_json_bytes(historical_without_id)).hexdigest()
+        or historical.get("builder") != LAYERED_HISTORY_BUILDER
+        or historical.get("schema_version") != LAYERED_HISTORY_SCHEMA_VERSION
+        or historical.get("verification") != "VERIFIED"
+    ):
+        raise TargetSeriesError("Portfolio123 historical generation identity differs")
+    historical_sources = historical.get("source_manifests")
+    historical_inputs = historical.get("inputs")
+    historical_outputs = historical.get("outputs")
+    if (
+        not isinstance(historical_sources, dict)
+        or historical_sources.get("portfolio123") != old_content.decode("utf-8")
+        or not isinstance(historical_inputs, list)
+        or not isinstance(historical_outputs, dict)
+    ):
+        raise TargetSeriesError("Portfolio123 historical source binding differs")
+    historical_p123_inputs = [
+        item
+        for item in historical_inputs
+        if isinstance(item, dict) and item.get("input_id") == "portfolio123-manifest"
+    ]
+    coverage_output = historical_outputs.get("coverage.json")
+    if (
+        len(historical_p123_inputs) != 1
+        or not isinstance(coverage_output, dict)
+        or (
+            historical_p123_inputs[0].get("generation_id"),
+            historical_p123_inputs[0].get("sha256"),
+            historical_p123_inputs[0].get("size_bytes"),
+        )
+        != (
+            old_manifest.get("generation_id"),
+            hashlib.sha256(old_content).hexdigest(),
+            len(old_content),
+        )
+        or (coverage_output.get("sha256"), coverage_output.get("size_bytes"))
+        != (hashlib.sha256(coverage_content).hexdigest(), len(coverage_content))
+    ):
+        raise TargetSeriesError("Portfolio123 historical coverage binding differs")
+    coverage_strategies = coverage.get("strategies")
+    if not isinstance(coverage_strategies, list):
+        raise TargetSeriesError("Portfolio123 historical coverage is invalid")
+    coverage_rows = [
+        row
+        for row in coverage_strategies
+        if isinstance(row, dict) and row.get("strategy_id") == "p123-ai-factor"
+    ]
+    if len(coverage_rows) != 1:
+        raise TargetSeriesError("Portfolio123 historical coverage strategy differs")
+    coverage_row = coverage_rows[0]
+    version = coverage_row.get("strategy_version")
+    segments = coverage_row.get("segments")
+    backtests = (
+        [
+            row
+            for row in segments
+            if isinstance(row, dict)
+            and row.get("segment_id") == "p123-ai-factor:backtest"
+        ]
+        if isinstance(segments, list)
+        else []
+    )
+    if (
+        not isinstance(version, dict)
+        or len(backtests) != 1
+        or (
+            version.get("history_generation_ref"),
+            version.get("product_version_ref"),
+            backtests[0].get("strategy_version"),
+            backtests[0].get("source_generation_id"),
+            backtests[0].get("mode_admission"),
+        )
+        != (
+            product_version,
+            product_version,
+            product_version,
+            old_manifest.get("generation_id"),
+            "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+        )
+    ):
+        raise TargetSeriesError("Portfolio123 historical coverage association differs")
+    return {
+        "accepted_source_generation_id": old_manifest["generation_id"],
+        "accepted_source_manifest_sha256": hashlib.sha256(old_content).hexdigest(),
+        "accepted_strategy_version": product_version,
+        "current_artifacts": sorted(
+            selected, key=lambda item: str(item["artifact_id"])
+        ),
+        "current_source_generation_id": current_manifest["generation_id"],
+        "historical_coverage_sha256": hashlib.sha256(coverage_content).hexdigest(),
+        "historical_generation_manifest_sha256": hashlib.sha256(
+            historical_content
+        ).hexdigest(),
+        "observation_strategy_version": observation_strategy_version,
+        "provider_entity_id": provider_entity_id,
+        "simulation_entity_id": simulation_entity_id,
+        "strategy_id": "p123-ai-factor",
+        "version_evidence_sha256": hashlib.sha256(evidence_content).hexdigest(),
+    }
+
+
+def _p123_ai_backtest(
+    *,
+    evidence: Mapping[str, Any],
+    returns_path: Path,
+    relationships_path: Path,
+    generation_id: str,
+    relationships_sha256: str,
+    strategy_evidence_sha256: str,
+    series_id: str,
+) -> tuple[list[dict[str, str]], str, dict[str, object]]:
+    provider_entity_id, simulation_entity_id = _portfolio123_ai_relationship_ids(
+        evidence, relationships_path
+    )
     rows, coverage = _portfolio123_simulation_returns(
         returns_path,
         relationships_path,
@@ -3725,6 +4028,7 @@ def build_layered_history_generation(
     portfolio123_equity_path: Path | None,
     portfolio123_returns_path: Path,
     portfolio123_relationships_path: Path,
+    portfolio123_version_evidence_path: Path | None = None,
     provider_admission_receipt_path: Path | None = None,
     financial_input_contract_path: Path | None = None,
     strategy_history_manifest_path: Path | None = None,
@@ -4490,6 +4794,26 @@ def build_layered_history_generation(
         strategy_evidence_sha256=hashlib.sha256(strategy_evidence_content).hexdigest(),
         series_id=p123_ai_series,
     )
+    portfolio123_version_equivalence = (
+        _portfolio123_version_equivalence(
+            evidence_path=portfolio123_version_evidence_path,
+            policy_source=next(
+                source
+                for source in contract["source_segments"]
+                if source.get("source_id") == "portfolio123-model-generation"
+            ),
+            strategy=strategies["p123-ai-factor"],
+            current_manifest_content=portfolio123_manifest_path.read_bytes(),
+            current_manifest=p123_manifest,
+            current_artifacts=p123_artifacts,
+            ai_evidence=p123_ai_evidence,
+            strategy_evidence_sha256=hashlib.sha256(
+                strategy_evidence_content
+            ).hexdigest(),
+        )
+        if portfolio123_version_evidence_path is not None
+        else None
+    )
 
     history_rows: dict[str, list[dict[str, str]]] = {}
     history_definitions: dict[str, dict[str, object]] = {}
@@ -4549,9 +4873,17 @@ def build_layered_history_generation(
     # The product assertion can be EVIDENCED and still not be the version the
     # evidence carries, so its status alone cannot distinguish them.
     version_mismatched_backtests: set[str] = set()
-    p123_ai_exact_version = (
-        version_status_by_strategy["p123-ai-factor"] == "EVIDENCED"
-        and version_by_strategy["p123-ai-factor"] == p123_ai_version
+    p123_ai_exact_version = version_status_by_strategy[
+        "p123-ai-factor"
+    ] == "EVIDENCED" and (
+        version_by_strategy["p123-ai-factor"] == p123_ai_version
+        or (
+            portfolio123_version_equivalence is not None
+            and portfolio123_version_equivalence["accepted_strategy_version"]
+            == version_by_strategy["p123-ai-factor"]
+            and portfolio123_version_equivalence["observation_strategy_version"]
+            == p123_ai_version
+        )
     )
     # Split the twin at this strategy's own account-live inception rather than
     # judging the series as a whole. The rows at or after it are a simulation
@@ -5151,6 +5483,14 @@ def build_layered_history_generation(
                 ),
             ]
         )
+    if portfolio123_version_evidence_path is not None:
+        inputs.append(
+            _artifact_identity(
+                input_id="portfolio123-version-evidence",
+                artifact_role="SOURCE_EQUIVALENCE_EVIDENCE",
+                path=portfolio123_version_evidence_path,
+            )
+        )
     if current_admission is not None:
         admission_path = cast(Path, provider_admission_receipt_path)
         admission_contract_path = (
@@ -5365,6 +5705,10 @@ def build_layered_history_generation(
         }
     if current_admission is not None:
         manifest_without_id["current_source_admission"] = current_admission["proof"]
+    if portfolio123_version_equivalence is not None:
+        manifest_without_id["portfolio123_version_equivalence"] = (
+            portfolio123_version_equivalence
+        )
 
     generation_id = hashlib.sha256(
         canonical_json_bytes(manifest_without_id)
@@ -5456,6 +5800,7 @@ def validate_layered_history_generation(
     financial_input_contract_path: Path | None = None,
     provider_ledger_manifest_path: Path | None = None,
     provider_ledger_catalog_path: Path | None = None,
+    portfolio123_version_evidence_path: Path | None = None,
     require_mode: str | None = None,
     assurance_profile: str | None = None,
     evaluated_on: date | None = None,
@@ -5474,6 +5819,7 @@ def validate_layered_history_generation(
     if source_selection_mode not in {"CURRENT_POINTERS", "IMMUTABLE_GENERATIONS"}:
         raise TargetSeriesError("layered history source selection mode differs")
     current_admission_requested = provider_admission_receipt_path is not None
+    version_evidence_requested = portfolio123_version_evidence_path is not None
     expected_manifest_keys = {
         "$schema",
         "as_of_date",
@@ -5492,6 +5838,8 @@ def validate_layered_history_generation(
     }
     if current_admission_requested:
         expected_manifest_keys.add("current_source_admission")
+    if version_evidence_requested:
+        expected_manifest_keys.add("portfolio123_version_equivalence")
     if "source_selection_mode" in manifest:
         expected_manifest_keys.add("source_selection_mode")
     if source_selection_mode == "CURRENT_POINTERS":
@@ -5721,6 +6069,11 @@ def validate_layered_history_generation(
     if not comparison_inputs_selected:
         for input_id in comparison_input_ids:
             expected_input_contracts.pop(input_id)
+    if version_evidence_requested:
+        expected_input_contracts["portfolio123-version-evidence"] = (
+            "SOURCE_EQUIVALENCE_EVIDENCE",
+            None,
+        )
     if current_admission is not None:
         expected_input_contracts.update(
             {
@@ -6011,6 +6364,8 @@ def validate_layered_history_generation(
     non_source_input_ids = {"financial-mvp-contract"}
     if current_admission is not None:
         non_source_input_ids.add("financial-input-contract")
+    if version_evidence_requested:
+        non_source_input_ids.add("portfolio123-version-evidence")
     if set(input_source_names) != set(inputs) - non_source_input_ids:
         raise TargetSeriesError("layered history input source mapping differs")
     for input_id, source_name in input_source_names.items():
@@ -6173,6 +6528,70 @@ def validate_layered_history_generation(
             raise TargetSeriesError(
                 f"layered history source artifact differs: {input_id}"
             )
+    if version_evidence_requested:
+        if (
+            portfolio123_version_evidence_path is None
+            or provider_ledger_manifest_path is None
+            or provider_ledger_catalog_path is None
+        ):
+            raise TargetSeriesError(
+                "Portfolio123 version evidence requires provider ledger inputs"
+            )
+        version_input = inputs["portfolio123-version-evidence"]
+        if (
+            version_input.get("generation_id"),
+            version_input.get("as_of_date"),
+            version_input.get("sha256"),
+            version_input.get("size_bytes"),
+        ) != (None, None, *_sha256(portfolio123_version_evidence_path)):
+            raise TargetSeriesError("Portfolio123 version evidence input differs")
+        _targets, strategy_evidence, _proof, _ledger_manifest = (
+            build_provider_ledger_targets(
+                provider_ledger_manifest_path, provider_ledger_catalog_path
+            )
+        )
+        try:
+            strategy_evidence_value = json.loads(strategy_evidence)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TargetSeriesError(
+                "Portfolio123 AI provider evidence is invalid"
+            ) from exc
+        strategy_evidence_rows = (
+            strategy_evidence_value.get("strategies")
+            if isinstance(strategy_evidence_value, dict)
+            else None
+        )
+        ai_rows = (
+            [
+                row
+                for row in strategy_evidence_rows
+                if isinstance(row, dict) and row.get("strategy_id") == "p123-ai-factor"
+            ]
+            if isinstance(strategy_evidence_rows, list)
+            else []
+        )
+        if len(ai_rows) != 1:
+            raise TargetSeriesError("Portfolio123 AI provider evidence is absent")
+        expected_equivalence = _portfolio123_version_equivalence(
+            evidence_path=portfolio123_version_evidence_path,
+            policy_source=next(
+                source
+                for source in contract["source_segments"]
+                if source.get("source_id") == "portfolio123-model-generation"
+            ),
+            strategy=strategies["p123-ai-factor"],
+            current_manifest_content=raw_source_manifests["portfolio123"].encode(
+                "utf-8"
+            ),
+            current_manifest=source_manifests["portfolio123"],
+            current_artifacts=_manifest_artifacts(
+                source_manifests["portfolio123"].get("artifacts")
+            ),
+            ai_evidence=ai_rows[0],
+            strategy_evidence_sha256=hashlib.sha256(strategy_evidence).hexdigest(),
+        )
+        if manifest.get("portfolio123_version_equivalence") != expected_equivalence:
+            raise TargetSeriesError("Portfolio123 version equivalence differs")
     output_rows = manifest.get("outputs")
     if not isinstance(output_rows, dict) or set(output_rows) != set(
         LAYERED_HISTORY_OUTPUT_NAMES
@@ -7439,6 +7858,7 @@ def verify_layered_history_generation(
     financial_input_contract_path: Path | None = None,
     provider_ledger_manifest_path: Path | None = None,
     provider_ledger_catalog_path: Path | None = None,
+    portfolio123_version_evidence_path: Path | None = None,
     require_mode: str | None = None,
     assurance_profile: str | None = None,
     evaluated_on: date | None = None,
@@ -7480,6 +7900,7 @@ def verify_layered_history_generation(
         financial_input_contract_path=financial_input_contract_path,
         provider_ledger_manifest_path=provider_ledger_manifest_path,
         provider_ledger_catalog_path=provider_ledger_catalog_path,
+        portfolio123_version_evidence_path=portfolio123_version_evidence_path,
         require_mode=require_mode,
         assurance_profile=assurance_profile,
         evaluated_on=evaluated_on,
@@ -8522,6 +8943,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio123-performance", type=Path)
     parser.add_argument("--portfolio123-returns", type=Path)
     parser.add_argument("--portfolio123-relationships", type=Path)
+    parser.add_argument("--portfolio123-version-evidence", type=Path)
     parser.add_argument("--portfolio123-provider-entity-id")
     parser.add_argument("--portfolio123-simulation-entity-id")
     parser.add_argument("--portfolio123-strategy-evidence", type=Path)
@@ -8594,6 +9016,7 @@ def main() -> int:
                 financial_input_contract_path=args.financial_input_contract,
                 provider_ledger_manifest_path=args.provider_ledger_manifest,
                 provider_ledger_catalog_path=args.provider_ledger_catalog,
+                portfolio123_version_evidence_path=args.portfolio123_version_evidence,
                 require_mode=args.require_mode,
                 assurance_profile=args.assurance_profile,
                 evaluated_on=assurance_evaluated_on,
@@ -8667,6 +9090,7 @@ def main() -> int:
                 portfolio123_equity_path=args.portfolio123_equity,
                 portfolio123_returns_path=args.portfolio123_returns,
                 portfolio123_relationships_path=args.portfolio123_relationships,
+                portfolio123_version_evidence_path=args.portfolio123_version_evidence,
                 provider_admission_receipt_path=args.provider_admission_receipt,
                 financial_input_contract_path=args.financial_input_contract,
                 portfolio_fx_rates_manifest_path=args.portfolio_fx_rates_manifest,
@@ -8687,6 +9111,7 @@ def main() -> int:
                 financial_input_contract_path=args.financial_input_contract,
                 provider_ledger_manifest_path=args.provider_ledger_manifest,
                 provider_ledger_catalog_path=args.provider_ledger_catalog,
+                portfolio123_version_evidence_path=args.portfolio123_version_evidence,
                 require_mode=args.require_mode,
             )
             write_layered_history_generation(
