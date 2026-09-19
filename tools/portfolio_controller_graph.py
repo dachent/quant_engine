@@ -12,6 +12,7 @@ import ast
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 from typing import Any, Iterable, Mapping, Sequence
 
 
@@ -26,6 +27,29 @@ _REPORT = "tools/portfolio_report.py"
 _PANEL = "tools/portfolio_control_panel.py"
 _PREPARATION = "tools/portfolio_attended_preparation.py"
 _SOURCE_CONTRACT = "contracts/portfolio-financial-mvp-source-v1.json"
+_SOURCE_SCHEMA = "schemas/portfolio/financial-mvp-source-contract.schema.json"
+_MAPPER_SKIP_DIRECTORIES = frozenset(
+    {
+        ".dep-map-cache",
+        ".git",
+        ".hg",
+        ".mypy_cache",
+        ".nox",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".svn",
+        ".tox",
+        ".venv",
+        "__pycache__",
+        "build",
+        "dist",
+        "env",
+        "node_modules",
+        "site-packages",
+        "target",
+        "venv",
+    }
+)
 _TEST_LINKS = {
     "source_qc_and_preparation": "tests/core/test_attended_preparation.py",
     "stage_contract": "tests/core/test_portfolio_pipeline_materialize.py",
@@ -51,6 +75,7 @@ _PATH_STAGES = {
     _RELEASE: list(_STAGE_ORDER),
     _PREPARATION: list(_STAGE_ORDER),
     _SOURCE_CONTRACT: list(_STAGE_ORDER),
+    _SOURCE_SCHEMA: list(_STAGE_ORDER),
     _REPORT: ["report", "panel"],
     _PANEL: ["panel"],
 }
@@ -77,6 +102,7 @@ def _required_paths(repo_root: Path) -> list[str]:
         _REPORT,
         _PANEL,
         _SOURCE_CONTRACT,
+        _SOURCE_SCHEMA,
     ]
     if (repo_root / _PREPARATION).is_file():
         paths.append(_PREPARATION)
@@ -157,12 +183,26 @@ def _function_calls(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str
     }
 
 
-def _function_strings(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
-    return {
-        node.value
-        for node in ast.walk(function)
-        if isinstance(node, ast.Constant) and isinstance(node.value, str)
-    }
+def _tool_calls(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+) -> set[tuple[str, str]]:
+    """Return literal ``_tool(target, subcommand, ...)`` calls in one function."""
+
+    calls: set[tuple[str, str]] = set()
+    for node in ast.walk(function):
+        if not isinstance(node, ast.Call) or _call_name(node) != "_tool":
+            continue
+        if len(node.args) < 2:
+            continue
+        target, subcommand = node.args[:2]
+        if (
+            isinstance(target, ast.Constant)
+            and isinstance(target.value, str)
+            and isinstance(subcommand, ast.Constant)
+            and isinstance(subcommand.value, str)
+        ):
+            calls.add((target.value, subcommand.value))
+    return calls
 
 
 def _module_imports(tree: ast.Module) -> set[str]:
@@ -230,7 +270,64 @@ def _require_calls(
         )
 
 
-def _critical_relationships(repo_root: Path) -> list[dict[str, object]]:
+def _require_tool_call(
+    function: ast.FunctionDef | ast.AsyncFunctionDef,
+    target: str,
+    subcommand: str,
+    relationship: str,
+) -> None:
+    if (target, subcommand) not in _tool_calls(function):
+        raise ControllerGraphError(f"required {relationship} is absent")
+
+
+def _preparation_stage_dependencies(
+    repo_root: Path,
+) -> tuple[dict[str, object], list[dict[str, str]]]:
+    """Record the worker-owned literal declaration when this checkout has it."""
+
+    preparation = _tree(repo_root, _PREPARATION)
+    try:
+        declared = _literal_assignment(preparation, "PREPARATION_STAGE_DEPENDENCIES")
+    except ControllerGraphError as exc:
+        if str(exc) == (
+            "controller declaration is absent: PREPARATION_STAGE_DEPENDENCIES"
+        ):
+            return {"edges": [], "status": "absent"}, []
+        raise
+    if not isinstance(declared, dict):
+        raise ControllerGraphError(
+            "preparation stage dependency declaration is not a mapping"
+        )
+    dependencies: dict[str, list[str]] = {}
+    edges: list[dict[str, str]] = []
+    for stage, prerequisites in declared.items():
+        if not isinstance(stage, str) or not isinstance(prerequisites, (list, tuple)):
+            raise ControllerGraphError(
+                "preparation stage dependency declaration differs"
+            )
+        if not all(isinstance(prerequisite, str) for prerequisite in prerequisites):
+            raise ControllerGraphError(
+                "preparation stage dependency declaration differs"
+            )
+        dependencies[stage] = list(prerequisites)
+        edges.extend(
+            {
+                "from": prerequisite,
+                "kind": "preparation-stage-dependency",
+                "to": stage,
+            }
+            for prerequisite in prerequisites
+        )
+    return {
+        "dependencies": dict(sorted(dependencies.items())),
+        "edges": sorted(edges, key=lambda edge: (edge["from"], edge["to"])),
+        "status": "verified",
+    }, edges
+
+
+def _critical_relationships(
+    repo_root: Path,
+) -> tuple[list[dict[str, object]], dict[str, object]]:
     materializer = _tree(repo_root, _MATERIALIZER)
     main_calls = _function_calls(_top_level_function(materializer, "main"))
     imports = _module_imports(materializer)
@@ -246,6 +343,9 @@ def _critical_relationships(repo_root: Path) -> list[dict[str, object]]:
         raise ControllerGraphError("attended preparation implementation is absent")
     _top_level_function(_tree(repo_root, _PREPARATION), "plan_attended_inputs")
     _top_level_function(_tree(repo_root, _PREPARATION), "prepare_attended_inputs")
+    preparation_dependencies, preparation_edges = _preparation_stage_dependencies(
+        repo_root
+    )
     _require_calls(repo_root, _MATERIALIZER, "_attended_stage_command", {"str"})
     command_source = (repo_root / _MATERIALIZER).read_text(encoding="utf-8")
     if "portfolio_release_builder.py" not in command_source:
@@ -260,17 +360,42 @@ def _critical_relationships(repo_root: Path) -> list[dict[str, object]]:
             raise ControllerGraphError(f"release producer handler is absent: {handler}")
     report_builder = _top_level_function(release_tree, "build_report")
     panel_builder = _top_level_function(release_tree, "build_panel_candidate")
-    if "portfolio_report.py" not in _function_strings(report_builder):
-        raise ControllerGraphError("release report consumer call is absent")
-    if "portfolio_control_panel.py" not in _function_strings(panel_builder):
-        raise ControllerGraphError("release panel consumer call is absent")
+    report_candidate_builder = _top_level_function(
+        release_tree, "build_report_candidate"
+    )
+    if "build_report_candidate" not in _function_calls(report_builder):
+        raise ControllerGraphError("release report candidate call is absent")
+    _require_tool_call(
+        report_candidate_builder,
+        "portfolio_report.py",
+        "build",
+        "report candidate build CLI target/subcommand",
+    )
+    _require_tool_call(
+        report_builder,
+        "portfolio_report.py",
+        "verify",
+        "report verify CLI target/subcommand",
+    )
+    _require_tool_call(
+        report_builder,
+        "portfolio_report.py",
+        "publish",
+        "report publish CLI target/subcommand",
+    )
+    _require_tool_call(
+        panel_builder,
+        "portfolio_control_panel.py",
+        "build",
+        "panel candidate build CLI target/subcommand",
+    )
     report_tree = _tree(repo_root, _REPORT)
     panel_tree = _tree(repo_root, _PANEL)
     _top_level_function(report_tree, "build_candidate")
     _top_level_function(report_tree, "verify_candidate")
     _top_level_function(panel_tree, "build_candidate")
     _top_level_function(panel_tree, "verify_candidate")
-    return [
+    relationships: list[dict[str, object]] = [
         {
             "caller": "tools.portfolio_pipeline_materialize.main",
             "callee": "tools.portfolio_attended_preparation.plan_attended_inputs",
@@ -305,60 +430,129 @@ def _critical_relationships(repo_root: Path) -> list[dict[str, object]]:
         },
         {
             "caller": "tools.portfolio_release_builder.build_report",
-            "callee": "tools.portfolio_report.build_candidate",
-            "kind": "report-consumer",
+            "callee": "tools.portfolio_release_builder.build_report_candidate",
+            "kind": "report-candidate",
+        },
+        {
+            "caller": "tools.portfolio_release_builder.build_report_candidate",
+            "callee": "tools/portfolio_report.py build",
+            "kind": "report-build-cli",
+        },
+        {
+            "caller": "tools.portfolio_release_builder.build_report",
+            "callee": "tools/portfolio_report.py verify",
+            "kind": "report-verify-cli",
+        },
+        {
+            "caller": "tools.portfolio_release_builder.build_report",
+            "callee": "tools/portfolio_report.py publish",
+            "kind": "report-publish-cli",
         },
         {
             "caller": "tools.portfolio_release_builder.build_panel_candidate",
-            "callee": "tools.portfolio_control_panel.build_candidate",
-            "kind": "panel-consumer",
+            "callee": "tools/portfolio_control_panel.py build",
+            "kind": "panel-build-cli",
         },
     ]
+    relationships.extend(
+        {
+            "caller": "tools.portfolio_attended_preparation.PREPARATION_STAGE_DEPENDENCIES",
+            "callee": f"preparation-stage:{edge['to']}",
+            "depends_on": edge["from"],
+            "kind": edge["kind"],
+        }
+        for edge in preparation_edges
+    )
+    return relationships, preparation_dependencies
 
 
-def _mapper_evidence(repo_root: Path) -> list[dict[str, str]]:
-    """Record stale mapper snapshots as non-authoritative contextual evidence."""
+def _mapper_python_hashes(repo_root: Path) -> dict[str, str]:
+    """Return the installed mapper's full repository Python scan scope."""
 
-    candidates = [
-        repo_root.parents[1]
-        / ".codex-bootstrap"
-        / "code-mapper"
-        / "m7-preparation-map.json",
-        repo_root.parents[1]
-        / ".codex-bootstrap"
-        / "code-mapper"
-        / "attended-tools-map.json",
-    ]
-    evidence: list[dict[str, str]] = []
-    for path in candidates:
-        if not path.is_file():
-            continue
+    paths: list[Path] = []
+    pending = [repo_root]
+    while pending:
+        directory = pending.pop()
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            evidence.append({"path": str(path), "status": "unreadable-not-consumed"})
+            children = list(directory.iterdir())
+        except OSError as exc:
+            raise ControllerGraphError(
+                f"cannot inspect mapper scope: {directory}"
+            ) from exc
+        for child in children:
+            if child.is_symlink():
+                continue
+            if child.is_dir() and child.name not in _MAPPER_SKIP_DIRECTORIES:
+                pending.append(child)
+            elif child.is_file() and child.suffix.lower() == ".py":
+                paths.append(child)
+    return {
+        path.relative_to(repo_root).as_posix(): _sha256(path) for path in sorted(paths)
+    }
+
+
+def _mapper_python_fingerprint(repo_root: Path) -> str:
+    """Match the installed mapper's sorted relative-path/raw-hash algorithm."""
+
+    rows = [
+        f"{relative_path}:{digest}"
+        for relative_path, digest in _mapper_python_hashes(repo_root).items()
+    ]
+    return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
+
+
+def _explicit_mapper_evidence(repo_root: Path, path: Path) -> dict[str, str]:
+    """Accept one explicit, current mapper artifact as optional context only."""
+
+    if path.is_symlink() or not path.is_file():
+        raise ControllerGraphError("explicit mapper evidence is not a regular file")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ControllerGraphError("explicit mapper evidence is unreadable") from exc
+    if not isinstance(payload, dict):
+        raise ControllerGraphError("explicit mapper evidence is not an object")
+    try:
+        scanned_root = Path(str(payload.get("root", ""))).resolve()
+    except (OSError, ValueError) as exc:
+        raise ControllerGraphError("mapper root is invalid") from exc
+    if scanned_root != repo_root.resolve():
+        raise ControllerGraphError("mapper root differs from repository root")
+    errors = payload.get("errors")
+    if not isinstance(errors, list) or errors:
+        raise ControllerGraphError("mapper scanner errors require reconciliation")
+    files = payload.get("files")
+    if not isinstance(files, Mapping):
+        raise ControllerGraphError("mapper Python scan scope is absent")
+    observed_hashes: dict[str, str] = {}
+    for relative_path, record in files.items():
+        if not isinstance(relative_path, str) or not isinstance(record, Mapping):
             continue
-        root = str(payload.get("root", ""))
-        errors = payload.get("errors")
-        status = "not-current-not-consumed"
-        if isinstance(errors, list) and errors:
-            status = "scanner-errors-not-consumed"
-        evidence.append(
-            {
-                "path": str(path),
-                "sha256": _sha256(path),
-                "source_fingerprint": str(payload.get("sourceFingerprint", "")),
-                "status": status,
-                "scanned_root": root,
-            }
-        )
-    return evidence
+        if record.get("kind") != "python":
+            continue
+        digest = record.get("sha256")
+        if not isinstance(digest, str):
+            raise ControllerGraphError("mapper Python scan scope is invalid")
+        observed_hashes[relative_path] = digest
+    if observed_hashes != _mapper_python_hashes(repo_root):
+        raise ControllerGraphError("mapper Python scan scope differs")
+    fingerprint = payload.get("sourceFingerprint")
+    if not isinstance(fingerprint, str) or fingerprint != _mapper_python_fingerprint(
+        repo_root
+    ):
+        raise ControllerGraphError("mapper source fingerprint differs")
+    return {
+        "path": str(path.resolve()),
+        "sha256": _sha256(path),
+        "source_fingerprint": fingerprint,
+        "status": "accepted-optional-context",
+    }
 
 
 def _current_graph(repo_root: Path) -> dict[str, object]:
     repo_root = repo_root.resolve()
     dependencies, materializer_dependencies = _stage_declarations(repo_root)
-    relationships = _critical_relationships(repo_root)
+    relationships, preparation_dependencies = _critical_relationships(repo_root)
     source_files = {
         path: _sha256(repo_root / path) for path in _required_paths(repo_root)
     }
@@ -384,7 +578,9 @@ def _current_graph(repo_root: Path) -> dict[str, object]:
             "core_stage_dependencies": dependencies,
             "materializer_stage_dependencies": materializer_dependencies,
             "attended_stages": list(_ATTENDED_ORDER),
+            "preparation_stage_dependencies": preparation_dependencies,
             "source_contract": _SOURCE_CONTRACT,
+            "source_schema": _SOURCE_SCHEMA,
         },
         "edges": edges,
         "relationships": relationships,
@@ -393,7 +589,6 @@ def _current_graph(repo_root: Path) -> dict[str, object]:
             "AST records declared static relationships only; it does not prove runtime ordering or numerical correctness.",
             "Runtime source admission, recovery, ordering, and numerical guarantees remain covered by the linked integration tests.",
         ],
-        "code_mapper_evidence": _mapper_evidence(repo_root),
     }
 
 
@@ -468,7 +663,12 @@ def affected_stages(graph: dict[str, Any], changed_paths: list[str]) -> list[str
         if mapped is not None:
             direct.update(mapped)
         elif normalized.startswith(
-            ("tools/", "packages/core/src/quant_engine/core/", "contracts/")
+            (
+                "tools/",
+                "packages/core/src/quant_engine/core/",
+                "contracts/",
+                "schemas/portfolio/",
+            )
         ):
             raise ControllerGraphError(
                 f"unmapped relevant production change requires reconciliation: {normalized}"
@@ -492,6 +692,55 @@ def affected_stages(graph: dict[str, Any], changed_paths: list[str]) -> list[str
     return [stage for stage in _STAGE_ORDER if stage in affected]
 
 
+def _git_changed_paths(
+    repo_root: Path, changed_from: str, changed_to: str
+) -> list[str]:
+    """Read one CI-supplied Git range without depending on workstation state."""
+
+    command: tuple[str, ...]
+    if changed_from == "EMPTY_TREE":
+        command = (
+            "git",
+            "diff-tree",
+            "--root",
+            "--no-commit-id",
+            "--name-only",
+            "-z",
+            changed_to,
+        )
+    else:
+        command = (
+            "git",
+            "diff",
+            "--name-only",
+            "--no-renames",
+            "-z",
+            changed_from,
+            changed_to,
+        )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=repo_root,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise ControllerGraphError("Git changed-path input is unavailable") from exc
+    if completed.returncode:
+        raise ControllerGraphError("Git changed-path range is invalid")
+    try:
+        paths = [item.decode("utf-8") for item in completed.stdout.split(b"\0") if item]
+    except UnicodeDecodeError as exc:
+        raise ControllerGraphError("Git changed-path input is not UTF-8") from exc
+    for path in paths:
+        candidate = Path(path)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ControllerGraphError("Git changed-path input escapes repository root")
+    return paths
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -499,19 +748,38 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--write", type=Path)
     parser.add_argument("--changed-path", action="append", default=[])
+    parser.add_argument("--changed-from")
+    parser.add_argument("--changed-to")
+    parser.add_argument("--mapper-evidence", type=Path)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
+        if (args.changed_from is None) != (args.changed_to is None):
+            raise ControllerGraphError(
+                "Git changed-path input requires both --changed-from and --changed-to"
+            )
         graph = build_controller_graph(args.repo_root)
         validation = validate_controller_graph(args.repo_root, graph)
         if args.write is not None:
             args.write.write_bytes(_canonical_bytes(graph) + b"\n")
         result: dict[str, object] = {"graph": graph, "validation": validation}
-        if args.changed_path:
-            result["affected_stages"] = affected_stages(graph, args.changed_path)
+        changed_paths = list(args.changed_path)
+        if args.changed_from is not None:
+            assert args.changed_to is not None
+            changed_paths.extend(
+                _git_changed_paths(args.repo_root, args.changed_from, args.changed_to)
+            )
+        if changed_paths:
+            result["affected_stages"] = affected_stages(graph, changed_paths)
+        if args.changed_from is not None and not changed_paths:
+            result["affected_stages"] = []
+        if args.mapper_evidence is not None:
+            result["mapper_evidence"] = _explicit_mapper_evidence(
+                args.repo_root, args.mapper_evidence
+            )
     except ControllerGraphError as exc:
         print(f"portfolio-controller-graph: FAIL: {exc}")
         return 1
