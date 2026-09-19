@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 import json
+import subprocess
 import sys
 
 import pytest
@@ -42,6 +43,88 @@ def _argv(tmp_path: Path, *, execute: bool = False, resume: bool = False) -> lis
     if resume:
         argv.append("--resume")
     return argv
+
+
+def test_resumed_preparation_handoff_starts_first_downstream_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A verified resumed preparation handoff may initialize its first child."""
+
+    output = tmp_path / "output"
+    output.mkdir()
+    source_run = tmp_path / "prepared-source-run.json"
+    clock = {"selected_financial_cutoff": "2026-09-17"}
+    source_run.write_bytes(canonical_json_bytes({"attended": {"data_clock": clock}}))
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text("{}", encoding="utf-8")
+    preflight: dict[str, object] = {
+        "financial_inputs": {},
+        "financial_stage_inputs": {},
+        "portfolio_root": tmp_path / "workspace" / "dataPortfolio",
+        "python": Path(sys.executable),
+        "qa_dir": None,
+        "recipe": recipe,
+        "repo_root": Path(materializer.__file__).resolve().parents[1],
+        "request_identity": {"fixture": "resumed-preparation-handoff"},
+        "required_stages": ("ledger",),
+        "retained_cache_root": tmp_path / "cache",
+        "source_phase": {"status": "PASS"},
+        "source_run": source_run,
+        "workspace_root": tmp_path / "workspace",
+    }
+    (output / "preparation-handoff.json").write_bytes(
+        canonical_json_bytes(
+            {
+                "data_clock": clock,
+                "financial_stage_inputs": {},
+                "schema_version": 1,
+                "source_phase": {"status": "PASS"},
+                "source_run": materializer._file_definition(source_run),
+            }
+        )
+    )
+
+    # These are the actual operational observation transitions a killed
+    # preparation attempt leaves behind before its verified resumed handoff.
+    materializer._attended_start_preparation_attempt(output)
+    resumed_attempt = materializer._attended_start_preparation_attempt(output)
+    materializer._attended_finish_preparation_attempt(
+        output, resumed_attempt, "COMPLETED"
+    )
+
+    def prepared(**kwargs: object) -> dict[str, object]:
+        assert kwargs["resume"] is True
+        return {"financial_stage_inputs": {}, "source_run": source_run}
+
+    calls: list[str] = []
+
+    def first_child(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 91, "", "first child stops here")
+
+    monkeypatch.setattr(preparation, "prepare_attended_inputs", prepared)
+    monkeypatch.setattr(materializer, "_git", lambda *_args: "a" * 40)
+    monkeypatch.setattr(materializer, "_attended_basic_preflight", lambda _args: {})
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", first_child)
+
+    assert materializer.main(_argv(tmp_path, execute=True, resume=True)) == 91
+    assert calls == ["ledger"]
+    assert json.loads((output / "attended-run.json").read_text(encoding="utf-8")) == {
+        "failed_stage": {"returncode": 91, "role": "ledger"},
+        "request_identity": {"fixture": "resumed-preparation-handoff"},
+        "schema_version": 2,
+    }
+    observations = json.loads(
+        (output / "attended-execution-observations.json").read_text(encoding="utf-8")
+    )
+    assert [attempt["status"] for attempt in observations["preparation_attempts"]] == [
+        "INCOMPLETE",
+        "COMPLETED",
+    ]
+    assert observations["execution_attempts"][-1]["status"] == "FAILED"
 
 
 @pytest.mark.parametrize(

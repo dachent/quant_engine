@@ -5893,6 +5893,18 @@ def _attended_start_or_resume(
         raise MaterializationError("attended request identity differs")
     receipt = _attended_run_receipt(output_root)
     if resume:
+        # Preparation owns the output root and may complete before any
+        # downstream receipt exists.  Reuse the established create-only
+        # handoff validation for that one first-execution transition, but only
+        # before the execution observation ledger shows a downstream attempt.
+        # A missing receipt after execution began remains fail-closed.
+        if output_root.exists() and not receipt.exists() and not receipt.is_symlink():
+            observations = _attended_execution_observations(output_root)
+            if observations["execution_attempts"]:
+                raise MaterializationError(
+                    "attended run receipt is missing after execution started"
+                )
+            return _attended_start_or_resume(preflight, output_root, resume=False)
         value = _load(receipt, "attended run receipt")
         failed = value.get("failed_stage")
         if (
