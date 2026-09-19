@@ -22987,6 +22987,7 @@ def test_mixed_open_receipt_cutoff_bounds_calculation_projection(
             "record_id": "receipt-nav-0",
             "account_id": "synthetic-account-01",
             "as_of_date": "2026-01-29",
+            "value_basis": "ACCOUNT_TOTAL",
             "nav": {
                 "currency": "USD",
                 "status": "AVAILABLE",
