@@ -1849,6 +1849,77 @@ def test_portfolio123_retained_transactions_require_the_admitted_fact() -> None:
         )
 
 
+def test_ibkr_native_leverage_data_classes_materialize_through_admission() -> None:
+    """The receipt admits native observations only when each class has rows."""
+
+    authority, identities, manifests, catalogs, provider_facts = _fixture()
+    source = authority["sources"]["ibkr-account-generation"]
+    native_classes = {
+        "FINANCING_COST": "financing_cost_observations",
+        "FINANCING_LIABILITY": "financing_liability_observations",
+        "LEVERAGE_EXPOSURE": "leverage_exposure_observations",
+    }
+    source["data_classes"].extend(native_classes)
+    source["admission"]["facts"].extend(native_classes)
+    source["data_classes"].sort()
+    source["admission"]["facts"].sort()
+    native_rows = {
+        target: [
+            {
+                "account_id": "private-ibkr-leverage",
+                "amount": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "-1",
+                },
+                "as_of_date": DAY.isoformat(),
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": manifests["ibkr"].generation_id,
+                "mapping_status": "MAPPED",
+                "native_source_record_id": f"native-{target}",
+                "provider_id": "ibkr",
+                "record_id": f"ibkr:catalog-{target}",
+                "source_artifact_id": "normalized/nav.json",
+                "source_record_id": f"catalog-{target}",
+                "strategy_id": "strategy-ibkr",
+            }
+        ]
+        for target in native_classes.values()
+    }
+    catalogs["ibkr"].update(native_rows)
+    provider_facts["ibkr"].update(native_rows)
+    _repin_dataset_pins(
+        authority,
+        "ibkr",
+        manifests,
+        catalogs,
+        provider_facts,
+        admitted_too=True,
+    )
+
+    receipt, _ = ledger._admit_or_declare_receipt(
+        authority,
+        identities,
+        manifests,
+        catalogs,
+        provider_facts,
+        (),
+    )
+
+    product_rows = {
+        row["item_id"]: row
+        for row in receipt["dispositions"]
+        if row["provider_id"] == "ibkr"
+        and row["item_kind"] == "PRODUCT_DATA_CLASS"
+        and row["item_id"] in native_classes
+    }
+    assert set(product_rows) == set(native_classes)
+    assert {
+        item_id: (row["action"], row["target_facts"], row["materialized_record_count"])
+        for item_id, row in product_rows.items()
+    } == {item_id: ("ADMIT", [target], 1) for item_id, target in native_classes.items()}
+
+
 QE_LEDGER_SPEC_PATH = os.environ.get("QE_LEDGER_SPEC_PATH", "")
 
 

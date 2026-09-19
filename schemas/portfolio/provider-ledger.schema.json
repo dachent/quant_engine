@@ -86,7 +86,10 @@
     "catalog_schema_version": {"const": 2},
     "corporate_actions": {"type": "array", "items": {"type": "object"}},
     "fact_counts": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/factCount"}},
+    "financing_cost_observations": {"type": "array", "items": {"type": "object"}},
+    "financing_liability_observations": {"type": "array", "items": {"type": "object"}},
     "flows": {"type": "array", "items": {"type": "object"}},
+    "leverage_exposure_observations": {"type": "array", "items": {"type": "object"}},
     "nav_observations": {
       "type": "array",
       "items": {
