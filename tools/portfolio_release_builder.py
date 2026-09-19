@@ -2292,6 +2292,7 @@ def _expected_model_timing(
             "expected_sha256",
             "expected_size_bytes",
             "factors",
+            "interval_policy",
             "relative_path",
             "risk_free_column",
             "schema_name",
@@ -2302,6 +2303,7 @@ def _expected_model_timing(
             "artifact_id",
             "expected_sha256",
             "expected_size_bytes",
+            "interval_policy",
             "relative_path",
             "schema_name",
             "schema_version",
@@ -2316,6 +2318,8 @@ def _expected_model_timing(
         or target_source.get("relative_path") != target_relative
         or factor_source.get("risk_free_column")
         != source_contract.get("risk_free_column")
+        or not isinstance(factor_source.get("interval_policy"), dict)
+        or not isinstance(target_source.get("interval_policy"), dict)
     ):
         raise VerticalBuildError("attribution plan model sources differ")
     _, factor_path = _portable_bundle_file(
@@ -3832,11 +3836,10 @@ def _current_release_plan_specs(
         "specs",
     }:
         raise VerticalBuildError("current decomposition plan fields differ")
-    if (
-        plan.get("builder") != "portfolio-current-decomposition-plan"
-        or plan.get("builder_version") != "0.17.0"
-        or plan.get("schema_version") != 2
-    ):
+    if plan.get("builder") != "portfolio-current-decomposition-plan" or (
+        plan.get("builder_version"),
+        plan.get("schema_version"),
+    ) not in {("0.17.0", 2), ("0.18.0", 2)}:
         raise VerticalBuildError("current decomposition plan contract differs")
     bundle_id = _text(plan.get("bundle_id"), "attribution plan bundle_id")
     if len(bundle_id) != 64 or any(
@@ -4326,11 +4329,10 @@ def build_analytics(
         correlation_as_of = _text(
             correlation_identity.get("as_of_date"), "correlation as_of_date"
         )
-    current_plan = (
-        plan.get("builder") == "portfolio-current-decomposition-plan"
-        and plan.get("builder_version") == "0.17.0"
-        and plan.get("schema_version") == 2
-    )
+    current_plan = plan.get("builder") == "portfolio-current-decomposition-plan" and (
+        plan.get("builder_version"),
+        plan.get("schema_version"),
+    ) in {("0.17.0", 2), ("0.18.0", 2)}
     if current_plan:
         if (
             plan.get("evaluation_date") != recipe_as_of

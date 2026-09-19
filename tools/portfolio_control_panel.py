@@ -3913,13 +3913,48 @@ def _factor_contribution_summary(model: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _schema_three_orthogonal_surface(
+    model: Mapping[str, Any], model_id: str, methodology_manifest_sha256: str
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Accept only the producer's named raw and orthogonal analytics receipts."""
+    orthogonal = _object(
+        model.get("orthogonal_attribution"), "model.orthogonal_attribution"
+    )
+    identities = _object(
+        model.get("analytics_identities"), "model.analytics_identities"
+    )
+    raw_identity = _object(identities.get("raw"), "model.analytics_identities.raw")
+    orthogonal_identity = _object(
+        identities.get("orthogonal"), "model.analytics_identities.orthogonal"
+    )
+    if (
+        raw_identity.get("model_id") != model_id
+        or raw_identity.get("methodology_manifest_sha256")
+        != methodology_manifest_sha256
+        or raw_identity.get("surface") not in {"RAW_MODEL", "RAW_CONSTRAINED_RBSA"}
+        or orthogonal_identity.get("model_id") != model_id
+        or orthogonal_identity.get("methodology_manifest_sha256")
+        != methodology_manifest_sha256
+        or orthogonal_identity.get("surface") != "ORTHOGONAL_RISK_ATTRIBUTION"
+    ):
+        raise ControlPanelValidationError("schema-three orthogonal identity differs")
+    interval = _object(model.get("interval_association"), "model.interval_association")
+    if (
+        interval.get("evaluation_information_set") != "RETROSPECTIVE_SELECTED_SNAPSHOT"
+        or interval.get("holdout_display_claim")
+        != "holdout association using selected historical snapshot"
+    ):
+        raise ControlPanelValidationError("schema-three orthogonal interval differs")
+    return orthogonal, identities, interval
+
+
 def _factor_analysis(
     decomposition: Mapping[str, Any],
     identity: Mapping[str, str],
     strategy_names: set[str],
 ) -> dict[str, Any]:
     analytics_schema_version = decomposition.get("analytics_schema_version")
-    if analytics_schema_version not in {1, 2}:
+    if analytics_schema_version not in {1, 2, 3}:
         raise ControlPanelValidationError("factor analytics schema is unsupported")
     method_label = _text(decomposition.get("method_label"), "factor.method_label")
     methodology_version = _text(
@@ -4044,6 +4079,31 @@ def _factor_analysis(
             model_quality.get("decision_status"), "model_quality.decision_status"
         )
         model_status = _text(model.get("status"), "model.status")
+        orthogonal_attribution: dict[str, Any] | None = None
+        analytics_identities: dict[str, Any] | None = None
+        interval_association: dict[str, Any] | None = None
+        if analytics_schema_version == 3:
+            (
+                orthogonal_attribution,
+                analytics_identities,
+                interval_association,
+            ) = _schema_three_orthogonal_surface(
+                model,
+                model_id,
+                _text(
+                    decomposition.get("methodology_manifest_sha256"),
+                    "factor.methodology_manifest_sha256",
+                ),
+            )
+        orthogonal_surface_fields = (
+            {
+                "analytics_identities": analytics_identities,
+                "interval_association": interval_association,
+                "orthogonal_attribution": orthogonal_attribution,
+            }
+            if analytics_schema_version == 3
+            else {}
+        )
         if computational_status != "AVAILABLE":
             raise ControlPanelValidationError(
                 f"selected factor model was not computed: {series_id}"
@@ -4101,6 +4161,7 @@ def _factor_analysis(
                     "exposures": diagnostic_exposures,
                     "model_id": model_id,
                     "model_quality": model_quality,
+                    **orthogonal_surface_fields,
                     "selection_status": _text(
                         selection.get("status"), "selection.status"
                     ),
@@ -4143,6 +4204,7 @@ def _factor_analysis(
                 "exposures": _objects(model.get("exposures"), "model.exposures"),
                 "model_id": model_id,
                 "model_quality": model_quality,
+                **orthogonal_surface_fields,
                 "selection_status": _text(selection.get("status"), "selection.status"),
                 "series_composition": series_composition.get(series_id, {}),
                 "series_id": series_id,
@@ -4168,7 +4230,7 @@ def _factor_analysis(
         )
         if accepted_proxy_governance.get("candidate_count") != len(proxies):
             raise ControlPanelValidationError("factor proxy candidate count differs")
-    if analytics_schema_version == 2 and not accepted_proxy_governance["proxies"]:
+    if analytics_schema_version in {2, 3} and not accepted_proxy_governance["proxies"]:
         raise ControlPanelValidationError("schema-v2 factor proxy governance is absent")
     return {
         "analytics_schema_version": analytics_schema_version,
@@ -4312,8 +4374,8 @@ def verify_decomposition_surface_against_plan(
     )
     if (
         manifest.get("builder") != "portfolio-current-decomposition-plan"
-        or manifest.get("builder_version") != "0.17.0"
-        or manifest.get("schema_version") != 2
+        or (manifest.get("builder_version"), manifest.get("schema_version"))
+        not in {("0.17.0", 2), ("0.18.0", 2)}
         or manifest.get("bundle_id") != plan_bundle.name
     ):
         raise ControlPanelValidationError("current decomposition plan identity differs")
@@ -4629,11 +4691,12 @@ def _decomposition_lenses_for_mode(
     dispositions, _dispositions_content, dispositions_sha256 = _json_snapshot(
         dispositions_path, "candidate dispositions"
     )
-    current_plan = (
-        manifest.get("builder") == "portfolio-current-decomposition-plan"
-        and manifest.get("builder_version") == "0.17.0"
-        and manifest.get("schema_version") == 2
-    )
+    current_plan = manifest.get(
+        "builder"
+    ) == "portfolio-current-decomposition-plan" and (
+        manifest.get("builder_version"),
+        manifest.get("schema_version"),
+    ) in {("0.17.0", 2), ("0.18.0", 2)}
     if current_plan:
         if manifest.get("bundle_id") != plan_bundle.name:
             raise ControlPanelValidationError(

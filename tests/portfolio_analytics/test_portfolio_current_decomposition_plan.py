@@ -336,6 +336,10 @@ def _fixture(
         tmp_path / "base-spec.json",
         {
             "schema_version": 1,
+            "models": [
+                {"series_id": "QSI", "periods_per_year": 252},
+                {"series_id": "TT Portfolio", "periods_per_year": 252},
+            ],
             "target_source": _definition(targets, "target-fixture"),
             "provenance_sources": [],
         },
@@ -597,7 +601,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         **{key: value for key, value in inputs.items() if key != "plan_document"}
     )
 
-    assert manifest["builder_version"] == "0.17.0"
+    assert manifest["builder_version"] == "0.18.0"
     assert manifest["schema_version"] == 2
     assert manifest["policies"]["publication"] == "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE"
     assert manifest["policies"]["holdout"] == {
@@ -707,6 +711,25 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         for model in dynamic_economic["models"]
     )
     assert economic["models"][0]["test_start"] > economic["models"][0]["train_end"]
+    assert economic["factor_source"]["interval_policy"]["native_calendar"] == (
+        "SOURCE_LABELLED_DAILY"
+    )
+    assert (
+        economic["target_source"]["interval_policy"]["evaluation_information_set"]
+        == "RETROSPECTIVE_SELECTED_SNAPSHOT"
+    )
+    target_interval = economic["target_source"]["interval_policy"]
+    assert target_interval["series_policies"] == {}
+    assert "native_calendar" not in target_interval
+    assert {
+        economic["series_composition"][series_id]["interval_association_status"]
+        for series_id in economic["series_composition"]
+    } == {"UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY"}
+    assert (
+        economic["factor_source"]["interval_policy"]["return_basis"]
+        == "SOURCE_PUBLISHED"
+    )
+    assert economic["models"][0]["periods_per_year"] == 252
     assert {factor["factor_id"] for factor in economic["factor_source"]["factors"]} == {
         "MKT_RF",
         "SMB",
@@ -735,6 +758,50 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         "reason": "NOT_APPLICABLE_OWNER_APPROVED_DEPRECATED",
         "status": "NOT_APPLICABLE_OWNER_APPROVED",
     }
+
+
+def test_emitted_interval_spec_marks_unresolved_calendar_authority_unavailable(
+    tmp_path: Path,
+) -> None:
+    """A source-declared calendar cannot be promoted to an invented schedule."""
+    inputs = _fixture(tmp_path)
+    written = planner.write_bundle(
+        output_root=tmp_path / "output",
+        **{key: value for key, value in inputs.items() if key != "plan_document"},
+    )
+    destination = Path(written["destination"])
+    result, _manifest, _content = engine.build_decomposition(
+        destination / "specs" / "economic.json",
+        destination,
+    )
+    model = next(
+        item
+        for item in result["model_results"]
+        if item["model_id"] == "qsi-economic-01-static"
+    )
+    assert result["analytics_schema_version"] == 3
+    assert model["coverage"]["train_observations"] == 0, model["coverage"]
+    assert model["status"] == "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY"
+
+
+def test_planner_preserves_declared_factor_anchor_periods_per_year(
+    tmp_path: Path,
+) -> None:
+    """Annualization comes from the supplied factor methodology, never dates."""
+    inputs = _fixture(tmp_path)
+    base_spec = json.loads(inputs["base_spec_path"].read_text(encoding="utf-8"))
+    base_spec["models"] = [
+        {"series_id": "QSI", "periods_per_year": 260},
+        {"series_id": "TT Portfolio", "periods_per_year": 260},
+    ]
+    _write_json(inputs["base_spec_path"], base_spec)
+
+    outputs, _manifest = planner.build_bundle(
+        **{key: value for key, value in inputs.items() if key != "plan_document"}
+    )
+
+    economic = json.loads(outputs["specs/economic.json"])
+    assert {model["periods_per_year"] for model in economic["models"]} == {260}
 
 
 def test_dynamic_surface_policy_and_grid_fail_closed(tmp_path: Path) -> None:
