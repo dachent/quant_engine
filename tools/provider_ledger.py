@@ -6592,20 +6592,30 @@ def _quantbase_flow_coverage(
 ) -> dict[str, dict[str, Any]]:
     """Prove the account-activity CSV is the complete captured API response."""
 
-    artifact_ids = (
-        "source/csv/account_activity.csv",
+    csv_artifact_id = "source/csv/account_activity.csv"
+    legacy_capture_ids = (
         "source/har/quantbase_20260902_171237.har",
-        ("source/har_output/responses/0274_qbapi3.com_200_application_json.json"),
+        "source/har_output/responses/0274_qbapi3.com_200_application_json.json",
+    )
+    current_capture_ids = (
+        "source/capture/account-activity-request-proof.json",
+        "source/capture/account-activity-response.json",
     )
     declared_artifact_ids = {artifact.artifact_id for artifact in manifest.artifacts}
-    raw_capture_ids = set(artifact_ids[1:])
-    declared_raw_capture_ids = declared_artifact_ids & raw_capture_ids
-    if not declared_raw_capture_ids:
+    declared_legacy_ids = declared_artifact_ids & set(legacy_capture_ids)
+    declared_current_ids = declared_artifact_ids & set(current_capture_ids)
+    if not declared_legacy_ids and not declared_current_ids:
         return {}
-    if declared_raw_capture_ids != raw_capture_ids:
+    if (
+        declared_legacy_ids not in (set(), set(legacy_capture_ids))
+        or declared_current_ids not in (set(), set(current_capture_ids))
+        or (declared_legacy_ids and declared_current_ids)
+    ):
         raise ProviderLedgerError(
             "Quantbase account activity capture artifact set is incomplete"
         )
+    capture_ids = legacy_capture_ids if declared_legacy_ids else current_capture_ids
+    artifact_ids = (csv_artifact_id, *capture_ids)
 
     account_id = _CSV_FACT_ACCOUNT["quantbase"]
     if known_accounts != {account_id}:
@@ -6619,6 +6629,8 @@ def _quantbase_flow_coverage(
     run_root = root / "source-runs" / run_id / "artifacts"
     verified: dict[str, dict[str, Any]] = {}
     contents: dict[str, bytes] = {}
+    artifacts: dict[str, Any] = {}
+    current_record_count: int | None = None
     for artifact_id in artifact_ids:
         artifact = _find_manifest_artifact(
             manifest, artifact_id, "Quantbase account activity capture"
@@ -6634,9 +6646,9 @@ def _quantbase_flow_coverage(
         if hashlib.sha256(content).hexdigest() != artifact.sha256:
             raise ProviderLedgerError("Quantbase account activity capture hash differs")
         contents[artifact_id] = content
+        artifacts[artifact_id] = artifact
 
-    har_id, response_id = artifact_ids[1], artifact_ids[2]
-    for artifact_id in (har_id, response_id):
+    for artifact_id in capture_ids:
         try:
             value = json.loads(contents[artifact_id].decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -6649,87 +6661,162 @@ def _quantbase_flow_coverage(
             )
         verified[artifact_id] = value
 
-    har = verified[har_id]
-    log = har.get("log")
-    if not isinstance(log, Mapping):
-        raise ProviderLedgerError("Quantbase account activity HAR shape differs")
-    entries = log.get("entries")
-    if not isinstance(entries, list):
-        raise ProviderLedgerError("Quantbase account activity HAR shape differs")
-    matches: list[Mapping[str, Any]] = []
-    for entry in entries:
-        if not isinstance(entry, Mapping):
-            continue
-        request = entry.get("request")
-        response = entry.get("response")
-        if not isinstance(request, Mapping) or not isinstance(response, Mapping):
-            continue
-        raw_url = request.get("url")
-        if not isinstance(raw_url, str):
-            continue
-        parsed_url = urlsplit(raw_url)
-        if (
-            request.get("method") == "GET"
-            and parsed_url.scheme == "https"
-            and parsed_url.hostname == "qbapi3.com"
-            and re.fullmatch(r"/api/users/[^/]+/accounts/activity/", parsed_url.path)
-            and parsed_url.query == ""
-            and request.get("queryString") == []
-            and response.get("status") == 200
-        ):
-            matches.append(entry)
-    if len(matches) != 1:
-        raise ProviderLedgerError(
-            "Quantbase account activity HAR request is missing or ambiguous"
-        )
-    match = matches[0]
-    try:
-        capture_observed_at = datetime.fromisoformat(
-            _text(
-                match.get("startedDateTime"),
-                "Quantbase account activity startedDateTime",
-            ).replace("Z", "+00:00")
-        )
-    except ValueError as exc:
-        raise ProviderLedgerError(
-            "Quantbase account activity capture time is invalid"
-        ) from exc
-    if (
-        capture_observed_at.tzinfo is None
-        or capture_observed_at.utcoffset() is None
-        or capture_observed_at.date() != manifest.as_of_date
-    ):
-        raise ProviderLedgerError("Quantbase account activity capture date differs")
-
-    response = match["response"]
-    content = response.get("content")
-    if not isinstance(content, Mapping) or not isinstance(content.get("text"), str):
-        raise ProviderLedgerError("Quantbase account activity HAR response is missing")
-    response_text = content["text"]
-    if content.get("encoding") == "base64":
-        try:
-            response_text = base64.b64decode(response_text, validate=True).decode(
-                "utf-8"
+    if capture_ids == legacy_capture_ids:
+        har_id, response_id = legacy_capture_ids
+        har = verified[har_id]
+        log = har.get("log")
+        if not isinstance(log, Mapping):
+            raise ProviderLedgerError("Quantbase account activity HAR shape differs")
+        entries = log.get("entries")
+        if not isinstance(entries, list):
+            raise ProviderLedgerError("Quantbase account activity HAR shape differs")
+        matches: list[Mapping[str, Any]] = []
+        for entry in entries:
+            if not isinstance(entry, Mapping):
+                continue
+            request = entry.get("request")
+            response = entry.get("response")
+            if not isinstance(request, Mapping) or not isinstance(response, Mapping):
+                continue
+            raw_url = request.get("url")
+            if not isinstance(raw_url, str):
+                continue
+            parsed_url = urlsplit(raw_url)
+            if (
+                request.get("method") == "GET"
+                and parsed_url.scheme == "https"
+                and parsed_url.hostname == "qbapi3.com"
+                and re.fullmatch(
+                    r"/api/users/[^/]+/accounts/activity/", parsed_url.path
+                )
+                and parsed_url.query == ""
+                and request.get("queryString") == []
+                and response.get("status") == 200
+            ):
+                matches.append(entry)
+        if len(matches) != 1:
+            raise ProviderLedgerError(
+                "Quantbase account activity HAR request is missing or ambiguous"
             )
-        except (ValueError, UnicodeDecodeError) as exc:
+        match = matches[0]
+        try:
+            capture_observed_at = datetime.fromisoformat(
+                _text(
+                    match.get("startedDateTime"),
+                    "Quantbase account activity startedDateTime",
+                ).replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ProviderLedgerError(
+                "Quantbase account activity capture time is invalid"
+            ) from exc
+        if (
+            capture_observed_at.tzinfo is None
+            or capture_observed_at.utcoffset() is None
+            or capture_observed_at.date() != manifest.as_of_date
+        ):
+            raise ProviderLedgerError("Quantbase account activity capture date differs")
+
+        response = match["response"]
+        content = response.get("content")
+        if not isinstance(content, Mapping) or not isinstance(content.get("text"), str):
+            raise ProviderLedgerError(
+                "Quantbase account activity HAR response is missing"
+            )
+        response_text = content["text"]
+        if content.get("encoding") == "base64":
+            try:
+                response_text = base64.b64decode(response_text, validate=True).decode(
+                    "utf-8"
+                )
+            except (ValueError, UnicodeDecodeError) as exc:
+                raise ProviderLedgerError(
+                    "Quantbase account activity HAR response encoding differs"
+                ) from exc
+        elif content.get("encoding") not in {None, ""}:
             raise ProviderLedgerError(
                 "Quantbase account activity HAR response encoding differs"
+            )
+        try:
+            har_response = json.loads(response_text)
+        except json.JSONDecodeError as exc:
+            raise ProviderLedgerError(
+                "Quantbase account activity HAR response is not JSON"
             ) from exc
-    elif content.get("encoding") not in {None, ""}:
-        raise ProviderLedgerError(
-            "Quantbase account activity HAR response encoding differs"
+        captured_response = verified[response_id]
+        if har_response != captured_response:
+            raise ProviderLedgerError(
+                "Quantbase account activity response differs from HAR"
+            )
+    else:
+        proof_id, response_id = current_capture_ids
+        proof = verified[proof_id]
+        request = proof.get("request")
+        receipt = proof.get("response")
+        record_count = (
+            receipt.get("record_count") if isinstance(receipt, Mapping) else None
         )
-    try:
-        har_response = json.loads(response_text)
-    except json.JSONDecodeError as exc:
-        raise ProviderLedgerError(
-            "Quantbase account activity HAR response is not JSON"
-        ) from exc
-    captured_response = verified[response_id]
-    if har_response != captured_response:
-        raise ProviderLedgerError(
-            "Quantbase account activity response differs from HAR"
-        )
+        if (
+            artifacts[proof_id].schema_name
+            != "quantbase-account-activity-request-proof"
+            or artifacts[proof_id].schema_version != "1"
+            or artifacts[response_id].schema_name
+            != "quantbase-account-activity-response"
+            or artifacts[response_id].schema_version != "1"
+            or proof.get("schema_version") != 1
+            or proof.get("provider_id") != "quantbase"
+            or proof.get("capture_kind") != "EXECUTED_READ_ONLY_REQUEST"
+            or not isinstance(request, Mapping)
+            or not isinstance(receipt, Mapping)
+            or not isinstance(proof.get("source_receipt"), Mapping)
+            or not isinstance(proof.get("execution_provenance"), Mapping)
+        ):
+            raise ProviderLedgerError(
+                "Quantbase account activity request proof differs"
+            )
+        if (
+            request.get("method") != "GET"
+            or request.get("scheme") != "https"
+            or request.get("host") != "qbapi3.com"
+            or request.get("path_template")
+            != "/api/users/{selected}/accounts/activity/"
+            or request.get("query_string") != []
+            or request.get("body_present") is not False
+            or receipt.get("http_status") != 200
+            or not isinstance(receipt.get("size_bytes"), int)
+            or isinstance(receipt.get("size_bytes"), bool)
+            or not isinstance(record_count, int)
+            or isinstance(record_count, bool)
+        ):
+            raise ProviderLedgerError(
+                "Quantbase account activity request proof differs"
+            )
+        try:
+            capture_observed_at = datetime.fromisoformat(
+                _text(
+                    proof.get("capture_observed_at"),
+                    "Quantbase account activity capture_observed_at",
+                ).replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise ProviderLedgerError(
+                "Quantbase account activity capture time is invalid"
+            ) from exc
+        if (
+            capture_observed_at.tzinfo is None
+            or capture_observed_at.utcoffset() is None
+            or capture_observed_at.date() != manifest.as_of_date
+        ):
+            raise ProviderLedgerError("Quantbase account activity capture date differs")
+        response_content = contents[response_id]
+        if receipt.get("sha256") != hashlib.sha256(
+            response_content
+        ).hexdigest() or receipt.get("size_bytes") != len(response_content):
+            raise ProviderLedgerError(
+                "Quantbase account activity request proof differs"
+            )
+        current_record_count = record_count
+        captured_response = verified[response_id]
     if set(captured_response) != {"data"} or not isinstance(
         captured_response["data"], list
     ):
@@ -6737,6 +6824,10 @@ def _quantbase_flow_coverage(
     response_rows = captured_response["data"]
     if not response_rows:
         raise ProviderLedgerError("Quantbase account activity response is empty")
+    if capture_ids == current_capture_ids and current_record_count != len(
+        response_rows
+    ):
+        raise ProviderLedgerError("Quantbase account activity request proof differs")
 
     normalized: list[tuple[str, Mapping[str, Any]]] = []
     fields = {"activity_type"}
