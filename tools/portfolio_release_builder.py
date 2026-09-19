@@ -760,6 +760,54 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
     return manifest.generation_id, path / "provider-ledger.json"
 
 
+def _validated_strategy_attribution_generation(
+    root: Path, generation_id: object
+) -> str:
+    """Bind the optional recipe selector to one verified attribution catalog."""
+
+    selected_generation_id = _generation_id(
+        generation_id, "strategy_attribution_root.generation_id"
+    )
+    try:
+        manifest = read_generation(root, selected_generation_id)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise VerticalBuildError(
+            "selected strategy-attribution generation is not accepted"
+        ) from exc
+    generation = root / "generations" / selected_generation_id
+    manifest_path = generation / "generation.json"
+    if (
+        manifest.generation_id != selected_generation_id
+        or manifest.verification is not VerificationStatus.VERIFIED
+        or manifest_path.is_symlink()
+        or not manifest_path.is_file()
+        or manifest_path.read_bytes() != manifest.to_json_bytes()
+    ):
+        raise VerticalBuildError("selected strategy-attribution generation differs")
+    catalog_path = generation / "strategy-attribution.json"
+    catalog = _load(catalog_path, "selected strategy-attribution catalog")
+    schema_version = catalog.get("catalog_schema_version")
+    if schema_version not in {1, 2}:
+        raise VerticalBuildError("selected strategy-attribution schema is unsupported")
+    sha256, size_bytes = hash_file(catalog_path)
+    artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "normalized/strategy-attribution.json"
+        ),
+        None,
+    )
+    if artifact is None or (
+        artifact.sha256,
+        artifact.size_bytes,
+        artifact.schema_name,
+        artifact.schema_version,
+    ) != (sha256, size_bytes, "strategy-attribution", str(schema_version)):
+        raise VerticalBuildError("selected strategy-attribution artifact differs")
+    return selected_generation_id
+
+
 def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
     correlation_root = _path(
         recipe["correlation_source_root"]["path"], "correlation source root"
@@ -905,7 +953,6 @@ def _recipe(path: Path) -> dict[str, Any]:
         "decomposition_plan_bundle",
         "correlation_source_root",
         "legacy_panel",
-        "strategy_attribution_root",
     ]
     if "hybrid_decomposition_plan_bundle" in recipe:
         directory_keys.append("hybrid_decomposition_plan_bundle")
@@ -923,6 +970,28 @@ def _recipe(path: Path) -> dict[str, Any]:
             "inventory_sha256": definition["inventory_sha256"],
         }:
             raise VerticalBuildError(f"{key} inventory differs")
+    attribution_definition = recipe["strategy_attribution_root"]
+    attribution_keys = {"file_count", "inventory_sha256", "path"}
+    if (
+        not isinstance(attribution_definition, dict)
+        or not attribution_keys.issubset(attribution_definition)
+        or not set(attribution_definition).issubset(
+            attribution_keys | {"generation_id"}
+        )
+    ):
+        raise VerticalBuildError("strategy_attribution_root definition differs")
+    attribution_root = _path(
+        attribution_definition["path"], "strategy_attribution_root.path"
+    )
+    if _directory_inventory(attribution_root) != {
+        "file_count": attribution_definition["file_count"],
+        "inventory_sha256": attribution_definition["inventory_sha256"],
+    }:
+        raise VerticalBuildError("strategy_attribution_root inventory differs")
+    if "generation_id" in attribution_definition:
+        _validated_strategy_attribution_generation(
+            attribution_root, attribution_definition["generation_id"]
+        )
     if schema_version in {7, 9, 10}:
         definition = recipe["provider_ledger_generation"]
         if not isinstance(definition, dict) or set(definition) != {
@@ -1037,6 +1106,7 @@ def create_recipe(
     account_strategy_admission_policy: Path | None = None,
     epoch_manifest_generation_root: Path | None = None,
     epoch_manifest_generation_id: str | None = None,
+    strategy_attribution_generation_id: str | None = None,
 ) -> dict[str, Any]:
     date.fromisoformat(as_of_date)
     if len(release_commit) != 40:
@@ -1080,6 +1150,14 @@ def create_recipe(
         raise VerticalBuildError(
             "verified epoch-manifest recipes require a reusable provider-ledger generation"
         )
+    resolved_strategy_attribution_root = strategy_attribution_root.resolve()
+    selected_attribution_generation_id = (
+        _validated_strategy_attribution_generation(
+            resolved_strategy_attribution_root, strategy_attribution_generation_id
+        )
+        if strategy_attribution_generation_id is not None
+        else None
+    )
     payload: dict[str, Any] = {
         "as_of_date": as_of_date,
         "base_factor_file": _file_definition(base_factor_file.resolve()),
@@ -1105,8 +1183,13 @@ def create_recipe(
         "pipeline_id": pipeline_id,
         "release_commit": release_commit,
         "strategy_attribution_root": {
-            "path": str(strategy_attribution_root.resolve()),
-            **_directory_inventory(strategy_attribution_root.resolve()),
+            "path": str(resolved_strategy_attribution_root),
+            **_directory_inventory(resolved_strategy_attribution_root),
+            **(
+                {"generation_id": selected_attribution_generation_id}
+                if selected_attribution_generation_id is not None
+                else {}
+            ),
         },
     }
     if hybrid_decomposition_plan_bundle is not None:
@@ -4659,6 +4742,7 @@ def build_report_candidate(
     invested_capital_result_path: Path | None = None,
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
+    attribution_generation_id: str | None = None,
 ) -> dict[str, Any]:
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
@@ -4679,6 +4763,10 @@ def build_report_candidate(
     ):
         raise VerticalBuildError(
             "epoch-manifest generation root and id must be supplied together"
+        )
+    if attribution_generation_id is not None and attribution_root is None:
+        raise VerticalBuildError(
+            "attribution root and generation identity are required together"
         )
     epoch_arguments: tuple[str, ...] = ()
     if epoch_manifest_generation_root is not None:
@@ -4722,6 +4810,11 @@ def build_report_candidate(
         *(
             ("--attribution-root", str(attribution_root))
             if attribution_root is not None
+            else ()
+        ),
+        *(
+            ("--attribution-generation-id", attribution_generation_id)
+            if attribution_generation_id is not None
             else ()
         ),
         *(
@@ -4789,6 +4882,7 @@ def build_workbook(
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
     workbook_runtime_path: Path | None = None,
+    attribution_generation_id: str | None = None,
 ) -> dict[str, Any]:
     workbook_runtime = _resolve_workbook_runtime(workbook_runtime_path)
     hwm_arguments = _governed_hwm_arguments(
@@ -4813,6 +4907,10 @@ def build_workbook(
     ):
         raise VerticalBuildError(
             "epoch-manifest generation root and id must be supplied together"
+        )
+    if attribution_generation_id is not None and attribution_root is None:
+        raise VerticalBuildError(
+            "attribution root and generation identity are required together"
         )
     epoch_arguments: tuple[str, ...] = ()
     epoch_source: dict[str, object] | None = None
@@ -4980,6 +5078,11 @@ def build_workbook(
             else ()
         ),
         *(
+            ("--attribution-generation-id", attribution_generation_id)
+            if attribution_generation_id is not None
+            else ()
+        ),
+        *(
             ("--correlation-root", str(correlation_root))
             if correlation_root is not None
             else ()
@@ -5042,6 +5145,11 @@ def build_workbook(
         *(
             ("--attribution-root", str(attribution_root))
             if attribution_root is not None
+            else ()
+        ),
+        *(
+            ("--attribution-generation-id", attribution_generation_id)
+            if attribution_generation_id is not None
             else ()
         ),
         *(
@@ -5141,6 +5249,7 @@ def build_report(
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
     workbook_runtime_path: Path | None = None,
+    attribution_generation_id: str | None = None,
 ) -> dict[str, Any]:
     _resolve_workbook_runtime(workbook_runtime_path)
     hwm_paths = (
@@ -5199,6 +5308,7 @@ def build_report(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         epoch_manifest_generation_id=epoch_manifest_generation_id,
+        attribution_generation_id=attribution_generation_id,
         **hwm_paths,
         **portfolio_paths,
         **capital_paths,
@@ -5219,6 +5329,7 @@ def build_report(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         epoch_manifest_generation_id=epoch_manifest_generation_id,
+        attribution_generation_id=attribution_generation_id,
         **hwm_paths,
         **portfolio_paths,
         **capital_paths,
@@ -6279,6 +6390,7 @@ def build_stage(
         recipe["strategy_attribution_root"]["path"],
         "strategy attribution root",
     )
+    attribution_generation_id = recipe["strategy_attribution_root"].get("generation_id")
     hybrid_decomposition_plan_bundle = (
         _path(
             recipe["hybrid_decomposition_plan_bundle"]["path"],
@@ -6330,6 +6442,7 @@ def build_stage(
             epoch_manifest_generation_id=(
                 epoch_identity[1] if epoch_identity is not None else None
             ),
+            attribution_generation_id=attribution_generation_id,
             hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
             **hwm_paths,
             **portfolio_paths,
@@ -6364,6 +6477,7 @@ def build_stage(
             epoch_manifest_generation_id=(
                 epoch_identity[1] if epoch_identity is not None else None
             ),
+            attribution_generation_id=attribution_generation_id,
             hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
             **hwm_paths,
             **portfolio_paths,
@@ -6656,6 +6770,7 @@ def _parser() -> argparse.ArgumentParser:
     recipe.add_argument("--implementation-reconciliation", type=Path, required=True)
     recipe.add_argument("--implementation-return-attribution", type=Path, required=True)
     recipe.add_argument("--strategy-attribution-root", type=Path, required=True)
+    recipe.add_argument("--strategy-attribution-generation-id")
     recipe.add_argument("--decomposition-plan-bundle", type=Path, required=True)
     recipe.add_argument("--hybrid-decomposition-plan-bundle", type=Path)
     recipe.add_argument("--correlation-source-root", type=Path, required=True)
@@ -6759,6 +6874,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 account_strategy_admission_policy=args.account_strategy_admission_policy,
                 epoch_manifest_generation_root=args.epoch_manifest_generation_root,
                 epoch_manifest_generation_id=args.epoch_manifest_generation_id,
+                strategy_attribution_generation_id=(
+                    args.strategy_attribution_generation_id
+                ),
             )
         else:
             result = build_stage(

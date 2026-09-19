@@ -4538,6 +4538,73 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
     assert built["generation_id"] == "f" * 64
 
 
+def test_build_workbook_forwards_selected_attribution_to_verify_and_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The workbook consumer keeps an immutable attribution choice to both readers."""
+
+    candidate = tmp_path / "candidate"
+    selected_generation_id = "a" * 64
+    runtime = SimpleNamespace(identity={"synthetic": True})
+    monkeypatch.setattr(builder, "_resolve_workbook_runtime", lambda _path: runtime)
+    monkeypatch.setattr(
+        builder, "_accepted_xlsx_evidence", lambda *_args, **_kwargs: True
+    )
+    monkeypatch.setattr(
+        builder,
+        "_successful_xlsx_result_path",
+        lambda selected: selected / "xlsx-result.json",
+    )
+    monkeypatch.setattr(
+        builder,
+        "_accepted_workbook_validation",
+        lambda *_args, **_kwargs: {"all_passed": True},
+    )
+    monkeypatch.setattr(
+        builder, "_record_workbook_runtime_execution", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        builder,
+        "_require_exact_report_delivery",
+        lambda *_args: {"delivery_classification": "NON_AUTHORITY_HUMAN_DELIVERY"},
+    )
+    calls: list[tuple[object, ...]] = []
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(args)
+        if args[1] == "publish":
+            return {"generation_id": "b" * 64}
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+
+    builder.build_workbook(
+        tmp_path / "baseline",
+        tmp_path / "ledger",
+        tmp_path / "freshness.json",
+        tmp_path / "history.json",
+        tmp_path / "implementation.json",
+        tmp_path / "return-attribution.json",
+        tmp_path / "attribution",
+        candidate,
+        tmp_path / "report-output",
+        attribution_generation_id=selected_generation_id,
+    )
+
+    report_calls = [
+        call
+        for call in calls
+        if call[0] == "portfolio_report.py" and call[1] in {"verify", "publish"}
+    ]
+    assert [call[1] for call in report_calls] == ["verify", "publish"]
+    for call in report_calls:
+        assert (
+            call[call.index("--attribution-generation-id") + 1]
+            == selected_generation_id
+        )
+
+
 def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

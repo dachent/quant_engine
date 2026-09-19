@@ -2077,6 +2077,98 @@ def test_explicit_baseline_generation_ignores_stale_pointer_and_verifies_bytes(
         reporter._baseline(root, generation_id=selected_id)
 
 
+def test_publish_report_snapshots_selected_attribution_without_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Explicit attribution publication snapshots only the selected generation."""
+
+    baseline_root = tmp_path / "baseline"
+    attribution_root = tmp_path / "attribution"
+    source_catalog = tmp_path / "source-attribution.json"
+    source_catalog.write_bytes(b"{}\n")
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 8, 13),
+        adapter=AdapterIdentity("portfolio-attribution-builder", "1.0.0"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic selected attribution snapshot",
+            fact_types=("strategy attribution",),
+            observed_start=date(2026, 8, 13),
+            observed_end=date(2026, 8, 13),
+        ),
+        artifacts=(
+            SourceArtifact.from_path(
+                source_catalog,
+                artifact_id="normalized/strategy-attribution.json",
+                as_of_date=date(2026, 8, 13),
+                schema_name="strategy-attribution",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    source_manifest = stage_generation(attribution_root, manifest)
+    selected_generation_id = manifest.generation_id
+    source_manifest_bytes = source_manifest.read_bytes()
+    baseline_ref = {"generation_id": "b" * 64, "catalog_sha256": "c" * 64}
+
+    monkeypatch.setattr(
+        reporter,
+        "_baseline",
+        lambda *_args: ({}, baseline_ref, tmp_path / "baseline-catalog.json"),
+    )
+    monkeypatch.setattr(reporter, "_report_product_controls", lambda _catalog: ([], {}))
+    monkeypatch.setattr(
+        reporter, "_is_governed_financial_mvp2_path", lambda *_args: False
+    )
+    monkeypatch.setattr(
+        reporter, "_validated_workbook_evidence_snapshots", lambda *_args: {}
+    )
+
+    def snapshot_current(source: Path, destination: Path, *_args: object) -> Path:
+        assert source == baseline_root
+        destination.mkdir(parents=True)
+        return destination
+
+    monkeypatch.setattr(reporter, "_snapshot_current_root", snapshot_current)
+
+    class SnapshotReached(Exception):
+        pass
+
+    def stop_after_selected_snapshot(
+        _snapshot_baseline_root: Path,
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[dict[str, object], bytes, Path]:
+        attribution_root = _args[2]
+        attribution_generation_id = _kwargs["attribution_generation_id"]
+        assert attribution_root is not None
+        assert attribution_generation_id == selected_generation_id
+        assert not (attribution_root / "CURRENT.json").exists()
+        assert (
+            attribution_root
+            / "generations"
+            / selected_generation_id
+            / "generation.json"
+        ).read_bytes() == source_manifest_bytes
+        raise SnapshotReached
+
+    monkeypatch.setattr(reporter, "build_report_data", stop_after_selected_snapshot)
+
+    with pytest.raises(SnapshotReached):
+        reporter.publish_report(
+            baseline_root,
+            tmp_path / "candidate",
+            tmp_path / "workbook.xlsx",
+            tmp_path / "xlsx-result.json",
+            tmp_path / "validation.json",
+            tmp_path / "published",
+            attribution_root=attribution_root,
+            attribution_generation_id=selected_generation_id,
+        )
+
+
 @pytest.mark.parametrize(
     ("baseline_root", "baseline_generation_id"),
     ((Path("missing-baseline"), None), (None, "a" * 64)),
