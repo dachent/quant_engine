@@ -5,7 +5,10 @@ from __future__ import annotations
 import builtins
 import importlib.util
 import inspect
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
@@ -74,3 +77,45 @@ def test_invalid_evaluation_is_rejected_before_source_import_or_reads(monkeypatc
             evaluated_on="2026-09-16",
         )
     assert "portfolio_invested_capital" not in imported
+
+
+def test_cli_resolves_repo_tools_before_reaching_date_validation(tmp_path):
+    source_root = tmp_path / "missing-source-root"
+    output_root = tmp_path / "output"
+    args = [
+        sys.executable,
+        str(SCRIPT),
+        "--provider-ledger-generation-root",
+        str(source_root / "ledger"),
+        "--epoch-manifest-generation-root",
+        str(source_root / "epochs"),
+        "--provider-ledger-spec",
+        str(source_root / "spec.json"),
+        "--financial-contract",
+        str(source_root / "contract.json"),
+        "--strategy-registry",
+        str(source_root / "registry.json"),
+        "--account-crosswalk",
+        str(source_root / "crosswalk.json"),
+        "--requested-as-of",
+        "2026-09-17",
+        "--evaluated-on",
+        "2026-09-16",
+        "--output-root",
+        str(output_root),
+    ]
+    environment = os.environ.copy()
+    environment.pop("PYTHONPATH", None)
+    completed = subprocess.run(
+        args,
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    combined_output = completed.stdout + completed.stderr
+    assert "evaluated_on cannot be before requested_as_of" in combined_output
+    assert "ModuleNotFoundError" not in combined_output
