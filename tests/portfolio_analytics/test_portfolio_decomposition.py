@@ -6,6 +6,7 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -1983,6 +1984,52 @@ def test_financial_replay_rederives_after_consumed_methodology_changes(
         )
     assert warm["full_rederivation_count"] == 1
     assert warm["receipt_reuse_count"] == 0
+
+
+def test_dynamic_all_unavailable_cv_returns_supported_status_without_cache(
+    tmp_path: Path,
+) -> None:
+    """An unavailable dynamic fit is a result, never a missing-cache exception."""
+
+    source_root = tmp_path / "source"
+    target_path, days, _truth = _write_dynamic_sources(source_root)
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    for row in rows[1:]:
+        row[2] = "0.00005"
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source_root, target_path, days, models=[_dynamic_model(days)])
+    cache_root = tmp_path / "retained"
+
+    result, _manifest, _content = decomposition.build_decomposition(
+        spec_path, source_root, training_cache_root=cache_root
+    )
+
+    assert (
+        result["model_results"][0]["status"] == "UNAVAILABLE_DYNAMIC_CROSS_VALIDATION"
+    )
+    assert not (cache_root / ".decomposition-training").exists()
+
+
+def test_cache_root_rejects_actual_symlinks_before_resolution(tmp_path: Path) -> None:
+    """A linked caller root cannot redirect retained state outside its boundary."""
+
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(real, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("native Windows symlink capability is unavailable")
+        raise
+
+    for output_root, retained_root in ((tmp_path / "output", linked), (linked, None)):
+        with pytest.raises(
+            decomposition.DecompositionError,
+            match="retained cache root must not be a symlink",
+        ):
+            decomposition._cache_root(output_root, retained_root)
 
 
 def test_staging_re_solves_when_the_indexed_result_does_not_verify(

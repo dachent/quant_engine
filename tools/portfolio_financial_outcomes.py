@@ -595,6 +595,27 @@ def financial_outcomes_semantic_identity(proof: Mapping[str, Any]) -> str:
     return hashlib.sha256(canonical_json_bytes(semantic_proof)).hexdigest()
 
 
+def _correlation_consumed_producer_identity(
+    producer: Any,
+) -> dict[str, str]:
+    """Hash the repository bytes the correlation replay actually imports."""
+
+    producer_path = Path(cast(str, producer.__file__)).resolve()
+    paths = {
+        "core_contracts": Path(
+            producer.canonical_json_bytes.__code__.co_filename
+        ).resolve(),
+        "decimal_text": Path(producer.decimal_text.__code__.co_filename).resolve(),
+        "producer": producer_path,
+    }
+    lock = producer_path.parents[1] / "uv.lock"
+    paths["dependency_lock"] = lock
+    return {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in sorted(paths.items())
+    }
+
+
 def _replay_model(
     spec: Any,
     artifact: ArtifactNode,
@@ -652,14 +673,9 @@ def _replay_model(
         correlation_spec = portfolio_correlation._load_spec(specification.path)
         source_definitions = [correlation_spec.source]
         build = cast(Any, portfolio_correlation.build_correlation)
-        producer_dependencies = {
-            "dependency_lock": hashlib.sha256(
-                (Path(__file__).resolve().parents[1] / "uv.lock").read_bytes()
-            ).hexdigest(),
-            "producer": hashlib.sha256(
-                Path(portfolio_correlation.__file__).read_bytes()
-            ).hexdigest(),
-        }
+        producer_dependencies = _correlation_consumed_producer_identity(
+            portfolio_correlation
+        )
     roots = set()
     source_bindings: list[dict[str, object]] = []
     for source in source_definitions:
