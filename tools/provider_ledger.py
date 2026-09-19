@@ -79,7 +79,10 @@ _ACCOUNT_FACTS: Final = {
     "ibkr": (
         "capital_anchors",
         "corporate_actions",
+        "financing_cost_observations",
+        "financing_liability_observations",
         "flows",
+        "leverage_exposure_observations",
         "nav_observations",
         "positions",
         "transactions",
@@ -116,12 +119,18 @@ _DATA_CLASS_TARGET_FACT: Final = {
     "TRANSACTION": "transactions",
     "EXTERNAL_FLOW": "flows",
     "CORPORATE_ACTION": "corporate_actions",
+    "FINANCING_COST": "financing_cost_observations",
+    "FINANCING_LIABILITY": "financing_liability_observations",
+    "LEVERAGE_EXPOSURE": "leverage_exposure_observations",
     "PROVIDER_LIVE_RETURN": "provider_strategy_returns",
 }
 _TARGET_ADMISSION_FACT: Final = {
     "corporate_actions": "CORPORATE_ACTION",
     "capital_anchors": "CAPITAL_ANCHOR",
     "flows": "EXTERNAL_FLOW",
+    "financing_cost_observations": "FINANCING_COST",
+    "financing_liability_observations": "FINANCING_LIABILITY",
+    "leverage_exposure_observations": "LEVERAGE_EXPOSURE",
     "nav_observations": "NAV_OBSERVATION",
     "positions": "POSITION",
     "provider_strategy_returns": (
@@ -149,6 +158,9 @@ _SOURCE_FACT_TARGET: Final = {
     "cash_flows": "flows",
     "corporate_actions": "corporate_actions",
     "flows": "flows",
+    "financing_cost_observations": "financing_cost_observations",
+    "financing_liability_observations": "financing_liability_observations",
+    "leverage_exposure_observations": "leverage_exposure_observations",
     "nav_observations": "nav_observations",
     "positions": "positions",
     "transactions": "transactions",
@@ -170,6 +182,24 @@ _SCHWAB_FLOW_KINDS: Final = frozenset(
         "Security Transfer",
         "Wire Sent",
     }
+)
+_NATIVE_LEVERAGE_OBSERVATION_FACTS: Final = frozenset(
+    {
+        "financing_cost_observations",
+        "financing_liability_observations",
+        "leverage_exposure_observations",
+    }
+)
+_NATIVE_LEVERAGE_DATE_FIELDS: Final = (
+    "effective_date",
+    "event_date",
+    "value_date",
+    "as_of_date",
+    "period_start",
+    "period_end",
+    "accounting_date",
+    "settlement_date",
+    "report_date",
 )
 # Pins the retained, independently audited Schwab Journal records to the
 # accepted Schwab refresh generation 4e47b7b8 (dataSchwab CURRENT) as of
@@ -3163,6 +3193,64 @@ def _mapped_strategy(
     return (unique[0], "MAPPED") if len(unique) == 1 else (None, "UNMAPPED")
 
 
+def _mapped_strategy_for_period(
+    row: Mapping[str, Any],
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> tuple[str | None, str, str | None]:
+    """Map an interval only when one validated strategy covers every day."""
+
+    raw_start = row.get("period_start")
+    raw_end = row.get("period_end")
+    if raw_start in {None, ""} or raw_end in {None, ""}:
+        return None, "UNMAPPED", "PERIOD_MAPPING_BOUNDARY_MISSING"
+    start = _day(raw_start, "period_start")
+    end = _day(raw_end, "period_end")
+    if end < start:
+        return None, "UNMAPPED", "PERIOD_MAPPING_INVALID_INTERVAL"
+
+    selected: str | None = None
+    current = start
+    while current <= end:
+        strategy_id, mapping_status = _mapped_strategy(
+            {
+                "account_id": row.get("account_id"),
+                "effective_date": current.isoformat(),
+            },
+            accounts,
+            strategies,
+            assignments,
+        )
+        if mapping_status != "MAPPED":
+            active = {
+                str(item["strategy_id"])
+                for item in assignments.get(str(row.get("account_id") or ""), ())
+                if isinstance(item.get("strategy_id"), str)
+                and item["strategy_id"] in strategies
+                and item.get("effective_start") not in {None, ""}
+                and _day(item["effective_start"], "assignment.effective_start")
+                <= current
+                <= (
+                    date.max
+                    if item.get("effective_end") in {None, ""}
+                    else _day(item["effective_end"], "assignment.effective_end")
+                )
+            }
+            reason = (
+                "PERIOD_MAPPING_AMBIGUOUS_INTERVAL"
+                if len(active) > 1
+                else "PERIOD_MAPPING_MISSING_VALIDATED_INTERVAL"
+            )
+            return None, "UNMAPPED", reason
+        if selected is None:
+            selected = strategy_id
+        elif selected != strategy_id:
+            return None, "UNMAPPED", "PERIOD_CROSSES_STRATEGY_EPOCH"
+        current += timedelta(days=1)
+    return selected, "MAPPED", None
+
+
 _IBKR_CAPITAL_FLOW_TYPES: Final = (
     "DEPOSIT_OR_WITHDRAWAL",
     "TRANSFER:ACATS:IN",
@@ -4016,11 +4104,22 @@ def _project_account_facts(
                     )
             continue
         if source_fact not in catalog:
+            if (
+                provider_id == "ibkr"
+                and source_fact in _NATIVE_LEVERAGE_OBSERVATION_FACTS
+            ):
+                # Older accepted IBKR generations predate these optional
+                # source collections. Their absence is not a zero balance or
+                # an admission failure; it is simply no native observation.
+                continue
             raise ProviderLedgerError(
                 f"declared provider fact collection is missing: "
                 f"{provider_id}.{source_fact}"
             )
         rows = _objects(catalog[source_fact], f"{provider_id}.{source_fact}")
+        native_leverage_observation = (
+            provider_id == "ibkr" and source_fact in _NATIVE_LEVERAGE_OBSERVATION_FACTS
+        )
         current_journal_transfers: dict[str, dict[str, str]] = {}
         if provider_id == "schwab" and source_fact == "transactions":
             rows = _schwab_transactions_within_cutoff(
@@ -4032,19 +4131,81 @@ def _project_account_facts(
         for row in rows:
             account_id = str(row.get("account_id") or "")
             mapping_row = row
+            mapping_reason: str | None = None
             if provider_id == "schwab" and source_fact == "transactions":
                 mapping_row = {
                     "account_id": account_id,
                     "effective_date": row.get("effective_date")
                     or row.get("event_date"),
                 }
+            if native_leverage_observation:
+                source_dates = {
+                    field: str(row[field])
+                    for field in _NATIVE_LEVERAGE_DATE_FIELDS
+                    if row.get(field) not in {None, ""}
+                }
+                parsed_dates = {
+                    field: _day(value, f"{source_fact}.{field}")
+                    for field, value in source_dates.items()
+                }
+                if financial_cutoff is not None and any(
+                    value > financial_cutoff for value in parsed_dates.values()
+                ):
+                    _excluded_source_row(
+                        exceptions,
+                        provider_id,
+                        source_fact,
+                        str(row.get("source_artifact_id", "")),
+                        row,
+                        max(parsed_dates.values()),
+                        financial_cutoff,
+                        original_source_dates=source_dates,
+                    )
+                    continue
+                mapping_day = next(
+                    (
+                        parsed_dates[field]
+                        for field in (
+                            "effective_date",
+                            "event_date",
+                            "value_date",
+                            "as_of_date",
+                            "period_end",
+                            "period_start",
+                        )
+                        if field in parsed_dates
+                    ),
+                    None,
+                )
+                mapping_row = {
+                    "account_id": account_id,
+                    **(
+                        {}
+                        if mapping_day is None
+                        else {"effective_date": mapping_day.isoformat()}
+                    ),
+                }
             day = _row_day(mapping_row)
             if (
                 provider_id == "ibkr"
                 and source_fact == "flows"
                 and row.get("provider_account_scope") != "STATEMENT_ACCOUNT"
+            ) or (
+                native_leverage_observation
+                and (
+                    row.get("source_account_scope") != "STATEMENT_ACCOUNT"
+                    or row.get("mapping_status") == "UNMAPPED"
+                )
             ):
                 strategy_id, mapping_status = None, "UNMAPPED"
+                if native_leverage_observation:
+                    mapping_reason = "SOURCE_ACCOUNT_SCOPE_UNMAPPED"
+            elif native_leverage_observation and (
+                "period_start" in row or "period_end" in row
+            ):
+                strategy_id, mapping_status, mapping_reason = (
+                    _mapped_strategy_for_period(row, accounts, strategies, assignments)
+                )
             else:
                 strategy_id, mapping_status = _mapped_strategy(
                     mapping_row, accounts, strategies, assignments
@@ -4062,28 +4223,40 @@ def _project_account_facts(
                 "source_record_id": source_id,
                 "strategy_id": strategy_id,
             }
-            for field in (
-                "amount",
-                "as_of_date",
-                "effective_date",
-                "event_date",
-                "execution_price",
-                "flow_type",
-                "kind",
-                "market_value",
-                "nav_recognition_date",
-                "nav",
-                "price",
-                "quantity",
-                "security_id",
-                "source_artifact_id",
-                "settle_date",
-                "provider_activity_id_sha256",
-                "provider_account_scope",
-                "value_basis",
-            ):
-                if field in row:
-                    record[field] = row[field]
+            if native_leverage_observation:
+                native_source_record_id = row.get("source_record_id")
+                record = {
+                    **row,
+                    **record,
+                    "source_record_id": source_id,
+                }
+                if native_source_record_id is not None:
+                    record["native_source_record_id"] = native_source_record_id
+                if mapping_reason is not None:
+                    record["mapping_reason"] = mapping_reason
+            else:
+                for field in (
+                    "amount",
+                    "as_of_date",
+                    "effective_date",
+                    "event_date",
+                    "execution_price",
+                    "flow_type",
+                    "kind",
+                    "market_value",
+                    "nav_recognition_date",
+                    "nav",
+                    "price",
+                    "quantity",
+                    "security_id",
+                    "source_artifact_id",
+                    "settle_date",
+                    "provider_activity_id_sha256",
+                    "provider_account_scope",
+                    "value_basis",
+                ):
+                    if field in row:
+                        record[field] = row[field]
             if source_fact == "positions" and position_observation is not None:
                 record.update(
                     observed_at=row["observed_at"],
@@ -4108,6 +4281,11 @@ def _project_account_facts(
                         "provider_id": provider_id,
                         "record_id": record["record_id"],
                         "status": "UNMAPPED",
+                        **(
+                            {}
+                            if mapping_reason is None
+                            else {"mapping_reason": mapping_reason}
+                        ),
                     }
                 )
 
@@ -7578,12 +7756,12 @@ def _materialized_rows(
     elif item.item_kind is DatasetItemKind.CATALOG_DATASET:
         if "/" not in item.item_id:
             target = _SOURCE_FACT_TARGET.get(item.item_id)
-            if target is not None:
+            if target is not None and target in provider_facts:
                 target_facts = (target,)
                 rows = provider_facts.get(target, ())
     elif item.item_kind is DatasetItemKind.COVERAGE_FACT_TYPE:
         target = _SOURCE_FACT_TARGET.get(item.item_id)
-        if target is not None:
+        if target is not None and target in provider_facts:
             target_facts = (target,)
             rows = provider_facts.get(target, ())
     elif item.item_kind is DatasetItemKind.ARTIFACT:
@@ -8353,7 +8531,14 @@ def build_catalog(
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
         "corporate_actions": combined.get("corporate_actions", []),
         "fact_counts": fact_counts,
+        "financing_cost_observations": combined.get("financing_cost_observations", []),
+        "financing_liability_observations": combined.get(
+            "financing_liability_observations", []
+        ),
         "flows": combined.get("flows", []),
+        "leverage_exposure_observations": combined.get(
+            "leverage_exposure_observations", []
+        ),
         "nav_observations": combined.get("nav_observations", []),
         "positions": combined.get("positions", []),
         "provider_coverage": provider_coverage,
