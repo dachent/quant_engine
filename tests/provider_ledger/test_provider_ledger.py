@@ -6249,15 +6249,22 @@ def _quantbase_account_activity_capture_fixture(
     capture_time: str = "2026-09-02T22:12:20.397353+00:00",
     response_matches_har: bool = True,
     csv_matches_response: bool = True,
+    current_request_proof: bool = False,
 ) -> tuple[Path, dict[str, Any], GenerationManifest]:
     run_id = "legacy-20260902-test"
     artifact_root = tmp_path / "source-runs" / run_id / "artifacts"
     response_rel = Path(
-        "har_output/responses/0274_qbapi3.com_200_application_json.json"
+        "capture/account-activity-response.json"
+        if current_request_proof
+        else "har_output/responses/0274_qbapi3.com_200_application_json.json"
     )
     har_rel = Path("har/quantbase_20260902_171237.har")
+    proof_rel = Path("capture/account-activity-request-proof.json")
     csv_rel = Path("csv/account_activity.csv")
-    for relative in (response_rel, har_rel, csv_rel):
+    native_relatives = (
+        (response_rel, proof_rel) if current_request_proof else (response_rel, har_rel)
+    )
+    for relative in (*native_relatives, csv_rel):
         (artifact_root / relative).parent.mkdir(parents=True, exist_ok=True)
 
     response = {
@@ -6324,7 +6331,41 @@ def _quantbase_account_activity_capture_fixture(
             ],
         }
     }
-    (artifact_root / har_rel).write_text(json.dumps(har), encoding="utf-8")
+    if current_request_proof:
+        response_sha256, response_size = hash_file(artifact_root / response_rel)
+        proof = {
+            "schema_version": 1,
+            "provider_id": "quantbase",
+            "capture_kind": "EXECUTED_READ_ONLY_REQUEST",
+            "capture_observed_at": capture_time,
+            "request": {
+                "method": "GET",
+                "scheme": "https",
+                "host": "qbapi3.com",
+                "path_template": "/api/users/{selected}/accounts/activity/",
+                "query_string": [],
+                "body_present": False,
+            },
+            "response": {
+                "http_status": 200,
+                "sha256": response_sha256,
+                "size_bytes": response_size,
+                "record_count": len(captured_response["data"]),
+            },
+            "source_receipt": {
+                "path": "synthetic-receipt.json",
+                "sha256": "a" * 64,
+                "size_bytes": 1,
+            },
+            "execution_provenance": {
+                "schema_version": 1,
+                "records": [],
+                "contains_credential_values": False,
+            },
+        }
+        (artifact_root / proof_rel).write_text(json.dumps(proof), encoding="utf-8")
+    else:
+        (artifact_root / har_rel).write_text(json.dumps(har), encoding="utf-8")
     rows = (
         "activity_type,amount,amount_cents,created_at,destination_account_id,id,"
         "origin_account_id,status,type\n"
@@ -6338,13 +6379,37 @@ def _quantbase_account_activity_capture_fixture(
 
     files = {
         "source/csv/account_activity.csv": artifact_root / csv_rel,
-        "source/har/quantbase_20260902_171237.har": artifact_root / har_rel,
-        (
-            "source/har_output/responses/0274_qbapi3.com_200_application_json.json"
-        ): artifact_root / response_rel,
+        **(
+            {
+                "source/capture/account-activity-request-proof.json": artifact_root
+                / proof_rel,
+                "source/capture/account-activity-response.json": artifact_root
+                / response_rel,
+            }
+            if current_request_proof
+            else {
+                "source/har/quantbase_20260902_171237.har": artifact_root / har_rel,
+                (
+                    "source/har_output/responses/"
+                    "0274_qbapi3.com_200_application_json.json"
+                ): artifact_root / response_rel,
+            }
+        ),
+    }
+    current_schema_names = {
+        "source/capture/account-activity-request-proof.json": (
+            "quantbase-account-activity-request-proof"
+        ),
+        "source/capture/account-activity-response.json": (
+            "quantbase-account-activity-response"
+        ),
     }
     manifest = GenerationManifest.build(
-        as_of_date=date(2026, 9, 2),
+        as_of_date=(
+            date.fromisoformat(capture_time[:10])
+            if current_request_proof
+            else date(2026, 9, 2)
+        ),
         adapter=AdapterIdentity(name="test-provider-ledger", version="1"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
@@ -6359,7 +6424,7 @@ def _quantbase_account_activity_capture_fixture(
                 sha256=hash_file(path)[0],
                 size_bytes=hash_file(path)[1],
                 as_of_date=date(2026, 9, 2),
-                schema_name="test-source",
+                schema_name=current_schema_names.get(artifact_id, "test-source"),
                 schema_version="1",
             )
             for artifact_id, path in files.items()
@@ -6419,6 +6484,33 @@ def test_quantbase_full_account_activity_capture_admits_account_flow_coverage(
         (date(2024, 7, 20), date(2026, 9, 2))
     }
     assert {item.account_id for item in admissions} == {account_id}
+
+
+def test_quantbase_current_request_proof_admits_account_flow_coverage(
+    tmp_path: Path,
+) -> None:
+    root, catalog, manifest = _quantbase_account_activity_capture_fixture(
+        tmp_path,
+        capture_time="2026-09-18T16:43:34.401+00:00",
+        current_request_proof=True,
+    )
+    account_id = ledger._CSV_FACT_ACCOUNT["quantbase"]
+
+    coverage = ledger._quantbase_flow_coverage(manifest, catalog, root, {account_id})
+
+    assert coverage == {
+        account_id: {
+            "capture_observed_at": "2026-09-18T16:43:34.401000+00:00",
+            "effective_end": "2026-09-18",
+            "effective_start": "2024-07-20",
+            "record_count": 2,
+            "source_artifact_ids": [
+                "source/capture/account-activity-request-proof.json",
+                "source/capture/account-activity-response.json",
+                "source/csv/account_activity.csv",
+            ],
+        }
+    }
 
 
 def test_quantbase_legacy_generation_without_native_capture_has_no_flow_coverage(
