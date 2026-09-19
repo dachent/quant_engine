@@ -3534,10 +3534,28 @@ def _build_mixed_account_manifest_payloads(
             },
             "status": "BLOCKED_RETURN_LINKAGE",
             "blocking_reason": (
-                "OPENING_ANCHOR_RECOGNITION_AFTER_CUTOFF"
-                if key in cutoff_excluded_opening_anchor_keys
-                else "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL"
+                blocking_reason := (
+                    "OPENING_ANCHOR_RECOGNITION_AFTER_CUTOFF"
+                    if key in cutoff_excluded_opening_anchor_keys
+                    else "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL"
+                )
             ),
+            "mwr_status": "BLOCKED_ADMISSION",
+            "mwr_reason": blocking_reason,
+            "mwr_xirr": None,
+            "mwr_opening_date": None,
+            "mwr_opening_value": None,
+            "mwr_terminal_date": None,
+            "mwr_terminal_value": None,
+            "mwr_currency": None,
+            "mwr_coverage_status": "BLOCKED",
+            "mwr_cashflows": [],
+            "mwr_label": None,
+            "mwr_value_basis": None,
+            "mwr_valuation_timing": None,
+            "mwr_day_count": "ACTUAL_365",
+            "mwr_unit": "ANNUALIZED_RETURN",
+            "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
         }
         if isinstance(row, dict)
         and (
