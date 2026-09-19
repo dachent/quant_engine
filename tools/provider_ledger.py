@@ -4838,8 +4838,10 @@ def _returns_within_declared_nav_gaps(
 
 def _funded_account_live_boundaries(
     financial_contract: Mapping[str, Any],
+    *,
+    current_source_boundaries: Mapping[str, date] | None = None,
 ) -> dict[str, tuple[date, date]]:
-    """Read the accepted funded ACCOUNT_LIVE intervals from product authority."""
+    """Bound funded returns by the historical snapshot or validated current sources."""
 
     history = _object(
         financial_contract.get("history_corrections"),
@@ -4862,14 +4864,34 @@ def _funded_account_live_boundaries(
         boundaries[strategy_id] = (observed_start, observed_end)
 
     required = {
-        _text(row.get("strategy_id"), "required financial MVP strategy_id")
+        _text(row.get("strategy_id"), "required financial MVP strategy_id"): row
         for row in _objects(
             financial_contract.get("strategies"), "financial MVP strategies"
         )
         if row.get("product_requirement") == "REQUIRED"
     }
-    if set(boundaries) != required:
+    if set(boundaries) != set(required):
         raise ProviderLedgerError("funded ACCOUNT_LIVE strategy boundary differs")
+    if current_source_boundaries is not None:
+        if set(current_source_boundaries) != set(required):
+            raise ProviderLedgerError("current funded strategy boundary differs")
+        for strategy_id, strategy in required.items():
+            membership = _object(strategy.get("funded_membership"), "funded_membership")
+            # A historical source-window end is not an economic closure. Keep
+            # its conservative first-return date, but cap current returns by
+            # source finality and any genuine owner membership end instead.
+            start = max(
+                boundaries[strategy_id][0],
+                _day(membership.get("effective_start"), "funded effective_start"),
+            )
+            end = current_source_boundaries[strategy_id]
+            if type(end) is not date:
+                raise ProviderLedgerError("current funded boundary must be a date")
+            if membership.get("effective_end") is not None:
+                end = min(
+                    end, _day(membership["effective_end"], "funded effective_end")
+                )
+            boundaries[strategy_id] = (start, end)
     return boundaries
 
 
@@ -7316,11 +7338,44 @@ def build_catalog(
     )
     _validate_current_census_provider_generations(authority, identities, manifests)
 
+    strategy_provider_map = _object(
+        spec["strategy_provider_map"], "strategy_provider_map"
+    )
+    current_source_boundaries: dict[str, date] | None = None
+    if run_observation is not None:
+        selected_providers = _object(
+            _object(run_observation, "run observation")["providers"],
+            "run observation providers",
+        )
+        current_source_boundaries = {}
+        for strategy_id in sorted(authoritative_strategy_ids):
+            label = f"strategy_provider_map.{strategy_id}"
+            if strategy_id not in strategy_provider_map:
+                raise ProviderLedgerError(
+                    f"{label} required strategy mapping is absent"
+                )
+            policy = strategy_provider_map[strategy_id]
+            provider_id = _text(
+                policy
+                if isinstance(policy, str)
+                else _object(policy, label).get("provider_id"),
+                label,
+            )
+            if provider_id not in manifests or provider_id not in selected_providers:
+                raise ProviderLedgerError(
+                    f"{label} provider is not a validated selection"
+                )
+            selection = _object(selected_providers[provider_id], label)
+            current_source_boundaries[strategy_id] = min(
+                as_of,
+                _day(selection.get("finalized_through"), f"{label} source finality"),
+            )
+
     strategy_return_rows, evidence_rows, strategy_artifacts = _strategy_inputs(
         spec["strategy_inputs"],
         provenance,
         as_of,
-        _object(spec["strategy_provider_map"], "strategy_provider_map"),
+        strategy_provider_map,
         financial_cutoffs=(
             {
                 provider_id: _day(selection["finalized_through"], "provider cutoff")
@@ -7397,7 +7452,8 @@ def build_catalog(
         provider_native_strategy_ids=provider_native_strategy_ids,
     )
     funded_boundaries = _funded_account_live_boundaries(
-        _object(authority.get("contract"), "financial MVP contract")
+        _object(authority.get("contract"), "financial MVP contract"),
+        current_source_boundaries=current_source_boundaries,
     )
     eligible_source_strategy_returns = _account_live_returns_within_funded_boundaries(
         source_strategy_returns,

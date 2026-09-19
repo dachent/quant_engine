@@ -409,6 +409,7 @@ def _staged_observation(
     from datetime import datetime, timedelta, timezone
     from quant_engine.core.publication import CurrentPointer
 
+    generation_day = max(DAY, cutoff)
     refs, selections = {}, {}
     for index, identity in enumerate(list(identities)):
         provider_id = identity.provider_id
@@ -441,7 +442,7 @@ def _staged_observation(
                     artifact_id=artifact_id,
                     sha256=hashlib.sha256(content).hexdigest(),
                     size_bytes=len(content),
-                    as_of_date=DAY,
+                    as_of_date=generation_day,
                     schema_name=schema,
                     schema_version="1",
                 )
@@ -463,7 +464,7 @@ def _staged_observation(
             native_day = cutoff.strftime("%Y%m%d")
             xml = (
                 '<FlexQueryResponse type="AF" queryName="SYNTHETIC"><FlexStatements>'
-                f'<FlexStatement accountId="SYNTHETIC" fromDate="{native_day}" toDate="{native_day}" whenGenerated="20260814;120000">'
+                f'<FlexStatement accountId="SYNTHETIC" fromDate="{native_day}" toDate="{native_day}" whenGenerated="{generation_day:%Y%m%d};120000">'
                 '<AccountInformation accountId="SYNTHETIC" currency="USD"/>'
                 f'<EquitySummaryByReportDateInBase reportDate="{native_day}" total="100"/>'
                 '<ChangeInNAV endingValue="100"/><CashTransactions/><ConversionRates/>'
@@ -613,7 +614,7 @@ def _staged_observation(
             evidence_path.write_bytes(
                 canonical_json_bytes(
                     {
-                        "as_of_date": DAY.isoformat(),
+                        "as_of_date": generation_day.isoformat(),
                         "roots": {"native": str(root)},
                         "sources": [
                             {
@@ -647,6 +648,7 @@ def _staged_observation(
         }[provider_id]
         coverage = replace(
             manifests[provider_id].coverage,
+            observed_end=generation_day,
             fact_types=ledger._ACCOUNT_FACTS[provider_id] or ("model_evidence",),
             status=CoverageStatus.PARTIAL
             if qualification == "ACCEPTED_PARTIAL"
@@ -656,7 +658,7 @@ def _staged_observation(
             else (),
         )
         manifest = GenerationManifest.build(
-            as_of_date=DAY,
+            as_of_date=generation_day,
             adapter=manifests[provider_id].adapter,
             coverage=coverage,
             artifacts=artifacts,
@@ -693,7 +695,7 @@ def _staged_observation(
                 "size_bytes": len(evidence_bytes),
             },
             "finalized_through": cutoff.isoformat(),
-            "generation_as_of_date": DAY.isoformat(),
+            "generation_as_of_date": generation_day.isoformat(),
         }
         manifests[provider_id] = manifest
         catalogs[provider_id] = catalog
@@ -707,11 +709,13 @@ def _staged_observation(
     return refs, selections
 
 
-def _source_bound_stage(tmp_path: Path) -> tuple[Path, dict[str, Any], Path]:
+def _source_bound_stage(
+    tmp_path: Path, *, source_cutoff: date = DAY
+) -> tuple[Path, dict[str, Any], Path]:
     """Real stage, real financial contract/schema/registry, tiny synthetic inputs."""
     _, identities, manifests, catalogs, _ = _fixture(unreferenced_dataset=True)
     refs, selections = _staged_observation(
-        tmp_path / "sources", identities, manifests, catalogs
+        tmp_path / "sources", identities, manifests, catalogs, cutoff=source_cutoff
     )
     contract_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
     schema_path = ROOT / "schemas/portfolio/financial-mvp-source-contract.schema.json"
@@ -896,6 +900,127 @@ def test_source_bound_stage_runs_without_replacing_validators(tmp_path: Path) ->
     ledger.verify_candidate(spec_path, generation.name)
 
 
+@pytest.mark.parametrize(
+    ("source_cutoff", "object_mapping", "expected_dates", "excluded_nav_date"),
+    [
+        (date(2026, 9, 17), False, ["2026-09-16", "2026-09-17"], "2026-09-18"),
+        (date(2026, 9, 16), True, ["2026-09-16"], "2026-09-17"),
+    ],
+)
+def test_current_build_keeps_source_bounded_returns_past_frozen_snapshot(
+    tmp_path: Path,
+    source_cutoff: date,
+    object_mapping: bool,
+    expected_dates: list[str],
+    excluded_nav_date: str,
+) -> None:
+    """The real builder must forward current bounds to retained and derived rows."""
+    import portfolio_pipeline_materialize as materializer
+
+    policy_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
+    policy_before = policy_path.read_bytes()
+    generation, authority, spec_path = _source_bound_stage(
+        tmp_path, source_cutoff=source_cutoff
+    )
+    spec = json.loads(spec_path.read_bytes())
+    provenance_path = Path(spec["provenance"]["catalog_path"])
+    provenance = json.loads(provenance_path.read_bytes())
+    provenance["assignments"].append(
+        {
+            "account_id": "synthetic-schwab",
+            "strategy_id": "qsi",
+            "mapping_status": "MAPPED",
+            "effective_start": "2026-01-05",
+            "effective_end": None,
+        }
+    )
+    provenance_path.write_bytes(canonical_json_bytes(provenance))
+    spec["provenance"]["catalog_sha256"] = hashlib.sha256(
+        provenance_path.read_bytes()
+    ).hexdigest()
+    returns_path = Path(spec["strategy_inputs"]["returns_path"])
+    returns_path.write_text(
+        "series_id,date,return,evidence_layer\n"
+        "qsi,2026-09-16,0.02,ACCOUNT_LIVE\n"
+        "qsi,2026-09-17,0.03,ACCOUNT_LIVE\n",
+        encoding="utf-8",
+    )
+    spec["strategy_inputs"]["returns_sha256"] = hashlib.sha256(
+        returns_path.read_bytes()
+    ).hexdigest()
+    if object_mapping:
+        spec["strategy_provider_map"] = {
+            strategy_id: {"provider_id": provider_id, "evidence_layer": "ACCOUNT_LIVE"}
+            for strategy_id, provider_id in spec["strategy_provider_map"].items()
+        }
+    spec_path.write_bytes(canonical_json_bytes(spec))
+    sources_before = {
+        path: path.read_bytes()
+        for path in (tmp_path / "sources").rglob("*")
+        if path.is_file()
+    }
+
+    catalog, _, _, _ = ledger.build_catalog(spec_path)
+
+    retained = [
+        row for row in catalog["strategy_returns"] if row["strategy_id"] == "qsi"
+    ]
+    assert [(row["date"], row["return"]) for row in retained] == [
+        (day, {"2026-09-16": "0.02", "2026-09-17": "0.03"}[day])
+        for day in expected_dates
+    ]
+    derived = [
+        row
+        for row in catalog["strategy_returns"]
+        if row["strategy_id"] == "robuxio-crypto"
+    ]
+    assert [(row["date"], row["return"]) for row in derived] == [
+        (expected_dates[-1], "0")
+    ]
+    assert all(row["evidence_layer"] == "ACCOUNT_LIVE" for row in retained + derived)
+    assert any(
+        row["status"] == "OUTSIDE_FINANCIAL_CUTOFF"
+        and row["provider_id"] == "quantbase"
+        and row["original_source_date"] == excluded_nav_date
+        for row in catalog["quality_findings"]
+    )
+    accepted = materializer._provider_admission_authority(
+        generation,
+        authority["contract"],
+        contract_raw_sha256=authority["contract_raw_sha256"],
+        contract_semantic_sha256=authority["contract_semantic_sha256"],
+        census_sha256=authority["census_sha256"],
+    )
+    assert (
+        accepted["catalog_sha256"]
+        == hashlib.sha256(
+            (generation / "provider-ledger.json").read_bytes()
+        ).hexdigest()
+    )
+    assert authority["contract_raw_sha256"] == hashlib.sha256(policy_before).hexdigest()
+    assert policy_path.read_bytes() == policy_before
+    assert all(path.read_bytes() == content for path, content in sources_before.items())
+    assert not (tmp_path / "staged/CURRENT.json").exists()
+
+
+@pytest.mark.parametrize(
+    "mapping",
+    [None, "unknown", {"provider_id": "unknown", "evidence_layer": "ACCOUNT_LIVE"}],
+)
+def test_current_build_rejects_missing_or_unknown_required_provider_mapping(
+    tmp_path: Path, mapping: object
+) -> None:
+    _, _, spec_path = _source_bound_stage(tmp_path)
+    spec = json.loads(spec_path.read_bytes())
+    if mapping is None:
+        del spec["strategy_provider_map"]["qsi"]
+    else:
+        spec["strategy_provider_map"]["qsi"] = mapping
+    spec_path.write_bytes(canonical_json_bytes(spec))
+    with pytest.raises(ledger.ProviderLedgerError, match="strategy_provider_map"):
+        ledger.build_catalog(spec_path)
+
+
 def test_finality_requires_selected_native_sources_and_account_scope(
     tmp_path: Path,
 ) -> None:
@@ -994,7 +1119,7 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
         },
         "schema_version": 2,
         "strategy_inputs": {},
-        "strategy_provider_map": {},
+        "strategy_provider_map": {"synthetic-required": "ibkr"},
     }
     spec_path = tmp_path / "spec.json"
     spec_path.write_bytes(canonical_json_bytes(spec))
@@ -1066,7 +1191,9 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
         ledger, "_broker_strategy_returns", lambda *_args, **_kwargs: []
     )
     monkeypatch.setattr(ledger, "_merge_account_returns", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(ledger, "_funded_account_live_boundaries", lambda *_args: {})
+    monkeypatch.setattr(
+        ledger, "_funded_account_live_boundaries", lambda *_args, **_kwargs: {}
+    )
     monkeypatch.setattr(
         ledger,
         "_account_live_returns_within_funded_boundaries",
