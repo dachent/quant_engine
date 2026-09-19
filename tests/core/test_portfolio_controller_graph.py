@@ -365,6 +365,18 @@ def test_affected_stages_uses_declared_downstream_closure() -> None:
     assert affected_stages(graph, ["docs/readme.md"]) == []
 
 
+def test_panel_consumer_inventory_does_not_create_report_impact() -> None:
+    """Artifact inventory is not an upstream causal-stage declaration."""
+
+    graph = build_controller_graph(REPOSITORY_ROOT)
+    report_flow = next(
+        flow for flow in graph["artifact_flows"] if flow["id"] == "report-candidate"
+    )
+
+    assert "tools/portfolio_control_panel.py" in report_flow["source_paths"]
+    assert affected_stages(graph, ["tools/portfolio_control_panel.py"]) == ["panel"]
+
+
 def test_affected_stages_requires_reconciliation_for_unmapped_production_change() -> (
     None
 ):
