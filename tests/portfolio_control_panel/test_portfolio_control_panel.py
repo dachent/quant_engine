@@ -782,6 +782,7 @@ def _report() -> dict[str, object]:
             {"check_id": "synthetic-total", "status": "PASS", "value_usd": "510316.01"}
         ],
         "report_schema_version": 1,
+        "leverage_disclosures": [],
         "strategy_provider_evidence": canonical["provider_evidence"],
         "strategy_returns": canonical["report_returns"],
         "strategy_summary": strategies,
