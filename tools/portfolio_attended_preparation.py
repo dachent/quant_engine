@@ -231,6 +231,62 @@ def _selected_history_authorities(files: Mapping[str, object]) -> dict[str, Path
     }
 
 
+def _retained_history_requires_rebuild(
+    history_root: Path,
+    contract_path: Path,
+    authorities: Mapping[str, Path],
+) -> bool:
+    """Distinguish stale code-bound derived history from invalid source evidence."""
+
+    import portfolio_target_series as history
+
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        try:
+            history.verify_layered_history_generation(
+                history_root, contract_path, require_mode=mode, **authorities
+            )
+        except history.TargetSeriesError as exc:
+            if str(exc).startswith("layered history repository dependency differs:"):
+                return True
+            raise AttendedPreparationError("retained layered history is invalid") from exc
+    return False
+
+
+def _rebuild_layered_history(
+    selection: Mapping[str, object],
+    output_root: Path,
+    release_commit: str,
+    contract_path: Path,
+    authorities: Mapping[str, Path],
+) -> Path:
+    """Regenerate only stale code-bound history from the frozen selected bytes."""
+
+    import portfolio_target_series as history
+
+    raw_kwargs = selection.get("builder_kwargs")
+    if not isinstance(raw_kwargs, Mapping):
+        raise AttendedPreparationError("selected history builder inputs are absent")
+    kwargs: dict[str, object] = {}
+    for name, value in raw_kwargs.items():
+        if not isinstance(name, str):
+            raise AttendedPreparationError("selected history builder inputs differ")
+        kwargs[name] = Path(value) if name.endswith("_path") and value is not None else value
+    if kwargs.get("contract_path") != contract_path:
+        raise AttendedPreparationError("selected history contract differs")
+    if not isinstance(kwargs.get("as_of_date"), str):
+        raise AttendedPreparationError("selected history cutoff differs")
+    kwargs["repository_sha"] = release_commit
+
+
+    artifacts, manifest = history.build_layered_history_generation(**kwargs)
+    rebuilt = history.write_layered_history_generation(output_root, artifacts, manifest)
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        history.verify_layered_history_generation(
+            rebuilt, contract_path, require_mode=mode, **authorities
+        )
+    return rebuilt
+
+
 def _validated_inputs(preparation_spec_path: Path, requested_as_of: str, evaluated_on: str) -> tuple[dict[str, Any], dict[str, Any]]:
     config = _read(preparation_spec_path.resolve(), "preparation specification")
     if config.get("schema_version") != 1:
@@ -258,53 +314,40 @@ def _validated_inputs(preparation_spec_path: Path, requested_as_of: str, evaluat
     # Replay the retained history and every public-plan boundary before this
     # function returns.  The caller creates its output root only afterwards.
     import portfolio_current_decomposition_plan as plans
-    import portfolio_target_series as history
 
     contract = _pin(config["financial_input_contract"], "financial input contract")
     history_root = Path(str(config["retained_verified_generations"]["history"]["root"])).resolve()
-    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
-        history.verify_layered_history_generation(
-            history_root,
-            contract,
-            provider_admission_receipt_path=history_authorities[
-                "provider_admission_receipt_path"
-            ],
-            financial_input_contract_path=history_authorities[
-                "financial_input_contract_path"
-            ],
-            provider_ledger_manifest_path=history_authorities[
-                "provider_ledger_manifest_path"
-            ],
-            provider_ledger_catalog_path=history_authorities[
-                "provider_ledger_catalog_path"
-            ],
-            portfolio123_version_evidence_path=history_authorities[
-                "portfolio123_version_evidence_path"
-            ],
-            require_mode=mode,
-        )
-        definition = config["plans"][mode]
-        market = {
-            key: _pin(definition[key], f"{mode} {key}")
-            for key in ("us_factors", "europe_factors", "style_returns", "sector_returns", "us_industries")
-        }
-        plans.build_bundle(
-            plan_path=_pin(definition["plan"], f"{mode} plan"),
-            catalog_path=_pin(definition["catalog"], f"{mode} catalog"),
-            financial_mvp_contract_path=contract,
-            layered_history_generation_path=history_root,
-            base_spec_path=_pin(definition["base_spec_template"], f"{mode} base spec"),
-            base_source_root=Path(str(definition["base_source_template_root"])),
-            market_paths=market,
-            public_factor_manifest_path=_pin(definition["public_factor_manifest"], f"{mode} public manifest"),
-            style_manifest_path=_pin(definition["style_manifest"], f"{mode} style manifest"),
-            sector_manifest_path=_pin(definition["sector_manifest"], f"{mode} sector manifest"),
-            evaluation_date=evaluated_on,
-            evidence_mode=mode,
-            assurance_profile="RELEASE_QC",
-            **history_authorities,
-        )
-    return config, {"source_phase": phase, "data_clock": _source_clock(phase, cutoff)}
+    rebuild_required = _retained_history_requires_rebuild(
+        history_root, contract, history_authorities
+    )
+    if not rebuild_required:
+        for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+            definition = config["plans"][mode]
+            market = {
+                key: _pin(definition[key], f"{mode} {key}")
+                for key in ("us_factors", "europe_factors", "style_returns", "sector_returns", "us_industries")
+            }
+            plans.build_bundle(
+                plan_path=_pin(definition["plan"], f"{mode} plan"),
+                catalog_path=_pin(definition["catalog"], f"{mode} catalog"),
+                financial_mvp_contract_path=contract,
+                layered_history_generation_path=history_root,
+                base_spec_path=_pin(definition["base_spec_template"], f"{mode} base spec"),
+                base_source_root=Path(str(definition["base_source_template_root"])),
+                market_paths=market,
+                public_factor_manifest_path=_pin(definition["public_factor_manifest"], f"{mode} public manifest"),
+                style_manifest_path=_pin(definition["style_manifest"], f"{mode} style manifest"),
+                sector_manifest_path=_pin(definition["sector_manifest"], f"{mode} sector manifest"),
+                evaluation_date=evaluated_on,
+                evidence_mode=mode,
+                assurance_profile="RELEASE_QC",
+                **history_authorities,
+            )
+    return config, {
+        "source_phase": phase,
+        "data_clock": _source_clock(phase, cutoff),
+        "history_rebuild_required": rebuild_required,
+    }
 
 
 def plan_attended_inputs(*, preparation_spec_path: Path, requested_as_of: str, evaluated_on: str) -> dict[str, Any]:
@@ -502,7 +545,6 @@ def prepare_attended_inputs(*, preparation_spec_path: Path, output_root: Path, r
     import portfolio_hwm_selected_inputs as hwm_inputs
     import portfolio_invested_capital as capital
     import portfolio_release_builder as release
-    import portfolio_target_series as history
     from quant_engine.portfolio_ledger.hwm_governed_execution import compute_governed_as_held_composite_hwm, verify_governed_hwm_result
     from rebind_current_epoch_crosswalk import rebind_current_epoch_crosswalk
     from stage_current_epoch_manifest import stage_current_epoch_manifest
@@ -521,26 +563,13 @@ def prepare_attended_inputs(*, preparation_spec_path: Path, output_root: Path, r
     baseline_source = Path(str(config["retained_verified_generations"]["baseline"]["root"])).resolve()
     attribution_source = Path(str(config["retained_verified_generations"]["attribution"]["root"])).resolve()
     history_source = Path(str(config["retained_verified_generations"]["history"]["root"])).resolve()
-    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
-        history.verify_layered_history_generation(
-            history_source,
+    if plan["history_rebuild_required"]:
+        history_source = _rebuild_layered_history(
+            selection,
+            root / "preparation" / "history",
+            release_commit,
             contract,
-            provider_admission_receipt_path=history_authorities[
-                "provider_admission_receipt_path"
-            ],
-            financial_input_contract_path=history_authorities[
-                "financial_input_contract_path"
-            ],
-            provider_ledger_manifest_path=history_authorities[
-                "provider_ledger_manifest_path"
-            ],
-            provider_ledger_catalog_path=history_authorities[
-                "provider_ledger_catalog_path"
-            ],
-            portfolio123_version_evidence_path=history_authorities[
-                "portfolio123_version_evidence_path"
-            ],
-            require_mode=mode,
+            history_authorities,
         )
 
     # The recipe is produced from retained accepted readers; all later stages use
