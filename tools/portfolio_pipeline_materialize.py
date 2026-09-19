@@ -3007,14 +3007,17 @@ def _semantic_gate_payload(
         if epoch_manifest_proof is not None
         else None
     )
+    if financial_outcomes is not None:
+        from portfolio_financial_outcomes import financial_outcomes_semantic_identity
+
     return {
         "as_of_date": recipe["as_of_date"],
         "checks": checks,
         **(
             {
-                "financial_outcomes_sha256": hashlib.sha256(
-                    canonical_json_bytes(financial_outcomes)
-                ).hexdigest()
+                "financial_outcomes_sha256": financial_outcomes_semantic_identity(
+                    financial_outcomes
+                )
             }
             if financial_outcomes is not None
             else {}
@@ -3558,6 +3561,7 @@ def build_spec(
     portfolio_root: Path | None = None,
     invested_capital_result_path: Path | None = None,
     invested_capital_input_generation_path: Path | None = None,
+    retained_cache_root: Path | None = None,
 ) -> dict[str, Any]:
     if portfolio_root is None:
         # Fail here rather than four nodes into the run. `build_workbook` and
@@ -3573,6 +3577,7 @@ def build_spec(
             "schema-2 recipe is recovery-only and cannot create a current specification"
         )
     _validate_output_path_budget(output_root.resolve(), recipe)
+    retained_cache_root = (retained_cache_root or output_root / "state").resolve()
     repo = Path(__file__).resolve().parents[1]
     release_commit = _git(repo, "rev-parse", "HEAD")
     if release_commit != recipe["release_commit"] or _git(
@@ -3720,6 +3725,7 @@ def build_spec(
         "analytics": [
             output_root / "stages" / "analytics",
             output_root / "stage-results" / "analytics.json",
+            retained_cache_root,
         ],
         "report": [
             report_candidate / "portfolio-report-data.json",
@@ -3770,6 +3776,8 @@ def build_spec(
                 args.extend((flag, str(manifest_input_paths[key])))
         if role == "panel":
             args.extend(("--qa-dir", str(qa_dir)))
+        if role == "analytics":
+            args.extend(("--retained-cache-root", str(retained_cache_root)))
         # `build_workbook` and `build_panel` treat any run carrying governed
         # HWM, invested capital or decomposition lenses as a financial
         # publication and refuse it without a portfolio root, which is what
@@ -4024,7 +4032,7 @@ def build_spec(
             for role in RELEASE_ROLES
         },
         "schema_version": 1,
-        "state_root": str(output_root / "state"),
+        "state_root": str(retained_cache_root),
     }
     _write_exact(spec_path, canonical_json_bytes(spec))
     return {"contract": str(contract_path), "nodes": len(nodes), "spec": str(spec_path)}
@@ -4624,6 +4632,7 @@ def _parser() -> argparse.ArgumentParser:
             "from it before publishing governed HWM."
         ),
     )
+    spec_cmd.add_argument("--retained-cache-root", type=Path)
     production_cmd = commands.add_parser("production-spec")
     production_cmd.add_argument("--recipe", type=Path, required=True)
     production_cmd.add_argument("--prepared-root", type=Path, required=True)
@@ -4696,6 +4705,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.portfolio_root,
                 args.invested_capital_result,
                 args.invested_capital_input_generation,
+                args.retained_cache_root,
             )
         else:
             result = build_production_spec(

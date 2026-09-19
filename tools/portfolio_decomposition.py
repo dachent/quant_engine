@@ -1792,7 +1792,9 @@ def _dynamic_loo_score(
     *,
     smoothness: float,
     ridge: float,
-) -> tuple[float | None, FloatArray]:
+    return_fit: bool = False,
+    fit: DynamicFit | None = None,
+) -> tuple[float | None, FloatArray] | tuple[float | None, FloatArray, DynamicFit]:
     """Compute exact leave-one-out predictions from linear-smoother leverage.
 
     The penalized FLS estimator is linear in the target for fixed smoothness
@@ -1801,12 +1803,13 @@ def _dynamic_loo_score(
     block solves.
     """
 
-    fit = _dynamic_fit(
-        matrix,
-        target,
-        smoothness=smoothness,
-        ridge=ridge,
-    )
+    if fit is None:
+        fit = _dynamic_fit(
+            matrix,
+            target,
+            smoothness=smoothness,
+            ridge=ridge,
+        )
     observation_count, factor_count = matrix.shape
     identity = np.eye(factor_count, dtype=np.float64)
     diagonal = [
@@ -1853,12 +1856,14 @@ def _dynamic_loo_score(
     )
     remaining = 1.0 - leverage
     if np.any(np.abs(remaining) <= 1e-12):
-        return None, cast(FloatArray, np.full(observation_count, np.nan))
+        unavailable = cast(FloatArray, np.full(observation_count, np.nan))
+        return (None, unavailable, fit) if return_fit else (None, unavailable)
     predictions = (fit.fitted - leverage * target) / remaining
-    return (
+    result = (
         _r_squared(target, predictions, float(np.mean(target))),
         cast(FloatArray, predictions.astype(np.float64)),
     )
+    return (*result, fit) if return_fit else result
 
 
 def _r_squared(
@@ -1868,6 +1873,303 @@ def _r_squared(
     if denominator <= 1e-24:
         return None
     return 1.0 - float(np.sum((actual - predicted) ** 2)) / denominator
+
+
+def _identity_number(value: float) -> str:
+    """Preserve a consumed float exactly when it participates in an identity."""
+
+    return float(value).hex()
+
+
+def _consumed_producer_identity() -> dict[str, str]:
+    """Hash only the local bytes the decomposition producer actually consumes."""
+
+    paths = {
+        "canonical_json": Path(canonical_json_bytes.__code__.co_filename).resolve(),
+        "methodology": METHODOLOGY_PATH.resolve(),
+        "producer": Path(__file__).resolve(),
+    }
+    lock = Path(__file__).resolve().parents[1] / "uv.lock"
+    if lock.is_file() and not lock.is_symlink():
+        paths["dependency_lock"] = lock
+    return {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in sorted(paths.items())
+    }
+
+
+def _training_identity(
+    model: ModelDefinition,
+    target_rows: Sequence[TargetRow],
+    train: Sequence[tuple[TargetRow, FactorRow, tuple[float, ...]]],
+    train_matrix: FloatArray,
+    train_target: FloatArray,
+    interval_association: Mapping[str, object],
+) -> str:
+    """Bind the numerical inputs that may legitimately share fitted state."""
+
+    policy_identity = {
+        key: interval_association[key]
+        for key in (
+            "evaluation_information_set",
+            "factor_native_calendar",
+            "factor_native_label_convention",
+            "point_in_time_vintage",
+            "policy_id",
+            "response_label",
+        )
+        if key in interval_association
+    }
+    payload = {
+        "consumed_producer_identity": _consumed_producer_identity(),
+        "interval_association": policy_identity,
+        "model": {
+            "constraint": model.constraint,
+            "cv_folds": model.cv_folds,
+            "estimator": model.estimator,
+            "factor_ids": list(model.factor_ids),
+            "minimum_train_observations": model.minimum_train_observations,
+            "model_id": model.model_id,
+            "parsimony_tolerance": _identity_number(model.parsimony_tolerance),
+            "periods_per_year": model.periods_per_year,
+            "ridge_candidates": [
+                _identity_number(value) for value in model.ridge_candidates
+            ],
+            "smoothness_candidates": [
+                _identity_number(value) for value in model.smoothness_candidates
+            ],
+            "train_end": model.train_end.isoformat(),
+        },
+        "rows": [
+            {
+                "cost": None if row.cost is None else _identity_number(row.cost),
+                "day": row.day.isoformat(),
+                "evidence_layer": row.evidence_layer,
+                "return_basis": row.return_basis,
+                "return_type": row.return_type,
+            }
+            for row, _factor, _values in train
+        ],
+        "training_target_rows": [
+            {
+                "canonical_return": row.canonical_return,
+                "cost": None if row.cost is None else _identity_number(row.cost),
+                "day": row.day.isoformat(),
+                "evidence_layer": row.evidence_layer,
+                "return_basis": row.return_basis,
+                "return_type": row.return_type,
+                "value": _identity_number(row.value),
+            }
+            for row in target_rows
+            if row.day <= model.train_end
+        ],
+        "target": [_identity_number(value) for value in train_target],
+        "transformed_factors": [
+            [_identity_number(value) for value in row] for row in train_matrix
+        ],
+    }
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def _evaluation_identity(
+    training_identity: str,
+    model: ModelDefinition,
+    test: Sequence[tuple[TargetRow, FactorRow, tuple[float, ...]]],
+    test_matrix: FloatArray,
+    test_target: FloatArray,
+) -> str:
+    """Bind evaluation rows and projections separately from fitted training work."""
+
+    payload = {
+        "evaluation_rows": [
+            {
+                "cost": None if row.cost is None else _identity_number(row.cost),
+                "day": row.day.isoformat(),
+                "evidence_layer": row.evidence_layer,
+                "return_basis": row.return_basis,
+                "return_type": row.return_type,
+            }
+            for row, _factor, _values in test
+        ],
+        "minimum_test_observations": model.minimum_test_observations,
+        "test_matrix": [
+            [_identity_number(value) for value in row] for row in test_matrix
+        ],
+        "test_start": model.test_start.isoformat(),
+        "test_target": [_identity_number(value) for value in test_target],
+        "training_identity": training_identity,
+    }
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def _dynamic_fit_to_cache(fit: DynamicFit) -> dict[str, object]:
+    return {
+        "exposures": [
+            [_identity_number(value) for value in row] for row in fit.exposures
+        ],
+        "fitted": [_identity_number(value) for value in fit.fitted],
+        "intercept": _identity_number(fit.intercept),
+        "rank_status": fit.rank_status,
+    }
+
+
+def _dynamic_fit_from_cache(
+    value: object, expected_shape: tuple[int, int]
+) -> DynamicFit | None:
+    if not isinstance(value, dict) or set(value) != {
+        "exposures",
+        "fitted",
+        "intercept",
+        "rank_status",
+    }:
+        return None
+    try:
+        exposures = np.asarray(
+            [[float.fromhex(item) for item in row] for row in value["exposures"]],
+            dtype=np.float64,
+        )
+        fitted = np.asarray(
+            [float.fromhex(item) for item in value["fitted"]], dtype=np.float64
+        )
+        intercept = float.fromhex(cast(str, value["intercept"]))
+    except (TypeError, ValueError):
+        return None
+    if (
+        exposures.shape != expected_shape
+        or fitted.shape != (expected_shape[0],)
+        or not isinstance(value["rank_status"], str)
+    ):
+        return None
+    return DynamicFit(
+        intercept=intercept,
+        exposures=exposures,
+        fitted=fitted,
+        rank_status=value["rank_status"],
+    )
+
+
+def _fit_to_cache(fit: Fit) -> dict[str, object]:
+    return {
+        "exposures": [_identity_number(value) for value in fit.exposures],
+        "intercept": _identity_number(fit.intercept),
+        "rank": fit.rank,
+        "rank_status": fit.rank_status,
+    }
+
+
+def _fit_from_cache(value: object, factor_count: int) -> Fit | None:
+    if not isinstance(value, dict) or set(value) != {
+        "exposures",
+        "intercept",
+        "rank",
+        "rank_status",
+    }:
+        return None
+    try:
+        exposures = np.asarray(
+            [float.fromhex(item) for item in value["exposures"]], dtype=np.float64
+        )
+        intercept = float.fromhex(cast(str, value["intercept"]))
+    except (TypeError, ValueError):
+        return None
+    if (
+        exposures.shape != (factor_count,)
+        or not isinstance(value["rank"], int)
+        or not isinstance(value["rank_status"], str)
+    ):
+        return None
+    return Fit(
+        intercept=intercept,
+        exposures=exposures,
+        rank=value["rank"],
+        rank_status=value["rank_status"],
+    )
+
+
+def _training_cache_path(cache_root: Path, training_identity: str) -> Path:
+    return cache_root / ".decomposition-training" / f"{training_identity}.json"
+
+
+def _training_evidence_path(cache_root: Path, training_identity: str) -> Path:
+    return cache_root / ".decomposition-training-evidence" / f"{training_identity}.json"
+
+
+def _training_cache_evidence(
+    training_identity: str, content: bytes
+) -> dict[str, object]:
+    """Bind retained fit/CV bytes to the producer output that verified them."""
+
+    return {
+        "cache_sha256": hashlib.sha256(content).hexdigest(),
+        "schema_version": 1,
+        "training_identity": training_identity,
+    }
+
+
+def _read_training_cache(
+    cache_root: Path | None, training_identity: str
+) -> dict[str, object] | None:
+    if cache_root is None:
+        return None
+    path = _training_cache_path(cache_root, training_identity)
+    evidence_path = _training_evidence_path(cache_root, training_identity)
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or evidence_path.is_symlink()
+        or not evidence_path.is_file()
+    ):
+        return None
+    try:
+        content = path.read_bytes()
+        value = json.loads(content)
+        evidence = json.loads(evidence_path.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(value, dict)
+        or value.get("training_identity") != training_identity
+        or value.get("schema_version") != 1
+        or evidence != _training_cache_evidence(training_identity, content)
+    ):
+        return None
+    return value
+
+
+def _write_training_cache(
+    cache_root: Path | None, training_identity: str, value: Mapping[str, object]
+) -> None:
+    if cache_root is None:
+        return
+    directory = _training_cache_path(cache_root, training_identity).parent
+    directory.mkdir(parents=True, exist_ok=True)
+    path = _training_cache_path(cache_root, training_identity)
+    if path.is_symlink():
+        raise DecompositionError("training receipt is linked")
+    content = canonical_json_bytes(
+        {"schema_version": 1, "training_identity": training_identity, **value}
+    )
+    if path.exists():
+        if path.read_bytes() != content:
+            # An altered cache cannot be overwritten or promoted to evidence.
+            # The caller has just rebuilt from verified inputs, so it may stage
+            # that result while leaving the untrusted retained bytes untouched.
+            return
+    else:
+        _write_new(path, content)
+
+    evidence_path = _training_evidence_path(cache_root, training_identity)
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    if evidence_path.is_symlink():
+        raise DecompositionError("training evidence is linked")
+    evidence = canonical_json_bytes(
+        _training_cache_evidence(training_identity, content)
+    )
+    if evidence_path.exists():
+        if evidence_path.read_bytes() != evidence:
+            raise DecompositionError("training evidence identity differs")
+        return
+    _write_new(evidence_path, evidence)
 
 
 def _cv_score(
@@ -2177,23 +2479,37 @@ def _dynamic_model_result(
     test_target: FloatArray,
     coverage: Mapping[str, object],
     training_design: Mapping[str, object],
+    cached_training: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     ridge = model.ridge_candidates[0]
     sensitivity: list[dict[str, object]] = []
     scored: list[tuple[float, float]] = []
+    candidate_fits: dict[float, DynamicFit] = {}
+    cached_candidates = (
+        cached_training.get("candidate_fits")
+        if isinstance(cached_training, Mapping)
+        else None
+    )
     for smoothness in model.smoothness_candidates:
-        predicted_r_squared, _predictions = _dynamic_loo_score(
+        cached_fit = (
+            _dynamic_fit_from_cache(
+                cached_candidates.get(_identity_number(smoothness)), train_matrix.shape
+            )
+            if isinstance(cached_candidates, Mapping)
+            else None
+        )
+        score = _dynamic_loo_score(
             train_matrix,
             train_target,
             smoothness=smoothness,
             ridge=ridge,
+            return_fit=True,
+            fit=cached_fit,
         )
-        fit = _dynamic_fit(
-            train_matrix,
-            train_target,
-            smoothness=smoothness,
-            ridge=ridge,
+        predicted_r_squared, _predictions, fit = cast(
+            tuple[float | None, FloatArray, DynamicFit], score
         )
+        candidate_fits[smoothness] = fit
         differences = np.diff(fit.exposures, axis=0)
         roughness = float(np.sum(differences**2))
         turnover = float(np.sum(np.abs(differences)))
@@ -2220,12 +2536,7 @@ def _dynamic_model_result(
         item for item in scored if best_score - item[0] <= model.parsimony_tolerance
     ]
     selected_score, selected_smoothness = max(eligible, key=lambda item: item[1])
-    train_fit = _dynamic_fit(
-        train_matrix,
-        train_target,
-        smoothness=selected_smoothness,
-        ridge=ridge,
-    )
+    train_fit = candidate_fits[selected_smoothness]
 
     test_predictions: list[float] = []
     filtered_exposures: dict[date, FloatArray] = {}
@@ -2273,12 +2584,20 @@ def _dynamic_model_result(
     holdout_r_squared = _r_squared(
         test_target, test_predicted, float(np.mean(train_target))
     )
-    static_benchmark_fit = _fit(
-        train_matrix,
-        train_target,
-        constraint="UNCONSTRAINED",
-        ridge=ridge,
+    static_benchmark_fit = (
+        _fit_from_cache(
+            cached_training.get("static_benchmark_fit"), train_matrix.shape[1]
+        )
+        if isinstance(cached_training, Mapping)
+        else None
     )
+    if static_benchmark_fit is None:
+        static_benchmark_fit = _fit(
+            train_matrix,
+            train_target,
+            constraint="UNCONSTRAINED",
+            ridge=ridge,
+        )
     static_benchmark_predictions = _predict(static_benchmark_fit, test_matrix)
     static_benchmark_r_squared = _r_squared(
         test_target,
@@ -2560,6 +2879,13 @@ def _dynamic_model_result(
         exposures=np.asarray(orthogonal_exposure_path, dtype=np.float64),
         intercept=train_fit.intercept,
     )
+    result["_retained_training_state"] = {
+        "candidate_fits": {
+            _identity_number(smoothness): _dynamic_fit_to_cache(fit)
+            for smoothness, fit in candidate_fits.items()
+        },
+        "static_benchmark_fit": _fit_to_cache(static_benchmark_fit),
+    }
     return _apply_model_quality_gate(result, holdout_r_squared)
 
 
@@ -2886,6 +3212,8 @@ def _model_result(
     factor_definitions: Mapping[str, FactorDefinition],
     maximum_staleness_days: int,
     interval_policy: IntervalAssociationPolicy | None,
+    *,
+    training_cache_root: Path | None = None,
 ) -> dict[str, object]:
     if model.as_of_date is not None:
         target_rows = tuple(
@@ -3089,7 +3417,14 @@ def _model_result(
     test_matrix, test_target = arrays(test)
     aligned_matrix, aligned_target = arrays(aligned)
     training_design = _training_design_diagnostics(train_matrix, model.factor_ids)
+    training_identity = _training_identity(
+        model, target_rows, train, train_matrix, train_target, interval_association
+    )
+    evaluation_identity = _evaluation_identity(
+        training_identity, model, test, test_matrix, test_target
+    )
     if model.estimator == "DYNAMIC_FLS":
+        cached_training = _read_training_cache(training_cache_root, training_identity)
         result = _dynamic_model_result(
             model,
             target_rows,
@@ -3104,7 +3439,14 @@ def _model_result(
             test_target,
             coverage,
             training_design,
+            cached_training,
         )
+        training_state = result.pop("_retained_training_state", None)
+        if not isinstance(training_state, Mapping):
+            raise DecompositionError("dynamic training state is unavailable")
+        _write_training_cache(training_cache_root, training_identity, training_state)
+        result["training_identity"] = training_identity
+        result["evaluation_identity"] = evaluation_identity
         result["interval_association"] = interval_association
         return result
     sensitivity: list[dict[str, object]] = []
@@ -3345,6 +3687,8 @@ def _model_result(
         exposures=fit.exposures,
         intercept=fit.intercept,
     )
+    result["training_identity"] = training_identity
+    result["evaluation_identity"] = evaluation_identity
     result["interval_association"] = interval_association
     return _apply_model_quality_gate(result, holdout_r2)
 
@@ -3498,7 +3842,7 @@ def _proxy_governance(
 
 
 def build_decomposition(
-    spec_path: Path, source_root: Path
+    spec_path: Path, source_root: Path, *, training_cache_root: Path | None = None
 ) -> tuple[dict[str, object], GenerationManifest, bytes]:
     spec = _load_spec(spec_path)
     target_path = _verify_source(source_root, spec.target_source)
@@ -3520,6 +3864,7 @@ def build_decomposition(
             spec.interval_association.get(
                 model.series_id, spec.default_interval_association
             ),
+            training_cache_root=training_cache_root,
         )
         for model in spec.models
     ]
@@ -3591,6 +3936,21 @@ def build_decomposition(
         },
         "sources": source_summary,
     }
+    payload["calculation_identity"] = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "models": [
+                    {
+                        "evaluation_identity": row.get("evaluation_identity"),
+                        "model_id": row["model_id"],
+                        "training_identity": row.get("training_identity"),
+                    }
+                    for row in results
+                ],
+                "sources": source_summary,
+            }
+        )
+    ).hexdigest()
     analytics_hash = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
     result: dict[str, object] = {"analytics_hash": analytics_hash, **payload}
     result_bytes = canonical_json_bytes(result)
@@ -3698,35 +4058,67 @@ def _verify_candidate(
             raise DecompositionError(f"candidate {name} differs from the exact build")
 
 
-def _input_key(spec_path: Path) -> str:
-    """Identify the inputs a decomposition would read, without reading them.
+def _input_key(spec_path: Path, source_root: Path) -> str:
+    """Verify the consumed inputs before deriving their reuse identity."""
 
-    The spec pins every source's digest and size and `_verify_source` refuses
-    anything that differs, so the spec's bytes stand for the whole input set.
-    The solver's own bytes are included because the same inputs under different
-    code are a different answer.
-    """
+    spec_bytes = spec_path.read_bytes()
+    spec = _load_spec(spec_path)
+    declared_sources = (
+        spec.target_source,
+        spec.factor_source,
+        *spec.provenance_sources,
+    )
+    # A declared source digest is only an expectation until its bytes are read.
+    # This must happen before an index lookup so a changed source cannot serve a
+    # previously valid candidate from another root.
+    for source in declared_sources:
+        _verify_source(source_root, source)
 
     digest = hashlib.sha256()
-    digest.update(spec_path.read_bytes())
-    digest.update(Path(__file__).resolve().read_bytes())
+    digest.update(spec_bytes)
+    # These are the producer bytes consumed for this result.  Execution roots,
+    # capture timestamps, and unrelated commits deliberately remain outside the
+    # numerical identity.
+    digest.update(canonical_json_bytes(_consumed_producer_identity()))
     return digest.hexdigest()
 
 
-def _indexed_generation(output_root: Path, key: str, kind: str) -> Path | None:
+def _cache_root(output_root: Path, retained_cache_root: Path | None) -> Path:
+    root = (retained_cache_root or output_root).resolve()
+    if root.exists() and root.is_symlink():
+        raise DecompositionError("retained cache root must not be a symlink")
+    return root
+
+
+def _indexed_generation(
+    cache_root: Path, key: str, kind: str, requested_spec_bytes: bytes
+) -> Path | None:
     """The generation a previous run produced from these inputs, if it survives.
 
     Returns the directory only when it still verifies against itself, so a
     partially written or edited artifact re-solves rather than being served.
     """
 
-    pointer = output_root.resolve() / ".decomposition-index" / f"{key}.txt"
+    pointer = cache_root / ".decomposition-index" / f"{key}.json"
     if pointer.is_symlink() or not pointer.is_file():
         return None
-    generation_id = pointer.read_text(encoding="utf-8").strip()
+    try:
+        index = json.loads(pointer.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if set(index) != {"generation_id", "key", "result_sha256", "result_size_bytes"}:
+        return None
+    if index.get("key") != key:
+        return None
+    generation_id = index.get("generation_id")
+    if not isinstance(generation_id, str):
+        return None
     if not re.fullmatch(r"[0-9a-f]{64}", generation_id):
         return None
-    candidate = output_root.resolve() / kind / generation_id
+    root = (cache_root / kind).resolve()
+    candidate = (root / generation_id).resolve()
+    if not candidate.is_relative_to(root):
+        return None
     result = candidate / "decomposition.json"
     manifest_path = candidate / "generation.json"
     if (
@@ -3744,6 +4136,26 @@ def _indexed_generation(output_root: Path, key: str, kind: str) -> Path | None:
         return None
     if manifest.generation_id != generation_id:
         return None
+    requested_spec = [
+        item
+        for item in manifest.artifacts
+        if item.artifact_id == "spec/decomposition-spec.json"
+    ]
+    if (
+        len(requested_spec) != 1
+        or requested_spec[0].sha256 != hashlib.sha256(requested_spec_bytes).hexdigest()
+        or requested_spec[0].size_bytes != len(requested_spec_bytes)
+    ):
+        raise DecompositionError(
+            "indexed generation is bound to a different requested identity"
+        )
+    if {item.name for item in candidate.iterdir()} != {
+        "decomposition.json",
+        "generation.json",
+    }:
+        raise DecompositionError(
+            "candidate file set differs from manifest-bound result"
+        )
     content = result.read_bytes()
     # The manifest names the result under its role, not its filename.
     declared = next(
@@ -3758,25 +4170,46 @@ def _indexed_generation(output_root: Path, key: str, kind: str) -> Path | None:
         declared is None
         or declared.sha256 != hashlib.sha256(content).hexdigest()
         or declared.size_bytes != len(content)
+        or index["result_sha256"] != declared.sha256
+        or index["result_size_bytes"] != declared.size_bytes
     ):
         return None
     return candidate
 
 
-def _record_input_key(output_root: Path, key: str, generation_id: str) -> None:
-    index = output_root.resolve() / ".decomposition-index"
+def _record_input_key(
+    cache_root: Path, key: str, generation_id: str, result_bytes: bytes
+) -> None:
+    index = cache_root / ".decomposition-index"
     index.mkdir(parents=True, exist_ok=True)
-    pointer = index / f"{key}.txt"
+    pointer = index / f"{key}.json"
     if pointer.is_symlink():
         raise DecompositionError("decomposition index entry is linked")
-    pointer.write_text(generation_id, encoding="utf-8")
+    record = canonical_json_bytes(
+        {
+            "generation_id": generation_id,
+            "key": key,
+            "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+            "result_size_bytes": len(result_bytes),
+        }
+    )
+    if pointer.exists():
+        if pointer.read_bytes() != record:
+            raise DecompositionError("decomposition index identity differs")
+        return
+    _write_new(pointer, record)
 
 
 def stage_candidate(
-    spec_path: Path, source_root: Path, output_root: Path
+    spec_path: Path,
+    source_root: Path,
+    output_root: Path,
+    *,
+    retained_cache_root: Path | None = None,
 ) -> dict[str, object]:
-    key = _input_key(spec_path)
-    cached = _indexed_generation(output_root, key, "candidates")
+    key = _input_key(spec_path, source_root)
+    cache_root = _cache_root(output_root, retained_cache_root)
+    cached = _indexed_generation(cache_root, key, "candidates", spec_path.read_bytes())
     if cached is not None:
         payload = json.loads((cached / "decomposition.json").read_text("utf-8"))
         return {
@@ -3786,10 +4219,13 @@ def stage_candidate(
             "model_count": len(cast(list[object], payload["model_results"])),
             "reused": True,
         }
-    result, manifest, result_bytes = build_decomposition(spec_path, source_root)
-    candidates = output_root.resolve() / "candidates"
-    if output_root.exists() and output_root.is_symlink():
-        raise DecompositionError("output root must not be a symlink")
+    if retained_cache_root is None:
+        result, manifest, result_bytes = build_decomposition(spec_path, source_root)
+    else:
+        result, manifest, result_bytes = build_decomposition(
+            spec_path, source_root, training_cache_root=cache_root
+        )
+    candidates = cache_root / "candidates"
     candidates.mkdir(parents=True, exist_ok=True)
     candidate = candidates / manifest.generation_id
     if candidate.exists():
@@ -3803,7 +4239,7 @@ def stage_candidate(
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
-    _record_input_key(output_root, key, manifest.generation_id)
+    _record_input_key(cache_root, key, manifest.generation_id, result_bytes)
     return {
         "analytics_hash": result["analytics_hash"],
         "candidate": str(candidate),
@@ -3837,12 +4273,19 @@ def _publish_candidate(
     return publish_generation(output_root, manifest.generation_id)
 
 
-def publish(spec_path: Path, source_root: Path, output_root: Path) -> dict[str, object]:
+def publish(
+    spec_path: Path,
+    source_root: Path,
+    output_root: Path,
+    *,
+    retained_cache_root: Path | None = None,
+) -> dict[str, object]:
     # Publishing normally follows staging in a separate process, so the answer
     # is usually already on disk. Re-reading the staged candidate is the same
     # verification a freshly solved one receives, at none of the cost.
-    key = _input_key(spec_path)
-    cached = _indexed_generation(output_root, key, "candidates")
+    key = _input_key(spec_path, source_root)
+    cache_root = _cache_root(output_root, retained_cache_root)
+    cached = _indexed_generation(cache_root, key, "candidates", spec_path.read_bytes())
     if cached is not None:
         manifest = GenerationManifest.from_json_bytes(
             (cached / "generation.json").read_bytes()
@@ -3857,10 +4300,15 @@ def publish(spec_path: Path, source_root: Path, output_root: Path) -> dict[str, 
             "publication_state": pointer.state.value,
             "reused": True,
         }
-    result, manifest, result_bytes = build_decomposition(spec_path, source_root)
-    candidate = output_root.resolve() / "candidates" / manifest.generation_id
+    if retained_cache_root is None:
+        result, manifest, result_bytes = build_decomposition(spec_path, source_root)
+    else:
+        result, manifest, result_bytes = build_decomposition(
+            spec_path, source_root, training_cache_root=cache_root
+        )
+    candidate = cache_root / "candidates" / manifest.generation_id
     pointer = _publish_candidate(candidate, output_root, manifest, result_bytes)
-    _record_input_key(output_root, key, manifest.generation_id)
+    _record_input_key(cache_root, key, manifest.generation_id, result_bytes)
     return {
         "analytics_hash": result["analytics_hash"],
         "generation_id": manifest.generation_id,
@@ -3892,6 +4340,8 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--source-root", required=True, type=Path)
         if command != "build":
             item.add_argument("--output-root", required=True, type=Path)
+        if command in {"stage", "publish"}:
+            item.add_argument("--retained-cache-root", type=Path)
     return parser
 
 
@@ -3900,9 +4350,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "build":
         result = _summary(args.spec, args.source_root)
     elif args.command == "stage":
-        result = stage_candidate(args.spec, args.source_root, args.output_root)
+        result = stage_candidate(
+            args.spec,
+            args.source_root,
+            args.output_root,
+            retained_cache_root=args.retained_cache_root,
+        )
     else:
-        result = publish(args.spec, args.source_root, args.output_root)
+        result = publish(
+            args.spec,
+            args.source_root,
+            args.output_root,
+            retained_cache_root=args.retained_cache_root,
+        )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 

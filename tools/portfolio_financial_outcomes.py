@@ -542,10 +542,69 @@ def verify_selected_hwm_generation(
     return {"portfolio-calendars", "portfolio-fx-rates", "portfolio-security-master"}
 
 
+def _replay_receipt_path(spec: Any, calculation_identity: str) -> Path | None:
+    """Locate the existing retained state surface without coupling to run roots."""
+
+    state_root = getattr(spec, "state_root", None)
+    if not isinstance(state_root, Path):
+        return None
+    return (
+        state_root.resolve()
+        / "financial-replay-receipts"
+        / f"{calculation_identity}.json"
+    )
+
+
+def _read_replay_receipt(path: Path | None, expected: Mapping[str, object]) -> bool:
+    if path is None or path.is_symlink() or not path.is_file():
+        return False
+    try:
+        value: object = json.loads(path.read_bytes())
+        return isinstance(value, dict) and value == expected
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+
+def _write_replay_receipt(path: Path | None, value: Mapping[str, object]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise FinancialOutcomeError("financial replay receipt is linked")
+    content = canonical_json_bytes(value)
+    if path.exists():
+        if path.read_bytes() != content:
+            raise FinancialOutcomeError("financial replay receipt identity differs")
+        return
+    try:
+        with path.open("xb") as handle:
+            handle.write(content)
+    except FileExistsError:
+        if path.is_symlink() or path.read_bytes() != content:
+            raise FinancialOutcomeError(
+                "financial replay receipt identity differs"
+            ) from None
+
+
+def financial_outcomes_semantic_identity(proof: Mapping[str, Any]) -> str:
+    """Hash immutable financial outcomes without per-invocation work evidence."""
+
+    semantic_proof = {
+        key: value for key, value in proof.items() if key != "work_counters"
+    }
+    return hashlib.sha256(canonical_json_bytes(semantic_proof)).hexdigest()
+
+
 def _replay_model(
-    spec: Any, artifact: ArtifactNode, kind: str, *, source_root: Path | None = None
+    spec: Any,
+    artifact: ArtifactNode,
+    kind: str,
+    *,
+    source_root: Path | None = None,
+    work_counters: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Delegate numerical replay to the existing domain producer, once per file."""
+    artifact_bytes = _verified_file(artifact.path, artifact.sha256, artifact.size_bytes)
     generation = _generation(spec, artifact)
     assert generation.source_dir is not None
     manifest_path = generation.source_dir / "generation.json"
@@ -570,6 +629,9 @@ def _replay_model(
     specification = _artifact_for_digest(
         spec, definition.sha256, definition.size_bytes, source_root=source_root
     )
+    specification_bytes = _verified_file(
+        specification.path, definition.sha256, definition.size_bytes
+    )
     import portfolio_decomposition
     import portfolio_correlation
 
@@ -584,12 +646,22 @@ def _replay_model(
             parsed.factor_source,
             *parsed.provenance_sources,
         ]
-        build = portfolio_decomposition.build_decomposition
+        build = cast(Any, portfolio_decomposition.build_decomposition)
+        producer_dependencies = portfolio_decomposition._consumed_producer_identity()
     else:
         correlation_spec = portfolio_correlation._load_spec(specification.path)
         source_definitions = [correlation_spec.source]
-        build = portfolio_correlation.build_correlation
+        build = cast(Any, portfolio_correlation.build_correlation)
+        producer_dependencies = {
+            "dependency_lock": hashlib.sha256(
+                (Path(__file__).resolve().parents[1] / "uv.lock").read_bytes()
+            ).hexdigest(),
+            "producer": hashlib.sha256(
+                Path(portfolio_correlation.__file__).read_bytes()
+            ).hexdigest(),
+        }
     roots = set()
+    source_bindings: list[dict[str, object]] = []
     for source in source_definitions:
         node = _artifact_for_digest(
             spec,
@@ -605,18 +677,89 @@ def _replay_model(
                 "financial source path differs from producer specification"
             )
         roots.add(root)
+        source_bytes = _verified_file(
+            node.path, source.expected_sha256, source.expected_size_bytes
+        )
+        source_bindings.append(
+            {
+                "relative_path": source.relative_path,
+                "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "size_bytes": len(source_bytes),
+            }
+        )
     if len(roots) != 1:
         raise FinancialOutcomeError("financial producer source roots conflict")
-    result, rebuilt_manifest, result_bytes = build(
-        specification.path, next(iter(roots))
-    )
+    receipt_base: dict[str, object] = {
+        "kind": kind,
+        "producer_sha256": hashlib.sha256(
+            (
+                Path(portfolio_decomposition.__file__)
+                if kind == "DECOMPOSITION"
+                else Path(portfolio_correlation.__file__)
+            ).read_bytes()
+        ).hexdigest(),
+        "producer_dependencies": producer_dependencies,
+        "result_sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+        "result_size_bytes": len(artifact_bytes),
+        "source_bindings": sorted(
+            source_bindings, key=lambda row: str(row["relative_path"])
+        ),
+        "spec_sha256": hashlib.sha256(specification_bytes).hexdigest(),
+        "spec_size_bytes": len(specification_bytes),
+        "validator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "verification_scope": "SOURCE_PRODUCER_RESULT_AND_CONSUMER_PROJECTION_V1",
+    }
+    calculation_identity = hashlib.sha256(
+        canonical_json_bytes(receipt_base)
+    ).hexdigest()
+    receipt = {
+        "calculation_identity": calculation_identity,
+        "schema_version": 1,
+        **receipt_base,
+    }
+    receipt_path = _replay_receipt_path(spec, calculation_identity)
+    if _read_replay_receipt(receipt_path, receipt):
+        if work_counters is not None:
+            work_counters["receipt_reuse_count"] += 1
+        return cast(dict[str, Any], json.loads(artifact_bytes.decode("utf-8")))
+    if work_counters is not None:
+        work_counters["full_rederivation_count"] += 1
+    if kind == "DECOMPOSITION" and work_counters is not None:
+        original_dynamic_fit: Any = portfolio_decomposition._dynamic_fit
+        original_fit: Any = portfolio_decomposition._fit
+
+        def counted_dynamic_fit(*args: object, **kwargs: object) -> Any:
+            work_counters["model_fit_calls"] += 1
+            return original_dynamic_fit(*args, **kwargs)
+
+        def counted_fit(*args: object, **kwargs: object) -> Any:
+            work_counters["model_fit_calls"] += 1
+            return original_fit(*args, **kwargs)
+
+        work_counters["grid_search_calls"] += len(parsed.models)
+        portfolio_decomposition._dynamic_fit = cast(Any, counted_dynamic_fit)
+        portfolio_decomposition._fit = cast(Any, counted_fit)
+        try:
+            result, rebuilt_manifest, result_bytes = build(
+                specification.path, next(iter(roots))
+            )
+        finally:
+            portfolio_decomposition._dynamic_fit = original_dynamic_fit
+            portfolio_decomposition._fit = original_fit
+    else:
+        if kind == "DEPENDENCE" and work_counters is not None:
+            work_counters["correlation_build_calls"] += 1
+        result, rebuilt_manifest, result_bytes = build(
+            specification.path, next(iter(roots))
+        )
     if (
         rebuilt_manifest.to_json_bytes() != manifest.to_json_bytes()
-        or result_bytes != artifact.path.read_bytes()
+        or result_bytes != artifact_bytes
     ):
         raise FinancialOutcomeError(
             "financial model differs from selected-source recomputation"
         )
+    _write_replay_receipt(receipt_path, receipt)
     # Hand back what every consumer actually read, not the in-memory object.
     # They all loaded the published bytes, and `canonical_json_bytes` sorts keys,
     # so a deserialized mapping iterates its factors in sorted order while the
@@ -1238,6 +1381,13 @@ def validate_financial_outcomes(
         not allow_synthetic and capital.get("authority_profile") != "ACCEPTED_GOVERNED"
     ):
         raise FinancialOutcomeError("capital result is unavailable or synthetic")
+    work_counters = {
+        "model_fit_calls": 0,
+        "grid_search_calls": 0,
+        "correlation_build_calls": 0,
+        "full_rederivation_count": 0,
+        "receipt_reuse_count": 0,
+    }
     replays: dict[tuple[str, Path], dict[str, Any]] = {}
     plan_bindings = {}
     plan_artifacts: dict[tuple[str, str, str], tuple[Path, str, int]] = {}
@@ -1253,6 +1403,7 @@ def validate_financial_outcomes(
                 node,
                 key[0],
                 source_root=plans[key[-1]] if key[0] == "DECOMPOSITION" else None,
+                work_counters=work_counters,
             )
         value = replays[cache_key]
         if key[0] == "DECOMPOSITION":
@@ -1366,4 +1517,5 @@ def validate_financial_outcomes(
         "selected_cells": selected_cells,
         "consumers": consumers,
         "artifact_sha256s": {key: node.sha256 for key, node in sorted(nodes.items())},
+        "work_counters": work_counters,
     }

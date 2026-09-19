@@ -1718,6 +1718,7 @@ def test_hybrid_decomposition_uses_shared_version_bound_history_contract(
         correlation_source=correlation_source,
         bundle_root=bundle_root,
         output_root=output_root,
+        retained_cache_root=tmp_path / "retained-decomposition",
     )
 
     assert result["bundle_id"] == "b" * 64
@@ -1737,6 +1738,14 @@ def test_hybrid_decomposition_uses_shared_version_bound_history_contract(
     )
     assert calls[1][0][0:2] == ("portfolio_decomposition.py", "stage")
     assert calls[2][0][0:2] == ("portfolio_decomposition.py", "publish")
+    assert calls[1][0][-2:] == (
+        "--retained-cache-root",
+        str(tmp_path / "retained-decomposition"),
+    )
+    assert calls[2][0][-2:] == (
+        "--retained-cache-root",
+        str(tmp_path / "retained-decomposition"),
+    )
 
 
 def _legacy_plan_manifest(specs: list[dict[str, object]]) -> dict[str, object]:
@@ -2057,6 +2066,15 @@ def _current_plan_bundle(
                 "evidence_mode": "LIVE_ONLY",
                 "factor_source": {
                     "artifact_id": f"market/{source_key}.csv",
+                    "interval_policy": {
+                        "available_through_anchor": "2026-08-03",
+                        "currency": "USD",
+                        "finality": "COMPLETE_SELECTED_SNAPSHOT",
+                        "native_calendar": "SOURCE_LABELLED_DAILY",
+                        "native_label_convention": "PUBLISHED_DAILY_LABEL",
+                        "return_basis": "NET",
+                        "source_vintage": "SELECTED_SNAPSHOT",
+                    },
                     "date_column": "date",
                     "expected_sha256": hashlib.sha256(
                         model_sources[source_key]["factor_content"]
@@ -2103,6 +2121,17 @@ def _current_plan_bundle(
                 },
                 "target_source": {
                     "artifact_id": f"target/{source_key}.csv",
+                    "interval_policy": {
+                        "currency": "USD",
+                        "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+                        "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
+                        "finalized_through": "2026-08-03",
+                        "gap_disposition": "REJECT_BUCKET",
+                        "native_calendar": "CALENDAR_DAY_24_7",
+                        "native_label_convention": "SYNTHETIC_CALENDAR_DAY",
+                        "return_basis": "NET",
+                        "source_vintage": "SELECTED_SNAPSHOT",
+                    },
                     "expected_sha256": hashlib.sha256(
                         model_sources[source_key]["target_content"]
                     ).hexdigest(),
