@@ -1400,6 +1400,12 @@ def validate_admit_or_declare_receipt(
                 raise ProviderAdmissionError(
                     "run observation historical comparison differs"
                 )
+            if product_count != policy.get(
+                "product_data_class_count"
+            ) or product_digest != policy.get("product_data_class_set_sha256"):
+                raise ProviderAdmissionError(
+                    "provider receipt product data-class set differs from product authority"
+                )
         elif (
             inventory_digest != policy.get("upstream_inventory_sha256")
             or product_count != policy.get("product_data_class_count")
