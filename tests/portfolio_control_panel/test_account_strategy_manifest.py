@@ -2681,6 +2681,176 @@ def test_full_perimeter_coverage_rejects_fact_outside_every_assignment_interval(
         )
 
 
+def test_evidence_coverage_allows_only_declared_reciprocal_support_outside_interval(
+    manifest_module: Any,
+) -> None:
+    """A known internal support leg remains evidence without inventing its epoch."""
+
+    root_key = ("p123-eu-account", "p123-eu", "2026-03-01", None)
+    prior_key = ("p123-eu-account", "p123-eu-prior", "2026-02-01", "2026-02-28")
+    chains = {
+        "p123-eu-account": [{"_key": prior_key}, {"_key": root_key}],
+        "reserve-only-account": [
+            {
+                "_key": (
+                    "reserve-only-account",
+                    "reserve-capital",
+                    "2026-04-01",
+                    None,
+                )
+            }
+        ],
+    }
+    events = [
+        {
+            "event_id": "root-event",
+            "source_record_id": "p123-eu-root",
+            "account_id": "p123-eu-account",
+            "event_date": "2026-03-10",
+            "nav_recognition_date": "2026-03-10",
+            "amount": Decimal("10"),
+            "disposition": "INTERNAL",
+            "counterparty_source_record_id": "reserve-support",
+        },
+        {
+            "event_id": "support-event",
+            "source_record_id": "reserve-support",
+            "account_id": "reserve-only-account",
+            "event_date": "2026-03-10",
+            "nav_recognition_date": "2026-03-10",
+            "amount": Decimal("-10"),
+            "disposition": "INTERNAL",
+            "counterparty_source_record_id": "p123-eu-root",
+        },
+    ]
+
+    manifest_module.validate_evidence_coverage(
+        {"nav_observations": [], "flows": []},
+        events,
+        chains,
+        {"p123-eu-account": {}, "reserve-only-account": {}},
+        supporting_internal_counterparty_source_record_ids=("reserve-support",),
+        selected_assignment_keys=(root_key,),
+    )
+
+
+def test_evidence_coverage_validates_selected_roots_when_support_descriptor_overlaps(
+    manifest_module: Any,
+) -> None:
+    """Selected-selected internal transfers retain normal interval validation."""
+
+    left_key = ("p123-eu-account", "p123-eu", "2026-03-01", None)
+    right_key = ("p123-us-account", "p123-us", "2026-03-01", None)
+    events = [
+        {
+            "event_id": "left-event",
+            "source_record_id": "p123-eu-root",
+            "account_id": "p123-eu-account",
+            "event_date": "2026-03-10",
+            "nav_recognition_date": "2026-03-10",
+            "amount": Decimal("10"),
+            "disposition": "INTERNAL",
+            "counterparty_source_record_id": "p123-us-root",
+        },
+        {
+            "event_id": "right-event",
+            "source_record_id": "p123-us-root",
+            "account_id": "p123-us-account",
+            "event_date": "2026-03-10",
+            "nav_recognition_date": "2026-03-10",
+            "amount": Decimal("-10"),
+            "disposition": "INTERNAL",
+            "counterparty_source_record_id": "p123-eu-root",
+        },
+    ]
+
+    manifest_module.validate_evidence_coverage(
+        {"nav_observations": [], "flows": []},
+        events,
+        {
+            "p123-eu-account": [{"_key": left_key}],
+            "p123-us-account": [{"_key": right_key}],
+        },
+        {"p123-eu-account": {}, "p123-us-account": {}},
+        supporting_internal_counterparty_source_record_ids=(
+            "p123-eu-root",
+            "p123-us-root",
+        ),
+        selected_assignment_keys=(left_key, right_key),
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("support_not_reciprocal", "support is not an exact reciprocal"),
+        ("root_outside_selected_epoch", "support root does not map to a selected"),
+        ("support_promoted_to_root", "classified flow does not map to exactly one"),
+    ],
+)
+def test_evidence_coverage_rejects_forged_or_unselected_support_roles(
+    manifest_module: Any, mutation: str, message: str
+) -> None:
+    """Support role selection never authorizes an unpaired or non-epoch fact."""
+
+    root_key = ("p123-eu-account", "p123-eu", "2026-03-01", None)
+    prior_key = ("p123-eu-account", "p123-eu-prior", "2026-02-01", "2026-02-28")
+    chains = {
+        "p123-eu-account": [{"_key": prior_key}, {"_key": root_key}],
+        "reserve-only-account": [
+            {
+                "_key": (
+                    "reserve-only-account",
+                    "reserve-capital",
+                    "2026-04-01",
+                    None,
+                )
+            }
+        ],
+    }
+    events = [
+        {
+            "event_id": "root-event",
+            "source_record_id": "p123-eu-root",
+            "account_id": "p123-eu-account",
+            "event_date": "2026-03-10",
+            "nav_recognition_date": "2026-03-10",
+            "amount": Decimal("10"),
+            "disposition": "INTERNAL",
+            "counterparty_source_record_id": "reserve-support",
+        },
+        {
+            "event_id": "support-event",
+            "source_record_id": "reserve-support",
+            "account_id": "reserve-only-account",
+            "event_date": "2026-03-10",
+            "nav_recognition_date": "2026-03-10",
+            "amount": Decimal("-10"),
+            "disposition": "INTERNAL",
+            "counterparty_source_record_id": "p123-eu-root",
+        },
+    ]
+    descriptor = ("reserve-support",)
+    if mutation == "support_not_reciprocal":
+        events[1]["counterparty_source_record_id"] = "other-root"
+    elif mutation == "root_outside_selected_epoch":
+        for event in events:
+            event["event_date"] = "2026-02-28"
+            event["nav_recognition_date"] = "2026-02-28"
+    else:
+        descriptor = ("p123-eu-root",)
+
+    with pytest.raises(manifest_module.ManifestError, match=message):
+        manifest_module.validate_evidence_coverage(
+            {"nav_observations": [], "flows": []},
+            events,
+            chains,
+            {"p123-eu-account": {}, "reserve-only-account": {}},
+            supporting_internal_counterparty_source_record_ids=descriptor,
+            selected_assignment_keys=(root_key,),
+        )
+
+
 def _non_strategy_bridge_assignments() -> list[dict[str, Any]]:
     return [
         {

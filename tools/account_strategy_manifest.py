@@ -2869,6 +2869,9 @@ def validate_evidence_coverage(
     reconciled_events: list[dict[str, Any]],
     chains: Mapping[str, list[dict[str, Any]]],
     accounts_index: Mapping[str, Mapping[str, Any]],
+    *,
+    supporting_internal_counterparty_source_record_ids: Sequence[str] = (),
+    selected_assignment_keys: Sequence[tuple[str, str, str, str | None]] = (),
 ) -> None:
     """Every source fact must map to exactly one known account epoch.
 
@@ -2880,7 +2883,9 @@ def validate_evidence_coverage(
         if account_id not in accounts_index:
             raise ManifestError(f"baseline assignment account is unknown: {account_id}")
 
-    def _require_one_interval(account_id: str, event_date: str, field: str) -> None:
+    def _matching_intervals(
+        account_id: str, event_date: str, field: str
+    ) -> list[dict[str, Any]]:
         if account_id not in accounts_index:
             raise ManifestError(f"{field} account is unknown: {account_id}")
         matches = [
@@ -2898,11 +2903,79 @@ def validate_evidence_coverage(
                 2
             ] and _is_historical_to_mapped_shared_boundary(predecessor, successor):
                 matches = [successor]
+        return matches
+
+    def _require_one_interval(
+        account_id: str, event_date: str, field: str
+    ) -> Mapping[str, Any]:
+        matches = _matching_intervals(account_id, event_date, field)
         if len(matches) != 1:
             raise ManifestError(
                 f"{field} does not map to exactly one baseline assignment interval: "
                 f"{account_id}/{event_date}"
             )
+        return matches[0]
+
+    support_ids = tuple(supporting_internal_counterparty_source_record_ids)
+    if any(
+        type(source_record_id) is not str or not source_record_id
+        for source_record_id in support_ids
+    ):
+        raise ManifestError(
+            "supporting internal counterparty source record ids are invalid"
+        )
+    if len(support_ids) != len(set(support_ids)):
+        raise ManifestError(
+            "supporting internal counterparty source record ids are duplicated"
+        )
+    selected_keys = set(selected_assignment_keys)
+    if support_ids and not selected_keys:
+        raise ManifestError("internal support requires selected assignment keys")
+    events_by_source_id = {
+        event.get("source_record_id"): event for event in reconciled_events
+    }
+    if len(events_by_source_id) != len(reconciled_events):
+        raise ManifestError("reconciled classified flow source record ids are invalid")
+    support_only_ids: set[str] = set()
+    for support_id in support_ids:
+        support = events_by_source_id.get(support_id)
+        if not isinstance(support, Mapping):
+            raise ManifestError(
+                "declared internal support is absent from classified flows"
+            )
+        support_account_id = str(support.get("account_id"))
+        if support_account_id not in accounts_index:
+            raise ManifestError(
+                f"classified flow account is unknown: {support_account_id}"
+            )
+        root_id = support.get("counterparty_source_record_id")
+        root = events_by_source_id.get(root_id)
+        if (
+            support.get("disposition") != "INTERNAL"
+            or not isinstance(root_id, str)
+            or not isinstance(root, Mapping)
+            or root.get("disposition") != "INTERNAL"
+            or root.get("counterparty_source_record_id") != support_id
+            or support.get("event_date") != root.get("event_date")
+            or support.get("nav_recognition_date") != root.get("nav_recognition_date")
+            or support.get("amount") != -root["amount"]
+        ):
+            raise ManifestError("declared internal support is not an exact reciprocal")
+        root_assignment = _require_one_interval(
+            str(root.get("account_id")), str(root.get("event_date")), "classified flow"
+        )
+        if root_assignment.get("_key") not in selected_keys:
+            raise ManifestError(
+                "internal support root does not map to a selected assignment interval"
+            )
+        support_matches = _matching_intervals(
+            support_account_id, str(support.get("event_date")), "classified flow"
+        )
+        if not (
+            len(support_matches) == 1
+            and support_matches[0].get("_key") in selected_keys
+        ):
+            support_only_ids.add(support_id)
 
     observations = ledger.get("nav_observations")
     if not isinstance(observations, list):
@@ -2918,6 +2991,8 @@ def validate_evidence_coverage(
             "ledger NAV",
         )
     for event in reconciled_events:
+        if event.get("source_record_id") in support_only_ids:
+            continue
         _require_one_interval(
             str(event["account_id"]),
             str(event["event_date"]),
@@ -4654,6 +4729,7 @@ class ManifestCandidateSnapshots:
     baseline_generation_id: str
     receipt_authority: InputSnapshot | None = None
     selected_assignment_keys: tuple[tuple[str, str, str, str | None], ...] | None = None
+    supporting_internal_counterparty_source_record_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -4699,6 +4775,21 @@ class ManifestCandidateSnapshots:
             if len(keys) != len(set(keys)):
                 raise ManifestError("selected_assignment_keys must be unique")
             object.__setattr__(self, "selected_assignment_keys", keys)
+        support_ids = tuple(self.supporting_internal_counterparty_source_record_ids)
+        if any(
+            type(source_record_id) is not str or not source_record_id
+            for source_record_id in support_ids
+        ):
+            raise ManifestError(
+                "supporting_internal_counterparty_source_record_ids are invalid"
+            )
+        if len(support_ids) != len(set(support_ids)):
+            raise ManifestError(
+                "supporting_internal_counterparty_source_record_ids are duplicated"
+            )
+        object.__setattr__(
+            self, "supporting_internal_counterparty_source_record_ids", support_ids
+        )
 
 
 def _build_manifest_candidate_from_snapshots_impl(
@@ -4864,7 +4955,16 @@ def _build_manifest_candidate_from_snapshots_impl(
     buckets = flow_buckets_from_classes(reconciled_events)
     series, unavailable_navs = parse_nav_observations(ledger)
     validate_evidence_coverage(
-        ledger, reconciled_events, perimeter.full_chains, accounts_index
+        ledger,
+        reconciled_events,
+        perimeter.full_chains,
+        accounts_index,
+        supporting_internal_counterparty_source_record_ids=(
+            inputs.supporting_internal_counterparty_source_record_ids
+        ),
+        selected_assignment_keys=tuple(
+            _assignment_key(assignment) for assignment in mapped_assignments
+        ),
     )
     flow_coverage_identity: dict[str, object] = {
         "artifact": flow_coverage_artifact,

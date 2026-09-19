@@ -3489,6 +3489,9 @@ def _build_mixed_account_manifest_payloads(
                 tuple(_c3_assignment_record(assignment).values())
                 for assignment in mapped
             ),
+            supporting_internal_counterparty_source_record_ids=tuple(
+                projection["supporting_internal_counterparty_source_record_ids"]
+            ),
         )
     )
     candidate_rows = candidate.get("rows")
