@@ -522,6 +522,15 @@ def _native_workbook_checks(candidate: Path) -> dict[str, object]:
 
 
 def _workstation(args: argparse.Namespace) -> Path:
+    # This profile is exclusively an xlsx-win/desktop-Excel route.  Workbook
+    # execution is permanently held for the current MVP, so reject the
+    # profile before resolving any candidate, runtime, or evidence path.
+    raise PrerequisiteUnavailable(
+        "workbook-only workstation profile is permanently held"
+    )
+
+
+def _retired_workstation(args: argparse.Namespace) -> Path:
     if args.spec is None:
         raise PrerequisiteUnavailable("pipeline spec")
     if args.candidate_dir is None:
