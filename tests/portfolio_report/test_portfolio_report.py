@@ -1156,6 +1156,26 @@ def test_epoch_admission_blocks_twelve_rows_before_any_numeric_candidate(
         }
         for row in included
     }
+    for detail in epoch_details.values():
+        if detail["epoch_admission_status"] == "BLOCKED":
+            detail["mwr_payload"] = {
+                "mwr_status": "BLOCKED_ADMISSION",
+                "mwr_xirr": None,
+                "mwr_reason": "SYNTHETIC_BLOCKED",
+                "mwr_opening_date": None,
+                "mwr_opening_value": None,
+                "mwr_terminal_date": None,
+                "mwr_terminal_value": None,
+                "mwr_currency": None,
+                "mwr_coverage_status": "BLOCKED",
+                "mwr_cashflows": [],
+                "mwr_label": None,
+                "mwr_value_basis": None,
+                "mwr_valuation_timing": None,
+                "mwr_day_count": "ACTUAL_365",
+                "mwr_unit": "ANNUALIZED_RETURN",
+                "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+            }
     catalog = {
         "assignments": assignments,
         "calendar_coverage": [],
@@ -1232,6 +1252,7 @@ def test_epoch_admission_blocks_twelve_rows_before_any_numeric_candidate(
         for row in blocked
         for status_field in ("twr_status", "mwr_status", "return_path_status")
     )
+    assert {row["mwr_reason"] for row in blocked} == {"SYNTHETIC_BLOCKED"}
     suppressed_fields = (
         "twr",
         "mwr_xirr",
@@ -2687,6 +2708,15 @@ def test_report_data_has_hand_checked_twr_and_coverage_failures(tmp_path: Path) 
     assert mapped["twr_status"] == "AVAILABLE_WITH_INFERRED_FLOW_TIMING"
     assert mapped["mwr_xirr"] is None
     assert mapped["mwr_status"] == "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE"
+    assert mapped["mwr_reason"] == "FLOW_COVERAGE_NOT_GOVERNED"
+    assert mapped["mwr_coverage_status"] == "BLOCKED"
+    assert mapped["mwr_cashflows"] == []
+    assert mapped["mwr_label"] is None
+    assert mapped["mwr_value_basis"] is None
+    assert mapped["mwr_valuation_timing"] is None
+    assert mapped["mwr_day_count"] == "ACTUAL_365"
+    assert mapped["mwr_unit"] == "ANNUALIZED_RETURN"
+    assert mapped["mwr_source_binding"] == "GOVERNED_SOURCE_IDENTITIES"
     missing = next(
         item for item in report["twr_mwr"] if item["assignment_id"] == "assignment-b"
     )
@@ -4254,8 +4284,17 @@ def test_report_schema_is_closed_and_keeps_mwr_unavailable() -> None:
     )
     assert schema["properties"]["strategy_summary"]["minItems"] == 7
     assert schema["properties"]["strategy_summary"]["maxItems"] == 7
-    assert schema["$defs"]["performance"]["properties"]["mwr_xirr"]["type"] == "null"
+    assert schema["$defs"]["performance"]["properties"]["mwr_xirr"]["type"] == [
+        "string",
+        "null",
+    ]
     assert schema["$defs"]["performance"]["properties"]["mwr_status"]["enum"] == [
+        "AVAILABLE",
+        "NO_ROOT",
+        "INDETERMINATE",
+        "UNIQUENESS_NOT_PROVED",
+        "NUMERICAL_SEARCH_UNRESOLVED",
+        "INCOMPLETE_FLOW_COVERAGE",
         "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
         "BLOCKED_ADMISSION",
     ]

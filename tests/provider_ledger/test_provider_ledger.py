@@ -3904,6 +3904,13 @@ def test_provider_ledger_schema_requires_exact_known_provider_nav_basis() -> Non
                 "properties": {"value_basis": {"const": "ACCOUNT_TOTAL"}},
             },
         },
+        "quantbase": {
+            "if_required": ["value_basis"],
+            "then": {
+                "required": ["source_artifact_id"],
+                "properties": {"value_basis": {"const": "STRATEGY_NAV"}},
+            },
+        },
         "schwab": {
             "if_required": ["value_basis"],
             "then": {
@@ -4550,11 +4557,10 @@ def test_matrixport_cutoff_excludes_future_holdings_before_fx_valuation(
     assert findings[0]["status"] == "OUTSIDE_FINANCIAL_CUTOFF"
 
 
-def test_quantbase_dashboard_nav_declares_account_total_basis(
+def test_quantbase_dashboard_nav_declares_strategy_nav_basis(
     tmp_path: Path,
 ) -> None:
-    """Volatis dashboard NAV is an authoritative account total and must carry
-    the same source-proven basis contract as Matrixport (#359/#361 class)."""
+    """Volatis dashboard NAV is fund-scoped, not a linked brokerage total."""
 
     run_id = "20260816T141010.494Z"
     artifacts_root = tmp_path / "output" / "source-runs" / run_id / "artifacts" / "csv"
@@ -4584,7 +4590,7 @@ def test_quantbase_dashboard_nav_declares_account_total_basis(
     )
 
     assert len(rows) == 1
-    assert rows[0]["value_basis"] == "ACCOUNT_TOTAL"
+    assert rows[0]["value_basis"] == "STRATEGY_NAV"
     assert (
         rows[0]["source_artifact_id"]
         == "source/csv/dashboard_Volatis_Strategy_pricehistory.csv"
@@ -5068,9 +5074,8 @@ def test_quantbase_volatis_dashboard_admitted_as_nav_observations(
     )
     assert rows[0]["strategy_id"] == "volatis-strategy"
     assert rows[0]["mapping_status"] == "MAPPED"
-    # The Volatis dashboard total is an authoritative account NAV: it must
-    # declare its basis under the #359/#361 value-basis contract.
-    assert rows[0]["value_basis"] == "ACCOUNT_TOTAL"
+    # Fund dashboard NAV is a strategy valuation, never an account total.
+    assert rows[0]["value_basis"] == "STRATEGY_NAV"
     assert rows[1]["as_of_date"] == "2026-08-14"
 
 
@@ -6099,6 +6104,48 @@ def test_quantbase_unreconciled_contribution_fails_closed(tmp_path: Path) -> Non
 
     with pytest.raises(
         ledger.ProviderLedgerError, match="capital additions do not reconcile"
+    ):
+        ledger._quantbase_capital_anchors(
+            "gen-1",
+            manifest,
+            catalog,
+            root,
+            {"account-58e75e8d952fa1b8"},
+            {"volatis-strategy"},
+            assignments,
+        )
+
+
+def test_quantbase_non_fee_fund_sell_fails_closed_without_withdrawal_admission(
+    tmp_path: Path,
+) -> None:
+    """A fund redemption cannot silently become a zero strategy flow."""
+    root, catalog, price_path, activity_path = _quantbase_fixture(tmp_path)
+    activity_path.write_text(
+        "activity_type,amount,fund,is_rebalance,time,type,created_to_cover_fees\n"
+        "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY,False\n"
+        "filled_txn,100,107,False,2026-08-14T20:00:00Z,SELL,False\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_two_artifact_manifest(
+        {
+            "source/csv/dashboard_Volatis_Strategy_pricehistory.csv": price_path,
+            "source/csv/account_activity.csv": activity_path,
+        }
+    )
+    assignments = {
+        "account-58e75e8d952fa1b8": [
+            {
+                "effective_start": "2024-10-01",
+                "mapping_status": "MAPPED",
+                "strategy_id": "volatis-strategy",
+            }
+        ]
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="non-fee fund sell requires admitted withdrawal",
     ):
         ledger._quantbase_capital_anchors(
             "gen-1",

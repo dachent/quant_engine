@@ -1124,7 +1124,20 @@ def _account_strategy_performance(
             "flow_count": 0,
             "flow_timing": "DATE_ONLY_END_OF_DAY_INFERRED_TIMING",
             "last_four": None,
+            "mwr_cashflows": [],
+            "mwr_coverage_status": "BLOCKED",
+            "mwr_day_count": "ACTUAL_365",
+            "mwr_label": None,
+            "mwr_opening_date": None,
+            "mwr_opening_value": None,
+            "mwr_reason": "FLOW_COVERAGE_NOT_GOVERNED",
+            "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
             "mwr_status": "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
+            "mwr_terminal_date": None,
+            "mwr_terminal_value": None,
+            "mwr_unit": "ANNUALIZED_RETURN",
+            "mwr_valuation_timing": None,
+            "mwr_value_basis": None,
             "mwr_xirr": None,
             "nav_observations": 0,
             "observed_end": None,
@@ -1176,6 +1189,8 @@ def _account_strategy_performance(
                 }
             )
             if detail is not None and detail["epoch_admission_status"] == "BLOCKED":
+                if detail.get("mwr_payload") is not None:
+                    base.update(cast(Mapping[str, Any], detail["mwr_payload"]))
                 base.update(
                     {
                         "flow_count": None,
@@ -1202,6 +1217,8 @@ def _account_strategy_performance(
                 )
                 rows.append(base)
                 continue
+            if detail is not None and detail.get("mwr_payload") is not None:
+                base.update(cast(Mapping[str, Any], detail["mwr_payload"]))
         if mapping_status != "MAPPED" or assignment.get("strategy_id") is None:
             base["twr_status"] = "UNMAPPED"
             rows.append(base)
@@ -5066,6 +5083,14 @@ def build_report_data(
                         row["effective_end"],
                     )
                 ]["epoch_blocking_reason"],
+                "mwr_payload": verified_epoch_details[
+                    (
+                        row["account_id"],
+                        row["strategy_id"],
+                        row["effective_start"],
+                        row["effective_end"],
+                    )
+                ]["mwr_payload"],
             }
             for row in crosswalk_payload["rows"]
             if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
@@ -8534,6 +8559,29 @@ def _verified_epoch_authority_details(
             "epoch_admission_status": admission["status"],
             "epoch_output_status": output["status"],
             "epoch_blocking_reason": output["blocking_reason"],
+            "mwr_payload": {
+                field: manifest_row.get(field)
+                for field in (
+                    "mwr_status",
+                    "mwr_xirr",
+                    "mwr_reason",
+                    "mwr_opening_date",
+                    "mwr_opening_value",
+                    "mwr_terminal_date",
+                    "mwr_terminal_value",
+                    "mwr_currency",
+                    "mwr_coverage_status",
+                    "mwr_cashflows",
+                    "mwr_label",
+                    "mwr_value_basis",
+                    "mwr_valuation_timing",
+                    "mwr_day_count",
+                    "mwr_unit",
+                    "mwr_source_binding",
+                )
+            }
+            if "mwr_status" in manifest_row
+            else None,
         }
     if (
         set(details) != set(by_key)
