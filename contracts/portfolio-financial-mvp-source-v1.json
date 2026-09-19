@@ -3574,7 +3574,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "9ea70645cc8f40dd38148fc115fa65ca02ef6d43eb932ece404c989fde555da1",
      "product_data_class_count": 1,
-     "product_data_class_set_sha256": "c93709fcedba78147eb9f17364a1c690a8cc78d5f1adbab2fd0b1ae01ac9171d",
+     "product_data_class_set_sha256": "bd9dc67925fb1bbed75941595a17013240853904918f97e7cee8d2ce84d01d40",
      "admitted_item_count": 2,
      "admitted_item_set_sha256": "c9a66669fe0cd411dee0b2d99c79f063a3c7c026bc671ce5ec97d58de6f6aa0f",
      "allowed_exclusion_reasons": [
@@ -3997,7 +3997,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8",
      "product_data_class_count": 9,
-     "product_data_class_set_sha256": "c8fa73170b7176c8d31ffe9b0d2ffb25aceed4193361930270e9e92a8968bfc5",
+     "product_data_class_set_sha256": "9b94724ff0b983b83b8f920ceedd0cd8ff691f34cbeb15d0603c7fc3e88c6ac9",
      "admitted_item_count": 25,
      "admitted_item_set_sha256": "0b8c38b8dcfcc551ac38dae244b47fd431488cc57d220656c5223967cd6892c2",
      "allowed_exclusion_reasons": [
@@ -4118,7 +4118,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "24f77dcf8c81b5c4906f66013568c2ec205e46752117c9bad56aba2e65d3b98e",
      "product_data_class_count": 2,
-     "product_data_class_set_sha256": "792f5bd0bbca0836b4e25a3559adf6f69aab248a4289959925bc0d1caa05c978",
+     "product_data_class_set_sha256": "58a28c6e71f75ed76a4548806906cf01dd9192a2d10f25679e5df4b1b62a8183",
      "admitted_item_count": 6,
      "admitted_item_set_sha256": "1c00617f3db60ee5b1571ef822261c39c02cf0c620604a66a35c45616f82141c",
      "allowed_exclusion_reasons": [
@@ -4296,7 +4296,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "2abcd635064683b61f71e11b07893a52029c7bb32d2a7d5ceb38e27a1aa9020f",
      "product_data_class_count": 3,
-     "product_data_class_set_sha256": "70fcf851a90a424642d944bf3e0a5c7fe984bde6506c9e284e4463c5d8a69ce1",
+     "product_data_class_set_sha256": "ae460ceb04d7a53821ab8b40eda9579e766f1e33c28df76719acdccb30f918c0",
      "admitted_item_count": 6,
      "admitted_item_set_sha256": "c08d7a42db964d459235cf0071a843a6b3b703c03932b5c3b72b0ccab7b1843b",
      "allowed_exclusion_reasons": [
@@ -4422,7 +4422,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "548db85021b3a735b9145934795c37d7d99f51360fba94f0548120f1828eaf33",
      "product_data_class_count": 5,
-     "product_data_class_set_sha256": "5e40f0cb78ec90654003fc71947b77a34effd3c4d3ba7f0c6656008d93413304",
+     "product_data_class_set_sha256": "84091cab83bf027885fa37553ad7951330839c4004bf5221bd51d56b626e4075",
      "admitted_item_count": 22,
      "admitted_item_set_sha256": "c736740e96e30517af5597c8819332d8e1020b45e0a8e35c646897f6b2bf4a26",
      "allowed_exclusion_reasons": [

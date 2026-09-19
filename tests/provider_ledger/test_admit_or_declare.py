@@ -976,6 +976,30 @@ def _source_bound_stage(
     )
 
 
+def test_current_product_data_class_pins_follow_source_identity() -> None:
+    """A current output-consumer change must rederive the affected data-class pins."""
+    _, _, manifests, catalogs, _ = _fixture(unreferenced_dataset=True)
+    contract = json.loads(
+        (ROOT / "contracts/portfolio-financial-mvp-source-v1.json").read_bytes()
+    )
+    sources = {row["source_id"]: row for row in contract["source_segments"]}
+
+    for provider_id, source_id in ledger._PROVIDER_SOURCE_SEGMENTS.items():
+        policy = sources[source_id]["admission"]["dataset_disposition_policy"]
+        observed = ledger._product_data_class_set_digest(
+            ledger._provider_inventory(
+                provider_id,
+                manifests[provider_id],
+                catalogs[provider_id],
+                sources[source_id],
+            )
+        )
+        assert observed == (
+            policy["product_data_class_count"],
+            policy["product_data_class_set_sha256"],
+        )
+
+
 def test_source_bound_stage_runs_without_replacing_validators(tmp_path: Path) -> None:
     policy_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
     policy_before = policy_path.read_bytes()

@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "331fdb96872ebdbc6a54073cfe47e69c9229a2fa7a1eff1230a885a1db758cd8"
+        "cd731019d30b9715545e56032e4d16280e6fbfd13e170a07a7ef7ad936a3073b"
     )
 
 
@@ -1104,7 +1104,7 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
                 "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8"
             ),
             "product_data_class_set_sha256": (
-                "c8fa73170b7176c8d31ffe9b0d2ffb25aceed4193361930270e9e92a8968bfc5"
+                "9b94724ff0b983b83b8f920ceedd0cd8ff691f34cbeb15d0603c7fc3e88c6ac9"
             ),
             # Moved from 24 to 25 when CAPITAL_ANCHOR materialized: netting
             # each statement account's capital events on their own recognition
@@ -4228,10 +4228,11 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # the bundle carrying the EU designer-model prehistory, then to declare
     # approved source-backed IBKR/Schwab leverage classes without changing
     # historical generation, inventory or admitted-item pins. The held-workbook
-    # correction removes only that consumer from the historical source rows;
-    # every source fact and admission pin remains unchanged.
+    # correction removes only that consumer from the historical source rows.
+    # The affected product-data-class pins are then rederived from those changed
+    # source identities; financial facts and admission membership stay unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "5133c440a4782e9505eee0b6a6447fc7ce77a59b021dd837cac19231ecfec716"
+        "cd1c53267f91175a3d13544add14195e20900a55c72238caf492f83d7af5ec6f"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4268,7 +4269,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "5133c440a4782e9505eee0b6a6447fc7ce77a59b021dd837cac19231ecfec716"
+        "cd1c53267f91175a3d13544add14195e20900a55c72238caf492f83d7af5ec6f"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
