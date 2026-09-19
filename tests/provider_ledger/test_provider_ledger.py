@@ -2356,9 +2356,152 @@ def test_ibkr_finalized_history_rejects_gap_or_out_of_scope_account() -> None:
 
     coverage["known_gaps"] = []
     coverage["status"] = "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    with pytest.raises(ledger.ProviderLedgerError, match="not contiguous"):
+        ledger._ibkr_flow_coverage({"fact_coverage": [coverage]}, {"account-one"})
     coverage["accounts"][0]["intervals"] = coverage["accounts"][0]["intervals"][:1]
     with pytest.raises(ledger.ProviderLedgerError, match="account scope differs"):
         ledger._ibkr_flow_coverage({"fact_coverage": [coverage]}, {"account-other"})
+
+
+def test_ibkr_scoped_partial_history_returns_only_required_contiguous_accounts() -> (
+    None
+):
+    coverage = {
+        "accounts": [
+            {
+                "account_id": "account-required",
+                "intervals": [
+                    {
+                        "effective_end": "2026-09-02",
+                        "effective_start": "2025-09-15",
+                        "source_artifact_ids": ["selected/required.xml"],
+                    }
+                ],
+                "statement_count": 240,
+            },
+            {
+                "account_id": "account-reserve",
+                "intervals": [
+                    {
+                        "effective_end": "2025-12-31",
+                        "effective_start": "2025-09-15",
+                        "source_artifact_ids": ["selected/reserve-old.xml"],
+                    },
+                    {
+                        "effective_end": "2026-09-02",
+                        "effective_start": "2026-03-02",
+                        "source_artifact_ids": ["selected/reserve-new.xml"],
+                    },
+                ],
+                "statement_count": 198,
+            },
+        ],
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "fact_type": "FLEX_FINALIZED_HISTORY",
+        "known_gaps": ["account-reserve has a native Jan-Feb gap"],
+        "status": "PARTIAL",
+    }
+
+    result = ledger._ibkr_flow_coverage(
+        {"fact_coverage": [coverage]},
+        {"account-required", "account-reserve"},
+        required_accounts={"account-required"},
+    )
+
+    assert set(result) == {"account-required"}
+    assert result["account-required"]["effective_start"] == "2025-09-15"
+    assert result["account-required"]["effective_end"] == "2026-09-02"
+
+
+def test_ibkr_scoped_partial_history_rejects_unknown_or_missing_required_account() -> (
+    None
+):
+    coverage = {
+        "accounts": [
+            {
+                "account_id": "account-required",
+                "intervals": [
+                    {
+                        "effective_end": "2026-09-02",
+                        "effective_start": "2025-09-15",
+                        "source_artifact_ids": ["selected/required.xml"],
+                    }
+                ],
+                "statement_count": 240,
+            }
+        ],
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "fact_type": "FLEX_FINALIZED_HISTORY",
+        "known_gaps": ["unrequired native gap"],
+        "status": "PARTIAL",
+    }
+
+    with pytest.raises(ledger.ProviderLedgerError, match="unknown requested account"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [coverage]},
+            {"account-required"},
+            required_accounts={"account-unknown"},
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="missing requested account"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [coverage]},
+            {"account-required", "account-missing"},
+            required_accounts={"account-missing"},
+        )
+
+
+def test_ibkr_scoped_partial_history_rejects_duplicate_and_malformed_accounts() -> None:
+    base_account = {
+        "account_id": "account-required",
+        "intervals": [
+            {
+                "effective_end": "2026-09-02",
+                "effective_start": "2025-09-15",
+                "source_artifact_ids": ["selected/required.xml"],
+            }
+        ],
+        "statement_count": 240,
+    }
+    duplicate = {
+        "accounts": [base_account, dict(base_account)],
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "fact_type": "FLEX_FINALIZED_HISTORY",
+        "known_gaps": [],
+        "status": "PARTIAL",
+    }
+    with pytest.raises(ledger.ProviderLedgerError, match="duplicate account"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [duplicate]},
+            {"account-required"},
+            required_accounts={"account-required"},
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="duplicate account"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [duplicate]},
+            {"account-required"},
+            required_accounts=set(),
+        )
+
+    malformed = {
+        **duplicate,
+        "accounts": [
+            {
+                **base_account,
+                "intervals": [
+                    {
+                        **base_account["intervals"][0],
+                        "effective_end": "not-a-date",
+                    }
+                ],
+            }
+        ],
+    }
+    with pytest.raises(ledger.ProviderLedgerError, match="malformed interval"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [malformed]},
+            {"account-required"},
+            required_accounts={"account-required"},
+        )
 
 
 def test_declared_provider_fact_collection_cannot_fall_back_to_empty() -> None:
