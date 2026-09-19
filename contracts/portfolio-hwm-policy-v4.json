@@ -8,7 +8,7 @@
  },
  "performance_authority": {
   "path": "contracts/portfolio-performance-policy-v1.json",
-  "sha256": "b9153ddb6bbaff9d707b0d160d88bf7d43383ce1880ea27339103adc74040809",
+  "sha256": "12862e2f53604807a338f027394d10ed50983365b9a91a2cc82adc5c0efe5c14",
   "policy_version": "PORT-PERF-1"
  },
  "owner_decision_receipts": {
