@@ -3510,7 +3510,9 @@ def _source_clock_display_lines(value: object) -> list[str]:
         value.get("latest_common_eod"), "source clock latest common EOD"
     ).isoformat()
     if latest < selected:
-        raise ControlPanelValidationError("source clock latest common EOD precedes cutoff")
+        raise ControlPanelValidationError(
+            "source clock latest common EOD precedes cutoff"
+        )
     limiting = value.get("limiting_inputs")
     rows = value.get("source_data_as_of")
     if (
@@ -3522,60 +3524,101 @@ def _source_clock_display_lines(value: object) -> list[str]:
     ):
         raise ControlPanelValidationError("source clock provider declarations differ")
     permitted = {
-        "applies_to_latest_common_eod", "captured_at", "finality", "native_calendar",
-        "native_capture_end_utc", "native_capture_start_utc", "native_observed_at",
-        "precision", "provider_data_date", "published_at", "source_id", "timezone",
+        "applies_to_latest_common_eod",
+        "captured_at",
+        "finality",
+        "native_calendar",
+        "native_capture_end_utc",
+        "native_capture_start_utc",
+        "native_observed_at",
+        "precision",
+        "provider_data_date",
+        "published_at",
+        "source_id",
+        "timezone",
     }
     source_ids: list[str] = []
     applicable_dates: dict[str, str] = {}
     rendered: list[str] = []
     for row in rows:
         if not isinstance(row, Mapping) or set(row) - permitted:
-            raise ControlPanelValidationError("source clock provider declaration differs")
+            raise ControlPanelValidationError(
+                "source clock provider declaration differs"
+            )
         source_id = _text(row.get("source_id"), "source clock provider source_id")
         source_ids.append(source_id)
         applies = row.get("applies_to_latest_common_eod")
         if not isinstance(applies, bool):
-            raise ControlPanelValidationError("source clock provider applicability differs")
+            raise ControlPanelValidationError(
+                "source clock provider applicability differs"
+            )
         provider_date = _panel_date(
             row.get("provider_data_date"), f"source clock {source_id} data date"
         ).isoformat()
         finality = row.get("finality")
-        if not isinstance(finality, Mapping) or set(finality) != {
-            "basis", "provider_finality_guarantee"
-        } or not isinstance(finality.get("basis"), str) or not isinstance(
-            finality.get("provider_finality_guarantee"), bool
+        if (
+            not isinstance(finality, Mapping)
+            or set(finality) != {"basis", "provider_finality_guarantee"}
+            or not isinstance(finality.get("basis"), str)
+            or not isinstance(finality.get("provider_finality_guarantee"), bool)
         ):
             raise ControlPanelValidationError("source clock provider finality differs")
-        if not isinstance(row.get("timezone"), str) or not row.get("timezone") or not isinstance(
-            row.get("precision"), str
-        ) or not row.get("precision"):
-            raise ControlPanelValidationError("source clock native timezone or precision differs")
+        timezone = row.get("timezone")
+        if timezone is not None and (not isinstance(timezone, str) or not timezone):
+            raise ControlPanelValidationError("source clock native timezone differs")
+        precision = row.get("precision")
+        if precision is not None and (not isinstance(precision, str) or not precision):
+            raise ControlPanelValidationError("source clock native precision differs")
+        native_observed_at = row.get("native_observed_at")
+        if native_observed_at is not None:
+            observed_text = _text(
+                native_observed_at, f"source clock {source_id} native observation"
+            )
+            try:
+                parsed_observation = datetime.fromisoformat(observed_text)
+            except ValueError as exc:
+                raise ControlPanelValidationError(
+                    "source clock native observation differs"
+                ) from exc
+            if (
+                parsed_observation.tzinfo is None
+                or parsed_observation.utcoffset() is None
+            ):
+                raise ControlPanelValidationError(
+                    "source clock native observation differs"
+                )
+            if precision is None or precision == "DATE":
+                raise ControlPanelValidationError(
+                    "source clock native precision differs"
+                )
+        rendered_timezone = timezone if timezone is not None else "unavailable"
+        rendered_precision = precision if precision is not None else "DATE"
         if applies:
             applicable_dates[source_id] = provider_date
         details = [
             f"Source clock — {source_id}: data as-of {provider_date}",
             f"finality basis {finality['basis']}",
         ]
-        native_observed_at = row.get("native_observed_at")
         if native_observed_at is not None:
             details.append(
                 "native observation "
-                + _text(native_observed_at, f"source clock {source_id} native observation")
+                + _text(
+                    native_observed_at, f"source clock {source_id} native observation"
+                )
             )
         for field_name, label in (
             ("native_capture_start_utc", "native capture start"),
             ("native_capture_end_utc", "native capture end"),
             ("captured_at", "native provenance captured"),
             ("published_at", "native provenance published"),
-            ("timezone", "native timezone"),
-            ("precision", "native precision"),
         ):
             field_value = row.get(field_name)
             if field_value is not None:
                 details.append(
                     f"{label} {_text(field_value, f'source clock {source_id} {field_name}')}"
                 )
+        details.append(f"native timezone {rendered_timezone}")
+        details.append(f"native precision {rendered_precision}")
         rendered.append("; ".join(details) + ".")
     if source_ids != sorted(set(source_ids)) or not applicable_dates:
         raise ControlPanelValidationError("source clock provider identities differ")
@@ -3586,7 +3629,9 @@ def _source_clock_display_lines(value: object) -> list[str]:
         if provider_date == expected_latest
     )
     if latest != expected_latest or limiting != expected_limiting:
-        raise ControlPanelValidationError("source clock latest common EOD or limiting inputs differ")
+        raise ControlPanelValidationError(
+            "source clock latest common EOD or limiting inputs differ"
+        )
     return [
         "Source clock — selected financial cutoff "
         f"{selected}; latest common finalized EOD {latest}; limiting inputs "
@@ -8913,9 +8958,9 @@ def _panel_data(
     source_clock_lines = (
         _source_clock_display_lines(source_clock) if source_clock is not None else []
     )
-    if source_clock is not None and source_clock.get("selected_financial_cutoff") != report.get(
-        "calculation_cutoff_date"
-    ):
+    if source_clock is not None and source_clock.get(
+        "selected_financial_cutoff"
+    ) != report.get("calculation_cutoff_date"):
         raise ControlPanelValidationError(
             "source clock selected financial cutoff differs from report cutoff"
         )

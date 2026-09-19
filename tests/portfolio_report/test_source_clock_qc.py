@@ -35,8 +35,13 @@ def _load(name: str, relative: str) -> Any:
 
 
 reporter = _load("source_clock_reporter", "tools/portfolio_report.py")
-materializer = _load("portfolio_pipeline_materialize", "tools/portfolio_pipeline_materialize.py")
-preparation = _load("portfolio_attended_preparation", "tools/portfolio_attended_preparation.py")
+materializer = _load(
+    "portfolio_pipeline_materialize", "tools/portfolio_pipeline_materialize.py"
+)
+preparation = _load(
+    "portfolio_attended_preparation", "tools/portfolio_attended_preparation.py"
+)
+panel = _load("source_clock_panel", "tools/portfolio_control_panel.py")
 fixture = _load("source_clock_fixture", "tests/core/financial_mvp_fixture.py")
 
 
@@ -53,20 +58,54 @@ def _mutate_one_provider_finality(phase: dict[str, object]) -> None:
     row["finalized_through"] = "2026-08-15"
 
 
+def _validated_native_phase(
+    admitted: Any, monkeypatch: pytest.MonkeyPatch
+) -> dict[str, Any]:
+    """Supply the fixture's source-bound date-only run observation to its real gate."""
+
+    monkeypatch.setattr(
+        materializer, "_financial_mvp_module", lambda: admitted.financial_module
+    )
+    original = materializer._provider_admission_authority
+    observation = {
+        "financial_cutoff": "2026-08-14",
+        "providers": [
+            {
+                "provider_id": row["provider_id"],
+                "finality_interpretation": {
+                    "basis": "NATIVE_LEDGER",
+                    "provider_finality_guarantee": True,
+                },
+                "finalized_through": "2026-08-14",
+            }
+            for row in admitted.receipt["provider_generations"]
+        ],
+        "schema_version": 1,
+    }
+
+    def observed_admission(*args: object, **kwargs: object) -> dict[str, object]:
+        replayed = original(*args, **kwargs)
+        receipt = deepcopy(replayed["receipt"])
+        receipt["run_observation"] = deepcopy(observation)
+        return {**replayed, "receipt": receipt}
+
+    monkeypatch.setattr(
+        materializer, "_provider_admission_authority", observed_admission
+    )
+    return materializer.validate_source_phase(
+        requested_as_of="2026-08-14",
+        provider_ledger_generation_root=admitted.generation,
+        financial_input_contract_path=admitted.contract_path,
+    )
+
+
 def test_source_clock_rejects_a_coherent_forged_phase_via_native_replay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Changing native finality must fail even when the receipt clock agrees."""
 
     admitted = fixture.build_financial_mvp_fixture(tmp_path / "native", ready=True)
-    monkeypatch.setattr(
-        materializer, "_financial_mvp_module", lambda: admitted.financial_module
-    )
-    native_phase = materializer.validate_source_phase(
-        requested_as_of="2026-08-14",
-        provider_ledger_generation_root=admitted.generation,
-        financial_input_contract_path=admitted.contract_path,
-    )
+    native_phase = _validated_native_phase(admitted, monkeypatch)
     forged_phase = deepcopy(native_phase)
     _mutate_one_provider_finality(forged_phase)
     receipt = {
@@ -77,8 +116,46 @@ def test_source_clock_rejects_a_coherent_forged_phase_via_native_replay(
     receipt_path = tmp_path / "source-clock.json"
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
 
-    with pytest.raises(reporter.ReportValidationError, match="source authority differs"):
+    with pytest.raises(
+        reporter.ReportValidationError, match="source authority differs"
+    ):
         reporter._validated_source_clock(receipt_path)
+
+
+def test_source_clock_replays_date_only_rows_into_the_panel_without_inventing_a_timezone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A producer's date-only rows stay date-only through both consumers."""
+
+    admitted = fixture.build_financial_mvp_fixture(tmp_path / "native", ready=True)
+    phase = _validated_native_phase(admitted, monkeypatch)
+    clock = preparation._source_clock(phase, "2026-08-14")
+    rows = clock["source_data_as_of"]
+    assert isinstance(rows, list)
+    date_only_rows = [row for row in rows if "native_observed_at" not in row]
+    assert date_only_rows
+    assert all(
+        "timezone" not in row and "precision" not in row for row in date_only_rows
+    )
+    receipt_path = tmp_path / "source-clock.json"
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "source_phase": phase,
+                "data_clock": clock,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    replayed = reporter._validated_source_clock(receipt_path)
+    assert replayed == clock
+    lines = panel._source_clock_display_lines(replayed)
+
+    assert any("native timezone unavailable" in line for line in lines)
+    assert any("native precision DATE" in line for line in lines)
+    assert not any("T00:00:00" in line for line in lines)
 
 
 def test_source_clock_rejects_a_ledger_other_than_the_report_selected_ledger(
@@ -87,14 +164,7 @@ def test_source_clock_rejects_a_ledger_other_than_the_report_selected_ledger(
     """A valid native phase cannot be attached to a different report ledger."""
 
     admitted = fixture.build_financial_mvp_fixture(tmp_path / "native", ready=True)
-    monkeypatch.setattr(
-        materializer, "_financial_mvp_module", lambda: admitted.financial_module
-    )
-    phase = materializer.validate_source_phase(
-        requested_as_of="2026-08-14",
-        provider_ledger_generation_root=admitted.generation,
-        financial_input_contract_path=admitted.contract_path,
-    )
+    phase = _validated_native_phase(admitted, monkeypatch)
     clock = preparation._source_clock(phase, "2026-08-14")
 
     replacement_catalog = b'{"as_of_date":"2026-08-14","catalog_schema_version":99}'
@@ -154,14 +224,7 @@ def test_source_clock_accepts_the_relocated_selected_generation_with_same_bytes(
     """The report consumes a staged copy of the retained native generation."""
 
     admitted = fixture.build_financial_mvp_fixture(tmp_path / "native", ready=True)
-    monkeypatch.setattr(
-        materializer, "_financial_mvp_module", lambda: admitted.financial_module
-    )
-    phase = materializer.validate_source_phase(
-        requested_as_of="2026-08-14",
-        provider_ledger_generation_root=admitted.generation,
-        financial_input_contract_path=admitted.contract_path,
-    )
+    phase = _validated_native_phase(admitted, monkeypatch)
     clock = preparation._source_clock(phase, "2026-08-14")
     staged_root = tmp_path / "staged-ledger"
     staged_generation = staged_root / "generations" / admitted.generation.name
