@@ -962,6 +962,12 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
     authority, identities, manifests, catalogs, provider_facts = _fixture(
         unreferenced_dataset=True, native_source_inventory=True
     )
+    authority["contract"]["strategies"] = [
+        {
+            "product_requirement": "REQUIRED",
+            "strategy_id": "synthetic-required",
+        }
+    ]
     refs, selections = _staged_observation(
         tmp_path / "sources", identities, manifests, catalogs
     )
@@ -1028,7 +1034,22 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
         "_provenance",
         lambda _spec: ({"assignments": [], "strategies": []}, provenance_artifact),
     )
-    monkeypatch.setattr(ledger, "_assignment_index", lambda *_args: (set(), set(), {}))
+    monkeypatch.setattr(
+        ledger,
+        "_assignment_index",
+        lambda *_args: (
+            {"synthetic-ibkr"},
+            {"synthetic-required"},
+            {
+                "synthetic-ibkr": [
+                    {
+                        "mapping_status": "MAPPED",
+                        "strategy_id": "synthetic-required",
+                    }
+                ]
+            },
+        ),
+    )
     monkeypatch.setattr(
         ledger,
         "_project_account_facts",
@@ -1078,12 +1099,19 @@ def test_staged_current_observation_rebuilds_receipt_and_never_publishes(
     monkeypatch.setattr(ledger, "_portfolio123_provider_returns", lambda *_args: [])
     monkeypatch.setattr(ledger, "_refresh_strategy_evidence", lambda *_args: [])
     monkeypatch.setattr(ledger, "_admissions", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(ledger, "_ibkr_flow_coverage", lambda *_args: {})
+    coverage_call: dict[str, object] = {}
+
+    def capture_ibkr_coverage(*_args: object, **kwargs: object) -> dict[str, object]:
+        coverage_call.update(kwargs)
+        return {}
+
+    monkeypatch.setattr(ledger, "_ibkr_flow_coverage", capture_ibkr_coverage)
     monkeypatch.setattr(ledger, "_matrixport_flow_coverage", lambda *_args: {})
     monkeypatch.setattr(ledger, "_quantbase_flow_coverage", lambda *_args: {})
 
     staged = ledger.stage_candidate(spec_path)
     assert staged["state"] == "STAGED"
+    assert coverage_call["required_accounts"] == {"synthetic-ibkr"}
     assert not (tmp_path / "staged" / "CURRENT.json").exists()
     assert canonical_json_bytes(authority["sources"]) == policy_before
 
