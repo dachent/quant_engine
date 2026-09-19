@@ -39,6 +39,14 @@ checkpoints, issue descriptions, PR text and skill defaults:
 - On resume or delegation, carry this correction and the exact unresolved
   source evidence forward. Reconcile the governing issue before relying on an
   older checkpoint. A new direct owner instruction can change this boundary.
+- Enforce this sequence and date contract in the supported general runner and
+  its actual control/QC gates. Parent discipline, task-local wrappers and written
+  PASS summaries are not substitutes. Verify retained capture and input evidence
+  before launching downstream calculations; bind cutoff and input identities
+  into start/resume/invalidation; verify financial report/panel output before
+  separately authorized publication. Final cold/unchanged/changed-input proof
+  must use that supported runner without workbook work. Task-local scripts may
+  diagnose defects, but do not establish the delivered execution workflow.
 
 ## Authority and source of truth
 
