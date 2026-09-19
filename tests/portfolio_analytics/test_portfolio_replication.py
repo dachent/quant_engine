@@ -287,6 +287,15 @@ def _producer_fixture(
         "as_of_date": days[-1].isoformat(),
         "factor_source": {
             "artifact_id": "frozen/factors.csv",
+            "interval_policy": {
+                "available_through_anchor": days[-1].isoformat(),
+                "currency": "USD",
+                "finality": "COMPLETE_SELECTED_SNAPSHOT",
+                "native_calendar": "SOURCE_LABELLED_DAILY",
+                "native_label_convention": "PUBLISHED_DAILY_LABEL",
+                "return_basis": "NET",
+                "source_vintage": "SELECTED_SNAPSHOT",
+            },
             "date_column": "date",
             "expected_sha256": factor_hash,
             "expected_size_bytes": factor_size,
@@ -329,6 +338,20 @@ def _producer_fixture(
         "schema_version": 1,
         "target_source": {
             "artifact_id": "frozen/targets.csv",
+            "interval_policy": {
+                "currency": "USD",
+                "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+                "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
+                "finalized_through": days[-1].isoformat(),
+                "gap_disposition": "REJECT_BUCKET",
+                "native_calendar": "SESSION_LABELLED",
+                "native_label_convention": "SYNTHETIC_EXCHANGE_SESSION_DATE",
+                "return_basis": "NET",
+                "session_schedule_labels": {
+                    "synthetic-strategy": [day.isoformat() for day in days]
+                },
+                "source_vintage": "SELECTED_SNAPSHOT",
+            },
             "expected_sha256": target_hash,
             "expected_size_bytes": target_size,
             "relative_path": "targets.csv",
