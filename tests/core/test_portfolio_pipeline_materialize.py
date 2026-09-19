@@ -4148,6 +4148,8 @@ def test_generated_semantic_command_declares_exact_gate_file(
     output_root = tmp_path / "dag"
     spec_path = output_root / "pipeline-spec.json"
     retained_cache_root = tmp_path / "retained-decomposition"
+    workbook_runtime = tmp_path / "workbook-runtime.json"
+    workbook_runtime.write_text("{}\n", encoding="utf-8")
 
     materializer.build_spec(
         recipe_path,
@@ -4155,6 +4157,7 @@ def test_generated_semantic_command_declares_exact_gate_file(
         spec_path,
         portfolio_root=tmp_path / "portfolio",
         retained_cache_root=retained_cache_root,
+        workbook_runtime_path=workbook_runtime,
     )
 
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -4178,6 +4181,10 @@ def test_generated_semantic_command_declares_exact_gate_file(
     assert analytics_command["argv"][retained_index + 1] == str(retained_cache_root)
     assert str(retained_cache_root) in analytics_command["declared_writes"]
     assert spec["state_root"] == str(retained_cache_root)
+    workbook_command = nodes["build-workbook"]
+    runtime_index = workbook_command["argv"].index("--workbook-runtime")
+    assert workbook_command["argv"][runtime_index + 1] == str(workbook_runtime)
+    assert str(workbook_runtime) in workbook_command["declared_reads"]
     assert nodes["build-workbook"]["retry_limit"] == 1
     assert all(
         node["retry_limit"] == 0

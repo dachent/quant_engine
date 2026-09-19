@@ -3442,9 +3442,16 @@ def _model_result(
             cached_training,
         )
         training_state = result.pop("_retained_training_state", None)
-        if not isinstance(training_state, Mapping):
+        if training_state is None and result.get("status") == (
+            "UNAVAILABLE_DYNAMIC_CROSS_VALIDATION"
+        ):
+            pass
+        elif not isinstance(training_state, Mapping):
             raise DecompositionError("dynamic training state is unavailable")
-        _write_training_cache(training_cache_root, training_identity, training_state)
+        else:
+            _write_training_cache(
+                training_cache_root, training_identity, training_state
+            )
         result["training_identity"] = training_identity
         result["evaluation_identity"] = evaluation_identity
         result["interval_association"] = interval_association
@@ -4084,10 +4091,10 @@ def _input_key(spec_path: Path, source_root: Path) -> str:
 
 
 def _cache_root(output_root: Path, retained_cache_root: Path | None) -> Path:
-    root = (retained_cache_root or output_root).resolve()
-    if root.exists() and root.is_symlink():
+    root = retained_cache_root or output_root
+    if root.is_symlink():
         raise DecompositionError("retained cache root must not be a symlink")
-    return root
+    return root.resolve()
 
 
 def _indexed_generation(

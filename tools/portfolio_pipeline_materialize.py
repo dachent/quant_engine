@@ -3715,6 +3715,7 @@ def build_spec(
     invested_capital_result_path: Path | None = None,
     invested_capital_input_generation_path: Path | None = None,
     retained_cache_root: Path | None = None,
+    workbook_runtime_path: Path | None = None,
 ) -> dict[str, Any]:
     if portfolio_root is None:
         # Fail here rather than four nodes into the run. `build_workbook` and
@@ -3931,6 +3932,8 @@ def build_spec(
             args.extend(("--qa-dir", str(qa_dir)))
         if role == "analytics":
             args.extend(("--retained-cache-root", str(retained_cache_root)))
+        if role == "workbook" and workbook_runtime_path is not None:
+            args.extend(("--workbook-runtime", str(workbook_runtime_path)))
         # `build_workbook` and `build_panel` treat any run carrying governed
         # HWM, invested capital or decomposition lenses as a financial
         # publication and refuse it without a portfolio root, which is what
@@ -3956,6 +3959,8 @@ def build_spec(
             reads.extend(stage_writes[dependency])
         if role == "panel":
             reads.append(qa_dir)
+        if role == "workbook" and workbook_runtime_path is not None:
+            reads.append(workbook_runtime_path)
         reads = list(dict.fromkeys(reads))
         command = _command(
             node_id=command_id,
@@ -4786,6 +4791,7 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     spec_cmd.add_argument("--retained-cache-root", type=Path)
+    spec_cmd.add_argument("--workbook-runtime", type=Path)
     production_cmd = commands.add_parser("production-spec")
     production_cmd.add_argument("--recipe", type=Path, required=True)
     production_cmd.add_argument("--prepared-root", type=Path, required=True)
@@ -4859,6 +4865,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.invested_capital_result,
                 args.invested_capital_input_generation,
                 args.retained_cache_root,
+                workbook_runtime_path=args.workbook_runtime,
             )
         else:
             result = build_production_spec(
