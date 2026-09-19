@@ -466,7 +466,7 @@ def _validate_provider_generation_dates(
             raise AccountAssignmentPerimeterError(
                 "provider ledger provider generation is invalid"
             )
-        generation_date = _iso_date(
+        _iso_date(
             generation.get("generation_as_of_date"),
             "provider generation as_of_date",
         )

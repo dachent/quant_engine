@@ -588,9 +588,7 @@ def test_catalog_identity_preserves_later_manifest_generation_date(
 ) -> None:
     catalog = InputSnapshot.from_bytes(
         "synthetic provider ledger",
-        canonical_json_bytes(
-            {"as_of_date": "2026-09-17", "catalog_schema_version": 1}
-        ),
+        canonical_json_bytes({"as_of_date": "2026-09-17", "catalog_schema_version": 1}),
     )
     manifest = _generation_manifest_snapshot(
         catalog=catalog,
@@ -626,9 +624,7 @@ def test_catalog_identity_rejects_catalog_byte_substitution_with_later_manifest(
 ) -> None:
     catalog = InputSnapshot.from_bytes(
         "synthetic provider ledger",
-        canonical_json_bytes(
-            {"as_of_date": "2026-09-17", "catalog_schema_version": 1}
-        ),
+        canonical_json_bytes({"as_of_date": "2026-09-17", "catalog_schema_version": 1}),
     )
     manifest = _generation_manifest_snapshot(
         catalog=catalog,
@@ -671,9 +667,7 @@ def test_catalog_identity_preserves_equal_date_compatibility(
 ) -> None:
     catalog = InputSnapshot.from_bytes(
         "synthetic provider ledger",
-        canonical_json_bytes(
-            {"as_of_date": "2026-09-17", "catalog_schema_version": 1}
-        ),
+        canonical_json_bytes({"as_of_date": "2026-09-17", "catalog_schema_version": 1}),
     )
     manifest = _generation_manifest_snapshot(
         catalog=catalog,
