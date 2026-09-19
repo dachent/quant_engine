@@ -4915,13 +4915,13 @@ def _decomposition_lenses_for_mode(
                 static_root,
                 filename="decomposition.json",
                 field_name=f"{source_label} STATIC decomposition",
-                expected_schema_version=(1, 2),
+                expected_schema_version=(1, 2, 3),
             )
             dynamic, dynamic_identity, dynamic_path = _current_analytics(
                 dynamic_surface_root,
                 filename="decomposition.json",
                 field_name=f"{source_label} DYNAMIC_FLS decomposition",
-                expected_schema_version=(1, 2),
+                expected_schema_version=(1, 2, 3),
             )
             surface_inputs = (
                 ("STATIC", decomposition, identity, path),
@@ -4932,7 +4932,7 @@ def _decomposition_lenses_for_mode(
                 root / source_key,
                 filename="decomposition.json",
                 field_name=f"{source_label} decomposition",
-                expected_schema_version=(1, 2),
+                expected_schema_version=(1, 2, 3),
             )
             surface_inputs = (("STATIC", decomposition, identity, path),)
         for surface, surface_value, surface_identity, surface_path in surface_inputs:
@@ -5100,7 +5100,7 @@ def _decomposition_lenses(
                 dynamic_root,
                 filename="decomposition.json",
                 field_name="hybrid dynamic-style decomposition",
-                expected_schema_version=(1, 2),
+                expected_schema_version=(1, 2, 3),
             )
             if dynamic.get("evidence_mode") != "LIVE_PLUS_BACKTEST":
                 raise ControlPanelValidationError(
@@ -10042,7 +10042,7 @@ def _rendered_files(
         resolved_decomposition,
         filename="decomposition.json",
         field_name="portfolio factor decomposition",
-        expected_schema_version=(1, 2),
+        expected_schema_version=(1, 2, 3),
     )
     correlation, correlation_identity, correlation_path = _current_analytics(
         resolved_correlation,
