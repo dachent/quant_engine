@@ -4877,6 +4877,128 @@ def _attended_completed_attribution(
         ) from exc
 
 
+def _attended_published_generation(
+    root: Path, expected_generation_id: object, label: str
+) -> None:
+    """Read one published immutable generation through the native verifier."""
+
+    import portfolio_release_builder as release
+
+    generation_id = _text(expected_generation_id, f"attended {label} generation_id")
+    observed_id, _generation = release._published_generation(root)  # noqa: SLF001
+    if observed_id != generation_id:
+        raise ValueError(f"{label} generation identity differs")
+    # The pointer reader authenticates the current generation identity; the
+    # bundle reader additionally checks every manifest-bound member byte.
+    read_generation_bundle(root, generation_id)
+
+
+def _attended_completed_analytics(
+    receipt: Mapping[str, Any], stage_root: Path
+) -> None:
+    """Re-read every result bound by the current analytics producer."""
+
+    if receipt.get("schema_version") != 2:
+        raise ValueError("analytics result schema differs")
+    roots = {
+        "correlation": _absolute(
+            receipt.get("correlation_root"), "attended analytics correlation_root"
+        ),
+        "decomposition": _absolute(
+            receipt.get("decomposition_root"), "attended analytics decomposition_root"
+        ),
+        "lenses": _absolute(
+            receipt.get("decomposition_lenses_root"),
+            "attended analytics decomposition_lenses_root",
+        ),
+        "weekly": _absolute(
+            receipt.get("weekly_root"), "attended analytics weekly_root"
+        ),
+    }
+    if any(
+        path.is_symlink() or not path.is_dir() or not path.is_relative_to(stage_root)
+        for path in roots.values()
+    ):
+        raise ValueError("analytics output differs")
+    _attended_published_generation(
+        roots["correlation"], receipt.get("correlation_generation_id"), "analytics correlation"
+    )
+    _attended_published_generation(
+        roots["decomposition"],
+        receipt.get("decomposition_generation_id"),
+        "analytics decomposition",
+    )
+    _attended_published_generation(
+        roots["weekly"], receipt.get("weekly_generation_id"), "analytics weekly"
+    )
+    bindings = receipt.get("lens_generation_bindings")
+    plan_bundles = receipt.get("plan_bundle_ids")
+    if not isinstance(bindings, list) or not bindings or not isinstance(plan_bundles, dict):
+        raise ValueError("analytics lens bindings differ")
+    seen: set[tuple[str, str]] = set()
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            raise ValueError("analytics lens binding differs")
+        evidence_mode = _text(binding.get("evidence_mode"), "analytics lens mode")
+        spec_id = _text(binding.get("spec_id"), "analytics lens spec_id")
+        source_key = _text(binding.get("source_key"), "analytics lens source_key")
+        surface = _text(binding.get("surface"), "analytics lens surface")
+        if (
+            evidence_mode not in {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}
+            or surface not in {"STATIC", "DYNAMIC_FLS"}
+            or (evidence_mode, spec_id) in seen
+            or binding.get("plan_bundle_id") != plan_bundles.get(evidence_mode)
+            or spec_id != f"{source_key}:{surface}"
+        ):
+            raise ValueError("analytics lens binding differs")
+        seen.add((evidence_mode, spec_id))
+        lens_root = roots["lenses"] / evidence_mode / surface / source_key
+        _attended_published_generation(
+            lens_root, binding.get("generation_id"), "analytics lens"
+        )
+    hybrid_generation = receipt.get("hybrid_dynamic_generation_id")
+    if hybrid_generation is not None:
+        _attended_published_generation(
+            roots["lenses"] / "LIVE_PLUS_BACKTEST" / "dynamic-style",
+            hybrid_generation,
+            "analytics hybrid decomposition",
+        )
+
+
+def _attended_completed_report(
+    receipt: Mapping[str, Any], stage_root: Path
+) -> None:
+    """Validate the report producer's candidate before workbook normalization."""
+
+    root = _absolute(receipt.get("root"), "attended completed report root")
+    candidate = _absolute(receipt.get("candidate_dir"), "attended report candidate")
+    if (
+        root != stage_root.resolve()
+        or candidate.is_symlink()
+        or not candidate.is_dir()
+        or not candidate.is_relative_to(stage_root)
+    ):
+        raise ValueError("report candidate differs")
+    report_data = candidate / "portfolio-report-data.json"
+    workbook = candidate / "portfolio-report.xlsx"
+    contract = candidate / "workbook-contract.json"
+    job = candidate / "xlsx-job.json"
+    for path in (report_data, workbook, contract, job):
+        if path.is_symlink() or not path.is_file():
+            raise ValueError("report candidate inventory differs")
+    report_bytes = report_data.read_bytes()
+    if (
+        candidate.name != hashlib.sha256(report_bytes).hexdigest()
+        or canonical_json_bytes(json.loads(report_bytes)) != report_bytes
+        or not isinstance(json.loads(contract.read_bytes()), dict)
+        or not isinstance(json.loads(job.read_bytes()), dict)
+    ):
+        raise ValueError("report candidate content differs")
+    import portfolio_report
+
+    portfolio_report.verify_workbook(workbook)
+
+
 def _attended_completed_stage_root(
     receipt: Mapping[str, Any], stage_root: Path, role: str
 ) -> None:
@@ -4884,38 +5006,13 @@ def _attended_completed_stage_root(
 
     try:
         if role == "analytics":
-            if receipt.get("schema_version") != 2:
-                raise ValueError("analytics result schema differs")
-            for key in (
-                "correlation_root",
-                "decomposition_root",
-                "decomposition_lenses_root",
-                "weekly_root",
-            ):
-                path = _absolute(receipt.get(key), f"attended analytics {key}")
-                if path.is_symlink() or not path.is_dir():
-                    raise ValueError("analytics output differs")
-            bindings = receipt.get("lens_generation_bindings")
-            if not isinstance(bindings, list) or not bindings:
-                raise ValueError("analytics lens bindings differ")
+            _attended_completed_analytics(receipt, stage_root)
             return
         root = _absolute(receipt.get("root"), f"attended completed {role} root")
         if root != stage_root.resolve():
             raise ValueError("stage root differs")
         if role == "report":
-            candidate = _absolute(
-                receipt.get("candidate_dir"), "attended report candidate"
-            )
-            if candidate.is_symlink() or not candidate.is_dir():
-                raise ValueError("report candidate differs")
-            for name in (
-                "portfolio-report-data.json",
-                "portfolio-report.xlsx",
-                "workbook-contract.json",
-                "xlsx-job.json",
-            ):
-                if not (candidate / name).is_file():
-                    raise ValueError("report candidate inventory differs")
+            _attended_completed_report(receipt, stage_root)
         else:
             import portfolio_release_builder as release
 
@@ -4960,7 +5057,10 @@ def _attended_completed_panel_candidate(
 
 
 def _attended_completed_stages(
-    output_root: Path, required_stages: Sequence[str]
+    output_root: Path,
+    required_stages: Sequence[str],
+    *,
+    failed_stage: str | None = None,
 ) -> list[str]:
     """Return only a contiguous, independently readable prefix of stage receipts."""
 
@@ -4987,6 +5087,15 @@ def _attended_completed_stages(
             raise MaterializationError(
                 f"attended completed {role} artifact set is incomplete"
             )
+        if role == failed_stage:
+            if any(
+                (output_root / "stage-results" / f"{later}.json").exists()
+                for later in required_stages[required_stages.index(role) + 1 :]
+            ):
+                raise MaterializationError(
+                    "attended failed stage has a later completed receipt"
+                )
+            return completed
         result = _load(receipt, f"attended {role} stage result")
         if stage_root.is_symlink() or not stage_root.is_dir():
             raise MaterializationError(
@@ -5352,25 +5461,43 @@ def _attended_bind_qa(
 
 def _attended_start_or_resume(
     preflight: Mapping[str, Any], output_root: Path, *, resume: bool
-) -> None:
+) -> str | None:
     request_identity = preflight["request_identity"]
     if not isinstance(request_identity, dict):
         raise MaterializationError("attended request identity differs")
     receipt = _attended_run_receipt(output_root)
     if resume:
         value = _load(receipt, "attended run receipt")
+        failed = value.get("failed_stage")
         if (
-            set(value) != {"request_identity", "schema_version"}
-            or value.get("schema_version") != 1
+            set(value)
+            not in (
+                {"request_identity", "schema_version"},
+                {"failed_stage", "request_identity", "schema_version"},
+            )
+            or value.get("schema_version") not in {1, 2}
             or canonical_json_bytes(value["request_identity"])
             != canonical_json_bytes(request_identity)
         ):
             raise MaterializationError("attended resume identity differs")
+        failed_role: str | None = None
+        if failed is not None:
+            if (
+                value.get("schema_version") != 2
+                or not isinstance(failed, dict)
+                or set(failed) != {"returncode", "role"}
+                or failed.get("role") not in preflight["required_stages"]
+                or isinstance(failed.get("returncode"), bool)
+                or not isinstance(failed.get("returncode"), int)
+                or failed["returncode"] == 0
+            ):
+                raise MaterializationError("attended failed-stage checkpoint differs")
+            failed_role = cast(str, failed["role"])
         completed = _attended_completed_stages(
-            output_root, preflight["required_stages"]
+            output_root, preflight["required_stages"], failed_stage=failed_role
         )
         _attended_bind_qa(preflight, output_root, completed)
-        return
+        return failed_role
     if output_root.exists():
         raise MaterializationError("attended output root already exists; use --resume")
     output_root.mkdir(parents=True, exist_ok=False)
@@ -5381,6 +5508,52 @@ def _attended_start_or_resume(
         ),
     )
     _attended_bind_qa(preflight, output_root, ())
+    return None
+
+
+def _attended_record_failed_stage(
+    output_root: Path,
+    request_identity: Mapping[str, Any],
+    role: str,
+    returncode: int,
+) -> None:
+    """Preserve a failed child's partial bytes as pending retry evidence."""
+
+    _attended_replace_checkpoint(
+        output_root,
+        {
+            "failed_stage": {"returncode": returncode, "role": role},
+            "request_identity": request_identity,
+            "schema_version": 2,
+        },
+    )
+
+
+def _attended_clear_failed_stage(
+    output_root: Path, request_identity: Mapping[str, Any]
+) -> None:
+    """Return a checkpoint to its completed-only shape after native verification."""
+
+    _attended_replace_checkpoint(
+        output_root,
+        {"request_identity": request_identity, "schema_version": 1},
+    )
+
+
+def _attended_replace_checkpoint(
+    output_root: Path, value: Mapping[str, Any]
+) -> None:
+    """Atomically update the one mutable attended-run checkpoint."""
+
+    receipt = _attended_run_receipt(output_root)
+    if receipt.is_symlink() or not receipt.is_file():
+        raise MaterializationError("attended run receipt is not a regular file")
+    temporary = receipt.with_name(f".{receipt.name}.update")
+    _write_exact(temporary, canonical_json_bytes(dict(value)))
+    try:
+        os.replace(temporary, receipt)
+    except OSError as exc:
+        raise MaterializationError("attended run checkpoint cannot be updated") from exc
 
 
 def _attended_stage_command(
@@ -5437,8 +5610,10 @@ def _attended_stage_command(
 def _attended_execute(
     preflight: Mapping[str, Any], output_root: Path, *, resume: bool
 ) -> tuple[int, dict[str, Any]]:
-    _attended_start_or_resume(preflight, output_root, resume=resume)
-    completed = _attended_completed_stages(output_root, preflight["required_stages"])
+    failed_stage = _attended_start_or_resume(preflight, output_root, resume=resume)
+    completed = _attended_completed_stages(
+        output_root, preflight["required_stages"], failed_stage=failed_stage
+    )
     for role in preflight["required_stages"]:
         if role in completed:
             continue
@@ -5455,6 +5630,9 @@ def _attended_execute(
         if result.stderr:
             print(result.stderr, end="", file=sys.stderr)
         if result.returncode != 0:
+            _attended_record_failed_stage(
+                output_root, preflight["request_identity"], role, result.returncode
+            )
             return result.returncode, _attended_view(
                 output_root,
                 preflight["required_stages"],
@@ -5468,6 +5646,9 @@ def _attended_execute(
             raise MaterializationError(
                 f"attended {role} child returned success without completed artifacts"
             )
+        if failed_stage == role:
+            _attended_clear_failed_stage(output_root, preflight["request_identity"])
+            failed_stage = None
     return 0, _attended_view(
         output_root, preflight["required_stages"], preflight["request_identity"]
     )

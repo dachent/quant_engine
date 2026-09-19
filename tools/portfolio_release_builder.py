@@ -3342,12 +3342,14 @@ def _verify_current_plan_upstream_evidence(
     history_contents = layered.get("contents")
     history_identity = layered.get("identity")
     history_composition = layered.get("composition")
+    series_interval_policies = layered.get("series_interval_policies")
     history_schema_definitions = layered.get("schema_definitions")
     plan_data_age = plan.get("data_age")
     if (
         not isinstance(history_contents, dict)
         or not isinstance(history_identity, dict)
         or not isinstance(history_composition, dict)
+        or not isinstance(series_interval_policies, dict)
         or not isinstance(history_schema_definitions, dict)
         or plan.get("layered_history") != history_identity
         or not isinstance(plan_data_age, dict)
@@ -3457,9 +3459,14 @@ def _verify_current_plan_upstream_evidence(
                 _text(schema.get("schema_version"), "history schema_version"),
             )
         )
+    reporting_currency = planner._reporting_currency(  # noqa: SLF001
+        _load(contract_path, "financial MVP source contract")
+    )
     return {
         "layered_composition": history_composition,
+        "series_interval_policies": series_interval_policies,
         "provenance_sources": expected_provenance,
+        "reporting_currency": reporting_currency,
     }
 
 
@@ -4305,8 +4312,12 @@ def _current_release_plan_specs(
             for model in governed_models[source_key].values()
         }
         layered_composition = upstream_evidence.get("layered_composition")
+        series_interval_policies = upstream_evidence.get("series_interval_policies")
+        reporting_currency = upstream_evidence.get("reporting_currency")
         if (
             not isinstance(layered_composition, dict)
+            or not isinstance(series_interval_policies, dict)
+            or not isinstance(reporting_currency, str)
             or specification.get("series_composition")
             != {
                 series_id: layered_composition[series_id]
@@ -4317,6 +4328,23 @@ def _current_release_plan_specs(
         ):
             raise VerticalBuildError(
                 f"attribution plan series composition differs: {spec_id}"
+            )
+        target_source = specification.get("target_source")
+        expected_target_interval_policy = {
+            "currency": reporting_currency,
+            "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+            "series_policies": {
+                series_id: series_interval_policies[series_id]
+                for series_id in sorted(expected_series)
+            },
+        }
+        if (
+            not expected_series.issubset(series_interval_policies)
+            or not isinstance(target_source, dict)
+            or target_source.get("interval_policy") != expected_target_interval_policy
+        ):
+            raise VerticalBuildError(
+                f"attribution plan interval policy differs: {spec_id}"
             )
         source_contracts = governed_model_policy.get("source_contracts")
         source_contract = (
@@ -4336,6 +4364,29 @@ def _current_release_plan_specs(
             evaluation_date=evaluation_date,
             holdout_fraction=governed_model_policy["holdout_fraction"],
         )
+        factor_source = specification.get("factor_source")
+        if not isinstance(factor_source, dict):
+            raise VerticalBuildError("attribution plan model sources differ")
+        _, factor_path = _portable_bundle_file(
+            attribution_bundle,
+            factor_source.get("relative_path"),
+            "factor source path",
+        )
+        expected_factor_interval_policy = {
+            "available_through_anchor": max(
+                timing["as_of_date"] for timing in expected_timing.values()
+            ),
+            "currency": reporting_currency,
+            "finality": "COMPLETE_SELECTED_SNAPSHOT",
+            "native_calendar": "SOURCE_LABELLED_DAILY",
+            "native_label_convention": "SOURCE_PUBLISHED_DAILY_LABEL",
+            "return_basis": "SOURCE_PUBLISHED",
+            "source_vintage": _sha(factor_path)[0],
+        }
+        if factor_source.get("interval_policy") != expected_factor_interval_policy:
+            raise VerticalBuildError(
+                f"attribution plan factor interval policy differs: {spec_id}"
+            )
         population = _surface_population(
             raw,
             specification,

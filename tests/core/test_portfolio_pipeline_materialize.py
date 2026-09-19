@@ -4504,6 +4504,7 @@ def test_attended_execute_never_starts_a_coordinated_publication_child(
     """Replacing a stage child with publication must fail this boundary assertion."""
 
     preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
     output_root = tmp_path / "output"
     calls: list[list[str]] = []
 
@@ -4519,7 +4520,7 @@ def test_attended_execute_never_starts_a_coordinated_publication_child(
     monkeypatch.setattr(materializer.subprocess, "run", stage_only)
 
     assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
-    assert len(calls) == len(materializer.ATTENDED_STAGES)
+    assert len(calls) == len(preflight["required_stages"])
     assert all(command[2] == "stage" for command in calls)
     assert all("publish" not in command for command in calls)
 
@@ -4530,6 +4531,7 @@ def test_attended_resume_skips_only_verified_completed_stages(
     """Removing a stage directory must turn a would-be resume skip into rejection."""
 
     preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
     output_root = tmp_path / "output"
 
     def complete(
@@ -4568,6 +4570,7 @@ def test_attended_resume_rejects_a_corrupt_completed_artifact(
     """Replacing a JSON receipt with arbitrary bytes must stop before another child."""
 
     preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
     output_root = tmp_path / "output"
 
     def complete(
@@ -4599,6 +4602,7 @@ def test_attended_resume_rejects_a_corrupt_completed_baseline_before_a_child(
     """A non-ledger receipt may not make a changed generation skippable."""
 
     preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
     output_root = tmp_path / "output"
 
     def complete(
@@ -4634,6 +4638,7 @@ def test_attended_preserves_failed_partial_child_and_retries_it_on_resume(
     """A failed child retains pending output and keeps its original exit code."""
 
     preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
     output_root = tmp_path / "output"
     calls: list[str] = []
 
@@ -4678,6 +4683,7 @@ def test_attended_preserves_original_exit_when_child_leaves_partial_receipt(
     """A malformed receipt from a failed child remains pending, not completed."""
 
     preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
     output_root = tmp_path / "output"
 
     def fail_ledger(
@@ -4693,6 +4699,32 @@ def test_attended_preserves_original_exit_when_child_leaves_partial_receipt(
 
     assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 97
     assert (output_root / "stage-results" / "ledger.json").read_bytes() == b"{"
+
+    calls: list[str] = []
+
+    def retry_pending_ledger(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        calls.append(role)
+        if role == "ledger":
+            shutil.rmtree(output_root / "stages" / "ledger")
+            _record_attended_stage(output_root, role)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 97, "", "next boundary")
+
+    monkeypatch.setattr(materializer.subprocess, "run", retry_pending_ledger)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 97
+    )
+    assert calls == ["ledger", "baseline"]
+    assert json.loads((output_root / "stage-results" / "ledger.json").read_text())
+    checkpoint = json.loads((output_root / "attended-run.json").read_text())
+    assert checkpoint["schema_version"] == 2
+    assert checkpoint["failed_stage"] == {"returncode": 97, "role": "baseline"}
 
 
 @pytest.mark.parametrize(
@@ -4718,6 +4750,7 @@ def test_attended_forwards_complete_governed_financial_families_and_qa(
     """The attended boundary keeps all governed stage inputs intact."""
 
     preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
     output_root = tmp_path / "output"
     qa_dir = tmp_path / "qa"
     supplied = {
@@ -4747,11 +4780,11 @@ def test_attended_forwards_complete_governed_financial_families_and_qa(
     argv.extend(item for flag, path in supplied.items() for item in (flag, str(path)))
     argv.extend(("--qa-dir", str(qa_dir)))
     assert materializer.main(argv) == 0
-    assert len(calls) == len(materializer.ATTENDED_STAGES)
+    assert len(calls) == len(preflight["required_stages"])
     for command in calls:
         for flag, path in supplied.items():
             assert command[command.index(flag) + 1] == str(path)
-    panel = calls[-1]
+    panel = materializer._attended_stage_command(preflight, output_root, "panel")
     assert panel[panel.index("--qa-dir") + 1] == str(qa_dir)
 
 
@@ -4777,6 +4810,7 @@ def test_attended_binds_late_qa_without_replacing_final_panel_evidence(
     """QA may arrive for an incomplete run but is immutable after panel completion."""
 
     initial = _attended_preflight_fixture(tmp_path)
+    initial["required_stages"] = ("ledger", "baseline")
     initial["qa_dir"] = None
     output_root = tmp_path / "output"
     materializer._attended_start_or_resume(initial, output_root, resume=False)
