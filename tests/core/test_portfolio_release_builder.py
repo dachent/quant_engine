@@ -3082,6 +3082,32 @@ def test_current_surface_plan_admits_leading_incomplete_ordinary_factor_row(
     assert len(builder._current_release_plan_specs(bundle, manifest)) == 2
 
 
+def test_current_surface_plan_admits_native_policy_superset_for_selected_series(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    original_verifier = builder._verify_current_plan_upstream_evidence
+
+    def native_evidence_with_unselected_policy(
+        *args: object, **kwargs: object
+    ) -> dict[str, object]:
+        evidence = original_verifier(*args, **kwargs)
+        policies = evidence["series_interval_policies"]
+        assert isinstance(policies, dict)
+        selected_policy = policies["Strategy 0"]
+        policies["QSI"] = copy.deepcopy(selected_policy)
+        return evidence
+
+    monkeypatch.setattr(
+        builder,
+        "_verify_current_plan_upstream_evidence",
+        native_evidence_with_unselected_policy,
+    )
+
+    assert len(builder._current_release_plan_specs(bundle, manifest)) == 2
+
+
 def test_current_surface_plan_rejects_rehashed_source_interval_policy_drift(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

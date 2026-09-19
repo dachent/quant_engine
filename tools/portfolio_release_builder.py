@@ -4343,10 +4343,6 @@ def _current_release_plan_specs(
         }
         if (
             any(
-                series_id not in expected_series
-                for series_id in series_interval_policies
-            )
-            or any(
                 not isinstance(layered_composition.get(series_id), dict)
                 or layered_composition[series_id].get("interval_association_status")
                 != "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY"
