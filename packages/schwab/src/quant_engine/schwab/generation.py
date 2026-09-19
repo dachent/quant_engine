@@ -36,7 +36,7 @@ from quant_engine.portfolio_ledger import (
 
 SPEC_SCHEMA_VERSION = 2
 SUPPORTED_SPEC_SCHEMA_VERSIONS = frozenset({1, 2})
-CATALOG_SCHEMA_VERSION = 2
+CATALOG_SCHEMA_VERSION = 3
 ADAPTER_VERSION = "0.4.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _PORTABLE_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -996,8 +996,95 @@ def _transaction_key(record: Mapping[str, Any], *, manual: bool) -> tuple[str, .
     return tuple(values)
 
 
+def _journal_counterparty_crosswalk(crosswalk: Mapping[str, str]) -> dict[str, object]:
+    """Retain the selected suffix relation without exposing account numbers."""
+
+    selected_crosswalk = [
+        {"external_account_id": external, "internal_account_id": internal}
+        for external, internal in sorted(crosswalk.items())
+    ]
+    entries = [
+        {"account_id": internal, "native_suffix": external[-3:]}
+        for external, internal in sorted(
+            crosswalk.items(), key=lambda item: item[0][-3:]
+        )
+    ]
+    return {
+        "basis": "SELECTED_SOURCE_SPEC_CROSSWALK",
+        "entries": entries,
+        "source_crosswalk_sha256": hashlib.sha256(
+            canonical_json_bytes(selected_crosswalk)
+        ).hexdigest(),
+    }
+
+
+def _journal_source_evidence(
+    record: Mapping[str, Any],
+    *,
+    source_artifact: SourceArtifact,
+    suffix_to_internal: Mapping[str, str],
+) -> dict[str, object] | None:
+    """Bind a native cash Journal row to its selected source artifact."""
+
+    if str(record.get("action") or "").strip().upper() != "JOURNAL":
+        return None
+    if _decimal(record.get("amount"), "amount", optional=True) is None:
+        return None
+    description = str(record.get("description") or "").strip()
+    match = re.fullmatch(r"JOURNAL (TO|FRM) \.\.\.(\d{3})", description)
+    direction = match.group(1) if match is not None else None
+    suffix = match.group(2) if match is not None else None
+    recipient_basis: str | None
+    if direction == "FRM":
+        recipient_basis = "NATIVE_JOURNAL_FRM"
+    elif direction == "TO":
+        recipient_basis = "NATIVE_JOURNAL_TO"
+    elif description.upper() == "IRA REGULAR CONTRIB":
+        recipient_basis = "IRA_REGULAR_CONTRIB"
+    else:
+        recipient_basis = None
+    return {
+        "counterparty_account_id": (
+            suffix_to_internal.get(suffix) if suffix is not None else None
+        ),
+        "currency_basis": "SELECTED_ACCOUNT_BASE_CURRENCY",
+        "direction": direction,
+        "native_row": dict(record),
+        "native_row_sha256": hashlib.sha256(canonical_json_bytes(record)).hexdigest(),
+        "recipient_basis": recipient_basis,
+        "source_artifact_id": source_artifact.artifact_id,
+        "source_artifact_sha256": source_artifact.sha256,
+    }
+
+
+def _account_source_artifacts(
+    source_specs: object,
+    *,
+    role: str,
+    artifacts: Sequence[SourceArtifact],
+) -> dict[str, SourceArtifact]:
+    """Return the selected artifact for every account-bound source role."""
+
+    artifacts_by_id = {artifact.artifact_id: artifact for artifact in artifacts}
+    selected: dict[str, SourceArtifact] = {}
+    for source in _objects(source_specs, "sources"):
+        if source.get("role") != role:
+            continue
+        account_id = _text(source.get("account_id"), f"{role}.account_id")
+        artifact_id = _text(source.get("artifact_id"), f"{role}.artifact_id")
+        artifact = artifacts_by_id.get(artifact_id)
+        if artifact is None or account_id in selected:
+            raise SchwabGenerationError(f"{role} selected artifact binding differs")
+        selected[account_id] = artifact
+    return selected
+
+
 def _transactions(
-    wch: Sequence[tuple[str | None, Path]], manual: Sequence[tuple[str | None, Path]]
+    wch: Sequence[tuple[str | None, Path]],
+    manual: Sequence[tuple[str | None, Path]],
+    *,
+    journal_source_artifacts: Mapping[str, SourceArtifact],
+    suffix_to_internal: Mapping[str, str],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     manual_by_account: dict[str, Counter[tuple[str, ...]]] = {}
     for account_id, path in manual:
@@ -1080,6 +1167,13 @@ def _transactions(
                     "symbol": symbol or None,
                 }
             )
+            evidence = _journal_source_evidence(
+                record,
+                source_artifact=journal_source_artifacts[account_id],
+                suffix_to_internal=suffix_to_internal,
+            )
+            if evidence is not None:
+                ledger["journal_source_evidence"] = evidence
             normalized.append(ledger)
         expected = manual_by_account.get(account_id)
         if expected is None or keys != expected:
@@ -1109,6 +1203,8 @@ def _transactions_all(
     manual_path: Path,
     *,
     expected_record_count: int | None = None,
+    journal_source_artifacts: Mapping[str, SourceArtifact],
+    suffix_to_internal: Mapping[str, str],
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object] | None]:
     """Reconcile an all-accounts manual transaction export against per-account WCH.
 
@@ -1222,6 +1318,13 @@ def _transactions_all(
                     "symbol": symbol or None,
                 }
             )
+            evidence = _journal_source_evidence(
+                record,
+                source_artifact=journal_source_artifacts[account_id],
+                suffix_to_internal=suffix_to_internal,
+            )
+            if evidence is not None:
+                ledger["journal_source_evidence"] = evidence
             normalized.append(ledger)
 
     extra_manual = manual_keys - wch_keys
@@ -1719,6 +1822,15 @@ def build_generation(
         generation_as_of,
         snapshot_schema_version=snapshot_schema_version,
     )
+    transaction_source_artifacts = _account_source_artifacts(
+        spec["sources"],
+        role="WCH_TRANSACTION_JSON",
+        artifacts=artifacts,
+    )
+    if set(transaction_source_artifacts) != set(crosswalk.values()):
+        raise SchwabGenerationError(
+            "transaction source artifact scope differs from crosswalk"
+        )
     nav_source_artifact_ids = _account_source_artifact_ids(
         spec["sources"], "WCH_NAV_CSV"
     )
@@ -1775,10 +1887,15 @@ def build_generation(
             sources["WCH_TRANSACTION_JSON"],
             sources["MANUAL_TRANSACTION_JSON_ALL"][0][1],
             expected_record_count=expected_export_record_count,
+            journal_source_artifacts=transaction_source_artifacts,
+            suffix_to_internal=suffix_to_internal,
         )
     else:
         transactions, transaction_reconciliation = _transactions(
-            sources["WCH_TRANSACTION_JSON"], sources["MANUAL_TRANSACTION_JSON"]
+            sources["WCH_TRANSACTION_JSON"],
+            sources["MANUAL_TRANSACTION_JSON"],
+            journal_source_artifacts=transaction_source_artifacts,
+            suffix_to_internal=suffix_to_internal,
         )
     transaction_history_coverage: dict[str, object] | None = None
     if spec.get("transaction_history_manifest") is not None:
@@ -1906,6 +2023,7 @@ def build_generation(
                 else {}
             ),
         },
+        "journal_counterparty_crosswalk": _journal_counterparty_crosswalk(crosswalk),
         "nav_observations": nav,
         "positions": positions,
         "position_snapshot_as_of": (
