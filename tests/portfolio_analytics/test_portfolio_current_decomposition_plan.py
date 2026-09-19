@@ -643,6 +643,110 @@ def _canonical_public_manifest_with_renamed_inputs(
     return market_paths, manifest_path, catalog_sha256, evaluation_date
 
 
+def test_legacy_development_accepts_complete_source_with_empty_gap_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _fixture(tmp_path)
+    contract = json.loads(
+        inputs["financial_mvp_contract_path"].read_text(encoding="utf-8")
+    )
+    coverage = json.loads(
+        (inputs["layered_history_generation_path"] / "coverage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    selected_source_ids = {
+        segment["source_id"]
+        for strategy in coverage["strategies"]
+        for segment in strategy["segments"]
+        if segment["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    }
+    for source in contract["source_segments"]:
+        if source["source_id"] in selected_source_ids:
+            source["declared_gap_policy"] = {
+                "declared_missing_source_dates": [],
+                "omitted_return_dates": [],
+                "span_return_receipts": [],
+                "unavailable_return_dates": [],
+            }
+    contract_path = _write_json(tmp_path / "empty-gap-contract.json", contract)
+
+    class _ValidVerifier:
+        @staticmethod
+        def verify_layered_history_generation(
+            _generation_root: Path, _contract_path: Path
+        ) -> dict[str, str]:
+            return {
+                "generation_id": inputs["layered_history_generation_path"].name,
+                "verification": "VALID",
+            }
+
+    monkeypatch.setattr(planner, "_layered_history_module", lambda: _ValidVerifier)
+    result = planner._layered_history_targets(
+        generation_root=inputs["layered_history_generation_path"],
+        contract_path=contract_path,
+        strategies=planner._resolved_strategies(inputs["plan_document"]),
+        evidence_mode="LIVE_ONLY",
+        evaluated_on=date.fromisoformat(inputs["evaluation_date"]),
+    )
+
+    assert result["rows"]
+
+
+def test_legacy_development_rejects_real_gap_without_manifest_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _fixture(tmp_path)
+    contract = json.loads(
+        inputs["financial_mvp_contract_path"].read_text(encoding="utf-8")
+    )
+    coverage = json.loads(
+        (inputs["layered_history_generation_path"] / "coverage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    selected_source_ids = {
+        segment["source_id"]
+        for strategy in coverage["strategies"]
+        for segment in strategy["segments"]
+        if segment["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    }
+    source = next(
+        item
+        for item in contract["source_segments"]
+        if item["source_id"] in selected_source_ids
+    )
+    source["declared_gap_policy"] = {
+        "declared_missing_source_dates": ["2026-01-02"],
+        "omitted_return_dates": ["2026-01-04"],
+        "span_return_receipts": [],
+        "unavailable_return_dates": ["2026-01-02", "2026-01-03"],
+    }
+    contract_path = _write_json(tmp_path / "real-gap-contract.json", contract)
+
+    class _ValidVerifier:
+        @staticmethod
+        def verify_layered_history_generation(
+            _generation_root: Path, _contract_path: Path
+        ) -> dict[str, str]:
+            return {
+                "generation_id": inputs["layered_history_generation_path"].name,
+                "verification": "VALID",
+            }
+
+    monkeypatch.setattr(planner, "_layered_history_module", lambda: _ValidVerifier)
+    with pytest.raises(
+        planner.CurrentPlanError, match="declared source gap authority is incomplete"
+    ):
+        planner._layered_history_targets(
+            generation_root=inputs["layered_history_generation_path"],
+            contract_path=contract_path,
+            strategies=planner._resolved_strategies(inputs["plan_document"]),
+            evidence_mode="LIVE_ONLY",
+            evaluated_on=date.fromisoformat(inputs["evaluation_date"]),
+        )
+
+
 def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -> None:
     inputs = _fixture(tmp_path)
     outputs, manifest = planner.build_bundle(

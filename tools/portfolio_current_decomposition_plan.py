@@ -791,9 +791,15 @@ def _layered_history_targets(
                     "declared unavailable return dates",
                 )
             ]
-            if not manifest_sha256 or set(unavailable_dates) != {
-                item for day in missing_dates for item in (day, day + timedelta(days=1))
-            }:
+            if (missing_dates or unavailable_dates) and (
+                not manifest_sha256
+                or set(unavailable_dates)
+                != {
+                    item
+                    for day in missing_dates
+                    for item in (day, day + timedelta(days=1))
+                }
+            ):
                 raise CurrentPlanError("declared source gap authority is incomplete")
             labels.extend(
                 day.isoformat()
