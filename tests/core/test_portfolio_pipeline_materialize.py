@@ -5018,3 +5018,76 @@ def test_attended_binds_late_qa_without_replacing_final_panel_evidence(
     changed["qa_dir"] = replacement
     with pytest.raises(materializer.MaterializationError, match="QA identity"):
         materializer._attended_start_or_resume(changed, output_root, resume=True)
+
+
+def test_attended_source_only_resume_still_rejects_a_missing_run_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy source-only resume cannot bootstrap a downstream receipt."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    calls: list[list[str]] = []
+
+    def no_child(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 1
+    )
+    assert calls == []
+
+
+def test_attended_rejects_missing_run_receipt_after_execution_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost downstream receipt never restarts verified completed producers."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    clock = {"selected_financial_cutoff": "2026-09-17"}
+    source_run = preflight["source_run"]
+    assert isinstance(source_run, Path)
+    source_run.write_bytes(canonical_json_bytes({"attended": {"data_clock": clock}}))
+    (output_root / "preparation-handoff.json").write_bytes(
+        canonical_json_bytes(
+            {
+                "data_clock": clock,
+                "financial_stage_inputs": {},
+                "schema_version": 1,
+                "source_phase": preflight["source_phase"],
+                "source_run": materializer._file_definition(source_run),
+            }
+        )
+    )
+    materializer._attended_start_or_resume(preflight, output_root, resume=False)
+    _record_attended_stage(output_root, "ledger")
+    materializer._attended_start_execution_attempt(output_root)
+    (output_root / "attended-run.json").unlink()
+    calls: list[list[str]] = []
+
+    def no_child(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+
+    with pytest.raises(materializer.MaterializationError, match="attended run receipt"):
+        materializer._attended_execute(preflight, output_root, resume=True)
+
+    assert calls == []
+    assert (output_root / "stage-results" / "ledger.json").is_file()
