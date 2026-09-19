@@ -549,10 +549,14 @@ def _generation_manifest_snapshot(
     catalog_schema_name: str,
     catalog_schema_version: str,
     as_of_date: str,
+    manifest_as_of_date: str | None = None,
 ) -> InputSnapshot:
     source_date = date.fromisoformat(as_of_date)
+    generation_date = date.fromisoformat(
+        as_of_date if manifest_as_of_date is None else manifest_as_of_date
+    )
     manifest = GenerationManifest.build(
-        as_of_date=source_date,
+        as_of_date=generation_date,
         adapter=AdapterIdentity("synthetic-selected-input", "1"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
@@ -576,6 +580,126 @@ def _generation_manifest_snapshot(
     return InputSnapshot.from_bytes(
         "synthetic generation manifest", manifest.to_json_bytes()
     )
+
+
+def test_catalog_identity_preserves_later_manifest_generation_date(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    catalog = InputSnapshot.from_bytes(
+        "synthetic provider ledger",
+        canonical_json_bytes(
+            {"as_of_date": "2026-09-17", "catalog_schema_version": 1}
+        ),
+    )
+    manifest = _generation_manifest_snapshot(
+        catalog=catalog,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-09-17",
+        manifest_as_of_date="2026-09-18",
+    )
+
+    _, built = perimeter_module._bound_catalog_identity(
+        catalog=catalog,
+        manifest_snapshot=manifest,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version_field="catalog_schema_version",
+        manifest_identity_artifact_id="identity/provider-ledger-generation.json",
+    )
+    _, verified = verifier_module._bound_catalog(
+        catalog,
+        manifest,
+        role="provider_ledger",
+    )
+
+    assert built == verified
+    assert built["artifact"]["as_of_date"] == "2026-09-17"
+    assert built["generation_manifest"]["as_of_date"] == "2026-09-18"
+
+
+def test_catalog_identity_rejects_catalog_byte_substitution_with_later_manifest(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    catalog = InputSnapshot.from_bytes(
+        "synthetic provider ledger",
+        canonical_json_bytes(
+            {"as_of_date": "2026-09-17", "catalog_schema_version": 1}
+        ),
+    )
+    manifest = _generation_manifest_snapshot(
+        catalog=catalog,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-09-17",
+        manifest_as_of_date="2026-09-18",
+    )
+    substituted = InputSnapshot.from_bytes(
+        "substituted provider ledger",
+        canonical_json_bytes(
+            {"as_of_date": "2026-09-17", "catalog_schema_version": 1, "x": 1}
+        ),
+    )
+
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="selected manifest catalog artifact differs from frozen catalog",
+    ):
+        perimeter_module._bound_catalog_identity(
+            catalog=substituted,
+            manifest_snapshot=manifest,
+            catalog_artifact_id="normalized/provider-ledger.json",
+            catalog_schema_name="provider-ledger-catalog",
+            catalog_schema_version_field="catalog_schema_version",
+            manifest_identity_artifact_id="identity/provider-ledger-generation.json",
+        )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._bound_catalog(
+            substituted,
+            manifest,
+            role="provider_ledger",
+        )
+
+
+def test_catalog_identity_preserves_equal_date_compatibility(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    catalog = InputSnapshot.from_bytes(
+        "synthetic provider ledger",
+        canonical_json_bytes(
+            {"as_of_date": "2026-09-17", "catalog_schema_version": 1}
+        ),
+    )
+    manifest = _generation_manifest_snapshot(
+        catalog=catalog,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-09-17",
+    )
+
+    _, built = perimeter_module._bound_catalog_identity(
+        catalog=catalog,
+        manifest_snapshot=manifest,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version_field="catalog_schema_version",
+        manifest_identity_artifact_id="identity/provider-ledger-generation.json",
+    )
+    _, verified = verifier_module._bound_catalog(
+        catalog,
+        manifest,
+        role="provider_ledger",
+    )
+
+    assert built == verified
+    assert built["artifact"]["as_of_date"] == "2026-09-17"
+    assert built["generation_manifest"]["as_of_date"] == "2026-09-17"
 
 
 def _selected_inputs(module: Any, baseline: InputSnapshot | None = None) -> object:
@@ -16231,7 +16355,7 @@ def _c4d3a_catalog_identity_oracle(
         "generation_id": manifest.generation_id,
         "artifact": {
             "artifact_id": catalog_artifact_id,
-            "as_of_date": manifest.as_of_date.isoformat(),
+            "as_of_date": catalog.json_object()["as_of_date"],
             "schema": {
                 "name": catalog_schema_name,
                 "version": artifact.schema_version,
