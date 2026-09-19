@@ -6,6 +6,7 @@ from quant_engine.schwab.api import (
     SchwabReadError,
     current_snapshot_bytes,
     read_current_snapshot,
+    read_holdings_v2_current_snapshot,
     read_web_current_snapshot,
     write_current_snapshot,
 )
@@ -27,6 +28,7 @@ __all__ = [
     "current_snapshot_bytes",
     "publish_generation_candidate",
     "read_current_snapshot",
+    "read_holdings_v2_current_snapshot",
     "read_web_current_snapshot",
     "stage_generation_candidate",
     "write_current_snapshot",

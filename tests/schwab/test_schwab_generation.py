@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -12,7 +13,9 @@ from quant_engine.schwab import (
     SchwabGenerationError,
     build_generation,
     publish_generation_candidate,
+    read_holdings_v2_current_snapshot,
     stage_generation_candidate,
+    write_current_snapshot,
 )
 
 
@@ -504,6 +507,93 @@ def test_current_snapshot_supersedes_manual_current_reference(tmp_path: Path) ->
     )
     assert current_reference["status"] == "PASS_EXACT"
     assert "current_balances" in manifest.coverage.fact_types
+
+
+def _assert_holdings_v2_snapshot_reaches_hash_bound_web_current_consumer(
+    tmp_path: Path,
+) -> None:
+    """Catch producer changes that make a retained Holdings-V2 snapshot unusable."""
+
+    spec_path = _spec_with_current(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    crosswalk = {
+        item["external_account_id"]: item["internal_account_id"]
+        for item in spec["crosswalk"]
+    }
+    holdings = {
+        "accounts": [
+            {
+                "accountId": external_id,
+                "groupedPositions": [
+                    {
+                        "groupName": "Equity",
+                        "securityType": 1,
+                        "holdingsRows": [
+                            {
+                                "dataSymbol": f"SYNTH-{index}",
+                                "qty": {"qty": "1"},
+                                "marketValue": {"val": "99"},
+                                "costBasis": {"cstBasis": "27"},
+                            }
+                        ]
+                        if index < 8
+                        else [],
+                    }
+                ],
+            }
+            for index, external_id in enumerate(crosswalk, start=1)
+        ],
+        "accountTotals": [],
+    }
+    first_group = holdings["accounts"][0]["groupedPositions"]
+    first_group.append(
+        {
+            "groupName": "Cash",
+            "securityType": 9,
+            "holdingsRows": [
+                {
+                    "dataSymbol": "SYNTHETIC-CASH",
+                    "qty": {"qty": "12"},
+                    "marketValue": {"val": "12"},
+                    "costBasis": {"cstBasis": "12"},
+                }
+            ],
+        }
+    )
+    snapshot = read_holdings_v2_current_snapshot(
+        holdings,
+        crosswalk=crosswalk,
+        captured_at="2026-07-31T20:00:00Z",
+    )
+    source_root = Path(spec["roots"]["source"])
+    snapshot_path = source_root / "holdings-v2-current.json"
+    digest, size = write_current_snapshot(snapshot, snapshot_path)
+    spec["current_snapshot"].update(
+        {
+            "expected_sha256": digest,
+            "expected_size_bytes": size,
+            "relative_path": snapshot_path.relative_to(source_root).as_posix(),
+            "schema_version": "2",
+        }
+    )
+    spec["baseline"]["position_count"] = 7
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    catalog, _, _ = build_generation(spec_path)
+
+    assert len(catalog["current_accounts"]) == 8
+    assert len(catalog["positions"]) == 7
+    assert {item["evidence_class"] for item in catalog["positions"]} == {"WCH_CURRENT"}
+    assert {item["market_value"]["status"] for item in catalog["positions"]} == {
+        "UNAVAILABLE"
+    }
+
+
+def test_holdings_v2_snapshot_reaches_hash_bound_web_current_consumer() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        _assert_holdings_v2_snapshot_reaches_hash_bound_web_current_consumer(
+            Path(directory)
+        )
 
 
 def test_complete_api_snapshot_can_reconcile_wch_nav_without_manual_nav(

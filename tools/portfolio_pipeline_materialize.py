@@ -965,6 +965,127 @@ def _manifest_artifact_bytes(
     return content
 
 
+def _schwab_selected_point_positions(
+    manifest: GenerationManifest,
+    source: Mapping[str, Any],
+    requested_as_of: date,
+) -> dict[str, dict[str, Any]] | None:
+    """Reconstruct point facts from reopened source authority, not ledger flags."""
+    metadata = source.get("position_snapshot_as_of")
+    if not isinstance(metadata, dict) or "observed_at" not in metadata:
+        return None
+    try:
+        clock = metadata["observed_at"]
+        captured = datetime.fromisoformat(clock)
+        day = captured.date()
+        transport = source["current_transport"]
+        artifacts = [
+            item
+            for item in source["source_artifacts"]
+            if item["schema"]["name"] == "schwab-api-current-snapshot"
+        ]
+        if (
+            captured.tzinfo is None
+            or captured.utcoffset() is None
+            or day != manifest.as_of_date
+            or source["as_of_date"] != day.isoformat()
+            or source["catalog_schema_version"] not in {2, 3}
+            or manifest.adapter.name != "quant-engine-schwab"
+            or len(artifacts) != 1
+            or transport not in {"WEB_CONTRACT", "DEVELOPER_API"}
+        ):
+            raise ValueError("point clock/date/transport differs")
+        artifact = artifacts[0]
+        if (
+            artifact["as_of_date"] != day.isoformat()
+            or artifact["schema"]["version"] not in {"1", "2"}
+            or (artifact["schema"]["version"] == "1" and transport != "DEVELOPER_API")
+            or type(artifact["size_bytes"]) is not int
+            or artifact["size_bytes"] < 1
+            or [
+                a.to_dict()
+                for a in manifest.artifacts
+                if a.artifact_id == artifact["artifact_id"]
+            ]
+            != [artifact]
+            or len(
+                [
+                    a
+                    for a in source["source_artifacts"]
+                    if a["artifact_id"] == artifact["artifact_id"]
+                ]
+            )
+            != 1
+        ):
+            raise ValueError("point selected artifact differs")
+        accounts = {row["account_id"] for row in source["accounts"]}
+        current = source["current_accounts"]
+        if (
+            not accounts
+            or len(accounts) != len(source["accounts"])
+            or {row["account_id"] for row in current} != accounts
+            or len(current) != len(accounts)
+            or any(row["observed_at"] != clock for row in current)
+        ):
+            raise ValueError("point account/clock scope differs")
+        expected = {}
+        for native in source["positions"]:
+            identity = {
+                "account_id": native["account_id"],
+                "as_of_date": native["as_of_date"],
+                "security_id": native["security_id"],
+            }
+            record_id = native["record_id"]
+            if (
+                native["account_id"] not in accounts
+                or native["as_of_date"] != day.isoformat()
+                or native["observed_at"] != clock
+                or native["security_id"]
+                != "security-schwab-"
+                + hashlib.sha256(native["symbol"].encode()).hexdigest()[:24]
+                or record_id
+                != "position-"
+                + hashlib.sha256(canonical_json_bytes(identity)).hexdigest()[:24]
+                or record_id in expected
+                or native.get("source_artifact_id", artifact["artifact_id"])
+                != artifact["artifact_id"]
+                or native["evidence_class"]
+                != (
+                    "WCH_CURRENT"
+                    if transport == "WEB_CONTRACT"
+                    else "DEVELOPER_API_CURRENT"
+                )
+            ):
+                raise ValueError("point native row scope differs")
+            expected[record_id] = {
+                **{
+                    key: native[key]
+                    for key in (
+                        "account_id",
+                        "as_of_date",
+                        "observed_at",
+                        "quantity",
+                        "market_value",
+                        "average_price",
+                        "security_id",
+                    )
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "schwab",
+                "record_id": "schwab:" + record_id,
+                "source_record_id": record_id,
+                "source_artifact_id": artifact["artifact_id"],
+                "generation_id": manifest.generation_id,
+            }
+        if source["current_position_account_count"] != len(
+            {row["account_id"] for row in expected.values()}
+        ):
+            raise ValueError("point position account count differs")
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        raise MaterializationError("Schwab selected point authority differs") from exc
+    return expected if day <= requested_as_of else None
+
+
 def _provider_admission_authority(
     generation: Path,
     contract: Mapping[str, Any],
@@ -1067,6 +1188,207 @@ def _provider_admission_authority(
         )
     except (RuntimeError, ValueError) as exc:
         raise MaterializationError("provider admission receipt is invalid") from exc
+    observation = receipt.get("run_observation")
+    if observation is not None:
+        # Reopen selection and inputs independently. Receipt counts/hashes and
+        # candidate dispositions are outputs, never the source inventory oracle.
+        module_spec = importlib.util.spec_from_file_location(
+            "_admission_source_reader", Path(__file__).with_name("provider_ledger.py")
+        )
+        if module_spec is None or module_spec.loader is None:
+            raise MaterializationError("provider source reader is unavailable")
+        reader = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(reader)
+        try:
+            observation = reader._object(observation, "provider run observation")
+            observation_path = reader._absolute_regular_path(
+                observation["path"], "provider run observation"
+            )
+            observed, digest, size = reader._verified_json(
+                observation_path,
+                observation["sha256"],
+                "provider run observation",
+            )
+            if (
+                size != observation["size_bytes"]
+                or set(observed)
+                != {
+                    "schema_version",
+                    "policy_contract_sha256",
+                    "financial_cutoff",
+                    "captured_at_utc",
+                    "providers",
+                }
+                or observed.get("schema_version") != 1
+                or observed.get("policy_contract_sha256") != contract_raw_sha256
+                or observed.get("financial_cutoff") != catalog["as_of_date"]
+                or any(
+                    observed.get(key) != observation.get(key)
+                    for key in (
+                        "captured_at_utc",
+                        "financial_cutoff",
+                        "policy_contract_sha256",
+                    )
+                )
+            ):
+                raise MaterializationError("provider run observation identity differs")
+            reader._utc_timestamp(
+                observed["captured_at_utc"], "run observation capture"
+            )
+            selected = reader._object(
+                observed["providers"], "run observation providers"
+            )
+            if set(selected) != set(reader._PROVIDER_CATALOGS):
+                raise MaterializationError("provider run observation selection differs")
+            identities, manifests, catalogs = [], {}, {}
+            facts: dict[str, dict[str, list[dict[str, Any]]]] = {}
+            cutoff = date.fromisoformat(observed["financial_cutoff"])
+            for provider_id, selection in sorted(selected.items()):
+                reference = {
+                    key: selection[key]
+                    for key in (
+                        "root",
+                        "generation_id",
+                        "manifest_sha256",
+                        "catalog_sha256",
+                        "qualification",
+                    )
+                }
+                identity, source_manifest, source_catalog, _, _ = reader._provider(
+                    provider_id,
+                    reference,
+                    cutoff,
+                    run_observation=observed,
+                )
+                identities.append(identity)
+                manifests[provider_id] = source_manifest
+                catalogs[provider_id] = source_catalog
+                facts[provider_id] = {}
+                effective = min(
+                    cutoff, date.fromisoformat(selection["finalized_through"])
+                )
+                point_positions = (
+                    _schwab_selected_point_positions(
+                        source_manifest, source_catalog, cutoff
+                    )
+                    if provider_id == "schwab"
+                    else None
+                )
+                for fact_name in reader._TARGET_ADMISSION_FACT:
+                    rows = reader._objects(catalog.get(fact_name, []), fact_name)
+                    if any(row.get("provider_id") not in selected for row in rows):
+                        raise MaterializationError(
+                            "materialized provider fact scope differs"
+                        )
+                    if fact_name == "provider_strategy_returns":
+                        continue
+                    rows = [row for row in rows if row["provider_id"] == provider_id]
+                    point_bound = (
+                        fact_name == "positions" and point_positions is not None
+                    )
+                    if point_bound:
+                        assert point_positions is not None
+                        if (
+                            len(rows) != len(point_positions)
+                            or {row.get("source_record_id") for row in rows}
+                            != set(point_positions)
+                            or any(
+                                {
+                                    key: value
+                                    for key, value in row.items()
+                                    if key not in {"mapping_status", "strategy_id"}
+                                }
+                                != point_positions.get(row.get("source_record_id"))
+                                for row in rows
+                            )
+                        ):
+                            raise MaterializationError(
+                                "materialized Schwab point differs from selected native positions"
+                            )
+                    for row in rows:
+                        days = [
+                            date.fromisoformat(row[field])
+                            for field in (
+                                "as_of_date",
+                                "event_date",
+                                "effective_date",
+                                "nav_recognition_date",
+                            )
+                            if row.get(field) not in {None, ""}
+                        ]
+                        if row.get("generation_id") != identity.generation_id or (
+                            any(
+                                day > (cutoff if point_bound else effective)
+                                for day in days
+                            )
+                        ):
+                            raise MaterializationError(
+                                "materialized provider fact cutoff or generation differs"
+                            )
+                    facts[provider_id][fact_name] = rows
+                for fact_name in ("strategy_returns", "provider_strategy_returns"):
+                    for row in reader._objects(catalog.get(fact_name, []), fact_name):
+                        if (
+                            row.get("provider_id") == provider_id
+                            and (
+                                fact_name == "provider_strategy_returns"
+                                or row.get("evidence_layer") == "ACCOUNT_LIVE"
+                            )
+                            and date.fromisoformat(row["date"]) > effective
+                        ):
+                            raise MaterializationError(
+                                "materialized strategy return cutoff differs"
+                            )
+            authority = {
+                "census_id": census["census_id"],
+                "census_sha256": census_sha256,
+                "contract": contract,
+                "sources": source_segments,
+                "contract_raw_sha256": contract_raw_sha256,
+                "contract_semantic_sha256": contract_semantic_sha256,
+                "product_id": product["product_id"],
+                "product_version": product["product_version"],
+                "run_observation": observed,
+                "run_observation_path": str(observation_path),
+                "run_observation_sha256": digest,
+                "run_observation_size_bytes": size,
+            }
+            reader._validate_current_census_provider_generations(
+                authority, identities, manifests
+            )
+            expected_receipt, _ = reader._admit_or_declare_receipt(
+                authority,
+                identities,
+                manifests,
+                catalogs,
+                facts,
+                reader._objects(
+                    catalog.get("provider_strategy_returns", []), "provider returns"
+                ),
+            )
+            if receipt != expected_receipt:
+                raise MaterializationError(
+                    "provider admission differs from independent source inventory or materialized facts"
+                )
+            expected_generations = [
+                {
+                    **identity.to_dict(),
+                    "generation_as_of_date": manifests[
+                        identity.provider_id
+                    ].as_of_date.isoformat(),
+                }
+                for identity in identities
+            ]
+            if catalog.get("provider_generations") != expected_generations:
+                raise MaterializationError(
+                    "provider ledger selected generations differ"
+                )
+        except MaterializationError:
+            raise
+        except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
+            raise MaterializationError(
+                "provider source admission verification failed"
+            ) from exc
     manifest_artifacts = tuple(manifest.artifacts)
     for row in provider_generations.values():
         if not isinstance(row, dict):
