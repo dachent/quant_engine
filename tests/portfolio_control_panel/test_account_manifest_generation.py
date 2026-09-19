@@ -26810,6 +26810,11 @@ def test_generation_available_mwr_reaches_bound_report_workbook(
     import portfolio_report as reporter
     from openpyxl import load_workbook  # type: ignore[import-untyped]
 
+    monkeypatch.setattr(
+        reporter,
+        "_PORTABLE_HWM_PRODUCT_CONTRACT",
+        REPOSITORY_ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json",
+    )
     selected = _generation_composer_selected_inputs(perimeter_module)
     report_fixture_name = "_c1_portfolio_report_fixture"
     report_fixture = sys.modules.get(report_fixture_name)
