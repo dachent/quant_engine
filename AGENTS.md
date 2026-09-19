@@ -57,6 +57,15 @@ checkpoints, issue descriptions, PR text and skill defaults:
   separately authorized publication. Final cold/unchanged/changed-input proof
   must use that supported runner without workbook work. Task-local scripts may
   diagnose defects, but do not establish the delivered execution workflow.
+- The owner's crash-recovery correction requires durable resume checkpoints
+  after each independently reusable preparation and execution stage. Reuse the
+  existing stage/receipt mechanisms. A crash must preserve completed verified
+  work and resume at the first incomplete or invalidated stage, not restart the
+  run. Revalidate all required input/source QC, cutoff, policy/code bindings and
+  checkpoint/output integrity before dependent work on every start or resume.
+  A partial output or started-stage receipt is not completion. Prove recovery
+  with deliberate interruption during preparation and downstream execution;
+  unchanged verified stages must not repeat numerical work.
 
 ## Authority and source of truth
 
