@@ -10277,7 +10277,7 @@ def _copy_epoch_browser_fixture(tmp_path: Path) -> Path:
 
 
 def _run_interaction_qa(
-    candidate: Path, output: Path
+    candidate: Path, output: Path, *, expected_common_eod: str | None = None
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     """Run the shipped Chromium acceptance harness against one candidate."""
 
@@ -10304,8 +10304,7 @@ def _run_interaction_qa(
     env = dict(os.environ)
     env["PLAYWRIGHT_MODULE"] = str(playwright_module)
     env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
-    result = subprocess.run(
-        [
+    command = [
             node,
             str(panel.DEFAULT_TEMPLATE_ROOT / "interaction_qa.mjs"),
             "--html",
@@ -10318,7 +10317,11 @@ def _run_interaction_qa(
             "true",
             "--expected-calculation-cutoff",
             "2026-08-13",
-        ],
+        ]
+    if expected_common_eod is not None:
+        command.extend(["--expected-common-eod", expected_common_eod])
+    result = subprocess.run(
+        command,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -10368,6 +10371,60 @@ def test_schema9_epoch_manifest_browser_uses_authority_labels_and_cutoff(
     assert rendered_rows[0]["label"] != "wrong-summary-provider account 1"
     assert evidence["legend"].find("Calculations through 2026-08-13") >= 0
     assert evidence["legend"].find("Artifact/provider capture date: 2026-08-16") >= 0
+
+
+def test_interaction_qa_checks_the_rendered_source_clock_handoff(tmp_path: Path) -> None:
+    """The shipped browser consumer sees the panel's accepted clock disclosures."""
+
+    candidate = _copy_epoch_browser_fixture(tmp_path)
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    clock = {
+        "selected_financial_cutoff": "2026-08-13",
+        "latest_common_eod": "2026-08-14",
+        "limiting_inputs": ["matrixport", "quantbase"],
+        "source_data_as_of": [
+            {
+                "source_id": "ibkr",
+                "applies_to_latest_common_eod": True,
+                "provider_data_date": "2026-08-15",
+                "finality": {"basis": "NATIVE_LEDGER", "provider_finality_guarantee": True},
+                "timezone": "UTC",
+                "precision": "DATE",
+            },
+            {
+                "source_id": "matrixport",
+                "applies_to_latest_common_eod": True,
+                "provider_data_date": "2026-08-14",
+                "finality": {"basis": "NATIVE_LEDGER", "provider_finality_guarantee": True},
+                "timezone": "UTC",
+                "precision": "DATE",
+            },
+            {
+                "source_id": "quantbase",
+                "applies_to_latest_common_eod": True,
+                "provider_data_date": "2026-08-14",
+                "finality": {"basis": "NATIVE_LEDGER", "provider_finality_guarantee": True},
+                "timezone": "UTC",
+                "precision": "DATE",
+            },
+        ],
+    }
+    data["meta"]["source_clock"] = clock
+    data["limitations"] = [*data["limitations"], *panel._source_clock_display_lines(clock)]
+    _write_dashboard_data_script(candidate, data)
+
+    result, evidence = _run_interaction_qa(
+        candidate, tmp_path / "source-clock-qa.json", expected_common_eod="2026-08-14"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert any(
+        item["check"] == "Source clock preserves selected/common EOD, limiting inputs, and native source disclosures"
+        and item["status"] == "PASS"
+        for item in evidence["checks"]
+    )
 
 
 def test_schema9_epoch_manifest_browser_tracks_label_mutations_and_discloses_missing_cutoff(

@@ -388,8 +388,26 @@ def _public_report_value(value: object) -> object:
     return value
 
 
-def _validated_source_clock(path: Path | None) -> dict[str, Any] | None:
-    """Admit only the pinned source-QC clock receipt, never a free-form dict."""
+def _source_clock_file_path(value: object, field_name: str) -> Path:
+    if not isinstance(value, Mapping) or set(value) != {
+        "path",
+        "sha256",
+        "size_bytes",
+    }:
+        raise ReportValidationError(f"source clock {field_name} differs")
+    path = Path(_text(value.get("path"), f"source clock {field_name}.path")).resolve()
+    if path.is_symlink() or not path.is_file():
+        raise ReportValidationError(f"source clock {field_name} is unavailable")
+    sha256, size_bytes = hash_file(path)
+    if sha256 != value.get("sha256") or size_bytes != value.get("size_bytes"):
+        raise ReportValidationError(f"source clock {field_name} differs")
+    return path
+
+
+def _source_clock_authority(
+    path: Path | None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Replay the receipt's native source phase before accepting its clock."""
 
     if path is None:
         return None
@@ -406,13 +424,94 @@ def _validated_source_clock(path: Path | None) -> dict[str, Any] | None:
         raise ReportValidationError("source clock receipt differs")
     try:
         from portfolio_attended_preparation import _source_clock
+        from portfolio_pipeline_materialize import validate_source_phase
 
-        expected = _source_clock(phase, str(clock.get("selected_financial_cutoff")))
+        cutoff = _text(
+            clock.get("selected_financial_cutoff"),
+            "source clock selected_financial_cutoff",
+        )
+        contract_path = _source_clock_file_path(
+            phase.get("financial_input_contract"), "financial input contract"
+        )
+        catalog_path = _source_clock_file_path(
+            phase.get("provider_ledger_catalog"), "provider ledger catalog"
+        )
+        manifest_path = _source_clock_file_path(
+            phase.get("provider_ledger_manifest"), "provider ledger manifest"
+        )
+        if catalog_path.parent != manifest_path.parent:
+            raise ValueError("provider ledger generation differs")
+        replayed_phase = validate_source_phase(
+            requested_as_of=cutoff,
+            provider_ledger_generation_root=manifest_path.parent,
+            financial_input_contract_path=contract_path,
+        )
+        expected = _source_clock(replayed_phase, cutoff)
     except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
         raise ReportValidationError("source clock source authority differs") from exc
-    if clock != expected:
+    if dict(phase) != replayed_phase or clock != expected:
         raise ReportValidationError("source clock source authority differs")
-    return dict(clock)
+    source_rows = expected.get("source_data_as_of")
+    if not isinstance(source_rows, list) or not source_rows or any(
+        not isinstance(row, Mapping)
+        or not isinstance(row.get("timezone"), str)
+        or not row.get("timezone")
+        or not isinstance(row.get("precision"), str)
+        or not row.get("precision")
+        for row in source_rows
+    ):
+        raise ReportValidationError("source clock native timezone or precision differs")
+    return replayed_phase, dict(clock)
+
+
+def _validated_source_clock(path: Path | None) -> dict[str, Any] | None:
+    """Admit only a clock replayed from its retained native source authority."""
+
+    authority = _source_clock_authority(path)
+    return None if authority is None else authority[1]
+
+
+def _validate_source_clock_consumer_binding(
+    phase: Mapping[str, Any],
+    clock: Mapping[str, Any],
+    *,
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+    calculation_cutoff_date: str | None,
+    financial_input_contract_path: Path,
+) -> None:
+    """Bind a replayed attended clock to the report's actual input selections."""
+
+    if calculation_cutoff_date is None or clock.get(
+        "selected_financial_cutoff"
+    ) != calculation_cutoff_date:
+        raise ReportValidationError("source clock selected financial cutoff differs")
+    _reference, _provider_catalog, generation_id, catalog_sha256 = (
+        _selected_provider_ledger_catalog(catalog, baseline_root, provider_ledger_root)
+    )
+    root = provider_ledger_root or baseline_root.parent / "provider-ledger"
+    selected_generation = root / "generations" / generation_id
+    phase_catalog = _source_clock_file_path(
+        phase.get("provider_ledger_catalog"), "provider ledger catalog"
+    )
+    phase_manifest = _source_clock_file_path(
+        phase.get("provider_ledger_manifest"), "provider ledger manifest"
+    )
+    selected_catalog = selected_generation / "provider-ledger.json"
+    selected_manifest = selected_generation / "generation.json"
+    if (
+        phase.get("provider_ledger_generation_id") != generation_id
+        or hash_file(phase_catalog) != hash_file(selected_catalog)
+        or hash_file(phase_manifest) != hash_file(selected_manifest)
+        or hash_file(selected_catalog)[0] != catalog_sha256
+    ):
+        raise ReportValidationError("source clock selected ledger differs")
+    phase_contract = _source_clock_file_path(
+        phase.get("financial_input_contract"), "financial input contract"
+    )
+    if hash_file(phase_contract) != hash_file(financial_input_contract_path):
+        raise ReportValidationError("source clock financial input contract differs")
 
 
 def _load_json(path: Path, field_name: str) -> dict[str, Any]:
@@ -5240,7 +5339,10 @@ def build_report_data(
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
-    source_clock = _validated_source_clock(source_clock_path)
+    source_clock_authority = _source_clock_authority(source_clock_path)
+    source_clock = (
+        None if source_clock_authority is None else source_clock_authority[1]
+    )
     catalog, baseline_ref, baseline_catalog_path = _baseline(
         baseline_root, baseline_generation_id
     )
@@ -5622,6 +5724,17 @@ def build_report_data(
                 _PORTABLE_HWM_PRODUCT_CONTRACT,
                 catalog,
             )
+        )
+    if source_clock_authority is not None:
+        assert source_clock is not None
+        _validate_source_clock_consumer_binding(
+            source_clock_authority[0],
+            source_clock,
+            catalog=catalog,
+            baseline_root=baseline_root,
+            provider_ledger_root=provider_ledger_root,
+            calculation_cutoff_date=calculation_cutoff_date,
+            financial_input_contract_path=financial_input_contract_path,
         )
     governed_hwm_proof = (
         _report_governed_hwm_proof(
