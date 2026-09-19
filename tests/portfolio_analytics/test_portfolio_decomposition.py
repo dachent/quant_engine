@@ -509,7 +509,7 @@ def test_declared_unavailable_label_does_not_hide_other_missing_source_label(
     with pytest.raises(
         decomposition.DecompositionError,
         match=(
-            "missing expected source-period target label\\(s\\).*"
+            "missing expected target label\\(s\\) from source-period authority.*"
             f"{unexpected_missing.isoformat()}"
         ),
     ):
