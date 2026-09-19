@@ -18,6 +18,10 @@ checkpoints, issue descriptions, PR text and skill defaults:
   A successful extraction, coherent older generation, passing component suite or
   new build date alone is not closure. Preserve documented publication lag,
   fixed-history boundaries and owner-approved unavailable observations.
+- Freeze the requested capture cutoff for the delivery run. A clock/date
+  rollover does not by itself reopen completed acquisition or require another
+  login. Distinguish a newer incremental refresh from a missing original
+  capture; preserve and reuse the original captures and their verified QC.
 - If any required capture or input QC remains pending, keep the source phase
   open in the governing issue. Do not report the input phase complete or resume
   downstream work. Resume it only after the missing source evidence is obtained
