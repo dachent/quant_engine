@@ -3499,7 +3499,7 @@ def _model_result(
         ]
         if unexpected_missing:
             raise DecompositionError(
-                "missing expected source-period target label(s): "
+                "missing expected target label(s) from source-period authority: "
                 f"{[day.isoformat() for day in unexpected_missing]}"
             )
         source_proof = {
