@@ -68,7 +68,7 @@ def _copy_trust_paths(root: Path) -> None:
 
 def _configure_source_alternate(root: Path) -> None:
     source_git_dir = _git(
-        REPOSITORY_ROOT, "rev-parse", "--absolute-git-dir"
+        REPOSITORY_ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"
     ).stdout.strip()
     alternates = root / ".git" / "objects" / "info" / "alternates"
     alternates.parent.mkdir(parents=True, exist_ok=True)
