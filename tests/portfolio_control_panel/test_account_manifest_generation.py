@@ -23109,6 +23109,7 @@ def _mixed_same_account_continuity_selected_inputs(perimeter_module: Any) -> obj
                 "record_id": record_id,
                 "account_id": "synthetic-account-01",
                 "as_of_date": as_of_date,
+                "value_basis": "ACCOUNT_TOTAL",
                 "nav": {
                     "currency": "USD",
                     "status": "AVAILABLE",
