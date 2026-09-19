@@ -2001,10 +2001,25 @@ def _owner_decision_payloads(
         policy.get("classification_treatments"),
         "invested-capital classification_treatments",
     )
+    leverage = _object(
+        policy.get("leverage_accounting"), "invested-capital leverage_accounting"
+    )
+    receipt_leverage = dict(leverage)
+    consumers = receipt_leverage.get("consumers")
+    if isinstance(consumers, list) and "WORKBOOK" not in consumers:
+        # The #318 receipt binds the financial treatment, not the now-held
+        # delivery surface.  Preserve its immutable legacy payload shape when
+        # replaying the current workbook-free contract.
+        panel_index = consumers.index("PANEL")
+        receipt_leverage["consumers"] = [
+            *consumers[:panel_index],
+            "WORKBOOK",
+            *consumers[panel_index:],
+        ]
     return {
         "MARGIN_AND_LEVERAGE": {
             "decision": treatments.get("MARGIN_FINANCING"),
-            "leverage_accounting": policy.get("leverage_accounting"),
+            "leverage_accounting": receipt_leverage,
         },
         "PREDECESSOR_TRANSITION": {
             "decision": treatments.get("PREDECESSOR_TRANSITION")
@@ -2570,13 +2585,11 @@ def _validate_leverage_accounting(
         "OWNER_EXTERNAL_FLOWS",
     }:
         raise FinancialMvpContractError("leverage required-fact set differs")
-    if set(leverage["consumers"]) != {
-        *OUTCOME_IDS,
-        "REPORT",
-        "WORKBOOK",
-        "PANEL",
-        "RELEASE_RECEIPT",
-    }:
+    current_consumers = {*OUTCOME_IDS, "REPORT", "PANEL", "RELEASE_RECEIPT"}
+    if set(leverage["consumers"]) not in (
+        current_consumers,
+        {*current_consumers, "WORKBOOK"},
+    ):
         raise FinancialMvpContractError("leverage consumer set differs")
     metrics = _object(
         leverage["affected_metrics"], "invested-capital leverage affected_metrics"
@@ -2802,16 +2815,21 @@ def _validate_product(product: Mapping[str, Any]) -> None:
             "current vertical recipe compatibility must be [6, 7]"
         )
     artifacts = _objects(product["final_artifacts"], "product.final_artifacts")
-    expected_roles = {"REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"}
+    current_roles = {"REPORT", "PANEL", "RELEASE_RECEIPT"}
+    legacy_roles = {"REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"}
     roles: set[str] = set()
     for row in artifacts:
         _strict_keys(row, {"acceptance", "role"}, "final_artifact")
         role = _text(row["role"], "final_artifact.role")
         roles.add(role)
         _text(row["acceptance"], "final_artifact.acceptance")
-    if roles != expected_roles:
+    if roles == legacy_roles and version == "1.8.0":
+        # Immutable financial input contracts admitted before the held-workbook
+        # correction remain replayable; they do not authorize new workbook work.
+        pass
+    elif roles != current_roles or version != "1.9.0":
         raise FinancialMvpContractError(
-            "final artifacts must name report/workbook/panel/receipt"
+            "final artifacts must name report/panel/receipt"
         )
     publication = _object(
         product["publication_boundary"], "product.publication_boundary"
@@ -4634,7 +4652,9 @@ def _validate_active_blocked_numeric_identities(
             )
 
 
-def _validate_outcomes(outcomes: list[dict[str, Any]]) -> None:
+def _validate_outcomes(
+    outcomes: list[dict[str, Any]], *, allow_legacy_workbook: bool
+) -> None:
     if [row.get("outcome_id") for row in outcomes] != list(OUTCOME_IDS):
         raise FinancialMvpContractError(
             "the four financial outcomes are not exact/ordered"
@@ -4675,9 +4695,12 @@ def _validate_outcomes(outcomes: list[dict[str, Any]]) -> None:
             raise FinancialMvpContractError(
                 f"generic UNAVAILABLE cannot accept required outcome {outcome_id}"
             )
-        if set(row["consumers"]) != {"REPORT", "WORKBOOK", "PANEL", "RELEASE_RECEIPT"}:
+        expected_consumers = {"REPORT", "PANEL", "RELEASE_RECEIPT"}
+        if allow_legacy_workbook:
+            expected_consumers.add("WORKBOOK")
+        if set(row["consumers"]) != expected_consumers:
             raise FinancialMvpContractError(
-                f"{outcome_id} must reach report/workbook/panel/receipt"
+                f"{outcome_id} must reach report/panel/receipt"
             )
         contract = _object(row["calculation_contract"], "calculation_contract")
         if outcome_id == "AS_HELD_COMPOSITE_HWM":
@@ -6543,7 +6566,9 @@ def validate_contract(
     strategies = _objects(contract["strategies"], "strategies")
     _validate_strategies(strategies, registry_ids)
     outcomes = _objects(contract["financial_outcomes"], "financial_outcomes")
-    _validate_outcomes(outcomes)
+    _validate_outcomes(
+        outcomes, allow_legacy_workbook=product["product_version"] == "1.8.0"
+    )
     sources = _objects(contract["source_segments"], "source_segments")
     required_strategy_ids = {
         row["strategy_id"]

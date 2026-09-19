@@ -633,7 +633,7 @@
         },
         "final_artifacts": {
           "type": "array",
-          "minItems": 4,
+          "minItems": 3,
           "maxItems": 4,
           "items": {
             "type": "object",

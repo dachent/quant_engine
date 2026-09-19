@@ -1112,11 +1112,11 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
     # The panel command writes the manifest from the same verified bundle, so
     # the spec build leaves that node's declared output untouched.
     assert not (output_root / "stages" / "panel").exists()
-    # `build_workbook` and `build_panel` refuse a financial publication
-    # without a portfolio root, so the nodes that run them must carry it.
+    # The report and panel stages are private financial stages and must carry
+    # the production root disjointness proof; workbook is permanently held.
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     argv_by_node = {row["node_id"]: row.get("argv", []) for row in spec["nodes"]}
-    for node_id in ("build-workbook", "build-panel"):
+    for node_id in ("build-report", "build-panel"):
         argv = argv_by_node[node_id]
         assert "--portfolio-root" in argv
         assert argv[argv.index("--portfolio-root") + 1] == str(tmp_path / "portfolio")
@@ -1130,7 +1130,7 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
     reads_by_node = {
         row["node_id"]: row.get("declared_reads", []) for row in spec["nodes"]
     }
-    for node_id in ("build-report", "build-workbook", "build-panel"):
+    for node_id in ("build-report", "build-panel"):
         argv = argv_by_node[node_id]
         for flag, path in (
             ("--hwm-governed-result", governed["as-held-hwm"]),
@@ -4227,16 +4227,12 @@ def test_generated_semantic_command_declares_exact_gate_file(
     output_root = tmp_path / "dag"
     spec_path = output_root / "pipeline-spec.json"
     retained_cache_root = tmp_path / "retained-decomposition"
-    workbook_runtime = tmp_path / "workbook-runtime.json"
-    workbook_runtime.write_text("{}\n", encoding="utf-8")
-
     materializer.build_spec(
         recipe_path,
         output_root,
         spec_path,
         portfolio_root=tmp_path / "portfolio",
         retained_cache_root=retained_cache_root,
-        workbook_runtime_path=workbook_runtime,
     )
 
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -4260,15 +4256,10 @@ def test_generated_semantic_command_declares_exact_gate_file(
     assert analytics_command["argv"][retained_index + 1] == str(retained_cache_root)
     assert str(retained_cache_root) in analytics_command["declared_writes"]
     assert spec["state_root"] == str(retained_cache_root)
-    workbook_command = nodes["build-workbook"]
-    runtime_index = workbook_command["argv"].index("--workbook-runtime")
-    assert workbook_command["argv"][runtime_index + 1] == str(workbook_runtime)
-    assert str(workbook_runtime) in workbook_command["declared_reads"]
-    assert nodes["build-workbook"]["retry_limit"] == 1
     assert all(
         node["retry_limit"] == 0
         for node_id, node in nodes.items()
-        if node.get("kind") == "COMMAND" and node_id != "build-workbook"
+        if node.get("kind") == "COMMAND"
     )
     vertical = json.loads(
         Path(json.loads(recipe_path.read_text())["vertical_recipe"]["path"]).read_text()
@@ -4297,7 +4288,7 @@ def test_generated_semantic_command_declares_exact_gate_file(
         str(output_root / "stages" / "ledger")
         in nodes["build-attribution"]["declared_reads"]
     )
-    for role in ("report", "workbook"):
+    for role in ("report",):
         assert (
             str(output_root / "stages" / "baseline")
             in nodes[f"build-{role}"]["declared_reads"]
@@ -4316,8 +4307,6 @@ def test_generated_semantic_command_declares_exact_gate_file(
     )
     assert {
         str(report_candidate / "portfolio-report-data.json"),
-        str(report_candidate / "workbook-contract.json"),
-        str(report_candidate / "xlsx-job.json"),
     } <= set(nodes["build-report"]["declared_writes"])
     report_generation_paths = {
         row["relative_path"] for row in nodes["report-generation"]["files"]
@@ -4325,16 +4314,14 @@ def test_generated_semantic_command_declares_exact_gate_file(
     assert "portfolio-report.xlsx" not in report_generation_paths
     assert not any(path.startswith("deliveries/") for path in report_generation_paths)
     assert (
-        str(output_root / "stages" / "report") in nodes["build-panel"]["declared_reads"]
-    )
-    assert (
-        str(output_root / "stage-results" / "workbook.json")
+        str(output_root / "stages" / "report-candidate")
         in nodes["build-panel"]["declared_reads"]
     )
     assert (
-        str(output_root / "stages" / "report-candidate")
-        in nodes["build-workbook"]["declared_writes"]
+        str(output_root / "stage-results" / "report.json")
+        in nodes["build-panel"]["declared_reads"]
     )
+    assert "build-workbook" not in nodes
 
 
 def test_governed_hwm_assessment_binds_the_admitted_input_contract() -> None:
@@ -4425,6 +4412,7 @@ def _attended_preflight_fixture(tmp_path: Path) -> dict[str, object]:
         "qa_dir": qa_dir,
         "request_identity": {"fixture": "attended-child-boundary"},
         "required_stages": materializer.ATTENDED_STAGES,
+        "source_phase": {"status": "PASS"},
     }
 
 
@@ -4433,7 +4421,7 @@ def _record_attended_stage(output_root: Path, role: str) -> None:
         output_root
         / "stages"
         / (
-            "report-candidate"
+            "report"
             if role == "report"
             else "report"
             if role == "workbook"
@@ -4505,8 +4493,6 @@ def _attended_argv(
     execute: bool,
     resume: bool = False,
 ) -> list[str]:
-    runtime = preflight["runtime"]
-    assert isinstance(runtime, dict)
     argv = [
         "attended",
         "--repo-root",
@@ -4523,8 +4509,6 @@ def _attended_argv(
         str(preflight["requested_as_of"]),
         "--source-run",
         str(preflight["source_run"]),
-        "--workbook-runtime",
-        str(runtime["descriptor"]),
     ]
     if execute:
         argv.append("--execute")
@@ -4825,7 +4809,7 @@ def test_attended_preserves_original_exit_when_child_leaves_partial_receipt(
 
 @pytest.mark.parametrize(
     "role",
-    ("attribution", "analytics", "report", "workbook", "panel-candidate", "panel"),
+    ("attribution", "analytics", "report", "panel-candidate", "panel"),
 )
 def test_attended_completed_nonledger_stage_requires_bound_native_artifacts(
     tmp_path: Path, role: str

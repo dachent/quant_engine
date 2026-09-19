@@ -1239,16 +1239,10 @@ def _verify_consumers(
     )
     if downloadable_report != report_bytes:
         raise FinancialOutcomeError("downloaded report differs from selected report")
-    # The panel carries the workbook inline rather than as a file beside the
-    # page: an .xlsx inside a published generation is rewritten in place by the
-    # SharePoint sync client, and a sealed directory cannot tolerate a file that
-    # changes under it. Parity is therefore checked against the bytes the panel
-    # actually delivers, which is what the browser downloads too.
-    _index_path, index_html = _generation_file(epochs["panel_generation"], "index.html")
-    workbook = panel_producer.embedded_download_bytes(
-        index_html.decode("utf-8"), panel_producer.WORKBOOK_DOWNLOAD
-    )
-    parity = report_producer._workbook_parity_receipt(report_bytes, workbook)
+    report_panel_parity = {
+        "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+        "panel_report_sha256": hashlib.sha256(downloadable_report).hexdigest(),
+    }
     correlation_node = nodes["financial-outcome-dependence-live-only"]
     correlation_generation = _generation(spec, correlation_node)
     correlation = replays[("DEPENDENCE", correlation_node.path.resolve())]
@@ -1282,7 +1276,7 @@ def _verify_consumers(
             raise FinancialOutcomeError(f"panel dependence values differ: {mode}")
     return {
         "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
-        "workbook_parity": parity,
+        "report_panel_parity": report_panel_parity,
         "decomposition_cells": _verify_decomposition_consumers(
             spec, contract, nodes, replays, series, dashboard, plan_bindings, plan
         ),

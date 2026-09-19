@@ -6808,6 +6808,7 @@ def build_candidate(
     hybrid_decomposition_plan_bundle: Path | None = None,
     attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    include_workbook: bool = False,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -6869,6 +6870,37 @@ def build_candidate(
                 "invested-capital input generation",
             ),
         )
+    if not include_workbook:
+        # The current product publishes canonical report authority only.  The
+        # dormant workbook branch below remains available for immutable legacy
+        # input replay, but no active runner or default report build reaches it.
+        if epoch_manifest_path is not None or epoch_manifest_source_path is not None:
+            _manifest, _source, manifest_bytes, source_bytes = _epoch_manifest_payloads(
+                epoch_manifest_path, epoch_manifest_source_path
+            )
+            if epoch_crosswalk_path is None:
+                raise ReportValidationError(
+                    "epoch manifest requires an explicit current epoch crosswalk"
+                )
+            _write_exact(candidate / EPOCH_MANIFEST_WORKBOOK_NAME, manifest_bytes)
+            _write_exact(candidate / EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME, source_bytes)
+            _write_exact(
+                candidate / EPOCH_CROSSWALK_WORKBOOK_NAME,
+                _regular_file_bytes(epoch_crosswalk_path, "current epoch crosswalk"),
+            )
+        return {
+            "account_count": len(report["account_summary"]),
+            "candidate_dir": str(candidate),
+            "report_data_sha256": report_id,
+            "report_id": report_id,
+            "strategy_count": len(report["strategy_summary"]),
+            "twr_available_count": sum(
+                1
+                for item in report["twr_mwr"]
+                if str(item["twr_status"]).startswith("AVAILABLE")
+            ),
+            "twr_row_count": len(report["twr_mwr"]),
+        }
     workbook_evidence = _build_workbook_exact(report, workbook_path)
     # Excel is allowed to rewrite the file it opens. Keep the canonical initial
     # workbook immutable and reset only this explicit non-authority copy.
@@ -9547,8 +9579,8 @@ def _verification_from_snapshots(
     report_bytes: bytes,
     candidate_dir: Path,
     candidate_report_bytes: bytes,
-    workbook_path: Path,
-    workbook_bytes: bytes,
+    workbook_path: Path | None = None,
+    workbook_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     report_id = hashlib.sha256(report_bytes).hexdigest()
     if candidate_dir.name != report_id:
@@ -9557,10 +9589,7 @@ def _verification_from_snapshots(
         raise ReportValidationError(
             "candidate report data differs from current baseline"
         )
-    if _regular_file_bytes(workbook_path, "Excel workbook") != workbook_bytes:
-        raise ReportValidationError("Excel workbook snapshot differs")
-    workbook_evidence = verify_workbook(workbook_path)
-    return {
+    verification = {
         "account_count": len(report["account_summary"]),
         "baseline_generation_id": report["baseline"]["generation_id"],
         "report_data_sha256": report_id,
@@ -9572,14 +9601,20 @@ def _verification_from_snapshots(
             if str(item["twr_status"]).startswith("AVAILABLE")
         ),
         "twr_row_count": len(report["twr_mwr"]),
-        **workbook_evidence,
     }
+    if workbook_path is not None or workbook_bytes is not None:
+        if workbook_path is None or workbook_bytes is None:
+            raise ReportValidationError("workbook snapshot arguments differ")
+        if _regular_file_bytes(workbook_path, "Excel workbook") != workbook_bytes:
+            raise ReportValidationError("Excel workbook snapshot differs")
+        verification.update(verify_workbook(workbook_path))
+    return verification
 
 
 def verify_candidate(
     baseline_root: Path,
     candidate_dir: Path,
-    excel_workbook: Path,
+    excel_workbook: Path | None = None,
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
     attribution_root: Path | None = None,
@@ -9693,7 +9728,11 @@ def verify_candidate(
             raise ReportValidationError(
                 "candidate invested-capital input generation differs"
             )
-    workbook_bytes = _regular_file_bytes(excel_workbook, "Excel workbook")
+    workbook_bytes = (
+        _regular_file_bytes(excel_workbook, "Excel workbook")
+        if excel_workbook is not None
+        else None
+    )
     verification = _verification_from_snapshots(
         report,
         report_bytes,
@@ -10315,9 +10354,9 @@ def _recheck_snapshot_identities(
 def publish_report(
     baseline_root: Path,
     candidate_dir: Path,
-    excel_workbook: Path,
-    xlsx_result: Path,
-    validation_result: Path,
+    excel_workbook: Path | None,
+    xlsx_result: Path | None,
+    validation_result: Path | None,
     output_root: Path,
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
@@ -10432,16 +10471,50 @@ def publish_report(
             baseline_catalog_path=baseline_catalog_path,
             epoch_manifest_generation_root=epoch_manifest_generation_root,
         )
-    evidence_snapshots = _validated_workbook_evidence_snapshots(
-        candidate_dir,
+    workbook_inputs = (
         excel_workbook,
         xlsx_result,
         validation_result,
         workbook_evidence_binding,
-        epoch_manifest_path,
-        epoch_manifest_source_path,
-        epoch_crosswalk_path,
     )
+    if all(value is None for value in workbook_inputs):
+        # Current authority is canonical report data.  Do not create or infer
+        # an XLSX/evidence substitute when the held workbook route is absent.
+        evidence_snapshots = {
+            "report_data": (
+                candidate_dir / REPORT_DATA_NAME,
+                _regular_file_bytes(
+                    candidate_dir / REPORT_DATA_NAME, "candidate report data"
+                ),
+            )
+        }
+        evidence_snapshots.update(
+            _epoch_manifest_workbook_snapshots(
+                candidate_dir,
+                epoch_manifest_path,
+                epoch_manifest_source_path,
+                epoch_crosswalk_path,
+            )
+        )
+    elif any(value is None for value in workbook_inputs):
+        raise ReportValidationError(
+            "workbook evidence arguments must be all absent or all supplied"
+        )
+    else:
+        assert excel_workbook is not None
+        assert xlsx_result is not None
+        assert validation_result is not None
+        assert workbook_evidence_binding is not None
+        evidence_snapshots = _validated_workbook_evidence_snapshots(
+            candidate_dir,
+            excel_workbook,
+            xlsx_result,
+            validation_result,
+            workbook_evidence_binding,
+            epoch_manifest_path,
+            epoch_manifest_source_path,
+            epoch_crosswalk_path,
+        )
     effective_epoch_manifest_path = (
         candidate_dir / EPOCH_MANIFEST_WORKBOOK_NAME
         if "epoch_manifest" in evidence_snapshots
@@ -10673,15 +10746,15 @@ def publish_report(
         attribution_generation_id=snapshot_attribution_generation_id,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
     )
-    snapshot_workbook = snapshot_root / WORKBOOK_NAME
-    _write_exact(snapshot_workbook, evidence_snapshots["workbook"][1])
+    if "workbook" in evidence_snapshots:
+        _write_exact(snapshot_root / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
     verification = _verification_from_snapshots(
         report,
         report_bytes,
         candidate_dir,
         evidence_snapshots["report_data"][1],
-        snapshot_workbook,
-        evidence_snapshots["workbook"][1],
+        snapshot_root / WORKBOOK_NAME if "workbook" in evidence_snapshots else None,
+        evidence_snapshots.get("workbook", (None, None))[1],
     )
     if "epoch_manifest" in evidence_snapshots:
         for name in ("epoch_manifest", "epoch_manifest_source", "epoch_crosswalk"):
@@ -10705,55 +10778,60 @@ def publish_report(
             "portfolio-report-data",
             "1",
         ),
-        (
-            evidence_snapshots["xlsx_result"][0],
-            "evidence/xlsx-win-result.json",
-            "xlsx-win-result",
-            "2.0",
-        ),
-        (
-            evidence_snapshots["validation_result"][0],
-            "evidence/workbook-validation.json",
-            "xlsx-win-validation",
-            "1",
-        ),
-        (
-            evidence_snapshots["workbook_canonicalization"][0],
-            "evidence/workbook-canonicalization.json",
-            "portfolio-report-workbook-canonicalization",
-            WORKBOOK_CANONICALIZATION_VERSION,
-        ),
-        (
-            evidence_snapshots["xlsx_result_canonicalization"][0],
-            "evidence/xlsx-result-canonicalization.json",
-            "xlsx-win-result-canonicalization",
-            XLSX_RESULT_CANONICALIZATION_VERSION,
-        ),
-        (
-            evidence_snapshots["workbook_contract"][0],
-            "evidence/workbook-contract.json",
-            "xlsx-win-validation-contract",
-            "1",
-        ),
-        (
-            evidence_snapshots["xlsx_job"][0],
-            "evidence/xlsx-job.json",
-            "xlsx-win-job",
-            "2.0",
-        ),
-        (
-            evidence_snapshots["workbook_evidence_binding"][0],
-            "evidence/workbook-evidence-binding.json",
-            "portfolio-report-workbook-evidence-binding",
-            str(WORKBOOK_EVIDENCE_BINDING_VERSION),
-        ),
-        (
-            evidence_snapshots["workbook_parity"][0],
-            "evidence/workbook-parity.json",
-            "portfolio-report-workbook-parity",
-            str(WORKBOOK_PARITY_VERSION),
-        ),
     ]
+    if "workbook" in evidence_snapshots:
+        artifact_specs.extend(
+            [
+                (
+                    evidence_snapshots["xlsx_result"][0],
+                    "evidence/xlsx-win-result.json",
+                    "xlsx-win-result",
+                    "2.0",
+                ),
+                (
+                    evidence_snapshots["validation_result"][0],
+                    "evidence/workbook-validation.json",
+                    "xlsx-win-validation",
+                    "1",
+                ),
+                (
+                    evidence_snapshots["workbook_canonicalization"][0],
+                    "evidence/workbook-canonicalization.json",
+                    "portfolio-report-workbook-canonicalization",
+                    WORKBOOK_CANONICALIZATION_VERSION,
+                ),
+                (
+                    evidence_snapshots["xlsx_result_canonicalization"][0],
+                    "evidence/xlsx-result-canonicalization.json",
+                    "xlsx-win-result-canonicalization",
+                    XLSX_RESULT_CANONICALIZATION_VERSION,
+                ),
+                (
+                    evidence_snapshots["workbook_contract"][0],
+                    "evidence/workbook-contract.json",
+                    "xlsx-win-validation-contract",
+                    "1",
+                ),
+                (
+                    evidence_snapshots["xlsx_job"][0],
+                    "evidence/xlsx-job.json",
+                    "xlsx-win-job",
+                    "2.0",
+                ),
+                (
+                    evidence_snapshots["workbook_evidence_binding"][0],
+                    "evidence/workbook-evidence-binding.json",
+                    "portfolio-report-workbook-evidence-binding",
+                    str(WORKBOOK_EVIDENCE_BINDING_VERSION),
+                ),
+                (
+                    evidence_snapshots["workbook_parity"][0],
+                    "evidence/workbook-parity.json",
+                    "portfolio-report-workbook-parity",
+                    str(WORKBOOK_PARITY_VERSION),
+                ),
+            ]
+        )
     if "invested_capital_result" in evidence_snapshots:
         artifact_specs.extend(
             [
@@ -10923,12 +11001,11 @@ def publish_report(
         adapter=AdapterIdentity("portfolio-report-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="accepted baseline report data plus explicit workbook coverage and validation dispositions",
+            boundary="accepted baseline report data with exact source and canonical-report verification",
             fact_types=(
                 "performance",
                 "portfolio report",
                 "reconciliation",
-                "workbook validation",
             ),
             observed_start=as_of,
             observed_end=as_of,
@@ -10942,38 +11019,18 @@ def publish_report(
         generation_dir / REPORT_DATA_NAME,
         evidence_snapshots["report_data"][1],
     )
-    _write_exact(
-        generation_dir / "xlsx-win-result.json",
-        evidence_snapshots["xlsx_result"][1],
-    )
-    _write_exact(
-        generation_dir / "workbook-validation.json",
-        evidence_snapshots["validation_result"][1],
-    )
-    _write_exact(
-        generation_dir / "workbook-canonicalization.json",
-        evidence_snapshots["workbook_canonicalization"][1],
-    )
-    _write_exact(
-        generation_dir / "xlsx-result-canonicalization.json",
-        evidence_snapshots["xlsx_result_canonicalization"][1],
-    )
-    _write_exact(
-        generation_dir / "workbook-contract.json",
-        evidence_snapshots["workbook_contract"][1],
-    )
-    _write_exact(
-        generation_dir / "xlsx-job.json",
-        evidence_snapshots["xlsx_job"][1],
-    )
-    _write_exact(
-        generation_dir / "workbook-evidence-binding.json",
-        evidence_snapshots["workbook_evidence_binding"][1],
-    )
-    _write_exact(
-        generation_dir / "workbook-parity.json",
-        evidence_snapshots["workbook_parity"][1],
-    )
+    if "workbook" in evidence_snapshots:
+        for name, relative in (
+            ("xlsx_result", "xlsx-win-result.json"),
+            ("validation_result", "workbook-validation.json"),
+            ("workbook_canonicalization", "workbook-canonicalization.json"),
+            ("xlsx_result_canonicalization", "xlsx-result-canonicalization.json"),
+            ("workbook_contract", "workbook-contract.json"),
+            ("xlsx_job", "xlsx-job.json"),
+            ("workbook_evidence_binding", "workbook-evidence-binding.json"),
+            ("workbook_parity", "workbook-parity.json"),
+        ):
+            _write_exact(generation_dir / relative, evidence_snapshots[name][1])
     if "invested_capital_result" in evidence_snapshots:
         _write_exact(
             generation_dir / INVESTED_CAPITAL_RESULT_NAME,
@@ -11003,28 +11060,30 @@ def publish_report(
         )
     _write_exact(generation_dir / "report-verification.json", verification_bytes)
     _recheck_snapshot_identities(originals, inventories)
-    generation_manifest_bytes = manifest.to_json_bytes()
-    delivery_dir = output_root / "deliveries" / manifest.generation_id
-    delivery_receipt = _report_delivery_receipt(
-        generation_id=manifest.generation_id,
-        generation_manifest_bytes=generation_manifest_bytes,
-        generation_inventory_sha256_value=generation_inventory_sha256(
-            output_root, manifest.generation_id
-        ),
-        report_data_bytes=evidence_snapshots["report_data"][1],
-        workbook_bytes=evidence_snapshots["workbook"][1],
-        epoch_crosswalk_bytes=(
-            evidence_snapshots["epoch_crosswalk"][1]
-            if "epoch_crosswalk" in evidence_snapshots
-            else None
-        ),
-    )
-    delivery_receipt_bytes = canonical_json_bytes(delivery_receipt)
-    _preflight_report_delivery(
-        delivery_dir, evidence_snapshots["workbook"][1], delivery_receipt_bytes
-    )
-    _write_exact(delivery_dir / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
-    _write_exact(delivery_dir / REPORT_DELIVERY_NAME, delivery_receipt_bytes)
+    delivery_dir: Path | None = None
+    if "workbook" in evidence_snapshots:
+        generation_manifest_bytes = manifest.to_json_bytes()
+        delivery_dir = output_root / "deliveries" / manifest.generation_id
+        delivery_receipt = _report_delivery_receipt(
+            generation_id=manifest.generation_id,
+            generation_manifest_bytes=generation_manifest_bytes,
+            generation_inventory_sha256_value=generation_inventory_sha256(
+                output_root, manifest.generation_id
+            ),
+            report_data_bytes=evidence_snapshots["report_data"][1],
+            workbook_bytes=evidence_snapshots["workbook"][1],
+            epoch_crosswalk_bytes=(
+                evidence_snapshots["epoch_crosswalk"][1]
+                if "epoch_crosswalk" in evidence_snapshots
+                else None
+            ),
+        )
+        delivery_receipt_bytes = canonical_json_bytes(delivery_receipt)
+        _preflight_report_delivery(
+            delivery_dir, evidence_snapshots["workbook"][1], delivery_receipt_bytes
+        )
+        _write_exact(delivery_dir / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
+        _write_exact(delivery_dir / REPORT_DELIVERY_NAME, delivery_receipt_bytes)
     pointer = publish_generation(output_root, manifest.generation_id)
     snapshot_context.cleanup()
     return {
@@ -11034,9 +11093,16 @@ def publish_report(
         "strategy_count": verification["strategy_count"],
         "twr_available_count": verification["twr_available_count"],
         "twr_row_count": verification["twr_row_count"],
-        "delivery_dir": str(delivery_dir),
-        "delivery_receipt": str(delivery_dir / REPORT_DELIVERY_NAME),
-        "workbook_sha256": verification["workbook_sha256"],
+        "root": str(output_root),
+        **(
+            {
+                "delivery_dir": str(delivery_dir),
+                "delivery_receipt": str(delivery_dir / REPORT_DELIVERY_NAME),
+                "workbook_sha256": verification["workbook_sha256"],
+            }
+            if delivery_dir is not None
+            else {}
+        ),
         **(
             {
                 "epoch_manifest_sha256": verification["epoch_manifest_sha256"],
@@ -11083,7 +11149,7 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--baseline-root", type=Path, required=True)
     verify.add_argument("--baseline-generation-id")
     verify.add_argument("--candidate-dir", type=Path, required=True)
-    verify.add_argument("--excel-workbook", type=Path, required=True)
+    verify.add_argument("--excel-workbook", type=Path)
     verify.add_argument("--freshness-health", type=Path)
     verify.add_argument("--provider-ledger-root", type=Path)
     verify.add_argument("--attribution-root", type=Path)
@@ -11130,10 +11196,10 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--baseline-root", type=Path, required=True)
     publish.add_argument("--baseline-generation-id")
     publish.add_argument("--candidate-dir", type=Path, required=True)
-    publish.add_argument("--excel-workbook", type=Path, required=True)
-    publish.add_argument("--xlsx-result", type=Path, required=True)
-    publish.add_argument("--validation-result", type=Path, required=True)
-    publish.add_argument("--workbook-evidence-binding", type=Path, required=True)
+    publish.add_argument("--excel-workbook", type=Path)
+    publish.add_argument("--xlsx-result", type=Path)
+    publish.add_argument("--validation-result", type=Path)
+    publish.add_argument("--workbook-evidence-binding", type=Path)
     publish.add_argument("--output-root", type=Path, required=True)
     publish.add_argument("--freshness-health", type=Path)
     publish.add_argument("--provider-ledger-root", type=Path)

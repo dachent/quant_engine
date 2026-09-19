@@ -5450,7 +5450,10 @@ def build_report(
     attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
-    _resolve_workbook_runtime(workbook_runtime_path)
+    if workbook_runtime_path is not None:
+        raise VerticalBuildError(
+            "workbook runtime is permanently held and excluded from the financial MVP"
+        )
     hwm_paths: _ReportForwardedArguments = (
         {
             "hwm_governed_result_path": hwm_governed_result_path,
@@ -5526,25 +5529,104 @@ def build_report(
         epoch_manifest_generation_id=epoch_manifest_generation_id,
         **forwarded_arguments,
     )
-    return build_workbook(
-        baseline_root,
-        provider_ledger_root,
-        freshness_health,
-        history_contract,
-        implementation_reconciliation,
-        implementation_return_attribution,
-        attribution_root,
-        Path(_text(candidate.get("candidate_dir"), "report candidate")),
-        output_root,
-        correlation_root,
-        decomposition_lenses_root,
-        decomposition_plan_bundle,
-        hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
-        epoch_manifest_generation_root=epoch_manifest_generation_root,
-        epoch_manifest_generation_id=epoch_manifest_generation_id,
-        **forwarded_arguments,
-        workbook_runtime_path=workbook_runtime_path,
+    candidate_dir = Path(_text(candidate.get("candidate_dir"), "report candidate"))
+    report_arguments = (
+        "--baseline-root",
+        str(baseline_root),
+        "--candidate-dir",
+        str(candidate_dir),
+        "--provider-ledger-root",
+        str(provider_ledger_root),
+        "--freshness-health",
+        str(freshness_health),
+        "--history-contract",
+        str(history_contract),
+        "--implementation-reconciliation",
+        str(implementation_reconciliation),
+        "--implementation-return-attribution",
+        str(implementation_return_attribution),
+        *(
+            ("--attribution-root", str(attribution_root))
+            if attribution_root is not None
+            else ()
+        ),
+        *(
+            ("--attribution-generation-id", attribution_generation_id)
+            if attribution_generation_id is not None
+            else ()
+        ),
+        *(
+            ("--correlation-root", str(correlation_root))
+            if correlation_root is not None
+            else ()
+        ),
+        *(
+            ("--dependence-selected-inputs", str(dependence_selected_inputs_path))
+            if dependence_selected_inputs_path is not None
+            else ()
+        ),
+        *(
+            (
+                "--decomposition-lenses-root",
+                str(decomposition_lenses_root),
+                "--decomposition-plan-bundle",
+                str(decomposition_plan_bundle),
+            )
+            if decomposition_lenses_root is not None
+            and decomposition_plan_bundle is not None
+            else ()
+        ),
+        *(
+            (
+                "--hybrid-decomposition-plan-bundle",
+                str(hybrid_decomposition_plan_bundle),
+            )
+            if hybrid_decomposition_plan_bundle is not None
+            else ()
+        ),
+        *(
+            (
+                "--epoch-manifest",
+                str(candidate_dir / "account-strategy-manifest.json"),
+                "--epoch-manifest-source",
+                str(candidate_dir / "epoch-manifest-source.json"),
+                "--epoch-crosswalk",
+                str(candidate_dir / "account-strategy-current-epoch-crosswalk.json"),
+                "--epoch-manifest-generation-root",
+                str(epoch_manifest_generation_root),
+            )
+            if epoch_manifest_generation_root is not None
+            else ()
+        ),
+        *_governed_hwm_arguments(
+            result=hwm_governed_result_path,
+            input_generation=hwm_governed_input_generation_path,
+            calendar_authority=hwm_governed_calendar_authority_path,
+            admission_receipt=hwm_governed_admission_receipt_path,
+        ),
+        *_invested_capital_arguments(
+            result=invested_capital_result_path,
+            input_generation=invested_capital_input_generation_path,
+        ),
     )
+    verification = _tool("portfolio_report.py", "verify", *report_arguments)
+    published = _tool(
+        "portfolio_report.py",
+        "publish",
+        *report_arguments,
+        "--output-root",
+        str(output_root),
+        "--private-stage-root",
+        str(output_root),
+        "--portfolio-root",
+        str(portfolio_root) if portfolio_root is not None else str(output_root),
+    )
+    return {
+        **published,
+        "candidate_dir": str(candidate_dir),
+        "root": str(output_root),
+        "verification": verification,
+    }
 
 
 def _financial_epoch_inputs(recipe: Mapping[str, Any]) -> dict[str, Path] | None:
@@ -6321,7 +6403,6 @@ _PANEL_CANDIDATE_PREDECESSORS = (
     "attribution",
     "analytics",
     "report",
-    "workbook",
 )
 
 
@@ -6559,7 +6640,9 @@ def build_stage(
     """Build exactly one source-to-panel stage from its predecessor outputs."""
 
     if role == "workbook":
-        _resolve_workbook_runtime(workbook_runtime_path)
+        raise VerticalBuildError(
+            "workbook stage is permanently held and excluded from the financial MVP"
+        )
 
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
@@ -6703,55 +6786,17 @@ def build_stage(
             **portfolio_paths,
             **capital_paths,
         )
-    elif role == "workbook":
-        ledger = _stage_result(output_root, "ledger")
-        report = _stage_result(output_root, "report")
-        analytics = _stage_result(output_root, "analytics")
-        epoch_identity = _epoch_manifest_panel_identity(recipe)
-        result = build_workbook(
-            stages / "baseline",
-            stages / "ledger",
-            _path(ledger.get("freshness_health"), "freshness health"),
-            history_contract,
-            implementation_reconciliation,
-            implementation_return_attribution,
-            strategy_attribution_root,
-            _path(report.get("candidate_dir"), "report candidate"),
-            stages / "report",
-            _path(analytics.get("correlation_root"), "correlation root"),
-            _path(
-                analytics.get("decomposition_lenses_root"), "decomposition lenses root"
-            ),
-            _path(
-                recipe["decomposition_plan_bundle"]["path"],
-                "decomposition plan bundle",
-            ),
-            epoch_manifest_generation_root=(
-                epoch_identity[0] if epoch_identity is not None else None
-            ),
-            epoch_manifest_generation_id=(
-                epoch_identity[1] if epoch_identity is not None else None
-            ),
-            attribution_generation_id=attribution_generation_id,
-            hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
-            **dependence_selected_inputs_paths,
-            **hwm_paths,
-            **portfolio_paths,
-            **capital_paths,
-            workbook_runtime_path=workbook_runtime_path,
-        )
     elif role in {"panel-candidate", "panel"}:
         ledger = _stage_result(output_root, "ledger")
         attribution = _stage_result(output_root, "attribution")
         analytics = _stage_result(output_root, "analytics")
-        _stage_result(output_root, "workbook")
         candidate_result_path = _stage_path(output_root, "panel-candidate")
         panel = (
             _load_panel_candidate_checkpoint(recipe_path, recipe, output_root)
             if candidate_result_path.is_file()
             else build_panel_candidate(
                 recipe_path,
-                stages / "report",
+                _path(_stage_result(output_root, "report").get("root"), "report root"),
                 stages / "baseline",
                 _path(attribution.get("destination"), "attribution destination"),
                 analytics,
@@ -6783,7 +6828,7 @@ def build_stage(
             staged_manifest = panel.get("account_strategy_manifest")
             result = publish_panel(
                 recipe_path,
-                stages / "report",
+                _path(_stage_result(output_root, "report").get("root"), "report root"),
                 stages / "baseline",
                 _path(attribution.get("destination"), "attribution destination"),
                 analytics,
@@ -6861,7 +6906,6 @@ def build_all(
     retained_cache_root: Path | None = None,
     workbook_runtime_path: Path | None = None,
 ) -> dict[str, Any]:
-    _resolve_workbook_runtime(workbook_runtime_path)
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
         input_generation=hwm_governed_input_generation_path,
@@ -6964,16 +7008,6 @@ def build_all(
         **portfolio_paths,
         **capital_paths,
     )
-    report = build_stage(
-        recipe_path,
-        output_root,
-        "workbook",
-        **financial_arguments,
-        **hwm_paths,
-        **portfolio_paths,
-        **capital_paths,
-        workbook_runtime_path=workbook_runtime_path,
-    )
     panel = build_stage(
         recipe_path,
         output_root,
@@ -6990,7 +7024,7 @@ def build_all(
         "ledger": ledger,
         "panel": panel,
         "release_commit": recipe["release_commit"],
-        "report": report,
+        "report": report_candidate,
         "report_candidate": report_candidate,
         "schema_version": 1,
         "state": "PANEL_CANDIDATE_REQUIRES_BROWSER_QA",
@@ -7014,7 +7048,6 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--invested-capital-input-generation", type=Path)
     build.add_argument("--portfolio-root", type=Path)
     build.add_argument("--retained-cache-root", type=Path)
-    build.add_argument("--workbook-runtime", type=Path)
     inventory = commands.add_parser("inventory")
     inventory.add_argument("--path", type=Path, required=True)
     recipe = commands.add_parser("recipe")
@@ -7054,7 +7087,6 @@ def _parser() -> argparse.ArgumentParser:
             "attribution",
             "analytics",
             "report",
-            "workbook",
             "panel-candidate",
             "panel",
         ),
@@ -7074,7 +7106,6 @@ def _parser() -> argparse.ArgumentParser:
     stage.add_argument("--invested-capital-input-generation", type=Path)
     stage.add_argument("--portfolio-root", type=Path)
     stage.add_argument("--retained-cache-root", type=Path)
-    stage.add_argument("--workbook-runtime", type=Path)
     return parser
 
 
@@ -7099,7 +7130,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 portfolio_root=args.portfolio_root,
                 retained_cache_root=args.retained_cache_root,
-                workbook_runtime_path=args.workbook_runtime,
             )
         elif args.command == "inventory":
             result = _directory_inventory(args.path.resolve())
@@ -7161,7 +7191,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 portfolio_root=args.portfolio_root,
                 retained_cache_root=args.retained_cache_root,
-                workbook_runtime_path=args.workbook_runtime,
             )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"portfolio-release-builder: FAIL: {exc}", file=sys.stderr)
