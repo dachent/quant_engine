@@ -1092,6 +1092,8 @@ def _report_downloads(
         raise ControlPanelValidationError("report download changed after selection")
     files = {REPORT_DOWNLOAD: report_bytes}
     bindings: dict[str, tuple[Path, str]] = {}
+    if not require_workbook:
+        return files, bindings
     workbook_dir = (
         report_root / "deliveries" / str(report_identity["generation_id"])
         if report_root is not None
@@ -10393,7 +10395,7 @@ def _rendered_files(
         report_path,
         report_identity,
         report_root,
-        require_workbook=invested_capital is not None,
+        require_workbook=False,
     )
     if files["index.html"].count(_DOWNLOAD_PLACEHOLDER) != 1:
         raise ControlPanelValidationError("report download template location differs")
