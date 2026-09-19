@@ -26069,7 +26069,7 @@ def test_provider_fact_after_selected_ledger_date_is_rejected_by_legacy_perimete
         )
 
 
-@pytest.mark.parametrize("fact_kind", ["nav", "flow", "provider_generation"])
+@pytest.mark.parametrize("fact_kind", ["nav", "flow"])
 def test_provider_fact_after_selected_ledger_date_is_rejected_before_c3_calculation_inputs(
     perimeter_module: Any, fact_kind: str
 ) -> None:
@@ -26080,15 +26080,6 @@ def test_provider_fact_after_selected_ledger_date_is_rejected_before_c3_calculat
         ledger["nav_observations"][0]["as_of_date"] = "2026-02-02"
     elif fact_kind == "flow":
         ledger["flows"][0]["event_date"] = "2026-02-02"
-    else:
-        ledger["provider_generations"] = [
-            {
-                "provider_id": "synthetic",
-                "generation_id": "c" * 64,
-                "manifest_sha256": "a" * 64,
-                "generation_as_of_date": "2026-02-02",
-            }
-        ]
     mutated = _c3_with_mutated_ledger_or_policy(
         perimeter_module, ledger, selected.flow_classification_policy.json_object()
     )
@@ -26096,10 +26087,10 @@ def test_provider_fact_after_selected_ledger_date_is_rejected_before_c3_calculat
         perimeter_module.build_blocked_account_manifest_payloads(mutated)
 
 
-def test_legacy_perimeter_rejects_future_provider_generation_metadata(
+def test_legacy_perimeter_accepts_later_provider_generation_metadata(
     perimeter_module: Any,
 ) -> None:
-    """Legacy perimeter selection rejects provider generations after ledger as_of_date."""
+    """Legacy perimeter keeps later generation provenance separate from facts."""
     selected = _c3_selected_inputs(perimeter_module)
     ledger = selected.provider_ledger.json_object()
     ledger["provider_generations"] = [
@@ -26128,13 +26119,12 @@ def test_legacy_perimeter_rejects_future_provider_generation_metadata(
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
     facts = _fixture_inputs()
-    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
-        perimeter_module.build_account_assignment_perimeter(
-            selected_inputs=selected,
-            nav_facts=facts["nav_facts"],
-            raw_flow_facts=facts["raw_flow_facts"],
-            classified_flow_facts=facts["classified_flow_facts"],
-        )
+    perimeter_module.build_account_assignment_perimeter(
+        selected_inputs=selected,
+        nav_facts=facts["nav_facts"],
+        raw_flow_facts=facts["raw_flow_facts"],
+        classified_flow_facts=facts["classified_flow_facts"],
+    )
 
 
 def test_blocked_c3_uses_provider_ledger_date_for_open_ended_boundaries(
@@ -26214,13 +26204,10 @@ def test_independent_verifier_accepts_later_baseline_receipt_capped_at_ledger_da
 @pytest.mark.parametrize(
     "receipt_field",
     [
-        "provider_generation",
         "requested_start",
         "requested_end",
         "covered_start",
         "covered_end",
-        "provider_generation_manifest",
-        "raw_evidence_artifacts",
     ],
 )
 def test_mixed_receipt_date_after_selected_ledger_date_is_rejected(
@@ -26248,8 +26235,6 @@ def test_mixed_receipt_date_after_selected_ledger_date_is_rejected(
         "requested_end",
         "covered_start",
         "covered_end",
-        "provider_generation_manifest",
-        "raw_evidence_artifacts",
     ],
 )
 def test_independent_verifier_rejects_receipt_interval_after_selected_ledger_date(
@@ -26273,7 +26258,7 @@ def test_independent_verifier_rejects_receipt_interval_after_selected_ledger_dat
         )
 
 
-@pytest.mark.parametrize("fact_kind", ["nav", "flow", "provider_generation"])
+@pytest.mark.parametrize("fact_kind", ["nav", "flow"])
 def test_independent_verifier_rejects_provider_fact_after_selected_ledger_date(
     perimeter_module: Any, verifier_module: Any, fact_kind: str
 ) -> None:
@@ -26284,8 +26269,6 @@ def test_independent_verifier_rejects_provider_fact_after_selected_ledger_date(
         ledger["nav_observations"][0]["as_of_date"] = "2026-02-02"
     elif fact_kind == "flow":
         ledger["flows"][0]["event_date"] = "2026-02-02"
-    else:
-        ledger["provider_generations"][0]["generation_as_of_date"] = "2026-02-02"
     values = _selected_input_kwargs(selected)
     ledger_snapshot = InputSnapshot.from_bytes(
         "future provider ledger", canonical_json_bytes(ledger)
@@ -26311,10 +26294,6 @@ def test_independent_verifier_rejects_provider_fact_after_selected_ledger_date(
             verifier_module._normalize_provider_navs(verifier_selected)
         elif fact_kind == "flow":
             verifier_module._mixed_normalized_facts(verifier_selected)
-        else:
-            verifier_module._validate_provider_ledger_date_authority(
-                verifier_selected, ledger
-            )
 
 
 @pytest.mark.parametrize("admission_edge", ["funded_to_blocked", "invalid_nav_id"])
