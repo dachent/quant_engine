@@ -404,15 +404,20 @@ def _staged_observation(
     catalogs: dict[str, dict[str, Any]],
     *,
     cutoff: date = DAY,
+    schwab_point_capture: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
     """Small synthetic sources using native formats, no asserted finality flag."""
     from datetime import datetime, timedelta, timezone
     from quant_engine.core.publication import CurrentPointer
 
-    generation_day = max(DAY, cutoff)
     refs, selections = {}, {}
     for index, identity in enumerate(list(identities)):
         provider_id = identity.provider_id
+        generation_day = (
+            datetime.fromisoformat(schwab_point_capture).date()
+            if provider_id == "schwab" and schwab_point_capture is not None
+            else max(DAY, cutoff)
+        )
         root = tmp_path / provider_id
         root.mkdir(parents=True)
         catalog_name, versions = ledger._PROVIDER_CATALOGS[provider_id]
@@ -434,6 +439,7 @@ def _staged_observation(
             path: Path,
             content: bytes,
             schema: str = "synthetic-source",
+            version: str = "1",
         ) -> None:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content)
@@ -444,7 +450,7 @@ def _staged_observation(
                     size_bytes=len(content),
                     as_of_date=generation_day,
                     schema_name=schema,
-                    schema_version="1",
+                    schema_version=version,
                 )
             )
 
@@ -611,6 +617,81 @@ def _staged_observation(
             catalog.update(
                 accounts=[{"account_id": account}], nav_observations=[nav(nav_artifact)]
             )
+            if schwab_point_capture is not None:
+                from quant_engine.schwab import (
+                    read_holdings_v2_current_snapshot,
+                    write_current_snapshot,
+                )
+
+                snapshot = read_holdings_v2_current_snapshot(
+                    {
+                        "accounts": [
+                            {
+                                "accountId": "SYNTHETIC-001",
+                                "groupedPositions": [
+                                    {
+                                        "groupName": "Equity",
+                                        "securityType": 1,
+                                        "holdingsRows": [
+                                            {
+                                                "dataSymbol": "SYNTH",
+                                                "qty": {"qty": "3"},
+                                                "marketValue": {"val": "99"},
+                                                "costBasis": {"cstBasis": "27"},
+                                            }
+                                        ],
+                                    }
+                                ],
+                            },
+                            {"accountId": "SYNTHETIC-002", "groupedPositions": []},
+                        ],
+                        "accountTotals": [],
+                    },
+                    crosswalk={
+                        "SYNTHETIC-001": account,
+                        "SYNTHETIC-002": "synthetic-schwab-empty",
+                    },
+                    captured_at=schwab_point_capture,
+                )
+                snapshot_path = root / "snapshot.json"
+                digest, size = write_current_snapshot(snapshot, snapshot_path)
+                document = json.loads(snapshot_path.read_bytes())
+                point_artifact = SourceArtifact(
+                    artifact_id="web/api-current-snapshot.json",
+                    sha256=digest,
+                    size_bytes=size,
+                    as_of_date=generation_day,
+                    schema_name="schwab-api-current-snapshot",
+                    schema_version="2",
+                )
+                artifacts.append(point_artifact)
+                catalog.update(
+                    catalog_schema_version=2,
+                    as_of_date=generation_day.isoformat(),
+                    accounts=[
+                        {"account_id": row["account_id"], "base_currency": "USD"}
+                        for row in document["accounts"]
+                    ],
+                    current_accounts=document["accounts"],
+                    positions=document["positions"],
+                    current_transport="WEB_CONTRACT",
+                    current_position_account_count=1,
+                    position_snapshot_as_of={"observed_at": schwab_point_capture},
+                    source_artifacts=[point_artifact.to_dict()],
+                )
+                bind(
+                    "native/empty-nav.csv",
+                    root / "native/empty-nav.csv",
+                    content,
+                    "schwab-wch-historical-balance",
+                )
+                catalog["nav_observations"].append(
+                    {
+                        **nav("native/empty-nav.csv"),
+                        "account_id": "synthetic-schwab-empty",
+                        "record_id": "synthetic-empty-nav",
+                    }
+                )
             evidence_path.write_bytes(
                 canonical_json_bytes(
                     {
@@ -626,7 +707,24 @@ def _staged_observation(
                                 "expected_sha256": hashlib.sha256(content).hexdigest(),
                                 "expected_size_bytes": len(content),
                             }
-                        ],
+                        ]
+                        + (
+                            [
+                                {
+                                    "role": "WCH_NAV_CSV",
+                                    "artifact_id": "native/empty-nav.csv",
+                                    "account_id": "synthetic-schwab-empty",
+                                    "root_id": "native",
+                                    "relative_path": "native/empty-nav.csv",
+                                    "expected_sha256": hashlib.sha256(
+                                        content
+                                    ).hexdigest(),
+                                    "expected_size_bytes": len(content),
+                                }
+                            ]
+                            if schwab_point_capture is not None
+                            else []
+                        ),
                     }
                 )
             )
@@ -636,6 +734,9 @@ def _staged_observation(
             root / catalog_name,
             catalog_bytes,
             provider_id + "-generation-catalog",
+            str(catalog["catalog_schema_version"])
+            if provider_id == "schwab" and schwab_point_capture is not None
+            else "1",
         )
         qualification = {
             "alpaca": "PUBLISHED_COMPLETE",
@@ -659,7 +760,11 @@ def _staged_observation(
         )
         manifest = GenerationManifest.build(
             as_of_date=generation_day,
-            adapter=manifests[provider_id].adapter,
+            adapter=(
+                AdapterIdentity("quant-engine-schwab", "1")
+                if provider_id == "schwab" and schwab_point_capture is not None
+                else manifests[provider_id].adapter
+            ),
             coverage=coverage,
             artifacts=artifacts,
             verification=VerificationStatus.VERIFIED,
@@ -710,12 +815,21 @@ def _staged_observation(
 
 
 def _source_bound_stage(
-    tmp_path: Path, *, source_cutoff: date = DAY
+    tmp_path: Path,
+    *,
+    source_cutoff: date = DAY,
+    schwab_point_capture: str | None = None,
+    requested_as_of: date = date(2026, 9, 17),
 ) -> tuple[Path, dict[str, Any], Path]:
     """Real stage, real financial contract/schema/registry, tiny synthetic inputs."""
     _, identities, manifests, catalogs, _ = _fixture(unreferenced_dataset=True)
     refs, selections = _staged_observation(
-        tmp_path / "sources", identities, manifests, catalogs, cutoff=source_cutoff
+        tmp_path / "sources",
+        identities,
+        manifests,
+        catalogs,
+        cutoff=source_cutoff,
+        schwab_point_capture=schwab_point_capture,
     )
     contract_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
     schema_path = ROOT / "schemas/portfolio/financial-mvp-source-contract.schema.json"
@@ -739,7 +853,7 @@ def _source_bound_stage(
     observation = {
         "schema_version": 1,
         "captured_at_utc": "2026-09-18T12:00:00Z",
-        "financial_cutoff": "2026-09-17",
+        "financial_cutoff": requested_as_of.isoformat(),
         "policy_contract_sha256": financial["contract_sha256"],
         "providers": selections,
     }
@@ -829,7 +943,7 @@ def _source_bound_stage(
         "spec.json",
         {
             "schema_version": 2,
-            "as_of_date": "2026-09-17",
+            "as_of_date": requested_as_of.isoformat(),
             "financial_mvp": financial,
             "output_root": str(tmp_path / "staged"),
             "providers": refs,

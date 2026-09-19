@@ -25,7 +25,7 @@ import re
 import shutil
 import sys
 import tempfile
-from typing import Any, Callable, Final, Mapping, Sequence
+from typing import Any, Callable, Final, Mapping, NamedTuple, Sequence
 from urllib.parse import urlsplit
 
 from quant_engine.core import (
@@ -3779,6 +3779,152 @@ def _schwab_transactions_within_cutoff(
     return retained
 
 
+class _SchwabPositionObservation(NamedTuple):
+    """One selected holdings point, never an extension of daily finality."""
+
+    observed_at: datetime
+    artifact: SourceArtifact
+    record_ids: frozenset[str]
+
+
+def _schwab_position_observation(
+    catalog: Mapping[str, Any],
+    manifest: GenerationManifest | None,
+    root: Path | None,
+    requested_as_of: date | None,
+) -> _SchwabPositionObservation | None:
+    metadata = catalog.get("position_snapshot_as_of")
+    if (
+        requested_as_of is None
+        or manifest is None
+        or root is None
+        or not isinstance(metadata, dict)
+        or "observed_at" not in metadata
+    ):
+        # Manual/legacy observations have no independently selected point proof.
+        return None
+    label = "Schwab position observation"
+    clock = _text(metadata["observed_at"], label)
+    try:
+        observed_at = datetime.fromisoformat(clock)
+    except ValueError as exc:
+        raise ProviderLedgerError(f"{label} clock is invalid") from exc
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ProviderLedgerError(f"{label} clock must be timezone-aware")
+    day = observed_at.date()
+    if (
+        manifest.verification is not VerificationStatus.VERIFIED
+        or manifest.adapter.name != "quant-engine-schwab"
+        or manifest.as_of_date != day
+        or catalog.get("as_of_date") != day.isoformat()
+        or catalog.get("catalog_schema_version") not in {2, 3}
+    ):
+        raise ProviderLedgerError(f"{label} generation/date/schema differs")
+    catalog_artifacts = [
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.artifact_id
+        in {"normalized/schwab-generation.json", "schwab-generation.json"}
+        and artifact.schema_name == "schwab-generation-catalog"
+        and artifact.schema_version == str(catalog["catalog_schema_version"])
+        and artifact.as_of_date == day
+    ]
+    if len(catalog_artifacts) != 1:
+        raise ProviderLedgerError(f"{label} selected catalog artifact differs")
+    selected, _, size = _verified_json(
+        _exact_file(
+            root / "generations" / manifest.generation_id,
+            Path("schwab-generation.json"),
+            label,
+        ),
+        catalog_artifacts[0].sha256,
+        label,
+    )
+    if size != catalog_artifacts[0].size_bytes or selected != catalog:
+        raise ProviderLedgerError(f"{label} selected catalog bytes differ")
+    try:
+        artifacts = [
+            SourceArtifact.from_dict(row)
+            for row in _objects(catalog.get("source_artifacts"), label)
+        ]
+    except (TypeError, ValueError) as exc:
+        raise ProviderLedgerError(f"{label} source artifacts are invalid") from exc
+    points = [a for a in artifacts if a.schema_name == "schwab-api-current-snapshot"]
+    if len(points) != 1:
+        raise ProviderLedgerError(
+            f"{label} selected snapshot artifact is absent or ambiguous"
+        )
+    artifact = points[0]
+    transport = catalog.get("current_transport")
+    if (
+        artifact.schema_version not in {"1", "2"}
+        or artifact.as_of_date != day
+        or artifact.size_bytes < 1
+        or [a for a in manifest.artifacts if a.artifact_id == artifact.artifact_id]
+        != [artifact]
+        or len([a for a in artifacts if a.artifact_id == artifact.artifact_id]) != 1
+        or transport not in {"WEB_CONTRACT", "DEVELOPER_API"}
+        or (artifact.schema_version == "1" and transport != "DEVELOPER_API")
+    ):
+        raise ProviderLedgerError(
+            f"{label} selected snapshot binding/transport differs"
+        )
+    accounts = _objects(catalog.get("accounts"), label)
+    account_ids = {_text(row.get("account_id"), label) for row in accounts}
+    current = _objects(catalog.get("current_accounts"), label)
+    if (
+        not account_ids
+        or len(account_ids) != len(accounts)
+        or len(current) != len(account_ids)
+        or {row.get("account_id") for row in current} != account_ids
+        or any(row.get("observed_at") != clock for row in current)
+    ):
+        raise ProviderLedgerError(f"{label} account/clock scope differs")
+    record_ids: set[str] = set()
+    position_accounts: set[str] = set()
+    for row in _objects(catalog.get("positions"), label):
+        account_id = _text(row.get("account_id"), label)
+        security_id = _text(row.get("security_id"), label)
+        symbol = _text(row.get("symbol"), label)
+        record_id = _text(row.get("record_id"), label)
+        native_identity = {
+            "account_id": account_id,
+            "as_of_date": day.isoformat(),
+            "security_id": security_id,
+        }
+        expected_id = (
+            "position-"
+            + hashlib.sha256(canonical_json_bytes(native_identity)).hexdigest()[:24]
+        )
+        if (
+            account_id not in account_ids
+            or record_id != expected_id
+            or record_id in record_ids
+            or security_id
+            != "security-schwab-" + hashlib.sha256(symbol.encode()).hexdigest()[:24]
+            or row.get("as_of_date") != day.isoformat()
+            or row.get("observed_at") != clock
+            or row.get("source_artifact_id", artifact.artifact_id)
+            != artifact.artifact_id
+            or row.get("evidence_class")
+            != (
+                "WCH_CURRENT"
+                if transport == "WEB_CONTRACT"
+                else "DEVELOPER_API_CURRENT"
+            )
+        ):
+            raise ProviderLedgerError(
+                f"{label} position record/date/clock scope differs"
+            )
+        record_ids.add(record_id)
+        position_accounts.add(account_id)
+    if catalog.get("current_position_account_count") != len(position_accounts):
+        raise ProviderLedgerError(f"{label} position account count differs")
+    if day > requested_as_of:
+        return None
+    return _SchwabPositionObservation(observed_at, artifact, frozenset(record_ids))
+
+
 def _project_account_facts(
     provider_id: str,
     generation_id: str,
@@ -3795,11 +3941,24 @@ def _project_account_facts(
     ]
     | None = None,
     financial_cutoff: date | None = None,
+    *,
+    requested_as_of: date | None = None,
 ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
     projections: dict[str, list[dict[str, Any]]] = defaultdict(list)
     exceptions: list[dict[str, Any]] = []
     if provider_id not in _ACCOUNT_FACTS:
         raise ProviderLedgerError(f"unknown provider fact mapping: {provider_id}")
+    position_observation = (
+        _schwab_position_observation(catalog, manifest, root, requested_as_of)
+        if provider_id == "schwab"
+        else None
+    )
+    if position_observation is not None and (
+        manifest is None or manifest.generation_id != generation_id
+    ):
+        raise ProviderLedgerError(
+            "Schwab position observation selected generation differs"
+        )
     if provider_id == "ibkr" and financial_cutoff is not None:
         # Anchors consume NAV, recognition-dated flows and ChangeInNAV. Cut all
         # three before reconciliation; a future unquantified flow must not erase
@@ -4098,6 +4257,12 @@ def _project_account_facts(
                 ):
                     if field in row:
                         record[field] = row[field]
+            if source_fact == "positions" and position_observation is not None:
+                record.update(
+                    observed_at=row["observed_at"],
+                    average_price=row["average_price"],
+                    source_artifact_id=position_observation.artifact.artifact_id,
+                )
             if (
                 source_fact == "flows"
                 and record.get("flow_type") == "DEPOSIT_OR_WITHDRAWAL"
@@ -4207,7 +4372,17 @@ def _project_account_facts(
             retained = []
             for row in rows:
                 observed = _row_day(row)
-                if observed is None or observed <= financial_cutoff:
+                if (
+                    observed is None
+                    or observed <= financial_cutoff
+                    or (
+                        fact_type == "positions"
+                        and position_observation is not None
+                        and row.get("source_record_id")
+                        in position_observation.record_ids
+                        and observed == position_observation.observed_at.date()
+                    )
+                ):
                     retained.append(row)
                     continue
                 exceptions.append(
@@ -8134,6 +8309,7 @@ def build_catalog(
             manifest=manifest,
             root=root,
             fx_rates=fx_rates if provider_id == "matrixport" else None,
+            requested_as_of=as_of if run_observation is not None else None,
             financial_cutoff=(
                 min(
                     as_of,
