@@ -485,6 +485,15 @@ def read_holdings_v2_current_snapshot(
             if group_kind is None:
                 raise SchwabReadError("holdings v2 group is unsupported")
             rows = _objects(group.get("holdingsRows"), "holdings v2 holdings rows")
+            declared_count = group.get("positionsCount")
+            if (
+                isinstance(declared_count, bool)
+                or not isinstance(declared_count, int)
+                or declared_count != len(rows)
+            ):
+                raise SchwabReadError(
+                    "holdings v2 declared count differs from holdings rows"
+                )
             if group_kind == "cash":
                 sweep_vehicle_count += len(rows)
                 continue
