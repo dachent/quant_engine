@@ -49,7 +49,10 @@ def _capture(path: Path, label: str) -> InputSnapshot:
 
 
 def _code_snapshots() -> tuple[InputSnapshot, InputSnapshot, InputSnapshot]:
-    builder_path = Path(account_manifest_generation.__file__).resolve()
+    builder_file = account_manifest_generation.__file__
+    if builder_file is None:
+        raise CurrentEpochManifestStageError("generation builder source is unavailable")
+    builder_path = Path(builder_file).resolve()
     producer_path = builder_path.with_name("account_strategy_manifest.py")
     verifier_path = builder_path.with_name("verify_account_manifest_generation.py")
     return (
