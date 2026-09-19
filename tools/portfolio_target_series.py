@@ -7211,6 +7211,11 @@ def validate_layered_history_generation(
         key=lambda row: row["date"],
     )
     robuxio_interval = _correction_interval("robuxio-account-live-after-funding")
+    matrixport_admission_cutoff = (
+        accepted_as_of
+        if current_admission is not None
+        else date.fromisoformat(str(robuxio_interval["observed_end"]))
+    )
     robuxio_provider_interval = _correction_interval(
         "robuxio-provider-live-before-funding"
     )
@@ -7259,7 +7264,7 @@ def validate_layered_history_generation(
             matrixport_manifest=source_manifests["matrixport"],
             source_gap_policy=expected_matrixport_gap_policy,
             account_live_start=funding_start,
-            admission_cutoff=date.fromisoformat(str(robuxio_interval["observed_end"])),
+            admission_cutoff=matrixport_admission_cutoff,
         )
         _matrixport_account_live_from_ledger(
             robuxio_live, expected_usd_rows, matrixport_unavailable_return_dates
@@ -7308,7 +7313,7 @@ def validate_layered_history_generation(
                 else raw_span_receipts
             ),
             source_gap_policy=expected_matrixport_gap_policy,
-            admission_cutoff=date.fromisoformat(str(robuxio_interval["observed_end"])),
+            admission_cutoff=matrixport_admission_cutoff,
         )
         if epoch_hpr_row != {
             "evidence_layer": "ACCOUNT_LIVE",
