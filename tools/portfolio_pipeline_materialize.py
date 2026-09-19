@@ -5051,7 +5051,6 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
         or selected_contract != financial_input_contract
     ):
         raise MaterializationError("attended selected dependence authority differs")
-    release._history_contract_path(recipe)  # noqa: SLF001
     _epoch_manifest_generation_definition(recipe)
     resolved_runtime = release._resolve_workbook_runtime(runtime_descriptor)  # noqa: SLF001
     predecessor = _attended_predecessor(attended["predecessor_spec"], portfolio_root)
