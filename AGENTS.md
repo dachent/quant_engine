@@ -4,6 +4,33 @@ These instructions apply to the entire repository. A more deeply nested
 `AGENTS.md` may narrow implementation details but may not weaken this contract,
 the governing GitHub Issue, or `docs/operating-model.md`.
 
+## Current owner correction: source-first, no desktop Excel
+
+The owner's September 19 correction under #374/#418 overrides older plans,
+checkpoints, issue descriptions, PR text and skill defaults:
+
+- Complete the required source captures and input QC before downstream MVP
+  implementation, fitting, integration tests, report/panel builds or publication.
+  A source repair necessary to perform capture or input QC is allowed; unrelated
+  downstream progress is not a substitute for source closure.
+- Bind closure to the actual selected source bytes, required accounts/strategies,
+  source-specific complete observation cutoffs, finality and reconciled overlap.
+  A successful extraction, coherent older generation, passing component suite or
+  new build date alone is not closure. Preserve documented publication lag,
+  fixed-history boundaries and owner-approved unavailable observations.
+- If any required capture or input QC remains pending, keep the source phase
+  open in the governing issue. Do not report the input phase complete or resume
+  downstream work. Resume it only after the missing source evidence is obtained
+  and its applicable QC succeeds; do not invent a waiver or a shorter cutoff.
+- Desktop Excel and related workbook work are on permanent hold and excluded
+  from the MVP delivery path. Do not launch Office/COM, request a desktop
+  reconnect, revive workbook tasks, or require desktop workbook approval for
+  source admission or MVP acceptance. Remove obsolete dependencies through the
+  existing producer/consumer seams; never fabricate workbook PASS evidence.
+- On resume or delegation, carry this correction and the exact unresolved
+  source evidence forward. Reconcile the governing issue before relying on an
+  older checkpoint. A new direct owner instruction can change this boundary.
+
 ## Authority and source of truth
 
 - Use exactly one open GitHub Issue as the governing work item. Its stable key,
