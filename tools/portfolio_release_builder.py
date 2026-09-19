@@ -814,6 +814,28 @@ def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
     )
     current_receipt = correlation_root / "dependence-source.json"
     if current_receipt.exists():
+        selected_definition = recipe.get("dependence_selected_inputs")
+        selected_inputs_path: Path | None = None
+        if selected_definition is not None:
+            if not isinstance(selected_definition, dict) or set(
+                selected_definition
+            ) != {
+                "path",
+                "sha256",
+                "size_bytes",
+            }:
+                raise VerticalBuildError(
+                    "dependence_selected_inputs definition differs"
+                )
+            selected_inputs_path = _path(
+                selected_definition["path"], "dependence_selected_inputs.path"
+            )
+            sha256, size = _sha(selected_inputs_path)
+            if (sha256, size) != (
+                selected_definition["sha256"],
+                selected_definition["size_bytes"],
+            ):
+                raise VerticalBuildError("dependence_selected_inputs identity differs")
         module_path = TOOLS_ROOT / "portfolio_current_dependence.py"
         module_name = "portfolio_current_dependence_for_release_builder"
         spec = importlib.util.spec_from_file_location(module_name, module_path)
@@ -831,6 +853,7 @@ def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
                 policy_path=REPOSITORY_ROOT
                 / "contracts"
                 / "portfolio-dependence-policy-v1.json",
+                selected_inputs_path=selected_inputs_path,
             )
         except Exception as exc:
             raise VerticalBuildError(
@@ -917,7 +940,7 @@ def _recipe(path: Path) -> dict[str, Any]:
         )
     if schema_version == 10:
         required.add("epoch_manifest_generation")
-    if set(recipe) != required:
+    if set(recipe) - {"dependence_selected_inputs"} != required:
         raise VerticalBuildError("vertical-build recipe keys differ")
     date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
     for key in (
@@ -937,6 +960,18 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError(f"{key} identity differs")
+    if "dependence_selected_inputs" in recipe:
+        definition = recipe["dependence_selected_inputs"]
+        if not isinstance(definition, dict) or set(definition) != {
+            "path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise VerticalBuildError("dependence_selected_inputs definition differs")
+        artifact = _path(definition["path"], "dependence_selected_inputs.path")
+        sha256, size = _sha(artifact)
+        if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+            raise VerticalBuildError("dependence_selected_inputs identity differs")
     if schema_version == 6:
         definition = recipe["provider_ledger_spec"]
         if not isinstance(definition, dict) or set(definition) != {
@@ -1107,6 +1142,7 @@ def create_recipe(
     epoch_manifest_generation_root: Path | None = None,
     epoch_manifest_generation_id: str | None = None,
     strategy_attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     date.fromisoformat(as_of_date)
     if len(release_commit) != 40:
@@ -1198,6 +1234,10 @@ def create_recipe(
             "path": str(hybrid_plan),
             **_directory_inventory(hybrid_plan),
         }
+    if dependence_selected_inputs_path is not None:
+        payload["dependence_selected_inputs"] = _file_definition(
+            dependence_selected_inputs_path.resolve()
+        )
     if provider_ledger_spec is not None:
         payload["provider_ledger_spec"] = _file_definition(
             provider_ledger_spec.resolve()
@@ -4743,6 +4783,7 @@ def build_report_candidate(
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
     attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
@@ -4803,6 +4844,11 @@ def build_report_candidate(
         str(freshness_health),
         "--history-contract",
         str(history_contract),
+        *(
+            ("--dependence-selected-inputs", str(dependence_selected_inputs_path))
+            if dependence_selected_inputs_path is not None
+            else ()
+        ),
         "--implementation-reconciliation",
         str(implementation_reconciliation),
         "--implementation-return-attribution",
@@ -4883,6 +4929,7 @@ def build_workbook(
     portfolio_root: Path | None = None,
     workbook_runtime_path: Path | None = None,
     attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     workbook_runtime = _resolve_workbook_runtime(workbook_runtime_path)
     hwm_arguments = _governed_hwm_arguments(
@@ -5068,6 +5115,11 @@ def build_workbook(
         str(freshness_health),
         "--history-contract",
         str(history_contract),
+        *(
+            ("--dependence-selected-inputs", str(dependence_selected_inputs_path))
+            if dependence_selected_inputs_path is not None
+            else ()
+        ),
         "--implementation-reconciliation",
         str(implementation_reconciliation),
         "--implementation-return-attribution",
@@ -5138,6 +5190,11 @@ def build_workbook(
         str(freshness_health),
         "--history-contract",
         str(history_contract),
+        *(
+            ("--dependence-selected-inputs", str(dependence_selected_inputs_path))
+            if dependence_selected_inputs_path is not None
+            else ()
+        ),
         "--implementation-reconciliation",
         str(implementation_reconciliation),
         "--implementation-return-attribution",
@@ -5250,6 +5307,7 @@ def build_report(
     portfolio_root: Path | None = None,
     workbook_runtime_path: Path | None = None,
     attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     _resolve_workbook_runtime(workbook_runtime_path)
     hwm_paths = (
@@ -5293,6 +5351,16 @@ def build_report(
     portfolio_paths = (
         {"portfolio_root": portfolio_root} if portfolio_root is not None else {}
     )
+    dependence_selected_inputs_paths = (
+        {"dependence_selected_inputs_path": dependence_selected_inputs_path}
+        if dependence_selected_inputs_path is not None
+        else {}
+    )
+    attribution_generation_paths = (
+        {"attribution_generation_id": attribution_generation_id}
+        if attribution_generation_id is not None
+        else {}
+    )
     candidate = build_report_candidate(
         baseline_root,
         provider_ledger_root,
@@ -5308,7 +5376,8 @@ def build_report(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         epoch_manifest_generation_id=epoch_manifest_generation_id,
-        attribution_generation_id=attribution_generation_id,
+        **attribution_generation_paths,
+        **dependence_selected_inputs_paths,
         **hwm_paths,
         **portfolio_paths,
         **capital_paths,
@@ -5329,7 +5398,8 @@ def build_report(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         epoch_manifest_generation_id=epoch_manifest_generation_id,
-        attribution_generation_id=attribution_generation_id,
+        **attribution_generation_paths,
+        **dependence_selected_inputs_paths,
         **hwm_paths,
         **portfolio_paths,
         **capital_paths,
@@ -5666,6 +5736,20 @@ def build_panel_candidate(
     # mere existence, or a missing source silently reverts the panel to
     # NO_HWM_INPUTS and HPR HWM parity fails with a misleading diff.
     strategy_history_contract = _history_contract_path(recipe)
+    dependence_selected_inputs = recipe.get("dependence_selected_inputs")
+    dependence_selected_arguments = (
+        (
+            "--dependence-selected-inputs",
+            str(
+                _path(
+                    dependence_selected_inputs["path"],
+                    "dependence_selected_inputs.path",
+                )
+            ),
+        )
+        if isinstance(dependence_selected_inputs, dict)
+        else ()
+    )
     strategy_history_arguments = (
         ("--strategy-history-contract", str(strategy_history_contract))
         if strategy_history_contract.name == "dependence-source.json"
@@ -5720,6 +5804,7 @@ def build_panel_candidate(
         "--report-root",
         str(report_root),
         *strategy_history_arguments,
+        *dependence_selected_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5755,6 +5840,7 @@ def build_panel_candidate(
         "--report-root",
         str(report_root),
         *strategy_history_arguments,
+        *dependence_selected_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5854,6 +5940,20 @@ def publish_panel(
     # mere existence, or a missing source silently reverts the panel to
     # NO_HWM_INPUTS and HPR HWM parity fails with a misleading diff.
     strategy_history_contract = _history_contract_path(recipe)
+    dependence_selected_inputs = recipe.get("dependence_selected_inputs")
+    dependence_selected_arguments = (
+        (
+            "--dependence-selected-inputs",
+            str(
+                _path(
+                    dependence_selected_inputs["path"],
+                    "dependence_selected_inputs.path",
+                )
+            ),
+        )
+        if isinstance(dependence_selected_inputs, dict)
+        else ()
+    )
     strategy_history_arguments = (
         ("--strategy-history-contract", str(strategy_history_contract))
         if strategy_history_contract.name == "dependence-source.json"
@@ -5938,6 +6038,7 @@ def publish_panel(
         "--report-root",
         str(report_root),
         *strategy_history_arguments,
+        *dependence_selected_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -6378,6 +6479,19 @@ def build_stage(
         manifest_admission_policy=manifest_admission_policy,
     )
     history_contract = _history_contract_path(recipe)
+    dependence_selected_inputs_path = (
+        _path(
+            recipe["dependence_selected_inputs"]["path"],
+            "dependence_selected_inputs.path",
+        )
+        if "dependence_selected_inputs" in recipe
+        else None
+    )
+    dependence_selected_inputs_paths = (
+        {"dependence_selected_inputs_path": dependence_selected_inputs_path}
+        if dependence_selected_inputs_path is not None
+        else {}
+    )
     implementation_reconciliation = _path(
         recipe["implementation_reconciliation"]["path"],
         "implementation reconciliation",
@@ -6444,6 +6558,7 @@ def build_stage(
             ),
             attribution_generation_id=attribution_generation_id,
             hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+            **dependence_selected_inputs_paths,
             **hwm_paths,
             **portfolio_paths,
             **capital_paths,
@@ -6479,6 +6594,7 @@ def build_stage(
             ),
             attribution_generation_id=attribution_generation_id,
             hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+            **dependence_selected_inputs_paths,
             **hwm_paths,
             **portfolio_paths,
             **capital_paths,
@@ -6774,6 +6890,7 @@ def _parser() -> argparse.ArgumentParser:
     recipe.add_argument("--decomposition-plan-bundle", type=Path, required=True)
     recipe.add_argument("--hybrid-decomposition-plan-bundle", type=Path)
     recipe.add_argument("--correlation-source-root", type=Path, required=True)
+    recipe.add_argument("--dependence-selected-inputs", type=Path)
     recipe.add_argument("--legacy-panel", type=Path, required=True)
     recipe.add_argument("--as-of-date", required=True)
     recipe.add_argument("--pipeline-id", required=True)
@@ -6877,6 +6994,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 strategy_attribution_generation_id=(
                     args.strategy_attribution_generation_id
                 ),
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
             )
         else:
             result = build_stage(
