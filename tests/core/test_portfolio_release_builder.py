@@ -3380,7 +3380,7 @@ def test_current_surface_plan_rejects_required_surface_policy_drift(
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    (("builder_version", "0.18.0"), ("schema_version", 3)),
+    (("builder_version", "0.19.0"), ("schema_version", 3)),
 )
 def test_current_surface_plan_rejects_unsupported_contract(
     tmp_path: Path, field: str, value: object

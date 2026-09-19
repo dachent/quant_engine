@@ -32,7 +32,26 @@
     "source": "https://patents.google.com/patent/US7617142B2/en",
     "source_caveat": "Google Patents states that its legal status is an assumption, is not a legal conclusion, and has not been independently analyzed by Google."
   },
-  "methodology_version": "ANL-DECOMP-CLEANROOM-3",
+  "methodology_version": "ANL-DECOMP-CLEANROOM-6",
+  "orthogonal_attribution": {
+    "method_id": "TRAINING_ONLY_SYMMETRIC_COVARIANCE_WHITENING_V1",
+    "raw_surface": "RAW_MODEL",
+    "surface": "ORTHOGONAL_RISK_ATTRIBUTION",
+    "training_only": true
+  },
+  "interval_association": {
+    "policy_id": "SOURCE_LABELLED_FACTOR_ANCHOR_ASSOCIATION_V1",
+    "response_label": "ANCHOR_ADJUSTED_TARGET_RETURN",
+    "risk_budget_interpretation": "EQUAL_FACTOR_ANCHOR_FITTED_COMPONENT_SAMPLE_VARIANCE",
+    "evaluation_information_set_default": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+    "holdout_display_claim": "holdout association using selected historical snapshot",
+    "asynchrony_disclosure": "SIMULTANEOUS_MARKS_NOT_PROVED",
+    "factor_row_rule": "ONE_RIGHT_HAND_FACTOR_AND_RF_ROW_UNCHANGED",
+    "annualization": "PREDECLARED_FACTOR_ANCHOR_PERIODS_PER_YEAR_WITH_VARIABLE_BUCKET_DURATION_DISCLOSURE",
+    "source_contract": "TARGET_NATIVE_CALENDAR_LABEL_FINALITY_VINTAGE_SESSION_SCHEDULE_AND_FACTOR_AVAILABILITY_REQUIRED",
+    "legacy_schema1_policy": "LEGACY_EXACT_LABEL_ASSOCIATION_V1; RETAINED_TARGET_LABEL_EXACT_INTERSECTION_ONLY; NO_CALENDAR_INFERENCE",
+    "return_basis": "TARGET_NET_MODEL_REGIMES_ARE_BUCKET_LOCAL; PUBLISHED_FACTOR_BASIS_REMAINS_SOURCE_LABELLED"
+  },
   "reading_list_artifact": {
     "artifact_id": "xBin/mpi_methodology_reading_list.md",
     "sha256": "a467290f2398ced4d19189a580314679699ef347308157c40627152ce7f00e00",
