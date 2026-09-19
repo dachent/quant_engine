@@ -4623,31 +4623,6 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
 ) -> None:
     candidate = tmp_path / "report-candidate"
     candidate.mkdir()
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text("{}", encoding="utf-8")
-    fake_runtime = SimpleNamespace(identity={"synthetic": True})
-    monkeypatch.setattr(
-        builder, "_resolve_workbook_runtime", lambda _path: fake_runtime
-    )
-    monkeypatch.setattr(
-        builder, "_current_workbook_runtime", lambda _runtime: fake_runtime
-    )
-    monkeypatch.setattr(
-        builder, "_record_workbook_runtime_execution", lambda *_args: None
-    )
-    monkeypatch.setattr(
-        builder, "_accepted_xlsx_evidence", lambda _path, **_kwargs: True
-    )
-    monkeypatch.setattr(
-        builder,
-        "_successful_xlsx_result_path",
-        lambda selected: selected / "xlsx-result.json",
-    )
-    monkeypatch.setattr(
-        builder,
-        "_accepted_workbook_validation",
-        lambda _path, _candidate, **_kwargs: {"all_passed": True},
-    )
     calls: list[tuple[object, ...]] = []
 
     def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
@@ -4659,16 +4634,6 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
         return {"status": "PASS"}
 
     monkeypatch.setattr(builder, "_tool", fake_tool)
-    monkeypatch.setattr(
-        builder,
-        "_require_exact_report_delivery",
-        lambda _root, generation_id, _delivery: {
-            "delivery_classification": "NON_AUTHORITY_HUMAN_DELIVERY",
-            "generation_id": generation_id,
-            "workbook_status": "EXACT_NON_AUTHORITY",
-        },
-    )
-
     built = builder.build_report(
         tmp_path / "baseline",
         tmp_path / "ledger",
@@ -4678,15 +4643,11 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
         tmp_path / "return-attribution.json",
         None,
         tmp_path / "report-output",
-        workbook_runtime_path=runtime,
     )
 
     report_calls = [call for call in calls if call[0] == "portfolio_report.py"]
     assert [call[1] for call in report_calls] == [
         "build",
-        "canonicalize-xlsx-result",
-        "canonicalize",
-        "bind-workbook-evidence",
         "verify",
         "publish",
     ]
@@ -4766,31 +4727,6 @@ def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
 ) -> None:
     candidate = tmp_path / "report-candidate"
     candidate.mkdir()
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text("{}", encoding="utf-8")
-    fake_runtime = SimpleNamespace(identity={"synthetic": True})
-    monkeypatch.setattr(
-        builder, "_resolve_workbook_runtime", lambda _path: fake_runtime
-    )
-    monkeypatch.setattr(
-        builder, "_current_workbook_runtime", lambda _runtime: fake_runtime
-    )
-    monkeypatch.setattr(
-        builder, "_record_workbook_runtime_execution", lambda *_args: None
-    )
-    monkeypatch.setattr(
-        builder, "_accepted_xlsx_evidence", lambda _path, **_kwargs: True
-    )
-    monkeypatch.setattr(
-        builder,
-        "_successful_xlsx_result_path",
-        lambda selected: selected / "xlsx-result.json",
-    )
-    monkeypatch.setattr(
-        builder,
-        "_accepted_workbook_validation",
-        lambda _path, _candidate, **_kwargs: {"all_passed": True},
-    )
     calls: list[tuple[object, ...]] = []
 
     def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
@@ -4834,7 +4770,6 @@ def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
         hwm_governed_calendar_authority_path=tmp_path / "hwm-calendar.json",
         hwm_governed_admission_receipt_path=tmp_path / "hwm-receipt.json",
         portfolio_root=portfolio_root,
-        workbook_runtime_path=runtime,
     )
 
     report_calls = [
@@ -4917,6 +4852,7 @@ def test_build_report_routes_schema10_epoch_binding_to_data_only_publication(
         **expected_epoch,
         **expected_selection,
         "hybrid_decomposition_plan_bundle": None,
+        "source_clock_path": None,
     }
     report_calls = calls["tool_calls"]
     assert [call[1] for call in report_calls] == ["verify", "publish"]
@@ -4963,6 +4899,7 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_data_only_p
     def real_candidate_boundary(*_args: object, **kwargs: object) -> dict[str, object]:
         assert kwargs == {
             "hybrid_decomposition_plan_bundle": None,
+            "source_clock_path": None,
             "epoch_manifest_generation_root": epoch_root,
             "epoch_manifest_generation_id": "d" * 64,
         }
@@ -5004,6 +4941,7 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_data_only_p
         assert "--validation-result" not in call
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook delivery workflow")
 @pytest.mark.parametrize(
     "smuggled_path",
     (
@@ -5309,7 +5247,7 @@ def test_schema10_publish_rejects_mutated_epoch_candidate_identity(
         )
 
 
-def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
+def test_builder_forwards_governed_hwm_bundle_to_report_and_panel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5371,19 +5309,7 @@ def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
         forwarded.append(kwargs)
         return {"candidate_dir": str(tmp_path / "candidate")}
 
-    def workbook(*_args: object, **kwargs: object) -> dict[str, object]:
-        forwarded.append(kwargs)
-        return {"generation_id": "f" * 64}
-
     monkeypatch.setattr(builder, "build_report_candidate", report_candidate)
-    monkeypatch.setattr(builder, "build_workbook", workbook)
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(
-        builder,
-        "_resolve_workbook_runtime",
-        lambda _path: SimpleNamespace(identity={"synthetic": True}),
-    )
     builder.build_report(
         tmp_path / "baseline",
         tmp_path / "ledger",
@@ -5400,7 +5326,6 @@ def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
         portfolio_root=tmp_path / "portfolio",
         invested_capital_result_path=capital_result_path,
         invested_capital_input_generation_path=capital_input_path,
-        workbook_runtime_path=runtime,
     )
     expected = {
         "hwm_governed_result_path": paths["result"],
@@ -5411,7 +5336,7 @@ def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
         "invested_capital_result_path": capital_result_path,
         "invested_capital_input_generation_path": capital_input_path,
     }
-    assert len(forwarded) == 2
+    assert len(forwarded) == 1
     assert all(
         all(call[key] == value for key, value in expected.items()) for call in forwarded
     )

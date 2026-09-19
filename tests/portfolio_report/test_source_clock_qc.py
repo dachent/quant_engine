@@ -12,6 +12,9 @@ from typing import Any
 
 import pytest
 
+import portfolio_attended_preparation as preparation
+import portfolio_pipeline_materialize as materializer
+
 from quant_engine.core import (
     AdapterIdentity,
     CoverageClaim,
@@ -35,12 +38,6 @@ def _load(name: str, relative: str) -> Any:
 
 
 reporter = _load("source_clock_reporter", "tools/portfolio_report.py")
-materializer = _load(
-    "portfolio_pipeline_materialize", "tools/portfolio_pipeline_materialize.py"
-)
-preparation = _load(
-    "portfolio_attended_preparation", "tools/portfolio_attended_preparation.py"
-)
 panel = _load("source_clock_panel", "tools/portfolio_control_panel.py")
 fixture = _load("source_clock_fixture", "tests/core/financial_mvp_fixture.py")
 
@@ -135,7 +132,7 @@ def test_source_clock_replays_date_only_rows_into_the_panel_without_inventing_a_
     date_only_rows = [row for row in rows if "native_observed_at" not in row]
     assert date_only_rows
     assert all(
-        "timezone" not in row and "precision" not in row for row in date_only_rows
+        "timezone" not in row and row["precision"] == "DATE" for row in date_only_rows
     )
     receipt_path = tmp_path / "source-clock.json"
     receipt_path.write_text(
