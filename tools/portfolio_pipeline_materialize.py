@@ -5376,15 +5376,14 @@ def _attended_stage_financial_inputs(
     }
 
 
-def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
-    """Bind schema-1 initial selection before a release-builder child may run."""
+def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Path | str]:
+    """Validate the runner environment before source admission can have effects."""
 
     repo_root = Path(args.repo_root).resolve()
     python = Path(args.python).resolve()
     workspace_root = Path(args.workspace_root).resolve()
     output_root = Path(args.output_root).resolve()
     retained_cache_root = Path(args.retained_cache_root).resolve()
-    source_run = Path(args.source_run).resolve()
     if repo_root != REPOSITORY_ROOT or not (repo_root / "tools").is_dir():
         raise MaterializationError(
             "attended repository root differs from this entrypoint"
@@ -5403,6 +5402,29 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
         requested_as_of = date.fromisoformat(args.requested_as_of).isoformat()
     except ValueError as exc:
         raise MaterializationError("attended requested as-of date is invalid") from exc
+    return {
+        "output_root": output_root,
+        "portfolio_root": portfolio_root,
+        "python": python,
+        "repo_root": repo_root,
+        "requested_as_of": requested_as_of,
+        "retained_cache_root": retained_cache_root,
+        "workspace_root": workspace_root,
+    }
+
+
+def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
+    """Bind schema-1 initial selection before a release-builder child may run."""
+
+    basic = _attended_basic_preflight(args)
+    repo_root = cast(Path, basic["repo_root"])
+    python = cast(Path, basic["python"])
+    workspace_root = cast(Path, basic["workspace_root"])
+    output_root = cast(Path, basic["output_root"])
+    retained_cache_root = cast(Path, basic["retained_cache_root"])
+    portfolio_root = cast(Path, basic["portfolio_root"])
+    requested_as_of = cast(str, basic["requested_as_of"])
+    source_run = Path(args.source_run).resolve()
     source = _load(source_run, "attended source run")
     if (
         set(source)
@@ -5441,10 +5463,34 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
         "required_stages",
         "predecessor_spec",
     }
-    if not isinstance(attended, dict) or set(attended) != expected_attended:
+    allowed_attended = (expected_attended, expected_attended | {"data_clock"})
+    if not isinstance(attended, dict) or set(attended) not in allowed_attended:
         raise MaterializationError("attended extension schema differs")
     if attended.get("schema_version") != 1:
         raise MaterializationError("attended extension version differs")
+    data_clock = attended.get("data_clock")
+    if data_clock is not None and (
+        not isinstance(data_clock, dict)
+        or set(data_clock)
+        != {
+            "latest_common_eod",
+            "selected_financial_cutoff",
+            "limiting_inputs",
+            "source_data_as_of",
+        }
+        or data_clock.get("selected_financial_cutoff") != requested_as_of
+        or not isinstance(data_clock.get("limiting_inputs"), list)
+        or not data_clock["limiting_inputs"]
+        or not isinstance(data_clock.get("source_data_as_of"), list)
+    ):
+        raise MaterializationError("attended data clock differs")
+    if data_clock is not None:
+        try:
+            date.fromisoformat(_text(data_clock["latest_common_eod"], "attended latest common EOD"))
+        except ValueError as exc:
+            raise MaterializationError("attended data clock differs") from exc
+    if getattr(args, "preparation_spec", None) is not None and data_clock is None:
+        raise MaterializationError("attended preparation data clock is absent")
     required_stages = attended.get("required_stages")
     if required_stages != list(ATTENDED_STAGES):
         raise MaterializationError("attended required stage graph differs")
@@ -5650,8 +5696,28 @@ def _attended_start_or_resume(
         _attended_bind_qa(preflight, output_root, completed)
         return failed_role
     if output_root.exists():
-        raise MaterializationError("attended output root already exists; use --resume")
-    output_root.mkdir(parents=True, exist_ok=False)
+        handoff = output_root / "preparation-handoff.json"
+        if handoff.is_symlink() or not handoff.is_file():
+            raise MaterializationError("attended output root already exists; use --resume")
+        expected_stage = {
+            flag: _file_definition(path)
+            for flag, path in sorted(
+                cast(Mapping[str, Path], preflight.get("financial_stage_inputs", {})).items()
+            )
+        }
+        value = _load(handoff, "attended preparation handoff")
+        source_run = cast(Path, preflight["source_run"])
+        expected = {
+            "schema_version": 1,
+            "source_run": _file_definition(source_run),
+            "financial_stage_inputs": expected_stage,
+            "source_phase": preflight["source_phase"],
+            "data_clock": _load(source_run, "attended prepared source run")["attended"]["data_clock"],
+        }
+        if value != expected:
+            raise MaterializationError("attended preparation handoff differs")
+    else:
+        output_root.mkdir(parents=True, exist_ok=False)
     _write_exact(
         receipt,
         canonical_json_bytes(
@@ -5857,7 +5923,10 @@ def _parser() -> argparse.ArgumentParser:
     attended_cmd.add_argument("--output-root", type=Path, required=True)
     attended_cmd.add_argument("--retained-cache-root", type=Path, required=True)
     attended_cmd.add_argument("--requested-as-of", required=True)
-    attended_cmd.add_argument("--source-run", type=Path, required=True)
+    attended_cmd.add_argument("--evaluated-on")
+    attended_inputs = attended_cmd.add_mutually_exclusive_group(required=True)
+    attended_inputs.add_argument("--source-run", type=Path)
+    attended_inputs.add_argument("--preparation-spec", type=Path)
     attended_cmd.add_argument("--hwm-governed-result", type=Path)
     attended_cmd.add_argument("--hwm-governed-input-generation", type=Path)
     attended_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
@@ -5953,6 +6022,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "attended":
             if args.resume and not args.execute:
                 raise MaterializationError("attended --resume requires --execute")
+            if args.preparation_spec is not None:
+                if args.evaluated_on is None:
+                    raise MaterializationError(
+                        "attended --preparation-spec requires --evaluated-on"
+                    )
+                # Source planning/preparation can create private handoff bytes,
+                # so retain the attended command's normal environment admission
+                # ahead of either branch.
+                _attended_basic_preflight(args)
+                import portfolio_attended_preparation as preparation
+
+                if not args.execute:
+                    result = preparation.plan_attended_inputs(
+                        preparation_spec_path=args.preparation_spec,
+                        requested_as_of=args.requested_as_of,
+                        evaluated_on=args.evaluated_on,
+                    )
+                    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+                    return 0
+                prepared = preparation.prepare_attended_inputs(
+                    preparation_spec_path=args.preparation_spec,
+                    output_root=Path(args.output_root).resolve(),
+                    requested_as_of=args.requested_as_of,
+                    evaluated_on=args.evaluated_on,
+                    release_commit=_git(REPOSITORY_ROOT, "rev-parse", "HEAD"),
+                    resume=args.resume,
+                )
+                source_run = prepared.get("source_run")
+                financial = prepared.get("financial_stage_inputs")
+                if not isinstance(source_run, Path) or not isinstance(financial, Mapping):
+                    raise MaterializationError("attended preparation handoff differs")
+                args.source_run = source_run
+                for flag, path in financial.items():
+                    if flag not in {*ATTENDED_HWM_INPUTS, *ATTENDED_CAPITAL_INPUTS} or not isinstance(path, Path):
+                        raise MaterializationError("attended preparation financial bindings differ")
+                    setattr(args, flag[2:].replace("-", "_"), path)
             preflight = _attended_preflight(args)
             if args.execute:
                 exit_code, result = _attended_execute(
