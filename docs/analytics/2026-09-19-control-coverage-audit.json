@@ -1,0 +1,175 @@
+{
+  "baseline_commit": "4b1c494",
+  "audit_lane": "glm: the shared model-proctor lane table assigns multi-module or unfamiliar substantial work to glm; this read-only audit spans the baseline attended CLI, core DAG, tests, control evidence, and historical plans. The model-proctor runtime was not operated.",
+  "scope": "Static, baseline-only control-coverage audit for #374. Baseline code was read with git show 4b1c494; uncommitted candidate code, M5 changes, and M7 policy-format WIP are not evidence for a delivered fix.",
+  "findings": [
+    {
+      "classification": "DEMONSTRATED",
+      "claim": "The delivered baseline has two execution-control planes: the attended CLI dispatches stage children directly, while the core PipelineSpec executor owns separate runtime verification, receipts, retry limits, command-I/O evidence, and release preparation. Controls implemented or tested only in the core plane are therefore not inherited by the attended route.",
+      "causal_mechanism": "The attended path performs its own preflight and then calls subprocess.run for each stage. It does not call execute_pipeline or _execute_node. The core executor's verified-runtime check, receipt identity checks, bounded command runner, and post-run gates therefore cannot constrain an attended invocation merely because they exist elsewhere. This is a coverage gap in an existing controller, not evidence that no controller exists.",
+      "counterfactual": "If attended execution constructed and executed the existing PipelineSpec (or used one shared command-execution seam), a core control change would govern the attended route by construction and a route-specific bypass could not remain green solely because the core suite passed.",
+      "corrective_control": "Make attended a thin adapter into the existing core execution/receipt seam, preserving its selected-input preflight and no-publication boundary. Do not add a third controller or new framework.",
+      "effectiveness_proof": "On the integrated candidate, invoke the supported attended CLI with a controlled failing first child and with a completed-resume case. Prove the same core receipt format, bound command identity, declared I/O verification, attempt limit, and no-later-child behavior observed through the CLI; then prove that a core control intentionally made to reject is also rejected before the corresponding attended child starts.",
+      "effectiveness_status": "Not established by this audit; no command was executed.",
+      "evidence": [
+        {
+          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5704-5744",
+          "quote": "def _attended_execute(\n    preflight: Mapping[str, Any], output_root: Path, *, resume: bool\n) -> tuple[int, dict[str, Any]]:"
+        },
+        {
+          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5716-5723",
+          "quote": "result = subprocess.run(\n            command,\n            cwd=cast(Path, preflight[\"repo_root\"]),\n            capture_output=True,\n            text=True,\n            check=False,\n        )"
+        },
+        {
+          "path": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:4473-4504",
+          "quote": "def execute_pipeline(\n    spec: PipelineSpec,\n    *,\n    commit: bool = False,\n    commit_authorization: Path | None = None,\n    allow_external_read: bool = False,\n    command_runner: CommandRunner = _default_command_runner,"
+        },
+        {
+          "path": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:4483-4504",
+          "quote": "_validate_portfolio_orchestration(spec, verify_runtime=True)\n    _require_executable_product(spec)"
+        }
+      ]
+    },
+    {
+      "classification": "DEMONSTRATED",
+      "claim": "The attended source-run is identity-checked at preflight but is not an argument to any stage child, and the preflight does not compare its artifact set with the release recipe's selected source inputs. Thus the source-run receipt and the stage-consumed source selection are parallel metadata surfaces rather than one enforced child-input contract.",
+      "causal_mechanism": "Preflight loads source_run, verifies its schema and validates each listed FILE/DIRECTORY definition, then records its file definition in the resume identity. The stage command instead forwards the release recipe and stage inputs but not source_run. A coherent source-run and a same-date/same-commit recipe can therefore pass the shown preflight without this function proving that their source-artifact selections are the same. This directly explains why source-QC instructions and a valid receipt can recur as a routing problem rather than become a hard execution dependency.",
+      "counterfactual": "If the child received a source-run binding that the release builder revalidated against its recipe-selected source identities before effects, a source-run/recipe mismatch would fail before ledger rather than be discoverable only through later component or parent evidence.",
+      "corrective_control": "Bind the existing source-run artifact definitions to the recipe's actual selected source definitions at preflight and forward that bound identity through the existing release-builder stage interface; have the builder reject disagreement before the first source-consuming child.",
+      "effectiveness_proof": "Create a synthetic but structurally valid source-run and recipe with the same as-of date and release commit but one different hash-bound source artifact. The supported attended CLI must reject before subprocess invocation. A positive fixture must show the exact bound source identities in the ledger receipt and a changed bound source must invalidate the actual dependent stages.",
+      "effectiveness_status": "Static coverage gap demonstrated; runtime discrimination remains required.",
+      "evidence": [
+        {
+          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5361-5388",
+          "quote": "source = _load(source_run, \"attended source run\")\n    if (\n        set(source)\n        != {\n            \"schema_version\",\n            \"as_of_date\",\n            \"release_commit\",\n            \"artifacts\",\n            \"attended\",\n        }"
+        },
+        {
+          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5383-5388",
+          "quote": "release_commit = _text(source.get(\"release_commit\"), \"attended release_commit\")\n    if len(release_commit) != 40 or release_commit != _git(\n        repo_root, \"rev-parse\", \"HEAD\"\n    ):\n        raise MaterializationError(\"attended release commit differs\")\n    _attended_artifacts(source.get(\"artifacts\"))"
+        },
+        {
+          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5653-5673",
+          "quote": "command = [\n        str(cast(Path, preflight[\"python\"])),\n        str(repo_root / \"tools\" / \"portfolio_release_builder.py\"),\n        \"stage\",\n        \"--recipe\",\n        str(cast(Path, preflight[\"recipe\"])),\n        \"--output-root\",\n        str(output_root),\n        \"--role\",\n        role,"
+        },
+        {
+          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5264-5293",
+          "quote": "\"source_run\": _file_definition(source_run),"
+        }
+      ]
+    },
+    {
+      "classification": "SUPPORTED_INFERENCE",
+      "claim": "Prior RCCAs and plans described the necessary composed-path proof, but the accepted verification units repeatedly stopped at component boundaries where the decisive process child was replaced or deliberately stopped. That made component acceptance informative but structurally unable to prevent recurrence in the supported product route.",
+      "causal_mechanism": "The historical plan explicitly required core and materializer paths to move together and required cold, warm, and changed-source product runs. The later D414 contract deliberately narrows its accepted evidence to initial preflight and the first-child boundary, and its verifier documents component-only completion. Baseline unit tests likewise monkeypatch both attended preflight and subprocess.run. This creates a control-evidence mismatch: the plan names the end-to-end predicate, while routine acceptance can certify a smaller boundary without mechanically blocking the unsatisfied predicate.",
+      "counterfactual": "If every component receipt were linked to a pending required supported-route acceptance receipt that had to be produced before the issue's applicable outcome could advance, component passes would remain useful but could not be mistaken for route closure.",
+      "corrective_control": "Keep model-proctor for code-change verification, but add an issue-owned, supported-route acceptance record that references the exact candidate and enumerates the still-unmet composed proofs. Make its absence an explicit non-terminal state, not a narrative qualification.",
+      "effectiveness_proof": "For one candidate, retain a passing component receipt and deliberately omit the supported cold/unchanged/changed-input route receipt. The governing acceptance status must remain non-terminal. Then add the actual route receipt for the same exact candidate and verify that only that receipt changes the product-run acceptance state.",
+      "history": "The evidence shows a plan/acceptance linkage failure, not that the plans omitted the desired end-to-end practices.",
+      "evidence": [
+        {
+          "path": "C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/audit/coding/2026-09-05_codex_mvp2-rcca/FINAL_PLAN.md",
+          "quote": "Update the materializer and core planning, execution, resume and production paths together."
+        },
+        {
+          "path": "C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/docs/code-review/2026-09-17-codex/deep/IMPLEMENTATION-PACKETS.md",
+          "quote": "Only after all packet tests and source receipts pass, run one cold candidate, one unchanged warm candidate from a distinct output root, then one controlled source refresh."
+        },
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/d414-native-contract.md",
+          "quote": "This is the smallest native **initial-preflight/first-child component**; it is not an attended financial-completion gate."
+        },
+        {
+          "path": "C:/Dev/worktrees/quant-engine-completion/.pt/control/d414-native-verify.py",
+          "quote": "print('PASS_D414_COMPONENT_ONLY_NATIVE_COMPLETION_REMAINS_SEPARATE',flush=True)"
+        },
+        {
+          "path": "git:4b1c494:tests/core/test_portfolio_pipeline_materialize.py:4597-4598",
+          "quote": "monkeypatch.setattr(materializer, \"_attended_preflight\", lambda _args: preflight)\n    monkeypatch.setattr(materializer.subprocess, \"run\", stage_only)"
+        }
+      ]
+    },
+    {
+      "classification": "UNPROVEN_RISK",
+      "claim": "The attended path may have a time-of-check/time-of-use and observability weakness between preflight and later children: it stores an input identity once, then launches children without a shown per-child revalidation, timeout, or core-style command receipt. Static inspection cannot establish whether another process can mutate the selected inputs in that interval.",
+      "causal_mechanism": "The attended checkpoint contains request_identity and, on failure, only role/returncode. The direct child call has no timeout argument and the shown loop prints child streams rather than recording core command I/O evidence. If an input changed after preflight, the reported request identity could describe preflight bytes while a later child consumes different bytes; whether a writer can do so is not proven by static reading.",
+      "counterfactual": "With an immutable staged input snapshot or a pre-child revalidation through the existing core receipt mechanism, a post-preflight mutation would be rejected before the child or be auditable as a new identity rather than silently sharing the old run identity.",
+      "corrective_control": "Reuse the core command receipt/pre-I/O evidence and existing timeout fields for attended children, or revalidate the bound source and recipe identities immediately before each child. Do not invent a new global retry or monitoring framework.",
+      "effectiveness_proof": "In a disposable controlled fixture, change one bound source file after attended preflight but before its next child. The command must reject before that child and retain an evidence record identifying the changed input. A silent child must also demonstrate the existing declared timeout/failed-receipt behavior once the shared seam is used.",
+      "effectiveness_status": "Unproven risk because concurrent-writer reachability and the real runtime behavior were not exercised.",
+      "evidence": [
+        {
+          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5530-5579",
+          "quote": "if resume:\n        value = _load(receipt, \"attended run receipt\")"
+        },
+        {
+          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5582-5597",
+          "quote": "\"failed_stage\": {\"returncode\": returncode, \"role\": role},\n            \"request_identity\": request_identity,\n            \"schema_version\": 2,"
+        },
+        {
+          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5717-5723",
+          "quote": "result = subprocess.run(\n            command,\n            cwd=cast(Path, preflight[\"repo_root\"]),\n            capture_output=True,\n            text=True,\n            check=False,\n        )"
+        },
+        {
+          "path": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:3550-3583",
+          "quote": "pre_io = _io_evidence(node)\n        in_flight = node.effect is CommandEffect.READ_ONLY_EXTERNAL"
+        }
+      ]
+    },
+    {
+      "classification": "REJECTED",
+      "claim": "Generic claim: the baseline has no retry, idempotency, or failed-stage preservation control.",
+      "causal_mechanism": "Rejected. The attended controller validates resume identity, accepts only a contiguous independently readable completed prefix, atomically records failure, and moves failed bytes aside before retry. Its coverage is not the same as core-path coverage, but it is a real controller rather than an absence.",
+      "counterfactual": "Without these controls, a resumed run could skip malformed or missing completed artifacts or overwrite partial evidence. The baseline contains explicit checks against that behavior.",
+      "corrective_control": "Do not create a duplicate retry framework. Preserve these controls when converging the attended and core routes, and prove their behavior through the supported CLI.",
+      "effectiveness_proof": "Existing baseline unit coverage is component evidence only; after convergence, execute the supported CLI through failed-child preservation, same-identity resume, and corrupt-completed-artifact rejection.",
+      "evidence": [
+        {
+          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5132-5183",
+          "quote": "\"\"\"Return only a contiguous, independently readable prefix of stage receipts.\"\"\""
+        },
+        {
+          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5611-5622",
+          "quote": "\"\"\"Atomically update the one mutable attended-run checkpoint.\"\"\""
+        },
+        {
+          "path": "git:4b1c494:tests/core/test_portfolio_pipeline_materialize.py:4606-4642",
+          "quote": "def test_attended_resume_skips_only_verified_completed_stages("
+        }
+      ]
+    },
+    {
+      "classification": "REJECTED",
+      "claim": "Generic claim: the baseline lacks runtime reproducibility or exact-candidate release protection.",
+      "causal_mechanism": "Rejected as an absence claim. The core controller hashes the executable and lock, checks the runtime environment inventory, requires the repository HEAD to match the spec and contract, and requires a clean repository. Commit also revalidates the orchestration and requires authorization bound to the exact spec. The demonstrated defect is failure to make the attended route inherit this controller, not nonexistence of these controls.",
+      "counterfactual": "Without the core checks, an altered runtime, lock, or repository HEAD could run under the same spec. The baseline explicitly rejects those conditions in the core route.",
+      "corrective_control": "Reuse the existing core runtime and exact-spec controls at the attended boundary; do not replace them with a new reproducibility system.",
+      "effectiveness_proof": "Once attended uses the shared route, alter the runtime lock or repository state in a disposable fixture and prove rejection before its first child; separately prove that a mismatched commit authorization cannot commit a prepared release.",
+      "evidence": [
+        {
+          "path": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:2682-2701",
+          "quote": "if _file_hash(executable)[0] != runtime[\"executable_sha256\"]:\n        raise PipelineValidationError(\"portfolio runtime executable differs\")"
+        },
+        {
+          "path": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:2697-2701",
+          "quote": "if head != spec.code_commit or head != contract[\"release_commit\"]:\n        raise PipelineValidationError(\"portfolio repository HEAD differs\")\n    if _git_output(repo_root, \"status\", \"--porcelain=v1\", \"--untracked-files=all\"):\n        raise PipelineValidationError(\"portfolio repository is not clean\")"
+        },
+        {
+          "path": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:4550-4567",
+          "quote": "_validate_commit_authorization(commit_authorization, spec)\n        journal = commit_release("
+        }
+      ]
+    }
+  ],
+  "rejected_explanations": [
+    "The recurrence is not explained by a missing core controller; core PipelineSpec execution contains material runtime, receipt, retry, and exact-commit controls.",
+    "The recurrence is not explained by model-proctor acceptance being product-run acceptance. D414 explicitly labels its accepted result component-only, so treating it as product acceptance would be a process error, not evidence supplied by the runner.",
+    "The recurrence is not evidence that released financial results were invalid. This audit ran no financial calculation and found no publication or numerical-result evidence establishing such a claim.",
+    "Unacquired September 18 tails are not described here as missing original EOD September 17 captures; the owner-supplied scope records EOD17 source/input QC as complete."
+  ],
+  "limitations": [
+    "No pytest, native exam, financial calculation, provider/network, Office, OneDrive, or production command was run; effectiveness proof remains executable work for the parent-owned integration path.",
+    "Mapper artifacts were navigation-only static evidence. They cannot establish branch execution, child ordering, source mutation reachability, finality, numerical correctness, or publication state.",
+    "The named historical analysis/IMPLEMENTATION_CONTRACT.md could be enumerated but its bounded text scan returned Access is denied; it was not relied upon. No hydration or OneDrive action was attempted.",
+    "M5 is active corrective work and M7 is unaccepted/stopped WIP. Neither was used as a delivered baseline fix."
+  ]
+}
