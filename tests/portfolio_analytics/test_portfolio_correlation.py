@@ -38,6 +38,28 @@ SERIES = (
 )
 
 
+def test_correlation_replay_identity_binds_consumed_helper_and_contract_bytes() -> None:
+    """A receipt must change with the source bytes its replay actually executes."""
+
+    import portfolio_financial_outcomes as outcomes
+
+    identity = outcomes._correlation_consumed_producer_identity(correlation)
+    expected_paths = {
+        "core_contracts": Path(
+            correlation.canonical_json_bytes.__code__.co_filename
+        ).resolve(),
+        "decimal_text": Path(correlation.decimal_text.__code__.co_filename).resolve(),
+        "producer": Path(cast(str, correlation.__file__)).resolve(),
+    }
+    lock = Path(cast(str, correlation.__file__)).resolve().parents[1] / "uv.lock"
+    expected_paths["dependency_lock"] = lock
+
+    assert identity == {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in sorted(expected_paths.items())
+    }
+
+
 def _days(count: int) -> list[date]:
     accepted: list[date] = []
     current = date(2025, 1, 2)
