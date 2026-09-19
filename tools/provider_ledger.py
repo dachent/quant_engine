@@ -5236,6 +5236,8 @@ def _validate_selected_strategy_evidence(
 
 
 def _observed_bounds(rows: Sequence[Mapping[str, Any]]) -> tuple[date, date]:
+    if any(row.get("measurement_basis") is not None for row in rows):
+        return _row_bounds(rows)
     days = [day for row in rows if (day := _row_day(row)) is not None]
     if not days:
         raise ProviderLedgerError("admitted provider fact lacks an effective date")
