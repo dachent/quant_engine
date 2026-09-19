@@ -45,6 +45,7 @@ def _write_sources(
     root: Path,
     *,
     count: int = 140,
+    start: date = date(2025, 1, 2),
     formula: str = "unconstrained",
     identical_factors: bool = False,
     target_only_dates: tuple[date, ...] = (),
@@ -52,7 +53,7 @@ def _write_sources(
     complete_costs: bool = False,
 ) -> tuple[Path, list[date]]:
     root.mkdir(parents=True)
-    days = _days(count)
+    days = _days(count, start)
     target_path = root / "targets.csv"
     with target_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
@@ -89,6 +90,28 @@ def _write_sources(
                 [day.isoformat(), "0.00005", format(f1, ".17g"), format(f2, ".17g")]
             )
     return target_path, days
+
+
+def _write_later_target_source(
+    root: Path,
+) -> tuple[Path, list[date], list[date]]:
+    """Keep target lifetime later than the selected factor history."""
+    target_path, days = _write_sources(root, start=date(2026, 1, 2))
+    factor_path = root / "factors.csv"
+    historical_days = _days(40, date(2024, 1, 2))
+    factor_rows = list(csv.reader(factor_path.read_text(encoding="utf-8").splitlines()))
+    factor_rows[1:1] = [
+        [
+            observed.isoformat(),
+            "0.00005",
+            "0.001",
+            "0.002",
+        ]
+        for observed in historical_days
+    ]
+    with factor_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(factor_rows)
+    return target_path, days, historical_days
 
 
 def _model(
@@ -386,6 +409,49 @@ def test_24_7_factor_anchor_association_compounds_weekends_and_emits_receipt(
     assert interval["holdout_display_claim"] == (
         "holdout association using selected historical snapshot"
     )
+
+
+def test_later_target_lifetime_uses_prior_factor_anchor_without_early_buckets(
+    tmp_path: Path,
+) -> None:
+    """Earlier factor history is not an implied earlier target lifetime."""
+    source = tmp_path / "source"
+    target_path, days, historical_days = _write_later_target_source(source)
+    spec_path = _spec(source, target_path, days)
+
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+
+    interval = _available(result)["interval_association"]
+    buckets = cast(list[dict[str, Any]], interval["buckets"])
+    assert buckets[0]["prior_factor_anchor"] == historical_days[-1].isoformat()
+    assert buckets[0]["target_labels"] == [days[0].isoformat()]
+    assert all(item["factor_anchor"] >= days[0].isoformat() for item in buckets)
+    assert interval["pre_anchor_labels"] == []
+    assert interval["pending_factor_anchor_labels"] == []
+    assert interval["unassignable_leading_labels"] == []
+    assert interval["unassignable_tail_labels"] == []
+    assert interval["target_source_lifetime_start"] == days[0].isoformat()
+    assert interval["target_source_lifetime_end"] == days[-1].isoformat()
+
+
+def test_later_target_lifetime_rejects_gap_inside_declared_source_bucket(
+    tmp_path: Path,
+) -> None:
+    """A source boundary does not excuse a missing declared target label."""
+    source = tmp_path / "source"
+    target_path, days, _historical_days = _write_later_target_source(source)
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    missing_day = days[20].isoformat()
+    rows = [row for row in rows if len(row) < 2 or row[1] != missing_day]
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source, target_path, days)
+
+    with pytest.raises(
+        decomposition.DecompositionError,
+        match=f"missing expected target label\\(s\\).*{missing_day}",
+    ):
+        decomposition.build_decomposition(spec_path, source)
 
 
 def _available(result: dict[str, object]) -> dict[str, Any]:
@@ -1101,6 +1167,82 @@ def test_live_plus_backtest_accepts_declared_model_return_basis(
     assert model["alpha"]["net_status"] == "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
     assert model["alpha"]["gross_annualized"] is None
     assert model["alpha"]["gross_status"] == "UNAVAILABLE_MODEL_RETURN_BASIS"
+
+
+def test_mixed_basis_source_layer_boundary_is_retained_but_not_fitted(
+    tmp_path: Path,
+) -> None:
+    """A complete MODEL-to-NET anchor is a rejected receipt, never a mixed fit."""
+    source = tmp_path / "mixed-basis-boundary"
+    weekend = (date(2025, 1, 4), date(2025, 1, 5))
+    weekday_days = _days(140)
+    calendar_only_days = tuple(
+        observed
+        for observed in (
+            weekday_days[0] + timedelta(days=offset)
+            for offset in range((weekday_days[-1] - weekday_days[0]).days + 1)
+        )
+        if observed not in set(weekday_days)
+    )
+    target_path, days = _write_sources(
+        source,
+        count=len(weekday_days),
+        target_only_dates=calendar_only_days,
+    )
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    for row in rows[1:]:
+        if row[1] <= weekend[0].isoformat():
+            row[3] = "BACKTEST"
+            row[4] = "MODEL"
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source, target_path, days)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    policy = spec["target_source"]["interval_policy"]
+    policy.update(
+        native_calendar="CALENDAR_DAY_24_7",
+        native_label_convention="UTC_CALENDAR_DATE",
+        return_basis="MIXED_NET_MODEL",
+    )
+    policy.pop("session_schedule_labels")
+    spec_path.write_text(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+
+    interval = _available(result)["interval_association"]
+    assert all(item["factor_anchor"] != "2025-01-06" for item in interval["buckets"])
+    rejected_buckets = interval["rejected_buckets"]
+    assert len(rejected_buckets) == 1
+    rejected = rejected_buckets[0]
+    assert {
+        field: rejected[field]
+        for field in (
+            "factor_anchor",
+            "factor_source_snapshot_identity",
+            "prior_factor_anchor",
+            "reason",
+            "target_labels",
+            "target_return_bases",
+            "target_source_snapshot_identity",
+            "target_source_layers",
+        )
+    } == {
+        "factor_anchor": "2025-01-06",
+        "factor_source_snapshot_identity": "SELECTED_SNAPSHOT",
+        "prior_factor_anchor": "2025-01-03",
+        "reason": "INCOMPATIBLE_RETURN_BASIS_SOURCE_LAYER_BOUNDARY",
+        "target_labels": ["2025-01-04", "2025-01-05", "2025-01-06"],
+        "target_return_bases": ["MODEL", "NET"],
+        "target_source_snapshot_identity": "SELECTED_SNAPSHOT",
+        "target_source_layers": ["BACKTEST", "ACCOUNT_LIVE"],
+    }
+    assert _available(result)["coverage"]["aligned_observations"] == len(
+        interval["buckets"]
+    )
 
 
 def test_canonical_live_series_digest_has_a_literal_live_series_oracle(
