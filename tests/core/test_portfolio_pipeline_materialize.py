@@ -2794,10 +2794,13 @@ def test_current_admission_separates_financial_cutoff_from_generation_date(
     ):
         (forged / name).write_bytes((generation / name).read_bytes())
 
-    accepted = materializer._provider_admission_authority(
-        forged, authority["contract"], **arguments
-    )
-    assert accepted["generation_id"] == rebound.generation_id
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="provider ledger generation date differs",
+    ):
+        materializer._provider_admission_authority(
+            forged, authority["contract"], **arguments
+        )
 
     catalog = json.loads((forged / "provider-ledger.json").read_bytes())
     catalog["as_of_date"] = later.isoformat()

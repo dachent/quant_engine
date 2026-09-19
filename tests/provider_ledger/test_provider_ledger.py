@@ -144,6 +144,95 @@ def test_generation_as_of_date_is_max_of_cutoff_and_selected_artifacts() -> None
     )
 
 
+def test_schwab_point_uses_new_york_financial_day_at_midnight_boundary(
+    tmp_path: Path,
+) -> None:
+    generation_id = "g" * 64
+    capture_artifact = SourceArtifact(
+        artifact_id="web/api-current-snapshot.json",
+        sha256="a" * 64,
+        size_bytes=1,
+        as_of_date=date(2026, 9, 18),
+        schema_name="schwab-api-current-snapshot",
+        schema_version="2",
+    )
+    account_id = "schwab-account"
+    symbol = "SYNTH"
+    security_id = "security-schwab-" + hashlib.sha256(symbol.encode()).hexdigest()[:24]
+    record_id = (
+        "position-"
+        + hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "account_id": account_id,
+                    "as_of_date": "2026-09-18",
+                    "security_id": security_id,
+                }
+            )
+        ).hexdigest()[:24]
+    )
+    catalog = {
+        "as_of_date": "2026-09-18",
+        "catalog_schema_version": 2,
+        "current_accounts": [{"account_id": account_id, "observed_at": "CLOCK"}],
+        "current_position_account_count": 1,
+        "current_transport": "WEB_CONTRACT",
+        "accounts": [{"account_id": account_id}],
+        "positions": [
+            {
+                "account_id": account_id,
+                "as_of_date": "2026-09-18",
+                "average_price": None,
+                "evidence_class": "WCH_CURRENT",
+                "market_value": None,
+                "observed_at": "CLOCK",
+                "record_id": record_id,
+                "security_id": security_id,
+                "source_artifact_id": capture_artifact.artifact_id,
+                "symbol": symbol,
+            }
+        ],
+        "position_snapshot_as_of": {"observed_at": "CLOCK"},
+        "source_artifacts": [capture_artifact.to_dict()],
+    }
+    manifest = SimpleNamespace(
+        adapter=SimpleNamespace(name="quant-engine-schwab"),
+        artifacts=(),
+        as_of_date=date(2026, 9, 18),
+        generation_id=generation_id,
+        verification=VerificationStatus.VERIFIED,
+    )
+    generation = tmp_path / "generations" / generation_id
+    generation.mkdir(parents=True)
+    (generation / "schwab-generation.json").write_bytes(canonical_json_bytes(catalog))
+
+    for clock, expected in (
+        ("2026-09-18T03:59:40+00:00", True),
+        ("2026-09-18T04:00:00+00:00", False),
+    ):
+        catalog["position_snapshot_as_of"]["observed_at"] = clock
+        catalog["current_accounts"][0]["observed_at"] = clock
+        catalog["positions"][0]["observed_at"] = clock
+        catalog_bytes = canonical_json_bytes(catalog)
+        catalog_artifact = SourceArtifact(
+            artifact_id="schwab-generation.json",
+            sha256=hashlib.sha256(catalog_bytes).hexdigest(),
+            size_bytes=len(catalog_bytes),
+            as_of_date=date(2026, 9, 18),
+            schema_name="schwab-generation-catalog",
+            schema_version="2",
+        )
+        manifest.artifacts = (catalog_artifact, capture_artifact)
+        (generation / "schwab-generation.json").write_bytes(catalog_bytes)
+        result = ledger._schwab_position_observation(
+            catalog,
+            manifest,
+            tmp_path,
+            date(2026, 9, 17),
+        )
+        assert (result is not None) is expected
+
+
 def test_retained_csv_cutoff_keeps_model_history_and_source_evidence(
     tmp_path: Path,
 ) -> None:
