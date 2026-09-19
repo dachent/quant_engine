@@ -306,8 +306,8 @@ def _baseline_mapped_rows(
         account_id = _text(
             raw_assignment.get("account_id"), "baseline assignment account_id"
         )
-        provider = account_providers.get(account_id)
-        if provider is None:
+        assignment_provider = account_providers.get(account_id)
+        if assignment_provider is None:
             raise CurrentEpochCrosswalkRebindError(
                 "baseline assignment account is missing"
             )
@@ -316,7 +316,7 @@ def _baseline_mapped_rows(
                 raw_assignment.get("assignment_id"), "baseline assignment_id"
             ),
             "account_id": account_id,
-            "provider": provider,
+            "provider": assignment_provider,
             "strategy_id": _text(
                 raw_assignment.get("strategy_id"), "baseline strategy_id"
             ),
