@@ -53,6 +53,12 @@ handoff requirements. It deliberately changes:
   immediately before promotion.
 - Make declared checks and evidence proportional to impact. A check is evidence,
   not truth; a deterministic pass cannot expand authority.
+- A resumable numerical run records each actual execution attempt separately from
+  its financial identity. A completed or failed attempt records observed start
+  and terminal times; a later resume marks an interrupted attempt incomplete
+  without inventing its terminal time. Reuse validates the selected financial
+  cutoff, source/policy/code identities and verified outputs before skipping a
+  producer, while operational timestamps never change financial cache identity.
 - Preserve Dead Ends in the issue whenever a path is rejected. Rejected paths
   may be retried only when their recorded failure mechanism materially changes.
 - Keep secrets, real account identifiers, captured sessions, and real financial

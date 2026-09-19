@@ -4798,6 +4798,122 @@ def test_attended_preserves_original_exit_when_child_leaves_partial_receipt(
     assert checkpoint["failed_stage"] == {"returncode": 97, "role": "baseline"}
 
 
+def test_attended_execution_observations_preserve_cold_and_resumed_attempt_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Execution timing is an operational receipt, not a financial identity input."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger",)
+    output_root = tmp_path / "output"
+    times = iter(
+        (
+            "2026-09-19T12:00:00+00:00",
+            "2026-09-19T12:00:01+00:00",
+            "2026-09-19T12:01:00+00:00",
+            "2026-09-19T12:01:01+00:00",
+        )
+    )
+    monkeypatch.setattr(materializer, "_execution_timestamp", lambda: next(times))
+
+    def fail_once(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 97, "", "ledger failed")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", fail_once)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 97
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, "ledger")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 0
+    )
+
+    receipt = json.loads(
+        (output_root / "attended-execution-observations.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert receipt == {
+        "attempts": [
+            {
+                "attempt": 1,
+                "ended_at": "2026-09-19T12:00:01+00:00",
+                "started_at": "2026-09-19T12:00:00+00:00",
+                "status": "FAILED",
+            },
+            {
+                "attempt": 2,
+                "ended_at": "2026-09-19T12:01:01+00:00",
+                "started_at": "2026-09-19T12:01:00+00:00",
+                "status": "COMPLETED",
+            },
+        ],
+        "schema_version": 1,
+    }
+    assert (
+        json.loads((output_root / "attended-run.json").read_text())["request_identity"]
+        == (preflight["request_identity"])
+    )
+
+
+def test_attended_execution_observations_mark_interrupted_attempt_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed run records interruption without inventing a terminal instant."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger",)
+    output_root = tmp_path / "output"
+    times = iter(
+        (
+            "2026-09-19T12:00:00+00:00",
+            "2026-09-19T12:01:00+00:00",
+            "2026-09-19T12:01:01+00:00",
+        )
+    )
+    monkeypatch.setattr(materializer, "_execution_timestamp", lambda: next(times))
+
+    def interrupted(
+        _argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(materializer.subprocess, "run", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        materializer._attended_execute(preflight, output_root, resume=False)
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, "ledger")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer._attended_execute(preflight, output_root, resume=True)[0] == 0
+    attempts = json.loads(
+        (output_root / "attended-execution-observations.json").read_text(
+            encoding="utf-8"
+        )
+    )["attempts"]
+    assert attempts[0] == {
+        "attempt": 1,
+        "started_at": "2026-09-19T12:00:00+00:00",
+        "status": "INCOMPLETE",
+    }
+    assert attempts[1]["status"] == "COMPLETED"
+
+
 @pytest.mark.parametrize(
     "role",
     ("attribution", "analytics", "report", "panel-candidate", "panel"),
