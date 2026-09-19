@@ -4695,8 +4695,13 @@ def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
         )
 
 
+@pytest.mark.parametrize("select_attribution", [False, True])
+@pytest.mark.parametrize("select_dependence", [False, True])
 def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    select_attribution: bool,
+    select_dependence: bool,
 ) -> None:
     """The wrapper keeps the same epoch authority through both report stages."""
 
@@ -4736,6 +4741,10 @@ def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
         epoch_manifest_generation_root=generation_root,
         epoch_manifest_generation_id="b" * 64,
         workbook_runtime_path=runtime,
+        attribution_generation_id="c" * 64 if select_attribution else None,
+        dependence_selected_inputs_path=(
+            tmp_path / "selected-inputs.json" if select_dependence else None
+        ),
     )
 
     assert result == {"generation_id": "a" * 64}
@@ -4743,12 +4752,21 @@ def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
         "epoch_manifest_generation_root": generation_root,
         "epoch_manifest_generation_id": "b" * 64,
     }
+    expected_selection: dict[str, object] = {}
+    if select_attribution:
+        expected_selection["attribution_generation_id"] = "c" * 64
+    if select_dependence:
+        expected_selection["dependence_selected_inputs_path"] = (
+            tmp_path / "selected-inputs.json"
+        )
     assert calls["candidate_kwargs"] == {
         **expected_epoch,
+        **expected_selection,
         "hybrid_decomposition_plan_bundle": None,
     }
     assert calls["workbook_kwargs"] == {
         **expected_epoch,
+        **expected_selection,
         "hybrid_decomposition_plan_bundle": None,
         "workbook_runtime_path": runtime,
     }

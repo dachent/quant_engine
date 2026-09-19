@@ -17,7 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, TypedDict
 
 from quant_engine.core import (
     GenerationManifest,
@@ -49,6 +49,18 @@ ACCOUNT_STRATEGY_PANEL_TEMPLATE_ROOT = (
     REPOSITORY_ROOT / "apps" / "portfolio-control-panel"
 )
 WORKBOOK_RUNTIME_RECEIPT = "workbook-runtime-execution.json"
+
+
+class _ReportForwardedArguments(TypedDict, total=False):
+    hwm_governed_result_path: Path | None
+    hwm_governed_input_generation_path: Path | None
+    hwm_governed_calendar_authority_path: Path | None
+    hwm_governed_admission_receipt_path: Path | None
+    invested_capital_result_path: Path | None
+    invested_capital_input_generation_path: Path | None
+    portfolio_root: Path
+    dependence_selected_inputs_path: Path
+    attribution_generation_id: str
 
 
 class _WorkbookRuntime:
@@ -5310,7 +5322,7 @@ def build_report(
     dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     _resolve_workbook_runtime(workbook_runtime_path)
-    hwm_paths = (
+    hwm_paths: _ReportForwardedArguments = (
         {
             "hwm_governed_result_path": hwm_governed_result_path,
             "hwm_governed_input_generation_path": (hwm_governed_input_generation_path),
@@ -5329,7 +5341,7 @@ def build_report(
         )
         else {}
     )
-    capital_paths = (
+    capital_paths: _ReportForwardedArguments = (
         {
             "invested_capital_result_path": invested_capital_result_path,
             "invested_capital_input_generation_path": (
@@ -5348,19 +5360,26 @@ def build_report(
     # publication and require the portfolio root for it.  Forward whatever
     # the caller supplied instead of only forwarding it alongside those two
     # argument families.
-    portfolio_paths = (
+    portfolio_paths: _ReportForwardedArguments = (
         {"portfolio_root": portfolio_root} if portfolio_root is not None else {}
     )
-    dependence_selected_inputs_paths = (
+    dependence_selected_inputs_paths: _ReportForwardedArguments = (
         {"dependence_selected_inputs_path": dependence_selected_inputs_path}
         if dependence_selected_inputs_path is not None
         else {}
     )
-    attribution_generation_paths = (
+    attribution_generation_paths: _ReportForwardedArguments = (
         {"attribution_generation_id": attribution_generation_id}
         if attribution_generation_id is not None
         else {}
     )
+    forwarded_arguments: _ReportForwardedArguments = {
+        **hwm_paths,
+        **capital_paths,
+        **portfolio_paths,
+        **dependence_selected_inputs_paths,
+        **attribution_generation_paths,
+    }
     candidate = build_report_candidate(
         baseline_root,
         provider_ledger_root,
@@ -5376,11 +5395,7 @@ def build_report(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         epoch_manifest_generation_id=epoch_manifest_generation_id,
-        **attribution_generation_paths,
-        **dependence_selected_inputs_paths,
-        **hwm_paths,
-        **portfolio_paths,
-        **capital_paths,
+        **forwarded_arguments,
     )
     return build_workbook(
         baseline_root,
@@ -5398,11 +5413,7 @@ def build_report(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         epoch_manifest_generation_id=epoch_manifest_generation_id,
-        **attribution_generation_paths,
-        **dependence_selected_inputs_paths,
-        **hwm_paths,
-        **portfolio_paths,
-        **capital_paths,
+        **forwarded_arguments,
         workbook_runtime_path=workbook_runtime_path,
     )
 
