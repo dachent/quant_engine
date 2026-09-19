@@ -1380,6 +1380,14 @@ def _provider_admission_authority(
                             )
                             if row.get(field) not in {None, ""}
                         ]
+                        if point_bound:
+                            # Native equality above binds the original UTC date
+                            # and clock; EOD selection uses the provider day.
+                            days = [
+                                datetime.fromisoformat(row["observed_at"])
+                                .astimezone(ZoneInfo("America/New_York"))
+                                .date()
+                            ]
                         if row.get("generation_id") != identity.generation_id or (
                             any(
                                 day > (cutoff if point_bound else effective)

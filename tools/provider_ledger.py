@@ -4415,7 +4415,9 @@ def _project_account_facts(
                         and position_observation is not None
                         and row.get("source_record_id")
                         in position_observation.record_ids
-                        and observed == position_observation.financial_observation_date
+                        # Selection checked the New York financial day; bind
+                        # the unchanged native UTC row date here.
+                        and observed == position_observation.observed_at.date()
                     )
                 ):
                     retained.append(row)
