@@ -156,7 +156,11 @@ def _forged_candidate(
         }
         for provider_id in manifests
     }
-    for fact_name in ledger._NATIVE_LEVERAGE_OBSERVATION_FACTS:
+    for fact_name in (
+        "financing_cost_observations",
+        "financing_liability_observations",
+        "leverage_exposure_observations",
+    ):
         if not facts["ibkr"].get(fact_name):
             facts["ibkr"].pop(fact_name, None)
     _, receipt_bytes = ledger._admit_or_declare_receipt(
