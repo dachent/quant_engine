@@ -176,6 +176,71 @@ def _spec(tmp_path: Path) -> Path:
     return path
 
 
+def _update_release_status(spec: Path, **updates: object) -> None:
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    run = Path(document["run_root"])
+    release_path = run / "reports" / "release_status.json"
+    release = json.loads(release_path.read_text(encoding="utf-8"))
+    release.update(updates)
+    _write_json(release_path, release)
+    for artifact in document["artifacts"]:
+        if artifact["artifact_id"] == "reports/release_status.json":
+            payload = release_path.read_bytes()
+            artifact["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+            artifact["expected_size_bytes"] = len(payload)
+            break
+    _write_json(spec, document)
+
+
+def test_source_admission_does_not_require_desktop_excel_statuses(
+    tmp_path: Path,
+) -> None:
+    spec = _spec(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    run = Path(document["run_root"])
+    release_path = run / "reports" / "release_status.json"
+    release = json.loads(release_path.read_text(encoding="utf-8"))
+    release.pop("xlsx_native_status")
+    release.pop("xlsx_visual_status")
+    _write_json(release_path, release)
+    for artifact in document["artifacts"]:
+        if artifact["artifact_id"] == "reports/release_status.json":
+            payload = release_path.read_bytes()
+            artifact["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+            artifact["expected_size_bytes"] = len(payload)
+            break
+    _write_json(spec, document)
+
+    catalog, manifest, _ = build_generation(spec)
+
+    assert catalog["coverage_status"] == "PARTIAL"
+    assert manifest.coverage.status is CoverageStatus.PARTIAL
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("export_status", "FAILED"),
+        ("extraction_status", "FAILED"),
+        ("status", "COMPLETE"),
+        ("verification_ok", False),
+    ],
+)
+def test_source_admission_rejects_failed_non_desktop_status(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    spec = _spec(tmp_path)
+    _update_release_status(spec, **{field: value})
+
+    with pytest.raises(
+        MatrixportGenerationError,
+        match="release status is not the accepted partial result",
+    ):
+        build_generation(spec)
+
+
 @pytest.mark.parametrize("coverage_pass", [False, True])
 def test_partial_generation_is_deterministic_and_never_published(
     tmp_path: Path,

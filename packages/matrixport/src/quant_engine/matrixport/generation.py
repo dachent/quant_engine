@@ -285,8 +285,6 @@ def _report_contract(
         "extraction_status": "COMPLETED",
         "status": "PARTIAL",
         "verification_ok": True,
-        "xlsx_native_status": "PASS",
-        "xlsx_visual_status": "PASS",
     }
     if any(release.get(key) != value for key, value in required_release.items()):
         raise MatrixportGenerationError(
