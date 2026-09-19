@@ -9,6 +9,7 @@ import importlib.util
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 from typing import Callable
 
@@ -4308,3 +4309,204 @@ def test_panel_lens_authority_admits_the_dynamic_style_path(tmp_path: Path) -> N
     panel["decomposition_lenses"]["modes"]["LIVE_ONLY"][-1]["generation_id"] = "0" * 64
     with pytest.raises(materializer.MaterializationError, match="panel lens"):
         materializer._verify_panel_lens_nodes(panel, nodes, DECOMPOSITION_AUTHORITY)
+
+
+def _attended_preflight_fixture(tmp_path: Path) -> dict[str, object]:
+    """A child-bound run fixture with no financial inputs or publication seam."""
+
+    repo = tmp_path / "repo"
+    builder = repo / "tools" / "portfolio_release_builder.py"
+    builder.parent.mkdir(parents=True)
+    builder.write_text("# child boundary\n", encoding="utf-8")
+    runtime = tmp_path / "python.exe"
+    runtime.write_bytes(b"python")
+    descriptor = tmp_path / "workbook-runtime.json"
+    descriptor.write_text("{}", encoding="utf-8")
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text("{}", encoding="utf-8")
+    source_run = tmp_path / "source-run.json"
+    source_run.write_text("{}", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    (workspace / "dataPortfolio").mkdir(parents=True)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    return {
+        "repo_root": repo,
+        "python": runtime,
+        "workspace_root": workspace,
+        "portfolio_root": workspace / "dataPortfolio",
+        "retained_cache_root": cache,
+        "requested_as_of": "2026-09-19",
+        "source_run": source_run,
+        "runtime": {"descriptor": descriptor, "identity": {"runtime": "test"}},
+        "recipe": recipe,
+        "financial_inputs": {},
+        "qa_dir": tmp_path / "qa",
+        "request_identity": {"fixture": "attended-child-boundary"},
+        "required_stages": materializer.ATTENDED_STAGES,
+    }
+
+
+def _record_attended_stage(output_root: Path, role: str) -> None:
+    stage_root = (
+        output_root
+        / "stages"
+        / (
+            "report-candidate"
+            if role == "report"
+            else "report"
+            if role == "workbook"
+            else "panel"
+            if role in {"panel-candidate", "panel"}
+            else role
+        )
+    )
+    stage_root.mkdir(parents=True, exist_ok=True)
+    _write_json(output_root / "stage-results" / f"{role}.json", {"role": role})
+
+
+def _attended_argv(
+    preflight: dict[str, object],
+    output_root: Path,
+    *,
+    execute: bool,
+    resume: bool = False,
+) -> list[str]:
+    runtime = preflight["runtime"]
+    assert isinstance(runtime, dict)
+    argv = [
+        "attended",
+        "--repo-root",
+        str(preflight["repo_root"]),
+        "--python",
+        str(preflight["python"]),
+        "--workspace-root",
+        str(preflight["workspace_root"]),
+        "--output-root",
+        str(output_root),
+        "--retained-cache-root",
+        str(preflight["retained_cache_root"]),
+        "--requested-as-of",
+        str(preflight["requested_as_of"]),
+        "--source-run",
+        str(preflight["source_run"]),
+        "--workbook-runtime",
+        str(runtime["descriptor"]),
+    ]
+    if execute:
+        argv.append("--execute")
+    if resume:
+        argv.append("--resume")
+    return argv
+
+
+def test_attended_view_separates_plan_from_verified_completed_artifacts(
+    tmp_path: Path,
+) -> None:
+    """Dropping a result receipt must make a completed stage disappear from the view."""
+
+    output_root = tmp_path / "output"
+    _record_attended_stage(output_root, "ledger")
+
+    view = materializer._attended_view(
+        output_root, materializer.ATTENDED_STAGES, {"source": "test"}
+    )
+
+    assert view["planned_stages"] == list(materializer.ATTENDED_STAGES)
+    assert view["verified_completed_stages"] == ["ledger"]
+    assert view["post_proof_pipeline_spec"] is None
+
+
+def test_attended_execute_never_starts_a_coordinated_publication_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replacing a stage child with publication must fail this boundary assertion."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    output_root = tmp_path / "output"
+    calls: list[list[str]] = []
+
+    def stage_only(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        role = argv[argv.index("--role") + 1]
+        _record_attended_stage(output_root, role)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", stage_only)
+
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+    assert len(calls) == len(materializer.ATTENDED_STAGES)
+    assert all(command[2] == "stage" for command in calls)
+    assert all("publish" not in command for command in calls)
+
+
+def test_attended_resume_skips_only_verified_completed_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing a stage directory must turn a would-be resume skip into rejection."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    output_root = tmp_path / "output"
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a verified completed stage must be skipped")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 0
+    )
+
+    (output_root / "stages" / "ledger").rmdir()
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 1
+    )
+
+
+def test_attended_resume_rejects_a_corrupt_completed_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replacing a JSON receipt with arbitrary bytes must stop before another child."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    output_root = tmp_path / "output"
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+    (output_root / "stage-results" / "ledger.json").write_bytes(b"not-json")
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("corrupt completion must fail before a child starts")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 1
+    )
