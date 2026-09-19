@@ -88,11 +88,6 @@ const candidateRecordSha256 = createHash("sha256").update(candidateRecordBytes).
 const dashboardData = JSON.parse(await readFile(path.join(path.dirname(html), "data", "dashboard_data.json"), "utf8"));
 const expectedFactorSeries = dashboardData.dependence_analysis.series_ids.length;
 const expectedCurrentStrategies = dashboardData.strategies.length;
-// The account selector lists every account the panel scopes to, plus the
-// "all accounts" entry.  Bind that to the census the panel actually carries
-// rather than to a literal: the current-product perimeter decides how many
-// accounts appear, and a fixed count silently encodes one perimeter vintage.
-const expectedAccountOptions = dashboardData.account_summary.length + 1;
 const expectedReserveAssignments = dashboardData.performance.filter((row) => row.strategy_mapping_disposition === "RESERVE_NOT_APPLICABLE").length;
 const performanceLineageMismatch = dashboardData.meta?.performance_lineage?.status === "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH";
 const includeCandidates = options["exclude-candidates"] !== "true";
@@ -474,6 +469,11 @@ if (epochOnly) {
   if (!result.all_passed) process.exitCode = 1;
   process.exit();
 }
+// The account selector lists every account the panel scopes to, plus the
+// "all accounts" entry.  Bind that to the census the panel actually carries
+// rather than to a literal: the current-product perimeter decides how many
+// accounts appear, and a fixed count silently encodes one perimeter vintage.
+const expectedAccountOptions = dashboardData.account_summary.length + 1;
 const views = ["command", "capital", "risk", "attribution", "dependence", "weekly", "data"];
 const requiredFactorLenses = [
   "ECONOMIC_FACTOR",
