@@ -8359,6 +8359,19 @@ def _admit_or_declare_receipt(
     return receipt, canonical_json_bytes(receipt)
 
 
+def _generation_as_of_date(
+    financial_cutoff: date, artifacts: Sequence[SourceArtifact]
+) -> date:
+    """Return native generation provenance, separate from financial cutoff.
+
+    The cutoff is the owner-selected financial boundary.  A retained source
+    capture may have a later native date; that capture date is provenance, not
+    a request to advance the financial projection or the execution clock.
+    """
+
+    return max(financial_cutoff, *(artifact.as_of_date for artifact in artifacts))
+
+
 @_catalog_decimal_context
 def build_catalog(
     spec_path: Path,
@@ -8820,8 +8833,16 @@ def build_catalog(
         schema_name="provider-admission-receipt",
         schema_version=str(ADMIT_OR_DECLARE_SCHEMA_VERSION),
     )
+    generation_as_of = _generation_as_of_date(
+        as_of,
+        (
+            *provider_artifacts,
+            *strategy_artifacts,
+            provenance_artifact,
+        ),
+    )
     manifest = GenerationManifest.build(
-        as_of_date=as_of,
+        as_of_date=generation_as_of,
         adapter=AdapterIdentity(
             name="quant-engine-provider-ledger", version=ADAPTER_VERSION
         ),

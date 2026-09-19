@@ -2759,6 +2759,81 @@ def test_current_admission_reopens_sources_and_rejects_coherent_omissions(
     assert not (tmp_path / "staged/CURRENT.json").exists()
 
 
+def test_current_admission_separates_financial_cutoff_from_generation_date(
+    tmp_path: Path,
+) -> None:
+    fixture_spec = importlib.util.spec_from_file_location(
+        "current_source_stage_date_fixture",
+        ROOT / "tests/provider_ledger/test_admit_or_declare.py",
+    )
+    assert fixture_spec is not None and fixture_spec.loader is not None
+    fixture = importlib.util.module_from_spec(fixture_spec)
+    fixture_spec.loader.exec_module(fixture)
+    generation, authority, _ = fixture._source_bound_stage(tmp_path)
+    arguments = {
+        key: authority[key]
+        for key in ("contract_raw_sha256", "contract_semantic_sha256", "census_sha256")
+    }
+    original = GenerationManifest.from_json_bytes(
+        (generation / "generation.json").read_bytes()
+    )
+    later = original.as_of_date + timedelta(days=1)
+    rebound = GenerationManifest.build(
+        as_of_date=later,
+        adapter=original.adapter,
+        coverage=original.coverage,
+        artifacts=original.artifacts,
+        verification=original.verification,
+    )
+    forged = tmp_path / "later-generation" / rebound.generation_id
+    forged.mkdir(parents=True)
+    (forged / "generation.json").write_bytes(rebound.to_json_bytes())
+    for name in (
+        "admit-or-declare-receipt.json",
+        "provider-ledger.json",
+    ):
+        (forged / name).write_bytes((generation / name).read_bytes())
+
+    accepted = materializer._provider_admission_authority(
+        forged, authority["contract"], **arguments
+    )
+    assert accepted["generation_id"] == rebound.generation_id
+
+    catalog = json.loads((forged / "provider-ledger.json").read_bytes())
+    catalog["as_of_date"] = later.isoformat()
+    tampered_catalog = canonical_json_bytes(catalog)
+    tampered_manifest = GenerationManifest.build(
+        as_of_date=later,
+        adapter=rebound.adapter,
+        coverage=rebound.coverage,
+        artifacts=tuple(
+            replace(
+                artifact,
+                sha256=hashlib.sha256(tampered_catalog).hexdigest(),
+                size_bytes=len(tampered_catalog),
+            )
+            if artifact.artifact_id == "normalized/provider-ledger.json"
+            else artifact
+            for artifact in rebound.artifacts
+        ),
+        verification=rebound.verification,
+    )
+    tampered = tmp_path / "tampered-generation" / tampered_manifest.generation_id
+    tampered.mkdir(parents=True)
+    (tampered / "generation.json").write_bytes(tampered_manifest.to_json_bytes())
+    (tampered / "provider-ledger.json").write_bytes(tampered_catalog)
+    (tampered / "admit-or-declare-receipt.json").write_bytes(
+        (generation / "admit-or-declare-receipt.json").read_bytes()
+    )
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="provider ledger catalog authority differs",
+    ):
+        materializer._provider_admission_authority(
+            tampered, authority["contract"], **arguments
+        )
+
+
 def _runtime_registry(
     tmp_path: Path,
     *,

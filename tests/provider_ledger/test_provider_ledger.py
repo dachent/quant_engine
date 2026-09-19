@@ -116,6 +116,34 @@ def test_ibkr_future_unquantified_capital_cannot_erase_cutoff_anchor() -> None:
     assert any(row.get("original_source_date") == "2025-09-30" for row in findings)
 
 
+def test_generation_as_of_date_is_max_of_cutoff_and_selected_artifacts() -> None:
+    artifacts = (
+        SourceArtifact(
+            artifact_id="providers/native/generation.json",
+            sha256="a" * 64,
+            size_bytes=1,
+            as_of_date=date(2026, 9, 18),
+            schema_name="generation-manifest",
+            schema_version="1",
+        ),
+        SourceArtifact(
+            artifact_id="normalized/provider-ledger.json",
+            sha256="b" * 64,
+            size_bytes=1,
+            as_of_date=date(2026, 9, 17),
+            schema_name="provider-ledger-catalog",
+            schema_version="2",
+        ),
+    )
+
+    assert ledger._generation_as_of_date(date(2026, 9, 17), artifacts) == date(
+        2026, 9, 18
+    )
+    assert ledger._generation_as_of_date(date(2026, 9, 19), artifacts) == date(
+        2026, 9, 19
+    )
+
+
 def test_retained_csv_cutoff_keeps_model_history_and_source_evidence(
     tmp_path: Path,
 ) -> None:
