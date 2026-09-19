@@ -1155,6 +1155,12 @@ def _provider_admission_authority(
                     if fact_name == "provider_strategy_returns":
                         continue
                     rows = [row for row in rows if row["provider_id"] == provider_id]
+                    if (
+                        provider_id == "ibkr"
+                        and fact_name in reader._NATIVE_LEVERAGE_OBSERVATION_FACTS
+                        and not rows
+                    ):
+                        continue
                     for row in rows:
                         days = [
                             date.fromisoformat(row[field])
@@ -1163,6 +1169,12 @@ def _provider_admission_authority(
                                 "event_date",
                                 "effective_date",
                                 "nav_recognition_date",
+                                "value_date",
+                                "accounting_date",
+                                "settlement_date",
+                                "period_start",
+                                "period_end",
+                                "report_date",
                             )
                             if row.get(field) not in {None, ""}
                         ]
