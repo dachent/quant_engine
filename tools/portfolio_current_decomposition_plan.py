@@ -350,6 +350,11 @@ def _layered_history_targets(
     evidence_mode: str,
     evaluated_on: date,
     assurance_profile: str = "DEVELOPMENT",
+    provider_admission_receipt_path: Path | None = None,
+    financial_input_contract_path: Path | None = None,
+    provider_ledger_manifest_path: Path | None = None,
+    provider_ledger_catalog_path: Path | None = None,
+    portfolio123_version_evidence_path: Path | None = None,
 ) -> dict[str, Any]:
     if assurance_profile not in ASSURANCE_PROFILES:
         raise CurrentPlanError("assurance_profile is unsupported")
@@ -370,9 +375,21 @@ def _layered_history_targets(
 
     verifier = _layered_history_module()
     try:
-        verification = verifier.verify_layered_history_generation(
-            generation_root, contract_path
-        )
+        authority_paths = {
+            "provider_admission_receipt_path": provider_admission_receipt_path,
+            "financial_input_contract_path": financial_input_contract_path,
+            "provider_ledger_manifest_path": provider_ledger_manifest_path,
+            "provider_ledger_catalog_path": provider_ledger_catalog_path,
+            "portfolio123_version_evidence_path": portfolio123_version_evidence_path,
+        }
+        if any(path is not None for path in authority_paths.values()):
+            verification = verifier.verify_layered_history_generation(
+                generation_root, contract_path, **authority_paths
+            )
+        else:
+            verification = verifier.verify_layered_history_generation(
+                generation_root, contract_path
+            )
     except (OSError, ValueError) as exc:
         raise CurrentPlanError(f"layered history verification failed: {exc}") from exc
     if verification.get("verification") != "VALID":
@@ -1621,6 +1638,11 @@ def build_bundle(
     evaluation_date: str,
     evidence_mode: str = "LIVE_ONLY",
     assurance_profile: str = "DEVELOPMENT",
+    provider_admission_receipt_path: Path | None = None,
+    financial_input_contract_path: Path | None = None,
+    provider_ledger_manifest_path: Path | None = None,
+    provider_ledger_catalog_path: Path | None = None,
+    portfolio123_version_evidence_path: Path | None = None,
 ) -> tuple[dict[str, bytes], dict[str, object]]:
     """Build a deterministic current-strategy planning bundle without writing."""
 
@@ -1659,13 +1681,25 @@ def build_bundle(
     )
     strategies = _resolved_strategies(plan)
     declared_periods_per_year = _declared_factor_anchor_periods_per_year(base_spec)
+    layered_history_kwargs: dict[str, Any] = {
+        "generation_root": layered_history_generation_path,
+        "contract_path": financial_mvp_contract_path,
+        "strategies": strategies,
+        "evidence_mode": evidence_mode,
+        "evaluated_on": evaluated_on,
+        "assurance_profile": assurance_profile,
+    }
+    authority_paths = {
+        "provider_admission_receipt_path": provider_admission_receipt_path,
+        "financial_input_contract_path": financial_input_contract_path,
+        "provider_ledger_manifest_path": provider_ledger_manifest_path,
+        "provider_ledger_catalog_path": provider_ledger_catalog_path,
+        "portfolio123_version_evidence_path": portfolio123_version_evidence_path,
+    }
+    if any(path is not None for path in authority_paths.values()):
+        layered_history_kwargs.update(authority_paths)
     layered_history = _layered_history_targets(
-        generation_root=layered_history_generation_path,
-        contract_path=financial_mvp_contract_path,
-        strategies=strategies,
-        evidence_mode=evidence_mode,
-        evaluated_on=evaluated_on,
-        assurance_profile=assurance_profile,
+        **layered_history_kwargs,
     )
     target_rows = cast(list[dict[str, str]], layered_history["rows"])
     series_interval_policies = cast(
@@ -2452,6 +2486,11 @@ def _parser() -> argparse.ArgumentParser:
         choices=ASSURANCE_PROFILES,
         default="DEVELOPMENT",
     )
+    parser.add_argument("--provider-admission-receipt", type=Path)
+    parser.add_argument("--financial-input-contract", type=Path)
+    parser.add_argument("--provider-ledger-manifest", type=Path)
+    parser.add_argument("--provider-ledger-catalog", type=Path)
+    parser.add_argument("--portfolio123-version-evidence", type=Path)
     return parser
 
 
@@ -2478,6 +2517,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         evaluation_date=args.evaluation_date,
         evidence_mode=args.evidence_mode,
         assurance_profile=args.assurance_profile,
+        provider_admission_receipt_path=args.provider_admission_receipt,
+        financial_input_contract_path=args.financial_input_contract,
+        provider_ledger_manifest_path=args.provider_ledger_manifest,
+        provider_ledger_catalog_path=args.provider_ledger_catalog,
+        portfolio123_version_evidence_path=args.portfolio123_version_evidence,
     )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
