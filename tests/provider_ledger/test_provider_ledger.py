@@ -2675,6 +2675,84 @@ def test_ibkr_native_leverage_projection_preserves_raw_lineage_and_cutoff() -> N
     ).items()
 
 
+def test_schwab_margin_interest_projects_as_source_bound_financing_cost() -> None:
+    """A native margin charge is an investment-cost observation, never owner flow."""
+
+    account_id = "account-schwab-margin"
+    transaction = {
+        "account_id": account_id,
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-1.25"},
+        "effective_date": "2026-01-15",
+        "event_date": "2026-01-14",
+        "kind": "MARGIN INTEREST",
+        "record_id": "schwab-margin-interest-1",
+        "source_artifact_id": "wch/transactions/account-schwab-margin.json",
+        "source_ordinal": 7,
+        "source_record_id": "native-schwab-margin-interest-1",
+    }
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    catalog["transactions"] = [transaction]
+
+    projected, findings = ledger._project_account_facts(
+        "schwab",
+        "generation-schwab-margin",
+        catalog,
+        {account_id},
+        {"strategy-schwab-margin"},
+        {
+            account_id: [
+                {
+                    "effective_start": "2026-01-01",
+                    "strategy_id": "strategy-schwab-margin",
+                }
+            ]
+        },
+    )
+
+    assert findings == []
+    assert projected.get("flows", []) == []
+    cost = projected["financing_cost_observations"]
+    assert len(cost) == 1
+    assert {
+        key: cost[0][key]
+        for key in (
+            "account_id",
+            "amount",
+            "classification",
+            "effective_date",
+            "event_date",
+            "generation_id",
+            "included_in_nav",
+            "measurement_basis",
+            "native_source_record_id",
+            "provider_id",
+            "record_id",
+            "source_amount",
+            "source_artifact_id",
+            "source_ordinal",
+            "source_record_id",
+            "strategy_id",
+        )
+    } == {
+        "account_id": account_id,
+        "amount": transaction["amount"],
+        "classification": "BROKER_DEBIT_INTEREST",
+        "effective_date": "2026-01-15",
+        "event_date": "2026-01-14",
+        "generation_id": "generation-schwab-margin",
+        "included_in_nav": None,
+        "measurement_basis": "CASH_POSTING",
+        "native_source_record_id": "native-schwab-margin-interest-1",
+        "provider_id": "schwab",
+        "record_id": "schwab-financing-cost:schwab-margin-interest-1",
+        "source_amount": transaction["amount"],
+        "source_artifact_id": "wch/transactions/account-schwab-margin.json",
+        "source_ordinal": 7,
+        "source_record_id": "schwab-margin-interest-1",
+        "strategy_id": "strategy-schwab-margin",
+    }
+
+
 @pytest.mark.parametrize(
     ("provider_id", "value_basis"),
     (("ibkr", "ACCOUNT_TOTAL"), ("schwab", "ACCOUNT_VALUE")),
