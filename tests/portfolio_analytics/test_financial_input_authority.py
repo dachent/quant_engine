@@ -37,6 +37,37 @@ def test_governed_policy_rebinds_only_product_authority() -> None:
     assert actual == expected_bytes
 
 
+def test_governed_policy_preserves_retained_pretty_bytes_when_only_authority_moves() -> None:
+    """A retained v4 receipt may keep its admitted non-canonical JSON layout."""
+
+    current = json.loads(reporter._PORTABLE_HWM_POLICY.read_bytes())
+    retained_contract = b'{\n  "retained": "native source authority"\n}\n'
+    old_raw = current["product_authority"]["raw_sha256"]
+    old_semantic = current["product_authority"]["semantic_digest"]
+    new_raw = hashlib.sha256(retained_contract).hexdigest()
+    new_semantic = hashlib.sha256(_canonical(json.loads(retained_contract))).hexdigest()
+    retained_pretty = json.dumps(current, indent=1).encode("utf-8") + b"\n"
+    expected = retained_pretty.replace(old_raw.encode(), new_raw.encode(), 1).replace(
+        old_semantic.encode(), new_semantic.encode(), 1
+    )
+
+    actual = capital.governed_hwm_input_policy(
+        retained_pretty,
+        retained_contract,
+        hashlib.sha256(expected).hexdigest(),
+    )
+
+    assert actual == expected
+    assert json.loads(actual) == {
+        **current,
+        "product_authority": {
+            **current["product_authority"],
+            "raw_sha256": new_raw,
+            "semantic_digest": new_semantic,
+        },
+    }
+
+
 def test_governed_policy_rejects_changed_current_calculation() -> None:
     current = json.loads(reporter._PORTABLE_HWM_POLICY.read_bytes())
     expected_bytes = _canonical(current)

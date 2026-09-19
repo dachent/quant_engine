@@ -1333,18 +1333,89 @@ def governed_hwm_input_policy(
     """Retarget current rules to admitted input only if the exact receipt agrees."""
     if hashlib.sha256(current_policy_bytes).hexdigest() == expected_policy_sha256:
         return current_policy_bytes
-    policy = json.loads(current_policy_bytes)
-    contract = json.loads(input_contract_bytes)
-    policy["product_authority"]["raw_sha256"] = hashlib.sha256(
-        input_contract_bytes
-    ).hexdigest()
-    policy["product_authority"]["semantic_digest"] = contract_digest(contract)
-    content = canonical_json_bytes(policy)
-    if hashlib.sha256(content).hexdigest() != expected_policy_sha256:
+    try:
+        policy = json.loads(current_policy_bytes)
+        contract = json.loads(input_contract_bytes)
+        authority = policy["product_authority"]
+        if not isinstance(authority, dict):
+            raise TypeError("product authority differs")
+        expected = deepcopy(policy)
+        expected_authority = expected["product_authority"]
+        if not isinstance(expected_authority, dict):
+            raise TypeError("product authority differs")
+        expected_authority["raw_sha256"] = hashlib.sha256(
+            input_contract_bytes
+        ).hexdigest()
+        expected_authority["semantic_digest"] = contract_digest(contract)
+    except (KeyError, TypeError, UnicodeDecodeError, ValueError) as exc:
         raise CapitalValidationError(
             "governed HWM policy differs from current calculation authority"
+        ) from exc
+
+    content = canonical_json_bytes(expected)
+    if hashlib.sha256(content).hexdigest() == expected_policy_sha256:
+        return content
+
+    # Retained native receipts were accepted with their original pretty JSON
+    # serialization.  Only this product-authority pair may move from the input
+    # contract to the current product contract; parsing and the final object
+    # equality check below reject every other policy or financial-rule change.
+    try:
+        text = current_policy_bytes.decode("utf-8")
+        authority_match = re.search(
+            r'"product_authority"\s*:\s*\{(?P<body>(?:[^{}"]|"(?:\\.|[^"\\])*")*)\}',
+            text,
         )
-    return content
+        if authority_match is None:
+            raise ValueError("product authority serialization differs")
+        body = authority_match.group("body")
+
+        def replace_authority_value(key: str, value: str) -> str:
+            pattern = re.compile(
+                rf'(?P<prefix>"{re.escape(key)}"\s*:\s*)"(?P<current>(?:\\.|[^"\\])*)"'
+            )
+            matched = list(pattern.finditer(body))
+            if len(matched) != 1:
+                raise ValueError("product authority field serialization differs")
+            return pattern.sub(
+                lambda match: f'{match.group("prefix")}"{value}"', body, count=1
+            )
+
+        raw_body = replace_authority_value(
+            "raw_sha256", expected_authority["raw_sha256"]
+        )
+        semantic_body = replace_authority_value(
+            "semantic_digest", expected_authority["semantic_digest"]
+        )
+        if raw_body == body or semantic_body == body:
+            raise ValueError("product authority replacement differs")
+        # Each replacement is calculated from the original body, so apply the
+        # second one to the first result without changing any other bytes.
+        semantic_pattern = re.compile(
+            r'(?P<prefix>"semantic_digest"\s*:\s*)"(?P<current>(?:\\.|[^"\\])*)"'
+        )
+        preserved = (
+            text[: authority_match.start("body")]
+            + semantic_pattern.sub(
+                lambda match: (
+                    f'{match.group("prefix")}'
+                    f'"{expected_authority["semantic_digest"]}"'
+                ),
+                raw_body,
+                count=1,
+            )
+            + text[authority_match.end("body") :]
+        ).encode("utf-8")
+        if (
+            json.loads(preserved) != expected
+            or hashlib.sha256(preserved).hexdigest() != expected_policy_sha256
+        ):
+            raise ValueError("retained policy authority differs")
+    except (TypeError, UnicodeDecodeError, ValueError) as exc:
+        raise CapitalValidationError(
+            "governed HWM policy differs from current calculation authority"
+        ) from exc
+    return preserved
 
 
 def _verify_epoch_accounts(
