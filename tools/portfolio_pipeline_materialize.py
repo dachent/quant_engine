@@ -1167,9 +1167,37 @@ def _provider_admission_authority(
         raise MaterializationError("provider ledger authority is unreadable") from exc
     if not isinstance(receipt, dict) or not isinstance(catalog, dict):
         raise MaterializationError("provider ledger authority root differs")
+    try:
+        financial_cutoff = date.fromisoformat(str(catalog["as_of_date"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MaterializationError("provider ledger catalog authority differs") from exc
+    normalized_artifacts = {
+        item.artifact_id: item
+        for item in manifest.artifacts
+        if item.artifact_id
+        in {
+            "normalized/provider-ledger.json",
+            "normalized/admit-or-declare-receipt.json",
+        }
+    }
+    observation = receipt.get("run_observation")
+    receipt_cutoff = (
+        observation.get("financial_cutoff")
+        if isinstance(observation, dict)
+        else catalog.get("as_of_date")
+    )
     if (
         catalog.get("catalog_schema_version") != 2
-        or catalog.get("as_of_date") != manifest.as_of_date.isoformat()
+        or receipt_cutoff != catalog.get("as_of_date")
+        or set(normalized_artifacts)
+        != {
+            "normalized/provider-ledger.json",
+            "normalized/admit-or-declare-receipt.json",
+        }
+        or any(
+            artifact.as_of_date != financial_cutoff
+            for artifact in normalized_artifacts.values()
+        )
     ):
         raise MaterializationError("provider ledger catalog authority differs")
     product = contract.get("product")
