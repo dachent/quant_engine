@@ -1398,8 +1398,7 @@ def governed_hwm_input_policy(
             text[: authority_match.start("body")]
             + semantic_pattern.sub(
                 lambda match: (
-                    f'{match.group("prefix")}'
-                    f'"{expected_authority["semantic_digest"]}"'
+                    f'{match.group("prefix")}"{expected_authority["semantic_digest"]}"'
                 ),
                 raw_body,
                 count=1,

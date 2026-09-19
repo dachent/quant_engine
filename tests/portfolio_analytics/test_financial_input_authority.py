@@ -37,7 +37,9 @@ def test_governed_policy_rebinds_only_product_authority() -> None:
     assert actual == expected_bytes
 
 
-def test_governed_policy_preserves_retained_pretty_bytes_when_only_authority_moves() -> None:
+def test_governed_policy_preserves_retained_pretty_bytes_when_only_authority_moves() -> (
+    None
+):
     """A retained v4 receipt may keep its admitted non-canonical JSON layout."""
 
     current = json.loads(reporter._PORTABLE_HWM_POLICY.read_bytes())

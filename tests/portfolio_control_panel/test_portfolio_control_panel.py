@@ -10305,19 +10305,19 @@ def _run_interaction_qa(
     env["PLAYWRIGHT_MODULE"] = str(playwright_module)
     env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
     command = [
-            node,
-            str(panel.DEFAULT_TEMPLATE_ROOT / "interaction_qa.mjs"),
-            "--html",
-            str(candidate / "index.html"),
-            "--output",
-            str(output),
-            "--exclude-candidates",
-            "true",
-            "--epoch-only",
-            "true",
-            "--expected-calculation-cutoff",
-            "2026-08-13",
-        ]
+        node,
+        str(panel.DEFAULT_TEMPLATE_ROOT / "interaction_qa.mjs"),
+        "--html",
+        str(candidate / "index.html"),
+        "--output",
+        str(output),
+        "--exclude-candidates",
+        "true",
+        "--epoch-only",
+        "true",
+        "--expected-calculation-cutoff",
+        "2026-08-13",
+    ]
     if expected_common_eod is not None:
         command.extend(["--expected-common-eod", expected_common_eod])
     result = subprocess.run(
@@ -10373,7 +10373,9 @@ def test_schema9_epoch_manifest_browser_uses_authority_labels_and_cutoff(
     assert evidence["legend"].find("Artifact/provider capture date: 2026-08-16") >= 0
 
 
-def test_interaction_qa_checks_the_rendered_source_clock_handoff(tmp_path: Path) -> None:
+def test_interaction_qa_checks_the_rendered_source_clock_handoff(
+    tmp_path: Path,
+) -> None:
     """The shipped browser consumer sees the panel's accepted clock disclosures."""
 
     candidate = _copy_epoch_browser_fixture(tmp_path)
@@ -10389,7 +10391,10 @@ def test_interaction_qa_checks_the_rendered_source_clock_handoff(tmp_path: Path)
                 "source_id": "ibkr",
                 "applies_to_latest_common_eod": True,
                 "provider_data_date": "2026-08-15",
-                "finality": {"basis": "NATIVE_LEDGER", "provider_finality_guarantee": True},
+                "finality": {
+                    "basis": "NATIVE_LEDGER",
+                    "provider_finality_guarantee": True,
+                },
                 "timezone": "UTC",
                 "precision": "DATE",
             },
@@ -10397,7 +10402,10 @@ def test_interaction_qa_checks_the_rendered_source_clock_handoff(tmp_path: Path)
                 "source_id": "matrixport",
                 "applies_to_latest_common_eod": True,
                 "provider_data_date": "2026-08-14",
-                "finality": {"basis": "NATIVE_LEDGER", "provider_finality_guarantee": True},
+                "finality": {
+                    "basis": "NATIVE_LEDGER",
+                    "provider_finality_guarantee": True,
+                },
                 "timezone": "UTC",
                 "precision": "DATE",
             },
@@ -10405,14 +10413,20 @@ def test_interaction_qa_checks_the_rendered_source_clock_handoff(tmp_path: Path)
                 "source_id": "quantbase",
                 "applies_to_latest_common_eod": True,
                 "provider_data_date": "2026-08-14",
-                "finality": {"basis": "NATIVE_LEDGER", "provider_finality_guarantee": True},
+                "finality": {
+                    "basis": "NATIVE_LEDGER",
+                    "provider_finality_guarantee": True,
+                },
                 "timezone": "UTC",
                 "precision": "DATE",
             },
         ],
     }
     data["meta"]["source_clock"] = clock
-    data["limitations"] = [*data["limitations"], *panel._source_clock_display_lines(clock)]
+    data["limitations"] = [
+        *data["limitations"],
+        *panel._source_clock_display_lines(clock),
+    ]
     _write_dashboard_data_script(candidate, data)
 
     result, evidence = _run_interaction_qa(
@@ -10421,7 +10435,8 @@ def test_interaction_qa_checks_the_rendered_source_clock_handoff(tmp_path: Path)
 
     assert result.returncode == 0, result.stderr
     assert any(
-        item["check"] == "Source clock preserves selected/common EOD, limiting inputs, and native source disclosures"
+        item["check"]
+        == "Source clock preserves selected/common EOD, limiting inputs, and native source disclosures"
         and item["status"] == "PASS"
         for item in evidence["checks"]
     )
