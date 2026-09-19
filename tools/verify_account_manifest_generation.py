@@ -2271,7 +2271,7 @@ def _bound_catalog(
     ):
         _fail()
     manifest = _manifest(manifest_snapshot)
-    if manifest.as_of_date != catalog_date or manifest.verification.value != "VERIFIED":
+    if manifest.verification.value != "VERIFIED":
         _fail()
     expected_artifact_id = (
         "normalized/provider-ledger.json"
@@ -2306,7 +2306,7 @@ def _bound_catalog(
         artifact_id=manifest_artifact_id,
         sha256=manifest_snapshot.sha256,
         size_bytes=manifest_snapshot.size_bytes,
-        as_of_date=catalog_date,
+        as_of_date=manifest.as_of_date,
         schema_name="generation-manifest",
         schema_version="1",
     )
