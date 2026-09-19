@@ -2336,6 +2336,49 @@ def _current_manifest(bundle: Path) -> dict[str, object]:
     return json.loads((bundle / "plan-manifest.json").read_text(encoding="utf-8"))
 
 
+def test_selected_dependence_authority_paths_preserve_all_native_readers(
+    tmp_path: Path,
+) -> None:
+    """Current-plan reconstruction receives the exact selected authority family."""
+
+    ledger_root = tmp_path / "ledger" / ("a" * 64)
+    ledger_root.mkdir(parents=True)
+    for path in (
+        ledger_root / "generation.json",
+        ledger_root / "provider-ledger.json",
+        tmp_path / "admission.json",
+        tmp_path / "financial-input-contract.json",
+        tmp_path / "portfolio123-version.json",
+    ):
+        path.write_text("{}", encoding="utf-8")
+    selected = tmp_path / "selected-inputs.json"
+    selected.write_bytes(
+        builder.canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "history_generation_root": str(tmp_path / "history"),
+                "allocation_generation_root": str(tmp_path / "allocation"),
+                "provider_ledger_generation_root": str(ledger_root),
+                "financial_input_contract_path": str(
+                    tmp_path / "financial-input-contract.json"
+                ),
+                "provider_admission_receipt_path": str(tmp_path / "admission.json"),
+                "portfolio123_version_evidence_path": str(
+                    tmp_path / "portfolio123-version.json"
+                ),
+            }
+        )
+    )
+
+    assert builder._selected_dependence_authority_paths(selected) == {
+        "provider_admission_receipt_path": tmp_path / "admission.json",
+        "financial_input_contract_path": tmp_path / "financial-input-contract.json",
+        "provider_ledger_manifest_path": ledger_root / "generation.json",
+        "provider_ledger_catalog_path": ledger_root / "provider-ledger.json",
+        "portfolio123_version_evidence_path": tmp_path / "portfolio123-version.json",
+    }
+
+
 def _rebind_current_bundle(
     bundle: Path, manifest: dict[str, object]
 ) -> tuple[Path, dict[str, object]]:
@@ -2412,13 +2455,13 @@ def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter
         recipe.write_bytes(builder.canonical_json_bytes(recipe_value))
         real_specs = builder._current_release_plan_specs
 
-        def routing_specs(selected_bundle, selected_plan):
+        def routing_specs(selected_bundle, selected_plan, **kwargs):
             if selected_bundle == hybrid_bundle:
                 return [
                     {**row, "evidence_mode": "LIVE_PLUS_BACKTEST"}
-                    for row in real_specs(bundle, _current_manifest(bundle))
+                    for row in real_specs(bundle, _current_manifest(bundle), **kwargs)
                 ]
-            return real_specs(selected_bundle, selected_plan)
+            return real_specs(selected_bundle, selected_plan, **kwargs)
 
         monkeypatch.setattr(builder, "_current_release_plan_specs", routing_specs)
     calls: list[tuple[object, ...]] = []
