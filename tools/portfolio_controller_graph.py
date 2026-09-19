@@ -144,21 +144,15 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             "schemas/portfolio/layered-history-generation.schema.json",
         ),
         "producer": (_TARGET_SERIES, "build_layered_history_generation"),
-        "artifacts": (
-            "layered-history generation",
-        ),
+        "artifacts": ("layered-history generation",),
         "consumers": (
             (_DEPENDENCE, "build_source"),
             (_DECOMPOSITION_PLAN, "build_bundle"),
         ),
-        "validators": (
-            (_TARGET_SERIES, "verify_layered_history_generation"),
-        ),
+        "validators": ((_TARGET_SERIES, "verify_layered_history_generation"),),
         "writers": ((_TARGET_SERIES, "write_layered_history_generation"),),
         "stages": ("baseline", "attribution", "analytics", "report", "panel"),
-        "tests": (
-            "tests/core/test_attended_preparation.py",
-        ),
+        "tests": ("tests/core/test_attended_preparation.py",),
         "sinks": (
             "report-json-html",
             "panel-json-html",
@@ -200,13 +194,9 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             "contracts/portfolio-performance-policy-v1.json",
         ),
         "producer": (_DECOMPOSITION_PLAN, "build_bundle"),
-        "artifacts": (
-            "current decomposition plan bundle",
-        ),
+        "artifacts": ("current decomposition plan bundle",),
         "consumers": ((_RELEASE, "build_attribution"), (_RELEASE, "build_analytics")),
-        "validators": (
-            (_DECOMPOSITION_PLAN, "build_bundle"),
-        ),
+        "validators": ((_DECOMPOSITION_PLAN, "build_bundle"),),
         "writers": ((_DECOMPOSITION_PLAN, "write_bundle"),),
         "stages": ("attribution", "analytics", "report", "panel"),
         "tests": (
@@ -234,13 +224,24 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             "schemas/portfolio/provider-ledger.schema.json",
         ),
         "producer": (_PROVIDER_LEDGER, "stage_candidate"),
-        "artifacts": ("provider-ledger.json", "generation.json", "admit-or-declare-receipt.json"),
-        "consumers": ((_RELEASE, "build_ledger"), (_PREPARATION, "prepare_attended_inputs")),
+        "artifacts": (
+            "provider-ledger.json",
+            "generation.json",
+            "admit-or-declare-receipt.json",
+        ),
+        "consumers": (
+            (_RELEASE, "build_ledger"),
+            (_PREPARATION, "prepare_attended_inputs"),
+        ),
         "validators": ((_PROVIDER_LEDGER, "verify_candidate"),),
         "writers": ((_RELEASE, "build_ledger"),),
         "stages": _STAGE_ORDER,
         "tests": ("tests/core/test_portfolio_release_builder.py",),
-        "sinks": ("report-json-html", "panel-json-html", "coordinated-publication-pointers"),
+        "sinks": (
+            "report-json-html",
+            "panel-json-html",
+            "coordinated-publication-pointers",
+        ),
     },
     {
         "id": "provider-ledger-freshness-health",
@@ -280,7 +281,11 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "writers": ((_BASELINE, "publish_baseline"),),
         "stages": ("baseline", "attribution", "analytics", "report", "panel"),
         "tests": ("tests/core/test_portfolio_release_builder.py",),
-        "sinks": ("report-json-html", "panel-json-html", "coordinated-publication-pointers"),
+        "sinks": (
+            "report-json-html",
+            "panel-json-html",
+            "coordinated-publication-pointers",
+        ),
     },
     {
         "id": "epoch-account-manifest-generation",
@@ -294,9 +299,17 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         ),
         "contracts": ("schemas/portfolio/account-strategy-manifest.schema.json",),
         "producer": (_ACCOUNT_MANIFEST, "stage_account_manifest_generation"),
-        "artifacts": ("account-strategy-manifest generation", "current-epoch crosswalk"),
-        "consumers": ((_CAPITAL_INPUT, "build_input_generation"), (_PREPARATION, "prepare_attended_inputs")),
-        "validators": ((_ACCOUNT_MANIFEST_VERIFY, "IndependentAccountManifestVerifier.verify"),),
+        "artifacts": (
+            "account-strategy-manifest generation",
+            "current-epoch crosswalk",
+        ),
+        "consumers": (
+            (_CAPITAL_INPUT, "build_input_generation"),
+            (_PREPARATION, "prepare_attended_inputs"),
+        ),
+        "validators": (
+            (_ACCOUNT_MANIFEST_VERIFY, "IndependentAccountManifestVerifier.verify"),
+        ),
         "writers": ((_EPOCH_MANIFEST, "stage_current_epoch_manifest"),),
         "stages": ("baseline", "attribution", "analytics", "report", "panel"),
         "tests": ("tests/core/test_attended_preparation.py",),
@@ -387,9 +400,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "validators": ((_REPORT, "verify_candidate"),),
         "writers": ((_REPORT, "publish_report"),),
         "stages": ("report", "panel"),
-        "tests": (
-            "tests/portfolio_report/test_portfolio_report.py",
-        ),
+        "tests": ("tests/portfolio_report/test_portfolio_report.py",),
         "sinks": ("report-json-html",),
     },
     {
@@ -498,13 +509,20 @@ def _endpoint_function(
     for node in tree.body:
         if isinstance(node, ast.ClassDef) and node.name == class_name:
             for member in node.body:
-                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name == method_name:
+                if (
+                    isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and member.name == method_name
+                ):
                     return member
     raise ControllerGraphError(f"required controller symbol is absent: {symbol}")
 
 
 def _require_attribute_call(
-    repo_root: Path, relative_path: str, function_name: str, attribute: str, relationship: str
+    repo_root: Path,
+    relative_path: str,
+    function_name: str,
+    attribute: str,
+    relationship: str,
 ) -> None:
     function = _top_level_function(_tree(repo_root, relative_path), function_name)
     if not any(
@@ -586,7 +604,9 @@ def _local_call_closure(tree: ast.Module, entrypoint: str) -> set[str]:
             )
         calls = _function_calls(function)
         observed.update(calls)
-        pending.extend(call for call in calls if call in functions and call not in visited)
+        pending.extend(
+            call for call in calls if call in functions and call not in visited
+        )
     return observed
 
 
@@ -829,7 +849,9 @@ def _critical_relationships(
             "capital.verify_governed_capital_result",
         },
     )
-    _require_calls(repo_root, _PROVIDER_LEDGER, "main", {"stage_candidate", "verify_candidate"})
+    _require_calls(
+        repo_root, _PROVIDER_LEDGER, "main", {"stage_candidate", "verify_candidate"}
+    )
     _require_calls(repo_root, _BASELINE, "main", {"stage_baseline"})
     _require_calls(repo_root, _ATTRIBUTION, "publish_catalog", {"stage_catalog"})
     preparation_dependencies, preparation_edges = _preparation_stage_dependencies(
@@ -1098,8 +1120,7 @@ def _artifact_flows(repo_root: Path) -> list[dict[str, object]]:
             ):
                 raise ControllerGraphError("artifact-flow source is absent")
         if not contracts or not all(
-            isinstance(path, str) and (repo_root / path).is_file()
-            for path in contracts
+            isinstance(path, str) and (repo_root / path).is_file() for path in contracts
         ):
             raise ControllerGraphError("artifact-flow contract is absent")
         endpoints = (producer, *consumers, *validators, *writers)
