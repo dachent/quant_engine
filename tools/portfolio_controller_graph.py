@@ -13,7 +13,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Mapping, Sequence, cast
 
 
 class ControllerGraphError(ValueError):
@@ -79,6 +79,176 @@ _PATH_STAGES = {
     _REPORT: ["report", "panel"],
     _PANEL: ["panel"],
 }
+_ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
+    {
+        "id": "attended-preparation-checkpoints",
+        "source_paths": (
+            "tools/portfolio_attended_preparation.py",
+            "tools/portfolio_financial_mvp_contract.py",
+            "tools/portfolio_financial_outcomes.py",
+            "tools/portfolio_qc.py",
+            "contracts/portfolio-financial-mvp-source-v1.json",
+            "schemas/portfolio/financial-mvp-source-contract.schema.json",
+        ),
+        "producer": (_PREPARATION, "prepare_attended_inputs"),
+        "artifacts": (
+            "source-QC receipt",
+            "preparation stage checkpoints",
+            "retained preparation caches",
+        ),
+        "consumers": ((_MATERIALIZER, "main"), (_RELEASE, "build_stage")),
+        "validators": ((_PREPARATION, "plan_attended_inputs"),),
+        "stages": _STAGE_ORDER,
+        "tests": ("tests/core/test_attended_preparation.py",),
+        "sinks": (
+            "report-json-html",
+            "panel-json-html",
+            "coordinated-publication-pointers",
+        ),
+    },
+    {
+        "id": "provider-ledger-generation",
+        "source_paths": (
+            "tools/provider_ledger.py",
+            "tools/quantbase_generation.py",
+            "tools/schwab_generation.py",
+            "schemas/portfolio/provider-admission-receipt.schema.json",
+            "schemas/portfolio/provider-ledger.schema.json",
+        ),
+        "producer": ("tools/provider_ledger.py", "stage_candidate"),
+        "artifacts": (
+            "provider-ledger.json",
+            "generation.json",
+            "admit-or-declare-receipt.json",
+        ),
+        "consumers": ((_RELEASE, "build_ledger"), (_MATERIALIZER, "main")),
+        "validators": (("tools/provider_ledger.py", "verify_candidate"),),
+        "stages": _STAGE_ORDER,
+        "tests": ("tests/core/test_portfolio_release_builder.py",),
+        "sinks": (
+            "report-json-html",
+            "panel-json-html",
+            "coordinated-publication-pointers",
+        ),
+    },
+    {
+        "id": "baseline-epoch-hwm-capital-generations",
+        "source_paths": (
+            "tools/account_strategy_manifest.py",
+            "tools/build_account_manifest_generation.py",
+            "tools/portfolio_baseline.py",
+            "tools/portfolio_invested_capital.py",
+            "tools/portfolio_target_series.py",
+            "tools/verify_account_manifest_generation.py",
+            "contracts/portfolio-hwm-policy-v4.json",
+            "schemas/portfolio/account-strategy-manifest.schema.json",
+            "schemas/portfolio/layered-history-generation.schema.json",
+        ),
+        "producer": ("tools/portfolio_baseline.py", "stage_baseline"),
+        "artifacts": (
+            "portfolio-baseline generation",
+            "account-strategy-manifest generation",
+            "layered-history generation",
+            "governed HWM and invested-capital receipts",
+        ),
+        "consumers": (
+            (_RELEASE, "build_baseline"),
+            (_RELEASE, "build_attribution"),
+            (_RELEASE, "build_analytics"),
+        ),
+        "validators": (
+            ("tools/portfolio_invested_capital.py", "verify_governed_capital_result"),
+            (
+                "tools/build_account_manifest_generation.py",
+                "stage_account_manifest_generation",
+            ),
+        ),
+        "stages": ("baseline", "attribution", "analytics", "report", "panel"),
+        "tests": (
+            "tests/core/test_attended_preparation.py",
+            "tests/core/test_portfolio_pipeline_orchestration.py",
+        ),
+        "sinks": (
+            "report-json-html",
+            "panel-json-html",
+            "coordinated-publication-pointers",
+        ),
+    },
+    {
+        "id": "attribution-and-analytics-generations",
+        "source_paths": (
+            "tools/portfolio_attribution.py",
+            "tools/portfolio_current_decomposition_plan.py",
+            "tools/portfolio_current_dependence.py",
+            "tools/portfolio_decomposition.py",
+            "contracts/portfolio-performance-policy-v1.json",
+        ),
+        "producer": ("tools/portfolio_decomposition.py", "stage_candidate"),
+        "artifacts": (
+            "strategy-attribution generation",
+            "current dependence source",
+            "decomposition generation",
+        ),
+        "consumers": ((_RELEASE, "build_analytics"), (_RELEASE, "build_report")),
+        "validators": (
+            ("tools/portfolio_current_dependence.py", "verify_source"),
+            ("tools/portfolio_attribution.py", "publish_catalog"),
+        ),
+        "stages": ("attribution", "analytics", "report", "panel"),
+        "tests": (
+            "tests/core/test_portfolio_pipeline_orchestration.py",
+            "tests/core/test_portfolio_release_builder.py",
+        ),
+        "sinks": (
+            "report-json-html",
+            "panel-json-html",
+            "coordinated-publication-pointers",
+        ),
+    },
+    {
+        "id": "report-and-panel-candidates",
+        "source_paths": (
+            _REPORT,
+            _PANEL,
+            "schemas/portfolio/report-data.schema.json",
+            "schemas/portfolio/control-panel-data.schema.json",
+        ),
+        "producer": (_RELEASE, "build_report_candidate"),
+        "artifacts": (
+            "portfolio-report-data.json",
+            "report HTML",
+            "panel JSON",
+            "panel HTML",
+        ),
+        "consumers": (
+            (_REPORT, "verify_candidate"),
+            (_PANEL, "build_candidate"),
+            (_PANEL, "verify_candidate"),
+        ),
+        "validators": ((_REPORT, "verify_candidate"), (_PANEL, "verify_candidate")),
+        "stages": ("report", "panel"),
+        "tests": (
+            "tests/portfolio_report/test_portfolio_report.py",
+            "tests/portfolio_control_panel/test_mvp2_candidate_report_panel.py",
+        ),
+        "sinks": ("report-json-html", "panel-json-html"),
+    },
+    {
+        "id": "coordinated-publication-pointers",
+        "source_paths": (_CORE, _MATERIALIZER, _RELEASE),
+        "producer": (_RELEASE, "build_report"),
+        "artifacts": (
+            "coordinated report and panel generations",
+            "CURRENT pointers",
+        ),
+        "consumers": ((_RELEASE, "build_panel_candidate"),),
+        "validators": ((_REPORT, "publish_report"), (_PANEL, "publish_panel")),
+        "stages": ("report", "panel"),
+        "tests": ("tests/core/test_portfolio_release_builder.py",),
+        "sinks": ("coordinated-publication-pointers",),
+        "publication_authority": "existing owner-publication gate",
+    },
+)
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -107,6 +277,9 @@ def _required_paths(repo_root: Path) -> list[str]:
     if (repo_root / _PREPARATION).is_file():
         paths.append(_PREPARATION)
     paths.extend(path for path in _TEST_LINKS.values() if (repo_root / path).is_file())
+    for flow in _ARTIFACT_FLOW_SPECS:
+        paths.extend(cast(Sequence[str], flow["source_paths"]))
+        paths.extend(cast(Sequence[str], flow["tests"]))
     return sorted(paths)
 
 
@@ -466,11 +639,85 @@ def _critical_relationships(
     return relationships, preparation_dependencies
 
 
-def _mapper_python_hashes(repo_root: Path) -> dict[str, str]:
-    """Return the installed mapper's full repository Python scan scope."""
+def _artifact_flows(repo_root: Path) -> list[dict[str, object]]:
+    """Bind the MVP's declared artifacts to real producers, consumers and checks.
 
+    This projection intentionally remains smaller than the mapper's full static
+    graph.  It records only the supported financial-MVP route, and leaves
+    runtime source/finality, recovery and publication authorization with the
+    native runner and existing owner gate.
+    """
+
+    flows: list[dict[str, object]] = []
+    for spec in _ARTIFACT_FLOW_SPECS:
+        flow = dict(spec)
+        source_paths = cast(tuple[str, ...], flow["source_paths"])
+        producer = cast(tuple[str, str], flow["producer"])
+        consumers = cast(tuple[tuple[str, str], ...], flow["consumers"])
+        validators = cast(tuple[tuple[str, str], ...], flow["validators"])
+        artifacts = cast(tuple[str, ...], flow["artifacts"])
+        stages = cast(tuple[str, ...], flow["stages"])
+        sinks = cast(tuple[str, ...], flow["sinks"])
+        tests = cast(tuple[str, ...], flow["tests"])
+        for source_path in source_paths:
+            if (
+                not isinstance(source_path, str)
+                or not (repo_root / source_path).is_file()
+            ):
+                raise ControllerGraphError("artifact-flow source is absent")
+        endpoints = (producer, *consumers, *validators)
+        for endpoint in endpoints:
+            if not isinstance(endpoint, tuple) or len(endpoint) != 2:
+                raise ControllerGraphError("artifact-flow endpoint differs")
+            path, symbol = endpoint
+            if not isinstance(path, str) or not isinstance(symbol, str):
+                raise ControllerGraphError("artifact-flow endpoint differs")
+            _top_level_function(_tree(repo_root, path), symbol)
+        if not artifacts or not consumers or not validators or not sinks:
+            raise ControllerGraphError("artifact-flow consumer or validator is absent")
+        if not stages or not all(stage in _STAGE_ORDER for stage in stages):
+            raise ControllerGraphError("artifact-flow stages differ")
+        if not tests or not all((repo_root / path).is_file() for path in tests):
+            raise ControllerGraphError("artifact-flow tests are absent")
+        flow["source_paths"] = sorted(source_paths)
+        flow["artifacts"] = list(artifacts)
+        flow["consumers"] = [list(endpoint) for endpoint in consumers]
+        flow["producer"] = list(producer)
+        flow["stages"] = list(stages)
+        flow["sinks"] = list(sinks)
+        flow["tests"] = list(tests)
+        flow["validators"] = [list(endpoint) for endpoint in validators]
+        flows.append(flow)
+    return flows
+
+
+def _mapper_package_root(repo_root: Path, package: object) -> Path:
+    """Resolve one public mapper package without allowing a root escape."""
+
+    if not isinstance(package, str) or not package:
+        raise ControllerGraphError("mapper package is invalid")
+    candidate = Path(package)
+    if candidate.is_absolute() or ".." in candidate.parts:
+        raise ControllerGraphError("mapper package is invalid")
+    try:
+        package_root = (repo_root / candidate).resolve(strict=True)
+    except (OSError, ValueError) as exc:
+        raise ControllerGraphError("mapper package is invalid") from exc
+    try:
+        package_root.relative_to(repo_root.resolve())
+    except ValueError as exc:
+        raise ControllerGraphError("mapper package is invalid") from exc
+    if not package_root.is_dir():
+        raise ControllerGraphError("mapper package is invalid")
+    return package_root
+
+
+def _mapper_python_hashes(repo_root: Path, package: object) -> dict[str, str]:
+    """Return the installed mapper's declared package Python scan scope."""
+
+    repo_root = repo_root.resolve()
     paths: list[Path] = []
-    pending = [repo_root]
+    pending = [_mapper_package_root(repo_root, package)]
     while pending:
         directory = pending.pop()
         try:
@@ -491,12 +738,12 @@ def _mapper_python_hashes(repo_root: Path) -> dict[str, str]:
     }
 
 
-def _mapper_python_fingerprint(repo_root: Path) -> str:
+def _mapper_python_fingerprint(repo_root: Path, package: object) -> str:
     """Match the installed mapper's sorted relative-path/raw-hash algorithm."""
 
     rows = [
         f"{relative_path}:{digest}"
-        for relative_path, digest in _mapper_python_hashes(repo_root).items()
+        for relative_path, digest in _mapper_python_hashes(repo_root, package).items()
     ]
     return hashlib.sha256("\n".join(rows).encode("utf-8")).hexdigest()
 
@@ -521,28 +768,18 @@ def _explicit_mapper_evidence(repo_root: Path, path: Path) -> dict[str, str]:
     errors = payload.get("errors")
     if not isinstance(errors, list) or errors:
         raise ControllerGraphError("mapper scanner errors require reconciliation")
-    files = payload.get("files")
-    if not isinstance(files, Mapping):
-        raise ControllerGraphError("mapper Python scan scope is absent")
-    observed_hashes: dict[str, str] = {}
-    for relative_path, record in files.items():
-        if not isinstance(relative_path, str) or not isinstance(record, Mapping):
-            continue
-        if record.get("kind") != "python":
-            continue
-        digest = record.get("sha256")
-        if not isinstance(digest, str):
-            raise ControllerGraphError("mapper Python scan scope is invalid")
-        observed_hashes[relative_path] = digest
-    if observed_hashes != _mapper_python_hashes(repo_root):
-        raise ControllerGraphError("mapper Python scan scope differs")
+    package = payload.get("package")
+    if not isinstance(package, str):
+        raise ControllerGraphError("mapper package is invalid")
+    _mapper_package_root(repo_root, package)
     fingerprint = payload.get("sourceFingerprint")
     if not isinstance(fingerprint, str) or fingerprint != _mapper_python_fingerprint(
-        repo_root
+        repo_root, package
     ):
         raise ControllerGraphError("mapper source fingerprint differs")
     return {
         "path": str(path.resolve()),
+        "package": package,
         "sha256": _sha256(path),
         "source_fingerprint": fingerprint,
         "status": "accepted-optional-context",
@@ -553,6 +790,7 @@ def _current_graph(repo_root: Path) -> dict[str, object]:
     repo_root = repo_root.resolve()
     dependencies, materializer_dependencies = _stage_declarations(repo_root)
     relationships, preparation_dependencies = _critical_relationships(repo_root)
+    artifact_flows = _artifact_flows(repo_root)
     source_files = {
         path: _sha256(repo_root / path) for path in _required_paths(repo_root)
     }
@@ -584,6 +822,10 @@ def _current_graph(repo_root: Path) -> dict[str, object]:
         },
         "edges": edges,
         "relationships": relationships,
+        "artifact_flows": artifact_flows,
+        "excluded_sinks": {
+            "workbook": "permanently held outside the MVP execution and acceptance path"
+        },
         "unresolved_critical_edges": [],
         "limitations": [
             "AST records declared static relationships only; it does not prove runtime ordering or numerical correctness.",
@@ -627,6 +869,8 @@ def validate_controller_graph(repo_root: Path, graph: dict[str, Any]) -> dict[st
         "contracts",
         "edges",
         "relationships",
+        "artifact_flows",
+        "excluded_sinks",
         "unresolved_critical_edges",
     ):
         if graph.get(field) != current[field]:
@@ -656,10 +900,37 @@ def affected_stages(graph: dict[str, Any], changed_paths: list[str]) -> list[str
     stages = graph.get("stages")
     if not isinstance(stages, Mapping):
         raise ControllerGraphError("controller graph stages are absent")
+    flows = graph.get("artifact_flows")
+    if not isinstance(flows, list):
+        raise ControllerGraphError("controller graph artifact_flows are absent")
+    path_stages: dict[str, set[str]] = {
+        path: set(stages) for path, stages in _PATH_STAGES.items()
+    }
+    for flow in flows:
+        if not isinstance(flow, Mapping):
+            raise ControllerGraphError("controller graph artifact-flow differs")
+        source_paths = flow.get("source_paths")
+        flow_stages = flow.get("stages")
+        if not isinstance(source_paths, list) or not isinstance(flow_stages, list):
+            raise ControllerGraphError("controller graph artifact-flow differs")
+        if (
+            not flow.get("consumers")
+            or not flow.get("validators")
+            or not flow.get("sinks")
+        ):
+            raise ControllerGraphError(
+                "controller graph artifact-flow consumer or validator is absent"
+            )
+        for path in source_paths:
+            if not isinstance(path, str):
+                raise ControllerGraphError("controller graph artifact-flow differs")
+            path_stages.setdefault(path, set()).update(
+                stage for stage in flow_stages if isinstance(stage, str)
+            )
     direct: set[str] = set()
     for changed_path in changed_paths:
         normalized = _relative(Path(changed_path))
-        mapped = _PATH_STAGES.get(normalized)
+        mapped = path_stages.get(normalized)
         if mapped is not None:
             direct.update(mapped)
         elif normalized.startswith(
