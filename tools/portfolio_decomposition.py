@@ -2663,12 +2663,15 @@ def _factor_anchor_observations(
     target_by_day = {row.day: row for row in usable_rows}
     if len(target_by_day) != len(usable_rows):
         raise DecompositionError("target source contains a duplicate date")
+    target_scope_start = min(target_by_day) if target_by_day else None
+    target_scope_end = max(target_by_day) if target_by_day else None
     if policy.target_calendar == "CALENDAR_DAY_24_7" and any(
         row.return_type != "TOTAL" for row in usable_rows
     ):
         raise DecompositionError("24/7 target intervals require simple total returns")
     observations: list[tuple[TargetRow, FactorRow, tuple[float, ...]]] = []
     bucket_receipts: list[dict[str, object]] = []
+    rejected_bucket_receipts: list[dict[str, object]] = []
     assigned: set[date] = set()
     for left, right in zip(anchors, anchors[1:]):
         if policy.target_calendar == "CALENDAR_DAY_24_7":
@@ -2689,6 +2692,17 @@ def _factor_anchor_observations(
             # describe its historic exact-label join.  It cannot be promoted to
             # a session schedule or a 24/7 bucket from observed rows alone.
             labels = [right] if right in target_by_day else []
+        bucket_intersects_target_scope = (
+            target_scope_start is None
+            or target_scope_end is None
+            or (left < target_scope_end and right >= target_scope_start)
+        )
+        if target_scope_start is not None and target_scope_end is not None:
+            labels = [
+                label
+                for label in labels
+                if target_scope_start <= label <= target_scope_end
+            ]
         missing = [label for label in labels if label not in target_by_day]
         if missing and policy.target_calendar != "LEGACY_EXACT_LABEL":
             raise DecompositionError(
@@ -2697,6 +2711,8 @@ def _factor_anchor_observations(
             )
         if not labels:
             if policy.target_calendar == "LEGACY_EXACT_LABEL":
+                continue
+            if not bucket_intersects_target_scope:
                 continue
             raise DecompositionError(
                 f"factor anchor {right.isoformat()} has no admitted target labels"
@@ -2721,7 +2737,37 @@ def _factor_anchor_observations(
         bucket_rows = [target_by_day[label] for label in labels]
         if len({row.return_type for row in bucket_rows}) != 1:
             raise DecompositionError("target bucket mixes return types")
-        if len({row.return_basis for row in bucket_rows}) != 1:
+        return_bases = list(dict.fromkeys(row.return_basis for row in bucket_rows))
+        source_layers = list(dict.fromkeys(row.evidence_layer for row in bucket_rows))
+        if len(return_bases) != 1:
+            source_layer_boundary = (
+                set(return_bases) == {"MODEL", "NET"}
+                and len(source_layers) > 1
+                and all(
+                    (row.return_basis == "MODEL" and row.evidence_layer == "BACKTEST")
+                    or (row.return_basis == "NET" and row.evidence_layer != "BACKTEST")
+                    for row in bucket_rows
+                )
+            )
+            if source_layer_boundary:
+                rejected_bucket_receipts.append(
+                    {
+                        "calendar_day_duration": (right - left).days,
+                        "factor_anchor": right.isoformat(),
+                        "factor_return_basis": policy.factor_return_basis,
+                        "factor_source_snapshot_identity": policy.factor_source_vintage,
+                        "prior_factor_anchor": left.isoformat(),
+                        "reason": "INCOMPATIBLE_RETURN_BASIS_SOURCE_LAYER_BOUNDARY",
+                        "target_calendar": policy.target_calendar,
+                        "target_currency": policy.target_currency,
+                        "target_label_convention": policy.target_label_convention,
+                        "target_labels": [label.isoformat() for label in labels],
+                        "target_return_bases": return_bases,
+                        "target_source_layers": source_layers,
+                        "target_source_snapshot_identity": policy.target_source_vintage,
+                    }
+                )
+                continue
             raise DecompositionError("target bucket mixes declared return bases")
         target_return = math.prod(1.0 + row.value for row in bucket_rows) - 1.0
         factor_row = factor_rows[right]
@@ -2781,6 +2827,12 @@ def _factor_anchor_observations(
             }
         )
     last_anchor = anchors[-1]
+    unassignable_leading_labels = [
+        row.day.isoformat() for row in usable_rows if row.day <= anchors[0]
+    ]
+    unassignable_tail_labels = [
+        row.day.isoformat() for row in usable_rows if row.day > last_anchor
+    ]
     return observations, {
         "buckets": bucket_receipts,
         "evaluation_information_set": policy.evaluation_information_set,
@@ -2793,9 +2845,7 @@ def _factor_anchor_observations(
             if policy.evaluation_information_set == "RETROSPECTIVE_SELECTED_SNAPSHOT"
             else "point-in-time factor-conditional holdout association using retained historical vintage"
         ),
-        "pending_factor_anchor_labels": [
-            row.day.isoformat() for row in usable_rows if row.day > last_anchor
-        ],
+        "pending_factor_anchor_labels": unassignable_tail_labels,
         "periods_per_year": model.periods_per_year,
         "policy_id": (
             FACTOR_ANCHOR_POLICY
@@ -2803,16 +2853,23 @@ def _factor_anchor_observations(
             else "LEGACY_EXACT_LABEL_ASSOCIATION_V1"
         ),
         "point_in_time_vintage": policy.point_in_time_vintage,
-        "pre_anchor_labels": [
-            row.day.isoformat() for row in usable_rows if row.day <= anchors[0]
-        ],
+        "pre_anchor_labels": unassignable_leading_labels,
         "response_label": "ANCHOR_ADJUSTED_TARGET_RETURN",
+        "rejected_buckets": rejected_bucket_receipts,
         "SIMULTANEOUS_MARKS_NOT_PROVED": True,
+        "target_source_lifetime_end": (
+            target_scope_end.isoformat() if target_scope_end is not None else None
+        ),
+        "target_source_lifetime_start": (
+            target_scope_start.isoformat() if target_scope_start is not None else None
+        ),
         "unfinalized_tail_labels": [
             row.day.isoformat()
             for row in target_rows
             if row.day > effective_target_finality
         ],
+        "unassignable_leading_labels": unassignable_leading_labels,
+        "unassignable_tail_labels": unassignable_tail_labels,
         "variable_bucket_duration_calendar_days": sorted(
             {
                 int(cast(int | str, item["calendar_day_duration"]))
