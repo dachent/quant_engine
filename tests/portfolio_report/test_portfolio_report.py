@@ -2357,9 +2357,12 @@ def test_staged_selectors_flow_through_data_only_build_and_verify(
     )
     assert verified["baseline_generation_id"] == baseline_generation_id
     assert verified["report_data_sha256"] == built["report_data_sha256"]
-    assert json.loads(
-        (candidate / reporter.REPORT_DATA_NAME).read_text(encoding="utf-8")
-    )["dependence_analysis"]["identity"]["generation_id"] == correlation_generation_dir.name
+    assert (
+        json.loads((candidate / reporter.REPORT_DATA_NAME).read_text(encoding="utf-8"))[
+            "dependence_analysis"
+        ]["identity"]["generation_id"]
+        == correlation_generation_dir.name
+    )
     assert (baseline_root / "CURRENT.json").read_bytes() == baseline_pointer_bytes
     assert (correlation_root / "CURRENT.json").read_bytes() == correlation_pointer_bytes
 
@@ -2395,28 +2398,35 @@ def test_staged_selectors_flow_through_real_cli_data_only_lifecycle(
     built = json.loads(capsys.readouterr().out)
     candidate = Path(built["candidate_dir"])
     assert reporter.main(["verify", *common, "--candidate-dir", str(candidate)]) == 0
-    assert json.loads(capsys.readouterr().out)["report_data_sha256"] == built[
-        "report_data_sha256"
-    ]
+    assert (
+        json.loads(capsys.readouterr().out)["report_data_sha256"]
+        == built["report_data_sha256"]
+    )
     published_root = tmp_path / "cli-published"
-    assert reporter.main(
-        [
-            "publish",
-            *common,
-            "--candidate-dir",
-            str(candidate),
-            "--output-root",
-            str(published_root),
-        ]
-    ) == 0
+    assert (
+        reporter.main(
+            [
+                "publish",
+                *common,
+                "--candidate-dir",
+                str(candidate),
+                "--output-root",
+                str(published_root),
+            ]
+        )
+        == 0
+    )
     published = json.loads(capsys.readouterr().out)
     generation_id = published["generation_id"]
     published_report = json.loads(
-        (published_root / "generations" / generation_id / reporter.REPORT_DATA_NAME).read_text(
-            encoding="utf-8"
-        )
+        (
+            published_root / "generations" / generation_id / reporter.REPORT_DATA_NAME
+        ).read_text(encoding="utf-8")
     )
-    assert published_report["dependence_analysis"]["identity"]["generation_id"] == correlation_generation_dir.name
+    assert (
+        published_report["dependence_analysis"]["identity"]["generation_id"]
+        == correlation_generation_dir.name
+    )
     assert (baseline_root / "CURRENT.json").read_bytes() == baseline_pointer_bytes
     assert (correlation_root / "CURRENT.json").read_bytes() == correlation_pointer_bytes
 
@@ -2977,17 +2987,10 @@ def test_workbook_is_deterministic_structured_and_has_no_external_surface(
     assert job_text.index('{"type":"save_as"') < job_text.index("output_path")
 
 
-@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_candidate_evidence_is_identical_across_output_roots(
     tmp_path: Path,
 ) -> None:
-    """The same content built into two roots must produce one identity.
-
-    This is the #293 mismatch in miniature. Two full builds of the same
-    vertical differed only in `xlsx-job.json` (absolute paths carrying the
-    output root) and the engine's random `run_id`, and that moved the report
-    generation id, the dashboard payload and the panel id.
-    """
+    """Canonical report identity and bytes do not depend on the output root."""
 
     baseline_root = _published_baseline(tmp_path)
     first = reporter.build_candidate(baseline_root, tmp_path / "reporting-a")
@@ -2995,11 +2998,13 @@ def test_candidate_evidence_is_identical_across_output_roots(
 
     left, right = Path(first["candidate_dir"]), Path(second["candidate_dir"])
     assert left.name == right.name
-    for name in (
-        "xlsx-job.json",
-        "portfolio-report-data.json",
-        "workbook-contract.json",
-    ):
+    left_files = {path.relative_to(left) for path in left.rglob("*") if path.is_file()}
+    right_files = {
+        path.relative_to(right) for path in right.rglob("*") if path.is_file()
+    }
+    assert left_files == right_files
+    assert Path("portfolio-report-data.json") in left_files
+    for name in left_files:
         assert (left / name).read_bytes() == (right / name).read_bytes(), name
 
 
@@ -7040,6 +7045,7 @@ def test_source_qualified_decomposition_is_visible_and_exact_in_report(
     assert mode["mode_coefficient"] == "-0.25"
     assert mode["mode_contribution"] == "-0.015"
     assert mode["risk_euler_allocation"] == "-0.0004"
+
 
 @pytest.mark.parametrize("command", ("build", "verify", "publish"))
 def test_report_cli_forwards_governed_hwm_bundle_for_build_verify_and_publish(
