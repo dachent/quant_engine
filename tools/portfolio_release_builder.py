@@ -857,11 +857,18 @@ def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
         sys.modules[module_name] = module
         try:
             spec.loader.exec_module(module)
+            contract_path = (
+                module._selected_inputs(selected_inputs_path)[  # noqa: SLF001
+                    "financial_input_contract_path"
+                ]
+                if selected_inputs_path is not None
+                else REPOSITORY_ROOT
+                / "contracts"
+                / "portfolio-financial-mvp-source-v1.json"
+            )
             result = module.verify_packaged_source(
                 correlation_root,
-                contract_path=REPOSITORY_ROOT
-                / "contracts"
-                / "portfolio-financial-mvp-source-v1.json",
+                contract_path=contract_path,
                 policy_path=REPOSITORY_ROOT
                 / "contracts"
                 / "portfolio-dependence-policy-v1.json",
