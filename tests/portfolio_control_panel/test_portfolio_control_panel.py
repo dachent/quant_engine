@@ -1087,6 +1087,105 @@ def test_diagnostic_dynamic_contributions_use_changing_beta_rows(
     )
 
 
+def test_factor_analysis_preserves_schema_three_orthogonal_surface() -> None:
+    decomposition = _decomposition()
+    decomposition["analytics_schema_version"] = 3
+    decomposition["proxy_governance"] = {
+        "candidate_count": 1,
+        "orthogonality_claim": "RAW_CANDIDATES_NOT_ASSUMED_ORTHOGONAL",
+        "proxies": [{"factor_id": "SPY_XS"}],
+        "selection_boundary": "TRAIN_ONLY",
+    }
+    for model in decomposition["model_results"]:
+        model["analytics_identities"] = {
+            "raw": {
+                "methodology_manifest_sha256": "e" * 64,
+                "model_id": model["model_id"],
+                "surface": "RAW_MODEL",
+            },
+            "orthogonal": {
+                "methodology_manifest_sha256": "e" * 64,
+                "model_id": model["model_id"],
+                "surface": "ORTHOGONAL_RISK_ATTRIBUTION",
+            },
+        }
+        model["interval_association"] = {
+            "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+            "holdout_display_claim": "holdout association using selected historical snapshot",
+        }
+        model["orthogonal_attribution"] = {
+            "method_id": "TRAIN_SYMMETRIC_WHITENING_V1",
+            "rank": 1,
+            "status": "AVAILABLE",
+            "training_row_identity": "f" * 64,
+        }
+    model = next(
+        row for row in decomposition["model_results"] if row["status"] == "AVAILABLE"
+    )
+
+    output = panel._factor_analysis(
+        decomposition,
+        {"generation_id": "a" * 64, "sha256": "b" * 64},
+        set(STRATEGY_NAMES),
+    )
+
+    row = next(
+        item for item in output["series"] if item["model_id"] == model["model_id"]
+    )
+    assert row["orthogonal_attribution"] == model["orthogonal_attribution"]
+    assert row["analytics_identities"] == model["analytics_identities"]
+    assert row["interval_association"] == model["interval_association"]
+    assert row["exposures"] == model["exposures"]
+
+
+@pytest.mark.parametrize("broken", ["missing", "wrong-surface", "wrong-model"])
+def test_schema_three_rejects_orthogonal_surface_without_matching_identity(
+    broken: str,
+) -> None:
+    decomposition = _decomposition()
+    decomposition["analytics_schema_version"] = 3
+    decomposition["proxy_governance"] = {
+        "candidate_count": 1,
+        "orthogonality_claim": "RAW_CANDIDATES_NOT_ASSUMED_ORTHOGONAL",
+        "proxies": [{"factor_id": "SPY_XS"}],
+        "selection_boundary": "TRAIN_ONLY",
+    }
+    for model in decomposition["model_results"]:
+        model["orthogonal_attribution"] = {"status": "AVAILABLE"}
+        model["interval_association"] = {
+            "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+            "holdout_display_claim": "holdout association using selected historical snapshot",
+        }
+        model["analytics_identities"] = {
+            "raw": {
+                "methodology_manifest_sha256": "e" * 64,
+                "model_id": model["model_id"],
+                "surface": "RAW_MODEL",
+            },
+            "orthogonal": {
+                "methodology_manifest_sha256": "e" * 64,
+                "model_id": model["model_id"],
+                "surface": "ORTHOGONAL_RISK_ATTRIBUTION",
+            },
+        }
+    selected = next(
+        row for row in decomposition["model_results"] if row["status"] == "AVAILABLE"
+    )
+    if broken == "missing":
+        del selected["analytics_identities"]["orthogonal"]
+    elif broken == "wrong-surface":
+        selected["analytics_identities"]["orthogonal"]["surface"] = "RAW_MODEL"
+    else:
+        selected["analytics_identities"]["orthogonal"]["model_id"] = "other-model"
+
+    with pytest.raises(panel.ControlPanelValidationError, match="orthogonal"):
+        panel._factor_analysis(
+            decomposition,
+            {"generation_id": "a" * 64, "sha256": "b" * 64},
+            set(STRATEGY_NAMES),
+        )
+
+
 def _correlation() -> dict[str, object]:
     canonical = _canonical_return_series_fixture()
     size = len(ACTIVE_STRATEGY_NAMES)
@@ -6259,6 +6358,10 @@ def test_factor_surface_separates_source_availability_from_model_acceptance() ->
     assert "MODEL_COMPUTED_NOT_VALIDATED" in renderer
     assert "It does not relabel accepted Volatis, Robuxio" in renderer
     assert "${dynamicAnalysisMarkup(row)}" in renderer
+    assert "function orthogonalAttributionMarkup(row)" in renderer
+    assert "Mixed modes, separate from raw factor betas" in renderer
+    assert "Holdout interpretation:" in renderer
+    assert "${orthogonalAttributionMarkup(row)}" in renderer
     assert "MPI-informed and non-equivalent" in renderer
     assert "clean-room dynamic FLS path" in template
 
@@ -8605,6 +8708,22 @@ def test_verified_bundle_panel_manifest_reads_binds_and_preserves_literal_values
         "provider": "SYNTHETIC",
         "status": "BLOCKED_ADMISSION",
         "strategy_id": "synthetic-strategy-02",
+        "mwr_status": "BLOCKED_ADMISSION",
+        "mwr_reason": "SYNTHETIC_BLOCKED",
+        "mwr_xirr": None,
+        "mwr_opening_date": None,
+        "mwr_opening_value": None,
+        "mwr_terminal_date": None,
+        "mwr_terminal_value": None,
+        "mwr_currency": None,
+        "mwr_coverage_status": "BLOCKED",
+        "mwr_cashflows": [],
+        "mwr_label": None,
+        "mwr_value_basis": None,
+        "mwr_valuation_timing": None,
+        "mwr_day_count": "ACTUAL_365",
+        "mwr_unit": "ANNUALIZED_RETURN",
+        "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
     }
 
 
@@ -11796,3 +11915,39 @@ def test_governed_hwm_direct_publish_requires_private_stage_context_before_io(
 
     assert not output_root.exists()
     assert not (tmp_path / "qa").exists()
+
+
+def test_panel_mwr_projection_rejects_label_perimeter_mismatch() -> None:
+    row = {
+        "mwr_status": "AVAILABLE",
+        "mwr_xirr": "0.10",
+        "mwr_opening_date": "2025-01-01",
+        "mwr_opening_value": "100",
+        "mwr_terminal_date": "2026-01-01",
+        "mwr_terminal_value": "110",
+        "mwr_currency": "USD",
+        "mwr_coverage_status": "COMPLETE",
+        "mwr_cashflows": [
+            {
+                "date": "2025-01-01",
+                "amount": "-100",
+                "source_record_ids": ["synthetic-opening-nav"],
+            },
+            {
+                "date": "2026-01-01",
+                "amount": "110",
+                "source_record_ids": ["synthetic-terminal-nav"],
+            },
+        ],
+        "mwr_label": "STRATEGY_EPOCH_MWR",
+        "mwr_value_basis": "STRATEGY_NAV",
+        "mwr_valuation_timing": "ECONOMIC_DATE_WITH_SEPARATE_NAV_RECOGNITION_DATE",
+        "mwr_day_count": "ACTUAL_365",
+        "mwr_unit": "ANNUALIZED_RETURN",
+        "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+    }
+    panel._validate_mwr_perimeter([row])
+
+    row["mwr_label"] = "ACCOUNT_EPOCH_MWR"
+    with pytest.raises(panel.ControlPanelValidationError, match="valuation perimeter"):
+        panel._validate_mwr_perimeter([row])

@@ -1124,7 +1124,20 @@ def _account_strategy_performance(
             "flow_count": 0,
             "flow_timing": "DATE_ONLY_END_OF_DAY_INFERRED_TIMING",
             "last_four": None,
+            "mwr_cashflows": [],
+            "mwr_coverage_status": "BLOCKED",
+            "mwr_day_count": "ACTUAL_365",
+            "mwr_label": None,
+            "mwr_opening_date": None,
+            "mwr_opening_value": None,
+            "mwr_reason": "FLOW_COVERAGE_NOT_GOVERNED",
+            "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
             "mwr_status": "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
+            "mwr_terminal_date": None,
+            "mwr_terminal_value": None,
+            "mwr_unit": "ANNUALIZED_RETURN",
+            "mwr_valuation_timing": None,
+            "mwr_value_basis": None,
             "mwr_xirr": None,
             "nav_observations": 0,
             "observed_end": None,
@@ -1176,6 +1189,8 @@ def _account_strategy_performance(
                 }
             )
             if detail is not None and detail["epoch_admission_status"] == "BLOCKED":
+                if detail.get("mwr_payload") is not None:
+                    base.update(cast(Mapping[str, Any], detail["mwr_payload"]))
                 base.update(
                     {
                         "flow_count": None,
@@ -1202,6 +1217,8 @@ def _account_strategy_performance(
                 )
                 rows.append(base)
                 continue
+            if detail is not None and detail.get("mwr_payload") is not None:
+                base.update(cast(Mapping[str, Any], detail["mwr_payload"]))
         if mapping_status != "MAPPED" or assignment.get("strategy_id") is None:
             base["twr_status"] = "UNMAPPED"
             rows.append(base)
@@ -5066,6 +5083,14 @@ def build_report_data(
                         row["effective_end"],
                     )
                 ]["epoch_blocking_reason"],
+                "mwr_payload": verified_epoch_details[
+                    (
+                        row["account_id"],
+                        row["strategy_id"],
+                        row["effective_start"],
+                        row["effective_end"],
+                    )
+                ]["mwr_payload"],
             }
             for row in crosswalk_payload["rows"]
             if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
@@ -5905,6 +5930,7 @@ def _decomposition_workbook_rows(
                         ("alpha", row.get("alpha")),
                         ("contribution", contribution),
                         ("coverage", row.get("coverage")),
+                        ("orthogonal", row.get("orthogonal_attribution")),
                         ("train", diagnostics.get("train")),
                         ("holdout", diagnostics.get("holdout")),
                         ("model_quality", row.get("model_quality")),
@@ -5918,6 +5944,26 @@ def _decomposition_workbook_rows(
                                     if not isinstance(field, (Mapping, list, tuple))
                                 }
                             )
+                    identities = row.get("analytics_identities")
+                    if isinstance(identities, Mapping):
+                        for name, identity in identities.items():
+                            if isinstance(identity, Mapping):
+                                cell.update(
+                                    {
+                                        f"{name}_identity_{key}": value
+                                        for key, value in identity.items()
+                                        if not isinstance(value, (Mapping, list, tuple))
+                                    }
+                                )
+                    interval = row.get("interval_association")
+                    if isinstance(interval, Mapping):
+                        cell.update(
+                            {
+                                f"interval_{name}": value
+                                for name, value in interval.items()
+                                if not isinstance(value, (Mapping, list, tuple))
+                            }
+                        )
                     cells.append(cell)
                     means = (
                         contribution.get("factor_means", {})
@@ -5946,12 +5992,146 @@ def _decomposition_workbook_rows(
                                 "series_id": series_id,
                                 "source_key": source_key,
                                 "surface": surface,
+                                "analytics_surface": (
+                                    _object(identities, "analytics identities")
+                                    .get("raw", {})
+                                    .get("surface")
+                                    if isinstance(identities, Mapping)
+                                    and isinstance(identities.get("raw"), Mapping)
+                                    else None
+                                ),
+                                "factor_kind": "RAW_FACTOR",
                             }
                         )
+                    orthogonal = row.get("orthogonal_attribution")
+                    orthogonal_identity = (
+                        identities.get("orthogonal")
+                        if isinstance(identities, Mapping)
+                        and isinstance(identities.get("orthogonal"), Mapping)
+                        else {}
+                    )
+                    if isinstance(orthogonal, Mapping) and orthogonal_identity:
+                        coefficients = orthogonal.get("mode_coefficients")
+                        per_date = orthogonal.get("per_date")
+                        budget = orthogonal.get("train_fitted_risk_budget")
+                        euler = (
+                            budget.get("euler_allocations", {})
+                            if isinstance(budget, Mapping)
+                            else {}
+                        )
+                        per_date_rows = per_date if isinstance(per_date, list) else []
+                        if per_date_rows:
+                            for index, dated in enumerate(per_date_rows):
+                                if not isinstance(dated, Mapping):
+                                    continue
+                                contributions = dated.get("mode_contributions")
+                                dated_coefficients = (
+                                    coefficients[index]
+                                    if isinstance(coefficients, list)
+                                    and index < len(coefficients)
+                                    and isinstance(coefficients[index], Mapping)
+                                    else coefficients
+                                    if isinstance(coefficients, Mapping)
+                                    else {}
+                                )
+                                mode_ids = set(
+                                    contributions
+                                    if isinstance(contributions, Mapping)
+                                    else {}
+                                ) | set(
+                                    dated_coefficients
+                                    if isinstance(dated_coefficients, Mapping)
+                                    else {}
+                                )
+                                for mode_id in sorted(mode_ids):
+                                    factors.append(
+                                        {
+                                            "analytics_identity_model_id": orthogonal_identity.get(
+                                                "model_id"
+                                            ),
+                                            "analytics_identity_methodology_manifest_sha256": orthogonal_identity.get(
+                                                "methodology_manifest_sha256"
+                                            ),
+                                            "analytics_surface": orthogonal_identity.get(
+                                                "surface"
+                                            ),
+                                            "date": dated.get("date"),
+                                            "evidence_mode": evidence_mode,
+                                            "factor_id": mode_id,
+                                            "factor_kind": "MIXED_ORTHOGONAL_MODE",
+                                            "generation_id": source.get(
+                                                "generation_id"
+                                            ),
+                                            "lens_id": lens_id,
+                                            "mode_coefficient": dated_coefficients.get(
+                                                mode_id
+                                            ),
+                                            "mode_contribution": contributions.get(
+                                                mode_id
+                                            )
+                                            if isinstance(contributions, Mapping)
+                                            else None,
+                                            "mode_id": mode_id,
+                                            "model_id": row.get("model_id"),
+                                            "partition": dated.get("partition"),
+                                            "risk_euler_allocation": euler.get(mode_id)
+                                            if isinstance(euler, Mapping)
+                                            else None,
+                                            "series_id": series_id,
+                                            "source_key": source_key,
+                                            "source_sha256": source.get(
+                                                "source_sha256"
+                                            ),
+                                            "status": orthogonal.get("status"),
+                                            "surface": surface,
+                                        }
+                                    )
+                        elif isinstance(coefficients, Mapping) or isinstance(
+                            euler, Mapping
+                        ):
+                            mode_ids = set(
+                                coefficients
+                                if isinstance(coefficients, Mapping)
+                                else {}
+                            ) | set(euler if isinstance(euler, Mapping) else {})
+                            for mode_id in sorted(mode_ids):
+                                factors.append(
+                                    {
+                                        "analytics_identity_model_id": orthogonal_identity.get(
+                                            "model_id"
+                                        ),
+                                        "analytics_identity_methodology_manifest_sha256": orthogonal_identity.get(
+                                            "methodology_manifest_sha256"
+                                        ),
+                                        "analytics_surface": orthogonal_identity.get(
+                                            "surface"
+                                        ),
+                                        "evidence_mode": evidence_mode,
+                                        "factor_id": mode_id,
+                                        "factor_kind": "MIXED_ORTHOGONAL_MODE",
+                                        "generation_id": source.get("generation_id"),
+                                        "lens_id": lens_id,
+                                        "mode_coefficient": coefficients.get(mode_id)
+                                        if isinstance(coefficients, Mapping)
+                                        else None,
+                                        "mode_id": mode_id,
+                                        "model_id": row.get("model_id"),
+                                        "risk_euler_allocation": euler.get(mode_id)
+                                        if isinstance(euler, Mapping)
+                                        else None,
+                                        "series_id": series_id,
+                                        "source_key": source_key,
+                                        "source_sha256": source.get("source_sha256"),
+                                        "status": orthogonal.get("status"),
+                                        "surface": surface,
+                                    }
+                                )
     # Some valid diagnostics apply to only one surface. Keep their columns
     # even when the first result has no value for that diagnostic.
     columns = sorted({key for cell in cells for key in cell})
     cells = [{key: cell.get(key) for key in columns} for cell in cells]
+    factor_columns = sorted({key for factor in factors for key in factor})
+    factors = [{key: factor.get(key) for key in factor_columns} for factor in factors]
     return cells, factors
 
 
@@ -8379,6 +8559,29 @@ def _verified_epoch_authority_details(
             "epoch_admission_status": admission["status"],
             "epoch_output_status": output["status"],
             "epoch_blocking_reason": output["blocking_reason"],
+            "mwr_payload": {
+                field: manifest_row.get(field)
+                for field in (
+                    "mwr_status",
+                    "mwr_xirr",
+                    "mwr_reason",
+                    "mwr_opening_date",
+                    "mwr_opening_value",
+                    "mwr_terminal_date",
+                    "mwr_terminal_value",
+                    "mwr_currency",
+                    "mwr_coverage_status",
+                    "mwr_cashflows",
+                    "mwr_label",
+                    "mwr_value_basis",
+                    "mwr_valuation_timing",
+                    "mwr_day_count",
+                    "mwr_unit",
+                    "mwr_source_binding",
+                )
+            }
+            if "mwr_status" in manifest_row
+            else None,
         }
     if (
         set(details) != set(by_key)

@@ -45,6 +45,7 @@ def _write_sources(
     root: Path,
     *,
     count: int = 140,
+    start: date = date(2025, 1, 2),
     formula: str = "unconstrained",
     identical_factors: bool = False,
     target_only_dates: tuple[date, ...] = (),
@@ -52,7 +53,7 @@ def _write_sources(
     complete_costs: bool = False,
 ) -> tuple[Path, list[date]]:
     root.mkdir(parents=True)
-    days = _days(count)
+    days = _days(count, start)
     target_path = root / "targets.csv"
     with target_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
@@ -89,6 +90,28 @@ def _write_sources(
                 [day.isoformat(), "0.00005", format(f1, ".17g"), format(f2, ".17g")]
             )
     return target_path, days
+
+
+def _write_later_target_source(
+    root: Path,
+) -> tuple[Path, list[date], list[date]]:
+    """Keep target lifetime later than the selected factor history."""
+    target_path, days = _write_sources(root, start=date(2026, 1, 2))
+    factor_path = root / "factors.csv"
+    historical_days = _days(40, date(2024, 1, 2))
+    factor_rows = list(csv.reader(factor_path.read_text(encoding="utf-8").splitlines()))
+    factor_rows[1:1] = [
+        [
+            observed.isoformat(),
+            "0.00005",
+            "0.001",
+            "0.002",
+        ]
+        for observed in historical_days
+    ]
+    with factor_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(factor_rows)
+    return target_path, days, historical_days
 
 
 def _model(
@@ -207,6 +230,15 @@ def _spec(
         "as_of_date": max(days).isoformat(),
         "factor_source": {
             "artifact_id": "frozen/factors.csv",
+            "interval_policy": {
+                "available_through_anchor": max(days).isoformat(),
+                "currency": "USD",
+                "finality": "COMPLETE_SELECTED_SNAPSHOT",
+                "native_calendar": "SOURCE_LABELLED_DAILY",
+                "native_label_convention": "PUBLISHED_DAILY_LABEL",
+                "return_basis": "NET",
+                "source_vintage": "SELECTED_SNAPSHOT",
+            },
             "date_column": "date",
             "expected_sha256": factor_hash,
             "expected_size_bytes": factor_size,
@@ -237,6 +269,22 @@ def _spec(
             "relative_path": "targets.csv",
             "schema_name": "synthetic-target-returns",
             "schema_version": "1",
+            "interval_policy": {
+                "currency": "USD",
+                "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+                "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
+                "finalized_through": max(days).isoformat(),
+                "gap_disposition": "REJECT_BUCKET",
+                "native_calendar": "SESSION_LABELLED",
+                "native_label_convention": "SYNTHETIC_EXCHANGE_SESSION_DATE",
+                "return_basis": "NET",
+                "session_schedule_labels": {
+                    "synthetic-strategy": [
+                        item.isoformat() for item in sorted(set(days))
+                    ]
+                },
+                "source_vintage": "SELECTED_SNAPSHOT",
+            },
         },
     }
     if analysis_lens is not None:
@@ -247,6 +295,163 @@ def _spec(
         encoding="utf-8",
     )
     return spec_path
+
+
+def test_24_7_factor_anchor_association_compounds_weekends_and_emits_receipt(
+    tmp_path: Path,
+) -> None:
+    """The real producer must retain Sat/Sun under Monday's one factor row."""
+    source = tmp_path / "source"
+    source.mkdir()
+    anchors = _days(18, date(2026, 1, 2))
+    target_path = source / "targets.csv"
+    factor_path = source / "factors.csv"
+    factor_values = {
+        observed: (
+            0.012 * math.sin(index / 2.0) + 0.003 * math.cos(index / 5.0),
+            0.009 * math.cos(index / 3.0) - 0.002 * math.sin(index / 7.0),
+        )
+        for index, observed in enumerate(anchors)
+    }
+    target_returns: dict[date, float] = {}
+    for left, right in zip(anchors, anchors[1:]):
+        target_labels = [
+            left + timedelta(days=offset)
+            for offset in range(1, (right - left).days + 1)
+        ]
+        for label in target_labels[:-1]:
+            target_returns.setdefault(label, 0.0)
+        if right == date(2026, 1, 5):
+            target_returns[date(2026, 1, 3)] = 0.02
+            target_returns[date(2026, 1, 4)] = -0.01
+        desired_excess = (
+            0.0005 + 0.55 * factor_values[right][0] - 0.30 * factor_values[right][1]
+        )
+        preceding_growth = math.prod(
+            1.0 + target_returns[label] for label in target_labels[:-1]
+        )
+        target_returns[right] = (1.0 + desired_excess + 0.001) / preceding_growth - 1.0
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(decomposition.TARGET_HEADERS)
+        for observed, value in sorted(target_returns.items()):
+            writer.writerow(
+                [
+                    "synthetic-strategy",
+                    observed.isoformat(),
+                    str(value),
+                    "ACCOUNT_LIVE",
+                    "NET",
+                    "TOTAL",
+                    "",
+                ]
+            )
+    with factor_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["date", "RF", "F1", "F2"])
+        for observed in anchors:
+            writer.writerow(
+                [
+                    observed.isoformat(),
+                    "0.001",
+                    format(factor_values[observed][0], ".17g"),
+                    format(factor_values[observed][1], ".17g"),
+                ]
+            )
+    models = [
+        {
+            "constraint": "UNCONSTRAINED",
+            "cost_coverage": "INCOMPLETE",
+            "cv_folds": 2,
+            "factor_ids": ["factor-one", "factor-two"],
+            "minimum_test_observations": 1,
+            "minimum_train_observations": 10,
+            "model_id": "anchor-model",
+            "parsimony_tolerance": "0.000001",
+            "periods_per_year": 252,
+            "ridge_candidates": ["0.0001"],
+            "series_id": "synthetic-strategy",
+            "test_start": anchors[-5].isoformat(),
+            "train_end": anchors[-6].isoformat(),
+        }
+    ]
+    spec_path = _spec(source, target_path, anchors, models=models)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["target_source"]["interval_policy"].update(
+        {
+            "native_calendar": "CALENDAR_DAY_24_7",
+            "native_label_convention": "UTC_CALENDAR_DATE",
+        }
+    )
+    spec["target_source"]["interval_policy"].pop("session_schedule_labels")
+    spec_path.write_text(json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\n")
+
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+
+    model = _available(result)
+    interval = model["interval_association"]
+    monday = next(
+        item for item in interval["buckets"] if item["factor_anchor"] == "2026-01-05"
+    )
+    assert monday["target_labels"] == ["2026-01-03", "2026-01-04", "2026-01-05"]
+    assert float(monday["target_total_return"]) == pytest.approx(
+        math.prod(
+            1.0 + target_returns[date.fromisoformat(label)]
+            for label in monday["target_labels"]
+        )
+        - 1.0
+    )
+    assert float(monday["anchor_adjusted_target_return"]) == pytest.approx(
+        float(monday["target_total_return"]) - 0.001
+    )
+    assert monday["partition"] == "TRAIN"
+    assert interval["policy_id"] == "SOURCE_LABELLED_FACTOR_ANCHOR_ASSOCIATION_V1"
+    assert interval["holdout_display_claim"] == (
+        "holdout association using selected historical snapshot"
+    )
+
+
+def test_later_target_lifetime_uses_prior_factor_anchor_without_early_buckets(
+    tmp_path: Path,
+) -> None:
+    """Earlier factor history is not an implied earlier target lifetime."""
+    source = tmp_path / "source"
+    target_path, days, historical_days = _write_later_target_source(source)
+    spec_path = _spec(source, target_path, days)
+
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+
+    interval = _available(result)["interval_association"]
+    buckets = cast(list[dict[str, Any]], interval["buckets"])
+    assert buckets[0]["prior_factor_anchor"] == historical_days[-1].isoformat()
+    assert buckets[0]["target_labels"] == [days[0].isoformat()]
+    assert all(item["factor_anchor"] >= days[0].isoformat() for item in buckets)
+    assert interval["pre_anchor_labels"] == []
+    assert interval["pending_factor_anchor_labels"] == []
+    assert interval["unassignable_leading_labels"] == []
+    assert interval["unassignable_tail_labels"] == []
+    assert interval["target_source_lifetime_start"] == days[0].isoformat()
+    assert interval["target_source_lifetime_end"] == days[-1].isoformat()
+
+
+def test_later_target_lifetime_rejects_gap_inside_declared_source_bucket(
+    tmp_path: Path,
+) -> None:
+    """A source boundary does not excuse a missing declared target label."""
+    source = tmp_path / "source"
+    target_path, days, _historical_days = _write_later_target_source(source)
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    missing_day = days[20].isoformat()
+    rows = [row for row in rows if len(row) < 2 or row[1] != missing_day]
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source, target_path, days)
+
+    with pytest.raises(
+        decomposition.DecompositionError,
+        match=f"missing expected target label\\(s\\).*{missing_day}",
+    ):
+        decomposition.build_decomposition(spec_path, source)
 
 
 def _available(result: dict[str, object]) -> dict[str, Any]:
@@ -390,7 +595,8 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
     assert inference["default_lag"] == decomposition._newey_west_lag(90)
     assert {row["lag"] for row in inference["lag_sensitivity"]} >= {0}
     assert model["alpha"]["confidence_status"] == inference["status"]
-    assert model["diagnostics"]["residuals"]["train"]["observation_count"] == 90
+    # The first factor label is a named pre-anchor tail, not a fitted bucket.
+    assert model["diagnostics"]["residuals"]["train"]["observation_count"] == 89
     assert model["coverage"]["target_observed_start"] == days[0].isoformat()
     assert model["coverage"]["target_cumulative_return"] is not None
     assert model["coverage"]["target_observed_end"] == days[-1].isoformat()
@@ -412,6 +618,45 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
         assert reconstructed == pytest.approx(
             float(row["actual_excess_return"]), abs=5e-11
         )
+
+
+def test_selected_static_model_emits_separate_train_only_orthogonal_attribution(
+    tmp_path: Path,
+) -> None:
+    """Removing the post-fit surface must not change the raw model receipt."""
+    source = tmp_path / "source"
+    target_path, days = _write_sources(source)
+
+    result, _manifest, _content = decomposition.build_decomposition(
+        _spec(source, target_path, days), source
+    )
+
+    model = _available(result)
+    orthogonal = model["orthogonal_attribution"]
+    assert orthogonal["status"] == "AVAILABLE"
+    assert orthogonal["method_id"] == "TRAINING_ONLY_SYMMETRIC_COVARIANCE_WHITENING_V1"
+    assert orthogonal["raw_factor_ids"] == ["factor-one", "factor-two"]
+    assert orthogonal["mode_ids"] == [
+        "symmetric_mode:factor-one",
+        "symmetric_mode:factor-two",
+    ]
+    assert orthogonal["training_row_identity"]["partition"] == "TRAIN"
+    assert orthogonal["train_fitted_risk_budget"]["interpretation"] == (
+        "EQUAL_FACTOR_ANCHOR_FITTED_COMPONENT_SAMPLE_VARIANCE"
+    )
+    assert (
+        orthogonal["train_fitted_risk_budget"]["cross_mode_covariance_present"] is False
+    )
+    assert all(
+        float(row["fitted_excess_return"])
+        == pytest.approx(float(row["fitted_excess_return"]), abs=5e-11)
+        for row in model["contributions"]
+    )
+    for raw, projected in zip(
+        model["contributions"], orthogonal["per_date"], strict=True
+    ):
+        assert projected["date"] == raw["date"]
+        assert projected["fitted_excess_return"] == raw["fitted_excess_return"]
 
 
 def test_manifest_binds_exact_returned_decomposition_bytes(tmp_path: Path) -> None:
@@ -639,8 +884,10 @@ def test_coverage_separates_missing_weekday_and_weekend_and_short_history(
         item["model_id"]: item
         for item in cast(list[dict[str, Any]], result["model_results"])
     }
-    assert by_id["available"]["coverage"]["factor_missing_weekdays"] == 1
-    assert by_id["available"]["coverage"]["factor_missing_weekends"] == 1
+    # Under the declared session schedule, both labels belong to their right
+    # factor-anchor bucket; neither is an exact-date factor-missing observation.
+    assert by_id["available"]["coverage"]["factor_missing_weekdays"] == 0
+    assert by_id["available"]["coverage"]["factor_missing_weekends"] == 0
     assert by_id["short"]["status"] == "UNAVAILABLE_INSUFFICIENT_TRAIN_HISTORY"
 
 
@@ -779,6 +1026,14 @@ def test_dynamic_fls_recovers_time_varying_path_and_walks_forward(
     assert first_manifest.generation_id == second_manifest.generation_id
     model = _available(first)
     assert model["estimator"] == "DYNAMIC_FLS"
+    orthogonal = model["orthogonal_attribution"]
+    assert orthogonal["status"] == "AVAILABLE"
+    budget = orthogonal["train_fitted_risk_budget"]
+    assert budget["cross_mode_covariance_present"] is True
+    assert budget["intercept_time_varying"] is True
+    assert sum(
+        float(value) for value in budget["euler_allocations"].values()
+    ) == pytest.approx(float(budget["fitted_variance"]), abs=5e-11)
     assert model["method_label"] == "MPI_INFORMED_NON_EQUIVALENT"
     dynamic = model["diagnostics"]["dynamic"]
     assert dynamic["validation"] == "EXACT_LEAVE_ONE_OUT_TRAIN_ONLY"
@@ -858,8 +1113,16 @@ def test_dynamic_selection_and_training_path_do_not_consume_holdout(
     changed_model = _selected(changed)
 
     assert changed_model["selected_smoothness"] == original_model["selected_smoothness"]
-    original_train = original_model["diagnostics"]["dynamic"]["exposure_path"][:105]
-    changed_train = changed_model["diagnostics"]["dynamic"]["exposure_path"][:105]
+    original_train = [
+        row
+        for row in original_model["diagnostics"]["dynamic"]["exposure_path"]
+        if row["date"] <= model_definition["train_end"]
+    ]
+    changed_train = [
+        row
+        for row in changed_model["diagnostics"]["dynamic"]["exposure_path"]
+        if row["date"] <= model_definition["train_end"]
+    ]
     assert changed_train == original_train
     assert float(changed_model["diagnostics"]["holdout"]["predicted_r_squared"]) < 0
     assert changed_model["status"] == "DIAGNOSTIC_ONLY"
@@ -881,6 +1144,7 @@ def test_live_plus_backtest_accepts_declared_model_return_basis(
     spec_path = _spec(source, target_path, days)
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     spec["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    spec["target_source"]["interval_policy"]["return_basis"] = "MIXED_NET_MODEL"
     spec_path.write_text(
         json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
@@ -903,6 +1167,82 @@ def test_live_plus_backtest_accepts_declared_model_return_basis(
     assert model["alpha"]["net_status"] == "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
     assert model["alpha"]["gross_annualized"] is None
     assert model["alpha"]["gross_status"] == "UNAVAILABLE_MODEL_RETURN_BASIS"
+
+
+def test_mixed_basis_source_layer_boundary_is_retained_but_not_fitted(
+    tmp_path: Path,
+) -> None:
+    """A complete MODEL-to-NET anchor is a rejected receipt, never a mixed fit."""
+    source = tmp_path / "mixed-basis-boundary"
+    weekend = (date(2025, 1, 4), date(2025, 1, 5))
+    weekday_days = _days(140)
+    calendar_only_days = tuple(
+        observed
+        for observed in (
+            weekday_days[0] + timedelta(days=offset)
+            for offset in range((weekday_days[-1] - weekday_days[0]).days + 1)
+        )
+        if observed not in set(weekday_days)
+    )
+    target_path, days = _write_sources(
+        source,
+        count=len(weekday_days),
+        target_only_dates=calendar_only_days,
+    )
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    for row in rows[1:]:
+        if row[1] <= weekend[0].isoformat():
+            row[3] = "BACKTEST"
+            row[4] = "MODEL"
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source, target_path, days)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    policy = spec["target_source"]["interval_policy"]
+    policy.update(
+        native_calendar="CALENDAR_DAY_24_7",
+        native_label_convention="UTC_CALENDAR_DATE",
+        return_basis="MIXED_NET_MODEL",
+    )
+    policy.pop("session_schedule_labels")
+    spec_path.write_text(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+
+    interval = _available(result)["interval_association"]
+    assert all(item["factor_anchor"] != "2025-01-06" for item in interval["buckets"])
+    rejected_buckets = interval["rejected_buckets"]
+    assert len(rejected_buckets) == 1
+    rejected = rejected_buckets[0]
+    assert {
+        field: rejected[field]
+        for field in (
+            "factor_anchor",
+            "factor_source_snapshot_identity",
+            "prior_factor_anchor",
+            "reason",
+            "target_labels",
+            "target_return_bases",
+            "target_source_snapshot_identity",
+            "target_source_layers",
+        )
+    } == {
+        "factor_anchor": "2025-01-06",
+        "factor_source_snapshot_identity": "SELECTED_SNAPSHOT",
+        "prior_factor_anchor": "2025-01-03",
+        "reason": "INCOMPATIBLE_RETURN_BASIS_SOURCE_LAYER_BOUNDARY",
+        "target_labels": ["2025-01-04", "2025-01-05", "2025-01-06"],
+        "target_return_bases": ["MODEL", "NET"],
+        "target_source_snapshot_identity": "SELECTED_SNAPSHOT",
+        "target_source_layers": ["BACKTEST", "ACCOUNT_LIVE"],
+    }
+    assert _available(result)["coverage"]["aligned_observations"] == len(
+        interval["buckets"]
+    )
 
 
 def test_canonical_live_series_digest_has_a_literal_live_series_oracle(

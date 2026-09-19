@@ -25,7 +25,9 @@ import pytest
 from quant_engine.core import (
     GenerationConflictError,
     InputSnapshot,
+    publish_generation,
     read_generation_bundle,
+    stage_generation,
 )
 from quant_engine.core.contracts import (
     AdapterIdentity,
@@ -4059,6 +4061,47 @@ def test_c4c1_xirr_restores_global_decimal_context(verifier_module: Any) -> None
             [(date(2026, 1, 1), Decimal("-100")), (date(2027, 1, 1), Decimal("12345"))]
         ) == Decimal("122.45")
         assert context_state() == expected_state
+    finally:
+        setcontext(before)
+
+
+def test_independent_mwr_classification_ignores_hostile_ambient_precision(
+    verifier_module: Any,
+) -> None:
+    """Same-date source-vector aggregation must retain its fixed precision."""
+
+    cashflows = [
+        (date(2026, 1, 1), Decimal("9999999999999999999999999999999999999999")),
+        (date(2026, 1, 1), Decimal("-9999999999999999999999999999999999999998")),
+        (date(2027, 1, 1), Decimal("-2")),
+    ]
+    ordinary = verifier_module._classify_independent_mwr(cashflows)
+    before = getcontext().copy()
+    getcontext().prec = 1
+    getcontext().rounding = ROUND_DOWN
+    expected_state = (
+        getcontext().prec,
+        getcontext().rounding,
+        getcontext().Emin,
+        getcontext().Emax,
+        dict(getcontext().flags),
+        dict(getcontext().traps),
+    )
+    try:
+        status, reason, rate = verifier_module._classify_independent_mwr(cashflows)
+        assert (status, reason, rate) == ordinary
+        assert (status, reason) == ("AVAILABLE", None)
+        assert rate is not None
+        assert abs(rate - Decimal("1")) <= Decimal("1e-28")
+        current = getcontext()
+        assert (
+            current.prec,
+            current.rounding,
+            current.Emin,
+            current.Emax,
+            dict(current.flags),
+            dict(current.traps),
+        ) == expected_state
     finally:
         setcontext(before)
 
@@ -21167,18 +21210,21 @@ def _mixed_base_selected_inputs(perimeter_module: Any) -> object:
             "record_id": "mixed-nav-1",
             "account_id": account_id,
             "as_of_date": "2026-01-30",
+            "value_basis": "ACCOUNT_TOTAL",
             "nav": {"currency": "USD", "status": "AVAILABLE", "value": "50"},
         },
         {
             "record_id": "mixed-nav-2",
             "account_id": account_id,
             "as_of_date": "2026-01-31",
+            "value_basis": "ACCOUNT_TOTAL",
             "nav": {"currency": "USD", "status": "AVAILABLE", "value": "60"},
         },
         {
             "record_id": "mixed-nav-3",
             "account_id": account_id,
             "as_of_date": "2026-02-01",
+            "value_basis": "ACCOUNT_TOTAL",
             "nav": {"currency": "USD", "status": "AVAILABLE", "value": "70"},
         },
     ]
@@ -22528,12 +22574,15 @@ def _mixed_two_receipt_selected_inputs(perimeter_module: Any) -> object:
     )
 
     ledger = selected.provider_ledger.json_object()
+    for nav in ledger["nav_observations"]:
+        nav["value_basis"] = "ACCOUNT_TOTAL"
     ledger["nav_observations"].extend(
         [
             {
                 "record_id": "mixed-2-nav-1",
                 "account_id": "synthetic-account-02",
                 "as_of_date": "2026-01-30",
+                "value_basis": "ACCOUNT_TOTAL",
                 "nav": {
                     "currency": "USD",
                     "status": "AVAILABLE",
@@ -22544,6 +22593,7 @@ def _mixed_two_receipt_selected_inputs(perimeter_module: Any) -> object:
                 "record_id": "mixed-2-nav-2",
                 "account_id": "synthetic-account-02",
                 "as_of_date": "2026-01-31",
+                "value_basis": "ACCOUNT_TOTAL",
                 "nav": {
                     "currency": "USD",
                     "status": "AVAILABLE",
@@ -22554,6 +22604,7 @@ def _mixed_two_receipt_selected_inputs(perimeter_module: Any) -> object:
                 "record_id": "mixed-2-nav-3",
                 "account_id": "synthetic-account-02",
                 "as_of_date": "2026-02-01",
+                "value_basis": "ACCOUNT_TOTAL",
                 "nav": {
                     "currency": "USD",
                     "status": "AVAILABLE",
@@ -26705,6 +26756,686 @@ def test_generation_composer_stages_one_verified_two_receipt_bundle(
         "independent_authority_verification": "NOT_PERFORMED",
         "publication_readiness": "NOT_READY",
     }
+
+
+def test_generation_composer_preserves_declared_nav_basis_for_mwr(
+    perimeter_module: Any,
+    verifier_module: Any,
+    tmp_path: Path,
+) -> None:
+    """The schema-9 seam retains declared NAV perimeter through verification."""
+
+    selected = _generation_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    for nav in ledger["nav_observations"]:
+        nav["value_basis"] = "ACCOUNT_TOTAL"
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+    bundle = perimeter_module.stage_account_manifest_generation(
+        selected, tmp_path / "mwr-basis"
+    )
+    output = json.loads(bundle.payloads["outputs/account-strategy-manifest.json"])
+    available = [row for row in output["rows"] if row["mwr_status"] == "AVAILABLE"]
+    assert available
+    assert {row["mwr_value_basis"] for row in available} == {"ACCOUNT_TOTAL"}
+    assert {row["mwr_label"] for row in available} == {"ACCOUNT_EPOCH_MWR"}
+    assert all(row["mwr_day_count"] == "ACTUAL_365" for row in output["rows"])
+
+    forged = dict(bundle.payloads)
+    forged_output = json.loads(forged["outputs/account-strategy-manifest.json"])
+    next(row for row in forged_output["rows"] if row["mwr_status"] == "AVAILABLE")[
+        "mwr_xirr"
+    ] = "999"
+    forged["outputs/account-strategy-manifest.json"] = canonical_json_bytes(
+        forged_output
+    )
+    forged.pop("verification/independent-verification.json")
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module.IndependentAccountManifestVerifier().verify(
+            _mixed_verifier_inputs(verifier_module, selected), forged
+        )
+
+
+def test_generation_available_mwr_reaches_bound_report_workbook(
+    perimeter_module: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One staged MWR reaches report, panel intake, and TWR/MWR workbook."""
+
+    import portfolio_control_panel as panel
+    import portfolio_release_builder as release_builder
+    import portfolio_report as reporter
+    from openpyxl import load_workbook  # type: ignore[import-untyped]
+
+    selected = _generation_composer_selected_inputs(perimeter_module)
+    report_fixture_name = "_c1_portfolio_report_fixture"
+    report_fixture = sys.modules.get(report_fixture_name)
+    if report_fixture is None:
+        report_fixture_path = (
+            REPOSITORY_ROOT / "tests" / "portfolio_report" / "test_portfolio_report.py"
+        )
+        report_fixture_spec = importlib.util.spec_from_file_location(
+            report_fixture_name, report_fixture_path
+        )
+        assert (
+            report_fixture_spec is not None and report_fixture_spec.loader is not None
+        )
+        report_fixture = importlib.util.module_from_spec(report_fixture_spec)
+        sys.modules[report_fixture_name] = report_fixture
+        report_fixture_spec.loader.exec_module(report_fixture)
+    panel_fixture_name = "_c1_portfolio_control_panel_fixture"
+    panel_fixture = sys.modules.get(panel_fixture_name)
+    if panel_fixture is None:
+        panel_fixture_path = (
+            REPOSITORY_ROOT
+            / "tests"
+            / "portfolio_control_panel"
+            / "test_portfolio_control_panel.py"
+        )
+        panel_fixture_spec = importlib.util.spec_from_file_location(
+            panel_fixture_name, panel_fixture_path
+        )
+        assert panel_fixture_spec is not None and panel_fixture_spec.loader is not None
+        panel_fixture = importlib.util.module_from_spec(panel_fixture_spec)
+        sys.modules[panel_fixture_name] = panel_fixture
+        panel_fixture_spec.loader.exec_module(panel_fixture)
+    baseline_payload = report_fixture._baseline_catalog()
+    correlation_fixture = panel_fixture._correlation()
+    selected_baseline = selected.baseline.json_object()
+    strategy_ids = sorted(reporter.CURRENT_STRATEGY_CONTROL_IDS)
+    required_strategy_ids = sorted(reporter.CURRENT_REQUIRED_STRATEGY_IDS)
+    fixture_strategy_remap = {
+        f"strategy-{index}": strategy_id
+        for index, strategy_id in enumerate(strategy_ids, 1)
+    }
+
+    def remap_fixture_strategy_ids(value: object) -> None:
+        if isinstance(value, list):
+            for item in value:
+                remap_fixture_strategy_ids(item)
+        elif isinstance(value, dict):
+            if value.get("strategy_id") in fixture_strategy_remap:
+                value["strategy_id"] = fixture_strategy_remap[value["strategy_id"]]
+            for item in value.values():
+                remap_fixture_strategy_ids(item)
+
+    remap_fixture_strategy_ids(baseline_payload)
+    mapped_selected_assignments = [
+        assignment
+        for assignment in selected_baseline["assignments"]
+        if assignment["strategy_id"] is not None
+    ]
+    strategy_remap = {
+        row["strategy_id"]: (
+            required_strategy_ids[index % len(required_strategy_ids)]
+            if index < 13
+            else "echotrade-growth-pivots"
+            if index == 13
+            else "composer-holy-grail"
+        )
+        for index, row in enumerate(mapped_selected_assignments)
+    }
+    assignment_remap = {
+        row["assignment_id"]: f"assignment-{index:02d}"
+        for index, row in enumerate(selected_baseline["assignments"], 1)
+    }
+    included_assignment_ids = {
+        *(f"assignment-{index:02d}" for index in range(1, 13)),
+        "assignment-14",
+    }
+    historical_successor_ids = {"assignment-13", "assignment-15"}
+    baseline_payload["accounts"] = selected_baseline["accounts"]
+    baseline_payload["assignments"] = selected_baseline["assignments"]
+    for assignment in baseline_payload["assignments"]:
+        assignment["assignment_id"] = assignment_remap[assignment["assignment_id"]]
+        if assignment["assignment_id"] in included_assignment_ids:
+            assignment["effective_end"] = None
+        elif assignment["assignment_id"] in historical_successor_ids:
+            assignment["effective_start"] = "2024-01-01"
+            assignment["effective_end"] = "2024-12-31"
+        assignment.update(
+            {
+                "mapping_status": (
+                    "MAPPED"
+                    if assignment["strategy_mapping_disposition"] == "STRATEGY_MAPPED"
+                    else "UNMAPPED"
+                ),
+                "observed_label": assignment["assignment_id"],
+                "pool_id": f"pool-{assignment['account_id']}",
+                "pool_mapping_status": "MAPPED",
+                "source_classification": "SYNTHETIC",
+                "source_id": f"source-{assignment['account_id']}",
+            }
+        )
+        strategy_id = assignment["strategy_id"]
+        if strategy_id is not None:
+            assignment["strategy_id"] = strategy_remap[strategy_id]
+            if assignment["strategy_id"] == "echotrade-growth-pivots":
+                assignment["effective_end"] = "2025-11-24"
+    echotrade_account_id = next(
+        assignment["account_id"]
+        for assignment in baseline_payload["assignments"]
+        if assignment["strategy_id"] == "echotrade-growth-pivots"
+    )
+    for assignment in baseline_payload["assignments"]:
+        if (
+            assignment["account_id"] == echotrade_account_id
+            and assignment["effective_start"] == "2026-01-01"
+        ):
+            assignment["effective_start"] = "2025-11-25"
+    baseline_payload["strategies"] = [
+        {
+            **row,
+            "strategy_id": strategy_id,
+            "name": strategy_id,
+        }
+        for row, strategy_id in zip(
+            baseline_payload["strategies"][: len(strategy_ids)],
+            strategy_ids,
+            strict=True,
+        )
+    ]
+    baseline_payload["as_of_date"] = selected_baseline["as_of_date"]
+    baseline_payload["policy_version"] = reporter.POLICY_VERSION
+    baseline_payload["replay"]["correlation_one_stress"] = correlation_fixture[
+        "dependence"
+    ]["correlation_one"]["loss"]
+
+    def remap_crosswalk_strategies(rows: list[dict[str, object]]) -> None:
+        for row in rows:
+            row["assignment_id"] = assignment_remap[str(row["assignment_id"])]
+            if row["assignment_id"] in included_assignment_ids:
+                row["effective_end"] = None
+            row["strategy_id"] = strategy_remap[str(row["strategy_id"])]
+            if row["strategy_id"] == "echotrade-growth-pivots":
+                row["effective_end"] = "2025-11-24"
+            row["owner_reason"] = {
+                "INCLUDED_PRODUCT_EPOCH": "CURRENT_PRODUCT_EPOCH",
+                "EXCLUDED_DEPRECATED_HISTORY_ONLY": (
+                    "ECHOTRADE_DEPRECATED_EFFECTIVE_2025_11_25"
+                ),
+                "EXCLUDED_IMMATERIAL": "COMPOSER_OWNER_EXCLUDED_IMMATERIAL",
+            }[str(row["product_epoch_disposition"])]
+
+    admission_policy = selected.admission_policy.json_object()
+    for admission in admission_policy["admissions"]:
+        admission["strategy_id"] = strategy_remap[admission["strategy_id"]]
+        if admission["account_id"] in {
+            assignment["account_id"]
+            for assignment in baseline_payload["assignments"]
+            if assignment["assignment_id"] in included_assignment_ids
+        }:
+            admission["effective_end"] = None
+        elif admission["strategy_id"] == "echotrade-growth-pivots":
+            admission["effective_end"] = "2025-11-24"
+    ledger = selected.provider_ledger.json_object()
+    ledger["reconciliation_checks"] = []
+    for nav in ledger["nav_observations"]:
+        nav["value_basis"] = "ACCOUNT_TOTAL"
+    for flow in ledger["flows"]:
+        assert flow["flow_type"] == "CONTRIBUTION"
+        flow["flow_type"] = "EXTERNAL_CONTRIBUTION"
+    for anchor in ledger["capital_anchors"]:
+        anchor["strategy_id"] = strategy_remap[anchor["strategy_id"]]
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+    selected_ledger_manifest = GenerationManifest.from_json_bytes(
+        selected.provider_ledger_manifest.contents
+    )
+    selected_ledger_artifact = next(
+        artifact
+        for artifact in selected_ledger_manifest.artifacts
+        if artifact.artifact_id == "normalized/provider-ledger.json"
+    )
+    baseline_payload["source_artifacts"].append(
+        {
+            "artifact_id": selected_ledger_artifact.artifact_id,
+            "as_of_date": selected_ledger_artifact.as_of_date.isoformat(),
+            "schema_name": selected_ledger_artifact.schema_name,
+            "schema_version": selected_ledger_artifact.schema_version,
+            "sha256": selected_ledger_artifact.sha256,
+            "source_key": "provider-ledger-generation",
+        }
+    )
+    baseline_payload["fact_coverage_matrix"] = [
+        {
+            "account_id": None,
+            "authority": "SELECTED_PROVIDER_LEDGER_GENERATION",
+            "fact_type": "provider-ledger",
+            "missing_interval_reason": None,
+            "status": "AVAILABLE",
+        }
+    ]
+    baseline_payload["fact_coverage"].extend(
+        [
+            {
+                "fact_type": "flows",
+                "known_gaps": ["SYNTHETIC partial"],
+                "status": "PARTIAL",
+            },
+            {
+                "fact_type": "fx",
+                "known_gaps": ["SYNTHETIC unavailable"],
+                "status": "FAILED",
+            },
+        ]
+    )
+    for coverage in baseline_payload["fact_coverage"]:
+        if coverage["fact_type"] == "accounts":
+            coverage["fact_type"] = "assignments"
+    baseline = InputSnapshot.from_bytes(
+        "mixed report-policy baseline", canonical_json_bytes(baseline_payload)
+    )
+    baseline_manifest = _generation_manifest_snapshot(
+        catalog=baseline,
+        catalog_artifact_id="normalized/portfolio-baseline.json",
+        catalog_schema_name="portfolio-baseline-catalog",
+        catalog_schema_version="1",
+        as_of_date=str(baseline_payload["as_of_date"]),
+    )
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "baseline": baseline,
+            "baseline_manifest": baseline_manifest,
+            "flow_classification_policy": InputSnapshot.capture(
+                REPOSITORY_ROOT
+                / "contracts"
+                / "account-strategy-flow-classification-policy-v1.json",
+                "mixed report-policy flow classification",
+            ),
+            "current_epoch_crosswalk": _rebound_current_epoch_crosswalk(
+                selected,
+                baseline=baseline,
+                baseline_manifest=baseline_manifest,
+                label="mixed report-policy crosswalk",
+                mutate_rows=remap_crosswalk_strategies,
+            ),
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": InputSnapshot.from_bytes(
+                "mixed report-policy admission", canonical_json_bytes(admission_policy)
+            ),
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+
+    baseline_generation_manifest = GenerationManifest.from_json_bytes(
+        selected.baseline_manifest.contents
+    )
+    provider_ledger_root = tmp_path / "provider-ledger"
+    provider_ledger_generation = stage_generation(
+        provider_ledger_root, selected_ledger_manifest
+    )
+    (provider_ledger_generation.parent / "provider-ledger.json").write_bytes(
+        selected.provider_ledger.contents
+    )
+    publish_generation(provider_ledger_root, selected_ledger_manifest.generation_id)
+    baseline_root = tmp_path / "baseline"
+    baseline_generation = stage_generation(baseline_root, baseline_generation_manifest)
+    (baseline_generation.parent / "portfolio-baseline.json").write_bytes(
+        selected.baseline.contents
+    )
+    generation_root = tmp_path / "manifest-generation"
+    bundle = perimeter_module.stage_account_manifest_generation(
+        selected, generation_root
+    )
+    staged_manifest = json.loads(
+        bundle.payloads["outputs/account-strategy-manifest.json"]
+    )
+    staged_available = next(
+        row for row in staged_manifest["rows"] if row["mwr_status"] == "AVAILABLE"
+    )
+    staged_blocked = next(
+        row for row in staged_manifest["rows"] if row["mwr_status"] != "AVAILABLE"
+    )
+    independent_verification = json.loads(
+        bundle.payloads["verification/independent-verification.json"]
+    )
+    assert independent_verification["numeric_verification"]["discrepancy_count"] == 0
+    manifest_path, source_path, crosswalk_path, _source, _artifact = (
+        release_builder._stage_verified_epoch_manifest_triplet_bundle(
+            generation_root,
+            bundle.manifest.generation_id,
+            tmp_path / "epoch-triplet",
+        )
+    )
+    panel_manifest, panel_identity = panel._verified_bundle_account_manifest(
+        manifest_path, generation_root, bundle.manifest.generation_id
+    )
+    panel_available = next(
+        row for row in panel_manifest["rows"] if row["mwr_status"] == "AVAILABLE"
+    )
+    assert {
+        field: panel_available[field]
+        for field in (
+            "account_id",
+            "strategy_id",
+            "mwr_status",
+            "mwr_unit",
+            "mwr_value_basis",
+            "mwr_xirr",
+        )
+    } == {
+        field: staged_available[field]
+        for field in (
+            "account_id",
+            "strategy_id",
+            "mwr_status",
+            "mwr_unit",
+            "mwr_value_basis",
+            "mwr_xirr",
+        )
+    }
+
+    freshness_path = tmp_path / "freshness-health.json"
+    report_as_of = str(baseline_payload["as_of_date"])
+    freshness_policy = {
+        "expected_interval_days": 1,
+        "grace_days": 0,
+        "mode": "RECURRING",
+        "policy_id": "daily-current",
+        "stale_after_days": 5,
+    }
+    expected_freshness = panel.FreshnessPolicy.from_dict(freshness_policy).assess(
+        date.fromisoformat(report_as_of), date.fromisoformat(report_as_of)
+    )
+    panel_fixture_payload = {
+        "assessment_schema_version": 2,
+        "as_of_date": report_as_of,
+        "assessments": [
+            {
+                "acquired_at": f"{report_as_of}T12:00:00+00:00",
+                "blocks_current_consumers": expected_freshness.blocks_current_consumers,
+                "escalation_required": expected_freshness.escalation_required,
+                "evaluated_on": expected_freshness.evaluated_on.isoformat(),
+                "fact_type": "strategy-returns",
+                "last_accepted_date": report_as_of,
+                "next_expected_date": expected_freshness.next_expected_date.isoformat(),
+                "policy_id": expected_freshness.policy_id,
+                "provider_id": "synthetic",
+                "reason": expected_freshness.reason,
+                "revision_state": "ORIGINAL",
+                "state": expected_freshness.state.value,
+                "subject_id": strategy_id,
+            }
+            for strategy_id in required_strategy_ids
+        ],
+        "policy": freshness_policy,
+    }
+    (tmp_path / "freshness-health.json").write_bytes(
+        canonical_json_bytes(panel_fixture_payload)
+    )
+    report, _report_bytes, _catalog_path = reporter.build_report_data(
+        baseline_root,
+        freshness_health_path=freshness_path,
+        provider_ledger_root=provider_ledger_root,
+        epoch_manifest_path=manifest_path,
+        epoch_manifest_source_path=source_path,
+        epoch_crosswalk_path=crosswalk_path,
+        epoch_manifest_generation_root=generation_root,
+        baseline_generation_id=baseline_generation_manifest.generation_id,
+    )
+    available = next(
+        row for row in report["twr_mwr"] if row["mwr_status"] == "AVAILABLE"
+    )
+    blocked = next(
+        row
+        for row in report["twr_mwr"]
+        if row["account_id"] == staged_blocked["account_id"]
+        and row["strategy_id"] == staged_blocked["strategy_id"]
+    )
+    assert {
+        field: available[field]
+        for field in (
+            "account_id",
+            "strategy_id",
+            "mwr_status",
+            "mwr_unit",
+            "mwr_value_basis",
+            "mwr_xirr",
+        )
+    } == {
+        field: staged_available[field]
+        for field in (
+            "account_id",
+            "strategy_id",
+            "mwr_status",
+            "mwr_unit",
+            "mwr_value_basis",
+            "mwr_xirr",
+        )
+    }
+
+    workbook_path = tmp_path / "portfolio-report.xlsx"
+    reporter._build_workbook_exact(report, workbook_path)
+    workbook = load_workbook(workbook_path, read_only=False, data_only=True)
+    try:
+        table = workbook["TWR MWR"].tables["tblTwrMwr"]
+        cells = list(workbook["TWR MWR"][table.ref])
+        headers = [cell.value for cell in cells[0]]
+        header_indexes = {
+            str(header).lower().replace(" ", "_"): index
+            for index, header in enumerate(headers)
+        }
+        row = next(
+            row
+            for row in cells[1:]
+            if row[header_indexes["account_id"]].value == available["account_id"]
+            and row[header_indexes["strategy_id"]].value == available["strategy_id"]
+        )
+        values_by_header = {
+            header: row[index].value for header, index in header_indexes.items()
+        }
+        assert values_by_header["mwr_status"] == available["mwr_status"]
+        assert abs(
+            Decimal(str(values_by_header["mwr_xirr"])) - Decimal(available["mwr_xirr"])
+        ) < Decimal("1e-15")
+        assert values_by_header["mwr_value_basis"] == available["mwr_value_basis"]
+        assert values_by_header["mwr_unit"] == available["mwr_unit"]
+        blocked_workbook_row = next(
+            row
+            for row in cells[1:]
+            if row[header_indexes["account_id"]].value == blocked["account_id"]
+            and row[header_indexes["strategy_id"]].value == blocked["strategy_id"]
+        )
+        assert (
+            blocked_workbook_row[header_indexes["mwr_reason"]].value
+            == staged_blocked["mwr_reason"]
+            == blocked["mwr_reason"]
+        )
+    finally:
+        workbook.close()
+
+    strategy_names = [str(row["name"]) for row in baseline_payload["strategies"]]
+    all_series_names = dict(
+        zip(panel_fixture.STRATEGY_NAMES, strategy_names, strict=True)
+    )
+    required_series_names = dict(
+        zip(
+            panel_fixture.ACTIVE_STRATEGY_NAMES,
+            required_strategy_ids,
+            strict=True,
+        )
+    )
+
+    def remap_series_names(value: object, names: dict[str, str]) -> object:
+        if isinstance(value, list):
+            return [remap_series_names(item, names) for item in value]
+        if isinstance(value, dict):
+            return {
+                names.get(key, key): remap_series_names(item, names)
+                for key, item in value.items()
+            }
+        return names.get(value, value) if isinstance(value, str) else value
+
+    decomposition_root = tmp_path / "panel-decomposition"
+    correlation_root = tmp_path / "panel-correlation"
+    panel_fixture._publish_analytics(
+        decomposition_root,
+        "decomposition.json",
+        remap_series_names(panel_fixture._decomposition(), all_series_names),
+        "synthetic-decomposition",
+    )
+    panel_fixture._publish_analytics(
+        correlation_root,
+        "correlation.json",
+        remap_series_names(correlation_fixture, required_series_names),
+        "synthetic-correlation",
+    )
+    decomposition, decomposition_identity, _decomposition_path = (
+        panel._current_analytics(
+            decomposition_root,
+            filename="decomposition.json",
+            field_name="portfolio factor decomposition",
+            expected_schema_version=(1, 2),
+        )
+    )
+    correlation, correlation_identity, _correlation_path = panel._current_analytics(
+        correlation_root,
+        filename="correlation.json",
+        field_name="portfolio correlation",
+        expected_schema_version=(1, 2),
+    )
+    legacy_root = tmp_path / "legacy"
+    source_content = {
+        "index.html": b"synthetic legacy index",
+        "styles.css": b":root { --accent: #5cc8c0; }",
+        "app.js": b"synthetic legacy app",
+        "control_panel_validation.json": b'{"status":"PASS"}',
+    }
+    for relative, content in source_content.items():
+        path = legacy_root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+    providers = [
+        {
+            "candidate": "CAOS" if index == 0 else f"Candidate {index}",
+            "cadence": "daily",
+            "category": "synthetic",
+            "execution": "fund",
+            "philosophy_module": "synthetic",
+            "portfolio_role": "synthetic research",
+            "principal_gap": "synthetic gap",
+            "ticker": "CAOS" if index == 0 else f"S{index}",
+            "tier": "Tier 1" if index < 5 else f"Tier {(index % 3) + 2}",
+        }
+        for index in range(33)
+    ]
+    panel_fixture._write_json(
+        legacy_root / "data" / "dashboard_data.json", {"providers": providers}
+    )
+    source_contract_path = tmp_path / "source-contract.json"
+    panel_fixture._write_json(
+        source_contract_path,
+        {
+            "contract_version": 1,
+            "frozen_appendix": {
+                "as_of_date": "2026-01-31",
+                "candidate_count": 33,
+                "data_file": "data/dashboard_data.json",
+                "data_sha256": hashlib.sha256(
+                    (legacy_root / "data" / "dashboard_data.json").read_bytes()
+                ).hexdigest(),
+                "status": "FROZEN_AUDIT_APPENDIX",
+            },
+            "source_files": {
+                relative: hashlib.sha256(
+                    (legacy_root / relative).read_bytes()
+                ).hexdigest()
+                for relative in source_content
+            },
+        },
+    )
+    monkeypatch.setattr(panel, "SOURCE_CONTRACT", source_contract_path)
+    legacy, source = panel._source_inputs(legacy_root)
+    freshness_health = panel._freshness_health(freshness_path, report_as_of)
+    template_hashes = {
+        name: hashlib.sha256(
+            panel._template_snapshot(panel.DEFAULT_TEMPLATE_ROOT / name)[0]
+        ).hexdigest()
+        for name in ("index.html", "analytics.css", "app.js")
+    }
+    economic_driver_snapshot = canonical_json_bytes(
+        {
+            "as_of_date": report_as_of,
+            "budget_rule": "ONE_AGGREGATE_ADVERSE_LOSS_BUDGET_PER_ECONOMIC_DRIVER_CLUSTER_NO_STRATEGY_LABEL_DIVERSIFICATION_CREDIT",
+            "clusters": [
+                {
+                    "cluster_id": "SYNTHETIC_CURRENT_PRODUCT",
+                    "label": "Synthetic current product",
+                    "members": required_strategy_ids,
+                    "rationale": "Synthetic current-product correlation fixture.",
+                }
+            ],
+            "historical_audit_reference": {
+                "classification": "SYNTHETIC_REFERENCE",
+                "full_systematic_loss": "0.3725",
+                "after_rejected_sleeves_loss": "0.2715",
+                "note": "Synthetic test reference.",
+            },
+            "schema_version": 1,
+            "systematic_loss_limit": "0.15",
+        }
+    )
+    data = panel._panel_data(
+        report,
+        {
+            "generation_id": bundle.manifest.generation_id,
+            "sha256": hashlib.sha256(_report_bytes).hexdigest(),
+        },
+        decomposition,
+        decomposition_identity,
+        correlation,
+        correlation_identity,
+        legacy,
+        source,
+        panel.DEFAULT_TEMPLATE_ROOT,
+        template_hashes,
+        freshness_health=freshness_health,
+        baseline_catalog=json.loads(selected.baseline.contents),
+        account_manifest=panel_manifest,
+        account_manifest_identity=panel_identity,
+        economic_driver_snapshot=economic_driver_snapshot,
+    )
+    panel_available = next(
+        row
+        for row in data["performance"]
+        if row["account_id"] == staged_available["account_id"]
+        and row["strategy_id"] == staged_available["strategy_id"]
+    )
+    assert {
+        field: panel_available[field]
+        for field in (
+            "mwr_status",
+            "mwr_xirr",
+            "mwr_unit",
+            "mwr_value_basis",
+            "mwr_label",
+            "mwr_source_binding",
+        )
+    } == {
+        field: staged_available[field]
+        for field in (
+            "mwr_status",
+            "mwr_xirr",
+            "mwr_unit",
+            "mwr_value_basis",
+            "mwr_label",
+            "mwr_source_binding",
+        )
+    }
+    panel_blocked = next(
+        row
+        for row in data["performance"]
+        if row["account_id"] == staged_blocked["account_id"]
+        and row["strategy_id"] == staged_blocked["strategy_id"]
+    )
+    assert panel_blocked["mwr_reason"] == staged_blocked["mwr_reason"]
+    assert data["counts"]["mwr_available"] == sum(
+        row["mwr_status"] == "AVAILABLE" for row in report["twr_mwr"]
+    )
+    panel._validate_panel_data_schema(data)
 
 
 def test_schema9_generation_coverage_boundary_is_version_neutral(

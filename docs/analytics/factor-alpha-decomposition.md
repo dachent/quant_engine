@@ -117,10 +117,12 @@ series_id,date,return,evidence_layer,return_basis,return_type,cost
 
 Factor rows contain one date column, the configured risk-free column, and the
 configured factor columns. Each factor declares whether it is already an
-excess return or must have the supplied risk-free return subtracted. Dates are
-joined exactly. No forward fill, interpolation, calendar coercion, or evidence
-layer concatenation occurs. Target-only weekdays are reported as missing
-factor observations; dates absent from both inputs are not invented.
+excess return or must have the supplied risk-free return subtracted. A declared
+24/7 or session calendar uses a right-hand published factor anchor: target
+returns compound only within that bucket and one published factor/RF row stays
+unchanged. A legacy schema-1 source remains explicitly exact-label-only;
+observed target rows never become an inferred session calendar. No forward
+fill, interpolation, calendar coercion, or evidence-layer concatenation occurs.
 
 Current-plan factor definitions also bind each candidate's economic family,
 source and return-source identities, observed effective interval, raw

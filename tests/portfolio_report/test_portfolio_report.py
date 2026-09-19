@@ -1156,6 +1156,26 @@ def test_epoch_admission_blocks_twelve_rows_before_any_numeric_candidate(
         }
         for row in included
     }
+    for detail in epoch_details.values():
+        if detail["epoch_admission_status"] == "BLOCKED":
+            detail["mwr_payload"] = {
+                "mwr_status": "BLOCKED_ADMISSION",
+                "mwr_xirr": None,
+                "mwr_reason": "SYNTHETIC_BLOCKED",
+                "mwr_opening_date": None,
+                "mwr_opening_value": None,
+                "mwr_terminal_date": None,
+                "mwr_terminal_value": None,
+                "mwr_currency": None,
+                "mwr_coverage_status": "BLOCKED",
+                "mwr_cashflows": [],
+                "mwr_label": None,
+                "mwr_value_basis": None,
+                "mwr_valuation_timing": None,
+                "mwr_day_count": "ACTUAL_365",
+                "mwr_unit": "ANNUALIZED_RETURN",
+                "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+            }
     catalog = {
         "assignments": assignments,
         "calendar_coverage": [],
@@ -1232,6 +1252,7 @@ def test_epoch_admission_blocks_twelve_rows_before_any_numeric_candidate(
         for row in blocked
         for status_field in ("twr_status", "mwr_status", "return_path_status")
     )
+    assert {row["mwr_reason"] for row in blocked} == {"SYNTHETIC_BLOCKED"}
     suppressed_fields = (
         "twr",
         "mwr_xirr",
@@ -2687,6 +2708,15 @@ def test_report_data_has_hand_checked_twr_and_coverage_failures(tmp_path: Path) 
     assert mapped["twr_status"] == "AVAILABLE_WITH_INFERRED_FLOW_TIMING"
     assert mapped["mwr_xirr"] is None
     assert mapped["mwr_status"] == "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE"
+    assert mapped["mwr_reason"] == "FLOW_COVERAGE_NOT_GOVERNED"
+    assert mapped["mwr_coverage_status"] == "BLOCKED"
+    assert mapped["mwr_cashflows"] == []
+    assert mapped["mwr_label"] is None
+    assert mapped["mwr_value_basis"] is None
+    assert mapped["mwr_valuation_timing"] is None
+    assert mapped["mwr_day_count"] == "ACTUAL_365"
+    assert mapped["mwr_unit"] == "ANNUALIZED_RETURN"
+    assert mapped["mwr_source_binding"] == "GOVERNED_SOURCE_IDENTITIES"
     missing = next(
         item for item in report["twr_mwr"] if item["assignment_id"] == "assignment-b"
     )
@@ -4254,8 +4284,17 @@ def test_report_schema_is_closed_and_keeps_mwr_unavailable() -> None:
     )
     assert schema["properties"]["strategy_summary"]["minItems"] == 7
     assert schema["properties"]["strategy_summary"]["maxItems"] == 7
-    assert schema["$defs"]["performance"]["properties"]["mwr_xirr"]["type"] == "null"
+    assert schema["$defs"]["performance"]["properties"]["mwr_xirr"]["type"] == [
+        "string",
+        "null",
+    ]
     assert schema["$defs"]["performance"]["properties"]["mwr_status"]["enum"] == [
+        "AVAILABLE",
+        "NO_ROOT",
+        "INDETERMINATE",
+        "UNIQUENESS_NOT_PROVED",
+        "NUMERICAL_SEARCH_UNRESOLVED",
+        "INCOMPLETE_FLOW_COVERAGE",
         "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
         "BLOCKED_ADMISSION",
     ]
@@ -6823,6 +6862,39 @@ def test_source_qualified_decomposition_is_visible_and_exact_in_native_workbook(
             }
         )
     series_rows[0]["coverage"]["factor_missing_weekdays"] = 1
+    series_rows[0]["orthogonal_attribution"] = {
+        "method_id": "TRAIN_SYMMETRIC_WHITENING_V1",
+        "mode_coefficients": {"symmetric_mode:VALUE": "-0.25"},
+        "per_date": [
+            {
+                "date": "2026-02-02",
+                "mode_contributions": {"symmetric_mode:VALUE": "-0.015"},
+                "partition": "TEST",
+            }
+        ],
+        "rank": 2,
+        "status": "AVAILABLE",
+        "train_fitted_risk_budget": {
+            "euler_allocations": {"symmetric_mode:VALUE": "-0.0004"},
+            "fitted_variance": "0.0004",
+        },
+    }
+    series_rows[0]["analytics_identities"] = {
+        "orthogonal": {
+            "methodology_manifest_sha256": "e" * 64,
+            "model_id": "model-1",
+            "surface": "ORTHOGONAL_RISK_ATTRIBUTION",
+        },
+        "raw": {
+            "methodology_manifest_sha256": "e" * 64,
+            "model_id": "model-1",
+            "surface": "RAW_MODEL",
+        },
+    }
+    series_rows[0]["interval_association"] = {
+        "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+        "holdout_display_claim": "holdout association using selected historical snapshot",
+    }
     surface = {
         "available_count": 2,
         "available_source_keys": [row["source_key"] for row in source_rows],
@@ -6856,7 +6928,22 @@ def test_source_qualified_decomposition_is_visible_and_exact_in_native_workbook(
         ("multi-asset-style", "Shared strategy"),
         ("us-equity-style", "Shared strategy"),
     }
-    assert {row["beta"] for row in factors} == {"0.1", "0.2"}
+    assert {row["beta"] for row in factors if row["factor_kind"] == "RAW_FACTOR"} == {
+        "0.1",
+        "0.2",
+    }
+    orthogonal = next(row for row in cells if row["source_key"] == "us-equity-style")
+    assert orthogonal["orthogonal_status"] == "AVAILABLE"
+    assert orthogonal["orthogonal_method_id"] == "TRAIN_SYMMETRIC_WHITENING_V1"
+    assert orthogonal["orthogonal_identity_surface"] == "ORTHOGONAL_RISK_ATTRIBUTION"
+    assert orthogonal["interval_holdout_display_claim"] == (
+        "holdout association using selected historical snapshot"
+    )
+    mode = next(row for row in factors if row.get("mode_id") == "symmetric_mode:VALUE")
+    assert mode["analytics_surface"] == "ORTHOGONAL_RISK_ATTRIBUTION"
+    assert mode["mode_coefficient"] == "-0.25"
+    assert mode["mode_contribution"] == "-0.015"
+    assert mode["risk_euler_allocation"] == "-0.0004"
     assert evidence["sheet_count"] == len(reporter.SHEET_NAMES) + 2
     assert parity["table_count"] == len(reporter.TABLE_NAMES) + 2
 
@@ -6885,6 +6972,23 @@ def test_source_qualified_decomposition_is_visible_and_exact_in_native_workbook(
         assert diagnostic["Coverage Observed Start"] == "2026-01-02"
         assert diagnostic["Coverage Factor Missing Weekdays"] == 1
         assert diagnostic["Source Sha256"] == "7" * 64
+        factor_sheet_rows = list(
+            workbook[reporter.DECOMPOSITION_SHEET_NAMES[1]].iter_rows(
+                min_row=5, values_only=True
+            )
+        )
+        exported_modes = [
+            dict(zip(factor_sheet_rows[0], values)) for values in factor_sheet_rows[1:]
+        ]
+        exported_mode = next(
+            row
+            for row in exported_modes
+            if row["Factor Kind"] == "MIXED_ORTHOGONAL_MODE"
+        )
+        assert exported_mode["Analytics Surface"] == "ORTHOGONAL_RISK_ATTRIBUTION"
+        assert exported_mode["Mode Coefficient"] == pytest.approx(-0.25)
+        assert exported_mode["Mode Contribution"] == pytest.approx(-0.015)
+        assert exported_mode["Risk Euler Allocation"] == pytest.approx(-0.0004)
     finally:
         workbook.close()
 
@@ -6898,7 +7002,7 @@ def test_source_qualified_decomposition_is_visible_and_exact_in_native_workbook(
     )
     with pytest.raises(
         reporter.ReportValidationError,
-        match="tblDecompositionFactors.*beta",
+        match="tblDecompositionFactors",
     ):
         reporter._workbook_parity_receipt(
             canonical_json_bytes(report), wrong_cell.read_bytes()

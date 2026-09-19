@@ -384,7 +384,7 @@ def _report_contract(
     coverage_check = _object(checks.get("coverage"), "checks.coverage")
     if (
         coverage_check.get("ok") is not True
-        or coverage_check.get("status") != "PARTIAL"
+        or coverage_check.get("status") not in {"PASS", "PARTIAL"}
         or coverage_check.get("status_counts") != expected_coverage
     ):
         raise MatrixportGenerationError("coverage verification differs")

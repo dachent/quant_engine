@@ -71,9 +71,9 @@ _MIXED_SNAPSHOT_ROLES: Final[tuple[str, ...]] = (
     "manifest_schema",
 )
 APPROVED_MANIFEST_SCHEMA_SHA256: Final[str] = (
-    "4c5ab109e6a51cadbfef0327438dadb43ad93fb64351f92e8304e2ecc09882d5"
+    "47e36a3e69e10f57a9b9e1e9cf6b5e440e7d2f51d53c2523e644415e690887d4"
 )
-APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 24975
+APPROVED_MANIFEST_SCHEMA_SIZE_BYTES: Final[int] = 26747
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _INTERNAL_ID = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _CROSSWALK_DISPOSITIONS: Final[frozenset[str]] = frozenset(
@@ -114,6 +114,29 @@ _OUTPUT_FORBIDDEN_NUMERIC_FIELDS: Final[frozenset[str]] = frozenset(
         "observation_trace",
         "capital_flow_trace",
         "nav_observation_trace",
+    }
+)
+_MWR_VALUE_BASES: Final[frozenset[str]] = frozenset(
+    {"ACCOUNT_TOTAL", "ACCOUNT_VALUE", "STRATEGY_NAV"}
+)
+_MWR_FIELDS: Final[frozenset[str]] = frozenset(
+    {
+        "mwr_status",
+        "mwr_reason",
+        "mwr_xirr",
+        "mwr_opening_date",
+        "mwr_opening_value",
+        "mwr_terminal_date",
+        "mwr_terminal_value",
+        "mwr_currency",
+        "mwr_coverage_status",
+        "mwr_cashflows",
+        "mwr_label",
+        "mwr_value_basis",
+        "mwr_valuation_timing",
+        "mwr_day_count",
+        "mwr_unit",
+        "mwr_source_binding",
     }
 )
 _PORTABLE_COMPONENT = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
@@ -1928,6 +1951,269 @@ def _compare_mixed_retained_numeric_epoch(
     )
 
 
+def _independent_mixed_numeric_row(fact_form: object) -> dict[str, object]:
+    if type(fact_form) is _IndependentEpochFacts:
+        return _derive_first_available_nav_epoch(fact_form)
+    if (
+        type(fact_form) is tuple
+        and len(fact_form) == 2
+        and type(fact_form[0]) is _IndependentPredecessorFact
+        and type(fact_form[1]) is _IndependentEpochFacts
+    ):
+        return _derive_predecessor_closing_nav_epoch(fact_form[0], fact_form[1])
+    _fail()
+
+
+def _mwr_blocked_projection(
+    status: str, reason: str, *, coverage: str
+) -> dict[str, object]:
+    if status not in {"BLOCKED_ADMISSION", "INCOMPLETE_FLOW_COVERAGE"}:
+        _fail()
+    return {
+        "mwr_status": status,
+        "mwr_reason": reason,
+        "mwr_xirr": None,
+        "mwr_opening_date": None,
+        "mwr_opening_value": None,
+        "mwr_terminal_date": None,
+        "mwr_terminal_value": None,
+        "mwr_currency": None,
+        "mwr_coverage_status": coverage,
+        "mwr_cashflows": [],
+        "mwr_label": None,
+        "mwr_value_basis": None,
+        "mwr_valuation_timing": None,
+        "mwr_day_count": "ACTUAL_365",
+        "mwr_unit": "ANNUALIZED_RETURN",
+        "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+    }
+
+
+def _classify_independent_mwr(
+    cashflows: list[tuple[date, Decimal]],
+) -> tuple[str, str | None, Decimal | None]:
+    with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
+        by_date: dict[date, Decimal] = {}
+        for when, amount in cashflows:
+            by_date[when] = by_date.get(when, Decimal(0)) + amount
+        ordered = [(when, amount) for when, amount in sorted(by_date.items()) if amount]
+        if not ordered:
+            return "INDETERMINATE", "ALL_CASHFLOWS_ZERO", None
+        signs = [amount > 0 for _, amount in ordered]
+        changes = sum(left != right for left, right in zip(signs, signs[1:]))
+        if changes == 0:
+            return "NO_ROOT", "NO_CHRONOLOGICAL_SIGN_CHANGE", None
+        if changes > 1:
+            return "UNIQUENESS_NOT_PROVED", "MULTIPLE_CHRONOLOGICAL_SIGN_CHANGES", None
+        rate = _xirr(ordered)
+        if rate is None:
+            return "NUMERICAL_SEARCH_UNRESOLVED", "UNIQUE_ROOT_SEARCH_UNRESOLVED", None
+        return "AVAILABLE", None, rate
+
+
+def _derive_independent_mwr_projection(
+    assignment: Mapping[str, object],
+    fact_form: object,
+    bridge: Mapping[str, object],
+) -> dict[str, object]:
+    """Rebuild the source-bound MWR vector without calling the producer."""
+
+    numeric = _independent_mixed_numeric_row(fact_form)
+    ledger = bridge.get("ledger")
+    events = bridge.get("events")
+    anchors = bridge.get("capital_anchors")
+    if (
+        not isinstance(ledger, Mapping)
+        or not isinstance(events, list)
+        or not isinstance(anchors, list)
+    ):
+        _fail()
+    account_id = _fact_text(assignment.get("account_id"))
+    strategy_id = _fact_text(assignment.get("strategy_id"))
+    trace = numeric.get("observation_trace")
+    if (
+        not isinstance(trace, Mapping)
+        or not isinstance(trace.get("links"), list)
+        or not trace["links"]
+    ):
+        _fail()
+    first_link = trace["links"][0]
+    if not isinstance(first_link, Mapping):
+        _fail()
+    opening_date = _parse_canonical_date(first_link.get("start_date"))
+    terminal_date = _parse_canonical_date(numeric.get("end"))
+    opening_value = numeric.get("opening_capital")
+    terminal_value = numeric.get("current_value")
+    if type(opening_value) is not Decimal or type(terminal_value) is not Decimal:
+        _fail()
+
+    nav_sources: dict[tuple[str, date], list[tuple[str, str, str]]] = {}
+    navs = ledger.get("nav_observations")
+    if not isinstance(navs, list):
+        _fail()
+    for nav in navs:
+        if not isinstance(nav, Mapping):
+            _fail()
+        nav_account = _fact_text(nav.get("account_id"))
+        nav_date = _parse_canonical_date(nav.get("as_of_date"))
+        record_id = _fact_text(nav.get("record_id"))
+        basis = _fact_text(nav.get("value_basis"))
+        if basis not in _MWR_VALUE_BASES:
+            _fail()
+        money = nav.get("nav")
+        if not isinstance(money, Mapping):
+            _fail()
+        currency = _fact_currency(money.get("currency"))
+        nav_sources.setdefault((nav_account, nav_date), []).append(
+            (record_id, basis, currency)
+        )
+
+    opening_anchor_ids: set[str] = set()
+    allocation_ids: dict[tuple[str, str, date, date], set[str]] = {}
+    for anchor in anchors:
+        if not isinstance(anchor, Mapping):
+            _fail()
+        if (
+            _fact_text(anchor.get("account_id")) != account_id
+            or _fact_text(anchor.get("strategy_id")) != strategy_id
+        ):
+            continue
+        anchor_type = _fact_text(anchor.get("capital_type"))
+        event_date = _parse_canonical_date(anchor.get("event_date"))
+        recognition_date = _parse_canonical_date(anchor.get("nav_recognition_date"))
+        source_id = _fact_text(anchor.get("source_record_id"))
+        if anchor_type == "OPENING_CAPITAL_ANCHOR" and event_date == opening_date:
+            opening_anchor_ids.add(source_id)
+        elif anchor_type == "STRATEGY_CAPITAL_ALLOCATION":
+            allocation_ids.setdefault(
+                (account_id, strategy_id, event_date, recognition_date), set()
+            ).add(source_id)
+        elif anchor_type != "OPENING_CAPITAL_ANCHOR":
+            _fail()
+
+    opening_navs = nav_sources.get((account_id, opening_date), [])
+    terminal_navs = nav_sources.get((account_id, terminal_date), [])
+    if (not opening_navs and not opening_anchor_ids) or not terminal_navs:
+        return _mwr_blocked_projection(
+            "BLOCKED_ADMISSION", "NAV_SOURCE_IDENTITY_UNAVAILABLE", coverage="COMPLETE"
+        )
+    perimeter = {*opening_navs, *terminal_navs}
+    bases = {item[1] for item in perimeter}
+    currencies = {item[2] for item in perimeter}
+    if len(bases) != 1 or len(currencies) != 1:
+        return _mwr_blocked_projection(
+            "BLOCKED_ADMISSION",
+            "NAV_PERIMETER_OR_CURRENCY_MISMATCH",
+            coverage="COMPLETE",
+        )
+    basis = next(iter(bases))
+    currency = next(iter(currencies))
+
+    event_ids: dict[tuple[str, str, date, date], set[str]] = {}
+    for event in events:
+        if not isinstance(event, Mapping):
+            _fail()
+        event_account = _fact_text(event.get("account_id"))
+        amount = _parse_retained_source_decimal(event.get("amount"))
+        if amount == 0:
+            _fail()
+        disposition = event.get("disposition")
+        if disposition not in {"EXTERNAL", "INTERNAL"}:
+            _fail()
+        event_date = _parse_canonical_date(event.get("event_date"))
+        recognition_date = _parse_canonical_date(event.get("nav_recognition_date"))
+        flow_class = f"{disposition}_{'IN' if amount > 0 else 'OUT'}"
+        event_ids.setdefault(
+            (event_account, flow_class, event_date, recognition_date), set()
+        ).add(_fact_text(event.get("source_record_id")))
+
+    grouped: dict[date, tuple[Decimal, set[str]]] = {}
+
+    def add_leg(when: date, amount: Decimal, source_ids: set[str]) -> bool:
+        if not source_ids:
+            return False
+        prior_amount, prior_ids = grouped.get(when, (Decimal(0), set()))
+        with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
+            grouped[when] = (prior_amount + amount, prior_ids | source_ids)
+        return True
+
+    with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
+        opening_leg = -opening_value
+    complete = add_leg(
+        opening_date,
+        opening_leg,
+        {item[0] for item in opening_navs} | opening_anchor_ids,
+    )
+    flow_trace = numeric.get("capital_flow_trace")
+    if not isinstance(flow_trace, list):
+        _fail()
+    for flow in flow_trace:
+        if not isinstance(flow, Mapping):
+            _fail()
+        flow_class = _fact_text(flow.get("class"))
+        event_date = _parse_canonical_date(flow.get("event_date"))
+        recognition_date = _parse_canonical_date(flow.get("nav_recognition_date"))
+        flow_amount = flow.get("amount")
+        if type(flow_amount) is not Decimal:
+            _fail()
+        source_ids = set(
+            event_ids.get((account_id, flow_class, event_date, recognition_date), set())
+        )
+        if flow_class == "INTERNAL_IN":
+            source_ids.update(
+                allocation_ids.get(
+                    (account_id, strategy_id, event_date, recognition_date), set()
+                )
+            )
+        with localcontext(Context(prec=40, rounding=ROUND_HALF_EVEN)):
+            investor_amount = (
+                -flow_amount
+                if flow_class in {"EXTERNAL_IN", "INTERNAL_IN"}
+                else flow_amount
+            )
+        complete = add_leg(event_date, investor_amount, source_ids) and complete
+    complete = (
+        add_leg(terminal_date, terminal_value, {item[0] for item in terminal_navs})
+        and complete
+    )
+    if not complete:
+        return _mwr_blocked_projection(
+            "BLOCKED_ADMISSION", "FLOW_SOURCE_IDENTITY_UNAVAILABLE", coverage="COMPLETE"
+        )
+    cashflows = [
+        (when, amount) for when, (amount, _) in sorted(grouped.items()) if amount
+    ]
+    status, reason, rate = _classify_independent_mwr(cashflows)
+    return {
+        "mwr_status": status,
+        "mwr_reason": reason,
+        "mwr_xirr": None if rate is None else _format_decimal(rate),
+        "mwr_opening_date": opening_date.isoformat(),
+        "mwr_opening_value": _format_decimal(opening_value),
+        "mwr_terminal_date": terminal_date.isoformat(),
+        "mwr_terminal_value": _format_decimal(terminal_value),
+        "mwr_currency": currency,
+        "mwr_coverage_status": "COMPLETE",
+        "mwr_cashflows": [
+            {
+                "date": when.isoformat(),
+                "amount": _format_decimal(amount),
+                "source_record_ids": sorted(source_ids),
+            }
+            for when, (amount, source_ids) in sorted(grouped.items())
+            if amount
+        ],
+        "mwr_label": (
+            "STRATEGY_EPOCH_MWR" if basis == "STRATEGY_NAV" else "ACCOUNT_EPOCH_MWR"
+        ),
+        "mwr_value_basis": basis,
+        "mwr_valuation_timing": "ECONOMIC_DATE_WITH_SEPARATE_NAV_RECOGNITION_DATE",
+        "mwr_day_count": "ACTUAL_365",
+        "mwr_unit": "ANNUALIZED_RETURN",
+        "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+    }
+
+
 def _internal_id(value: object, *, nullable: bool = False) -> str | None:
     if nullable and value is None:
         return None
@@ -2943,14 +3229,15 @@ def _normalize_provider_navs(
         _reject_provider_fact_after_ledger_date(as_of_date, ledger_as_of_date)
         if amount["status"] == "AVAILABLE":
             available_currencies.add(str(amount["currency"]))
-        normalized.append(
-            {
-                "record_id": record_id,
-                "account_id": account_id,
-                "as_of_date": as_of_date.isoformat(),
-                "nav": amount,
-            }
-        )
+        normalized_nav: dict[str, object] = {
+            "record_id": record_id,
+            "account_id": account_id,
+            "as_of_date": as_of_date.isoformat(),
+            "nav": amount,
+        }
+        if "value_basis" in row:
+            normalized_nav["value_basis"] = _fact_text(row.get("value_basis"))
+        normalized.append(normalized_nav)
     if enforce_global_accounting_currency:
         if len(available_currencies) != 1:
             _fail()
@@ -5495,6 +5782,9 @@ def _verify_mixed_output_and_state(
                     "funded_nav_record_ids": list(policy_row["funded_nav_record_ids"]),
                     "status": "BLOCKED_RETURN_LINKAGE",
                     "blocking_reason": blocking_reason,
+                    **_mwr_blocked_projection(
+                        "BLOCKED_ADMISSION", blocking_reason, coverage="BLOCKED"
+                    ),
                 }
                 if candidate != expected or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(
                     candidate
@@ -5552,6 +5842,11 @@ def _verify_mixed_output_and_state(
                     "blocking_reason": (
                         "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL"
                     ),
+                    **_mwr_blocked_projection(
+                        "BLOCKED_ADMISSION",
+                        "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL",
+                        coverage="BLOCKED",
+                    ),
                 }
                 if candidate != expected or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(
                     candidate
@@ -5581,7 +5876,12 @@ def _verify_mixed_output_and_state(
                 "funded_nav_record_ids": list(policy_row["funded_nav_record_ids"]),
                 "status": "OK",
             }
-            if set(candidate) != set(expected_base) | _NUMERIC_PROJECTION_FIELDS:
+            expected_mwr = _derive_independent_mwr_projection(
+                assignment, fact_form, bridge
+            )
+            if set(candidate) != (
+                set(expected_base) | _NUMERIC_PROJECTION_FIELDS | _MWR_FIELDS
+            ):
                 _fail()
             projection = {
                 field: candidate[field] for field in _NUMERIC_PROJECTION_FIELDS
@@ -5596,7 +5896,7 @@ def _verify_mixed_output_and_state(
                 comparison.comparison_count + row_comparison.comparison_count,
                 comparison.discrepancy_count + row_comparison.discrepancy_count,
             )
-            expected_rows.append({**expected_base, **projection})
+            expected_rows.append({**expected_base, **projection, **expected_mwr})
             blocker_chains.append(
                 {
                     "assignment": _assignment_record(assignment),
@@ -5615,6 +5915,9 @@ def _verify_mixed_output_and_state(
                 "funded_nav_record_ids": [],
                 "status": "BLOCKED_ADMISSION",
                 "blocking_reason": policy_row["reason"],
+                **_mwr_blocked_projection(
+                    "BLOCKED_ADMISSION", policy_row["reason"], coverage="BLOCKED"
+                ),
             }
             if candidate != expected or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(
                 candidate
@@ -5648,6 +5951,11 @@ def _verify_mixed_output_and_state(
                 "funded_nav_record_ids": list(policy_row["funded_nav_record_ids"]),
                 "status": "BLOCKED_UNPROVABLE_OPENING_FLOWS",
                 "blocking_reason": "FLOW_COMPLETENESS_NOT_PROVEN",
+                **_mwr_blocked_projection(
+                    "INCOMPLETE_FLOW_COVERAGE",
+                    "FLOW_COMPLETENESS_NOT_PROVEN",
+                    coverage="BLOCKED",
+                ),
             }
             if candidate != expected or _OUTPUT_FORBIDDEN_NUMERIC_FIELDS & set(
                 candidate

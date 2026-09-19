@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "6be237352a4c9e380e22869c9362677ea96c1c1271562f0cbc265f81c4352a95"
+        "38c9b379239793d308f748a0b36f2f83870760c8da6e6a1029e488c104ec0dcb"
     )
 
 
@@ -2532,16 +2532,6 @@ def test_leverage_policy_preserves_returns_without_inflating_invested_capital() 
     assert vector["ending_nav"] == "114"
     assert vector["invested_capital"] == "100"
     assert vector["total_return"] == vector["twr"] == vector["mwr_one_year"] == "0.14"
-    contract = _contract()
-    # Issue #396 deferred the three leverage classes out of MVP-2's scope, so
-    # no account source may declare one: a declared class with no producer
-    # returns the product to REQUIRED_DATA_CLASS_NOT_MATERIALIZED. The
-    # calculation contract below still governs how leverage is treated if and
-    # when the facts return.
-    for source_id in contract_tool.REQUIRED_ACCOUNT_PROVIDER_SOURCE_IDS:
-        declared = set(_source(contract, source_id)["data_classes"])
-        assert not contract_tool.DEFERRED_LEVERAGE_CLASSES & declared
-
     changed = _contract()
     changed_vector = _outcome(changed, "INVESTED_CAPITAL")["calculation_contract"][
         "leverage_accounting"
@@ -2555,13 +2545,13 @@ def test_leverage_policy_preserves_returns_without_inflating_invested_capital() 
 
     readded_source_fact = _contract()
     ibkr = _source(readded_source_fact, "ibkr-account-generation")
-    ibkr["data_classes"].append("FINANCING_LIABILITY")
-    with pytest.raises(
-        contract_tool.FinancialMvpContractError,
-        match="source declares leverage facts deferred by issue 396: "
-        "ibkr-account-generation",
-    ):
-        _validate(readded_source_fact)
+    ibkr["data_classes"].extend(
+        ["FINANCING_COST", "FINANCING_LIABILITY", "LEVERAGE_EXPOSURE"]
+    )
+    # #396 now has a source and ledger producer. Contract declarations are
+    # allowed; actual source materialization remains independently required
+    # by provider admission before composition.
+    _validate(readded_source_fact)
 
 
 @pytest.mark.parametrize(

@@ -86,6 +86,16 @@ def test_hand_calculated_xirr_vector_uses_actual_365_and_investor_signs() -> Non
     assert xirr == Decimal(case["expected_return"])
 
 
+def test_mwr_policy_vectors_cover_negative_no_root_and_conservative_ambiguity() -> None:
+    cases = {item["case_id"]: item for item in _vectors()["mwr_cases"]}  # type: ignore[index]
+
+    assert cases["one_year_negative_xirr"]["expected_return"] == "-0.20"
+    assert cases["same_sign_no_root"]["expected_status"] == "NO_ROOT"
+    assert cases["two_root_conservative_rejection"]["expected_status"] == (
+        "UNIQUENESS_NOT_PROVED"
+    )
+
+
 def test_hand_calculated_composite_twr_is_beginning_capital_weighted() -> None:
     case = _vectors()["composite_twr_cases"][0]  # type: ignore[index]
     members = case["members"]
