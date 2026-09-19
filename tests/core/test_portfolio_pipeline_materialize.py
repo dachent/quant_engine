@@ -4330,6 +4330,8 @@ def _attended_preflight_fixture(tmp_path: Path) -> dict[str, object]:
     (workspace / "dataPortfolio").mkdir(parents=True)
     cache = tmp_path / "cache"
     cache.mkdir()
+    qa_dir = tmp_path / "qa"
+    qa_dir.mkdir()
     return {
         "repo_root": repo,
         "python": runtime,
@@ -4341,7 +4343,8 @@ def _attended_preflight_fixture(tmp_path: Path) -> dict[str, object]:
         "runtime": {"descriptor": descriptor, "identity": {"runtime": "test"}},
         "recipe": recipe,
         "financial_inputs": {},
-        "qa_dir": tmp_path / "qa",
+        "financial_stage_inputs": {},
+        "qa_dir": qa_dir,
         "request_identity": {"fixture": "attended-child-boundary"},
         "required_stages": materializer.ATTENDED_STAGES,
     }
@@ -4375,6 +4378,42 @@ def _record_attended_stage(output_root: Path, role: str) -> None:
                     (generation / "provider-ledger.json").read_bytes()
                 ).hexdigest(),
                 "generation_id": product.generation.name,
+                "root": str(stage_root),
+            }
+        )
+    elif role == "baseline":
+        catalog = canonical_json_bytes(
+            {"baseline_schema_version": 1, "policy_version": "PORT-PERF-1"}
+        )
+        artifact = SourceArtifact(
+            artifact_id="normalized/portfolio-baseline.json",
+            sha256=hashlib.sha256(catalog).hexdigest(),
+            size_bytes=len(catalog),
+            as_of_date=AS_OF,
+            schema_name="portfolio-baseline-catalog",
+            schema_version="1",
+        )
+        manifest = GenerationManifest.build(
+            as_of_date=AS_OF,
+            adapter=AdapterIdentity("attended-baseline", "1"),
+            coverage=CoverageClaim(
+                status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+                boundary="attended baseline test artifact",
+                fact_types=("baseline",),
+                observed_start=AS_OF,
+                observed_end=AS_OF,
+            ),
+            artifacts=(artifact,),
+            verification=VerificationStatus.VERIFIED,
+        )
+        generation = stage_root / "generations" / manifest.generation_id
+        generation.mkdir(parents=True)
+        (generation / "generation.json").write_bytes(manifest.to_json_bytes())
+        (generation / "portfolio-baseline.json").write_bytes(catalog)
+        result.update(
+            {
+                "catalog_sha256": artifact.sha256,
+                "generation_id": manifest.generation_id,
                 "root": str(stage_root),
             }
         )
@@ -4552,3 +4591,168 @@ def test_attended_resume_rejects_a_corrupt_completed_artifact(
         )
         == 1
     )
+
+
+def test_attended_resume_rejects_a_corrupt_completed_baseline_before_a_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ledger receipt may not make a changed generation skippable."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    output_root = tmp_path / "output"
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+    baseline = (
+        next((output_root / "stages" / "baseline" / "generations").iterdir())
+        / "portfolio-baseline.json"
+    )
+    baseline.write_bytes(baseline.read_bytes() + b"\n")
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("corrupt baseline must fail before a child starts")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 1
+    )
+
+
+def test_attended_preserves_failed_partial_child_and_retries_it_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed child retains pending output and keeps its original exit code."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    output_root = tmp_path / "output"
+    calls: list[str] = []
+
+    def fail_baseline(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        calls.append(role)
+        if role == "ledger":
+            _record_attended_stage(output_root, role)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        (output_root / "stages" / "baseline").mkdir(parents=True)
+        return subprocess.CompletedProcess(argv, 83, "", "failed baseline")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", fail_baseline)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 83
+
+    def retry_baseline(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        calls.append(role)
+        assert role == "baseline"
+        shutil.rmtree(output_root / "stages" / "baseline")
+        _record_attended_stage(output_root, role)
+        return subprocess.CompletedProcess(argv, 97, "", "next boundary")
+
+    monkeypatch.setattr(materializer.subprocess, "run", retry_baseline)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 97
+    )
+    assert calls == ["ledger", "baseline", "baseline"]
+
+
+def test_attended_forwards_complete_governed_financial_families_and_qa(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attended boundary keeps all governed stage inputs intact."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    output_root = tmp_path / "output"
+    qa_dir = tmp_path / "qa"
+    supplied = {
+        "--hwm-governed-result": tmp_path / "hwm-result.json",
+        "--hwm-governed-input-generation": tmp_path / "hwm-generation.json",
+        "--hwm-governed-calendar-authority": tmp_path / "hwm-calendar.json",
+        "--hwm-governed-admission-receipt": tmp_path / "hwm-receipt.json",
+        "--invested-capital-result": tmp_path / "capital-result.json",
+        "--invested-capital-input-generation": tmp_path / "capital-generation.json",
+    }
+    for path in supplied.values():
+        path.write_text("{}", encoding="utf-8")
+    preflight["financial_stage_inputs"] = supplied
+    preflight["qa_dir"] = qa_dir
+    calls: list[list[str]] = []
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    argv = _attended_argv(preflight, output_root, execute=True)
+    argv.extend(item for flag, path in supplied.items() for item in (flag, str(path)))
+    argv.extend(("--qa-dir", str(qa_dir)))
+    assert materializer.main(argv) == 0
+    assert len(calls) == len(materializer.ATTENDED_STAGES)
+    for command in calls:
+        for flag, path in supplied.items():
+            assert command[command.index(flag) + 1] == str(path)
+    panel = calls[-1]
+    assert panel[panel.index("--qa-dir") + 1] == str(qa_dir)
+
+
+def test_attended_rejects_partial_governed_financial_family_before_child(
+    tmp_path: Path,
+) -> None:
+    """A lone governed HWM path cannot enter an attended stage command."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["financial_stage_inputs"] = {
+        "--hwm-governed-result": tmp_path / "hwm-result.json"
+    }
+
+    with pytest.raises(
+        materializer.MaterializationError, match="financial input family"
+    ):
+        materializer._attended_stage_command(preflight, tmp_path / "output", "ledger")
+
+
+def test_attended_binds_late_qa_without_replacing_final_panel_evidence(
+    tmp_path: Path,
+) -> None:
+    """QA may arrive for an incomplete run but is immutable after panel completion."""
+
+    initial = _attended_preflight_fixture(tmp_path)
+    initial["qa_dir"] = None
+    output_root = tmp_path / "output"
+    materializer._attended_start_or_resume(initial, output_root, resume=False)
+
+    qa_dir = tmp_path / "qa"
+    late = dict(initial)
+    late["qa_dir"] = qa_dir
+    materializer._attended_start_or_resume(late, output_root, resume=True)
+    bound = json.loads((output_root / "attended-qa.json").read_text(encoding="utf-8"))
+    assert bound["path"] == str(qa_dir)
+
+    for role in materializer.ATTENDED_STAGES:
+        _record_attended_stage(output_root, role)
+    replacement = tmp_path / "replacement-qa"
+    replacement.mkdir()
+    changed = dict(initial)
+    changed["qa_dir"] = replacement
+    with pytest.raises(materializer.MaterializationError, match="QA identity"):
+        materializer._attended_start_or_resume(changed, output_root, resume=True)
