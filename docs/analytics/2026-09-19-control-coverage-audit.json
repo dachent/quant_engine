@@ -13,20 +13,24 @@
       "effectiveness_status": "Not established by this audit; no command was executed.",
       "evidence": [
         {
-          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5704-5744",
-          "quote": "def _attended_execute(\n    preflight: Mapping[str, Any], output_root: Path, *, resume: bool\n) -> tuple[int, dict[str, Any]]:"
+          "path": "tools/portfolio_pipeline_materialize.py",
+          "quote": "def _attended_execute(\n    preflight: Mapping[str, Any], output_root: Path, *, resume: bool\n) -> tuple[int, dict[str, Any]]:",
+          "git_reference": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5704-5744"
         },
         {
-          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5716-5723",
-          "quote": "result = subprocess.run(\n            command,\n            cwd=cast(Path, preflight[\"repo_root\"]),\n            capture_output=True,\n            text=True,\n            check=False,\n        )"
+          "path": "tools/portfolio_pipeline_materialize.py",
+          "quote": "result = subprocess.run(\n            command,\n            cwd=cast(Path, preflight[\"repo_root\"]),\n            capture_output=True,\n            text=True,\n            check=False,\n        )",
+          "git_reference": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5716-5723"
         },
         {
-          "path": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:4473-4504",
-          "quote": "def execute_pipeline(\n    spec: PipelineSpec,\n    *,\n    commit: bool = False,\n    commit_authorization: Path | None = None,\n    allow_external_read: bool = False,\n    command_runner: CommandRunner = _default_command_runner,"
+          "path": "packages/core/src/quant_engine/core/pipeline.py",
+          "quote": "def execute_pipeline(\n    spec: PipelineSpec,\n    *,\n    commit: bool = False,\n    commit_authorization: Path | None = None,\n    allow_external_read: bool = False,\n    command_runner: CommandRunner = _default_command_runner,",
+          "git_reference": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:4473-4504"
         },
         {
-          "path": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:4483-4504",
-          "quote": "_validate_portfolio_orchestration(spec, verify_runtime=True)\n    _require_executable_product(spec)"
+          "path": "packages/core/src/quant_engine/core/pipeline.py",
+          "quote": "_validate_portfolio_orchestration(spec, verify_runtime=True)\n    _require_executable_product(spec)",
+          "git_reference": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:4483-4504"
         }
       ]
     },
@@ -40,20 +44,24 @@
       "effectiveness_status": "Static coverage gap demonstrated; runtime discrimination remains required.",
       "evidence": [
         {
-          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5361-5388",
-          "quote": "source = _load(source_run, \"attended source run\")\n    if (\n        set(source)\n        != {\n            \"schema_version\",\n            \"as_of_date\",\n            \"release_commit\",\n            \"artifacts\",\n            \"attended\",\n        }"
+          "path": "tools/portfolio_pipeline_materialize.py",
+          "quote": "source = _load(source_run, \"attended source run\")\n    if (\n        set(source)\n        != {\n            \"schema_version\",\n            \"as_of_date\",\n            \"release_commit\",\n            \"artifacts\",\n            \"attended\",\n        }",
+          "git_reference": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5361-5388"
         },
         {
-          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5383-5388",
-          "quote": "release_commit = _text(source.get(\"release_commit\"), \"attended release_commit\")\n    if len(release_commit) != 40 or release_commit != _git(\n        repo_root, \"rev-parse\", \"HEAD\"\n    ):\n        raise MaterializationError(\"attended release commit differs\")\n    _attended_artifacts(source.get(\"artifacts\"))"
+          "path": "tools/portfolio_pipeline_materialize.py",
+          "quote": "release_commit = _text(source.get(\"release_commit\"), \"attended release_commit\")\n    if len(release_commit) != 40 or release_commit != _git(\n        repo_root, \"rev-parse\", \"HEAD\"\n    ):\n        raise MaterializationError(\"attended release commit differs\")\n    _attended_artifacts(source.get(\"artifacts\"))",
+          "git_reference": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5383-5388"
         },
         {
-          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5653-5673",
-          "quote": "command = [\n        str(cast(Path, preflight[\"python\"])),\n        str(repo_root / \"tools\" / \"portfolio_release_builder.py\"),\n        \"stage\",\n        \"--recipe\",\n        str(cast(Path, preflight[\"recipe\"])),\n        \"--output-root\",\n        str(output_root),\n        \"--role\",\n        role,"
+          "path": "tools/portfolio_pipeline_materialize.py",
+          "quote": "command = [\n        str(cast(Path, preflight[\"python\"])),\n        str(repo_root / \"tools\" / \"portfolio_release_builder.py\"),\n        \"stage\",\n        \"--recipe\",\n        str(cast(Path, preflight[\"recipe\"])),\n        \"--output-root\",\n        str(output_root),\n        \"--role\",\n        role,",
+          "git_reference": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5653-5673"
         },
         {
-          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5264-5293",
-          "quote": "\"source_run\": _file_definition(source_run),"
+          "path": "tools/portfolio_pipeline_materialize.py",
+          "quote": "\"source_run\": _file_definition(source_run),",
+          "git_reference": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5264-5293"
         }
       ]
     },
@@ -83,8 +91,9 @@
           "quote": "print('PASS_D414_COMPONENT_ONLY_NATIVE_COMPLETION_REMAINS_SEPARATE',flush=True)"
         },
         {
-          "path": "git:4b1c494:tests/core/test_portfolio_pipeline_materialize.py:4597-4598",
-          "quote": "monkeypatch.setattr(materializer, \"_attended_preflight\", lambda _args: preflight)\n    monkeypatch.setattr(materializer.subprocess, \"run\", stage_only)"
+          "path": "tests/core/test_portfolio_pipeline_materialize.py",
+          "quote": "monkeypatch.setattr(materializer, \"_attended_preflight\", lambda _args: preflight)\n    monkeypatch.setattr(materializer.subprocess, \"run\", stage_only)",
+          "git_reference": "git:4b1c494:tests/core/test_portfolio_pipeline_materialize.py:4597-4598"
         }
       ]
     },
@@ -98,20 +107,24 @@
       "effectiveness_status": "Unproven risk because concurrent-writer reachability and the real runtime behavior were not exercised.",
       "evidence": [
         {
-          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5530-5579",
-          "quote": "if resume:\n        value = _load(receipt, \"attended run receipt\")"
+          "path": "tools/portfolio_pipeline_materialize.py",
+          "quote": "if resume:\n        value = _load(receipt, \"attended run receipt\")",
+          "git_reference": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5530-5579"
         },
         {
-          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5582-5597",
-          "quote": "\"failed_stage\": {\"returncode\": returncode, \"role\": role},\n            \"request_identity\": request_identity,\n            \"schema_version\": 2,"
+          "path": "tools/portfolio_pipeline_materialize.py",
+          "quote": "\"failed_stage\": {\"returncode\": returncode, \"role\": role},\n            \"request_identity\": request_identity,\n            \"schema_version\": 2,",
+          "git_reference": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5582-5597"
         },
         {
-          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5717-5723",
-          "quote": "result = subprocess.run(\n            command,\n            cwd=cast(Path, preflight[\"repo_root\"]),\n            capture_output=True,\n            text=True,\n            check=False,\n        )"
+          "path": "tools/portfolio_pipeline_materialize.py",
+          "quote": "result = subprocess.run(\n            command,\n            cwd=cast(Path, preflight[\"repo_root\"]),\n            capture_output=True,\n            text=True,\n            check=False,\n        )",
+          "git_reference": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5717-5723"
         },
         {
-          "path": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:3550-3583",
-          "quote": "pre_io = _io_evidence(node)\n        in_flight = node.effect is CommandEffect.READ_ONLY_EXTERNAL"
+          "path": "packages/core/src/quant_engine/core/pipeline.py",
+          "quote": "pre_io = _io_evidence(node)\n        in_flight = node.effect is CommandEffect.READ_ONLY_EXTERNAL",
+          "git_reference": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:3550-3583"
         }
       ]
     },
@@ -124,16 +137,19 @@
       "effectiveness_proof": "Existing baseline unit coverage is component evidence only; after convergence, execute the supported CLI through failed-child preservation, same-identity resume, and corrupt-completed-artifact rejection.",
       "evidence": [
         {
-          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5132-5183",
-          "quote": "\"\"\"Return only a contiguous, independently readable prefix of stage receipts.\"\"\""
+          "path": "tools/portfolio_pipeline_materialize.py",
+          "quote": "\"\"\"Return only a contiguous, independently readable prefix of stage receipts.\"\"\"",
+          "git_reference": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5132-5183"
         },
         {
-          "path": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5611-5622",
-          "quote": "\"\"\"Atomically update the one mutable attended-run checkpoint.\"\"\""
+          "path": "tools/portfolio_pipeline_materialize.py",
+          "quote": "\"\"\"Atomically update the one mutable attended-run checkpoint.\"\"\"",
+          "git_reference": "git:4b1c494:tools/portfolio_pipeline_materialize.py:5611-5622"
         },
         {
-          "path": "git:4b1c494:tests/core/test_portfolio_pipeline_materialize.py:4606-4642",
-          "quote": "def test_attended_resume_skips_only_verified_completed_stages("
+          "path": "tests/core/test_portfolio_pipeline_materialize.py",
+          "quote": "def test_attended_resume_skips_only_verified_completed_stages(",
+          "git_reference": "git:4b1c494:tests/core/test_portfolio_pipeline_materialize.py:4606-4642"
         }
       ]
     },
@@ -146,16 +162,19 @@
       "effectiveness_proof": "Once attended uses the shared route, alter the runtime lock or repository state in a disposable fixture and prove rejection before its first child; separately prove that a mismatched commit authorization cannot commit a prepared release.",
       "evidence": [
         {
-          "path": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:2682-2701",
-          "quote": "if _file_hash(executable)[0] != runtime[\"executable_sha256\"]:\n        raise PipelineValidationError(\"portfolio runtime executable differs\")"
+          "path": "packages/core/src/quant_engine/core/pipeline.py",
+          "quote": "if _file_hash(executable)[0] != runtime[\"executable_sha256\"]:\n        raise PipelineValidationError(\"portfolio runtime executable differs\")",
+          "git_reference": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:2682-2701"
         },
         {
-          "path": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:2697-2701",
-          "quote": "if head != spec.code_commit or head != contract[\"release_commit\"]:\n        raise PipelineValidationError(\"portfolio repository HEAD differs\")\n    if _git_output(repo_root, \"status\", \"--porcelain=v1\", \"--untracked-files=all\"):\n        raise PipelineValidationError(\"portfolio repository is not clean\")"
+          "path": "packages/core/src/quant_engine/core/pipeline.py",
+          "quote": "if head != spec.code_commit or head != contract[\"release_commit\"]:\n        raise PipelineValidationError(\"portfolio repository HEAD differs\")\n    if _git_output(repo_root, \"status\", \"--porcelain=v1\", \"--untracked-files=all\"):\n        raise PipelineValidationError(\"portfolio repository is not clean\")",
+          "git_reference": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:2697-2701"
         },
         {
-          "path": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:4550-4567",
-          "quote": "_validate_commit_authorization(commit_authorization, spec)\n        journal = commit_release("
+          "path": "packages/core/src/quant_engine/core/pipeline.py",
+          "quote": "_validate_commit_authorization(commit_authorization, spec)\n        journal = commit_release(",
+          "git_reference": "git:4b1c494:packages/core/src/quant_engine/core/pipeline.py:4550-4567"
         }
       ]
     }
@@ -171,5 +190,6 @@
     "Mapper artifacts were navigation-only static evidence. They cannot establish branch execution, child ordering, source mutation reachability, finality, numerical correctness, or publication state.",
     "The named historical analysis/IMPLEMENTATION_CONTRACT.md could be enumerated but its bounded text scan returned Access is denied; it was not relied upon. No hydration or OneDrive action was attempted.",
     "M5 is active corrective work and M7 is unaccepted/stopped WIP. Neither was used as a delivered baseline fix."
-  ]
+  ],
+  "parent_evidence_normalization": "Git revision/line references retained in git_reference; path points to the same baseline source file for exact-quote verification. All quotes were independently matched before this mechanical edit."
 }
