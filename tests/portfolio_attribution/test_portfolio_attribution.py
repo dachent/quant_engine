@@ -34,7 +34,10 @@ SPEC.loader.exec_module(attribution)
 
 
 def _baseline(
-    tmp_path: Path, *, generation_as_of_date: date = date(2026, 1, 3)
+    tmp_path: Path,
+    *,
+    generation_as_of_date: date = date(2026, 1, 3),
+    retained_source_as_of_date: date | None = None,
 ) -> Path:
     root = tmp_path / "baseline"
     strategies = [
@@ -79,7 +82,7 @@ def _baseline(
         artifact_id="source/retained-baseline-provenance.json",
         sha256=hashlib.sha256(b"retained-baseline-provenance").hexdigest(),
         size_bytes=len(b"retained-baseline-provenance"),
-        as_of_date=generation_as_of_date,
+        as_of_date=retained_source_as_of_date or generation_as_of_date,
         schema_name="retained-baseline-provenance",
         schema_version="1",
     )
@@ -303,3 +306,27 @@ def test_attribution_preserves_baseline_financial_cutoff_with_later_provenance(
 
     assert catalog["as_of_date"] == "2026-01-03"
     assert generation["as_of_date"] == "2026-01-05"
+    artifact_dates = {
+        item["artifact_id"]: item["as_of_date"] for item in generation["artifacts"]
+    }
+    assert artifact_dates["input/portfolio-baseline.json"] == "2026-01-03"
+    assert artifact_dates["input/portfolio-baseline-generation.json"] == "2026-01-04"
+
+
+def test_attribution_rejects_baseline_generation_date_not_derived_from_artifacts(
+    tmp_path: Path,
+) -> None:
+    """A coherently rehashed baseline manifest cannot carry an arbitrary outer date."""
+
+    baseline_root = _baseline(
+        tmp_path,
+        generation_as_of_date=date(2026, 1, 5),
+        retained_source_as_of_date=date(2026, 1, 4),
+    )
+    spec, _ = _inputs(tmp_path)
+
+    with pytest.raises(
+        attribution.AttributionValidationError,
+        match="baseline generation date is not artifact-derived",
+    ):
+        attribution.stage_catalog(baseline_root, spec, tmp_path / "attribution")
