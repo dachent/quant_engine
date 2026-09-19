@@ -22,10 +22,14 @@ core product stage.  The gate requires the report-to-panel dependency, so the
 MVP path cannot be silently redirected through a workbook.
 
 It also binds the actual static seams: attended preflight to the selected-source
-preparation entrypoints, materializer stage command to the release builder,
-release builder to report and panel producers, and those producers to their
-native report and panel consumers.  Every runtime guarantee points to a real
-integration-test path in the graph.  Missing source bytes, changed declarations,
+preparation entrypoints, materializer stage command to the release builder, and
+the release builder's exact Python and CLI calls.  In particular,
+`build_report` must call `build_report_candidate`; that candidate must call
+`_tool("portfolio_report.py", "build", ...)`; `build_report` must call report
+`verify` and `publish`; and `build_panel_candidate` must call
+`_tool("portfolio_control_panel.py", "build", ...)`. A matching string literal
+or a call to `str` is not an edge. Every runtime guarantee points to a real
+integration-test path in the graph. Missing source bytes, changed declarations,
 missing static symbols/calls, an omitted bound file, or a stale fingerprint are
 validation failures.
 
@@ -34,24 +38,29 @@ runtime ordering, source admission/finality, recovery/reuse behavior, or
 financial numerics.  Those guarantees remain with the supported attended
 runner and its integration tests.  The gate neither replaces nor invokes them.
 
-The retained code-mapper snapshots are recorded only as contextual evidence.
-Their root, fingerprint, and scanner-error state are inspected and labeled
-non-current/non-consumed when they do not match this checkout.  They therefore
-cannot certify the graph.  A future accepted mapper must match the actual
-scanned root and fingerprint and be free of errors affecting the bound paths
-before it may be used as evidence.
+The graph never probes an ancestor for task-specific mapper snapshots. An
+optional mapper artifact is accepted only through `--mapper-evidence <path>`.
+It must name this exact repository root, have no scanner errors, and carry the
+current installed-mapper Python fingerprint: the SHA-256 of sorted
+`relative_path:raw_sha256` lines for every scanned Python file. Accepted mapper
+evidence is contextual only; the standard-library executable-contract gate does
+not need it in CI.
 
 Run the gate locally without executing financial code:
 
 ```powershell
 python tools/portfolio_controller_graph.py --repo-root .
 python tools/portfolio_controller_graph.py --repo-root . --write .pt\tmp\controller-graph.json --changed-path tools/portfolio_report.py
+python tools/portfolio_controller_graph.py --repo-root . --changed-from <base-sha> --changed-to <candidate-sha>
 ```
 
 The second form writes the supplied task-local graph output and reports the
-declared downstream impact.  A report change affects report and panel; a
-panel-only change affects panel.  Preparation and controller changes affect
-their downstream stages.  An unmapped production or contract change raises a
-reconciliation error; unrelated documentation/test paths return no execution
-stage impact.  The Quality workflow invokes the gate with its installed CI
-environment, without a workstation path or an optional visualization tool.
+declared downstream impact. The third reads the actual Git range; Quality uses
+the pull request's base SHA, the push's `before` SHA, or `EMPTY_TREE` for a
+root commit/workflow dispatch. A report change affects report and panel; a
+panel-only change affects panel. Preparation, controller, the financial-source
+contract, and its JSON schema affect their downstream stages. An unmapped
+relevant production or portfolio-schema path raises a reconciliation error;
+unrelated documentation/test paths return no execution-stage impact. The
+Quality workflow invokes the gate with its installed CI environment, without a
+workstation path or an optional mapper artifact.
