@@ -183,6 +183,79 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
     ]
 
 
+def test_history_dependency_mismatch_requires_rebuild_but_source_failure_does_not(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only a trusted-code mismatch may replace a retained derived generation."""
+
+    import portfolio_target_series as history
+
+    calls: list[str] = []
+
+    def changed(*_args: object, **kwargs: object) -> dict[str, object]:
+        calls.append(str(kwargs["require_mode"]))
+        raise history.TargetSeriesError(
+            "layered history repository dependency differs: schemas/portfolio/financial-mvp-source-contract.schema.json"
+        )
+
+    monkeypatch.setattr(history, "verify_layered_history_generation", changed)
+    assert preparation._retained_history_requires_rebuild(
+        tmp_path / "history", tmp_path / "contract.json", {}
+    ) is True
+    assert calls == ["LIVE_ONLY"]
+
+    def corrupted(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise history.TargetSeriesError("layered history artifact sha256 differs")
+
+    monkeypatch.setattr(history, "verify_layered_history_generation", corrupted)
+    with pytest.raises(
+        preparation.AttendedPreparationError,
+        match="retained layered history is invalid",
+    ):
+        preparation._retained_history_requires_rebuild(
+            tmp_path / "history", tmp_path / "contract.json", {}
+        )
+
+
+def test_rebuild_layered_history_uses_selected_builder_kwargs_and_current_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A regenerated history is bound to the frozen selection and current code."""
+
+    import portfolio_target_series as history
+
+    source = tmp_path / "native.csv"
+    source.write_text("selected source", encoding="utf-8")
+    built: dict[str, object] = {}
+    verified: list[str] = []
+
+    def build(**kwargs: object) -> tuple[dict[str, bytes], bytes]:
+        built.update(kwargs)
+        return {"history.csv": b"economic values"}, b'{"generation_id":"a"}'
+
+    destination = tmp_path / "prepared-history" / "a"
+    monkeypatch.setattr(history, "build_layered_history_generation", build)
+    monkeypatch.setattr(
+        history, "write_layered_history_generation", lambda *_args: destination
+    )
+    monkeypatch.setattr(
+        history,
+        "verify_layered_history_generation",
+        lambda *_args, **kwargs: verified.append(str(kwargs["require_mode"])) or {},
+    )
+
+    assert preparation._rebuild_layered_history(
+        {"builder_kwargs": {"as_of_date": "2026-09-17", "contract_path": str(source), "repository_sha": "old"}},
+        tmp_path / "prepared-history",
+        "b" * 40,
+        source,
+        {},
+    ) == destination
+    assert built["repository_sha"] == "b" * 40
+    assert built["contract_path"] == source
+    assert verified == ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"]
+
+
 def test_attended_preparation_resume_reuses_verified_handoff_before_producers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
