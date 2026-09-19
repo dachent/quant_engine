@@ -3589,28 +3589,25 @@
      "effective_end": null,
      "upstream_inventory_sha256": "9ea70645cc8f40dd38148fc115fa65ca02ef6d43eb932ece404c989fde555da1",
      "product_data_class_count": 1,
-     "product_data_class_set_sha256": "8855be07f869e61d3eeef1a2dd1b97e8645c48f99c01205f113d5b7cd8382cd7",
+     "product_data_class_set_sha256": "c93709fcedba78147eb9f17364a1c690a8cc78d5f1adbab2fd0b1ae01ac9171d",
      "admitted_item_count": 2,
      "admitted_item_set_sha256": "c9a66669fe0cd411dee0b2d99c79f063a3c7c026bc671ce5ec97d58de6f6aa0f",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
-      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
+      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER",
+      "NO_CURRENT_PRODUCT_CONSUMER"
      ],
-     "exclusion_readiness_impact": "REQUIRED_NOT_READY",
+     "exclusion_readiness_impact": "NO_CURRENT_PRODUCT_EFFECT",
      "exclusion_readiness_impact_by_reason": {
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED": "REQUIRED_NOT_READY",
-      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER": "NO_CURRENT_PRODUCT_EFFECT"
+      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER": "NO_CURRENT_PRODUCT_EFFECT",
+      "NO_CURRENT_PRODUCT_CONSUMER": "NO_CURRENT_PRODUCT_EFFECT"
      },
      "exclusion_invalidated_outputs_rule": "SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"
     }
    },
-   "product_requirement": "REQUIRED",
-   "consumers": [
-    "DECOMPOSITION",
-    "DEPENDENCE",
-    "REPORT",
-    "RELEASE_RECEIPT"
-   ],
+   "product_requirement": "EXCLUDED",
+   "consumers": [],
    "current_generation": {
     "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
     "sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",

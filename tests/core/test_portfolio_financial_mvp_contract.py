@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "fa920d9fcd504ecdca5122ae9beec96cd2f8de7c2cc15c5f99717dee10a0f4ec"
+        "0d2f16829dc4bc7e0298e04d26d0c7fee8119c92a1dbce9a7d597e3d2e89a326"
     )
 
 
@@ -1192,7 +1192,16 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
     ] == [
         "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
         "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER",
+        "NO_CURRENT_PRODUCT_CONSUMER",
     ]
+    assert p123["product_requirement"] == "EXCLUDED"
+    assert p123["consumers"] == []
+    assert (
+        p123["admission"]["dataset_disposition_policy"][
+            "exclusion_readiness_impact_by_reason"
+        ]["NO_CURRENT_PRODUCT_CONSUMER"]
+        == "NO_CURRENT_PRODUCT_EFFECT"
+    )
 
 
 def test_current_strategy_registry_binds_exact_applicability_plan_bytes() -> None:
@@ -4214,7 +4223,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # approved source-backed IBKR/Schwab leverage classes without changing
     # historical generation, inventory or admitted-item pins.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "22ff75caae0417988b513bdfa745616306ff2c0e31803aac33a462e0ce539f51"
+        "80f406242546e9d174e95b9d3465217f5de869c8fe02ed865f65a9ff91f598bf"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4251,7 +4260,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "22ff75caae0417988b513bdfa745616306ff2c0e31803aac33a462e0ce539f51"
+        "80f406242546e9d174e95b9d3465217f5de869c8fe02ed865f65a9ff91f598bf"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
