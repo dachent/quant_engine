@@ -4878,19 +4878,26 @@ def _attended_completed_attribution(
 
 
 def _attended_published_generation(
-    root: Path, expected_generation_id: object, label: str
+    root: Path,
+    expected_generation_id: object,
+    label: str,
+    *,
+    filename: str,
+    expected_schema_version: int | Sequence[int],
 ) -> None:
-    """Read one published immutable generation through the native verifier."""
+    """Read one published analytics generation through its native reader."""
 
-    import portfolio_release_builder as release
+    import portfolio_control_panel as panel
 
     generation_id = _text(expected_generation_id, f"attended {label} generation_id")
-    observed_id, _generation = release._published_generation(root)  # noqa: SLF001
-    if observed_id != generation_id:
+    _value, identity, _path = panel._current_analytics(  # noqa: SLF001
+        root,
+        filename=filename,
+        field_name=label,
+        expected_schema_version=expected_schema_version,
+    )
+    if identity.get("generation_id") != generation_id:
         raise ValueError(f"{label} generation identity differs")
-    # The pointer reader authenticates the current generation identity; the
-    # bundle reader additionally checks every manifest-bound member byte.
-    read_generation_bundle(root, generation_id)
 
 
 def _attended_completed_analytics(
@@ -4921,15 +4928,25 @@ def _attended_completed_analytics(
     ):
         raise ValueError("analytics output differs")
     _attended_published_generation(
-        roots["correlation"], receipt.get("correlation_generation_id"), "analytics correlation"
+        roots["correlation"],
+        receipt.get("correlation_generation_id"),
+        "analytics correlation",
+        filename="correlation.json",
+        expected_schema_version=(1, 2),
     )
     _attended_published_generation(
         roots["decomposition"],
         receipt.get("decomposition_generation_id"),
         "analytics decomposition",
+        filename="decomposition.json",
+        expected_schema_version=(1, 2, 3),
     )
     _attended_published_generation(
-        roots["weekly"], receipt.get("weekly_generation_id"), "analytics weekly"
+        roots["weekly"],
+        receipt.get("weekly_generation_id"),
+        "analytics weekly",
+        filename="weekly-returns.json",
+        expected_schema_version=1,
     )
     bindings = receipt.get("lens_generation_bindings")
     plan_bundles = receipt.get("plan_bundle_ids")
@@ -4954,7 +4971,11 @@ def _attended_completed_analytics(
         seen.add((evidence_mode, spec_id))
         lens_root = roots["lenses"] / evidence_mode / surface / source_key
         _attended_published_generation(
-            lens_root, binding.get("generation_id"), "analytics lens"
+            lens_root,
+            binding.get("generation_id"),
+            "analytics lens",
+            filename="decomposition.json",
+            expected_schema_version=(1, 2, 3),
         )
     hybrid_generation = receipt.get("hybrid_dynamic_generation_id")
     if hybrid_generation is not None:
@@ -4962,6 +4983,8 @@ def _attended_completed_analytics(
             roots["lenses"] / "LIVE_PLUS_BACKTEST" / "dynamic-style",
             hybrid_generation,
             "analytics hybrid decomposition",
+            filename="decomposition.json",
+            expected_schema_version=(1, 2, 3),
         )
 
 
@@ -5556,6 +5579,34 @@ def _attended_replace_checkpoint(
         raise MaterializationError("attended run checkpoint cannot be updated") from exc
 
 
+def _attended_preserve_failed_stage(
+    output_root: Path, role: str
+) -> None:
+    """Move failed-stage bytes aside before a create-only producer retries."""
+
+    stage_root = _attended_stage_root(output_root, role)
+    receipt = output_root / "stage-results" / f"{role}.json"
+    if not stage_root.exists() and not receipt.exists():
+        return
+    if stage_root.is_symlink() or (stage_root.exists() and not stage_root.is_dir()):
+        raise MaterializationError("attended failed stage root is not a directory")
+    if receipt.is_symlink() or (receipt.exists() and not receipt.is_file()):
+        raise MaterializationError("attended failed stage receipt is not a regular file")
+
+    evidence_root = output_root / "failed-stage-evidence" / role
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    attempt = 1
+    while (evidence_root / f"attempt-{attempt}").exists():
+        attempt += 1
+    destination = evidence_root / f"attempt-{attempt}"
+    destination.mkdir()
+    if stage_root.exists():
+        os.replace(stage_root, destination / "stage-root")
+        stage_root.mkdir(parents=True)
+    if receipt.exists():
+        os.replace(receipt, destination / "stage-result.json")
+
+
 def _attended_stage_command(
     preflight: Mapping[str, Any], output_root: Path, role: str
 ) -> list[str]:
@@ -5611,6 +5662,8 @@ def _attended_execute(
     preflight: Mapping[str, Any], output_root: Path, *, resume: bool
 ) -> tuple[int, dict[str, Any]]:
     failed_stage = _attended_start_or_resume(preflight, output_root, resume=resume)
+    if failed_stage is not None:
+        _attended_preserve_failed_stage(output_root, failed_stage)
     completed = _attended_completed_stages(
         output_root, preflight["required_stages"], failed_stage=failed_stage
     )

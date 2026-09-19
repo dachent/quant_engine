@@ -4708,8 +4708,22 @@ def test_attended_preserves_original_exit_when_child_leaves_partial_receipt(
         role = argv[argv.index("--role") + 1]
         calls.append(role)
         if role == "ledger":
-            shutil.rmtree(output_root / "stages" / "ledger")
-            _record_attended_stage(output_root, role)
+            import portfolio_release_builder as release
+
+            expected_root = tmp_path / "expected-ledger"
+            _record_attended_stage(expected_root, role)
+            expected = json.loads(
+                (expected_root / "stage-results" / "ledger.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            expected["root"] = str(output_root / "stages" / "ledger")
+            shutil.copytree(
+                expected_root / "stages" / "ledger",
+                output_root / "stages" / "ledger",
+                dirs_exist_ok=True,
+            )
+            release._record_stage(output_root, role, expected)
             return subprocess.CompletedProcess(argv, 0, "", "")
         return subprocess.CompletedProcess(argv, 97, "", "next boundary")
 
@@ -4722,6 +4736,10 @@ def test_attended_preserves_original_exit_when_child_leaves_partial_receipt(
     )
     assert calls == ["ledger", "baseline"]
     assert json.loads((output_root / "stage-results" / "ledger.json").read_text())
+    assert any(
+        path.read_bytes() == b"{"
+        for path in (output_root / "failed-stage-evidence").rglob("stage-result.json")
+    )
     checkpoint = json.loads((output_root / "attended-run.json").read_text())
     assert checkpoint["schema_version"] == 2
     assert checkpoint["failed_stage"] == {"returncode": 97, "role": "baseline"}
