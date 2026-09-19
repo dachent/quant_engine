@@ -11,9 +11,11 @@ import pytest
 
 from portfolio_controller_graph import (
     ControllerGraphError,
-    _mapper_python_hashes,
+    _mapper_python_fingerprint,
+    _required_paths,
     affected_stages,
     build_controller_graph,
+    _git_changed_paths,
     main,
     validate_controller_graph,
 )
@@ -26,23 +28,25 @@ def _isolated_projection_root(tmp_path: Path) -> Path:
     """Copy only the source-bound controller surface for a mutation test."""
 
     root = tmp_path / "repo"
-    for relative_path in (
-        "tools/portfolio_controller_graph.py",
-        "packages/core/src/quant_engine/core/pipeline.py",
-        "tools/portfolio_pipeline_materialize.py",
-        "tools/portfolio_release_builder.py",
-        "tools/portfolio_report.py",
-        "tools/portfolio_control_panel.py",
-        "tools/portfolio_attended_preparation.py",
-        "contracts/portfolio-financial-mvp-source-v1.json",
-        "schemas/portfolio/financial-mvp-source-contract.schema.json",
-        "tests/core/test_attended_preparation.py",
-        "tests/core/test_portfolio_pipeline_materialize.py",
-        "tests/core/test_portfolio_pipeline_orchestration.py",
-        "tests/core/test_portfolio_release_builder.py",
-        "tests/portfolio_report/test_portfolio_report.py",
-        "tests/portfolio_control_panel/test_mvp2_candidate_report_panel.py",
-    ):
+    for relative_path in set(
+        (
+            "tools/portfolio_controller_graph.py",
+            "packages/core/src/quant_engine/core/pipeline.py",
+            "tools/portfolio_pipeline_materialize.py",
+            "tools/portfolio_release_builder.py",
+            "tools/portfolio_report.py",
+            "tools/portfolio_control_panel.py",
+            "tools/portfolio_attended_preparation.py",
+            "contracts/portfolio-financial-mvp-source-v1.json",
+            "schemas/portfolio/financial-mvp-source-contract.schema.json",
+            "tests/core/test_attended_preparation.py",
+            "tests/core/test_portfolio_pipeline_materialize.py",
+            "tests/core/test_portfolio_pipeline_orchestration.py",
+            "tests/core/test_portfolio_release_builder.py",
+            "tests/portfolio_report/test_portfolio_report.py",
+            "tests/portfolio_control_panel/test_mvp2_candidate_report_panel.py",
+        )
+    ).union(_required_paths(REPOSITORY_ROOT)):
         source = REPOSITORY_ROOT / relative_path
         destination = root / relative_path
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -79,6 +83,9 @@ def test_native_controller_projection_is_source_bound_and_valid() -> None:
 
     assert graph["schema_version"] == 1
     assert graph["source_files"]
+    assert graph["excluded_sinks"] == {
+        "workbook": "permanently held outside the MVP execution and acceptance path"
+    }
     assert graph["stages"]["panel"]["dependencies"] == [
         "ledger",
         "attribution",
@@ -386,26 +393,31 @@ def test_cli_accepts_actual_git_change_range(
     assert json.loads(capsys.readouterr().out)["affected_stages"] == []
 
 
-def test_cli_rejects_mismatched_explicit_mapper_evidence(
+def _canonical_tools_mapper_evidence(root: Path) -> dict[str, object]:
+    """Return the installed mapper's public tools-map shape without cache internals."""
+
+    return {
+        "schemaVersion": 1,
+        "generatedAt": "2026-09-19T00:00:00Z",
+        "root": str(root),
+        "package": "tools",
+        "sourceFingerprint": _mapper_python_fingerprint(root, "tools"),
+        "edges": [],
+        "contracts": [],
+        "errors": [],
+        "stats": {},
+        "structural": {},
+    }
+
+
+def test_cli_accepts_current_public_tools_mapper_evidence(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An explicitly supplied mapper must describe this root and source bytes."""
+    """The public mapper artifact is package-scoped and exposes no cache files."""
 
     mapper = tmp_path / "mapper.json"
     mapper.write_text(
-        json.dumps(
-            {
-                "errors": [],
-                "files": {
-                    relative_path: {"kind": "python", "sha256": digest}
-                    for relative_path, digest in _mapper_python_hashes(
-                        REPOSITORY_ROOT
-                    ).items()
-                },
-                "root": str(REPOSITORY_ROOT),
-                "sourceFingerprint": "0" * 64,
-            }
-        ),
+        json.dumps(_canonical_tools_mapper_evidence(REPOSITORY_ROOT)),
         encoding="utf-8",
     )
 
@@ -418,6 +430,113 @@ def test_cli_rejects_mismatched_explicit_mapper_evidence(
                 str(mapper),
             ]
         )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["mapper_evidence"]["status"] == (
+        "accepted-optional-context"
+    )
+
+
+def test_cli_accepts_public_mapper_evidence_with_relative_repository_root(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI normalizes its root before deriving mapper-relative file keys."""
+
+    mapper = tmp_path / "mapper.json"
+    mapper.write_text(
+        json.dumps(_canonical_tools_mapper_evidence(REPOSITORY_ROOT)),
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(REPOSITORY_ROOT)
+
+    assert main(["--repo-root", ".", "--mapper-evidence", str(mapper)]) == 0
+    assert json.loads(capsys.readouterr().out)["mapper_evidence"]["package"] == "tools"
+
+
+def test_cli_rejects_stale_public_tools_mapper_evidence(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A source-byte change under the declared mapper package invalidates evidence."""
+
+    root = _isolated_projection_root(tmp_path)
+    mapper = tmp_path / "mapper.json"
+    mapper.write_text(
+        json.dumps(_canonical_tools_mapper_evidence(root)), encoding="utf-8"
+    )
+    report = root / "tools/portfolio_report.py"
+    report.write_bytes(report.read_bytes() + b"\n# mapper-package-drift\n")
+
+    assert (
+        main(
+            [
+                "--repo-root",
+                str(root),
+                "--mapper-evidence",
+                str(mapper),
+            ]
+        )
         == 1
     )
     assert "mapper source fingerprint differs" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "error"),
+    [
+        ("root", "C:/not-the-repository", "mapper root differs"),
+        ("package", "../tools", "mapper package is invalid"),
+    ],
+)
+def test_cli_rejects_public_mapper_root_or_package_drift(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    field: str,
+    value: str,
+    error: str,
+) -> None:
+    """Root and package declarations are as binding as the source fingerprint."""
+
+    mapper = _canonical_tools_mapper_evidence(REPOSITORY_ROOT)
+    mapper[field] = value
+    path = tmp_path / "mapper.json"
+    path.write_text(json.dumps(mapper), encoding="utf-8")
+
+    assert (
+        main(["--repo-root", str(REPOSITORY_ROOT), "--mapper-evidence", str(path)]) == 1
+    )
+    assert error in capsys.readouterr().out
+
+
+def test_actual_delivery_range_has_complete_affected_stage_closure() -> None:
+    """The actual #374 delivery range cannot omit its changed producer surfaces."""
+
+    graph = build_controller_graph(REPOSITORY_ROOT)
+    changed = _git_changed_paths(REPOSITORY_ROOT, "a579a35", "HEAD")
+
+    assert affected_stages(graph, changed) == [
+        "ledger",
+        "baseline",
+        "attribution",
+        "analytics",
+        "report",
+        "panel",
+    ]
+
+
+def test_validation_rejects_missing_required_artifact_consumer_or_sink() -> None:
+    """A saved projection may not hide a required artifact-flow consumer."""
+
+    graph = build_controller_graph(REPOSITORY_ROOT)
+    flows = graph["artifact_flows"]
+    assert isinstance(flows, list) and flows
+    flows[0]["consumers"] = []
+
+    with pytest.raises(ControllerGraphError, match="artifact_flows"):
+        validate_controller_graph(REPOSITORY_ROOT, graph)
+
+    graph = build_controller_graph(REPOSITORY_ROOT)
+    flows = graph["artifact_flows"]
+    assert isinstance(flows, list) and flows
+    flows[0]["sinks"] = []
+    with pytest.raises(ControllerGraphError, match="artifact_flows"):
+        validate_controller_graph(REPOSITORY_ROOT, graph)

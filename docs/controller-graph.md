@@ -33,6 +33,19 @@ integration-test path in the graph. Missing source bytes, changed declarations,
 missing static symbols/calls, an omitted bound file, or a stale fingerprint are
 validation failures.
 
+The same source-bound projection carries six maintained `artifact_flows`, not a
+separate mapper or diagram. They trace retained/preparation receipts,
+checkpoints and caches; provider-ledger and baseline/epoch/HWM/capital
+generations; attribution/dependence/decomposition generations; report JSON and
+HTML; panel JSON and HTML; and coordinated generation/CURRENT-pointer handoff.
+Every flow names its current producer, consumers, native validators, linked
+tests, downstream stages and terminal sink(s). The actual delivery change range
+is resolved through these records, so an unlisted relevant producer, contract
+or consumer fails reconciliation rather than disappearing. The
+publication-pointer record documents the existing owner-publication gate; it
+does not create a new publication requirement. Workbook is an explicit
+excluded sink and cannot become a required edge.
+
 The graph is deliberately not an execution authority.  AST cannot prove dynamic
 runtime ordering, source admission/finality, recovery/reuse behavior, or
 financial numerics.  Those guarantees remain with the supported attended
@@ -40,9 +53,11 @@ runner and its integration tests.  The gate neither replaces nor invokes them.
 
 The graph never probes an ancestor for task-specific mapper snapshots. An
 optional mapper artifact is accepted only through `--mapper-evidence <path>`.
-It must name this exact repository root, have no scanner errors, and carry the
-current installed-mapper Python fingerprint: the SHA-256 of sorted
-`relative_path:raw_sha256` lines for every scanned Python file. Accepted mapper
+It must name this exact repository root and package, have no scanner errors,
+and carry the current installed-mapper Python fingerprint: the SHA-256 of
+sorted `relative_path:raw_sha256` lines for every scanned Python file in its
+declared package (currently `tools`). The mapper's internal cache `files`
+dictionary is not required or consumed. Accepted mapper
 evidence is contextual only; the standard-library executable-contract gate does
 not need it in CI.
 
