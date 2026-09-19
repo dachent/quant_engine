@@ -231,6 +231,58 @@ def _selected_history_authorities(files: Mapping[str, object]) -> dict[str, Path
     }
 
 
+def _selected_dependence_handoff(
+    *,
+    config: Mapping[str, Any],
+    selection: Mapping[str, object],
+    history_source: Path,
+    baseline_source: Path,
+    contract: Path,
+) -> dict[str, object]:
+    """Rebind every selected-dependence authority from the admitted selection.
+
+    The retained template contributes only its fixed schema; source-sensitive
+    locators must come from the selection already admitted for this run.
+    """
+
+    files = selection.get("files")
+    if not isinstance(files, Mapping):
+        raise AttendedPreparationError("source selection pins are absent")
+    authorities = _selected_history_authorities(files)
+    selected = _read(
+        _pin(config["dependence_selection_template"], "dependence selection"),
+        "dependence selection",
+    )
+    required = {
+        "schema_version",
+        "history_generation_root",
+        "allocation_generation_root",
+        "provider_ledger_generation_root",
+        "financial_input_contract_path",
+        "provider_admission_receipt_path",
+        "portfolio123_version_evidence_path",
+    }
+    if set(selected) != required or selected.get("schema_version") != 1:
+        raise AttendedPreparationError("dependence selection schema differs")
+    if authorities["financial_input_contract_path"] != contract.resolve():
+        raise AttendedPreparationError("selected financial input contract differs")
+    return {
+        "schema_version": 1,
+        "history_generation_root": str(history_source.resolve()),
+        "allocation_generation_root": str(baseline_source.resolve()),
+        "provider_ledger_generation_root": str(
+            Path(str(config["provider_ledger_generation_root"])).resolve()
+        ),
+        "financial_input_contract_path": str(contract.resolve()),
+        "provider_admission_receipt_path": str(
+            authorities["provider_admission_receipt_path"].resolve()
+        ),
+        "portfolio123_version_evidence_path": str(
+            authorities["portfolio123_version_evidence_path"].resolve()
+        ),
+    }
+
+
 def _retained_history_requires_rebuild(
     history_root: Path,
     contract_path: Path,
@@ -551,6 +603,8 @@ def prepare_attended_inputs(*, preparation_spec_path: Path, output_root: Path, r
     from static_snapshot_coverage_receipts import issue_static_snapshot_receipts
 
     cutoff = _date(requested_as_of, "requested financial cutoff")
+    source_clock = root / "preparation" / "source-clock.json"
+    _write(source_clock, {"schema_version": 1, "source_phase": plan["source_phase"], "data_clock": plan["data_clock"]})
     contract = _pin(config["financial_input_contract"], "financial input contract")
     selection = _read(
         _pin(config["source_selection"], "source selection"), "source selection"
@@ -574,8 +628,13 @@ def prepare_attended_inputs(*, preparation_spec_path: Path, output_root: Path, r
 
     # The recipe is produced from retained accepted readers; all later stages use
     # the real private roots below, never a task-script output path.
-    selected = _read(_pin(config["dependence_selection_template"], "dependence selection"), "dependence selection")
-    selected.update({"history_generation_root": str(history_source), "allocation_generation_root": str(baseline_source), "financial_input_contract_path": str(contract)})
+    selected = _selected_dependence_handoff(
+        config=config,
+        selection=selection,
+        history_source=history_source,
+        baseline_source=baseline_source,
+        contract=contract,
+    )
     selected_path = root / "preparation" / "dependence-selected-inputs.json"
     _write(selected_path, selected)
     dependence_result = dependence.write_source(root / "preparation" / "dependence", contract_path=contract, policy_path=ROOT / "contracts" / "portfolio-dependence-policy-v1.json", history_generation_root=history_source, allocation_generation_root=baseline_source, evaluated_on=date.fromisoformat(evaluated_on), selected_inputs_path=selected_path)
@@ -589,7 +648,7 @@ def prepare_attended_inputs(*, preparation_spec_path: Path, output_root: Path, r
         plan_roots[mode] = Path(str(result["destination"]))
 
     recipe_path = root / "preparation" / "staging-recipe.json"
-    release.create_recipe(provider_ledger_spec=None, provider_ledger_generation=ledger_source, baseline_spec=_pin(config["baseline_spec_template"], "baseline spec"), base_factor_file=_pin(config["base_factor_file"], "base factor file"), implementation_reconciliation=_pin(config["implementation_reconciliation"], "implementation reconciliation"), implementation_return_attribution=_pin(config["implementation_return_attribution"], "implementation attribution"), strategy_attribution_root=attribution_source.parents[1], strategy_attribution_generation_id=attribution_source.name, decomposition_plan_bundle=plan_roots["LIVE_ONLY"], hybrid_decomposition_plan_bundle=plan_roots["LIVE_PLUS_BACKTEST"], correlation_source_root=dependence_root, legacy_panel=Path(str(config["legacy_panel_root"])), as_of_date=cutoff, pipeline_id="qe-attended-native-eod17", release_commit=release_commit, output=recipe_path, epoch_manifest_generation_root=None, epoch_manifest_generation_id=None, dependence_selected_inputs_path=selected_path)
+    release.create_recipe(provider_ledger_spec=None, provider_ledger_generation=ledger_source, baseline_spec=_pin(config["baseline_spec_template"], "baseline spec"), base_factor_file=_pin(config["base_factor_file"], "base factor file"), implementation_reconciliation=_pin(config["implementation_reconciliation"], "implementation reconciliation"), implementation_return_attribution=_pin(config["implementation_return_attribution"], "implementation attribution"), strategy_attribution_root=attribution_source.parents[1], strategy_attribution_generation_id=attribution_source.name, decomposition_plan_bundle=plan_roots["LIVE_ONLY"], hybrid_decomposition_plan_bundle=plan_roots["LIVE_PLUS_BACKTEST"], correlation_source_root=dependence_root, legacy_panel=Path(str(config["legacy_panel_root"])), as_of_date=cutoff, pipeline_id="qe-attended-native-eod17", release_commit=release_commit, output=recipe_path, epoch_manifest_generation_root=None, epoch_manifest_generation_id=None, dependence_selected_inputs_path=selected_path, source_clock_path=source_clock)
     ledger_result = release.build_ledger(recipe_path, root / "stages" / "ledger")
     release._record_stage(root, "ledger", ledger_result)  # noqa: SLF001
     baseline_result = release.build_baseline(recipe_path, root / "stages" / "ledger", root / "stages" / "baseline")
@@ -609,7 +668,7 @@ def prepare_attended_inputs(*, preparation_spec_path: Path, output_root: Path, r
     epoch = stage_current_epoch_manifest(provider_ledger_generation_root=root / "stages" / "ledger", provider_ledger_generation_id=str(ledger_result["generation_id"]), baseline_generation_root=root / "stages" / "baseline", baseline_generation_id=str(baseline_result["generation_id"]), flow_policy_path=ROOT / "contracts" / "account-strategy-flow-classification-policy-v1.json", crosswalk_path=crosswalk, manifest_schema_path=ROOT / "schemas" / "portfolio" / "account-strategy-manifest.schema.json", receipt_authority_path=authority_path, admission_policy_path=_pin(config["epoch_admission_policy"], "epoch admission policy"), receipt_paths=receipt_paths, output_generation_root=root / "stages" / "epoch")
     epoch_root = root / "stages" / "epoch" / "generations" / str(epoch["generation_id"])
     recipe_path = root / "preparation" / "release-recipe.json"
-    release.create_recipe(provider_ledger_spec=None, provider_ledger_generation=ledger_source, baseline_spec=_pin(config["baseline_spec_template"], "baseline spec"), base_factor_file=_pin(config["base_factor_file"], "base factor file"), implementation_reconciliation=_pin(config["implementation_reconciliation"], "implementation reconciliation"), implementation_return_attribution=_pin(config["implementation_return_attribution"], "implementation attribution"), strategy_attribution_root=attribution_source.parents[1], strategy_attribution_generation_id=attribution_source.name, decomposition_plan_bundle=plan_roots["LIVE_ONLY"], hybrid_decomposition_plan_bundle=plan_roots["LIVE_PLUS_BACKTEST"], correlation_source_root=dependence_root, legacy_panel=Path(str(config["legacy_panel_root"])), as_of_date=cutoff, pipeline_id="qe-attended-native-eod17", release_commit=release_commit, output=recipe_path, epoch_manifest_generation_root=root / "stages" / "epoch", epoch_manifest_generation_id=str(epoch["generation_id"]), dependence_selected_inputs_path=selected_path)
+    release.create_recipe(provider_ledger_spec=None, provider_ledger_generation=ledger_source, baseline_spec=_pin(config["baseline_spec_template"], "baseline spec"), base_factor_file=_pin(config["base_factor_file"], "base factor file"), implementation_reconciliation=_pin(config["implementation_reconciliation"], "implementation reconciliation"), implementation_return_attribution=_pin(config["implementation_return_attribution"], "implementation attribution"), strategy_attribution_root=attribution_source.parents[1], strategy_attribution_generation_id=attribution_source.name, decomposition_plan_bundle=plan_roots["LIVE_ONLY"], hybrid_decomposition_plan_bundle=plan_roots["LIVE_PLUS_BACKTEST"], correlation_source_root=dependence_root, legacy_panel=Path(str(config["legacy_panel_root"])), as_of_date=cutoff, pipeline_id="qe-attended-native-eod17", release_commit=release_commit, output=recipe_path, epoch_manifest_generation_root=root / "stages" / "epoch", epoch_manifest_generation_id=str(epoch["generation_id"]), dependence_selected_inputs_path=selected_path, source_clock_path=source_clock)
 
     calendar_path = _pin(config["calendar_authority"], "calendar authority")
     calendar = _read(calendar_path, "calendar authority")
@@ -635,7 +694,7 @@ def prepare_attended_inputs(*, preparation_spec_path: Path, output_root: Path, r
     release._record_stage(root, "attribution", attribution_result)  # noqa: SLF001
 
     source_run = root / "preparation" / "source-run.json"
-    attended = {"schema_version": 1, "release_recipe": _definition(recipe_path), "history_generation": _directory_definition(history_source), "allocation_generation": _directory_definition(root / "stages" / "baseline" / "generations" / str(baseline_result["generation_id"])), "financial_input_contract": _definition(contract), "required_stages": ["ledger", "baseline", "attribution", "analytics", "report", "panel-candidate", "panel"], "predecessor_spec": None, "data_clock": plan["data_clock"]}
+    attended = {"schema_version": 1, "release_recipe": _definition(recipe_path), "history_generation": _directory_definition(history_source), "allocation_generation": _directory_definition(root / "stages" / "baseline" / "generations" / str(baseline_result["generation_id"])), "financial_input_contract": _definition(contract), "required_stages": ["ledger", "baseline", "attribution", "analytics", "report", "panel-candidate", "panel"], "predecessor_spec": None, "data_clock": plan["data_clock"], "source_clock": _definition(source_clock)}
     _write(source_run, {"schema_version": 1, "as_of_date": cutoff, "release_commit": release_commit, "artifacts": [], "attended": attended})
     financial = {"--hwm-governed-result": hwm_result, "--hwm-governed-input-generation": hwm_input, "--hwm-governed-calendar-authority": calendar_path, "--hwm-governed-admission-receipt": root / "stages" / "ledger" / "generations" / str(ledger_result["generation_id"]) / "admit-or-declare-receipt.json", "--invested-capital-result": capital_result, "--invested-capital-input-generation": capital_input}
     handoff = {"schema_version": 1, "source_run": _definition(source_run), "financial_stage_inputs": {key: _definition(path) for key, path in sorted(financial.items())}, "source_phase": plan["source_phase"], "data_clock": plan["data_clock"]}

@@ -959,7 +959,7 @@ def _recipe(path: Path) -> dict[str, Any]:
         )
     if schema_version == 10:
         required.add("epoch_manifest_generation")
-    if set(recipe) - {"dependence_selected_inputs"} != required:
+    if set(recipe) - {"dependence_selected_inputs", "source_clock"} != required:
         raise VerticalBuildError("vertical-build recipe keys differ")
     date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
     for key in (
@@ -991,6 +991,16 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError("dependence_selected_inputs identity differs")
+    if "source_clock" in recipe:
+        definition = recipe["source_clock"]
+        if not isinstance(definition, dict) or set(definition) != {
+            "path", "sha256", "size_bytes"
+        }:
+            raise VerticalBuildError("source_clock definition differs")
+        artifact = _path(definition["path"], "source_clock.path")
+        sha256, size = _sha(artifact)
+        if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+            raise VerticalBuildError("source_clock identity differs")
     if schema_version == 6:
         definition = recipe["provider_ledger_spec"]
         if not isinstance(definition, dict) or set(definition) != {
@@ -1162,6 +1172,7 @@ def create_recipe(
     epoch_manifest_generation_id: str | None = None,
     strategy_attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
 ) -> dict[str, Any]:
     date.fromisoformat(as_of_date)
     if len(release_commit) != 40:
@@ -1257,6 +1268,8 @@ def create_recipe(
         payload["dependence_selected_inputs"] = _file_definition(
             dependence_selected_inputs_path.resolve()
         )
+    if source_clock_path is not None:
+        payload["source_clock"] = _file_definition(source_clock_path.resolve())
     if provider_ledger_spec is not None:
         payload["provider_ledger_spec"] = _file_definition(
             provider_ledger_spec.resolve()
@@ -4925,6 +4938,7 @@ def build_report_candidate(
     portfolio_root: Path | None = None,
     attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
 ) -> dict[str, Any]:
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
@@ -4990,6 +5004,7 @@ def build_report_candidate(
             if dependence_selected_inputs_path is not None
             else ()
         ),
+        *(("--source-clock", str(source_clock_path)) if source_clock_path is not None else ()),
         "--implementation-reconciliation",
         str(implementation_reconciliation),
         "--implementation-return-attribution",
@@ -5449,6 +5464,7 @@ def build_report(
     workbook_runtime_path: Path | None = None,
     attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
 ) -> dict[str, Any]:
     if workbook_runtime_path is not None:
         raise VerticalBuildError(
@@ -5528,6 +5544,7 @@ def build_report(
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         epoch_manifest_generation_id=epoch_manifest_generation_id,
         **forwarded_arguments,
+        source_clock_path=source_clock_path,
     )
     candidate_dir = Path(_text(candidate.get("candidate_dir"), "report candidate"))
     report_arguments = (
@@ -5565,6 +5582,7 @@ def build_report(
             if dependence_selected_inputs_path is not None
             else ()
         ),
+        *(("--source-clock", str(source_clock_path)) if source_clock_path is not None else ()),
         *(
             (
                 "--decomposition-lenses-root",
@@ -6719,6 +6737,11 @@ def build_stage(
         if dependence_selected_inputs_path is not None
         else {}
     )
+    source_clock_paths = (
+        {"source_clock_path": _path(recipe["source_clock"]["path"], "source_clock.path")}
+        if isinstance(recipe.get("source_clock"), dict)
+        else {}
+    )
     implementation_reconciliation = _path(
         recipe["implementation_reconciliation"]["path"],
         "implementation reconciliation",
@@ -6786,6 +6809,7 @@ def build_stage(
             attribution_generation_id=attribution_generation_id,
             hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
             **dependence_selected_inputs_paths,
+            **source_clock_paths,
             **hwm_paths,
             **portfolio_paths,
             **capital_paths,

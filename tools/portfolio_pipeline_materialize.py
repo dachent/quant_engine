@@ -5322,6 +5322,7 @@ def _attended_request_identity(
     source_run: Path,
     financial_stage_inputs: Mapping[str, Path],
     source_phase: Mapping[str, Any],
+    runtime: Mapping[str, Any],
 ) -> dict[str, Any]:
     return {
         "output_root": str(output_root),
@@ -5333,9 +5334,52 @@ def _attended_request_identity(
         "repo_root": str(repo_root),
         "requested_as_of": requested_as_of,
         "retained_cache_root": str(retained_cache_root),
+        "runtime": _canonical_clone(runtime),
         "source_phase": _canonical_clone(source_phase),
         "source_run": _file_definition(source_run),
         "workspace_root": str(workspace_root),
+    }
+
+
+def _runtime_identity(python: Path, repo_root: Path) -> dict[str, object]:
+    """Probe the exact configured interpreter before source preparation writes."""
+
+    if python.is_symlink() or not python.is_file():
+        raise MaterializationError("attended configured Python is unavailable")
+    try:
+        probe = subprocess.run(
+            [
+                str(python),
+                "-I",
+                "-c",
+                "import json,sys; print(json.dumps({'executable':sys.executable,'version':list(sys.version_info[:3])},sort_keys=True))",
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        value = json.loads(probe.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise MaterializationError("attended configured Python probe failed") from exc
+    if probe.returncode != 0 or not isinstance(value, dict):
+        raise MaterializationError("attended configured Python probe failed")
+    executable = value.get("executable")
+    version = value.get("version")
+    if (
+        not isinstance(executable, str)
+        or Path(executable).resolve() != python.resolve()
+        or not isinstance(version, list)
+        or len(version) != 3
+        or not all(isinstance(item, int) for item in version)
+    ):
+        raise MaterializationError("attended configured Python identity differs")
+    return {
+        "environment_sha256": runtime_environment_sha256(python),
+        "executable_path": str(python.resolve()),
+        "executable_sha256": _sha(python)[0],
+        "version": version,
     }
 
 
@@ -5388,7 +5432,7 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Path | str]
         raise MaterializationError(
             "attended repository root differs from this entrypoint"
         )
-    _sha(python)
+    runtime = _runtime_identity(python, repo_root)
     if workspace_root.is_symlink() or not workspace_root.is_dir():
         raise MaterializationError("attended workspace root is unavailable")
     if retained_cache_root.is_symlink() or not retained_cache_root.is_dir():
@@ -5409,6 +5453,7 @@ def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Path | str]
         "repo_root": repo_root,
         "requested_as_of": requested_as_of,
         "retained_cache_root": retained_cache_root,
+        "runtime": runtime,
         "workspace_root": workspace_root,
     }
 
@@ -5422,6 +5467,7 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
     workspace_root = cast(Path, basic["workspace_root"])
     output_root = cast(Path, basic["output_root"])
     retained_cache_root = cast(Path, basic["retained_cache_root"])
+    runtime = cast(Mapping[str, Any], basic["runtime"])
     portfolio_root = cast(Path, basic["portfolio_root"])
     requested_as_of = cast(str, basic["requested_as_of"])
     source_run = Path(args.source_run).resolve()
@@ -5463,7 +5509,11 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
         "required_stages",
         "predecessor_spec",
     }
-    allowed_attended = (expected_attended, expected_attended | {"data_clock"})
+    allowed_attended = (
+        expected_attended,
+        expected_attended | {"data_clock"},
+        expected_attended | {"data_clock", "source_clock"},
+    )
     if not isinstance(attended, dict) or set(attended) not in allowed_attended:
         raise MaterializationError("attended extension schema differs")
     if attended.get("schema_version") != 1:
@@ -5489,6 +5539,16 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
             date.fromisoformat(_text(data_clock["latest_common_eod"], "attended latest common EOD"))
         except ValueError as exc:
             raise MaterializationError("attended data clock differs") from exc
+    source_clock = attended.get("source_clock")
+    if source_clock is not None:
+        clock_path = _validate_file_definition(source_clock, "attended source clock")
+        try:
+            import portfolio_report as report
+
+            if report._validated_source_clock(clock_path) != data_clock:  # noqa: SLF001
+                raise ValueError("clock differs")
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise MaterializationError("attended source clock differs") from exc
     if getattr(args, "preparation_spec", None) is not None and data_clock is None:
         raise MaterializationError("attended preparation data clock is absent")
     required_stages = attended.get("required_stages")
@@ -5596,6 +5656,7 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
         source_run=source_run,
         financial_stage_inputs=financial_stage_inputs,
         source_phase=source_phase,
+        runtime=runtime,
     )
     return {
         "financial_inputs": financial_inputs or {},

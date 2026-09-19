@@ -8983,6 +8983,7 @@ def _panel_data(
             ),
             "panel_mode": "LOCAL_DIRECT_FILE_READ_ONLY",
             "portfolio_as_of": _text(report.get("as_of_date"), "report.as_of_date"),
+            "source_clock": report.get("source_clock"),
             "freshness_evaluated_on": freshness_evaluated_on,
             "performance_lineage": performance_lineage,
             "correlation_generation_id": correlation_identity["generation_id"],

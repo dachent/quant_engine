@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import sys
 
 import pytest
 
@@ -19,7 +20,7 @@ def _argv(tmp_path: Path, *, execute: bool = False, resume: bool = False) -> lis
         "--repo-root",
         str(Path(materializer.__file__).resolve().parents[1]),
         "--python",
-        str(Path(materializer.__file__).resolve()),
+        sys.executable,
         "--workspace-root",
         str(tmp_path / "workspace"),
         "--output-root",
@@ -181,6 +182,82 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
         expected,
         expected,
     ]
+
+
+def test_selected_dependence_handoff_replaces_every_stale_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The historical template cannot retain a superseded ledger authority."""
+
+    template = {
+        "schema_version": 1,
+        "history_generation_root": "old-history",
+        "allocation_generation_root": "old-baseline",
+        "provider_ledger_generation_root": "old-ledger",
+        "financial_input_contract_path": "old-contract",
+        "provider_admission_receipt_path": "old-receipt",
+        "portfolio123_version_evidence_path": "old-p123",
+    }
+    selection = {
+        "files": {
+            "provider_admission_receipt_path": {"path": "new-receipt"},
+            "financial_input_contract_path": {"path": "new-contract"},
+            "portfolio123_version_evidence_path": {"path": "new-p123"},
+        }
+    }
+    config = {
+        "provider_ledger_generation_root": str(tmp_path / "new-ledger"),
+        "dependence_selection_template": {"path": "template.json"},
+    }
+
+    monkeypatch.setattr(preparation, "_read", lambda *_args: template.copy())
+    monkeypatch.setattr(
+        preparation, "_pin", lambda _value, _label: tmp_path / "template.json"
+    )
+    monkeypatch.setattr(
+        preparation, "_selected_history_authorities", lambda _files: {
+            "provider_admission_receipt_path": tmp_path / "new-receipt",
+            "financial_input_contract_path": tmp_path / "new-contract",
+            "portfolio123_version_evidence_path": tmp_path / "new-p123",
+        }
+    )
+
+    actual = preparation._selected_dependence_handoff(
+        config=config,
+        selection=selection,
+        history_source=tmp_path / "new-history",
+        baseline_source=tmp_path / "new-baseline",
+        contract=tmp_path / "new-contract",
+    )
+
+    assert actual == {
+        "schema_version": 1,
+        "history_generation_root": str((tmp_path / "new-history").resolve()),
+        "allocation_generation_root": str((tmp_path / "new-baseline").resolve()),
+        "provider_ledger_generation_root": str((tmp_path / "new-ledger").resolve()),
+        "financial_input_contract_path": str((tmp_path / "new-contract").resolve()),
+        "provider_admission_receipt_path": str((tmp_path / "new-receipt").resolve()),
+        "portfolio123_version_evidence_path": str((tmp_path / "new-p123").resolve()),
+    }
+
+
+def test_attended_basic_preflight_probes_configured_runtime_before_source_qc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A file-shaped --python argument is not enough to start preparation."""
+
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        materializer,
+        "_runtime_identity",
+        lambda python, repo: calls.append(python) or {"repo_root": str(repo)},
+    )
+
+    args = materializer._parser().parse_args(_argv(tmp_path))
+    basic = materializer._attended_basic_preflight(args)
+
+    assert basic["python"] == Path(sys.executable).resolve()
+    assert calls == [Path(sys.executable).resolve()]
 
 
 def test_history_dependency_mismatch_requires_rebuild_but_source_failure_does_not(
