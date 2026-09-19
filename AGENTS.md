@@ -27,6 +27,16 @@ checkpoints, issue descriptions, PR text and skill defaults:
   rollover does not by itself reopen completed acquisition or require another
   login. Distinguish a newer incremental refresh from a missing original
   capture; preserve and reuse the original captures and their verified QC.
+- The general runner must identify and declare the latest common EOD supported
+  by the required applicable sources and the data-as-of date/time, with timezone
+  and source precision, separately from the selected financial cutoff, capture
+  and execution timestamps. Derive the common EOD from verified source coverage
+  and finality under existing calendar/publication-lag rules; do not take a
+  minimum across unrelated closed epochs, fixed histories or publication dates.
+  Declare limiting sources and bind these declarations into the real QC receipt
+  and report/panel metadata. A date-only source must not receive an invented
+  time. Identifying a later common EOD does not change this delivery's fixed
+  EOD2026-09-17 selection without a new owner instruction.
 - If any required capture or input QC remains pending, keep the source phase
   open in the governing issue. Do not report the input phase complete or resume
   downstream work. Resume it only after the missing source evidence is obtained
