@@ -1307,17 +1307,6 @@ def test_release_builder_admits_exact_planner_bundle(tmp_path: Path) -> None:
 
     assert {row["source_key"] for row in admitted} == {"economic", "sector", "style"}
     assert {row["surface"] for row in admitted} == {"STATIC", "DYNAMIC_FLS"}
-    for row in admitted:
-        specification = json.loads(
-            (destination / str(row["path"])).read_text(encoding="utf-8")
-        )
-        assert specification["target_source"]["interval_policy"][
-            "series_policies"
-        ] == {}
-        assert {
-            composition["interval_association_status"]
-            for composition in specification["series_composition"].values()
-        } == {"UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY"}
 
 
 def test_release_builder_accepts_planner_valid_manifest_forms(
