@@ -213,5 +213,12 @@
     "The audit did not inspect live GitHub issue comments or remote CI because the scope forbids network/external calls. It relies on the named retained local evidence and read-only Git history.",
     "Code-mapper artifacts were read from the actual repository-root .codex-bootstrap location. Their static inferred relationships support caller/contract tracing but cannot prove runtime order, source finality, numerical correctness, or side-effect absence.",
     "No claim is made that any accepted or released financial result was invalid. The retained current evidence instead says no invalid accepted release or unauthorized publication was established."
-  ]
+  ],
+  "parent_adjudication": {
+    "acceptance_boundary": "Exact evidence bindings may be accepted as an audit artifact; this does not accept every causal inference or proposed control.",
+    "chronology_correction": "Finding 3 does not prove the Sep19 wrapper was written or executed after the later EOD17 instruction. The wrapper is superseded evidence. Current baseline CLI workbook requirements independently demonstrate an unimplemented hold.",
+    "terminal_control_correction": "Finding 1 must not imply the Sep1 RCCA implemented a new terminal control. Its source says publisher/authorization/rollback controls already existed; its corrective requirement concerned actual use and product completion.",
+    "rejected_new_receipt_control": "No evidence shows product code accepting a model-proctor receipt as a product-run receipt. The substitution is in parent decisions/status, not a reproduced parser vulnerability. Do not add a new receipt framework or handoff prerequisite to fix a nonexistent consumer.",
+    "required_primary_causal_link": "Sep5 plan explicitly requires core/materializer together; original M5 task scope and sealed component verifier omitted that composed seam. Current broader tests reproduce the resulting divergence. This is the stronger requirement-to-packet-to-escape chain."
+  }
 }
