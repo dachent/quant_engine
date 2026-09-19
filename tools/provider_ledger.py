@@ -7559,12 +7559,18 @@ def _materialized_rows(
     elif item.item_kind is DatasetItemKind.CATALOG_DATASET:
         if "/" not in item.item_id:
             target = _SOURCE_FACT_TARGET.get(item.item_id)
-            if target is not None and target in provider_facts:
+            if target is not None and (
+                target not in _NATIVE_LEVERAGE_OBSERVATION_FACTS
+                or target in provider_facts
+            ):
                 target_facts = (target,)
                 rows = provider_facts.get(target, ())
     elif item.item_kind is DatasetItemKind.COVERAGE_FACT_TYPE:
         target = _SOURCE_FACT_TARGET.get(item.item_id)
-        if target is not None and target in provider_facts:
+        if target is not None and (
+            target not in _NATIVE_LEVERAGE_OBSERVATION_FACTS
+            or target in provider_facts
+        ):
             target_facts = (target,)
             rows = provider_facts.get(target, ())
     elif item.item_kind is DatasetItemKind.ARTIFACT:
@@ -7596,16 +7602,32 @@ def _materialized_rows(
 def _row_bounds(rows: Sequence[Mapping[str, Any]]) -> tuple[date, date]:
     observed = []
     for row in rows:
+        if row.get("measurement_basis") is not None:
+            source_days = [
+                _day(row[field], f"materialized row {field}")
+                for field in _NATIVE_LEVERAGE_DATE_FIELDS
+                if row.get(field) not in {None, ""}
+            ]
+            if not source_days:
+                raise ProviderLedgerError(
+                    "admitted dataset lacks an exact observed interval"
+                )
+            observed.extend(source_days)
+            continue
         raw = row.get("date")
-        observed.append(
+        observed_day = (
             _day(raw, "materialized row date")
             if raw not in {None, ""}
             else _row_day(row)
         )
-    days = [item for item in observed if item is not None]
-    if len(days) != len(rows) or not days:
+        if observed_day is None:
+            raise ProviderLedgerError(
+                "admitted dataset lacks an exact observed interval"
+            )
+        observed.append(observed_day)
+    if not observed:
         raise ProviderLedgerError("admitted dataset lacks an exact observed interval")
-    return min(days), max(days)
+    return min(observed), max(observed)
 
 
 def _dataset_disposition(
