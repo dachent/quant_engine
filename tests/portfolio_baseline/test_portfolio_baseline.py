@@ -1318,6 +1318,84 @@ def test_provider_ledger_v2_consumes_only_effective_authoritative_account_facts(
 
 
 @pytest.mark.parametrize(
+    ("observed_at", "expects_position"),
+    (
+        ("2026-09-18T03:59:40.004417+00:00", True),
+        ("2026-09-18T04:00:00+00:00", False),
+    ),
+)
+def test_provider_ledger_schwab_current_position_uses_new_york_financial_day(
+    observed_at: str, expects_position: bool
+) -> None:
+    """A native UTC position date remains authoritative, but EOD selection is New York."""
+
+    catalog = {
+        "admissions": [
+            {
+                "account_id": "account-schwab",
+                "account_reconciliation_sha256": "a" * 64,
+                "disposition": "AUTHORITATIVE",
+                "effective_end": "2026-09-18",
+                "effective_start": "2026-09-18",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "fact_type": "positions",
+                "pool_id": None,
+                "provider_id": "schwab",
+                "strategy_id": None,
+            }
+        ],
+        "catalog_schema_version": 2,
+        "flows": [],
+        "nav_observations": [],
+        "positions": [
+            {
+                "account_id": "account-schwab",
+                "as_of_date": "2026-09-18",
+                "mapping_status": "MAPPED",
+                "observed_at": observed_at,
+                "provider_id": "schwab",
+                "record_id": "schwab:position-native-utc-18",
+                "security_id": "security-schwab-current",
+                "source_artifact_id": "source/schwab-current.json",
+                "source_record_id": "position-native-utc-18",
+            }
+        ],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+
+    if expects_position:
+        result = baseline._provider_ledger_facts(
+            catalog,
+            [{"account_id": "account-schwab"}],
+            [],
+            [],
+            [],
+            [],
+            date(2026, 9, 17),
+        )
+        assert [row["record_id"] for row in result[3]] == [
+            "schwab:position-native-utc-18"
+        ]
+    else:
+        with pytest.raises(
+            baseline.BaselineValidationError,
+            match="provider-ledger fact is newer than baseline",
+        ):
+            baseline._provider_ledger_facts(
+                catalog,
+                [{"account_id": "account-schwab"}],
+                [],
+                [],
+                [],
+                [],
+                date(2026, 9, 17),
+            )
+
+
+@pytest.mark.parametrize(
     ("admission_updates", "fact_updates"),
     (
         ({"provider_id": "alpaca"}, {}),

@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 from typing import Any, Final, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -1649,7 +1650,35 @@ def _provider_ledger_facts(
                 )
             ):
                 continue
-            if fact_date > baseline_as_of:
+            financial_fact_date = fact_date
+            if (
+                name == "positions"
+                and provider_id == "schwab"
+                and item.get("observed_at") is not None
+            ):
+                try:
+                    observed_at = datetime.fromisoformat(
+                        _text(item.get("observed_at"), "positions.observed_at")
+                    )
+                except ValueError as exc:
+                    raise BaselineValidationError(
+                        "Schwab current position clock is invalid"
+                    ) from exc
+                if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+                    raise BaselineValidationError(
+                        "Schwab current position clock must be timezone-aware"
+                    )
+                if observed_at.date() != fact_date:
+                    raise BaselineValidationError(
+                        "Schwab current position native date differs"
+                    )
+                # Authority remains bound to the native UTC row date above.  The
+                # retained current-point evidence has already bound this clock;
+                # only its financial-cutoff comparison uses Schwab's New York day.
+                financial_fact_date = observed_at.astimezone(
+                    ZoneInfo("America/New_York")
+                ).date()
+            if financial_fact_date > baseline_as_of:
                 raise BaselineValidationError(
                     "provider-ledger fact is newer than baseline"
                 )

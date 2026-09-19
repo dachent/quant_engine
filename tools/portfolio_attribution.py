@@ -101,7 +101,7 @@ def _verify_hash(path: Path, expected: object, name: str) -> tuple[str, int]:
 
 def _baseline(
     root: Path, baseline_generation_id: str | None = None
-) -> tuple[dict[str, Any], dict[str, str], Path, date]:
+) -> tuple[dict[str, Any], dict[str, str], Path, SourceArtifact]:
     if baseline_generation_id is None:
         pointer = read_current(root)
         baseline_generation_id = pointer.generation_id
@@ -123,6 +123,10 @@ def _baseline(
         or manifest_size_bytes != len(expected_manifest)
     ):
         raise AttributionValidationError("baseline generation contract differs")
+    if manifest.as_of_date != max(item.as_of_date for item in manifest.artifacts):
+        raise AttributionValidationError(
+            "baseline generation date is not artifact-derived"
+        )
     catalog = _load_json(catalog_path, "baseline catalog")
     if catalog.get("baseline_schema_version") != 1:
         raise AttributionValidationError("baseline schema is unsupported")
@@ -164,7 +168,14 @@ def _baseline(
             "catalog_sha256": catalog_sha256,
         },
         catalog_path,
-        manifest.as_of_date,
+        SourceArtifact(
+            artifact_id="input/portfolio-baseline-generation.json",
+            sha256=manifest_sha256,
+            size_bytes=manifest_size_bytes,
+            as_of_date=manifest.as_of_date,
+            schema_name="generation-manifest",
+            schema_version="1",
+        ),
     )
 
 
@@ -385,8 +396,8 @@ def build_catalog(
     if spec.get("schema_version") != SCHEMA_VERSION:
         raise AttributionValidationError("attribution spec schema is unsupported")
     as_of = date.fromisoformat(_text(spec.get("as_of_date"), "spec.as_of_date"))
-    baseline, baseline_identity, baseline_path, baseline_generation_as_of = _baseline(
-        baseline_root, baseline_generation_id
+    baseline, baseline_identity, baseline_path, baseline_generation_artifact = (
+        _baseline(baseline_root, baseline_generation_id)
     )
     if baseline.get("as_of_date") != as_of.isoformat():
         raise AttributionValidationError("spec as_of_date differs from baseline")
@@ -568,10 +579,11 @@ def build_catalog(
         SourceArtifact.from_path(
             baseline_path,
             artifact_id="input/portfolio-baseline.json",
-            as_of_date=baseline_generation_as_of,
+            as_of_date=as_of,
             schema_name="portfolio-baseline-catalog",
             schema_version="1",
         ),
+        baseline_generation_artifact,
         SourceArtifact(
             artifact_id="input/attribution-returns.csv",
             sha256=source_hash,
