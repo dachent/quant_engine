@@ -573,12 +573,47 @@ def _call_name(node: ast.Call) -> str | None:
 
 
 def _function_calls(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str]:
-    return {
-        call_name
-        for node in ast.walk(function)
-        if isinstance(node, ast.Call)
-        if (call_name := _call_name(node)) is not None
-    }
+    class CallCollector(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.calls: set[str] = set()
+            self.aliases: dict[str, str] = {}
+
+        @staticmethod
+        def _bound_callable(value: ast.expr) -> str | None:
+            if (
+                isinstance(value, ast.Call)
+                and _call_name(value) == "cast"
+                and len(value.args) >= 2
+            ):
+                value = value.args[1]
+            if isinstance(value, ast.Attribute):
+                return _call_name(ast.Call(func=value, args=[], keywords=[]))
+            return None
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            bound = self._bound_callable(node.value)
+            if bound is not None:
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        self.aliases[target.id] = bound
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if node.value is not None:
+                bound = self._bound_callable(node.value)
+                if bound is not None and isinstance(node.target, ast.Name):
+                    self.aliases[node.target.id] = bound
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            call_name = _call_name(node)
+            if call_name is not None:
+                self.calls.add(self.aliases.get(call_name, call_name))
+            self.generic_visit(node)
+
+    collector = CallCollector()
+    collector.visit(function)
+    return collector.calls
 
 
 def _local_call_closure(tree: ast.Module, entrypoint: str) -> set[str]:

@@ -96,6 +96,46 @@ def test_native_controller_projection_is_source_bound_and_valid() -> None:
     assert validate_controller_graph(REPOSITORY_ROOT, graph)["valid"] is True
 
 
+def test_build_accepts_the_integrated_layered_history_callable_alias() -> None:
+    """The real preparation route invokes its statically bound history alias."""
+
+    graph = build_controller_graph(REPOSITORY_ROOT)
+
+    assert validate_controller_graph(REPOSITORY_ROOT, graph)["valid"] is True
+
+
+@pytest.mark.parametrize(
+    ("expected", "replacement"),
+    [
+        (
+            "build_history = cast(",
+            "missing_build_history = cast(",
+        ),
+        (
+            "artifacts, manifest = build_history(**kwargs)",
+            "artifacts, manifest = missing_build_history(**kwargs)",
+        ),
+    ],
+)
+def test_build_rejects_mutated_layered_history_alias_or_call(
+    tmp_path: Path, expected: str, replacement: str
+) -> None:
+    """A binding mention or a different alias call cannot satisfy the route."""
+
+    root = _isolated_projection_root(tmp_path)
+    _replace_function_literal(
+        root / "tools/portfolio_attended_preparation.py",
+        "_rebuild_layered_history",
+        expected,
+        replacement,
+    )
+
+    with pytest.raises(
+        ControllerGraphError, match="required controller call is absent"
+    ):
+        build_controller_graph(root)
+
+
 def test_validation_rejects_a_graph_after_a_bound_source_byte_changes(
     tmp_path: Path,
 ) -> None:
@@ -211,7 +251,7 @@ def test_build_rejects_altered_actual_freshness_producer_cli_edge(
     [
         (
             "tools/portfolio_attended_preparation.py",
-            "prepare_attended_inputs",
+            "_prepare_attended_inputs",
             "compute_governed_as_held_composite_hwm(",
             "missing_governed_hwm_producer(",
             "governed HWM producer invocation",
@@ -320,15 +360,14 @@ def test_financial_source_schema_is_bound_and_has_full_impact() -> None:
     ) == ["ledger", "baseline", "attribution", "analytics", "report", "panel"]
 
 
-def test_graph_records_absent_preparation_declaration_without_inventing_edges() -> None:
-    """This base lacks the worker-owned literal declaration, so absence is explicit."""
+def test_graph_records_integrated_preparation_declaration() -> None:
+    """The graph consumes the executable preparation declaration as-is."""
 
     graph = build_controller_graph(REPOSITORY_ROOT)
+    declaration = graph["contracts"]["preparation_stage_dependencies"]
 
-    assert graph["contracts"]["preparation_stage_dependencies"] == {
-        "edges": [],
-        "status": "absent",
-    }
+    assert declaration["status"] == "verified"
+    assert declaration["dependencies"]["selected-history-normalization"] == []
 
 
 def test_graph_records_verified_present_preparation_declaration(tmp_path: Path) -> None:
@@ -337,24 +376,20 @@ def test_graph_records_verified_present_preparation_declaration(tmp_path: Path) 
     root = _isolated_projection_root(tmp_path)
     preparation = root / "tools/portfolio_attended_preparation.py"
     preparation.write_text(
-        preparation.read_text(encoding="utf-8")
-        + '\nPREPARATION_STAGE_DEPENDENCIES = {"input-qc": ("capture",)}\n',
+        preparation.read_text(encoding="utf-8").replace(
+            "PREPARATION_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {",
+            "PREPARATION_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {\n"
+            '    "input-qc": ("capture",),',
+            1,
+        ),
         encoding="utf-8",
     )
 
     graph = build_controller_graph(root)
+    declaration = graph["contracts"]["preparation_stage_dependencies"]
 
-    assert graph["contracts"]["preparation_stage_dependencies"] == {
-        "dependencies": {"input-qc": ["capture"]},
-        "edges": [
-            {
-                "from": "capture",
-                "kind": "preparation-stage-dependency",
-                "to": "input-qc",
-            }
-        ],
-        "status": "verified",
-    }
+    assert declaration["status"] == "verified"
+    assert declaration["dependencies"]["input-qc"] == ["capture"]
     assert {
         "caller": "tools.portfolio_attended_preparation.PREPARATION_STAGE_DEPENDENCIES",
         "callee": "preparation-stage:input-qc",
