@@ -18,7 +18,7 @@ checkpoints, issue descriptions, PR text and skill defaults:
   A successful extraction, coherent older generation, passing component suite or
   new build date alone is not closure. Preserve documented publication lag,
   fixed-history boundaries and owner-approved unavailable observations.
-- This MVP delivery's owner-selected financial data cutoff is **2026-09-17**.
+- This MVP delivery's owner-selected financial data cutoff is **EOD 2026-09-17**.
   Keep financial observation dates, provider finality, source capture timestamps,
   source-generation provenance dates, and execution/calculation timestamps distinct.
   A later capture or execution timestamp does not change the financial cutoff;
