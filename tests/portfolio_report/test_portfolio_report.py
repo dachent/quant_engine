@@ -43,6 +43,10 @@ sys.modules[SPEC.name] = reporter
 SPEC.loader.exec_module(reporter)
 DEFAULT_PRODUCT_CONTRACT = reporter._PORTABLE_HWM_PRODUCT_CONTRACT
 _SYNTHETIC_PRODUCT_CONTRACT_PATHS: set[Path] = set()
+WORKBOOK_PERMANENT_HOLD = (
+    "Owner permanent hold under #374: retired workbook generation, recalculation, "
+    "evidence, and delivery workflow"
+)
 
 
 def _policy_unavailable_appendices(tmp_path: Path) -> tuple[Path, Path, dict[str, Any]]:
@@ -461,6 +465,7 @@ def _excel_saved_package(
             archive.writestr(info, content)
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_native_excel_workbook_canonicalization_is_deterministic_and_bounded(
     tmp_path: Path,
 ) -> None:
@@ -506,6 +511,7 @@ def test_native_excel_workbook_canonicalization_is_deterministic_and_bounded(
     assert reporter.canonicalize_workbook(first) == first_result
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_initial_workbook_build_is_stable_across_volatile_package_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -571,6 +577,7 @@ def test_publication_snapshot_preserves_bundle_root_identity(tmp_path: Path) -> 
     } == expected
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_canonicalization_fails_closed_on_unrecognized_volatile_field(
     tmp_path: Path,
 ) -> None:
@@ -777,6 +784,7 @@ def _first_table_data_cell(path: Path, sheet_name: str, table_name: str) -> str:
         workbook.close()
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_xlsx_result_canonicalization_normalizes_the_engine_run_id(
     tmp_path: Path,
 ) -> None:
@@ -828,6 +836,7 @@ def test_xlsx_result_canonicalization_normalizes_the_engine_run_id(
         reporter.canonicalize_xlsx_result(failed)
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_xlsx_result_canonicalization_rejects_a_different_original_sidecar(
     tmp_path: Path,
 ) -> None:
@@ -852,6 +861,7 @@ def test_xlsx_result_canonicalization_rejects_a_different_original_sidecar(
     assert sidecar.read_bytes() == original_sidecar
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_xlsx_result_canonicalization_rejects_canonical_result_without_sidecar(
     tmp_path: Path,
 ) -> None:
@@ -1780,7 +1790,7 @@ def _published_dependence(
     return root
 
 
-def test_current_dependence_reaches_report_workbook_and_receipt_identity(
+def test_current_dependence_reaches_report_data_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1847,17 +1857,13 @@ def test_current_dependence_reaches_report_workbook_and_receipt_identity(
     )
     assert correlation_one_summary["value"] == "0.31"
     assert correlation_one_summary["value"] != "0.37"
-    workbook = load_workbook(Path(built["workbook_path"]), data_only=True)
-    assert workbook["Dependence"].max_row == 47
-    assert "tblDependence" in workbook["Dependence"].tables
     verified = reporter.verify_candidate(
         baseline_root,
         candidate,
-        Path(built["workbook_path"]),
         history_contract_path=history_path,
         correlation_root=dependence_root,
     )
-    assert verified["table_count"] == 15
+    assert verified["report_data_sha256"] == built["report_data_sha256"]
 
 
 def test_current_dependence_report_rejects_mismatched_verified_source(
@@ -2156,13 +2162,16 @@ def test_publish_report_snapshots_selected_attribution_without_current(
 
     monkeypatch.setattr(reporter, "build_report_data", stop_after_selected_snapshot)
 
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / reporter.REPORT_DATA_NAME).write_bytes(b"{}")
     with pytest.raises(SnapshotReached):
         reporter.publish_report(
             baseline_root,
-            tmp_path / "candidate",
-            tmp_path / "workbook.xlsx",
-            tmp_path / "xlsx-result.json",
-            tmp_path / "validation.json",
+            candidate,
+            None,
+            None,
+            None,
             tmp_path / "published",
             attribution_root=attribution_root,
             attribution_generation_id=selected_generation_id,
@@ -2173,6 +2182,7 @@ def test_publish_report_snapshots_selected_attribution_without_current(
     ("baseline_root", "baseline_generation_id"),
     ((Path("missing-baseline"), None), (None, "a" * 64)),
 )
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_bind_workbook_evidence_rejects_half_baseline_selector(
     baseline_root: Path | None, baseline_generation_id: str | None
 ) -> None:
@@ -2194,6 +2204,7 @@ def test_bind_workbook_evidence_rejects_half_baseline_selector(
     "selector_args",
     (("--baseline-root", "missing"), ("--baseline-generation-id", "a" * 64)),
 )
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_bind_workbook_evidence_cli_rejects_half_baseline_selector(
     selector_args: tuple[str, str], capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -2307,7 +2318,7 @@ def _staged_selector_fixture(
     )
 
 
-def test_staged_selectors_flow_through_build_verify_bind_publish_and_inspect(
+def test_staged_selectors_flow_through_data_only_build_and_verify(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     (
@@ -2339,63 +2350,21 @@ def test_staged_selectors_flow_through_build_verify_bind_publish_and_inspect(
     verified = reporter.verify_candidate(
         baseline_root,
         candidate,
-        Path(built["workbook_path"]),
         history_contract_path=history_path,
         correlation_root=correlation_root,
         baseline_generation_id=baseline_generation_id,
         correlation_generation_dir=correlation_generation_dir,
     )
     assert verified["baseline_generation_id"] == baseline_generation_id
-    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
-        candidate
-    )
-    binding = reporter.bind_workbook_evidence(
-        candidate,
-        workbook,
-        run_result,
-        validation,
-        binding_path,
-        baseline_root=baseline_root,
-        baseline_generation_id=baseline_generation_id,
-    )
-    assert binding["workbook_evidence_status"] == (
-        "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
-    )
-    published_root = tmp_path / "published"
-    published = reporter.publish_report(
-        baseline_root,
-        candidate,
-        workbook,
-        run_result,
-        validation,
-        published_root,
-        history_contract_path=history_path,
-        correlation_root=correlation_root,
-        workbook_evidence_binding=binding_path,
-        baseline_generation_id=baseline_generation_id,
-        correlation_generation_dir=correlation_generation_dir,
-    )
-    generation_id = published["generation_id"]
-    delivery = published_root / "deliveries" / generation_id
-    inspected = reporter.inspect_report_delivery(
-        published_root, generation_id, delivery
-    )
-    assert inspected["workbook_status"] == "EXACT_NON_AUTHORITY"
-    published_report = json.loads(
-        (
-            published_root / "generations" / generation_id / reporter.REPORT_DATA_NAME
-        ).read_text(encoding="utf-8")
-    )
-    assert published_report["baseline"]["generation_id"] == baseline_generation_id
-    assert (
-        published_report["dependence_analysis"]["identity"]["generation_id"]
-        == correlation_generation_dir.name
-    )
+    assert verified["report_data_sha256"] == built["report_data_sha256"]
+    assert json.loads(
+        (candidate / reporter.REPORT_DATA_NAME).read_text(encoding="utf-8")
+    )["dependence_analysis"]["identity"]["generation_id"] == correlation_generation_dir.name
     assert (baseline_root / "CURRENT.json").read_bytes() == baseline_pointer_bytes
     assert (correlation_root / "CURRENT.json").read_bytes() == correlation_pointer_bytes
 
 
-def test_staged_selectors_flow_through_real_cli_lifecycle(
+def test_staged_selectors_flow_through_real_cli_data_only_lifecycle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -2425,79 +2394,29 @@ def test_staged_selectors_flow_through_real_cli_lifecycle(
     assert reporter.main(["build", *common, "--output-root", str(candidate_root)]) == 0
     built = json.loads(capsys.readouterr().out)
     candidate = Path(built["candidate_dir"])
-    workbook = Path(built["workbook_path"])
-    assert (
-        reporter.main(
-            [
-                "verify",
-                *common,
-                "--candidate-dir",
-                str(candidate),
-                "--excel-workbook",
-                str(workbook),
-            ]
-        )
-        == 0
-    )
-    assert json.loads(capsys.readouterr().out)["table_count"] == 15
-    final_workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
-        candidate, run_id="4" * 32
-    )
-    assert (
-        reporter.main(
-            [
-                "bind-workbook-evidence",
-                "--candidate-dir",
-                str(candidate),
-                "--excel-workbook",
-                str(final_workbook),
-                "--xlsx-result",
-                str(run_result),
-                "--validation-result",
-                str(validation),
-                "--evidence",
-                str(binding_path),
-                "--baseline-root",
-                str(baseline_root),
-                "--baseline-generation-id",
-                baseline_generation_id,
-            ]
-        )
-        == 0
-    )
-    assert json.loads(capsys.readouterr().out)["workbook_evidence_status"] == (
-        "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
-    )
+    assert reporter.main(["verify", *common, "--candidate-dir", str(candidate)]) == 0
+    assert json.loads(capsys.readouterr().out)["report_data_sha256"] == built[
+        "report_data_sha256"
+    ]
     published_root = tmp_path / "cli-published"
-    assert (
-        reporter.main(
-            [
-                "publish",
-                *common,
-                "--candidate-dir",
-                str(candidate),
-                "--excel-workbook",
-                str(final_workbook),
-                "--xlsx-result",
-                str(run_result),
-                "--validation-result",
-                str(validation),
-                "--workbook-evidence-binding",
-                str(binding_path),
-                "--output-root",
-                str(published_root),
-            ]
-        )
-        == 0
-    )
+    assert reporter.main(
+        [
+            "publish",
+            *common,
+            "--candidate-dir",
+            str(candidate),
+            "--output-root",
+            str(published_root),
+        ]
+    ) == 0
     published = json.loads(capsys.readouterr().out)
     generation_id = published["generation_id"]
-    inspected = reporter.inspect_report_delivery(
-        published_root,
-        generation_id,
-        published_root / "deliveries" / generation_id,
+    published_report = json.loads(
+        (published_root / "generations" / generation_id / reporter.REPORT_DATA_NAME).read_text(
+            encoding="utf-8"
+        )
     )
-    assert inspected["workbook_status"] == "EXACT_NON_AUTHORITY"
+    assert published_report["dependence_analysis"]["identity"]["generation_id"] == correlation_generation_dir.name
     assert (baseline_root / "CURRENT.json").read_bytes() == baseline_pointer_bytes
     assert (correlation_root / "CURRENT.json").read_bytes() == correlation_pointer_bytes
 
@@ -2957,6 +2876,7 @@ def test_transaction_without_amount_remains_explicitly_unavailable(
     assert row["amount_usd"] is None
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_high_precision_performance_is_numeric_only_in_excel_presentation() -> None:
     exact = "0.001932516064483270690775302874751"
 
@@ -2966,6 +2886,7 @@ def test_high_precision_performance_is_numeric_only_in_excel_presentation() -> N
     )
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_workbook_parity_round_trips_high_precision_summary_ratio(
     tmp_path: Path,
 ) -> None:
@@ -3006,6 +2927,7 @@ def test_workbook_parity_round_trips_high_precision_summary_ratio(
         workbook.close()
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_workbook_is_deterministic_structured_and_has_no_external_surface(
     tmp_path: Path,
 ) -> None:
@@ -3055,6 +2977,7 @@ def test_workbook_is_deterministic_structured_and_has_no_external_surface(
     assert job_text.index('{"type":"save_as"') < job_text.index("output_path")
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_candidate_evidence_is_identical_across_output_roots(
     tmp_path: Path,
 ) -> None:
@@ -3080,6 +3003,7 @@ def test_candidate_evidence_is_identical_across_output_roots(
         assert (left / name).read_bytes() == (right / name).read_bytes(), name
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_excel_recalc_uses_resettable_copy_and_cannot_mutate_initial(
     tmp_path: Path,
 ) -> None:
@@ -3108,6 +3032,7 @@ def test_excel_recalc_uses_resettable_copy_and_cannot_mutate_initial(
     assert excel_input.read_bytes() == canonical_bytes
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_candidate_drift_and_failed_excel_evidence_block_publication(
     tmp_path: Path,
 ) -> None:
@@ -3151,6 +3076,7 @@ def test_candidate_drift_and_failed_excel_evidence_block_publication(
         )
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_workbook_evidence_binding_pins_exact_final_workbook_and_sidecars(
     tmp_path: Path,
 ) -> None:
@@ -3209,6 +3135,7 @@ def test_workbook_evidence_binding_pins_exact_final_workbook_and_sidecars(
     assert json.loads(binding_path.read_text(encoding="utf-8")) == binding
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_workbook_evidence_binding_rejects_pre_excel_input_even_when_bytes_match(
     tmp_path: Path,
 ) -> None:
@@ -3232,6 +3159,7 @@ def test_workbook_evidence_binding_rejects_pre_excel_input_even_when_bytes_match
 
 
 @pytest.mark.parametrize("job_step", ("open", "save_as"))
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_workbook_evidence_binding_rejects_wrong_excel_job_path(
     tmp_path: Path, job_step: str
 ) -> None:
@@ -3278,6 +3206,7 @@ _WORKBOOK_TABLE_CASES = (
 
 
 @pytest.mark.parametrize(("sheet_name", "table_name"), _WORKBOOK_TABLE_CASES)
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_every_governed_table_mutation_can_only_be_repo_bound(
     tmp_path: Path, sheet_name: str, table_name: str
 ) -> None:
@@ -3309,6 +3238,7 @@ def test_every_governed_table_mutation_can_only_be_repo_bound(
     assert binding["workbook_evidence_status"] == "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_workbook_header_mutation_can_only_be_repo_bound(
     tmp_path: Path,
 ) -> None:
@@ -3339,6 +3269,7 @@ def test_workbook_header_mutation_can_only_be_repo_bound(
     assert binding["workbook_evidence_status"] == "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_workbook_parity_does_not_round_expected_floats() -> None:
     value = 1.2345678901234567
 
@@ -3347,6 +3278,7 @@ def test_workbook_parity_does_not_round_expected_floats() -> None:
 
 
 @pytest.mark.parametrize("mutation", ("formula", "cached_value"))
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_workbook_formula_mutation_can_only_be_repo_bound(
     tmp_path: Path, mutation: str
 ) -> None:
@@ -3378,6 +3310,7 @@ def test_workbook_formula_mutation_can_only_be_repo_bound(
     assert binding["workbook_evidence_status"] == "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_workbook_readiness_mutation_can_only_be_repo_bound(
     tmp_path: Path,
 ) -> None:
@@ -3408,6 +3341,7 @@ def test_workbook_readiness_mutation_can_only_be_repo_bound(
     assert binding["workbook_evidence_status"] == "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_canonical_report_mutation_is_rejected_before_binding(tmp_path: Path) -> None:
     baseline_root = _published_baseline(tmp_path)
     built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
@@ -3448,6 +3382,7 @@ def test_canonical_report_mutation_is_rejected_before_binding(tmp_path: Path) ->
         ("workbook-evidence-binding.json", "workbook evidence binding is invalid"),
     ),
 )
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_any_bound_workbook_evidence_byte_change_blocks_publication(
     tmp_path: Path, target_name: str, error_category: str
 ) -> None:
@@ -3489,6 +3424,7 @@ def test_any_bound_workbook_evidence_byte_change_blocks_publication(
     assert not (published_root / "deliveries").exists()
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_validated_workbook_evidence_publishes_authority_and_delivery(
     tmp_path: Path,
 ) -> None:
@@ -3522,6 +3458,7 @@ def test_validated_workbook_evidence_publishes_authority_and_delivery(
     ).is_file()
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_accepted_delivery_evidence_publishes_without_authority_upgrade(
     tmp_path: Path,
 ) -> None:
@@ -3569,6 +3506,7 @@ def test_accepted_delivery_evidence_publishes_without_authority_upgrade(
         ("validation", "xlsx-win workbook invariants did not all pass"),
     ),
 )
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_failed_or_incomplete_workbook_evidence_cannot_create_delivery_binding(
     tmp_path: Path, target: str, error_category: str
 ) -> None:
@@ -3608,6 +3546,7 @@ def test_failed_or_incomplete_workbook_evidence_cannot_create_delivery_binding(
 
 
 @pytest.mark.parametrize("mutation", ("relabel", "extra", "missing"))
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_noncanonical_delivery_binding_cannot_advance_authority(
     tmp_path: Path, mutation: str
 ) -> None:
@@ -3674,6 +3613,7 @@ def test_noncanonical_delivery_binding_cannot_advance_authority(
         (("validation", "passed_invariant_count"), 0),
     ),
 )
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_delivery_evidence_binding_mutation_cannot_advance_authority(
     tmp_path: Path, field_path: tuple[str | int, ...], replacement: str | int
 ) -> None:
@@ -3722,6 +3662,7 @@ def test_delivery_evidence_binding_mutation_cannot_advance_authority(
     assert not (published_root / "deliveries").exists()
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_validated_local_workbook_evidence_publishes_an_immutable_report(
     tmp_path: Path,
 ) -> None:
@@ -3762,6 +3703,7 @@ def test_validated_local_workbook_evidence_publishes_an_immutable_report(
     assert (generation / "report-verification.json").is_file()
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_publish_keeps_authority_json_immutable_when_delivery_workbook_drifts(
     tmp_path: Path,
 ) -> None:
@@ -3906,6 +3848,7 @@ def test_publish_keeps_authority_json_immutable_when_delivery_workbook_drifts(
         )
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_delivery_inspection_requires_closed_receipt_and_exact_authority_binding(
     tmp_path: Path,
 ) -> None:
@@ -4001,6 +3944,7 @@ def test_delivery_inspection_requires_closed_receipt_and_exact_authority_binding
         (("extra",), "structure"),
     ),
 )
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_delivery_inspection_receipt_mutations_are_closed_or_non_authority_drift(
     tmp_path: Path, mutation: tuple[str, ...], expected: str
 ) -> None:
@@ -4048,6 +3992,7 @@ def test_delivery_inspection_receipt_mutations_are_closed_or_non_authority_drift
 
 
 @pytest.mark.parametrize("conflicting_target", ("receipt", "workbook"))
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_delivery_preflight_does_not_create_other_target_on_conflict(
     tmp_path: Path, conflicting_target: str
 ) -> None:
@@ -4117,6 +4062,7 @@ def test_delivery_preflight_does_not_create_other_target_on_conflict(
 
 
 @pytest.mark.parametrize("missing_target", ("receipt", "workbook"))
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_delivery_preflight_recovers_exact_partial_delivery(
     tmp_path: Path, missing_target: str
 ) -> None:
@@ -4172,6 +4118,7 @@ def test_delivery_preflight_recovers_exact_partial_delivery(
 
 
 @pytest.mark.parametrize("receipt_kind", ("missing", "malformed", "caller_created"))
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_publish_requires_exact_bound_workbook_evidence_for_every_caller_input(
     tmp_path: Path, receipt_kind: str
 ) -> None:
@@ -4252,6 +4199,7 @@ def test_publish_requires_exact_bound_workbook_evidence_for_every_caller_input(
     assert not list(published_root.rglob("report-verification.json"))
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_publish_cli_accepts_exact_bound_workbook_evidence(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -4298,6 +4246,7 @@ def test_publish_cli_accepts_exact_bound_workbook_evidence(
     assert read_current(published_root).generation_id in captured.out
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_delivery_evidence_stages_without_current_or_release_pointer(
     tmp_path: Path,
 ) -> None:
@@ -4325,14 +4274,6 @@ def test_publication_rejects_source_rollover_before_delivery(
     baseline_root = _published_baseline(tmp_path)
     built = reporter.build_candidate(baseline_root, tmp_path / "candidates")
     candidate = Path(built["candidate_dir"])
-    workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
-        candidate,
-        run_id="a" * 32,
-        temporary_root=r"C:\Temp\xlsx-source-rollover",
-    )
-    reporter.bind_workbook_evidence(
-        candidate, workbook, run_result, validation, binding_path
-    )
     original_build_report_data = reporter.build_report_data
     calls = 0
 
@@ -4352,11 +4293,10 @@ def test_publication_rejects_source_rollover_before_delivery(
         reporter.publish_report(
             baseline_root,
             candidate,
-            workbook,
-            run_result,
-            validation,
+            None,
+            None,
+            None,
             tmp_path / "published",
-            workbook_evidence_binding=binding_path,
         )
 
 
@@ -5874,7 +5814,7 @@ def test_report_accepts_explicit_non_sibling_provider_ledger_root(
     assert rows[0]["source_generation_id"] == provider_generation
 
 
-def test_report_projects_hash_bound_leverage_disclosures_to_physical_workbook(
+def test_report_projects_hash_bound_leverage_disclosures_to_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Observed leverage facts remain source-bound and unavailable measures explicit."""
@@ -5966,43 +5906,6 @@ def test_report_projects_hash_bound_leverage_disclosures_to_physical_workbook(
         "DELTA_EQUIVALENT_NOT_PROVED",
         "EMBEDDED_PRODUCT_EXPOSURE_NOT_PROVED",
     }
-
-    workbook_path = tmp_path / "portfolio-report.xlsx"
-    reporter._build_workbook_exact(report, workbook_path)
-    workbook = load_workbook(workbook_path, read_only=False, data_only=True)
-    try:
-        table = workbook["Leverage Disclosures"].tables["tblLeverageDisclosures"]
-        cells = list(workbook["Leverage Disclosures"][table.ref])
-        headers = [str(cell.value).lower().replace(" ", "_") for cell in cells[0]]
-        physical = next(
-            dict(zip(headers, (cell.value for cell in row), strict=True))
-            for row in cells[1:]
-            if row[headers.index("record_id")].value == tier["record_id"]
-        )
-        for field in (
-            "account_id",
-            "accounting_date",
-            "classification",
-            "measurement_basis",
-            "native_source_record_id",
-            "provider_id",
-            "record_id",
-            "source_artifact_id",
-            "source_record_id",
-            "strategy_id",
-            "value_date",
-        ):
-            assert physical[field] == observed[field]
-        assert json.loads(physical["amount"])["value"] == observed["amount"]["value"]
-        assert (
-            json.loads(physical["source_amount"])["value"]
-            == observed["source_amount"]["value"]
-        )
-        assert (
-            json.loads(physical["source_record_ids"]) == observed["source_record_ids"]
-        )
-    finally:
-        workbook.close()
 
     with pytest.raises(
         reporter.ReportValidationError,
@@ -6404,7 +6307,7 @@ def test_hwm_uncovered_weight_uses_final_current_allocation_weight(
     assert detail["systematic_weight"] == allocation["systematic_weight"]
 
 
-def test_portable_hwm_proof_coexists_with_governed_report_and_workbook_hwm(
+def test_portable_hwm_proof_coexists_with_governed_report_hwm(
     tmp_path: Path,
 ) -> None:
     catalog = _baseline_catalog()
@@ -6470,44 +6373,6 @@ def test_portable_hwm_proof_coexists_with_governed_report_and_workbook_hwm(
     assert _summary_row(report, "PORT-HWM-4 proof HWM") == "104"
     assert _summary_row(report, "PORT-HWM-4 proof current drawdown") == "-0.1"
     assert _summary_row(report, "PORT-HWM-4 proof maximum drawdown") == "-0.1"
-    assert reporter.verify_workbook(candidate_dir / reporter.WORKBOOK_NAME)[
-        "sheet_count"
-    ] == len(reporter.SHEET_NAMES)
-    workbook = load_workbook(
-        candidate_dir / reporter.WORKBOOK_NAME, read_only=True, data_only=True
-    )
-    summary_sheet = workbook["Portfolio Summary"]
-    workbook_summary = {
-        str(summary_sheet.cell(row=row_index, column=1).value): summary_sheet.cell(
-            row=row_index, column=4
-        ).value
-        for row_index in range(7, 7 + len(report["portfolio_summary"]))
-    }
-    assert workbook_summary["PORT-HWM-4 proof status"] == (
-        "DEVELOPMENT_NOT_FINANCIAL_ACCEPTANCE"
-    )
-    assert Decimal(str(workbook_summary["PORT-HWM-4 proof index"])) == Decimal("93.6")
-    assert Decimal(str(workbook_summary["PORT-HWM-4 proof HWM"])) == Decimal("104")
-    assert Decimal(
-        str(workbook_summary["PORT-HWM-4 proof current drawdown"])
-    ) == Decimal("-0.1")
-    assert Decimal(
-        str(workbook_summary["PORT-HWM-4 proof maximum drawdown"])
-    ) == Decimal("-0.1")
-    assert [
-        Decimal(str(workbook_summary[f"PORT-HWM-4 proof path {point['as_of']}"]))
-        for point in proof["index_path"]
-    ] == [Decimal("100"), Decimal("104"), Decimal("93.6"), Decimal("93.6")]
-    workbook_contract = json.loads(
-        (candidate_dir / "workbook-contract.json").read_text(encoding="utf-8")
-    )
-    assert workbook_contract["sentinel_cells"][0] == {
-        "cell": "B4",
-        "expected": "ELIGIBLE_FOR_REVIEW",
-        "sheet": "Portfolio Summary",
-    }
-    workbook.close()
-
     schema = json.loads(
         (REPOSITORY_ROOT / "schemas/portfolio/report-data.schema.json").read_text(
             encoding="utf-8"
@@ -6970,6 +6835,7 @@ def test_hwm_valid_envelope_publishes_with_full_context(tmp_path: Path) -> None:
     assert "hwm_index" in hwm
 
 
+@pytest.mark.skip(reason=WORKBOOK_PERMANENT_HOLD)
 def test_invested_capital_is_visible_and_exact_in_native_workbook(
     tmp_path: Path,
 ) -> None:
@@ -7042,7 +6908,7 @@ def test_invested_capital_is_visible_and_exact_in_native_workbook(
         )
 
 
-def test_source_qualified_decomposition_is_visible_and_exact_in_native_workbook(
+def test_source_qualified_decomposition_is_visible_and_exact_in_report(
     tmp_path: Path,
 ) -> None:
     baseline_root = _published_baseline(tmp_path / "baseline", _baseline_catalog())
@@ -7151,13 +7017,6 @@ def test_source_qualified_decomposition_is_visible_and_exact_in_native_workbook(
         "default_lens": "ETF_STYLE",
         "modes": {"LIVE_ONLY": [lens]},
     }
-    workbook_path = tmp_path / "decomposition.xlsx"
-    reporter._workbook(report, workbook_path)
-
-    evidence = reporter.verify_workbook(workbook_path)
-    parity = reporter._workbook_parity_receipt(
-        canonical_json_bytes(report), workbook_path.read_bytes()
-    )
     cells, factors = reporter._decomposition_workbook_rows(
         report["decomposition_lenses"]
     )
@@ -7181,70 +7040,6 @@ def test_source_qualified_decomposition_is_visible_and_exact_in_native_workbook(
     assert mode["mode_coefficient"] == "-0.25"
     assert mode["mode_contribution"] == "-0.015"
     assert mode["risk_euler_allocation"] == "-0.0004"
-    assert evidence["sheet_count"] == len(reporter.SHEET_NAMES) + 2
-    assert parity["table_count"] == len(reporter.TABLE_NAMES) + 2
-
-    # Read actual Excel cells independently of the export/parity projection.
-    workbook = load_workbook(workbook_path, read_only=True, data_only=True)
-    try:
-        sheet_rows = list(
-            workbook[reporter.DECOMPOSITION_SHEET_NAMES[0]].iter_rows(
-                min_row=5, values_only=True
-            )
-        )
-        exported = {
-            row["Source Key"]: row
-            for values in sheet_rows[1:]
-            if (row := dict(zip(sheet_rows[0], values)))["Source Key"]
-        }
-        diagnostic = exported["us-equity-style"]
-        assert diagnostic["Status"] == "DIAGNOSTIC_ONLY"
-        assert diagnostic["Alpha Periodic Intercept"] == pytest.approx(0.003)
-        assert diagnostic["Contribution Residual Mean"] == pytest.approx(-0.001)
-        assert diagnostic["Contribution Fitted Mean"] == pytest.approx(0.013)
-        assert diagnostic["Contribution Realized Mean"] == pytest.approx(0.012)
-        assert diagnostic["Train R Squared"] == pytest.approx(0.8)
-        assert diagnostic["Holdout Predicted R Squared"] == pytest.approx(-0.2)
-        assert diagnostic["Coverage Aligned Observations"] == 40
-        assert diagnostic["Coverage Observed Start"] == "2026-01-02"
-        assert diagnostic["Coverage Factor Missing Weekdays"] == 1
-        assert diagnostic["Source Sha256"] == "7" * 64
-        factor_sheet_rows = list(
-            workbook[reporter.DECOMPOSITION_SHEET_NAMES[1]].iter_rows(
-                min_row=5, values_only=True
-            )
-        )
-        exported_modes = [
-            dict(zip(factor_sheet_rows[0], values)) for values in factor_sheet_rows[1:]
-        ]
-        exported_mode = next(
-            row
-            for row in exported_modes
-            if row["Factor Kind"] == "MIXED_ORTHOGONAL_MODE"
-        )
-        assert exported_mode["Analytics Surface"] == "ORTHOGONAL_RISK_ATTRIBUTION"
-        assert exported_mode["Mode Coefficient"] == pytest.approx(-0.25)
-        assert exported_mode["Mode Contribution"] == pytest.approx(-0.015)
-        assert exported_mode["Risk Euler Allocation"] == pytest.approx(-0.0004)
-    finally:
-        workbook.close()
-
-    wrong_cell = tmp_path / "wrong-decomposition-cell.xlsx"
-    shutil.copyfile(workbook_path, wrong_cell)
-    _rewrite_xlsx_cell(
-        wrong_cell,
-        sheet_name=reporter.DECOMPOSITION_SHEET_NAMES[1],
-        cell_reference="A6",
-        value="0.9",
-    )
-    with pytest.raises(
-        reporter.ReportValidationError,
-        match="tblDecompositionFactors",
-    ):
-        reporter._workbook_parity_receipt(
-            canonical_json_bytes(report), wrong_cell.read_bytes()
-        )
-
 
 @pytest.mark.parametrize("command", ("build", "verify", "publish"))
 def test_report_cli_forwards_governed_hwm_bundle_for_build_verify_and_publish(
