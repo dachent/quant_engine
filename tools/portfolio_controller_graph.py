@@ -26,6 +26,19 @@ _RELEASE = "tools/portfolio_release_builder.py"
 _REPORT = "tools/portfolio_report.py"
 _PANEL = "tools/portfolio_control_panel.py"
 _PREPARATION = "tools/portfolio_attended_preparation.py"
+_TARGET_SERIES = "tools/portfolio_target_series.py"
+_DEPENDENCE = "tools/portfolio_current_dependence.py"
+_DECOMPOSITION_PLAN = "tools/portfolio_current_decomposition_plan.py"
+_PROVIDER_LEDGER = "tools/provider_ledger.py"
+_BASELINE = "tools/portfolio_baseline.py"
+_EPOCH_MANIFEST = "tools/stage_current_epoch_manifest.py"
+_ACCOUNT_MANIFEST = "tools/build_account_manifest_generation.py"
+_ACCOUNT_MANIFEST_VERIFY = "tools/verify_account_manifest_generation.py"
+_HWM = "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_governed_execution.py"
+_CAPITAL_INPUT = "ops/mvp2-release/scripts/build_capital_input.py"
+_CAPITAL = "tools/portfolio_invested_capital.py"
+_ATTRIBUTION = "tools/portfolio_attribution.py"
+_DECOMPOSITION = "tools/portfolio_decomposition.py"
 _SOURCE_CONTRACT = "contracts/portfolio-financial-mvp-source-v1.json"
 _SOURCE_SCHEMA = "schemas/portfolio/financial-mvp-source-contract.schema.json"
 _MAPPER_SKIP_DIRECTORIES = frozenset(
@@ -90,6 +103,10 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             "contracts/portfolio-financial-mvp-source-v1.json",
             "schemas/portfolio/financial-mvp-source-contract.schema.json",
         ),
+        "contracts": (
+            "contracts/portfolio-financial-mvp-source-v1.json",
+            "schemas/portfolio/financial-mvp-source-contract.schema.json",
+        ),
         "producer": (_PREPARATION, "prepare_attended_inputs"),
         "artifacts": (
             "source-QC receipt",
@@ -98,6 +115,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         ),
         "consumers": ((_MATERIALIZER, "main"), (_RELEASE, "build_stage")),
         "validators": ((_PREPARATION, "plan_attended_inputs"),),
+        "writers": ((_PREPARATION, "prepare_attended_inputs"),),
         "stages": _STAGE_ORDER,
         "tests": ("tests/core/test_attended_preparation.py",),
         "sinks": (
@@ -107,66 +125,38 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         ),
     },
     {
-        "id": "provider-ledger-generation",
+        "id": "layered-history-generation",
         "source_paths": (
-            "tools/provider_ledger.py",
-            "tools/quantbase_generation.py",
-            "tools/schwab_generation.py",
-            "schemas/portfolio/provider-admission-receipt.schema.json",
-            "schemas/portfolio/provider-ledger.schema.json",
-        ),
-        "producer": ("tools/provider_ledger.py", "stage_candidate"),
-        "artifacts": (
-            "provider-ledger.json",
-            "generation.json",
-            "admit-or-declare-receipt.json",
-        ),
-        "consumers": ((_RELEASE, "build_ledger"), (_MATERIALIZER, "main")),
-        "validators": (("tools/provider_ledger.py", "verify_candidate"),),
-        "stages": _STAGE_ORDER,
-        "tests": ("tests/core/test_portfolio_release_builder.py",),
-        "sinks": (
-            "report-json-html",
-            "panel-json-html",
-            "coordinated-publication-pointers",
-        ),
-    },
-    {
-        "id": "baseline-epoch-hwm-capital-generations",
-        "source_paths": (
+            _TARGET_SERIES,
+            "tools/portfolio_designer_model_curve.py",
+            "tools/portfolio_strategy_history.py",
+            "tools/portfolio_strategy_backtests.py",
+            "tools/portfolio_provider_track_record.py",
             "tools/account_strategy_manifest.py",
-            "tools/build_account_manifest_generation.py",
-            "tools/portfolio_baseline.py",
-            "tools/portfolio_invested_capital.py",
-            "tools/portfolio_target_series.py",
-            "tools/verify_account_manifest_generation.py",
-            "contracts/portfolio-hwm-policy-v4.json",
+            _PREPARATION,
+            "contracts/portfolio-financial-mvp-source-v1.json",
+            "schemas/portfolio/layered-history-generation.schema.json",
+        ),
+        "contracts": (
+            "contracts/portfolio-financial-mvp-source-v1.json",
             "schemas/portfolio/account-strategy-manifest.schema.json",
             "schemas/portfolio/layered-history-generation.schema.json",
         ),
-        "producer": ("tools/portfolio_baseline.py", "stage_baseline"),
+        "producer": (_TARGET_SERIES, "build_layered_history_generation"),
         "artifacts": (
-            "portfolio-baseline generation",
-            "account-strategy-manifest generation",
             "layered-history generation",
-            "governed HWM and invested-capital receipts",
         ),
         "consumers": (
-            (_RELEASE, "build_baseline"),
-            (_RELEASE, "build_attribution"),
-            (_RELEASE, "build_analytics"),
+            (_DEPENDENCE, "build_source"),
+            (_DECOMPOSITION_PLAN, "build_bundle"),
         ),
         "validators": (
-            ("tools/portfolio_invested_capital.py", "verify_governed_capital_result"),
-            (
-                "tools/build_account_manifest_generation.py",
-                "stage_account_manifest_generation",
-            ),
+            (_TARGET_SERIES, "verify_layered_history_generation"),
         ),
+        "writers": ((_TARGET_SERIES, "write_layered_history_generation"),),
         "stages": ("baseline", "attribution", "analytics", "report", "panel"),
         "tests": (
             "tests/core/test_attended_preparation.py",
-            "tests/core/test_portfolio_pipeline_orchestration.py",
         ),
         "sinks": (
             "report-json-html",
@@ -175,25 +165,48 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         ),
     },
     {
-        "id": "attribution-and-analytics-generations",
+        "id": "current-dependence-source",
         "source_paths": (
-            "tools/portfolio_attribution.py",
-            "tools/portfolio_current_decomposition_plan.py",
-            "tools/portfolio_current_dependence.py",
-            "tools/portfolio_decomposition.py",
+            _DEPENDENCE,
+            _PREPARATION,
+            _TARGET_SERIES,
+            "contracts/portfolio-dependence-policy-v1.json",
+            "contracts/portfolio-financial-mvp-source-v1.json",
+        ),
+        "contracts": (
+            "contracts/portfolio-dependence-policy-v1.json",
+            "contracts/portfolio-financial-mvp-source-v1.json",
+        ),
+        "producer": (_DEPENDENCE, "build_source"),
+        "artifacts": ("current dependence source",),
+        "consumers": ((_RELEASE, "create_recipe"),),
+        "validators": ((_DEPENDENCE, "verify_source"),),
+        "writers": ((_DEPENDENCE, "write_source"),),
+        "stages": ("attribution", "analytics", "report", "panel"),
+        "tests": ("tests/core/test_attended_preparation.py",),
+        "sinks": ("report-json-html", "panel-json-html"),
+    },
+    {
+        "id": "current-decomposition-plan-bundle",
+        "source_paths": (
+            _DECOMPOSITION_PLAN,
+            _PREPARATION,
+            _TARGET_SERIES,
             "contracts/portfolio-performance-policy-v1.json",
         ),
-        "producer": ("tools/portfolio_decomposition.py", "stage_candidate"),
+        "contracts": (
+            "contracts/portfolio-financial-mvp-source-v1.json",
+            "contracts/portfolio-performance-policy-v1.json",
+        ),
+        "producer": (_DECOMPOSITION_PLAN, "build_bundle"),
         "artifacts": (
-            "strategy-attribution generation",
-            "current dependence source",
-            "decomposition generation",
+            "current decomposition plan bundle",
         ),
-        "consumers": ((_RELEASE, "build_analytics"), (_RELEASE, "build_report")),
+        "consumers": ((_RELEASE, "build_attribution"), (_RELEASE, "build_analytics")),
         "validators": (
-            ("tools/portfolio_current_dependence.py", "verify_source"),
-            ("tools/portfolio_attribution.py", "publish_catalog"),
+            (_DECOMPOSITION_PLAN, "build_bundle"),
         ),
+        "writers": ((_DECOMPOSITION_PLAN, "write_bundle"),),
         "stages": ("attribution", "analytics", "report", "panel"),
         "tests": (
             "tests/core/test_portfolio_pipeline_orchestration.py",
@@ -206,43 +219,179 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         ),
     },
     {
-        "id": "report-and-panel-candidates",
+        "id": "provider-ledger-generation",
+        "source_paths": (
+            _PROVIDER_LEDGER,
+            "tools/quantbase_generation.py",
+            "tools/schwab_generation.py",
+            _RELEASE,
+            "schemas/portfolio/provider-admission-receipt.schema.json",
+            "schemas/portfolio/provider-ledger.schema.json",
+        ),
+        "contracts": (
+            "schemas/portfolio/provider-admission-receipt.schema.json",
+            "schemas/portfolio/provider-ledger.schema.json",
+        ),
+        "producer": (_PROVIDER_LEDGER, "stage_candidate"),
+        "artifacts": ("provider-ledger.json", "generation.json", "admit-or-declare-receipt.json"),
+        "consumers": ((_RELEASE, "build_ledger"), (_PREPARATION, "prepare_attended_inputs")),
+        "validators": ((_PROVIDER_LEDGER, "verify_candidate"),),
+        "writers": ((_RELEASE, "build_ledger"),),
+        "stages": _STAGE_ORDER,
+        "tests": ("tests/core/test_portfolio_release_builder.py",),
+        "sinks": ("report-json-html", "panel-json-html", "coordinated-publication-pointers"),
+    },
+    {
+        "id": "baseline-generation",
+        "source_paths": (_BASELINE, _RELEASE, _PREPARATION),
+        "contracts": ("contracts/portfolio-financial-mvp-source-v1.json",),
+        "producer": (_BASELINE, "stage_baseline"),
+        "artifacts": ("portfolio-baseline.json", "generation.json"),
+        "consumers": ((_RELEASE, "build_baseline"), (_DEPENDENCE, "build_source")),
+        "validators": ((_BASELINE, "stage_baseline"),),
+        "writers": ((_BASELINE, "publish_baseline"),),
+        "stages": ("baseline", "attribution", "analytics", "report", "panel"),
+        "tests": ("tests/core/test_portfolio_release_builder.py",),
+        "sinks": ("report-json-html", "panel-json-html", "coordinated-publication-pointers"),
+    },
+    {
+        "id": "epoch-account-manifest-generation",
+        "source_paths": (
+            _EPOCH_MANIFEST,
+            _ACCOUNT_MANIFEST,
+            _ACCOUNT_MANIFEST_VERIFY,
+            "tools/rebind_current_epoch_crosswalk.py",
+            _PREPARATION,
+            "schemas/portfolio/account-strategy-manifest.schema.json",
+        ),
+        "contracts": ("schemas/portfolio/account-strategy-manifest.schema.json",),
+        "producer": (_ACCOUNT_MANIFEST, "stage_account_manifest_generation"),
+        "artifacts": ("account-strategy-manifest generation", "current-epoch crosswalk"),
+        "consumers": ((_CAPITAL_INPUT, "build_input_generation"), (_PREPARATION, "prepare_attended_inputs")),
+        "validators": ((_ACCOUNT_MANIFEST_VERIFY, "IndependentAccountManifestVerifier.verify"),),
+        "writers": ((_EPOCH_MANIFEST, "stage_current_epoch_manifest"),),
+        "stages": ("baseline", "attribution", "analytics", "report", "panel"),
+        "tests": ("tests/core/test_attended_preparation.py",),
+        "sinks": ("report-json-html", "panel-json-html"),
+    },
+    {
+        "id": "governed-hwm-result",
+        "source_paths": (
+            _HWM,
+            _PREPARATION,
+            "tools/portfolio_hwm_selected_inputs.py",
+            "contracts/portfolio-hwm-policy-v4.json",
+            "contracts/portfolio-performance-policy-v1.json",
+        ),
+        "contracts": (
+            "contracts/portfolio-hwm-policy-v4.json",
+            "contracts/portfolio-performance-policy-v1.json",
+        ),
+        "producer": (_HWM, "compute_governed_as_held_composite_hwm"),
+        "artifacts": ("hwm-governed-result.json", "hwm-input-generation.json"),
+        "consumers": ((_RELEASE, "build_report"), (_PANEL, "build_candidate")),
+        "validators": ((_HWM, "verify_governed_hwm_result"),),
+        "writers": ((_PREPARATION, "prepare_attended_inputs"),),
+        "stages": ("report", "panel"),
+        "tests": ("tests/core/test_attended_preparation.py",),
+        "sinks": ("report-json-html", "panel-json-html"),
+    },
+    {
+        "id": "governed-invested-capital-result",
+        "source_paths": (_CAPITAL_INPUT, _CAPITAL, _PREPARATION),
+        "contracts": ("contracts/portfolio-financial-mvp-source-v1.json",),
+        "producer": (_CAPITAL, "build_governed_capital_result"),
+        "artifacts": ("capital-input-generation.json", "invested-capital-result.json"),
+        "consumers": ((_RELEASE, "build_report"), (_PANEL, "build_candidate")),
+        "validators": ((_CAPITAL, "verify_governed_capital_result"),),
+        "writers": ((_CAPITAL_INPUT, "build_input_generation"),),
+        "stages": ("report", "panel"),
+        "tests": ("tests/core/test_attended_preparation.py",),
+        "sinks": ("report-json-html", "panel-json-html"),
+    },
+    {
+        "id": "attribution-catalog-generation",
+        "source_paths": (_ATTRIBUTION, _RELEASE),
+        "contracts": ("contracts/portfolio-performance-policy-v1.json",),
+        "producer": (_ATTRIBUTION, "stage_catalog"),
+        "artifacts": ("strategy-attribution generation",),
+        "consumers": ((_RELEASE, "build_attribution"),),
+        "validators": ((_ATTRIBUTION, "stage_catalog"),),
+        "writers": ((_ATTRIBUTION, "publish_catalog"),),
+        "stages": ("attribution", "analytics", "report", "panel"),
+        "tests": ("tests/core/test_portfolio_release_builder.py",),
+        "sinks": ("report-json-html", "panel-json-html"),
+    },
+    {
+        "id": "decomposition-generation",
+        "source_paths": (_DECOMPOSITION, _RELEASE),
+        "contracts": ("contracts/portfolio-performance-policy-v1.json",),
+        "producer": (_DECOMPOSITION, "stage_candidate"),
+        "artifacts": ("decomposition generation",),
+        "consumers": ((_RELEASE, "build_analytics"), (_PANEL, "build_candidate")),
+        "validators": ((_DECOMPOSITION, "stage_candidate"),),
+        "writers": ((_DECOMPOSITION, "publish"),),
+        "stages": ("analytics", "report", "panel"),
+        "tests": ("tests/core/test_portfolio_release_builder.py",),
+        "sinks": ("report-json-html", "panel-json-html"),
+    },
+    {
+        "id": "report-candidate",
         "source_paths": (
             _REPORT,
             _PANEL,
             "schemas/portfolio/report-data.schema.json",
             "schemas/portfolio/control-panel-data.schema.json",
         ),
-        "producer": (_RELEASE, "build_report_candidate"),
+        "contracts": (
+            "schemas/portfolio/report-data.schema.json",
+            "schemas/portfolio/control-panel-data.schema.json",
+        ),
+        "producer": (_REPORT, "build_candidate"),
         "artifacts": (
             "portfolio-report-data.json",
             "report HTML",
-            "panel JSON",
-            "panel HTML",
         ),
         "consumers": (
             (_REPORT, "verify_candidate"),
             (_PANEL, "build_candidate"),
-            (_PANEL, "verify_candidate"),
         ),
-        "validators": ((_REPORT, "verify_candidate"), (_PANEL, "verify_candidate")),
+        "validators": ((_REPORT, "verify_candidate"),),
+        "writers": ((_REPORT, "publish_report"),),
         "stages": ("report", "panel"),
         "tests": (
             "tests/portfolio_report/test_portfolio_report.py",
-            "tests/portfolio_control_panel/test_mvp2_candidate_report_panel.py",
         ),
-        "sinks": ("report-json-html", "panel-json-html"),
+        "sinks": ("report-json-html",),
+    },
+    {
+        "id": "panel-candidate",
+        "source_paths": (
+            _PANEL,
+            "schemas/portfolio/control-panel-data.schema.json",
+        ),
+        "contracts": ("schemas/portfolio/control-panel-data.schema.json",),
+        "producer": (_PANEL, "build_candidate"),
+        "artifacts": ("panel JSON", "panel HTML"),
+        "consumers": ((_PANEL, "verify_candidate"),),
+        "validators": ((_PANEL, "verify_candidate"),),
+        "writers": ((_PANEL, "publish_panel"),),
+        "stages": ("panel",),
+        "tests": ("tests/portfolio_control_panel/test_mvp2_candidate_report_panel.py",),
+        "sinks": ("panel-json-html",),
     },
     {
         "id": "coordinated-publication-pointers",
-        "source_paths": (_CORE, _MATERIALIZER, _RELEASE),
-        "producer": (_RELEASE, "build_report"),
+        "source_paths": (_CORE, _MATERIALIZER, _RELEASE, _REPORT, _PANEL),
+        "contracts": ("contracts/portfolio-financial-mvp-source-v1.json",),
+        "producer": (_CORE, "execute_pipeline"),
         "artifacts": (
             "coordinated report and panel generations",
             "CURRENT pointers",
         ),
-        "consumers": ((_RELEASE, "build_panel_candidate"),),
-        "validators": ((_REPORT, "publish_report"), (_PANEL, "publish_panel")),
+        "consumers": ((_CORE, "execute_pipeline"),),
+        "validators": ((_CORE, "_validate_commit_authorization"),),
+        "writers": ((_REPORT, "publish_report"), (_PANEL, "publish_panel")),
         "stages": ("report", "panel"),
         "tests": ("tests/core/test_portfolio_release_builder.py",),
         "sinks": ("coordinated-publication-pointers",),
@@ -279,6 +428,7 @@ def _required_paths(repo_root: Path) -> list[str]:
     paths.extend(path for path in _TEST_LINKS.values() if (repo_root / path).is_file())
     for flow in _ARTIFACT_FLOW_SPECS:
         paths.extend(cast(Sequence[str], flow["source_paths"]))
+        paths.extend(cast(Sequence[str], flow["contracts"]))
         paths.extend(cast(Sequence[str], flow["tests"]))
     return sorted(paths)
 
@@ -307,6 +457,35 @@ def _top_level_function(
         ):
             return node
     raise ControllerGraphError(f"required controller symbol is absent: {name}")
+
+
+def _endpoint_function(
+    tree: ast.Module, symbol: str
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    """Resolve a public function or a named public class method."""
+
+    if "." not in symbol:
+        return _top_level_function(tree, symbol)
+    class_name, method_name = symbol.split(".", 1)
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for member in node.body:
+                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name == method_name:
+                    return member
+    raise ControllerGraphError(f"required controller symbol is absent: {symbol}")
+
+
+def _require_attribute_call(
+    repo_root: Path, relative_path: str, function_name: str, attribute: str, relationship: str
+) -> None:
+    function = _top_level_function(_tree(repo_root, relative_path), function_name)
+    if not any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == attribute
+        for node in ast.walk(function)
+    ):
+        raise ControllerGraphError(f"required {relationship} is absent")
 
 
 def _literal_assignment(tree: ast.Module, name: str) -> object:
@@ -354,6 +533,41 @@ def _function_calls(function: ast.FunctionDef | ast.AsyncFunctionDef) -> set[str
         if isinstance(node, ast.Call)
         if (call_name := _call_name(node)) is not None
     }
+
+
+def _local_call_closure(tree: ast.Module, entrypoint: str) -> set[str]:
+    """Follow only same-module helpers reachable from one public entrypoint."""
+
+    functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    pending = [entrypoint]
+    visited: set[str] = set()
+    observed: set[str] = set()
+    while pending:
+        name = pending.pop()
+        if name in visited:
+            continue
+        visited.add(name)
+        function = functions.get(name)
+        if function is None:
+            raise ControllerGraphError(
+                f"required controller local route is absent: {entrypoint}:{name}"
+            )
+        calls = _function_calls(function)
+        observed.update(calls)
+        pending.extend(call for call in calls if call in functions and call not in visited)
+    return observed
+
+
+def _require_local_route_calls(
+    tree: ast.Module, entrypoint: str, calls: Iterable[str], relationship: str
+) -> None:
+    missing = sorted(set(calls) - _local_call_closure(tree, entrypoint))
+    if missing:
+        raise ControllerGraphError(f"required {relationship} is absent")
 
 
 def _tool_calls(
@@ -514,8 +728,82 @@ def _critical_relationships(
         raise ControllerGraphError("attended preparation entrypoint calls are absent")
     if not (repo_root / _PREPARATION).is_file():
         raise ControllerGraphError("attended preparation implementation is absent")
-    _top_level_function(_tree(repo_root, _PREPARATION), "plan_attended_inputs")
-    _top_level_function(_tree(repo_root, _PREPARATION), "prepare_attended_inputs")
+    preparation_tree = _tree(repo_root, _PREPARATION)
+    _top_level_function(preparation_tree, "plan_attended_inputs")
+    _top_level_function(preparation_tree, "prepare_attended_inputs")
+    _require_local_route_calls(
+        preparation_tree,
+        "prepare_attended_inputs",
+        {
+            "_rebuild_layered_history",
+            "dependence.write_source",
+            "dependence.verify_packaged_source",
+            "plans.write_bundle",
+            "release.build_ledger",
+            "release.build_baseline",
+            "stage_current_epoch_manifest",
+            "capital.build_governed_capital_result",
+            "capital.verify_governed_capital_result",
+            "release.build_attribution",
+        },
+        "attended preparation producer route",
+    )
+    _require_local_route_calls(
+        preparation_tree,
+        "prepare_attended_inputs",
+        {"compute_governed_as_held_composite_hwm"},
+        "governed HWM producer invocation",
+    )
+    _require_local_route_calls(
+        preparation_tree,
+        "prepare_attended_inputs",
+        {"verify_governed_hwm_result"},
+        "governed HWM verifier invocation",
+    )
+    _require_calls(
+        repo_root,
+        _PREPARATION,
+        "_rebuild_layered_history",
+        {
+            "history.build_layered_history_generation",
+            "history.write_layered_history_generation",
+            "history.verify_layered_history_generation",
+        },
+    )
+    _require_attribute_call(
+        repo_root,
+        _ACCOUNT_MANIFEST,
+        "stage_account_manifest_generation",
+        "verify",
+        "independent account-manifest verifier invocation",
+    )
+    _require_local_route_calls(
+        preparation_tree,
+        "prepare_attended_inputs",
+        {"plans.build_bundle"},
+        "attended decomposition-plan producer route",
+    )
+    _require_calls(repo_root, _DEPENDENCE, "write_source", {"build_source"})
+    _require_calls(repo_root, _DECOMPOSITION_PLAN, "write_bundle", {"build_bundle"})
+    _require_calls(
+        repo_root,
+        _EPOCH_MANIFEST,
+        "stage_current_epoch_manifest",
+        {"account_manifest_generation.stage_account_manifest_generation"},
+    )
+    _require_calls(
+        repo_root,
+        _CAPITAL_INPUT,
+        "main",
+        {
+            "build_input_generation",
+            "capital.build_governed_capital_result",
+            "capital.verify_governed_capital_result",
+        },
+    )
+    _require_calls(repo_root, _PROVIDER_LEDGER, "main", {"stage_candidate", "verify_candidate"})
+    _require_calls(repo_root, _BASELINE, "main", {"stage_baseline"})
+    _require_calls(repo_root, _ATTRIBUTION, "publish_catalog", {"stage_catalog"})
     preparation_dependencies, preparation_edges = _preparation_stage_dependencies(
         repo_root
     )
@@ -532,12 +820,38 @@ def _critical_relationships(
         if handler.rsplit(".", 1)[1] not in release_stage_calls:
             raise ControllerGraphError(f"release producer handler is absent: {handler}")
     report_builder = _top_level_function(release_tree, "build_report")
+    ledger_builder = _top_level_function(release_tree, "build_ledger")
+    baseline_builder = _top_level_function(release_tree, "build_baseline")
     panel_builder = _top_level_function(release_tree, "build_panel_candidate")
     report_candidate_builder = _top_level_function(
         release_tree, "build_report_candidate"
     )
     if "build_report_candidate" not in _function_calls(report_builder):
         raise ControllerGraphError("release report candidate call is absent")
+    _require_tool_call(
+        ledger_builder,
+        "provider_ledger.py",
+        "stage",
+        "provider-ledger stage CLI target/subcommand",
+    )
+    _require_tool_call(
+        ledger_builder,
+        "provider_ledger.py",
+        "verify",
+        "provider-ledger verify CLI target/subcommand",
+    )
+    _require_tool_call(
+        baseline_builder,
+        "portfolio_baseline.py",
+        "stage",
+        "baseline stage CLI target/subcommand",
+    )
+    _require_tool_call(
+        baseline_builder,
+        "portfolio_baseline.py",
+        "publish",
+        "baseline publish CLI target/subcommand",
+    )
     _require_tool_call(
         report_candidate_builder,
         "portfolio_report.py",
@@ -568,6 +882,19 @@ def _critical_relationships(
     _top_level_function(report_tree, "verify_candidate")
     _top_level_function(panel_tree, "build_candidate")
     _top_level_function(panel_tree, "verify_candidate")
+    core_tree = _tree(repo_root, _CORE)
+    _require_local_route_calls(
+        core_tree,
+        "execute_pipeline",
+        {"_validate_commit_authorization"},
+        "owner publication authorization invocation",
+    )
+    _require_local_route_calls(
+        core_tree,
+        "execute_pipeline",
+        {"commit_release"},
+        "coordinated publication sink invocation",
+    )
     relationships: list[dict[str, object]] = [
         {
             "caller": "tools.portfolio_pipeline_materialize.main",
@@ -595,6 +922,26 @@ def _critical_relationships(
             "caller": "tools.portfolio_release_builder.build_stage",
             "callee": "tools.portfolio_release_builder.build_report",
             "kind": "report-producer",
+        },
+        {
+            "caller": "tools.portfolio_attended_preparation.prepare_attended_inputs",
+            "callee": "quant_engine.portfolio_ledger.hwm_governed_execution.compute_governed_as_held_composite_hwm",
+            "kind": "governed-hwm-producer",
+        },
+        {
+            "caller": "tools.portfolio_attended_preparation.prepare_attended_inputs",
+            "callee": "quant_engine.portfolio_ledger.hwm_governed_execution.verify_governed_hwm_result",
+            "kind": "governed-hwm-verifier",
+        },
+        {
+            "caller": "packages.core.quant_engine.core.pipeline.execute_pipeline",
+            "callee": "packages.core.quant_engine.core.pipeline._validate_commit_authorization",
+            "kind": "owner-publication-authorization",
+        },
+        {
+            "caller": "packages.core.quant_engine.core.pipeline.execute_pipeline",
+            "callee": "quant_engine.release.protocol.commit_release",
+            "kind": "coordinated-publication-sink",
         },
         {
             "caller": "tools.portfolio_release_builder.build_stage",
@@ -655,6 +1002,8 @@ def _artifact_flows(repo_root: Path) -> list[dict[str, object]]:
         producer = cast(tuple[str, str], flow["producer"])
         consumers = cast(tuple[tuple[str, str], ...], flow["consumers"])
         validators = cast(tuple[tuple[str, str], ...], flow["validators"])
+        writers = cast(tuple[tuple[str, str], ...], flow["writers"])
+        contracts = cast(tuple[str, ...], flow["contracts"])
         artifacts = cast(tuple[str, ...], flow["artifacts"])
         stages = cast(tuple[str, ...], flow["stages"])
         sinks = cast(tuple[str, ...], flow["sinks"])
@@ -665,28 +1014,36 @@ def _artifact_flows(repo_root: Path) -> list[dict[str, object]]:
                 or not (repo_root / source_path).is_file()
             ):
                 raise ControllerGraphError("artifact-flow source is absent")
-        endpoints = (producer, *consumers, *validators)
+        if not contracts or not all(
+            isinstance(path, str) and (repo_root / path).is_file()
+            for path in contracts
+        ):
+            raise ControllerGraphError("artifact-flow contract is absent")
+        endpoints = (producer, *consumers, *validators, *writers)
         for endpoint in endpoints:
             if not isinstance(endpoint, tuple) or len(endpoint) != 2:
                 raise ControllerGraphError("artifact-flow endpoint differs")
             path, symbol = endpoint
             if not isinstance(path, str) or not isinstance(symbol, str):
                 raise ControllerGraphError("artifact-flow endpoint differs")
-            _top_level_function(_tree(repo_root, path), symbol)
-        if not artifacts or not consumers or not validators or not sinks:
+            _endpoint_function(_tree(repo_root, path), symbol)
+        if not artifacts or not consumers or not validators or not writers or not sinks:
             raise ControllerGraphError("artifact-flow consumer or validator is absent")
         if not stages or not all(stage in _STAGE_ORDER for stage in stages):
             raise ControllerGraphError("artifact-flow stages differ")
         if not tests or not all((repo_root / path).is_file() for path in tests):
             raise ControllerGraphError("artifact-flow tests are absent")
         flow["source_paths"] = sorted(source_paths)
+        flow["contracts"] = sorted(contracts)
         flow["artifacts"] = list(artifacts)
+        flow["output_inventory"] = list(artifacts)
         flow["consumers"] = [list(endpoint) for endpoint in consumers]
         flow["producer"] = list(producer)
         flow["stages"] = list(stages)
         flow["sinks"] = list(sinks)
         flow["tests"] = list(tests)
         flow["validators"] = [list(endpoint) for endpoint in validators]
+        flow["writers"] = [list(endpoint) for endpoint in writers]
         flows.append(flow)
     return flows
 

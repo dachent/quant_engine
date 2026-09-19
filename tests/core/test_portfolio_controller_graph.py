@@ -183,6 +183,44 @@ def test_build_rejects_removed_panel_consumer_call(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("relative_path", "function_name", "expected", "replacement", "error"),
+    [
+        (
+            "tools/portfolio_attended_preparation.py",
+            "prepare_attended_inputs",
+            "compute_governed_as_held_composite_hwm(",
+            "missing_governed_hwm_producer(",
+            "governed HWM producer invocation",
+        ),
+        (
+            "packages/core/src/quant_engine/core/pipeline.py",
+            "execute_pipeline",
+            "_validate_commit_authorization(commit_authorization, spec)",
+            "missing_commit_authorization(commit_authorization, spec)",
+            "owner publication authorization invocation",
+        ),
+    ],
+)
+def test_build_rejects_removed_actual_producer_or_sink_invocation(
+    tmp_path: Path,
+    relative_path: str,
+    function_name: str,
+    expected: str,
+    replacement: str,
+    error: str,
+) -> None:
+    """The graph must reject a removed required runtime-route invocation."""
+
+    root = _isolated_projection_root(tmp_path)
+    _replace_function_literal(
+        root / relative_path, function_name, expected, replacement
+    )
+
+    with pytest.raises(ControllerGraphError, match=error):
+        build_controller_graph(root)
+
+
+@pytest.mark.parametrize(
     ("function_name", "expected", "replacement", "error"),
     [
         (

@@ -22,8 +22,14 @@ core product stage.  The gate requires the report-to-panel dependency, so the
 MVP path cannot be silently redirected through a workbook.
 
 It also binds the actual static seams: attended preflight to the selected-source
-preparation entrypoints, materializer stage command to the release builder, and
-the release builder's exact Python and CLI calls.  In particular,
+preparation entrypoints (including reachable same-module helpers), materializer
+stage command to the release builder, and the release builder's exact Python and
+CLI calls. The preparation route must reach the layered-history, governed-HWM,
+dependence, decomposition-plan, epoch-manifest, and governed-capital producer
+or verifier seams. The core coordinator's `execute_pipeline` must call both
+`_validate_commit_authorization` and `commit_release`; this is the coordinated
+publication sink protected by the existing owner-publication gate, not the
+release builder's private-stage `CURRENT` work. For report and panel routing,
 `build_report` must call `build_report_candidate`; that candidate must call
 `_tool("portfolio_report.py", "build", ...)`; `build_report` must call report
 `verify` and `publish`; and `build_panel_candidate` must call
@@ -33,18 +39,19 @@ integration-test path in the graph. Missing source bytes, changed declarations,
 missing static symbols/calls, an omitted bound file, or a stale fingerprint are
 validation failures.
 
-The same source-bound projection carries six maintained `artifact_flows`, not a
-separate mapper or diagram. They trace retained/preparation receipts,
-checkpoints and caches; provider-ledger and baseline/epoch/HWM/capital
-generations; attribution/dependence/decomposition generations; report JSON and
-HTML; panel JSON and HTML; and coordinated generation/CURRENT-pointer handoff.
-Every flow names its current producer, consumers, native validators, linked
-tests, downstream stages and terminal sink(s). The actual delivery change range
-is resolved through these records, so an unlisted relevant producer, contract
-or consumer fails reconciliation rather than disappearing. The
-publication-pointer record documents the existing owner-publication gate; it
-does not create a new publication requirement. Workbook is an explicit
-excluded sink and cannot become a required edge.
+The same source-bound projection carries maintained `artifact_flows`, not a
+separate mapper or diagram. Each flow has one native producer, its output
+inventory, bound contracts and source hashes, consumers, native validators,
+writers, linked tests, downstream stages and terminal sink(s). Layered history,
+dependence, plan, ledger, baseline, epoch manifest, HWM, capital, attribution,
+decomposition, report and panel artifacts remain separate records. Report and
+panel candidates are distinct producer records, and `publish_catalog`,
+`publish_report`, and `publish_panel` are writers rather than relabelled
+validators. The actual delivery change range is resolved through these records,
+so an unlisted relevant producer, contract or consumer fails reconciliation
+rather than disappearing. The publication-pointer record documents the existing
+owner-publication gate; it does not create a new publication requirement.
+Workbook is an explicit excluded sink and cannot become a required edge.
 
 The graph is deliberately not an execution authority.  AST cannot prove dynamic
 runtime ordering, source admission/finality, recovery/reuse behavior, or
