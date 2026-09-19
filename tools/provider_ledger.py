@@ -4501,9 +4501,7 @@ def _schwab_current_journal_transfers(
         # A native receipt from outside the selected account perimeter is not
         # a missing internal pair. Preserve its existing external-flow route.
         if expected_recipient_basis is not None and not (
-            expected_direction == "FRM"
-            and expected_counterparty is None
-            and amount > 0
+            expected_direction == "FRM" and expected_counterparty is None and amount > 0
         ):
             if (
                 not isinstance(row.get("source_ordinal"), int)
