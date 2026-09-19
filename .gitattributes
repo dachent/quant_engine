@@ -1,5 +1,6 @@
 * text=auto
 *.json text eol=lf
+/contracts/portfolio-financial-mvp-source-v1.json text eol=crlf
 *.lock text eol=lf
 *.md text eol=lf
 *.py text eol=lf
