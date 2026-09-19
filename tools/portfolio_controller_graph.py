@@ -1281,9 +1281,14 @@ def affected_stages(graph: dict[str, Any], changed_paths: list[str]) -> list[str
         for path in source_paths:
             if not isinstance(path, str):
                 raise ControllerGraphError("controller graph artifact-flow differs")
-            path_stages.setdefault(path, set()).update(
-                stage for stage in flow_stages if isinstance(stage, str)
-            )
+            # Artifact source inventory binds every byte used by a flow, but a
+            # path with explicit ownership must retain that causal boundary.
+            # In particular, a downstream consumer listed by a report artifact
+            # must not acquire upstream report impact from that inventory.
+            if path not in path_stages:
+                path_stages[path] = {
+                    stage for stage in flow_stages if isinstance(stage, str)
+                }
     direct: set[str] = set()
     for changed_path in changed_paths:
         normalized = _relative(Path(changed_path))
