@@ -18,7 +18,12 @@ checkpoints, issue descriptions, PR text and skill defaults:
   A successful extraction, coherent older generation, passing component suite or
   new build date alone is not closure. Preserve documented publication lag,
   fixed-history boundaries and owner-approved unavailable observations.
-- Freeze the requested capture cutoff for the delivery run. A clock/date
+- This MVP delivery's owner-selected financial data cutoff is **2026-09-17**.
+  Keep financial observation dates, provider finality, source capture timestamps,
+  source-generation provenance dates, and execution/calculation timestamps distinct.
+  A later capture or execution timestamp does not change the financial cutoff;
+  preserve later source evidence while excluding post-cutoff financial observations.
+- Freeze the requested financial data cutoff for the delivery run. A clock/date
   rollover does not by itself reopen completed acquisition or require another
   login. Distinguish a newer incremental refresh from a missing original
   capture; preserve and reuse the original captures and their verified QC.
