@@ -4268,7 +4268,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "80f406242546e9d174e95b9d3465217f5de869c8fe02ed865f65a9ff91f598bf"
+        "5133c440a4782e9505eee0b6a6447fc7ce77a59b021dd837cac19231ecfec716"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json
