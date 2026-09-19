@@ -456,6 +456,66 @@ def test_later_target_lifetime_rejects_gap_inside_declared_source_bucket(
         decomposition.build_decomposition(spec_path, source)
 
 
+def test_declared_unavailable_label_does_not_hide_other_missing_source_label(
+    tmp_path: Path,
+) -> None:
+    """A named source omission does not authorize an unrelated dropped period."""
+    source = tmp_path / "source"
+    target_path, days = _write_sources(source)
+    declared_missing = days[20]
+    unexpected_missing = days[40]
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerows(
+            row
+            for row in rows
+            if len(row) < 2
+            or row[1]
+            not in {declared_missing.isoformat(), unexpected_missing.isoformat()}
+        )
+    spec_path = _spec(source, target_path, days)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    target_source = spec["target_source"]
+    target_hash, target_size = _hash(target_path)
+    target_source["expected_sha256"] = target_hash
+    target_source["expected_size_bytes"] = target_size
+    policy = target_source["interval_policy"]
+    policy["source_segments"] = [
+        {
+            "segment_id": "selected-source-segment",
+            "observed_start": days[0].isoformat(),
+            "observed_end": days[-1].isoformat(),
+            "source_vintage": "SELECTED_SNAPSHOT",
+        }
+    ]
+    policy["declared_unavailable_labels"] = [
+        {
+            "date": declared_missing.isoformat(),
+            "reason": "DECLARED_NATIVE_NAV_GAP",
+            "source_reference": {
+                "source_id": "matrixport",
+                "generation_id": "SELECTED_SNAPSHOT",
+                "manifest_sha256": "selected-manifest",
+                "declared_exclusion_item": f"nav_missing_date:{declared_missing.isoformat()}",
+            },
+        }
+    ]
+    spec_path.write_text(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        decomposition.DecompositionError,
+        match=(
+            "missing expected source-period target label\\(s\\).*"
+            f"{unexpected_missing.isoformat()}"
+        ),
+    ):
+        decomposition.build_decomposition(spec_path, source)
+
+
 def _available(result: dict[str, object]) -> dict[str, Any]:
     models = cast(list[dict[str, Any]], result["model_results"])
     selected = [item for item in models if item["selected_for_series"]]

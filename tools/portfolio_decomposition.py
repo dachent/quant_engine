@@ -3441,12 +3441,14 @@ def _model_result(
             _day(item["date"], "declared unavailable label date")
             for item in declared_unavailable
         ]
+        expected_labels: tuple[date, ...]
         if interval_policy.target_calendar == "SESSION_LABELLED":
             schedule = interval_policy.target_session_labels.get(model.series_id)
             if schedule is None or any(day not in schedule for day in declared_days):
                 raise DecompositionError(
                     "declared unavailable label is outside the source schedule"
                 )
+            expected_labels = schedule
         elif interval_policy.target_calendar == "CALENDAR_DAY_24_7":
             if any(
                 not any(
@@ -3460,6 +3462,21 @@ def _model_result(
                 raise DecompositionError(
                     "declared unavailable label is outside source segments"
                 )
+            expected_labels = tuple(
+                day
+                for segment in interval_policy.source_segments
+                for day in (
+                    _day(segment["observed_start"], "source segment start")
+                    + timedelta(days=offset)
+                    for offset in range(
+                        (
+                            _day(segment["observed_end"], "source segment end")
+                            - _day(segment["observed_start"], "source segment start")
+                        ).days
+                        + 1
+                    )
+                )
+            )
         else:
             raise DecompositionError(
                 "declared unavailable labels require source schedule"
@@ -3468,6 +3485,22 @@ def _model_result(
         if any(day in observed_days for day in declared_days):
             raise DecompositionError(
                 "declared unavailable label is present in target rows"
+            )
+        effective_target_finality = min(
+            interval_policy.target_finalized_through,
+            model.as_of_date or interval_policy.target_finalized_through,
+        )
+        unexpected_missing = [
+            day
+            for day in expected_labels
+            if day <= effective_target_finality
+            and day not in declared_days
+            and day not in observed_days
+        ]
+        if unexpected_missing:
+            raise DecompositionError(
+                "missing expected source-period target label(s): "
+                f"{[day.isoformat() for day in unexpected_missing]}"
             )
         source_proof = {
             "declared_unavailable_labels": [
