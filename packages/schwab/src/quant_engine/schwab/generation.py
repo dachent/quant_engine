@@ -1000,7 +1000,13 @@ def _journal_counterparty_crosswalk(crosswalk: Mapping[str, str]) -> dict[str, o
     """Retain the selected suffix relation without exposing account numbers."""
 
     selected_crosswalk = [
-        {"external_account_id": external, "internal_account_id": internal}
+        dict(
+            zip(
+                ("external_account_id", "internal_account_id"),
+                (external, internal),
+                strict=True,
+            )
+        )
         for external, internal in sorted(crosswalk.items())
     ]
     entries = [
