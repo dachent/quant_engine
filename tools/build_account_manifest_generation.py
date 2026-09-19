@@ -470,7 +470,9 @@ def _validate_provider_generation_dates(
             generation.get("generation_as_of_date"),
             "provider generation as_of_date",
         )
-        _reject_provider_fact_after_ledger_date(generation_date, ledger_as_of_date)
+        # Generation provenance is retained source metadata, not a financial
+        # observation. Its canonical date remains validated and is bound to
+        # the selected generation identity at each receipt seam below.
 
 
 def _nonnegative_schema_version(snapshot: InputSnapshot, field_name: str) -> str:
@@ -2782,6 +2784,23 @@ def _validate_mixed_receipt_provider_evidence(
             raise AccountAssignmentPerimeterError(
                 "selected static receipt cutoff differs"
             )
+        receipt_cutoff = _iso_date(
+            receipt.get("calculation_cutoff_date"),
+            "static receipt calculation cutoff",
+        )
+        receipt_coverage = _iso_date(
+            receipt.get("coverage_as_of_date"),
+            "static receipt coverage as_of_date",
+        )
+        if (
+            start > end
+            or end > ledger_as_of_date.isoformat()
+            or receipt_cutoff > ledger_as_of_date.isoformat()
+            or receipt_coverage != ledger_as_of_date.isoformat()
+        ):
+            raise AccountAssignmentPerimeterError(
+                "selected static receipt financial interval exceeds ledger date"
+            )
 
         def fact_date(row: Mapping[str, object], kind: str) -> str:
             return str(
@@ -2824,13 +2843,6 @@ def _validate_mixed_receipt_provider_evidence(
             raise AccountAssignmentPerimeterError(
                 "selected static receipt observed facts differ"
             )
-        _reject_provider_fact_after_ledger_date(
-            _iso_date(
-                generation.get("generation_as_of_date"),
-                "static receipt generation date",
-            ),
-            ledger_as_of_date,
-        )
         return
     manifest = receipt.get("provider_generation_manifest")
     matches = []
@@ -2857,27 +2869,19 @@ def _validate_mixed_receipt_provider_evidence(
             "selected receipt provider evidence differs"
         )
     generation = matches[0]
-    generation_date = _iso_date(
-        generation.get("generation_as_of_date"),
-        "provider generation as_of_date",
-    )
-    _reject_provider_fact_after_ledger_date(generation_date, ledger_as_of_date)
+    _iso_date(generation.get("generation_as_of_date"), "provider generation as_of_date")
     if isinstance(manifest, Mapping):
-        manifest_date = _iso_date(
+        _iso_date(
             manifest.get("as_of_date"),
             "provider generation manifest as_of_date",
         )
-        _reject_provider_fact_after_ledger_date(manifest_date, ledger_as_of_date)
     raw_artifacts = receipt.get("raw_evidence_artifacts")
     if isinstance(raw_artifacts, list):
         for artifact in raw_artifacts:
             if isinstance(artifact, Mapping):
-                artifact_date = _iso_date(
+                _iso_date(
                     artifact.get("as_of_date"),
                     "raw evidence artifact as_of_date",
-                )
-                _reject_provider_fact_after_ledger_date(
-                    artifact_date, ledger_as_of_date
                 )
     for field_name in (
         "requested_start",
