@@ -803,6 +803,8 @@ def _panel_checkpoint_stage_fixture(
     candidate.mkdir()
     candidate_file = candidate / "panel.html"
     candidate_file.write_text("candidate-v1", encoding="utf-8")
+    report_root = tmp_path / "report"
+    report_root.mkdir()
     implementation = tmp_path / "implementation.json"
     return_attribution = tmp_path / "return-attribution.json"
     strategy_root = tmp_path / "strategy-root"
@@ -817,7 +819,10 @@ def _panel_checkpoint_stage_fixture(
         "baseline": {},
         "attribution": {"destination": str(tmp_path / "attribution")},
         "analytics": {"correlation_root": str(tmp_path / "correlation")},
-        "report": {},
+        # The panel producer consumes the report producer's declared root.
+        # Keep this fixture on that real producer/consumer seam rather than
+        # weakening the non-empty report-root guard.
+        "report": {"root": str(report_root)},
         "workbook": {},
     }
     for role, value in values.items():
@@ -885,7 +890,7 @@ def test_panel_candidate_checkpoint_rejects_foreign_or_stale_provenance(
         return
 
     recipe_bytes = recipe_path.read_bytes()
-    predecessor_path = output_root / "stage-results" / "workbook.json"
+    predecessor_path = output_root / "stage-results" / "report.json"
     predecessor_bytes = predecessor_path.read_bytes()
     candidate_bytes = candidate_file.read_bytes()
 

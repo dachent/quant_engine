@@ -7,7 +7,7 @@ not a second pipeline: its only output is the schema-1 source-run handoff that
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
 import hashlib
 import importlib.util
 import json
@@ -212,6 +212,108 @@ def _write(path: Path, value: Mapping[str, Any]) -> None:
         handle.write(content)
 
 
+def _original_observation_locators(
+    observation: Mapping[str, Any], provider_rows: Mapping[str, Mapping[str, Any]]
+) -> dict[str, Mapping[str, Any]]:
+    """Recover provider roots only from the hash-pinned original observation."""
+
+    pin_keys = {"path", "sha256", "size_bytes"}
+    observed_keys = set(observation)
+    if not observed_keys & pin_keys:
+        # Lightweight unit rows need no filesystem locator. Actual admitted
+        # receipts always carry all three binding fields.
+        return {}
+    required = {
+        "captured_at_utc",
+        "financial_cutoff",
+        "path",
+        "policy_contract_sha256",
+        "providers",
+        "sha256",
+        "size_bytes",
+    }
+    if observed_keys != required:
+        raise AttendedPreparationError("native source observation binding differs")
+    original_path = _pin(
+        {key: observation[key] for key in pin_keys},
+        "original native source observation",
+    )
+    original = _read(original_path, "original native source observation")
+    if set(original) != {
+        "schema_version",
+        "policy_contract_sha256",
+        "financial_cutoff",
+        "captured_at_utc",
+        "providers",
+    } or any(
+        original.get(key) != observation.get(key)
+        for key in ("policy_contract_sha256", "financial_cutoff", "captured_at_utc")
+    ):
+        raise AttendedPreparationError("original native source observation differs")
+    selected = original.get("providers")
+    if not isinstance(selected, Mapping) or set(selected) != set(provider_rows):
+        raise AttendedPreparationError("original native provider set differs")
+    locators: dict[str, Mapping[str, Any]] = {}
+    for source_id, row in provider_rows.items():
+        selected_row = selected.get(source_id)
+        if not isinstance(selected_row, Mapping):
+            raise AttendedPreparationError("original native provider row differs")
+        if any(
+            selected_row.get(key) != row.get(key)
+            for key in (
+                "catalog_sha256",
+                "generation_id",
+                "manifest_sha256",
+                "qualification",
+                "finalized_through",
+            )
+        ):
+            raise AttendedPreparationError("original native provider identity differs")
+        if not isinstance(selected_row.get("root"), str):
+            raise AttendedPreparationError("original native provider root differs")
+        locators[source_id] = selected_row
+    return locators
+
+
+def _native_snapshot(
+    source_id: str, locator: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    """Read one source-selected catalog after checking its bound generation bytes."""
+
+    try:
+        import provider_ledger
+
+        catalog_name = provider_ledger._PROVIDER_CATALOGS[source_id][0]  # noqa: SLF001
+        root = Path(str(locator["root"])).resolve()
+        generation = root / "generations" / str(locator["generation_id"])
+        manifest = generation / "generation.json"
+        catalog = generation / catalog_name
+        if any(path.is_symlink() or not path.is_file() for path in (manifest, catalog)):
+            raise AttendedPreparationError("original native generation is unavailable")
+        if hashlib.sha256(manifest.read_bytes()).hexdigest() != locator.get(
+            "manifest_sha256"
+        ):
+            raise AttendedPreparationError("original native manifest differs")
+        catalog_bytes = catalog.read_bytes()
+        if hashlib.sha256(catalog_bytes).hexdigest() != locator.get("catalog_sha256"):
+            raise AttendedPreparationError("original native catalog differs")
+        payload = json.loads(catalog_bytes)
+    except (
+        ImportError,
+        OSError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        KeyError,
+    ) as exc:
+        raise AttendedPreparationError(
+            "original native catalog is unavailable"
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise AttendedPreparationError("original native catalog differs")
+    snapshot = payload.get("position_snapshot_as_of")
+    return snapshot if isinstance(snapshot, Mapping) else None
+
+
 def _source_clock(source_phase: Mapping[str, Any], cutoff: str) -> dict[str, Any]:
     observation = source_phase.get("source_provenance")
     if not isinstance(observation, Mapping):
@@ -229,6 +331,14 @@ def _source_clock(source_phase: Mapping[str, Any], cutoff: str) -> dict[str, Any
         provider_rows = []
     if not provider_rows:
         raise AttendedPreparationError("native source provider finality is absent")
+    normalized_rows = {
+        source_id: row
+        for source_id, row in provider_rows
+        if isinstance(source_id, str) and isinstance(row, Mapping)
+    }
+    if len(normalized_rows) != len(provider_rows):
+        raise AttendedPreparationError("native source provider row differs")
+    locators = _original_observation_locators(observation, normalized_rows)
     rows: list[dict[str, object]] = []
     limiting: list[str] = []
     applicable_final_dates: dict[str, str] = {}
@@ -287,36 +397,38 @@ def _source_clock(source_phase: Mapping[str, Any], cutoff: str) -> dict[str, Any
                 )
             if "timezone" in position:
                 item["timezone"] = position["timezone"]
-        # The provider row names the selected immutable generation.  Read its
-        # native catalog only to recover a stated observation clock; never use
-        # the assembled run-observation timestamp as a substitute.
-        root = row.get("root")
-        generation_id = row.get("generation_id")
-        if isinstance(root, str) and isinstance(generation_id, str):
-            generation = Path(root) / "generations" / generation_id
-            for name in ("schwab-generation.json", "ibkr-catalog.json", "catalog.json"):
-                candidate = generation / name
-                if candidate.is_symlink() or not candidate.is_file():
-                    continue
-                try:
-                    native = json.loads(candidate.read_bytes())
-                except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                    continue
-                snapshot = (
-                    native.get("position_snapshot_as_of")
-                    if isinstance(native, Mapping)
-                    else None
+        if (locator := locators.get(source_id)) is not None and (
+            snapshot := _native_snapshot(source_id, locator)
+        ) is not None:
+            if "observed_at" in snapshot:
+                item["native_observed_at"] = snapshot["observed_at"]
+            if "provider_data_date" in snapshot:
+                item["provider_data_date"] = _date(
+                    snapshot["provider_data_date"], "position data date"
                 )
-                if isinstance(snapshot, Mapping):
-                    if "observed_at" in snapshot:
-                        item["native_observed_at"] = snapshot["observed_at"]
-                    if "provider_data_date" in snapshot:
-                        item["provider_data_date"] = _date(
-                            snapshot["provider_data_date"], "position data date"
-                        )
-                    if "timezone" in snapshot:
-                        item["timezone"] = snapshot["timezone"]
-                    break
+            if "timezone" in snapshot:
+                item["timezone"] = snapshot["timezone"]
+        observed_at = item.get("native_observed_at")
+        if observed_at is not None:
+            if not isinstance(observed_at, str):
+                raise AttendedPreparationError("native source observation differs")
+            try:
+                instant = datetime.fromisoformat(observed_at)
+            except ValueError as exc:
+                raise AttendedPreparationError(
+                    "native source observation differs"
+                ) from exc
+            if instant.tzinfo is None or instant.utcoffset() is None:
+                raise AttendedPreparationError("native source observation differs")
+            item["native_observed_at"] = instant.astimezone(UTC).isoformat()
+            item.setdefault("precision", "TIMESTAMP")
+            if source_id == "schwab":
+                # Schwab position snapshots use the established New York
+                # financial-day policy; this labels the native instant, not a
+                # fabricated provider capture time.
+                item.setdefault("timezone", "America/New_York")
+        else:
+            item.setdefault("precision", "DATE")
         rows.append(item)
     if not applicable_final_dates:
         raise AttendedPreparationError("native source current finality is absent")
@@ -1033,7 +1145,7 @@ def _preserve_uncheckpointed_stage(root: Path, stage: str) -> None:
         os.replace(path, destination / path.name)
 
 
-def prepare_attended_inputs(
+def _prepare_attended_inputs(
     *,
     preparation_spec_path: Path,
     output_root: Path,
@@ -1041,13 +1153,18 @@ def prepare_attended_inputs(
     evaluated_on: str,
     release_commit: str,
     resume: bool = False,
+    observation_started: bool = False,
+    validated: tuple[dict[str, Any], dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Build one verified local preparation handoff using retained native inputs."""
     if len(release_commit) != 40:
         raise AttendedPreparationError("release commit differs")
-    config, plan = _validated_inputs(
-        preparation_spec_path, requested_as_of, evaluated_on
-    )
+    if validated is None:
+        config, plan = _validated_inputs(
+            preparation_spec_path, requested_as_of, evaluated_on
+        )
+    else:
+        config, plan = validated
     root = output_root.resolve()
     identity = _preparation_input_identity(
         preparation_spec_path=preparation_spec_path,
@@ -1057,15 +1174,18 @@ def prepare_attended_inputs(
     )
     run_identity = _preparation_run_identity(identity)
     if root.exists():
-        if not resume:
+        if not resume and not observation_started:
             raise AttendedPreparationError(
                 "preparation output already exists; use --resume"
             )
-        stored_identity = _read(
-            root / "preparation-input-identity.json", "preparation input identity"
-        )
-        if _preparation_run_identity(stored_identity) != run_identity:
-            raise AttendedPreparationError("preparation input identity differs")
+        if resume:
+            stored_identity = _read(
+                root / "preparation-input-identity.json", "preparation input identity"
+            )
+            if _preparation_run_identity(stored_identity) != run_identity:
+                raise AttendedPreparationError("preparation input identity differs")
+        else:
+            _write(root / "preparation-input-identity.json", run_identity)
     else:
         root.mkdir(parents=True)
         _write(root / "preparation-input-identity.json", run_identity)
@@ -1667,3 +1787,51 @@ def prepare_attended_inputs(
         "financial_stage_inputs": financial,
         "data_clock": plan["data_clock"],
     }
+
+
+def prepare_attended_inputs(
+    *,
+    preparation_spec_path: Path,
+    output_root: Path,
+    requested_as_of: str,
+    evaluated_on: str,
+    release_commit: str,
+    resume: bool = False,
+) -> dict[str, Any]:
+    """Record actual preparation work before using its checkpointed producer path."""
+
+    # Source and input QC deliberately precede output creation and operational
+    # attempt observation.  A rejected input must not leave a resumable-looking
+    # preparation root behind.
+    config, plan = _validated_inputs(
+        preparation_spec_path, requested_as_of, evaluated_on
+    )
+    root = output_root.resolve()
+    if root.exists():
+        if not resume:
+            raise AttendedPreparationError(
+                "preparation output already exists; use --resume"
+            )
+    else:
+        root.mkdir(parents=True)
+    import portfolio_pipeline_materialize as materializer
+
+    attempt = materializer._attended_start_preparation_attempt(root)  # noqa: SLF001
+    try:
+        result = _prepare_attended_inputs(
+            preparation_spec_path=preparation_spec_path,
+            output_root=root,
+            requested_as_of=requested_as_of,
+            evaluated_on=evaluated_on,
+            release_commit=release_commit,
+            resume=resume,
+            observation_started=True,
+            validated=(config, plan),
+        )
+    except Exception:
+        materializer._attended_finish_preparation_attempt(  # noqa: SLF001
+            root, attempt, "FAILED"
+        )
+        raise
+    materializer._attended_finish_preparation_attempt(root, attempt, "COMPLETED")  # noqa: SLF001
+    return result

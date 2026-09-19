@@ -5702,60 +5702,89 @@ def _execution_timestamp() -> str:
 
 def _attended_execution_observations(
     output_root: Path,
-) -> list[dict[str, Any]]:
+) -> dict[str, list[dict[str, Any]]]:
     """Read prior operational attempts, rejecting malformed timing evidence."""
 
     receipt = _attended_execution_observations_receipt(output_root)
     if not receipt.exists():
-        return []
+        return {"execution_attempts": [], "preparation_attempts": []}
     value = _load(receipt, "attended execution observations")
-    attempts = value.get("attempts")
-    if (
-        set(value) != {"attempts", "schema_version"}
-        or value.get("schema_version") != 1
-        or not isinstance(attempts, list)
-    ):
+    schema = value.get("schema_version")
+    values: dict[str, object]
+    if schema == 1 and set(value) == {"attempts", "schema_version"}:
+        values = {
+            "execution_attempts": value.get("attempts"),
+            "preparation_attempts": [],
+        }
+    elif schema == 2 and set(value) == {
+        "execution_attempts",
+        "preparation_attempts",
+        "schema_version",
+    }:
+        values = {
+            "execution_attempts": value.get("execution_attempts"),
+            "preparation_attempts": value.get("preparation_attempts"),
+        }
+    else:
         raise MaterializationError("attended execution observations differ")
-    validated: list[dict[str, Any]] = []
-    for expected_attempt, attempt in enumerate(attempts, start=1):
-        if not isinstance(attempt, dict) or attempt.get("attempt") != expected_attempt:
+    validated: dict[str, list[dict[str, Any]]] = {}
+    for phase, attempts in values.items():
+        if not isinstance(attempts, list):
             raise MaterializationError("attended execution observations differ")
-        status = attempt.get("status")
-        required = (
-            {"attempt", "started_at", "status"}
-            if status in {"RUNNING", "INCOMPLETE"}
-            else {"attempt", "ended_at", "started_at", "status"}
-        )
-        if (
-            set(attempt) != required
-            or status not in {"RUNNING", "INCOMPLETE", "COMPLETED", "FAILED"}
-            or not isinstance(attempt.get("started_at"), str)
-        ):
-            raise MaterializationError("attended execution observations differ")
-        try:
-            started = datetime.fromisoformat(cast(str, attempt["started_at"]))
-            ended = (
-                datetime.fromisoformat(cast(str, attempt["ended_at"]))
-                if "ended_at" in attempt
-                else None
+        phase_attempts: list[dict[str, Any]] = []
+        for expected_attempt, attempt in enumerate(attempts, start=1):
+            if (
+                not isinstance(attempt, dict)
+                or attempt.get("attempt") != expected_attempt
+            ):
+                raise MaterializationError("attended execution observations differ")
+            status = attempt.get("status")
+            required = (
+                {"attempt", "started_at", "status"}
+                if status in {"RUNNING", "INCOMPLETE"}
+                else {"attempt", "ended_at", "started_at", "status"}
             )
-        except ValueError as exc:
-            raise MaterializationError(
-                "attended execution observations differ"
-            ) from exc
-        if started.tzinfo is None or (ended is not None and ended.tzinfo is None):
-            raise MaterializationError("attended execution observations differ")
-        validated.append(dict(attempt))
+            if (
+                set(attempt) != required
+                or status not in {"RUNNING", "INCOMPLETE", "COMPLETED", "FAILED"}
+                or not isinstance(attempt.get("started_at"), str)
+            ):
+                raise MaterializationError("attended execution observations differ")
+            try:
+                started = datetime.fromisoformat(cast(str, attempt["started_at"]))
+                ended = (
+                    datetime.fromisoformat(cast(str, attempt["ended_at"]))
+                    if "ended_at" in attempt
+                    else None
+                )
+            except ValueError as exc:
+                raise MaterializationError(
+                    "attended execution observations differ"
+                ) from exc
+            if started.tzinfo is None or (ended is not None and ended.tzinfo is None):
+                raise MaterializationError("attended execution observations differ")
+            phase_attempts.append(dict(attempt))
+        validated[phase] = phase_attempts
     return validated
 
 
 def _attended_replace_execution_observations(
-    output_root: Path, attempts: Sequence[Mapping[str, Any]]
+    output_root: Path, attempts: Mapping[str, Sequence[Mapping[str, Any]]]
 ) -> None:
     """Atomically preserve every operational attempt outside financial cache state."""
 
     receipt = _attended_execution_observations_receipt(output_root)
-    value = {"attempts": [dict(attempt) for attempt in attempts], "schema_version": 1}
+    if set(attempts) != {"execution_attempts", "preparation_attempts"}:
+        raise MaterializationError("attended execution observations differ")
+    value = {
+        "execution_attempts": [
+            dict(attempt) for attempt in attempts["execution_attempts"]
+        ],
+        "preparation_attempts": [
+            dict(attempt) for attempt in attempts["preparation_attempts"]
+        ],
+        "schema_version": 2,
+    }
     if not receipt.exists():
         _write_exact(receipt, canonical_json_bytes(value))
         return
@@ -5773,37 +5802,64 @@ def _attended_replace_execution_observations(
         ) from exc
 
 
-def _attended_start_execution_attempt(output_root: Path) -> int:
-    """Begin a new attempt and classify any previously interrupted attempt."""
+def _attended_start_attempt(output_root: Path, phase: str) -> int:
+    """Begin one operational phase attempt without altering financial identity."""
 
+    if phase not in {"execution", "preparation"}:
+        raise MaterializationError("attended execution phase differs")
     attempts = _attended_execution_observations(output_root)
-    if attempts and attempts[-1]["status"] == "RUNNING":
-        attempts[-1]["status"] = "INCOMPLETE"
-    attempt = len(attempts) + 1
-    attempts.append(
+    key = f"{phase}_attempts"
+    phase_attempts = attempts[key]
+    if phase_attempts and phase_attempts[-1]["status"] == "RUNNING":
+        phase_attempts[-1]["status"] = "INCOMPLETE"
+    attempt = len(phase_attempts) + 1
+    phase_attempts.append(
         {"attempt": attempt, "started_at": _execution_timestamp(), "status": "RUNNING"}
     )
     _attended_replace_execution_observations(output_root, attempts)
     return attempt
 
 
-def _attended_finish_execution_attempt(
-    output_root: Path, attempt: int, status: str
+def _attended_finish_attempt(
+    output_root: Path, phase: str, attempt: int, status: str
 ) -> None:
     """Terminal outcomes receive a real ending instant; interruption remains open."""
 
     if status not in {"COMPLETED", "FAILED"}:
         raise MaterializationError("attended execution status differs")
+    if phase not in {"execution", "preparation"}:
+        raise MaterializationError("attended execution phase differs")
     attempts = _attended_execution_observations(output_root)
+    phase_attempts = attempts[f"{phase}_attempts"]
     if (
-        not attempts
-        or attempts[-1].get("attempt") != attempt
-        or attempts[-1].get("status") != "RUNNING"
+        not phase_attempts
+        or phase_attempts[-1].get("attempt") != attempt
+        or phase_attempts[-1].get("status") != "RUNNING"
     ):
         raise MaterializationError("attended execution attempt differs")
-    attempts[-1]["ended_at"] = _execution_timestamp()
-    attempts[-1]["status"] = status
+    phase_attempts[-1]["ended_at"] = _execution_timestamp()
+    phase_attempts[-1]["status"] = status
     _attended_replace_execution_observations(output_root, attempts)
+
+
+def _attended_start_execution_attempt(output_root: Path) -> int:
+    return _attended_start_attempt(output_root, "execution")
+
+
+def _attended_finish_execution_attempt(
+    output_root: Path, attempt: int, status: str
+) -> None:
+    _attended_finish_attempt(output_root, "execution", attempt, status)
+
+
+def _attended_start_preparation_attempt(output_root: Path) -> int:
+    return _attended_start_attempt(output_root, "preparation")
+
+
+def _attended_finish_preparation_attempt(
+    output_root: Path, attempt: int, status: str
+) -> None:
+    _attended_finish_attempt(output_root, "preparation", attempt, status)
 
 
 def _attended_bind_qa(

@@ -4845,7 +4845,7 @@ def test_attended_execution_observations_preserve_cold_and_resumed_attempt_times
         )
     )
     assert receipt == {
-        "attempts": [
+        "execution_attempts": [
             {
                 "attempt": 1,
                 "ended_at": "2026-09-19T12:00:01+00:00",
@@ -4859,7 +4859,8 @@ def test_attended_execution_observations_preserve_cold_and_resumed_attempt_times
                 "status": "COMPLETED",
             },
         ],
-        "schema_version": 1,
+        "preparation_attempts": [],
+        "schema_version": 2,
     }
     assert (
         json.loads((output_root / "attended-run.json").read_text())["request_identity"]
@@ -4905,7 +4906,7 @@ def test_attended_execution_observations_mark_interrupted_attempt_incomplete(
         (output_root / "attended-execution-observations.json").read_text(
             encoding="utf-8"
         )
-    )["attempts"]
+    )["execution_attempts"]
     assert attempts[0] == {
         "attempt": 1,
         "started_at": "2026-09-19T12:00:00+00:00",

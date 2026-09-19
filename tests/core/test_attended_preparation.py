@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 import json
 import sys
 
 import pytest
+
+from quant_engine.core.contracts import canonical_json_bytes
 
 import portfolio_attended_preparation as preparation
 import portfolio_pipeline_materialize as materializer
@@ -962,6 +965,96 @@ def test_source_clock_excludes_finite_history_from_live_common_eod() -> None:
         "quantbase",
         "schwab",
     }
+    assert all(
+        row["precision"] == "DATE" and "timezone" not in row
+        for row in clock["source_data_as_of"]
+    )
+
+
+def test_source_clock_recovers_schwab_snapshot_from_pinned_original_observation(
+    tmp_path: Path,
+) -> None:
+    """Normalized admission rows cannot replace the selected native locator."""
+
+    generation_id = "a" * 64
+    root = tmp_path / "schwab"
+    generation = root / "generations" / generation_id
+    generation.mkdir(parents=True)
+    catalog = {
+        "position_snapshot_as_of": {"observed_at": "2026-09-18T03:59:40.004417+00:00"}
+    }
+    catalog_path = generation / "schwab-generation.json"
+    catalog_path.write_bytes(canonical_json_bytes(catalog))
+    manifest_path = generation / "generation.json"
+    manifest_path.write_bytes(canonical_json_bytes({"generation_id": generation_id}))
+
+    original = {
+        "schema_version": 1,
+        "policy_contract_sha256": "b" * 64,
+        "financial_cutoff": "2026-09-17",
+        "captured_at_utc": "2026-09-19T09:19:17.369302+00:00",
+        "providers": {
+            "schwab": {
+                "root": str(root),
+                "generation_id": generation_id,
+                "manifest_sha256": hashlib.sha256(
+                    manifest_path.read_bytes()
+                ).hexdigest(),
+                "catalog_sha256": hashlib.sha256(catalog_path.read_bytes()).hexdigest(),
+                "qualification": "STAGED_COMPLETE",
+                "generation_as_of_date": "2026-09-18",
+                "finalized_through": "2026-09-17",
+                "finality_evidence": {
+                    "path": "unused",
+                    "sha256": "c" * 64,
+                    "size_bytes": 1,
+                },
+            }
+        },
+    }
+    original_path = tmp_path / "run-observation.json"
+    original_path.write_bytes(canonical_json_bytes(original))
+    source_provenance = {
+        "captured_at_utc": original["captured_at_utc"],
+        "financial_cutoff": original["financial_cutoff"],
+        "path": str(original_path),
+        "policy_contract_sha256": original["policy_contract_sha256"],
+        "providers": [
+            {
+                "provider_id": "schwab",
+                "catalog_sha256": original["providers"]["schwab"]["catalog_sha256"],
+                "generation_id": generation_id,
+                "manifest_sha256": original["providers"]["schwab"]["manifest_sha256"],
+                "qualification": "STAGED_COMPLETE",
+                "finalized_through": "2026-09-17",
+                "finality_interpretation": {
+                    "basis": "CAPTURED_NATIVE_HISTORICAL_NAV_LABEL",
+                    "provider_finality_guarantee": False,
+                },
+            }
+        ],
+        "sha256": hashlib.sha256(original_path.read_bytes()).hexdigest(),
+        "size_bytes": len(original_path.read_bytes()),
+    }
+
+    clock = preparation._source_clock(
+        {"source_provenance": source_provenance}, "2026-09-17"
+    )
+
+    assert clock["source_data_as_of"] == [
+        {
+            "applies_to_latest_common_eod": True,
+            "finality": {
+                "basis": "CAPTURED_NATIVE_HISTORICAL_NAV_LABEL",
+                "provider_finality_guarantee": False,
+            },
+            "native_observed_at": "2026-09-18T03:59:40.004417+00:00",
+            "precision": "TIMESTAMP",
+            "provider_data_date": "2026-09-17",
+            "source_id": "schwab",
+            "timezone": "America/New_York",
+        }
+    ]
 
 
 def test_source_clock_rejects_unclassified_selected_finality() -> None:
@@ -1108,6 +1201,162 @@ def test_attended_execute_binds_prepared_handoff_before_native_stages(
 
     assert materializer.main(_argv(tmp_path, execute=True)) == 0
     assert events == ["prepare", "preflight", "execute"]
+
+
+def test_supported_entrypoint_records_preparation_attempt_before_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preparation timing starts before its work and remains outside execution."""
+
+    output = tmp_path / "output"
+    source_run = tmp_path / "source-run.json"
+    source_run.write_text("{}", encoding="utf-8")
+    times = iter(("2026-09-19T12:00:00+00:00", "2026-09-19T12:00:01+00:00"))
+    events: list[str] = []
+    monkeypatch.setattr(materializer, "_execution_timestamp", lambda: next(times))
+
+    def prepare_inner(**kwargs: object) -> dict[str, object]:
+        events.append("prepare")
+        receipt = json.loads(
+            (
+                Path(str(kwargs["output_root"]))
+                / "attended-execution-observations.json"
+            ).read_text(encoding="utf-8")
+        )
+        assert receipt["preparation_attempts"] == [
+            {
+                "attempt": 1,
+                "started_at": "2026-09-19T12:00:00+00:00",
+                "status": "RUNNING",
+            }
+        ]
+        return {"financial_stage_inputs": {}, "source_run": source_run}
+
+    def preflight(_args: object) -> dict[str, object]:
+        events.append("preflight")
+        return {"prepared": True}
+
+    def execute(
+        actual: object, _root: Path, *, resume: bool
+    ) -> tuple[int, dict[str, object]]:
+        events.append("execute")
+        assert actual == {"prepared": True}
+        assert resume is False
+        return 0, {"status": "EXECUTED"}
+
+    monkeypatch.setattr(preparation, "_prepare_attended_inputs", prepare_inner)
+    monkeypatch.setattr(preparation, "_validated_inputs", lambda *_args: ({}, {}))
+    monkeypatch.setattr(materializer, "_git", lambda *_args: "a" * 40)
+    monkeypatch.setattr(materializer, "_attended_preflight", preflight)
+    monkeypatch.setattr(materializer, "_attended_execute", execute)
+
+    assert materializer.main(_argv(tmp_path, execute=True)) == 0
+    receipt = json.loads(
+        (output / "attended-execution-observations.json").read_text(encoding="utf-8")
+    )
+    assert receipt == {
+        "execution_attempts": [],
+        "preparation_attempts": [
+            {
+                "attempt": 1,
+                "ended_at": "2026-09-19T12:00:01+00:00",
+                "started_at": "2026-09-19T12:00:00+00:00",
+                "status": "COMPLETED",
+            }
+        ],
+        "schema_version": 2,
+    }
+    assert events == ["prepare", "preflight", "execute"]
+
+
+def test_preparation_attempt_resume_marks_interruption_without_terminal_time(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Killed preparation attempts remain incomplete when the supported entry resumes."""
+
+    output = tmp_path / "output"
+    times = iter(
+        (
+            "2026-09-19T12:00:00+00:00",
+            "2026-09-19T12:01:00+00:00",
+            "2026-09-19T12:01:01+00:00",
+        )
+    )
+    monkeypatch.setattr(materializer, "_execution_timestamp", lambda: next(times))
+
+    def interrupted(**_kwargs: object) -> dict[str, object]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(preparation, "_prepare_attended_inputs", interrupted)
+    monkeypatch.setattr(preparation, "_validated_inputs", lambda *_args: ({}, {}))
+    with pytest.raises(KeyboardInterrupt):
+        preparation.prepare_attended_inputs(
+            preparation_spec_path=tmp_path / "config.json",
+            output_root=output,
+            requested_as_of="2026-09-17",
+            evaluated_on="2026-09-19",
+            release_commit="a" * 40,
+        )
+
+    monkeypatch.setattr(
+        preparation,
+        "_prepare_attended_inputs",
+        lambda **_kwargs: {
+            "financial_stage_inputs": {},
+            "source_run": tmp_path / "run",
+        },
+    )
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=tmp_path / "config.json",
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+        resume=True,
+    )
+
+    attempts = json.loads(
+        (output / "attended-execution-observations.json").read_text(encoding="utf-8")
+    )["preparation_attempts"]
+    assert attempts == [
+        {
+            "attempt": 1,
+            "started_at": "2026-09-19T12:00:00+00:00",
+            "status": "INCOMPLETE",
+        },
+        {
+            "attempt": 2,
+            "ended_at": "2026-09-19T12:01:01+00:00",
+            "started_at": "2026-09-19T12:01:00+00:00",
+            "status": "COMPLETED",
+        },
+    ]
+
+
+def test_preparation_input_qc_rejection_creates_no_operational_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Input QC remains ahead of both numerical work and operational receipts."""
+
+    output = tmp_path / "output"
+    monkeypatch.setattr(
+        preparation,
+        "_validated_inputs",
+        lambda *_args: (_ for _ in ()).throw(
+            preparation.AttendedPreparationError("source input QC rejected")
+        ),
+    )
+
+    with pytest.raises(preparation.AttendedPreparationError, match="source input QC"):
+        preparation.prepare_attended_inputs(
+            preparation_spec_path=tmp_path / "config.json",
+            output_root=output,
+            requested_as_of="2026-09-17",
+            evaluated_on="2026-09-19",
+            release_commit="a" * 40,
+        )
+
+    assert not output.exists()
 
 
 @pytest.mark.parametrize(
