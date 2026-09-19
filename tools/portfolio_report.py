@@ -412,14 +412,17 @@ def _source_clock_authority(
     if path is None:
         return None
     receipt = _load_json(path, "source clock receipt")
-    if set(receipt) != {"schema_version", "source_phase", "data_clock"} or receipt.get(
-        "schema_version"
-    ) != 1:
+    if (
+        set(receipt) != {"schema_version", "source_phase", "data_clock"}
+        or receipt.get("schema_version") != 1
+    ):
         raise ReportValidationError("source clock receipt differs")
     phase = receipt.get("source_phase")
     clock = receipt.get("data_clock")
-    if not isinstance(phase, Mapping) or phase.get("status") != "PASS" or not isinstance(
-        clock, dict
+    if (
+        not isinstance(phase, Mapping)
+        or phase.get("status") != "PASS"
+        or not isinstance(clock, dict)
     ):
         raise ReportValidationError("source clock receipt differs")
     try:
@@ -452,15 +455,31 @@ def _source_clock_authority(
     if dict(phase) != replayed_phase or clock != expected:
         raise ReportValidationError("source clock source authority differs")
     source_rows = expected.get("source_data_as_of")
-    if not isinstance(source_rows, list) or not source_rows or any(
-        not isinstance(row, Mapping)
-        or not isinstance(row.get("timezone"), str)
-        or not row.get("timezone")
-        or not isinstance(row.get("precision"), str)
-        or not row.get("precision")
-        for row in source_rows
-    ):
-        raise ReportValidationError("source clock native timezone or precision differs")
+    if not isinstance(source_rows, list) or not source_rows:
+        raise ReportValidationError("source clock native declarations differ")
+    for row in source_rows:
+        if not isinstance(row, Mapping):
+            raise ReportValidationError("source clock native declarations differ")
+        timezone = row.get("timezone")
+        if timezone is not None and (not isinstance(timezone, str) or not timezone):
+            raise ReportValidationError("source clock native timezone differs")
+        precision = row.get("precision")
+        if precision is not None and (not isinstance(precision, str) or not precision):
+            raise ReportValidationError("source clock native precision differs")
+        observed_at = row.get("native_observed_at")
+        if observed_at is not None:
+            if not isinstance(observed_at, str) or not observed_at:
+                raise ReportValidationError("source clock native observation differs")
+            try:
+                parsed = datetime.fromisoformat(observed_at)
+            except ValueError as exc:
+                raise ReportValidationError(
+                    "source clock native observation differs"
+                ) from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ReportValidationError("source clock native observation differs")
+            if precision is None or precision == "DATE":
+                raise ReportValidationError("source clock native precision differs")
     return replayed_phase, dict(clock)
 
 
@@ -483,9 +502,10 @@ def _validate_source_clock_consumer_binding(
 ) -> None:
     """Bind a replayed attended clock to the report's actual input selections."""
 
-    if calculation_cutoff_date is None or clock.get(
-        "selected_financial_cutoff"
-    ) != calculation_cutoff_date:
+    if (
+        calculation_cutoff_date is None
+        or clock.get("selected_financial_cutoff") != calculation_cutoff_date
+    ):
         raise ReportValidationError("source clock selected financial cutoff differs")
     _reference, _provider_catalog, generation_id, catalog_sha256 = (
         _selected_provider_ledger_catalog(catalog, baseline_root, provider_ledger_root)
@@ -5340,9 +5360,7 @@ def build_report_data(
     """Build canonical report data from the currently accepted baseline."""
 
     source_clock_authority = _source_clock_authority(source_clock_path)
-    source_clock = (
-        None if source_clock_authority is None else source_clock_authority[1]
-    )
+    source_clock = None if source_clock_authority is None else source_clock_authority[1]
     catalog, baseline_ref, baseline_catalog_path = _baseline(
         baseline_root, baseline_generation_id
     )

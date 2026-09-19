@@ -49,7 +49,24 @@ function sourceClockEvidence(clock, expectedCutoff, expectedCommonEod, renderedL
   const sourceIds = rows.map((row) => row?.source_id);
   const expectedHeadline = `Source clock — selected financial cutoff ${clock.selected_financial_cutoff}; latest common finalized EOD ${clock.latest_common_eod}; limiting inputs ${(clock.limiting_inputs || []).join(", ")}.`;
   const sourceLines = rows.map((row) => renderedLines.find((line) => line.startsWith(`Source clock — ${row?.source_id}:`)) || "");
-  const dateOnlySafe = rows.every((row, index) => row?.native_observed_at != null || !sourceLines[index].includes("T00:00:00"));
+  const nativeObservationValid = rows.every((row) => row?.native_observed_at == null
+    || (typeof row.native_observed_at === "string"
+      && /(?:Z|[+-]\d{2}:\d{2})$/.test(row.native_observed_at)
+      && typeof row.precision === "string"
+      && row.precision.length > 0
+      && row.precision !== "DATE"));
+  const nativeDeclarationDisplay = rows.every((row, index) => {
+    const line = sourceLines[index];
+    const timezone = typeof row?.timezone === "string" && row.timezone.length > 0
+      ? row.timezone
+      : "unavailable";
+    const precision = typeof row?.precision === "string" && row.precision.length > 0
+      ? row.precision
+      : "DATE";
+    return line.includes(`native timezone ${timezone}`)
+      && line.includes(`native precision ${precision}`)
+      && (row?.native_observed_at != null || !line.includes("T00:00:00"));
+  });
   return {
     applicable: true,
     valid: isCalendarDate(clock.selected_financial_cutoff)
@@ -59,13 +76,15 @@ function sourceClockEvidence(clock, expectedCutoff, expectedCommonEod, renderedL
       && clock.latest_common_eod >= clock.selected_financial_cutoff
       && sourceIds.length > 0
       && sourceIds.every((sourceId) => typeof sourceId === "string" && sourceId.length > 0)
-      && rows.every((row) => typeof row?.timezone === "string" && row.timezone.length > 0 && typeof row?.precision === "string" && row.precision.length > 0)
+      && rows.every((row) => (row?.timezone == null || (typeof row.timezone === "string" && row.timezone.length > 0))
+        && (row?.precision == null || (typeof row.precision === "string" && row.precision.length > 0)))
+      && nativeObservationValid
       && JSON.stringify(sourceIds) === JSON.stringify([...new Set(sourceIds)].sort())
       && latest === clock.latest_common_eod
       && JSON.stringify(clock.limiting_inputs) === JSON.stringify(limiting)
       && renderedLines.includes(expectedHeadline)
       && sourceLines.every(Boolean)
-      && dateOnlySafe
+      && nativeDeclarationDisplay
       && renderedLines.some((line) => line.includes("Actual execution timestamp is not declared")),
     selected_financial_cutoff: clock.selected_financial_cutoff,
     latest_common_eod: clock.latest_common_eod,
