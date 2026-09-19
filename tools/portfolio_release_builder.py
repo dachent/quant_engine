@@ -974,9 +974,22 @@ def _recipe(path: Path) -> dict[str, Any]:
         )
     if schema_version == 10:
         required.add("epoch_manifest_generation")
-    if set(recipe) - {"dependence_selected_inputs", "source_clock"} != required:
+    if (
+        set(recipe) - {"dependence_selected_inputs", "evaluated_on", "source_clock"}
+        != required
+    ):
         raise VerticalBuildError("vertical-build recipe keys differ")
-    date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
+    financial_cutoff = date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
+    if "evaluated_on" in recipe:
+        evaluation_text = _text(recipe["evaluated_on"], "evaluated_on")
+        try:
+            evaluation_date = date.fromisoformat(evaluation_text)
+        except ValueError as exc:
+            raise VerticalBuildError("evaluated_on is invalid") from exc
+        if evaluation_date.isoformat() != evaluation_text:
+            raise VerticalBuildError("evaluated_on is invalid")
+        if evaluation_date < financial_cutoff:
+            raise VerticalBuildError("evaluation date precedes financial cutoff")
     for key in (
         "baseline_spec",
         "base_factor_file",
@@ -1190,8 +1203,20 @@ def create_recipe(
     strategy_attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
     source_clock_path: Path | None = None,
+    evaluated_on: str | None = None,
 ) -> dict[str, Any]:
-    date.fromisoformat(as_of_date)
+    financial_cutoff = date.fromisoformat(as_of_date)
+    normalized_evaluated_on: str | None = None
+    if evaluated_on is not None:
+        normalized_evaluated_on = _text(evaluated_on, "evaluated_on")
+        try:
+            evaluation_date = date.fromisoformat(normalized_evaluated_on)
+        except ValueError as exc:
+            raise VerticalBuildError("evaluated_on is invalid") from exc
+        if evaluation_date.isoformat() != normalized_evaluated_on:
+            raise VerticalBuildError("evaluated_on is invalid")
+        if evaluation_date < financial_cutoff:
+            raise VerticalBuildError("evaluation date precedes financial cutoff")
     if len(release_commit) != 40:
         raise VerticalBuildError("release commit differs")
     if (provider_ledger_spec is None) == (provider_ledger_generation is None):
@@ -1287,6 +1312,8 @@ def create_recipe(
         )
     if source_clock_path is not None:
         payload["source_clock"] = _file_definition(source_clock_path.resolve())
+    if normalized_evaluated_on is not None:
+        payload["evaluated_on"] = normalized_evaluated_on
     if provider_ledger_spec is not None:
         payload["provider_ledger_spec"] = _file_definition(
             provider_ledger_spec.resolve()
@@ -1917,7 +1944,7 @@ def build_ledger(recipe_path: Path, output_root: Path) -> dict[str, Any]:
         "--provider-ledger-generation-id",
         generation_id,
         "--evaluation-date",
-        _text(recipe["as_of_date"], "as_of_date"),
+        _text(recipe.get("evaluated_on", recipe["as_of_date"]), "evaluation date"),
         "--output",
         str(freshness),
     )

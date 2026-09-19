@@ -1395,6 +1395,7 @@ def _prepare_attended_inputs(
             epoch_manifest_generation_id=None,
             dependence_selected_inputs_path=selected_path,
             source_clock_path=source_clock,
+            evaluated_on=evaluated_on,
         )
         ledger_result = release.build_ledger(recipe_path, root / "stages" / "ledger")
         release._record_stage(root, "ledger", ledger_result)  # noqa: SLF001
@@ -1526,6 +1527,7 @@ def _prepare_attended_inputs(
             epoch_manifest_generation_id=str(epoch["generation_id"]),
             dependence_selected_inputs_path=selected_path,
             source_clock_path=source_clock,
+            evaluated_on=evaluated_on,
         )
         checkpoint(
             "epoch",

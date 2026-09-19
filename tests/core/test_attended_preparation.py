@@ -1004,6 +1004,35 @@ def test_preparation_full_handoff_rejects_changed_hwm_policy_binding(
     assert new_final["input_identity"] != old_final["input_identity"]
 
 
+def test_preparation_forwards_evaluation_to_each_release_recipe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Using the financial cutoff for freshness would drop the preparation clock."""
+
+    spec, _calls, _identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    import portfolio_release_builder as release
+
+    recipes: list[dict[str, object]] = []
+
+    def create_recipe(**kwargs: object) -> None:
+        recipes.append(dict(kwargs))
+        preparation._write(Path(str(kwargs["output"])), {})
+
+    monkeypatch.setattr(release, "create_recipe", create_recipe)
+
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=tmp_path / "prepared",
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+
+    assert len(recipes) == 2
+    assert all(recipe["as_of_date"] == "2026-09-17" for recipe in recipes)
+    assert all(recipe["evaluated_on"] == "2026-09-19" for recipe in recipes)
+
+
 def test_source_clock_excludes_finite_history_from_live_common_eod() -> None:
     """Closed and fixed-history rows remain disclosed but cannot cap live common EOD."""
 
