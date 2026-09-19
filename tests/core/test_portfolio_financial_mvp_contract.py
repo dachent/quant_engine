@@ -4227,9 +4227,11 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # hashes. Moved again when the strategy-backtests segment was restaged onto
     # the bundle carrying the EU designer-model prehistory, then to declare
     # approved source-backed IBKR/Schwab leverage classes without changing
-    # historical generation, inventory or admitted-item pins.
+    # historical generation, inventory or admitted-item pins. The held-workbook
+    # correction removes only that consumer from the historical source rows;
+    # every source fact and admission pin remains unchanged.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "80f406242546e9d174e95b9d3465217f5de869c8fe02ed865f65a9ff91f598bf"
+        "5133c440a4782e9505eee0b6a6447fc7ce77a59b021dd837cac19231ecfec716"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
