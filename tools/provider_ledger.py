@@ -4272,6 +4272,31 @@ def _project_account_facts(
                     "NON_CAPITAL" if amount == 0 else "EXTERNAL_CAPITAL"
                 )
             projections[target_fact].append(record)
+            if (
+                provider_id == "schwab"
+                and source_fact == "transactions"
+                and str(row.get("kind") or "").strip().upper() == "MARGIN INTEREST"
+            ):
+                # A retained Schwab MARGIN INTEREST transaction is an actual
+                # cash-posting financing observation.  It remains separate
+                # from owner flows and retains its native signed amount,
+                # economic dates and artifact/record lineage.
+                projections["financing_cost_observations"].append(
+                    {
+                        **record,
+                        "classification": "BROKER_DEBIT_INTEREST",
+                        "included_in_nav": None,
+                        "measurement_basis": "CASH_POSTING",
+                        "native_source_record_id": row.get("source_record_id")
+                        or source_id,
+                        "record_id": f"schwab-financing-cost:{source_id}",
+                        "source_amount": row.get("amount"),
+                        "source_field": "amount",
+                        "source_ordinal": row.get("source_ordinal"),
+                        "source_record_id": source_id,
+                        "source_section": "transactions",
+                    }
+                )
             if mapping_status == "UNMAPPED":
                 exceptions.append(
                     {
