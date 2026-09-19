@@ -4672,6 +4672,46 @@ def test_attended_preserves_failed_partial_child_and_retries_it_on_resume(
     assert calls == ["ledger", "baseline", "baseline"]
 
 
+def test_attended_preserves_original_exit_when_child_leaves_partial_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed receipt from a failed child remains pending, not completed."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    output_root = tmp_path / "output"
+
+    def fail_ledger(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        (output_root / "stages" / "ledger").mkdir(parents=True)
+        (output_root / "stage-results").mkdir(parents=True)
+        (output_root / "stage-results" / "ledger.json").write_bytes(b"{")
+        return subprocess.CompletedProcess(argv, 97, "", "partial ledger")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", fail_ledger)
+
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 97
+    assert (output_root / "stage-results" / "ledger.json").read_bytes() == b"{"
+
+
+@pytest.mark.parametrize(
+    "role",
+    ("attribution", "analytics", "report", "workbook", "panel-candidate", "panel"),
+)
+def test_attended_completed_nonledger_stage_requires_bound_native_artifacts(
+    tmp_path: Path, role: str
+) -> None:
+    """A non-ledger result receipt alone is never a verified resume artifact."""
+
+    output_root = tmp_path / "output"
+    materializer._attended_stage_root(output_root, role).mkdir(parents=True)
+    _write_json(output_root / "stage-results" / f"{role}.json", {"role": role})
+
+    with pytest.raises(materializer.MaterializationError, match=f"completed {role}"):
+        materializer._attended_completed_stages(output_root, (role,))
+
+
 def test_attended_forwards_complete_governed_financial_families_and_qa(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

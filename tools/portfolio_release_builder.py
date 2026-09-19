@@ -3130,6 +3130,7 @@ def _verify_current_plan_upstream_evidence(
     evaluation_date: str,
     evidence_mode: str,
     assurance_profile: str,
+    dependence_authority_paths: Mapping[str, Path | None] | None = None,
 ) -> dict[str, Any]:
     module_name = "portfolio_current_decomposition_plan_for_release_builder"
     module_path = TOOLS_ROOT / "portfolio_current_decomposition_plan.py"
@@ -3329,6 +3330,7 @@ def _verify_current_plan_upstream_evidence(
                 evidence_mode=evidence_mode,
                 evaluated_on=evaluated_on,
                 assurance_profile=assurance_profile,
+                **(dependence_authority_paths or {}),
             )
     except Exception as exc:
         raise VerticalBuildError(
@@ -3974,8 +3976,48 @@ def _governed_plan_sources(
     )
 
 
+def _selected_dependence_authority_paths(
+    selected_inputs_path: Path | None,
+) -> dict[str, Path | None]:
+    """Reconstruct the five selected source authorities for current history."""
+
+    if selected_inputs_path is None:
+        return {}
+    module_path = TOOLS_ROOT / "portfolio_current_dependence.py"
+    module_name = "portfolio_current_dependence_for_release_builder"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise VerticalBuildError("current dependence verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+        selected = module._selected_inputs(selected_inputs_path)  # noqa: SLF001
+        ledger_root = selected["provider_ledger_generation_root"]
+        return {
+            "provider_admission_receipt_path": selected[
+                "provider_admission_receipt_path"
+            ],
+            "financial_input_contract_path": selected["financial_input_contract_path"],
+            "provider_ledger_manifest_path": ledger_root / "generation.json",
+            "provider_ledger_catalog_path": ledger_root / "provider-ledger.json",
+            "portfolio123_version_evidence_path": selected.get(
+                "portfolio123_version_evidence_path"
+            ),
+        }
+    except Exception as exc:
+        raise VerticalBuildError(
+            f"selected dependence authority is invalid: {exc}"
+        ) from exc
+    finally:
+        sys.modules.pop(module_name, None)
+
+
 def _current_release_plan_specs(
-    attribution_bundle: Path, plan: Mapping[str, Any]
+    attribution_bundle: Path,
+    plan: Mapping[str, Any],
+    *,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     if set(plan) != {
         "assurance_profile",
@@ -4114,6 +4156,9 @@ def _current_release_plan_specs(
         evaluation_date=evaluation_date,
         evidence_mode=evidence_mode,
         assurance_profile=assurance_profile,
+        dependence_authority_paths=_selected_dependence_authority_paths(
+            dependence_selected_inputs_path
+        ),
     )
     (
         governed_sources,
@@ -4480,6 +4525,12 @@ def build_analytics(
     if attribution_bundle.resolve() != recipe_bundle:
         raise VerticalBuildError("attribution plan bundle differs from recipe")
     recipe_as_of = _text(recipe.get("as_of_date"), "recipe as_of_date")
+    selected_definition = recipe.get("dependence_selected_inputs")
+    selected_inputs_path = (
+        _path(selected_definition.get("path"), "dependence_selected_inputs.path")
+        if isinstance(selected_definition, dict)
+        else None
+    )
     correlation_source = _path(
         recipe["correlation_source_root"]["path"], "correlation source root"
     )
@@ -4509,7 +4560,11 @@ def build_analytics(
             or correlation_as_of != recipe_as_of
         ):
             raise VerticalBuildError("current analytics as-of date differs")
-        specs = _current_release_plan_specs(attribution_bundle, plan)
+        specs = _current_release_plan_specs(
+            attribution_bundle,
+            plan,
+            dependence_selected_inputs_path=selected_inputs_path,
+        )
     else:
         specs = _legacy_release_plan_specs(plan)
     mode_plans = (
@@ -4530,7 +4585,11 @@ def build_analytics(
         hybrid_plan = _load(
             hybrid_bundle / "plan-manifest.json", "hybrid decomposition plan"
         )
-        hybrid_specs = _current_release_plan_specs(hybrid_bundle, hybrid_plan)
+        hybrid_specs = _current_release_plan_specs(
+            hybrid_bundle,
+            hybrid_plan,
+            dependence_selected_inputs_path=selected_inputs_path,
+        )
         if (
             hybrid_plan["policies"]["strategy_evidence_mode"] != "LIVE_PLUS_BACKTEST"
             or hybrid_plan["evaluation_date"] != recipe_as_of

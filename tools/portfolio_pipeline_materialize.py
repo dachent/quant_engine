@@ -4831,6 +4831,134 @@ def _attended_completed_baseline(receipt: Mapping[str, Any], stage_root: Path) -
         ) from exc
 
 
+def _attended_completed_attribution(
+    receipt: Mapping[str, Any], stage_root: Path
+) -> None:
+    """Re-read the immutable attribution bundle and its stage verification."""
+
+    try:
+        bundle_id = _text(receipt.get("bundle_id"), "attended attribution bundle_id")
+        destination = _absolute(
+            receipt.get("destination"), "attended attribution destination"
+        )
+        verification_path = _absolute(
+            receipt.get("verification"), "attended attribution verification"
+        )
+        if destination.name != bundle_id or verification_path != (
+            stage_root.resolve() / "attribution-verification.json"
+        ):
+            raise ValueError("attribution receipt identity differs")
+        manifest_path = destination / "plan-manifest.json"
+        manifest = _load(manifest_path, "attended attribution plan manifest")
+        if manifest.get("bundle_id") != bundle_id:
+            raise ValueError("attribution bundle identity differs")
+        for section in ("inputs", "outputs"):
+            rows = manifest.get(section)
+            if not isinstance(rows, list) or not rows:
+                raise ValueError("attribution artifact inventory differs")
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError("attribution artifact definition differs")
+                path = destination / _text(row.get("path"), "attribution artifact")
+                sha256, size_bytes = _sha(path)
+                if sha256 != row.get("sha256") or size_bytes != row.get("size_bytes"):
+                    raise ValueError("attribution artifact identity differs")
+        verification = _load(verification_path, "attended attribution verification")
+        if (
+            verification.get("schema_version") != 1
+            or verification.get("status") != "PASS"
+            or verification.get("bundle_id") != bundle_id
+            or verification.get("plan_manifest_sha256") != _sha(manifest_path)[0]
+        ):
+            raise ValueError("attribution verification identity differs")
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "attended completed attribution artifact identity differs"
+        ) from exc
+
+
+def _attended_completed_stage_root(
+    receipt: Mapping[str, Any], stage_root: Path, role: str
+) -> None:
+    """Require a role result to bind its materialized root before resume."""
+
+    try:
+        if role == "analytics":
+            if receipt.get("schema_version") != 2:
+                raise ValueError("analytics result schema differs")
+            for key in (
+                "correlation_root",
+                "decomposition_root",
+                "decomposition_lenses_root",
+                "weekly_root",
+            ):
+                path = _absolute(receipt.get(key), f"attended analytics {key}")
+                if path.is_symlink() or not path.is_dir():
+                    raise ValueError("analytics output differs")
+            bindings = receipt.get("lens_generation_bindings")
+            if not isinstance(bindings, list) or not bindings:
+                raise ValueError("analytics lens bindings differ")
+            return
+        root = _absolute(receipt.get("root"), f"attended completed {role} root")
+        if root != stage_root.resolve():
+            raise ValueError("stage root differs")
+        if role == "report":
+            candidate = _absolute(
+                receipt.get("candidate_dir"), "attended report candidate"
+            )
+            if candidate.is_symlink() or not candidate.is_dir():
+                raise ValueError("report candidate differs")
+            for name in (
+                "portfolio-report-data.json",
+                "portfolio-report.xlsx",
+                "workbook-contract.json",
+                "xlsx-job.json",
+            ):
+                if not (candidate / name).is_file():
+                    raise ValueError("report candidate inventory differs")
+        else:
+            import portfolio_release_builder as release
+
+            generation_id, _generation = release._published_generation(stage_root)  # noqa: SLF001
+            if receipt.get("generation_id") != generation_id:
+                raise ValueError("published generation identity differs")
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            f"attended completed {role} artifact identity differs"
+        ) from exc
+
+
+def _attended_completed_panel_candidate(
+    receipt: Mapping[str, Any], stage_root: Path
+) -> None:
+    """Validate the release builder's immutable panel-candidate checkpoint."""
+
+    try:
+        if (
+            receipt.get("schema_version") != 1
+            or receipt.get("role") != "panel-candidate"
+        ):
+            raise ValueError("panel candidate checkpoint differs")
+        candidate = receipt.get("candidate")
+        if not isinstance(candidate, dict):
+            raise ValueError("panel candidate identity differs")
+        candidate_root = _absolute(candidate.get("path"), "panel candidate path")
+        if not candidate_root.is_relative_to(stage_root.resolve()):
+            raise ValueError("panel candidate root differs")
+        _validate_directory_definition(candidate, "attended panel candidate")
+        result = receipt.get("result")
+        if (
+            not isinstance(result, dict)
+            or _absolute(result.get("candidate_dir"), "panel candidate result")
+            != candidate_root
+        ):
+            raise ValueError("panel candidate result differs")
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "attended completed panel-candidate artifact identity differs"
+        ) from exc
+
+
 def _attended_completed_stages(
     output_root: Path, required_stages: Sequence[str]
 ) -> list[str]:
@@ -4868,6 +4996,12 @@ def _attended_completed_stages(
             _attended_completed_ledger(result, stage_root)
         elif role == "baseline":
             _attended_completed_baseline(result, stage_root)
+        elif role == "attribution":
+            _attended_completed_attribution(result, stage_root)
+        elif role == "panel-candidate":
+            _attended_completed_panel_candidate(result, stage_root)
+        else:
+            _attended_completed_stage_root(result, stage_root, role)
         completed.append(role)
     return completed
 
@@ -4876,6 +5010,7 @@ def _attended_view(
     output_root: Path,
     required_stages: Sequence[str],
     request_identity: Mapping[str, Any],
+    verified_completed_stages: Sequence[str] | None = None,
 ) -> dict[str, Any]:
     """Render selection facts without claiming later proof-bound material exists."""
 
@@ -4883,9 +5018,9 @@ def _attended_view(
         "planned_stages": list(required_stages),
         "post_proof_pipeline_spec": None,
         "request_identity": _canonical_clone(request_identity),
-        "verified_completed_stages": _attended_completed_stages(
-            output_root, required_stages
-        ),
+        "verified_completed_stages": list(verified_completed_stages)
+        if verified_completed_stages is not None
+        else _attended_completed_stages(output_root, required_stages),
     }
 
 
@@ -5321,7 +5456,10 @@ def _attended_execute(
             print(result.stderr, end="", file=sys.stderr)
         if result.returncode != 0:
             return result.returncode, _attended_view(
-                output_root, preflight["required_stages"], preflight["request_identity"]
+                output_root,
+                preflight["required_stages"],
+                preflight["request_identity"],
+                completed,
             )
         completed = _attended_completed_stages(
             output_root, preflight["required_stages"]
