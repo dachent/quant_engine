@@ -79,6 +79,54 @@ def _write_json(path: Path, value: object) -> Path:
     return path
 
 
+def test_layered_history_authority_paths_forward_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+    authority_paths = {
+        "provider_admission_receipt_path": tmp_path / "receipt.json",
+        "financial_input_contract_path": tmp_path / "financial-contract.json",
+        "provider_ledger_manifest_path": tmp_path / "ledger-manifest.json",
+        "provider_ledger_catalog_path": tmp_path / "ledger-catalog.json",
+        "portfolio123_version_evidence_path": tmp_path / "p123-version.json",
+    }
+
+    class _RoutingVerifier:
+        @staticmethod
+        def verify_layered_history_generation(
+            generation_root: Path,
+            contract_path: Path,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            captured.update(
+                generation_root=generation_root, contract_path=contract_path, **kwargs
+            )
+            raise OSError("routing sentinel")
+
+    monkeypatch.setattr(planner, "_layered_history_module", lambda: _RoutingVerifier)
+    with pytest.raises(planner.CurrentPlanError, match="routing sentinel"):
+        planner._layered_history_targets(
+            generation_root=tmp_path / "generation",
+            contract_path=tmp_path / "contract.json",
+            strategies=[
+                {
+                    "strategy_id": "strategy",
+                    "series_id": "SERIES",
+                    "assignments": [{"source_key": "source"}],
+                }
+            ],
+            evidence_mode="LIVE_ONLY",
+            evaluated_on=date(2026, 1, 1),
+            **authority_paths,
+        )
+
+    assert captured == {
+        "generation_root": tmp_path / "generation",
+        "contract_path": tmp_path / "contract.json",
+        **authority_paths,
+    }
+
+
 def _release_builder_module(name: str) -> Any:
     release_path = REPOSITORY_ROOT / "tools" / "portfolio_release_builder.py"
     release_spec = importlib.util.spec_from_file_location(name, release_path)
