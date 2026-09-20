@@ -2562,6 +2562,123 @@ def test_current_analytics_rejects_recipe_plan_as_of_drift(tmp_path: Path) -> No
         builder.build_analytics(recipe, bundle, tmp_path / "analytics")
 
 
+def test_current_analytics_uses_execution_clock_separate_from_financial_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Current primary and hybrid plans bind execution time, not financial as-of."""
+
+    recipe_root = tmp_path / "recipe-fixture"
+    recipe_root.mkdir()
+    recipe = _recipe(recipe_root)
+    recipe_value = json.loads(recipe.read_text(encoding="utf-8"))
+    execution_date = "2026-08-04"
+    correlation = Path(recipe_value["correlation_source_root"]["path"])
+    (correlation / "dependence-source.json").write_bytes(
+        builder.canonical_json_bytes({"evaluated_on": execution_date})
+    )
+    recipe_value["evaluated_on"] = execution_date
+    recipe_value["correlation_source_root"].update(
+        builder._directory_inventory(correlation)
+    )
+
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["evaluation_date"] = execution_date
+    bundle, _manifest = _rebind_current_bundle(bundle, manifest)
+    recipe_value["decomposition_plan_bundle"] = {
+        "path": str(bundle),
+        **builder._directory_inventory(bundle),
+    }
+
+    hybrid = tmp_path / "hybrid-execution-clock"
+    shutil.copytree(bundle, hybrid)
+    hybrid_manifest = _current_manifest(hybrid)
+    hybrid_manifest["policies"]["strategy_evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    hybrid_manifest["layered_history"]["mode"] = "LIVE_PLUS_BACKTEST"
+    hybrid, _hybrid_manifest = _rebind_current_bundle(hybrid, hybrid_manifest)
+    recipe_value["hybrid_decomposition_plan_bundle"] = {
+        "path": str(hybrid),
+        **builder._directory_inventory(hybrid),
+    }
+    recipe.write_bytes(builder.canonical_json_bytes(recipe_value))
+
+    class ReachedNumericalBuild(Exception):
+        pass
+
+    monkeypatch.setattr(
+        builder, "_history_contract_path", lambda _recipe: Path("synthetic-history")
+    )
+    monkeypatch.setattr(
+        builder, "_current_release_plan_specs", lambda *_args, **_kw: []
+    )
+    monkeypatch.setattr(
+        builder,
+        "_build_base_analytics",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ReachedNumericalBuild()),
+    )
+    with pytest.raises(ReachedNumericalBuild):
+        builder.build_analytics(recipe, bundle, tmp_path / "analytics")
+
+
+@pytest.mark.parametrize("identity", ("plan", "dependence", "hybrid"))
+def test_current_analytics_rejects_changed_execution_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, identity: str
+) -> None:
+    recipe_root = tmp_path / "recipe-fixture"
+    recipe_root.mkdir()
+    recipe = _recipe(recipe_root)
+    recipe_value = json.loads(recipe.read_text(encoding="utf-8"))
+    execution_date = "2026-08-04"
+    correlation = Path(recipe_value["correlation_source_root"]["path"])
+    (correlation / "dependence-source.json").write_bytes(
+        builder.canonical_json_bytes(
+            {
+                "evaluated_on": "2026-08-05"
+                if identity == "dependence"
+                else execution_date
+            }
+        )
+    )
+    recipe_value["evaluated_on"] = execution_date
+    recipe_value["correlation_source_root"].update(
+        builder._directory_inventory(correlation)
+    )
+
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["evaluation_date"] = "2026-08-05" if identity == "plan" else execution_date
+    bundle, _manifest = _rebind_current_bundle(bundle, manifest)
+    recipe_value["decomposition_plan_bundle"] = {
+        "path": str(bundle),
+        **builder._directory_inventory(bundle),
+    }
+    hybrid = tmp_path / "hybrid-execution-clock"
+    shutil.copytree(bundle, hybrid)
+    hybrid_manifest = _current_manifest(hybrid)
+    hybrid_manifest["policies"]["strategy_evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    hybrid_manifest["layered_history"]["mode"] = "LIVE_PLUS_BACKTEST"
+    if identity == "hybrid":
+        hybrid_manifest["evaluation_date"] = "2026-08-05"
+    hybrid, _hybrid_manifest = _rebind_current_bundle(hybrid, hybrid_manifest)
+    recipe_value["hybrid_decomposition_plan_bundle"] = {
+        "path": str(hybrid),
+        **builder._directory_inventory(hybrid),
+    }
+    recipe.write_bytes(builder.canonical_json_bytes(recipe_value))
+
+    monkeypatch.setattr(
+        builder, "_history_contract_path", lambda _recipe: Path("synthetic-history")
+    )
+    monkeypatch.setattr(
+        builder, "_current_release_plan_specs", lambda *_args, **_kw: []
+    )
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="current analytics as-of date differs|hybrid decomposition mode, date",
+    ):
+        builder.build_analytics(recipe, bundle, tmp_path / "analytics")
+
+
 @pytest.mark.parametrize("value", (None, "not-a-generation", "g" * 64))
 def test_generation_id_requires_canonical_hash(value: object) -> None:
     with pytest.raises(builder.VerticalBuildError, match="generation"):

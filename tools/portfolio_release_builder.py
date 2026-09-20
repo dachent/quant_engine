@@ -3163,6 +3163,75 @@ def _age_boundary_value(
     }
 
 
+def _retained_public_factor_capture(
+    attribution_bundle: Path,
+    inputs: Mapping[str, tuple[str, int]],
+    public_manifest: Mapping[str, Any],
+    *,
+    evaluation_date: str,
+) -> dict[str, object] | None:
+    """Read a frozen capture only when it is inventory-bound to this plan."""
+
+    relative = "inputs/governance/retained-public-factor-capture.json"
+    if relative not in inputs:
+        return None
+    _, receipt_path = _portable_bundle_file(
+        attribution_bundle, relative, "retained public factor capture path"
+    )
+    if inputs.get(relative) != _sha(receipt_path):
+        raise VerticalBuildError("retained public factor capture binding differs")
+    receipt = _load(receipt_path, "retained public factor capture")
+    if set(receipt) != {
+        "schema_version",
+        "financial_data_cutoff",
+        "manifest_sha256",
+        "manifest_size_bytes",
+        "acquisition_run_id",
+    }:
+        raise VerticalBuildError("retained public factor capture fields differ")
+    manifest_relative = "inputs/governance/public-factor-source-manifest.json"
+    _, manifest_path = _portable_bundle_file(
+        attribution_bundle, manifest_relative, "public factor manifest path"
+    )
+    manifest_sha256, manifest_size = _sha(manifest_path)
+    acquisition_run = public_manifest.get("acquisition_run")
+    history_relative = "inputs/history/generation.json"
+    _, history_path = _portable_bundle_file(
+        attribution_bundle, history_relative, "layered generation path"
+    )
+    if inputs.get(history_relative) != _sha(history_path):
+        raise VerticalBuildError("layered generation binding differs")
+    generation = _load(history_path, "layered generation")
+    cutoff = _text(
+        receipt.get("financial_data_cutoff"), "retained public factor financial cutoff"
+    )
+    try:
+        cutoff_date = date.fromisoformat(cutoff)
+        evaluated_on = date.fromisoformat(evaluation_date)
+    except ValueError as exc:
+        raise VerticalBuildError(
+            "retained public factor capture cutoff differs"
+        ) from exc
+    if (
+        receipt.get("schema_version") != 1
+        or cutoff_date.isoformat() != cutoff
+        or cutoff_date > evaluated_on
+        or receipt.get("manifest_sha256") != manifest_sha256
+        or receipt.get("manifest_size_bytes") != manifest_size
+        or not isinstance(acquisition_run, dict)
+        or receipt.get("acquisition_run_id") != acquisition_run.get("run_id")
+        or cutoff != generation.get("as_of_date")
+    ):
+        raise VerticalBuildError("retained public factor capture identity differs")
+    return {
+        "schema_version": 1,
+        "financial_data_cutoff": cutoff,
+        "manifest_sha256": manifest_sha256,
+        "manifest_size_bytes": manifest_size,
+        "acquisition_run_id": receipt["acquisition_run_id"],
+    }
+
+
 def _expected_non_spec_data_age(
     attribution_bundle: Path,
     inputs: Mapping[str, tuple[str, int]],
@@ -3181,6 +3250,12 @@ def _expected_non_spec_data_age(
     if inputs.get(public_manifest_relative) != _sha(public_manifest_path):
         raise VerticalBuildError("public factor manifest binding differs")
     public_manifest = _load(public_manifest_path, "public factor manifest")
+    retained_capture = _retained_public_factor_capture(
+        attribution_bundle,
+        inputs,
+        public_manifest,
+        evaluation_date=evaluation_date,
+    )
     acquisition_run = public_manifest.get("acquisition_run")
     if (
         public_manifest.get("schema_version") != 2
@@ -3202,6 +3277,7 @@ def _expected_non_spec_data_age(
         or (
             assurance_profile == "RELEASE_QC"
             and capture_evaluation_date != evaluated_on
+            and retained_capture is None
         )
     ):
         raise VerticalBuildError("public factor evaluation date differs")
@@ -3357,6 +3433,12 @@ def _verify_current_plan_upstream_evidence(
         )
         catalog_sha256 = hashlib.sha256(catalog_content).hexdigest()
         public_manifest = _load(public_manifest_path, "public factor manifest")
+        retained_capture = _retained_public_factor_capture(
+            attribution_bundle,
+            inputs,
+            public_manifest,
+            evaluation_date=evaluation_date,
+        )
         public_outputs = public_manifest.get("outputs")
         style_manifest = _load(style_manifest_path, "style source manifest")
         sector_manifest = _load(sector_manifest_path, "sector source manifest")
@@ -3426,6 +3508,7 @@ def _verify_current_plan_upstream_evidence(
                 catalog_sha256,
                 evaluated_on,
                 assurance_profile,
+                retained_capture,
             )
             for key, manifest in (
                 ("style_returns", style_manifest),
@@ -4798,6 +4881,9 @@ def build_analytics(
     if attribution_bundle.resolve() != recipe_bundle:
         raise VerticalBuildError("attribution plan bundle differs from recipe")
     recipe_as_of = _text(recipe.get("as_of_date"), "recipe as_of_date")
+    recipe_evaluated_on = _text(
+        recipe.get("evaluated_on", recipe["as_of_date"]), "recipe evaluated_on"
+    )
     selected_definition = recipe.get("dependence_selected_inputs")
     selected_inputs_path = (
         _path(selected_definition.get("path"), "dependence_selected_inputs.path")
@@ -4828,9 +4914,12 @@ def build_analytics(
         plan.get("schema_version"),
     ) in {("0.17.0", 2), ("0.18.0", 2)}
     if current_plan:
+        correlation_execution_date = (
+            correlation_as_of if current_dependence_receipt.is_file() else recipe_as_of
+        )
         if (
-            plan.get("evaluation_date") != recipe_as_of
-            or correlation_as_of != recipe_as_of
+            plan.get("evaluation_date") != recipe_evaluated_on
+            or correlation_execution_date != recipe_evaluated_on
         ):
             raise VerticalBuildError("current analytics as-of date differs")
         specs = _current_release_plan_specs(
@@ -4865,7 +4954,7 @@ def build_analytics(
         )
         if (
             hybrid_plan["policies"]["strategy_evidence_mode"] != "LIVE_PLUS_BACKTEST"
-            or hybrid_plan["evaluation_date"] != recipe_as_of
+            or hybrid_plan["evaluation_date"] != recipe_evaluated_on
             or (
                 hybrid_bundle / "inputs/history/financial-mvp-contract.json"
             ).read_bytes()
