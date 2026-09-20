@@ -561,7 +561,7 @@ def test_weekly_rejects_correlation_artifact_from_another_generation(
     ("field", "value", "message"),
     (
         ("builder", "forged-builder", "builder identity differs"),
-        ("builder_version", "0.18.0", "builder identity differs"),
+        ("builder_version", "0.19.0", "builder identity differs"),
     ),
 )
 def test_weekly_rejects_current_plan_builder_substitution(
