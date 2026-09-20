@@ -26182,6 +26182,19 @@ def test_independent_verifier_accepts_later_baseline_receipt_capped_at_ledger_da
     selected = _with_later_baseline_date(
         perimeter_module, _mixed_composer_selected_inputs(perimeter_module)
     )
+    admission = selected.admission_policy.json_object()
+    admission["as_of_date"] = selected.generation_as_of_date.isoformat()
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "receipt_authority": selected.receipt_authority,
+            "admission_policy": InputSnapshot.from_bytes(
+                "later baseline admission", canonical_json_bytes(admission)
+            ),
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
     payloads = perimeter_module.build_account_manifest_payloads(selected)
     report = verifier_module.IndependentAccountManifestVerifier().verify(
         _mixed_verifier_inputs(verifier_module, selected), payloads
@@ -26199,6 +26212,76 @@ def test_independent_verifier_accepts_later_baseline_receipt_capped_at_ledger_da
         for row in coverage["rows"]
         if row["assignment"]["effective_end"] is None
     } == {"2026-02-01"}
+
+
+def test_mixed_route_preserves_later_admission_authority_date_and_provenance(
+    perimeter_module: Any,
+    verifier_module: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Admission authority and source provenance may be later than ledger facts."""
+    from tools import account_strategy_manifest
+
+    monkeypatch.setattr(
+        account_strategy_manifest,
+        "validate_manifest_schema",
+        lambda *args, **kwargs: None,
+    )
+    selected = _with_later_baseline_date(
+        perimeter_module, _mixed_composer_selected_inputs(perimeter_module)
+    )
+    ledger = selected.provider_ledger.json_object()
+    ledger["provider_generations"][0]["generation_as_of_date"] = "2026-02-03"
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+
+    receipt_id = "receipt/mixed-account-01.json"
+    receipt = selected.retrieval_receipts[receipt_id].json_object()
+    receipt["provider_generation_manifest"]["as_of_date"] = "2026-02-03"
+    receipt["raw_evidence_artifacts"][0]["as_of_date"] = "2026-02-03"
+    receipt_snapshot = InputSnapshot.from_bytes(
+        "later provenance receipt", canonical_json_bytes(receipt)
+    )
+    authority = selected.receipt_authority.json_object()
+    authority_entry = authority["receipts"][0]
+    authority_entry["sha256"] = receipt_snapshot.sha256
+    authority_entry["size_bytes"] = receipt_snapshot.size_bytes
+    authority_entry["contract"]["provider_generation_manifest"]["as_of_date"] = (
+        "2026-02-03"
+    )
+    authority_entry["contract"]["raw_evidence_artifacts"][0]["as_of_date"] = (
+        "2026-02-03"
+    )
+    authority_snapshot = InputSnapshot.from_bytes(
+        "later provenance authority", canonical_json_bytes(authority)
+    )
+    admission = selected.admission_policy.json_object()
+    admission["as_of_date"] = "2026-02-03"
+    admission_snapshot = InputSnapshot.from_bytes(
+        "later admission authority", canonical_json_bytes(admission)
+    )
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "retrieval_receipts": {receipt_id: receipt_snapshot},
+            "receipt_authority": authority_snapshot,
+            "admission_policy": admission_snapshot,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    assert (
+        output["source_identities"]["admission_policy"]["artifact"]["as_of_date"]
+        == "2026-02-03"
+    )
+    assert json.loads(payloads["authority/account-flow-coverage.json"])[
+        "as_of_date"
+    ] == ("2026-02-01")
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
 
 
 @pytest.mark.parametrize(
