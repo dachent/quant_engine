@@ -73,6 +73,18 @@ def _day(value: object, label: str) -> date:
 def _build(bundle: Path) -> tuple[bytes, bytes, GenerationManifest, dict[str, Any]]:
     manifest_bytes = _regular_file(bundle / "manifest.json", "bundle manifest")
     returns_bytes = _regular_file(bundle / "returns.csv", "bundle returns")
+    result = _build_from_contents(manifest_bytes, returns_bytes)
+    source = json.loads(manifest_bytes)
+    if str(source.get("bundle_id")) != bundle.name:
+        raise StrategyBacktestsError("bundle identity differs from its directory")
+    return result
+
+
+def _build_from_contents(
+    manifest_bytes: bytes,
+    returns_bytes: bytes,
+) -> tuple[bytes, bytes, GenerationManifest, dict[str, Any]]:
+    """Reproduce the staging receipt from retained bytes without staging files."""
     try:
         source = json.loads(manifest_bytes)
     except json.JSONDecodeError as exc:
@@ -83,9 +95,6 @@ def _build(bundle: Path) -> tuple[bytes, bytes, GenerationManifest, dict[str, An
         raise StrategyBacktestsError("bundle builder differs")
     if source.get("verification") != "VERIFIED":
         raise StrategyBacktestsError("bundle is not verified")
-    if str(source.get("bundle_id")) != bundle.name:
-        raise StrategyBacktestsError("bundle identity differs from its directory")
-
     artifact = source.get("returns_artifact")
     if not isinstance(artifact, dict):
         raise StrategyBacktestsError("bundle returns artifact is invalid")

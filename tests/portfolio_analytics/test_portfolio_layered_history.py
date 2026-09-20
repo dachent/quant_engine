@@ -4947,6 +4947,259 @@ def test_layered_history_registers_optional_strategy_history_manifest(
         )
 
 
+def _qsi_revision_fixture(tmp_path: Path) -> tuple[dict[str, Any], Path, Path]:
+    from test_portfolio_strategy_history import (
+        _bundle_inputs,
+        _qsi_current_archive,
+        _qsi_price_extension,
+        history,
+    )
+    import portfolio_strategy_backtests as backtests
+
+    fixture = _history_fixture(tmp_path)
+    fixture["as_of_date"] = "2026-09-17"
+    raw = tmp_path / "synthetic-qsi-sources"
+    raw.mkdir()
+    inputs = _bundle_inputs(raw)
+    seed = Path(
+        history.write_bundle(
+            raw / "seed",
+            **inputs,
+            as_of_date="2026-09-17",
+            live_inceptions={"QSI": "2026-01-05"},
+        )["destination"]
+    )
+    stage_root = raw / "staged"
+    staged_seed = backtests.stage_candidate(seed, stage_root)
+    seed_generation_path = (
+        stage_root
+        / "generations"
+        / str(staged_seed["generation_id"])
+        / "generation.json"
+    )
+    seed_manifest = json.loads((seed / "manifest.json").read_bytes())
+    contract = json.loads(fixture["contract_path"].read_bytes())
+    definitions = {row["series_id"]: row for row in seed_manifest["series"]}
+    for strategy in contract["strategies"]:
+        definition = definitions.get(strategy.get("history_series_id"))
+        if definition:
+            strategy["strategy_version"] = {
+                "status": "EVIDENCED",
+                "version_ref": definition["strategy_version"],
+            }
+            for source in contract["source_segments"]:
+                refs = source["strategy_version"]["version_refs"]
+                if strategy["strategy_id"] in refs:
+                    refs[strategy["strategy_id"]] = definition["strategy_version"]
+    _update_source_generation(
+        contract, "strategy-backtests", seed_generation_path, "2026-09-17"
+    )
+    _write_json(fixture["contract_path"], contract)
+    fixture.update(
+        {
+            "strategy_history_manifest_path": seed / "manifest.json",
+            "strategy_history_returns_path": seed / "returns.csv",
+            "strategy_backtests_generation_path": seed_generation_path,
+        }
+    )
+    _refresh_materialized_segment_identities(fixture)
+    current = raw / "qsi-current.zip"
+    extension = raw / "qsi-extension.json"
+    _qsi_current_archive(current, revised=True)
+    _qsi_price_extension(extension, inputs["qsi_price_root"])
+    refreshed = Path(
+        history.write_qsi_refresh_bundle(
+            raw / "refreshed",
+            retained_manifest_path=seed / "manifest.json",
+            retained_returns_path=seed / "returns.csv",
+            qsi_subscription_archive=inputs["qsi_subscription_archive"],
+            qsi_current_subscription_archive=current,
+            qsi_appendix_workbook=inputs["qsi_appendix_workbook"],
+            qsi_price_root=inputs["qsi_price_root"],
+            price_extension_json=extension,
+            as_of_date="2026-09-17",
+        )["destination"]
+    )
+    staged = backtests.stage_candidate(refreshed, stage_root)
+    refreshed_generation = (
+        stage_root / "generations" / str(staged["generation_id"]) / "generation.json"
+    )
+    return fixture, refreshed, refreshed_generation
+
+
+def test_qsi_revision_null_proof_cannot_be_added_to_legacy_generation(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+) -> None:
+    fixture = _history_fixture(tmp_path)
+    artifacts, manifest_content = _build(fixture)
+    manifest = json.loads(manifest_content)
+    manifest["qsi_source_revision"] = None
+    with pytest.raises(TargetSeriesError, match="QSI source revision proof differs"):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+
+def test_qsi_revision_layered_producer_reader_preserve_live_and_other_histories(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+) -> None:
+    fixture, refreshed, generation = _qsi_revision_fixture(tmp_path)
+    previous, _ = _build(fixture)
+    contract_bytes = fixture["contract_path"].read_bytes()
+    fixture.update(
+        {
+            "strategy_history_manifest_path": refreshed / "manifest.json",
+            "strategy_history_returns_path": refreshed / "returns.csv",
+            "strategy_backtests_generation_path": generation,
+        }
+    )
+    artifacts, manifest_content = _build(fixture)
+    assert artifacts["live-only.csv"] == previous["live-only.csv"]
+    schema = json.loads(
+        (ROOT / "schemas/portfolio/layered-history-generation.schema.json").read_bytes()
+    )
+    Draft202012Validator(schema).validate(json.loads(manifest_content))
+
+    def non_qsi(content: bytes) -> list[dict[str, str]]:
+        return [
+            row
+            for row in csv.DictReader(io.StringIO(content.decode()))
+            if row["series_id"] != "QSI"
+        ]
+
+    assert non_qsi(artifacts["live-plus-backtest.csv"]) == non_qsi(
+        previous["live-plus-backtest.csv"]
+    )
+    coverage = json.loads(artifacts["coverage.json"])
+    qsi = next(row for row in coverage["strategies"] if row["strategy_id"] == "qsi")
+    assert qsi["modes"]["LIVE_PLUS_BACKTEST"]["status"] == "AVAILABLE"
+    assert (
+        qsi["source_history_revision"]["observation_strategy_version"]
+        != qsi["strategy_version"]["product_version_ref"]
+    )
+    assert (
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=manifest_content,
+            contract_path=fixture["contract_path"],
+        )["verification"]
+        == "VALID"
+    )
+    destination = write_layered_history_generation(
+        tmp_path / "layered", artifacts, manifest_content
+    )
+    assert (
+        verify_layered_history_generation(destination, fixture["contract_path"])[
+            "verification"
+        ]
+        == "VALID"
+    )
+    assert fixture["contract_path"].read_bytes() == contract_bytes
+
+
+@pytest.mark.parametrize("mutation", ["qsi", "other", "proof", "coverage"])
+def test_qsi_revision_reader_rejects_rehashed_layered_tampering(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+    mutation: str,
+) -> None:
+    fixture, refreshed, generation = _qsi_revision_fixture(tmp_path)
+    fixture.update(
+        {
+            "strategy_history_manifest_path": refreshed / "manifest.json",
+            "strategy_history_returns_path": refreshed / "returns.csv",
+            "strategy_backtests_generation_path": generation,
+        }
+    )
+    artifacts, manifest_content = _build(fixture)
+    manifest = json.loads(manifest_content)
+    if mutation in {"qsi", "other"}:
+        rows = list(csv.DictReader(io.StringIO(artifacts["segments.csv"].decode())))
+        next(
+            row
+            for row in rows
+            if row["source_id"] == "strategy-backtests"
+            and (row["series_id"] == "QSI") == (mutation == "qsi")
+        )["return"] = "0.8"
+        _replace_output(
+            artifacts, manifest, "segments.csv", target_series._segment_view_bytes(rows)
+        )
+    elif mutation == "proof":
+        manifest["qsi_source_revision"]["accepted_generation_manifest_sha256"] = (
+            "0" * 64
+        )
+    else:
+        coverage = json.loads(artifacts["coverage.json"])
+        qsi = next(row for row in coverage["strategies"] if row["strategy_id"] == "qsi")
+        qsi["source_history_revision"]["observation_strategy_version"] = "FORGED"
+        _replace_output(
+            artifacts, manifest, "coverage.json", canonical_json_bytes(coverage)
+        )
+    with pytest.raises(TargetSeriesError, match="QSI source revision"):
+        validate_layered_history_generation(
+            artifacts=artifacts,
+            manifest_content=_reidentify_manifest(manifest),
+            contract_path=fixture["contract_path"],
+        )
+
+
+def test_qsi_revision_wrong_seed_and_missing_receipt_cannot_admit(
+    tmp_path: Path,
+    synthetic_history_authority: None,
+) -> None:
+    import portfolio_strategy_backtests as backtests
+
+    fixture, refreshed, generation = _qsi_revision_fixture(tmp_path)
+    fixture.update(
+        {
+            "strategy_history_manifest_path": refreshed / "manifest.json",
+            "strategy_history_returns_path": refreshed / "returns.csv",
+            "strategy_backtests_generation_path": generation,
+        }
+    )
+    contract = json.loads(fixture["contract_path"].read_bytes())
+    seed = next(
+        row
+        for row in contract["source_segments"]
+        if row["source_id"] == "strategy-backtests"
+    )
+    seed["current_generation"]["sha256"] = "0" * 64
+    _write_json(fixture["contract_path"], contract)
+    with pytest.raises(TargetSeriesError, match="accepted contract seed"):
+        _build(fixture)
+    bundle = json.loads((refreshed / "manifest.json").read_bytes())
+    bundle.pop("qsi_source_revision")
+    bundle.pop("bundle_id")
+    bundle["bundle_id"] = hashlib.sha256(canonical_json_bytes(bundle)).hexdigest()
+    stripped = tmp_path / str(bundle["bundle_id"])
+    stripped.mkdir()
+    (stripped / "manifest.json").write_bytes(canonical_json_bytes(bundle))
+    (stripped / "returns.csv").write_bytes((refreshed / "returns.csv").read_bytes())
+    staged = backtests.stage_candidate(stripped, tmp_path / "stripped-stage")
+    fixture.update(
+        {
+            "strategy_history_manifest_path": stripped / "manifest.json",
+            "strategy_history_returns_path": stripped / "returns.csv",
+            "strategy_backtests_generation_path": tmp_path
+            / "stripped-stage"
+            / "generations"
+            / str(staged["generation_id"])
+            / "generation.json",
+        }
+    )
+    artifacts, _ = _build(fixture)
+    qsi = next(
+        row
+        for row in json.loads(artifacts["coverage.json"])["strategies"]
+        if row["strategy_id"] == "qsi"
+    )
+    assert qsi["modes"]["LIVE_PLUS_BACKTEST"]["status"] == "REQUIRED_NOT_READY"
+
+
 def test_layered_history_rejects_coherent_receipt_and_semantic_rewrites(
     tmp_path: Path,
     synthetic_history_authority: None,

@@ -172,6 +172,38 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         ),
     },
     {
+        "id": "qsi-source-revision",
+        "source_paths": (
+            "tools/portfolio_strategy_history.py",
+            "tools/portfolio_strategy_backtests.py",
+            _TARGET_SERIES,
+        ),
+        "contracts": (_SOURCE_CONTRACT,),
+        "producer": ("tools/portfolio_strategy_history.py", "write_qsi_refresh_bundle"),
+        "artifacts": ("QSI source revision bundle", "strategy-backtests generation"),
+        "consumers": (
+            ("tools/portfolio_strategy_backtests.py", "stage_candidate"),
+            (_TARGET_SERIES, "_qsi_source_revision_admission"),
+        ),
+        "validators": (
+            ("tools/portfolio_strategy_history.py", "verify_qsi_refresh_bundle"),
+            (_TARGET_SERIES, "validate_layered_history_generation"),
+        ),
+        "writers": (
+            ("tools/portfolio_strategy_history.py", "write_qsi_refresh_bundle"),
+        ),
+        "stages": ("baseline", "attribution", "analytics", "report", "panel"),
+        "tests": (
+            "tests/portfolio_analytics/test_portfolio_strategy_history.py",
+            "tests/portfolio_analytics/test_portfolio_layered_history.py",
+        ),
+        "sinks": (
+            "report-json-html",
+            "panel-json-html",
+            "coordinated-publication-pointers",
+        ),
+    },
+    {
         "id": "current-dependence-source",
         "source_paths": (
             _DEPENDENCE,
