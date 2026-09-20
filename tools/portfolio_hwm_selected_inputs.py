@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from datetime import date
+from dataclasses import dataclass
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
 import hashlib
@@ -27,7 +28,11 @@ from quant_engine.portfolio_ledger.hwm import (
     AS_HELD_HWM_RETURN_BASIS,
     validate_as_held_hwm_policy,
 )
+from quant_engine.portfolio_ledger.hwm_calendar_authority import (
+    derive_governed_calendar_authority,
+)
 from quant_engine.portfolio_ledger.hwm_governed import (
+    GovernedHwmAuthorityError,
     validate_governed_hwm_calendar_authority,
 )
 from quant_engine.portfolio_ledger.hwm_input_builder import build_governed_hwm_inputs
@@ -69,6 +74,22 @@ _FORBIDDEN_QUALITY_MARKERS: Final = (
 Row = dict[str, Any]
 EpochKey = tuple[str, str, str, str | None]
 IntervalKey = tuple[str, str, str]
+
+
+@dataclass(frozen=True)
+class _SelectedHwmSourceRows:
+    """Verified selected-source rows shared by strict build and calendar derivation."""
+
+    artifact_sha256s: Mapping[str, str]
+    calendar: Row
+    memberships: list[Row]
+    capital: list[Row]
+    policy_bytes: bytes
+    receipt_bytes: bytes
+    returns: list[Row]
+    account_generation_id: str
+    source_generation_id: str
+    source_generation_sha256: str
 
 
 class SelectedHwmInputError(ValueError):
@@ -1031,7 +1052,7 @@ def _derive_builder_rows(
     return memberships, capital, returns
 
 
-def _build_selected_hwm_inputs(
+def _selected_hwm_source_rows(
     *,
     account_manifest_generation_path: Path,
     account_manifest_admission_policy_path: Path,
@@ -1043,7 +1064,7 @@ def _build_selected_hwm_inputs(
     provider_admission_path: Path,
     hwm_policy_path: Path,
     hwm_policy_bytes: bytes | None = None,
-) -> Row:
+) -> _SelectedHwmSourceRows:
     generation_path = _filesystem_path(account_manifest_generation_path)
     if generation_path.name != "generation.json":
         raise SelectedHwmInputError(
@@ -1167,30 +1188,301 @@ def _build_selected_hwm_inputs(
         source_generation_sha256=source_generation_sha256,
         artifact_sha256s=artifact_sha256s,
     )
+    return _SelectedHwmSourceRows(
+        artifact_sha256s=artifact_sha256s,
+        calendar=calendar,
+        memberships=members,
+        capital=capital,
+        policy_bytes=policy_bytes,
+        receipt_bytes=receipt_bytes,
+        returns=returns,
+        account_generation_id=bundle.manifest.generation_id,
+        source_generation_id=source_generation_id,
+        source_generation_sha256=source_generation_sha256,
+    )
+
+
+def _build_selected_hwm_inputs(
+    *,
+    account_manifest_generation_path: Path,
+    account_manifest_admission_policy_path: Path,
+    account_manifest_flow_classification_policy_path: Path,
+    provider_ledger_generation_path: Path,
+    baseline_generation_path: Path,
+    financial_contract_path: Path,
+    calendar_authority_path: Path,
+    provider_admission_path: Path,
+    hwm_policy_path: Path,
+    hwm_policy_bytes: bytes | None = None,
+) -> Row:
+    source = _selected_hwm_source_rows(
+        account_manifest_generation_path=account_manifest_generation_path,
+        account_manifest_admission_policy_path=account_manifest_admission_policy_path,
+        account_manifest_flow_classification_policy_path=(
+            account_manifest_flow_classification_policy_path
+        ),
+        provider_ledger_generation_path=provider_ledger_generation_path,
+        baseline_generation_path=baseline_generation_path,
+        financial_contract_path=financial_contract_path,
+        calendar_authority_path=calendar_authority_path,
+        provider_admission_path=provider_admission_path,
+        hwm_policy_path=hwm_policy_path,
+        hwm_policy_bytes=hwm_policy_bytes,
+    )
     result = build_governed_hwm_inputs(
-        members=members,
-        capital_observations=capital,
-        return_observations=returns,
-        calendar_authority_sha256=calendar["authority_evidence_sha256"],
-        hwm_policy_sha256=hashlib.sha256(policy_bytes).hexdigest(),
-        calendar_authority=calendar,
-        upstream_receipt_sha256=hashlib.sha256(receipt_bytes).hexdigest(),
+        members=source.memberships,
+        capital_observations=source.capital,
+        return_observations=source.returns,
+        calendar_authority_sha256=source.calendar["authority_evidence_sha256"],
+        hwm_policy_sha256=hashlib.sha256(source.policy_bytes).hexdigest(),
+        calendar_authority=source.calendar,
+        upstream_receipt_sha256=hashlib.sha256(source.receipt_bytes).hexdigest(),
     )
     for row in result["component_periods"]:
-        row["source_generation_sha256"] = source_generation_sha256
+        row["source_generation_sha256"] = source.source_generation_sha256
     result["evidence_sha256s"] = sorted(
         set(result["evidence_sha256s"])
         | {
-            source_generation_id,
-            source_generation_sha256,
-            bundle.manifest.generation_id,
+            source.source_generation_id,
+            source.source_generation_sha256,
+            source.account_generation_id,
         }
-        | set(artifact_sha256s.values())
+        | set(source.artifact_sha256s.values())
     )
     unhashed = dict(result)
     unhashed.pop("generation_evidence_sha256", None)
     result["generation_evidence_sha256"] = _canonical_sha(unhashed)
     return result
+
+
+def _accepted_calendar_topology(
+    calendar: Mapping[str, Any],
+) -> tuple[dict[str, str], set[IntervalKey], set[tuple[str, str, str, str]]]:
+    kinds: dict[str, str] = {}
+    for index, raw in enumerate(
+        _rows(calendar.get("source_calendars"), "calendar source calendars")
+    ):
+        strategy_id = _text(
+            raw.get("strategy_id"), f"calendar source {index}.strategy_id"
+        )
+        kind = raw.get("calendar_kind")
+        if kind not in {"ALWAYS_ON", "DECLARED_SESSION"} or strategy_id in kinds:
+            raise SelectedHwmInputError("accepted calendar source topology differs")
+        kinds[strategy_id] = kind
+
+    intervals: set[IntervalKey] = set()
+    for index, raw in enumerate(
+        _rows(calendar.get("accepted_source_intervals"), "accepted calendar intervals")
+    ):
+        strategy_id = _text(
+            raw.get("strategy_id"), f"accepted interval {index}.strategy_id"
+        )
+        prior = _day(
+            raw.get("prior_observation_date"), f"accepted interval {index}.prior"
+        ).isoformat()
+        following = _day(
+            raw.get("next_observation_date"), f"accepted interval {index}.next"
+        ).isoformat()
+        if prior >= following or raw.get("binding_return_date") != following:
+            raise SelectedHwmInputError("accepted calendar interval topology differs")
+        key = (strategy_id, prior, following)
+        if key in intervals:
+            raise SelectedHwmInputError("accepted calendar interval is duplicated")
+        intervals.add(key)
+
+    closures: set[tuple[str, str, str, str]] = set()
+    for index, raw in enumerate(
+        _rows(calendar.get("closed_source_dates"), "accepted calendar closures")
+    ):
+        strategy_id = _text(
+            raw.get("strategy_id"), f"accepted closure {index}.strategy_id"
+        )
+        closed = _day(raw.get("date"), f"accepted closure {index}.date").isoformat()
+        prior = _day(
+            raw.get("prior_observation_date"), f"accepted closure {index}.prior"
+        ).isoformat()
+        following = _day(
+            raw.get("next_observation_date"), f"accepted closure {index}.next"
+        ).isoformat()
+        if not prior < closed < following:
+            raise SelectedHwmInputError("accepted calendar closure topology differs")
+        closure_key = (strategy_id, closed, prior, following)
+        if closure_key in closures:
+            raise SelectedHwmInputError("accepted calendar closure is duplicated")
+        closures.add(closure_key)
+    return kinds, intervals, closures
+
+
+def _derive_selected_hwm_calendar(source: _SelectedHwmSourceRows) -> Row:
+    """Rebind accepted calendar topology to exact currently selected source rows."""
+
+    calendar = source.calendar
+    kinds, accepted_intervals, accepted_closures = _accepted_calendar_topology(calendar)
+    member_ids = {
+        _text(row.get("strategy_id"), "HWM membership strategy_id")
+        for row in source.memberships
+    }
+    if member_ids != set(kinds):
+        raise SelectedHwmInputError(
+            "selected source strategy perimeter differs from accepted calendar"
+        )
+
+    capital_by_strategy: dict[str, dict[str, str]] = defaultdict(dict)
+    for row in source.capital:
+        strategy_id = _text(row.get("strategy_id"), "selected capital strategy_id")
+        observed_on = _day(row.get("date"), "selected capital date").isoformat()
+        value = _text(row.get("closing_capital_usd"), "selected capital value")
+        prior = capital_by_strategy[strategy_id].get(observed_on)
+        if prior is not None and prior != value:
+            raise SelectedHwmInputError("selected capital observations conflict")
+        capital_by_strategy[strategy_id][observed_on] = value
+
+    returns_by_interval: dict[IntervalKey, Row] = {}
+    for row in source.returns:
+        strategy_id = _text(row.get("strategy_id"), "selected return strategy_id")
+        prior = _day(
+            row.get("interval_start"), "selected return interval_start"
+        ).isoformat()
+        following = _day(
+            row.get("interval_end"), "selected return interval_end"
+        ).isoformat()
+        key = (strategy_id, prior, following)
+        if key in returns_by_interval:
+            raise SelectedHwmInputError("selected source return interval is duplicated")
+        returns_by_interval[key] = row
+
+    if set(capital_by_strategy) != set(kinds):
+        raise SelectedHwmInputError("selected source calendar perimeter differs")
+    strategy_calendars: list[Row] = []
+    for strategy_id in sorted(kinds):
+        capital = capital_by_strategy[strategy_id]
+        observed = sorted(capital)
+        if len(observed) < 2:
+            raise SelectedHwmInputError("selected source calendar lacks observations")
+        declared_intervals: list[Row] = []
+        for prior, following in zip(observed, observed[1:]):
+            if (date.fromisoformat(following) - date.fromisoformat(prior)).days <= 1:
+                continue
+            key = (strategy_id, prior, following)
+            if key in accepted_intervals:
+                source_return = returns_by_interval.get(key)
+                if source_return is None:
+                    raise SelectedHwmInputError(
+                        "accepted calendar interval lacks a selected source return"
+                    )
+                declared_intervals.append(
+                    {
+                        "prior_observation_date": prior,
+                        "next_observation_date": following,
+                        "binding_return_date": following,
+                        "binding_return_value": _text(
+                            source_return.get("net_return"),
+                            "selected interval net_return",
+                        ),
+                    }
+                )
+                continue
+            cursor = date.fromisoformat(prior) + timedelta(days=1)
+            while cursor < date.fromisoformat(following):
+                if (
+                    strategy_id,
+                    cursor.isoformat(),
+                    prior,
+                    following,
+                ) not in accepted_closures:
+                    raise SelectedHwmInputError(
+                        "selected source has an unapproved calendar gap"
+                    )
+                cursor += timedelta(days=1)
+        strategy_calendars.append(
+            {
+                "strategy_id": strategy_id,
+                "calendar_kind": kinds[strategy_id],
+                "observed_dates": observed,
+                "closing_capital_usd_by_date": capital,
+                **(
+                    {"accepted_intervals": declared_intervals}
+                    if declared_intervals
+                    else {}
+                ),
+            }
+        )
+
+    policy_sha = hashlib.sha256(source.policy_bytes).hexdigest()
+    if calendar.get("hwm_policy_sha256") != policy_sha:
+        raise SelectedHwmInputError("accepted calendar HWM policy binding differs")
+    try:
+        derived = derive_governed_calendar_authority(
+            strategy_calendars=strategy_calendars,
+            calendar_policy_id=_text(
+                calendar.get("calendar_policy_id"), "calendar policy id"
+            ),
+            owner_decision_evidence=_text(
+                calendar.get("owner_decision_evidence"),
+                "calendar owner decision evidence",
+            ),
+            hwm_policy_sha256=policy_sha,
+        )
+        validate_governed_hwm_calendar_authority(
+            derived,
+            hwm_policy_bytes=source.policy_bytes,
+            accepted_authority_sha256=_sha(
+                derived.get("authority_evidence_sha256"),
+                "derived calendar authority_evidence_sha256",
+            ),
+        )
+    except GovernedHwmAuthorityError as exc:
+        raise SelectedHwmInputError(str(exc)) from exc
+
+    derived_kinds, derived_intervals, derived_closures = _accepted_calendar_topology(
+        derived
+    )
+    if (
+        derived_kinds != kinds
+        or derived_intervals != accepted_intervals
+        or derived_closures != accepted_closures
+    ):
+        raise SelectedHwmInputError(
+            "derived calendar topology differs from accepted authority"
+        )
+    return derived
+
+
+def derive_selected_hwm_calendar_authority(
+    *,
+    account_manifest_generation_path: Path,
+    account_manifest_admission_policy_path: Path,
+    account_manifest_flow_classification_policy_path: Path,
+    provider_ledger_generation_path: Path,
+    baseline_generation_path: Path,
+    financial_contract_path: Path,
+    calendar_authority_path: Path,
+    provider_admission_path: Path,
+    hwm_policy_path: Path,
+    hwm_policy_bytes: bytes | None = None,
+) -> Row:
+    """Derive the governed HWM calendar for the exact selected source generation."""
+
+    try:
+        source = _selected_hwm_source_rows(
+            account_manifest_generation_path=account_manifest_generation_path,
+            account_manifest_admission_policy_path=account_manifest_admission_policy_path,
+            account_manifest_flow_classification_policy_path=(
+                account_manifest_flow_classification_policy_path
+            ),
+            provider_ledger_generation_path=provider_ledger_generation_path,
+            baseline_generation_path=baseline_generation_path,
+            financial_contract_path=financial_contract_path,
+            calendar_authority_path=calendar_authority_path,
+            provider_admission_path=provider_admission_path,
+            hwm_policy_path=hwm_policy_path,
+            hwm_policy_bytes=hwm_policy_bytes,
+        )
+        return _derive_selected_hwm_calendar(source)
+    except SelectedHwmInputError:
+        raise
+    except (KeyError, OSError, TypeError, ValueError) as exc:
+        raise SelectedHwmInputError(str(exc)) from exc
 
 
 def build_selected_hwm_inputs(

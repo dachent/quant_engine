@@ -809,6 +809,7 @@ def _preparation_function_fixture(
                 "current_dependence",
                 "current_plan",
                 "financial_outcomes",
+                "hwm_calendar_authority",
                 "hwm_inputs",
                 "invested_capital",
                 "rebind_current_epoch_crosswalk",
@@ -969,8 +970,15 @@ def _preparation_function_fixture(
     monkeypatch.setattr(capital, "governed_hwm_input_policy", lambda *_args: b"policy")
     monkeypatch.setattr(
         hwm_inputs,
+        "derive_selected_hwm_calendar_authority",
+        lambda **_kwargs: json.loads(calendar.read_bytes()),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        hwm_inputs,
         "build_selected_hwm_inputs",
         lambda **_kwargs: {
+            "calendar_sha256": "calendar",
             "component_periods": [],
             "memberships": [{"effective_start": "2026-09-16"}],
         },
@@ -1003,6 +1011,80 @@ def _preparation_function_fixture(
 
     monkeypatch.setattr(release, "build_attribution", build_attribution)
     return tmp_path / "preparation-spec.json", calls, identity
+
+
+def test_hwm_stage_checkpoints_and_reuses_its_selected_calendar(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The HWM builder must consume its local selected-source calendar, not the seed."""
+
+    spec, _calls, _identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    import portfolio_hwm_selected_inputs as hwm_inputs
+
+    output = tmp_path / "prepared"
+    local_calendar = output / "preparation" / "hwm-calendar-authority.json"
+    derived_calls = 0
+
+    def derive_selected_calendar(**kwargs: object) -> dict[str, object]:
+        nonlocal derived_calls
+        derived_calls += 1
+        assert Path(str(kwargs["calendar_authority_path"])).name == "calendar.json"
+        return {
+            "authority_evidence_sha256": "derived-calendar",
+            "hwm_policy_sha256": "policy",
+            "accepted_source_intervals": [],
+            "source_calendars": [],
+        }
+
+    def build_hwm(**kwargs: object) -> dict[str, object]:
+        assert (
+            Path(str(kwargs["calendar_authority_path"])).resolve()
+            == local_calendar.resolve()
+        )
+        assert json.loads(local_calendar.read_bytes())["authority_evidence_sha256"] == (
+            "derived-calendar"
+        )
+        return {
+            "calendar_sha256": "derived-calendar",
+            "component_periods": [],
+            "memberships": [{"effective_start": "2026-09-16"}],
+        }
+
+    monkeypatch.setattr(
+        hwm_inputs,
+        "derive_selected_hwm_calendar_authority",
+        derive_selected_calendar,
+        raising=False,
+    )
+    monkeypatch.setattr(hwm_inputs, "build_selected_hwm_inputs", build_hwm)
+
+    result = preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+
+    assert derived_calls == 1
+    assert result["financial_stage_inputs"]["--hwm-governed-calendar-authority"] == (
+        local_calendar
+    )
+    checkpoint = preparation._read(
+        output / "preparation" / "checkpoints" / "hwm.json", "HWM checkpoint"
+    )
+    assert checkpoint["result"]["hwm_calendar"] == str(local_calendar)
+    assert "hwm_calendar" in checkpoint["outputs"]
+
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+        resume=True,
+    )
+    assert derived_calls == 1
 
 
 def test_preparation_resume_skips_completed_dependence_after_plan_interruption(
