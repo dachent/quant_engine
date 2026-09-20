@@ -3741,8 +3741,22 @@ def build_catalog(
         # perform the anchor-content cross-check without access to the
         # governed source files.
         catalog["hwm_acceptance_record"] = hwm_acceptance_record
-    if provenance.get("strategy_version_catalog") is not None:
-        catalog["strategy_version_catalog"] = provenance["strategy_version_catalog"]
+    version_catalog = provenance.get("strategy_version_catalog")
+    if version_catalog is not None:
+        # The catalog's as_of_date is a certification date: the provenance producer requires
+        # every strategy version to be in force at it, and downstream it decides hybrid
+        # eligibility rather than labelling anything. Copying a catalog certified for an
+        # earlier date into a later baseline therefore carries an assumption, not evidence.
+        # The report refuses that, but three stages downstream -- so it is refused here,
+        # where the baseline that would carry it is being built.
+        certified_at = version_catalog.get("as_of_date")
+        if certified_at != catalog.get("as_of_date"):
+            raise BaselineValidationError(
+                "strategy version catalog certifies "
+                f"{certified_at} but the baseline is dated {catalog.get('as_of_date')}; "
+                "re-certify the provenance generation at this cutoff"
+            )
+        catalog["strategy_version_catalog"] = version_catalog
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(
         artifact_id="normalized/portfolio-baseline.json",
