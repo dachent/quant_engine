@@ -1502,6 +1502,7 @@ def test_reusable_provider_ledger_requires_hash_bound_admission_receipt(
         builder._validated_reusable_provider_ledger(generation)
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_xlsx_startup_deadline_is_the_only_extended_failure() -> None:
     startup = {
         "final_state": "TIMED_OUT",
@@ -1522,6 +1523,7 @@ def test_xlsx_startup_deadline_is_the_only_extended_failure() -> None:
     assert builder._is_xlsx_startup_deadline(startup) is False
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_xlsx_startup_extension_is_bounded_and_preserves_job() -> None:
     job = {
         "idempotency_key": "synthetic",
@@ -1541,6 +1543,7 @@ def test_xlsx_startup_extension_is_bounded_and_preserves_job() -> None:
     }
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_xlsx_startup_extension_rejects_unvalidated_job_shape() -> None:
     with pytest.raises(builder.VerticalBuildError, match="keys differ"):
         builder._xlsx_job_with_startup_extension(
@@ -1553,6 +1556,7 @@ def test_xlsx_startup_extension_rejects_unvalidated_job_shape() -> None:
         )
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_derived_runner_job_resolves_paths_and_keeps_type_first(
     tmp_path: Path,
 ) -> None:
@@ -1659,6 +1663,7 @@ def test_active_cli_does_not_admit_a_workbook_runtime() -> None:
         )
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_runtime_contract_validation_uses_configured_python_and_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1681,6 +1686,7 @@ def test_runtime_contract_validation_uses_configured_python_and_cli(
     assert all(call[1] == str(runtime.cli) for call in calls)
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_runtime_execution_receipt_binds_resume_to_runtime_identity(
     tmp_path: Path,
 ) -> None:
@@ -1725,6 +1731,7 @@ def test_runtime_execution_receipt_binds_resume_to_runtime_identity(
         builder._current_workbook_runtime = original
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_successful_xlsx_evidence_is_resumable_and_identity_bound(
     tmp_path: Path,
 ) -> None:
@@ -1753,6 +1760,7 @@ def test_successful_xlsx_evidence_is_resumable_and_identity_bound(
     assert builder._accepted_xlsx_evidence(candidate) is False
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_workbook_validation_resume_requires_all_invariants(tmp_path: Path) -> None:
     candidate = tmp_path / "candidate"
     (candidate / "excel").mkdir(parents=True)
@@ -4545,6 +4553,7 @@ def test_schema10_panel_build_publish_routes_one_verified_epoch_bundle(
         assert not any(str(argument).startswith("--manifest-") for argument in call)
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4757,6 +4766,7 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
     assert built["generation_id"] == "f" * 64
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_build_workbook_forwards_selected_attribution_to_verify_and_publish(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
