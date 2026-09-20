@@ -274,7 +274,7 @@ def test_point_source_catalog_mutation_rejected_by_build_and_materializer(
         _verify(generation, authority)
 
 
-@pytest.mark.parametrize("requested", [None, CUTOFF])
+@pytest.mark.parametrize("requested", [None, date(2026, 9, 16), CUTOFF])
 def test_point_projection_preserves_legacy_and_requested_date_bounds(
     point_stage: PointStage,
     requested: date | None,
@@ -294,12 +294,23 @@ def test_point_projection_preserves_legacy_and_requested_date_bounds(
         financial_cutoff=CUTOFF,
         **kwargs,
     )
-    assert not facts["positions"]
-    assert any(
-        row.get("fact_type") == "positions"
-        and row["status"] == "OUTSIDE_FINANCIAL_CUTOFF"
+    outside_positions = [
+        row
         for row in findings
-    )
+        if row.get("fact_type") == "positions"
+        and row["status"] == "OUTSIDE_FINANCIAL_CUTOFF"
+    ]
+    if requested == CUTOFF:
+        # The native UTC timestamp falls on September 17 in New York. Keep
+        # its native bytes while selecting it by the provider's financial day.
+        assert len(facts["positions"]) == 1
+        position = facts["positions"][0]
+        assert position["as_of_date"] == "2026-09-18"
+        assert position["observed_at"] == CLOCK
+        assert not outside_positions
+    else:
+        assert not facts["positions"]
+        assert outside_positions
 
 
 @pytest.mark.parametrize(
