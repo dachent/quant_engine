@@ -332,6 +332,21 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
         }
         for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST")
     }
+    expected_captures: dict[str, dict[str, object]] = {}
+    for mode, definition in modes.items():
+        manifest_path = tmp_path / f"{mode}-public_factor_manifest.json"
+        manifest_content = preparation.canonical_json_bytes(
+            {"acquisition_run": {"run_id": "a" * 64}}
+        )
+        manifest_path.write_bytes(manifest_content)
+        definition["public_factor_manifest"] = pin(manifest_path.name)
+        expected_captures[mode] = {
+            "schema_version": 1,
+            "financial_data_cutoff": "2026-09-17",
+            "manifest_sha256": hashlib.sha256(manifest_content).hexdigest(),
+            "manifest_size_bytes": len(manifest_content),
+            "acquisition_run_id": "a" * 64,
+        }
     for definition in modes.values():
         definition["base_source_template_root"] = str(tmp_path / "base")
     config_path = tmp_path / "config.json"
@@ -416,6 +431,10 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
     assert [{name: call[name] for name in authority_names} for call in plan_calls] == [
         expected,
         expected,
+    ]
+    assert [call["retained_public_factor_capture"] for call in plan_calls] == [
+        expected_captures["LIVE_ONLY"],
+        expected_captures["LIVE_PLUS_BACKTEST"],
     ]
 
 

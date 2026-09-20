@@ -2750,6 +2750,103 @@ def test_public_manifest_reuse_warns_in_development_and_fails_release_qc(
         )
 
 
+def _retained_public_factor_capture(
+    inputs: dict[str, Any], financial_data_cutoff: str
+) -> dict[str, object]:
+    """Bind one already verified public-factor acquisition to a frozen cutoff."""
+
+    manifest_path = inputs["public_factor_manifest_path"]
+    assert isinstance(manifest_path, Path)
+    content = manifest_path.read_bytes()
+    manifest = json.loads(content)
+    acquisition_run = manifest["acquisition_run"]
+    return {
+        "schema_version": 1,
+        "financial_data_cutoff": financial_data_cutoff,
+        "manifest_sha256": hashlib.sha256(content).hexdigest(),
+        "manifest_size_bytes": len(content),
+        "acquisition_run_id": acquisition_run["run_id"],
+    }
+
+
+def test_release_qc_replays_verified_frozen_public_capture_through_plan_and_reader(
+    tmp_path: Path,
+) -> None:
+    """A rollover may age a bound capture, but cannot relabel its source identity."""
+
+    inputs = _fixture(tmp_path)
+    generation = json.loads(
+        (inputs["layered_history_generation_path"] / "generation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    capture_date = date.fromisoformat(inputs["evaluation_date"])
+    inputs["evaluation_date"] = (capture_date + timedelta(days=1)).isoformat()
+    receipt = _retained_public_factor_capture(inputs, generation["as_of_date"])
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+
+    written = planner.write_bundle(
+        output_root=tmp_path / "output",
+        assurance_profile="RELEASE_QC",
+        retained_public_factor_capture=receipt,
+        **kwargs,
+    )
+    destination = Path(written["destination"])
+    manifest = json.loads(
+        (destination / "plan-manifest.json").read_text(encoding="utf-8")
+    )
+    receipt_path = destination / "inputs/governance/retained-public-factor-capture.json"
+    assert json.loads(receipt_path.read_text(encoding="utf-8")) == receipt
+    assert any(
+        item["path"] == "inputs/governance/retained-public-factor-capture.json"
+        for item in manifest["inputs"]
+    )
+
+    release_builder = _release_builder_module(
+        "portfolio_release_builder_for_frozen_public_capture"
+    )
+    assert len(release_builder._current_release_plan_specs(destination, manifest)) == 6
+    assert manifest["data_age"]["public_factor_capture"] == {
+        "age_days": 1,
+        "complete_through": capture_date.isoformat(),
+        "evaluated_on": inputs["evaluation_date"],
+        "limiting_inputs": ["public-factor-acquisition-run"],
+        "status": "WARN_COMPLETE_DATA_AGE",
+        "warning_after_days": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("financial_data_cutoff", "2026-01-01"),
+        ("manifest_sha256", "0" * 64),
+        ("manifest_size_bytes", 0),
+        ("acquisition_run_id", "0" * 64),
+    ),
+)
+def test_release_qc_rejects_unbound_frozen_public_capture_identity(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    inputs = _fixture(tmp_path)
+    generation = json.loads(
+        (inputs["layered_history_generation_path"] / "generation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    capture_date = date.fromisoformat(inputs["evaluation_date"])
+    inputs["evaluation_date"] = (capture_date + timedelta(days=1)).isoformat()
+    receipt = _retained_public_factor_capture(inputs, generation["as_of_date"])
+    receipt[field] = value
+
+    with pytest.raises(planner.CurrentPlanError, match="retained public factor"):
+        planner.build_bundle(
+            assurance_profile="RELEASE_QC",
+            retained_public_factor_capture=receipt,
+            **{key: value for key, value in inputs.items() if key != "plan_document"},
+        )
+
+
 def test_market_source_age_warns_in_development_and_release_qc(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

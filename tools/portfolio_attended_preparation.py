@@ -684,6 +684,29 @@ def _validate_hwm_authority_inputs(config: Mapping[str, Any]) -> None:
     )
 
 
+def _retained_public_factor_capture(
+    definition: Mapping[str, Any], financial_data_cutoff: str
+) -> dict[str, object]:
+    """Freeze the already pinned public-factor acquisition identity for a plan."""
+
+    manifest_path = _pin(definition["public_factor_manifest"], "public factor manifest")
+    manifest = _read(manifest_path, "public factor manifest")
+    acquisition_run = manifest.get("acquisition_run")
+    if not isinstance(acquisition_run, Mapping):
+        raise AttendedPreparationError("public factor acquisition run is absent")
+    run_id = acquisition_run.get("run_id")
+    if not isinstance(run_id, str):
+        raise AttendedPreparationError("public factor acquisition run is absent")
+    content = manifest_path.read_bytes()
+    return {
+        "schema_version": 1,
+        "financial_data_cutoff": financial_data_cutoff,
+        "manifest_sha256": hashlib.sha256(content).hexdigest(),
+        "manifest_size_bytes": len(content),
+        "acquisition_run_id": run_id,
+    }
+
+
 def _validated_inputs(
     preparation_spec_path: Path, requested_as_of: str, evaluated_on: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -775,6 +798,9 @@ def _validated_inputs(
                 evaluation_date=evaluated_on,
                 evidence_mode=mode,
                 assurance_profile="RELEASE_QC",
+                retained_public_factor_capture=_retained_public_factor_capture(
+                    definition, cutoff
+                ),
                 **history_authorities,
             )
     return config, {
@@ -1554,6 +1580,9 @@ def _prepare_attended_inputs(
             evaluation_date=evaluated_on,
             evidence_mode=mode,
             assurance_profile="RELEASE_QC",
+            retained_public_factor_capture=_retained_public_factor_capture(
+                definition, cutoff
+            ),
             **history_authorities,
         )
         plan_root = Path(str(result["destination"])).resolve()

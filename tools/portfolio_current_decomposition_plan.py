@@ -1117,8 +1117,11 @@ def _verify_public_factor_manifest(
     catalog_sha256: str,
     planning_evaluation_date: date,
     assurance_profile: str,
+    retained_public_factor_capture: Mapping[str, object] | None = None,
 ) -> tuple[dict[str, date], dict[str, object]]:
-    manifest, _content = _load_json(manifest_path, "public factor source manifest")
+    manifest, manifest_content = _load_json(
+        manifest_path, "public factor source manifest"
+    )
     if (
         manifest.get("schema_version") != 2
         or manifest.get("builder") != PUBLIC_FACTOR_BUILDER
@@ -1142,13 +1145,6 @@ def _verify_public_factor_manifest(
     if capture_evaluation_date > planning_evaluation_date:
         raise CurrentPlanError(
             "public factor evaluation date exceeds the current planning run"
-        )
-    if (
-        assurance_profile == "RELEASE_QC"
-        and capture_evaluation_date != planning_evaluation_date
-    ):
-        raise CurrentPlanError(
-            "release QC requires public factors captured for the planning run"
         )
     run_started = _utc_datetime(
         run.get("run_started_at_utc"), "public factor run start"
@@ -1180,6 +1176,21 @@ def _verify_public_factor_manifest(
     }
     if run.get("run_id") != _sha256(_canonical_json(run_payload)):
         raise CurrentPlanError("public factor acquisition run identity differs")
+    retained_capture = _validated_retained_public_factor_capture(
+        retained_public_factor_capture,
+        manifest_content=manifest_content,
+        acquisition_run=run,
+        capture_evaluation_date=capture_evaluation_date,
+        planning_evaluation_date=planning_evaluation_date,
+    )
+    if (
+        assurance_profile == "RELEASE_QC"
+        and capture_evaluation_date != planning_evaluation_date
+        and retained_capture is None
+    ):
+        raise CurrentPlanError(
+            "release QC requires public factors captured for the planning run"
+        )
 
     source_rows = {
         _text(item.get("source_key"), "public factor source key"): item
@@ -1339,6 +1350,54 @@ def _verify_public_factor_manifest(
         limiting_inputs=("public-factor-acquisition-run",),
     )
     return admitted_boundaries, capture_age
+
+
+def _validated_retained_public_factor_capture(
+    value: Mapping[str, object] | None,
+    *,
+    manifest_content: bytes,
+    acquisition_run: Mapping[str, object],
+    capture_evaluation_date: date,
+    planning_evaluation_date: date,
+) -> dict[str, object] | None:
+    """Validate an optional frozen-capture identity against selected source bytes."""
+
+    if value is None:
+        return None
+    if set(value) != {
+        "schema_version",
+        "financial_data_cutoff",
+        "manifest_sha256",
+        "manifest_size_bytes",
+        "acquisition_run_id",
+    }:
+        raise CurrentPlanError("retained public factor capture fields differ")
+    cutoff = _day(
+        value.get("financial_data_cutoff"), "retained public factor financial cutoff"
+    )
+    manifest_sha256 = value.get("manifest_sha256")
+    manifest_size = value.get("manifest_size_bytes")
+    acquisition_run_id = value.get("acquisition_run_id")
+    if (
+        value.get("schema_version") != 1
+        or not isinstance(manifest_sha256, str)
+        or manifest_sha256 != _sha256(manifest_content)
+        or not isinstance(manifest_size, int)
+        or isinstance(manifest_size, bool)
+        or manifest_size != len(manifest_content)
+        or not isinstance(acquisition_run_id, str)
+        or acquisition_run_id != acquisition_run.get("run_id")
+        or cutoff > planning_evaluation_date
+        or capture_evaluation_date > planning_evaluation_date
+    ):
+        raise CurrentPlanError("retained public factor capture identity differs")
+    return {
+        "schema_version": 1,
+        "financial_data_cutoff": cutoff.isoformat(),
+        "manifest_sha256": manifest_sha256,
+        "manifest_size_bytes": manifest_size,
+        "acquisition_run_id": acquisition_run_id,
+    }
 
 
 def _resolved_strategies(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -1831,6 +1890,7 @@ def build_bundle(
     evaluation_date: str,
     evidence_mode: str = "LIVE_ONLY",
     assurance_profile: str = "DEVELOPMENT",
+    retained_public_factor_capture: Mapping[str, object] | None = None,
     provider_admission_receipt_path: Path | None = None,
     financial_input_contract_path: Path | None = None,
     provider_ledger_manifest_path: Path | None = None,
@@ -1864,6 +1924,7 @@ def build_bundle(
             catalog_sha256,
             evaluated_on,
             assurance_profile,
+            retained_public_factor_capture,
         )
     )
     _verify_market_manifest(
@@ -1894,6 +1955,35 @@ def build_bundle(
     layered_history = _layered_history_targets(
         **layered_history_kwargs,
     )
+    retained_capture: dict[str, object] | None = None
+    if retained_public_factor_capture is not None:
+        public_manifest, public_manifest_content = _load_json(
+            public_factor_manifest_path, "public factor source manifest"
+        )
+        retained_capture = _validated_retained_public_factor_capture(
+            retained_public_factor_capture,
+            manifest_content=public_manifest_content,
+            acquisition_run=_object(
+                public_manifest.get("acquisition_run"), "public factor acquisition run"
+            ),
+            capture_evaluation_date=_day(
+                _object(
+                    public_manifest.get("acquisition_run"),
+                    "public factor acquisition run",
+                ).get("evaluation_date"),
+                "public factor evaluation date",
+            ),
+            planning_evaluation_date=evaluated_on,
+        )
+        if retained_capture is None:
+            raise CurrentPlanError("retained public factor capture identity differs")
+        if (
+            retained_capture["financial_data_cutoff"]
+            != layered_history["identity"]["generation_as_of_date"]
+        ):
+            raise CurrentPlanError(
+                "retained public factor capture cutoff differs from layered history"
+            )
     target_rows = cast(list[dict[str, str]], layered_history["rows"])
     series_interval_policies = cast(
         dict[str, dict[str, object]], layered_history["series_interval_policies"]
@@ -1951,6 +2041,10 @@ def build_bundle(
     outputs["inputs/governance/public-factor-source-manifest.json"] = (
         factor_manifest_content
     )
+    if retained_capture is not None:
+        outputs["inputs/governance/retained-public-factor-capture.json"] = (
+            _canonical_json(retained_capture)
+        )
     outputs["inputs/governance/style-source-manifest.json"] = style_manifest_content
     outputs["inputs/governance/sector-source-manifest.json"] = sector_manifest_content
     generated_provenance.extend(
