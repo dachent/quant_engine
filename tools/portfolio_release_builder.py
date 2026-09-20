@@ -4859,6 +4859,11 @@ def build_analytics(
         str(correlation_source),
         "--output-root",
         str(correlation_root),
+        *(
+            ("--retained-cache-root", str(retained_cache_root))
+            if retained_cache_root is not None
+            else ()
+        ),
         timeout=7200,
     )
     correlation = _tool(
@@ -4870,6 +4875,11 @@ def build_analytics(
         str(correlation_source),
         "--output-root",
         str(correlation_root),
+        *(
+            ("--retained-cache-root", str(retained_cache_root))
+            if retained_cache_root is not None
+            else ()
+        ),
         timeout=7200,
     )
     correlation_generation_id = _generation_id(
