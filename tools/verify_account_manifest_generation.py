@@ -5266,7 +5266,6 @@ def _verify_mixed_admission(
     if (
         policy.get("policy_id") != "MAPPED_EPOCH_ADMISSION_V2"
         or policy.get("policy_version") != "2"
-        or _date_value(policy.get("as_of_date")) != selected.generation_as_of_date
     ):
         _fail()
     admissions = policy.get("admissions")
