@@ -29,6 +29,7 @@ from quant_engine.core import (
     inventory_generation,
     pipeline_status,
     plan_pipeline,
+    publish_generation,
     read_generation_bundle,
     stage_generation,
     stage_generation_bundle,
@@ -4930,6 +4931,68 @@ def test_attended_completed_nonledger_stage_requires_bound_native_artifacts(
 
     with pytest.raises(materializer.MaterializationError, match=f"completed {role}"):
         materializer._attended_completed_stages(output_root, (role,))
+
+
+@pytest.mark.parametrize("mutation", ("tamper", "missing"))
+def test_attended_completed_panel_verifies_retained_qa_generation(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Panel resume must verify the generation's retained QA payloads."""
+
+    root = tmp_path / "output" / "stages" / "panel"
+    as_of = date(2026, 9, 17)
+    payloads = {
+        "panel/index.html": b"panel",
+        "verification/independent-verification.json": canonical_json_bytes({}),
+        "qa/qa-validation.json": canonical_json_bytes({"all_passed": True}),
+        "qa/semantic-validation.json": canonical_json_bytes({"all_passed": True}),
+    }
+    artifacts = tuple(
+        SourceArtifact(
+            artifact_id=relative,
+            sha256=hashlib.sha256(content).hexdigest(),
+            size_bytes=len(content),
+            as_of_date=as_of,
+            schema_name="attended-panel-test",
+            schema_version="1",
+        )
+        for relative, content in payloads.items()
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("attended-panel-test", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="attended panel QA resume test",
+            fact_types=("panel", "browser QA"),
+            observed_start=as_of,
+            observed_end=as_of,
+        ),
+        artifacts=artifacts,
+        verification=VerificationStatus.VERIFIED,
+    )
+    stage_generation_bundle(root, manifest, payloads)
+    publish_generation(root, manifest.generation_id)
+    receipt = {
+        "generation_id": manifest.generation_id,
+        "root": str(root),
+    }
+    _write_json(tmp_path / "output" / "stage-results" / "panel.json", receipt)
+
+    materializer._attended_completed_stages(  # noqa: SLF001
+        tmp_path / "output", ("panel",)
+    )
+    target = root / "generations" / manifest.generation_id / ("qa/qa-validation.json")
+    if mutation == "tamper":
+        target.write_bytes(b'{"all_passed":false}')
+    else:
+        target.unlink()
+    with pytest.raises(
+        materializer.MaterializationError, match="attended completed panel"
+    ):
+        materializer._attended_completed_stage_root(  # noqa: SLF001
+            receipt, root, "panel"
+        )
 
 
 def test_attended_forwards_complete_governed_financial_families_and_qa(

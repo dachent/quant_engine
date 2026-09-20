@@ -620,6 +620,35 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
     }
 
 
+def _stage_panel_qa(qa_dir: Path, output_root: Path) -> Path:
+    """Copy immutable attended QA into the panel producer's stage root."""
+
+    source = qa_dir.resolve()
+    destination = output_root.resolve() / "qa"
+    source_inventory = _directory_inventory(source)
+    try:
+        destination.relative_to(source)
+    except ValueError:
+        pass
+    else:
+        raise VerticalBuildError("panel QA stage copy overlaps its source")
+    if destination.exists():
+        if _directory_inventory(destination) != source_inventory:
+            raise VerticalBuildError("panel QA stage copy differs")
+        return destination
+    destination.mkdir(parents=True)
+    for item in sorted(source.rglob("*")):
+        relative = item.relative_to(source)
+        target = destination / relative
+        if item.is_dir():
+            target.mkdir()
+        else:
+            _write_exact(target, item.read_bytes())
+    if _directory_inventory(destination) != source_inventory:
+        raise VerticalBuildError("panel QA stage copy differs after creation")
+    return destination
+
+
 def _panel_publication_receipt(
     recipe_path: Path,
     recipe: Mapping[str, Any],
@@ -6507,6 +6536,7 @@ def publish_panel(
             raise VerticalBuildError(
                 "staged account-strategy manifest identity differs"
             )
+    producer_qa_dir = _stage_panel_qa(qa_dir, output_root)
     semantic_validation = _tool(
         "portfolio_control_panel.py",
         "verify",
@@ -6540,7 +6570,8 @@ def publish_panel(
         timeout=7200,
     )
     _write_exact(
-        qa_dir / "semantic-validation.json", canonical_json_bytes(semantic_validation)
+        producer_qa_dir / "semantic-validation.json",
+        canonical_json_bytes(semantic_validation),
     )
     _tool(
         "portfolio_control_panel.py",
@@ -6548,11 +6579,11 @@ def publish_panel(
         "--candidate-dir",
         str(candidate),
         "--qa-dir",
-        str(qa_dir),
+        str(producer_qa_dir),
         timeout=7200,
     )
     receipt_path, receipt = _panel_publication_receipt(
-        recipe_path, recipe, output_root, candidate, qa_dir
+        recipe_path, recipe, output_root, candidate, producer_qa_dir
     )
     result = _tool(
         "portfolio_control_panel.py",
@@ -6587,7 +6618,7 @@ def publish_panel(
         "--candidate-dir",
         str(candidate),
         "--qa-dir",
-        str(qa_dir),
+        str(producer_qa_dir),
         "--coordinated-release-receipt",
         str(receipt_path),
         "--output-root",

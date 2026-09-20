@@ -5117,6 +5117,22 @@ def _attended_completed_report(receipt: Mapping[str, Any], stage_root: Path) -> 
         raise ValueError("report generation content differs")
 
 
+def _attended_completed_panel(receipt: Mapping[str, Any], stage_root: Path) -> None:
+    """Verify the published panel generation and its retained producer QA."""
+
+    root = _absolute(receipt.get("root"), "attended completed panel root")
+    if root != stage_root.resolve():
+        raise ValueError("panel root differs")
+    generation_id = _text(receipt.get("generation_id"), "attended panel generation_id")
+    current = read_current(root)
+    if current.generation_id != generation_id:
+        raise ValueError("panel current generation differs")
+    bundle = read_generation_bundle(root, generation_id)
+    required_qa = {"qa/qa-validation.json", "qa/semantic-validation.json"}
+    if not required_qa.issubset(bundle.payloads):
+        raise ValueError("panel retained QA evidence differs")
+
+
 def _attended_completed_stage_root(
     receipt: Mapping[str, Any], stage_root: Path, role: str
 ) -> None:
@@ -5131,6 +5147,8 @@ def _attended_completed_stage_root(
             raise ValueError("stage root differs")
         if role == "report":
             _attended_completed_report(receipt, stage_root)
+        elif role == "panel":
+            _attended_completed_panel(receipt, stage_root)
         else:
             import portfolio_release_builder as release
 
