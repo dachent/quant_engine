@@ -5128,7 +5128,10 @@ def _attended_completed_panel(receipt: Mapping[str, Any], stage_root: Path) -> N
     if current.generation_id != generation_id:
         raise ValueError("panel current generation differs")
     bundle = read_generation_bundle(root, generation_id)
-    required_qa = {"qa/qa-validation.json", "qa/semantic-validation.json"}
+    required_qa = {
+        "evidence/qa-validation.json",
+        "evidence/semantic-validation.json",
+    }
     if not required_qa.issubset(bundle.payloads):
         raise ValueError("panel retained QA evidence differs")
 

@@ -4944,8 +4944,10 @@ def test_attended_completed_panel_verifies_retained_qa_generation(
     payloads = {
         "panel/index.html": b"panel",
         "verification/independent-verification.json": canonical_json_bytes({}),
-        "qa/qa-validation.json": canonical_json_bytes({"all_passed": True}),
-        "qa/semantic-validation.json": canonical_json_bytes({"all_passed": True}),
+        "evidence/qa-validation.json": canonical_json_bytes({"all_passed": True}),
+        "evidence/semantic-validation.json": canonical_json_bytes(
+            {"all_passed": True}
+        ),
     }
     artifacts = tuple(
         SourceArtifact(
@@ -4982,7 +4984,12 @@ def test_attended_completed_panel_verifies_retained_qa_generation(
     materializer._attended_completed_stages(  # noqa: SLF001
         tmp_path / "output", ("panel",)
     )
-    target = root / "generations" / manifest.generation_id / ("qa/qa-validation.json")
+    target = (
+        root
+        / "generations"
+        / manifest.generation_id
+        / "evidence/qa-validation.json"
+    )
     if mutation == "tamper":
         target.write_bytes(b'{"all_passed":false}')
     else:
