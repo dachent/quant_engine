@@ -2099,19 +2099,52 @@ def build_attribution(recipe_path: Path, output_root: Path) -> dict[str, Any]:
     ledger_id, ledger_generation = _published_generation(output_root.parent / "ledger")
     ledger_manifest = ledger_generation / "generation.json"
     ledger_catalog = ledger_generation / "provider-ledger.json"
-    bound_manifest = (
-        source / "inputs" / "base" / "provenance" / "00-provider-ledger-generation.json"
-    )
-    bound_catalog = (
-        source / "inputs" / "base" / "provenance" / "01-provider-ledger.json"
-    )
-    if (
-        bound_manifest.read_bytes() != ledger_manifest.read_bytes()
-        or bound_catalog.read_bytes() != ledger_catalog.read_bytes()
-    ):
-        raise VerticalBuildError(
-            "attribution plan is not bound to the rebuilt provider ledger"
+    if manifest.get("builder") == "portfolio-current-decomposition-plan":
+        # Current targets come from selected layered history. Base provenance
+        # remains the immutable template's provenance and may name an older
+        # ledger; it must neither replace nor be relabelled as current evidence.
+        history_relative = "inputs/history/generation.json"
+        if sum(row.get("path") == history_relative for row in manifest["inputs"]) != 1:
+            raise VerticalBuildError("selected history is not bound to the ledger plan")
+        history = _load(source / history_relative, "selected history generation")
+        history_inputs = history.get("inputs")
+        if not isinstance(history_inputs, list):
+            raise VerticalBuildError("selected history ledger inputs are invalid")
+        for input_id, artifact in (
+            ("provider-ledger-manifest", ledger_manifest),
+            ("provider-ledger-catalog", ledger_catalog),
+        ):
+            bindings = [
+                row
+                for row in history_inputs
+                if isinstance(row, dict) and row.get("input_id") == input_id
+            ]
+            if len(bindings) != 1 or (
+                bindings[0].get("generation_id") != ledger_id
+                or (bindings[0].get("sha256"), bindings[0].get("size_bytes"))
+                != _sha(artifact)
+            ):
+                raise VerticalBuildError(
+                    "selected history is not bound to the rebuilt ledger"
+                )
+    else:
+        bound_manifest = (
+            source
+            / "inputs"
+            / "base"
+            / "provenance"
+            / "00-provider-ledger-generation.json"
         )
+        bound_catalog = (
+            source / "inputs" / "base" / "provenance" / "01-provider-ledger.json"
+        )
+        if (
+            bound_manifest.read_bytes() != ledger_manifest.read_bytes()
+            or bound_catalog.read_bytes() != ledger_catalog.read_bytes()
+        ):
+            raise VerticalBuildError(
+                "attribution plan is not bound to the rebuilt provider ledger"
+            )
     verification = {
         "artifact_count": len(rows),
         "bundle_id": source.name,
