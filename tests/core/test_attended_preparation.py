@@ -997,10 +997,32 @@ def _preparation_function_fixture(
         preparation, "_preparation_input_identity", lambda **_kwargs: identity.copy()
     )
     monkeypatch.setattr(preparation, "_selected_history_authorities", lambda _files: {})
+
+    def selected_dependence_handoff(**kwargs: object) -> dict[str, object]:
+        """Populate the authority fields used by the real final-handoff seam."""
+
+        return {
+            "schema_version": 1,
+            "history_generation_root": str(
+                Path(str(kwargs["history_source"])).resolve()
+            ),
+            "allocation_generation_root": str(
+                Path(str(kwargs["baseline_source"])).resolve()
+            ),
+            "provider_ledger_generation_root": str(
+                Path(str(config["provider_ledger_generation_root"])).resolve()
+            ),
+            "financial_input_contract_path": str(contract.resolve()),
+            "provider_admission_receipt_path": str(
+                (tmp_path / "receipt.json").resolve()
+            ),
+            "portfolio123_version_evidence_path": str(
+                (tmp_path / "p123.json").resolve()
+            ),
+        }
+
     monkeypatch.setattr(
-        preparation,
-        "_selected_dependence_handoff",
-        lambda **_kwargs: {"schema_version": 1},
+        preparation, "_selected_dependence_handoff", selected_dependence_handoff
     )
 
     def fixture_pin(value: object, _label: str) -> Path:
@@ -1139,6 +1161,40 @@ def _preparation_function_fixture(
 
     monkeypatch.setattr(release, "build_attribution", build_attribution)
     return tmp_path / "preparation-spec.json", calls, identity
+
+
+def test_final_handoff_binds_allocation_to_selected_retained_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The final handoff must use dependence's retained allocation authority."""
+
+    spec, _calls, _identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "prepared"
+
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+
+    selected = preparation._read(
+        output / "preparation" / "dependence-selected-inputs.json",
+        "selected dependence inputs",
+    )
+    source_run = preparation._read(
+        output / "preparation" / "source-run.json", "source run"
+    )
+    attended = source_run["attended"]
+    assert isinstance(attended, dict)
+    allocation = attended["allocation_generation"]
+    assert isinstance(allocation, dict)
+    assert allocation["path"] == selected["allocation_generation_root"]
+    assert allocation["path"] == str((tmp_path / "baseline-source").resolve())
+    assert allocation["path"] != str(
+        (output / "stages" / "baseline" / "generations" / ("b" * 64)).resolve()
+    )
 
 
 def test_hwm_stage_checkpoints_and_reuses_its_selected_calendar(

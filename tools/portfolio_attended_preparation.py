@@ -1971,13 +1971,7 @@ def _prepare_attended_inputs(
         "schema_version": 1,
         "release_recipe": _definition(recipe_path),
         "history_generation": _directory_definition(history_source),
-        "allocation_generation": _directory_definition(
-            root
-            / "stages"
-            / "baseline"
-            / "generations"
-            / str(baseline_result["generation_id"])
-        ),
+        "allocation_generation": _directory_definition(baseline_source),
         "financial_input_contract": _definition(contract),
         "required_stages": [
             "ledger",
