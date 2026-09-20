@@ -1406,6 +1406,7 @@ def _prepare_attended_inputs(
     import portfolio_hwm_selected_inputs as hwm_inputs
     import portfolio_invested_capital as capital
     import portfolio_release_builder as release
+    from quant_engine.portfolio_ledger.hwm import _json_safe as hwm_json_safe
     from quant_engine.portfolio_ledger.hwm_governed_execution import (
         compute_governed_as_held_composite_hwm,
         verify_governed_hwm_result,
@@ -1816,9 +1817,9 @@ def _prepare_attended_inputs(
             maximum_age_days=_maximum_age_days(_read(contract, "financial contract")),
             assurance_profile="RELEASE_QC",
         )
-        _write(hwm_result, result)
+        _write(hwm_result, hwm_json_safe(result))
         verify_governed_hwm_result(
-            result,
+            _read(hwm_result, "persisted governed HWM result"),
             hwm_input.read_bytes(),
             calendar_bytes=hwm_calendar.read_bytes(),
             input_receipt_bytes=(

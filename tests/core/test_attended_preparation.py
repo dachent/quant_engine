@@ -1108,6 +1108,58 @@ def test_hwm_stage_checkpoints_and_reuses_its_selected_calendar(
     assert derived_calls == 1
 
 
+def test_preparation_persists_exact_hwm_decimals_before_verification_and_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Real HWM return types must survive the calculation-to-JSON boundary."""
+    from decimal import Decimal
+    from quant_engine.portfolio_ledger import hwm_governed_execution as hwm
+
+    spec, calls, _identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "prepared"
+    expected = {
+        "current_index": "101.1234567890123456789012345678901",
+        "periods": [{"composite_return": "0.0000000000000000000000000000001234"}],
+        "count": 1,
+        "available": True,
+    }
+
+    def compute(*_args: object, **_kwargs: object) -> dict[str, object]:
+        calls["hwm"] += 1
+        return {
+            "current_index": Decimal(expected["current_index"]),
+            "periods": [{"composite_return": Decimal("1.234E-31")}],
+            "count": 1,
+            "available": True,
+        }
+
+    verified = []
+
+    def verify(result: object, *_args: object, **_kwargs: object) -> None:
+        persisted = json.loads(
+            (output / "preparation" / "hwm-governed-result.json").read_bytes()
+        )
+        assert result == persisted == expected
+        verified.append(persisted)
+
+    monkeypatch.setattr(hwm, "compute_governed_as_held_composite_hwm", compute)
+    monkeypatch.setattr(hwm, "verify_governed_hwm_result", verify)
+    kwargs = dict(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+    preparation.prepare_attended_inputs(**kwargs)
+    assert verified == [expected]
+    checkpoint = output / "preparation" / "checkpoints" / "hwm.json"
+    before = checkpoint.read_bytes()
+    preparation.prepare_attended_inputs(**kwargs, resume=True)
+    assert checkpoint.read_bytes() == before
+    assert calls["hwm"] == 1
+
+
 def test_preparation_resume_skips_completed_dependence_after_plan_interruption(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
