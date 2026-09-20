@@ -68,6 +68,49 @@ def test_governed_policy_preserves_retained_pretty_bytes_when_only_authority_mov
     }
 
 
+@pytest.mark.parametrize(
+    "current_newline, expected_newline", [(b"\n", b"\r\n"), (b"\r\n", b"\n")]
+)
+def test_governed_policy_accepts_lf_crlf_interchange(
+    current_newline: bytes, expected_newline: bytes
+) -> None:
+    current = json.loads(reporter._PORTABLE_HWM_POLICY.read_bytes())
+    current["test_note"] = r"line1\nline2"
+    current_lf = json.dumps(current, indent=1).encode("utf-8") + b"\n"
+    current_lf = current_lf.replace(b"\r\n", b"\n")
+    current_bytes = current_lf.replace(b"\n", current_newline)
+    retained_contract = b'{"retained":"native source authority"}'
+    expected = deepcopy(current)
+    expected["product_authority"]["raw_sha256"] = hashlib.sha256(
+        retained_contract
+    ).hexdigest()
+    expected["product_authority"]["semantic_digest"] = hashlib.sha256(
+        _canonical(json.loads(retained_contract))
+    ).hexdigest()
+    expected_lf = json.dumps(expected, indent=1).encode("utf-8") + b"\n"
+    expected_lf = expected_lf.replace(b"\r\n", b"\n")
+    expected_bytes = expected_lf.replace(b"\n", expected_newline)
+
+    actual = capital.governed_hwm_input_policy(
+        current_bytes,
+        retained_contract,
+        hashlib.sha256(expected_bytes).hexdigest(),
+    )
+
+    assert actual == expected_bytes
+    assert json.loads(actual) == expected
+    assert b'"test_note": "line1\\\\nline2"' in actual
+
+
+def test_governed_policy_rejects_unknown_expected_hash() -> None:
+    with pytest.raises(capital.CapitalValidationError, match="HWM policy"):
+        capital.governed_hwm_input_policy(
+            reporter._PORTABLE_HWM_POLICY.read_bytes(),
+            reporter._PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes(),
+            "0" * 64,
+        )
+
+
 def test_governed_policy_rejects_changed_current_calculation() -> None:
     current = json.loads(reporter._PORTABLE_HWM_POLICY.read_bytes())
     expected_bytes = _canonical(current)

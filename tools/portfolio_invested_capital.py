@@ -1406,11 +1406,17 @@ def governed_hwm_input_policy(
             )
             + text[authority_match.end("body") :]
         ).encode("utf-8")
-        if (
-            json.loads(preserved) != expected
-            or hashlib.sha256(preserved).hexdigest() != expected_policy_sha256
-        ):
+        if json.loads(preserved) != expected:
             raise ValueError("retained policy authority differs")
+        newline_variants = (
+            preserved,
+            preserved.replace(b"\r\n", b"\n"),
+            preserved.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"),
+        )
+        for candidate in newline_variants:
+            if hashlib.sha256(candidate).hexdigest() == expected_policy_sha256:
+                return candidate
+        raise ValueError("retained policy serialization differs")
     except (TypeError, UnicodeDecodeError, ValueError) as exc:
         raise CapitalValidationError(
             "governed HWM policy differs from current calculation authority"
