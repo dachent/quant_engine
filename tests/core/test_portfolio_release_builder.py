@@ -3998,21 +3998,39 @@ def test_panel_publication_validates_browser_qa_before_authorizing_receipt(
 
     receipt_bytes: bytes | None = None
     qa_bytes_at_receipt: dict[str, bytes] | None = None
+    original_qa_bytes = {
+        item.relative_to(qa).as_posix(): item.read_bytes()
+        for item in qa.rglob("*")
+        if item.is_file()
+    }
     panel_result: dict[str, object] = {}
 
     def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
         nonlocal receipt_bytes, qa_bytes_at_receipt, panel_result
         calls.append(args)
         if args[1] == "qa":
-            assert (qa / "semantic-validation.json").is_file()
+            producer_qa = Path(str(args[args.index("--qa-dir") + 1]))
+            assert producer_qa != qa
+            assert (producer_qa / "semantic-validation.json").is_file()
+            assert {
+                item.relative_to(producer_qa).as_posix(): item.read_bytes()
+                for item in producer_qa.rglob("*")
+                if item.is_file()
+            } == {
+                "browser.json": b"{}",
+                "semantic-validation.json": canonical_json_bytes(
+                    {"publication_state": "PUBLISHED"}
+                ),
+            }
         if args[1] == "publish":
             receipt_path = Path(
                 str(args[args.index("--coordinated-release-receipt") + 1])
             )
             receipt_bytes = receipt_path.read_bytes()
+            producer_qa = Path(str(args[args.index("--qa-dir") + 1]))
             qa_bytes_at_receipt = {
-                item.relative_to(qa).as_posix(): item.read_bytes()
-                for item in qa.rglob("*")
+                item.relative_to(producer_qa).as_posix(): item.read_bytes()
+                for item in producer_qa.rglob("*")
                 if item.is_file()
             }
             receipt = json.loads(receipt_bytes)
@@ -4049,10 +4067,16 @@ def test_panel_publication_validates_browser_qa_before_authorizing_receipt(
     assert receipt_bytes is not None
     assert qa_bytes_at_receipt is not None
     assert qa_bytes_at_receipt == {
+        "browser.json": b"{}",
+        "semantic-validation.json": canonical_json_bytes(
+            {"publication_state": "PUBLISHED"}
+        ),
+    }
+    assert {
         item.relative_to(qa).as_posix(): item.read_bytes()
         for item in qa.rglob("*")
         if item.is_file()
-    }
+    } == original_qa_bytes
     assert receipt_bytes == canonical_json_bytes(json.loads(receipt_bytes))
     assert (
         result["coordinated_release_receipt_sha256"]
@@ -4554,6 +4578,8 @@ def test_schema10_panel_build_publish_routes_one_verified_epoch_bundle(
     panel_root = tmp_path / "stages" / "panel"
     candidate_dir = tmp_path / "candidate"
     qa_dir = tmp_path / "qa"
+    qa_dir.mkdir()
+    (qa_dir / "browser.json").write_text("{}", encoding="utf-8")
     calls: list[tuple[object, ...]] = []
     real_stage = builder._stage_verified_epoch_manifest_bundle
     stage_calls: list[tuple[object, ...]] = []
