@@ -2006,6 +2006,28 @@ def build_bundle(
         ) from exc
     required_surfaces = _required_decomposition_surfaces(financial_mvp_contract)
     reporting_currency = _reporting_currency(financial_mvp_contract)
+    # The base specification was being emitted as the retained template's bytes verbatim,
+    # while the composition and the source-period interval policy it is supposed to carry
+    # were computed above and discarded.  A template produced before source-period policy
+    # existed therefore travelled with empty `source_segments` and empty
+    # `declared_unavailable_labels`; the decomposition producer could not reach its
+    # SOURCE_SEGMENT_GAP tolerance path, and a delivery run stopped on the first declared
+    # provider NAV gap.  Emit what was computed.  The manifest hashes `outputs` below, so
+    # rebinding here yields the new bundle identity a changed specification should have.
+    rebound_base_spec = dict(base_spec)
+    rebound_base_spec["series_composition"] = layered_history["composition"]
+    rebound_target_source = dict(
+        _object(rebound_base_spec.get("target_source"), "base.target_source")
+    )
+    rebound_target_source["interval_policy"] = {
+        "currency": reporting_currency,
+        "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+        "series_policies": series_interval_policies,
+    }
+    rebound_base_spec["target_source"] = rebound_target_source
+    outputs["inputs/governance/base-decomposition-spec.json"] = _canonical_json(
+        rebound_base_spec
+    )
     contract_sources = {
         _text(source.get("source_id"), "financial MVP source_id"): source
         for source in _objects(

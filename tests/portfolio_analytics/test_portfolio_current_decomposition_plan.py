@@ -3105,3 +3105,86 @@ def test_build_rejects_missing_candidate_disposition_and_unknown_lens(
         planner.build_bundle(
             **{key: value for key, value in inputs.items() if key != "plan_document"}
         )
+
+
+def test_emitted_base_spec_carries_the_computed_source_period_policy(
+    tmp_path: Path,
+) -> None:
+    """The planner must emit what it computed, not the template it was handed.
+
+    The base specification used to travel as the retained template's bytes verbatim while
+    the composition and source-period interval policy were computed and discarded. A
+    template produced before source-period policy existed therefore reached the
+    decomposition producer with empty `source_segments`, the producer could not reach its
+    SOURCE_SEGMENT_GAP tolerance path, and a delivery run stopped on the first declared
+    provider NAV gap.
+    """
+    inputs = _fixture(tmp_path)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+
+    # A template with no source-period authority at all: exactly the stale shape.
+    template = json.loads(inputs["base_spec_path"].read_text(encoding="utf-8"))
+    template["target_source"]["interval_policy"] = {
+        "currency": "XXX",
+        "evaluation_information_set": "STALE_TEMPLATE",
+        "series_policies": {},
+    }
+    template["series_composition"] = {}
+    _write_json(inputs["base_spec_path"], template)
+
+    outputs, _manifest = planner.build_bundle(**kwargs)
+
+    emitted = json.loads(
+        outputs["inputs/governance/base-decomposition-spec.json"].decode("utf-8")
+    )
+    policy = emitted["target_source"]["interval_policy"]
+    assert policy["evaluation_information_set"] == "RETROSPECTIVE_SELECTED_SNAPSHOT"
+    assert policy["currency"] != "XXX"
+    assert emitted["series_composition"], (
+        "the emitted composition is still the template"
+    )
+    assert policy != template["target_source"]["interval_policy"]
+    # Whatever the layered history computed is what travels, and every series it names
+    # carries its source-period authority explicitly.
+    for series_id, series_policy in policy["series_policies"].items():
+        assert "source_segments" in series_policy, series_id
+        assert "declared_unavailable_labels" in series_policy, series_id
+
+
+def test_a_stale_template_interval_policy_cannot_reach_the_bundle(
+    tmp_path: Path,
+) -> None:
+    """A template's source-period policy is no longer an input, so it cannot poison a bundle.
+
+    This is the property that makes the out-of-band template regeneration unnecessary: the
+    emitted specification is computed from the layered history, so replacing the template's
+    interval policy with nonsense changes nothing at all -- not the bytes, not the identity.
+    """
+    inputs = _fixture(tmp_path)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    baseline_outputs, baseline = planner.build_bundle(**kwargs)
+
+    template = json.loads(inputs["base_spec_path"].read_text(encoding="utf-8"))
+    template["target_source"]["interval_policy"] = {
+        "currency": "XXX",
+        "evaluation_information_set": "STALE_TEMPLATE",
+        "series_policies": {},
+    }
+    _write_json(inputs["base_spec_path"], template)
+
+    changed_outputs, changed = planner.build_bundle(**kwargs)
+
+    assert (
+        changed_outputs["inputs/governance/base-decomposition-spec.json"]
+        == baseline_outputs["inputs/governance/base-decomposition-spec.json"]
+    )
+    assert changed["bundle_id"] == baseline["bundle_id"]
+    emitted = json.loads(
+        changed_outputs["inputs/governance/base-decomposition-spec.json"].decode(
+            "utf-8"
+        )
+    )
+    assert (
+        emitted["target_source"]["interval_policy"]["evaluation_information_set"]
+        == "RETROSPECTIVE_SELECTED_SNAPSHOT"
+    )
