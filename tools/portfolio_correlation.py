@@ -2042,7 +2042,11 @@ def publish(
     result, manifest, result_bytes = build_correlation(spec_path, source_root)
     if output_root.exists() and output_root.is_symlink():
         raise CorrelationError("output root must not be a symlink")
-    candidate = _stage_candidate(cache_root / "candidates", manifest, result_bytes)
+    candidate = (
+        cache_root.resolve() / "candidates" / manifest.generation_id
+        if retained_cache_root is None
+        else _stage_candidate(cache_root / "candidates", manifest, result_bytes)
+    )
     pointer = _publish_candidate(candidate, output_root, manifest, result_bytes)
     if retained_cache_root is not None:
         _record_input_key(cache_root, key, manifest.generation_id, result_bytes)
