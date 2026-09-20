@@ -806,9 +806,14 @@ def _preparation_stage_bindings(repo_root: Path) -> dict[str, object]:
     policy = _literal_assignment(preparation, "_PREPARATION_STAGE_POLICY")
     outputs = _literal_assignment(preparation, "_PREPARATION_STAGE_OUTPUTS")
     runtime_paths = _literal_assignment(preparation, "PREPARATION_RUNTIME_PATHS")
-    declarations = (dependencies, code, policy, outputs)
-    if not all(isinstance(declaration, dict) for declaration in declarations):
+    if (
+        not isinstance(dependencies, dict)
+        or not isinstance(code, dict)
+        or not isinstance(policy, dict)
+        or not isinstance(outputs, dict)
+    ):
         raise ControllerGraphError("preparation stage declarations differ")
+    declarations = (dependencies, code, policy, outputs)
     if not isinstance(runtime_paths, dict):
         raise ControllerGraphError("preparation runtime path registry differs")
     stage_names = set(dependencies)
