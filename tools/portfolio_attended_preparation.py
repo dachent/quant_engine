@@ -60,13 +60,71 @@ PREPARATION_STAGE_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     ),
 }
 
+# Every runtime alias used by preparation checkpoint identity resolves through
+# this one repository-relative registry.  The layered-history dependency alias
+# deliberately points at its owning declaration below rather than copying its
+# list here.
+PREPARATION_RUNTIME_PATHS: dict[str, str] = {
+    "account_manifest_generation": "tools/build_account_manifest_generation.py",
+    "account_manifest_schema": "schemas/portfolio/account-strategy-manifest.schema.json",
+    "account_strategy_manifest": "tools/account_strategy_manifest.py",
+    "attended_preparation": "tools/portfolio_attended_preparation.py",
+    "baseline_producer": "tools/portfolio_baseline.py",
+    "capital_input": "ops/mvp2-release/scripts/build_capital_input.py",
+    "core_authority": "packages/core/src/quant_engine/core/authority.py",
+    "core_publication": "packages/core/src/quant_engine/core/publication.py",
+    "current_dependence": "tools/portfolio_current_dependence.py",
+    "current_plan": "tools/portfolio_current_decomposition_plan.py",
+    "dependence": "contracts/portfolio-dependence-policy-v1.json",
+    "dependence_schema": "schemas/portfolio/dependence-policy.schema.json",
+    "financial_outcomes": "tools/portfolio_financial_outcomes.py",
+    "flow_classification": "contracts/account-strategy-flow-classification-policy-v1.json",
+    "freshness": "tools/portfolio_freshness.py",
+    "hwm_current": "contracts/portfolio-hwm-policy-v4.json",
+    "hwm_execution": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_governed_execution.py",
+    "hwm_governed": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_governed.py",
+    "hwm_input_kernel": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_input_builder.py",
+    "hwm_inputs": "tools/portfolio_hwm_selected_inputs.py",
+    "hwm_kernel": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm.py",
+    "hwm_legacy": "contracts/portfolio-hwm-policy-v3.json",
+    "invested_capital": "tools/portfolio_invested_capital.py",
+    "layered_history_repository_dependencies": "tools/portfolio_target_series.py",
+    "ledger_admission": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/provider_admission.py",
+    "ledger_hwm_inputs": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_inputs.py",
+    "ledger_models": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/models.py",
+    "performance": "contracts/portfolio-performance-policy-v1.json",
+    "rebind_current_epoch_crosswalk": "tools/rebind_current_epoch_crosswalk.py",
+    "release_builder": "tools/portfolio_release_builder.py",
+    "stage_current_epoch_manifest": "tools/stage_current_epoch_manifest.py",
+    "static_snapshot_coverage_receipts": "tools/static_snapshot_coverage_receipts.py",
+    "target_series": "tools/portfolio_target_series.py",
+    "verify_account_manifest_generation": "tools/verify_account_manifest_generation.py",
+}
+
 _PREPARATION_STAGE_CODE = {
-    "selected-history-normalization": ("attended_preparation", "target_series"),
+    "selected-history-normalization": (
+        "attended_preparation",
+        "target_series",
+        "layered_history_repository_dependencies",
+    ),
     "dependence": ("attended_preparation", "current_dependence"),
     "plan-live-only": ("attended_preparation", "current_plan"),
     "plan-live-plus-backtest": ("attended_preparation", "current_plan"),
-    "ledger": ("attended_preparation", "release_builder"),
-    "baseline": ("attended_preparation", "release_builder"),
+    "ledger": (
+        "attended_preparation",
+        "release_builder",
+        "freshness",
+        "core_authority",
+        "core_publication",
+    ),
+    "baseline": (
+        "attended_preparation",
+        "release_builder",
+        "baseline_producer",
+        "ledger_models",
+        "ledger_admission",
+        "ledger_hwm_inputs",
+    ),
     "epoch": (
         "attended_preparation",
         "rebind_current_epoch_crosswalk",
@@ -77,11 +135,20 @@ _PREPARATION_STAGE_CODE = {
         "verify_account_manifest_generation",
         "release_builder",
     ),
-    "hwm": ("attended_preparation", "hwm_inputs", "invested_capital"),
+    "hwm": (
+        "attended_preparation",
+        "hwm_inputs",
+        "invested_capital",
+        "hwm_execution",
+        "hwm_input_kernel",
+        "hwm_governed",
+        "hwm_kernel",
+    ),
     "capital": (
         "attended_preparation",
         "capital_input",
         "financial_outcomes",
+        "hwm_inputs",
         "invested_capital",
     ),
     "attribution": ("attended_preparation", "current_plan", "release_builder"),
@@ -90,12 +157,12 @@ _PREPARATION_STAGE_CODE = {
 
 _PREPARATION_STAGE_POLICY = {
     "selected-history-normalization": (),
-    "dependence": ("dependence",),
+    "dependence": ("dependence", "dependence_schema"),
     "plan-live-only": (),
     "plan-live-plus-backtest": (),
     "ledger": (),
-    "baseline": (),
-    "epoch": ("flow_classification",),
+    "baseline": ("hwm_legacy",),
+    "epoch": ("flow_classification", "account_manifest_schema"),
     "hwm": ("hwm_current", "hwm_legacy", "performance"),
     "capital": (),
     "attribution": (),
@@ -777,6 +844,58 @@ def _maximum_age_days(contract: Mapping[str, Any]) -> int:
     return min(found)
 
 
+def _preparation_stage_names() -> set[str]:
+    declarations = (
+        PREPARATION_STAGE_DEPENDENCIES,
+        _PREPARATION_STAGE_CODE,
+        _PREPARATION_STAGE_POLICY,
+        _PREPARATION_STAGE_OUTPUTS,
+    )
+    stage_names = set(PREPARATION_STAGE_DEPENDENCIES)
+    if not stage_names or any(
+        set(declaration) != stage_names for declaration in declarations
+    ):
+        raise AttendedPreparationError("preparation stage declaration differs")
+    for stage, predecessors in PREPARATION_STAGE_DEPENDENCIES.items():
+        if any(predecessor not in stage_names for predecessor in predecessors):
+            raise AttendedPreparationError("preparation stage declaration differs")
+    return stage_names
+
+
+def _runtime_path(alias: str) -> Path:
+    try:
+        relative_path = PREPARATION_RUNTIME_PATHS[alias]
+    except KeyError as exc:
+        raise AttendedPreparationError("preparation runtime alias differs") from exc
+    path = Path(relative_path)
+    if path.is_absolute() or ".." in path.parts:
+        raise AttendedPreparationError("preparation runtime alias differs")
+    resolved = ROOT / path
+    if resolved.is_symlink() or not resolved.is_file():
+        raise AttendedPreparationError("preparation runtime path is unavailable")
+    return resolved
+
+
+def _layered_history_repository_dependency_identity() -> dict[str, object]:
+    """Bind the target-series authority list without copying its owned paths."""
+
+    import portfolio_target_series as target_series
+
+    definitions: dict[str, object] = {}
+    for relative_path in target_series.LAYERED_HISTORY_REPOSITORY_DEPENDENCIES:
+        if not isinstance(relative_path, str):
+            raise AttendedPreparationError("layered history runtime dependency differs")
+        path = ROOT / relative_path
+        if path.is_symlink() or not path.is_file():
+            raise AttendedPreparationError(
+                "layered history runtime dependency is unavailable"
+            )
+        definitions[relative_path] = _definition(path)
+    if not definitions:
+        raise AttendedPreparationError("layered history runtime dependency differs")
+    return definitions
+
+
 def _preparation_input_identity(
     *,
     preparation_spec_path: Path,
@@ -787,53 +906,23 @@ def _preparation_input_identity(
     """Bind every selected input, policy, and local producer code surface."""
 
     source_selection = _pin(config["source_selection"], "source selection")
-    policy_paths = {
-        "dependence": ROOT / "contracts" / "portfolio-dependence-policy-v1.json",
-        "flow_classification": ROOT
-        / "contracts"
-        / "account-strategy-flow-classification-policy-v1.json",
-        "hwm_current": ROOT / "contracts" / "portfolio-hwm-policy-v4.json",
-        "hwm_legacy": ROOT / "contracts" / "portfolio-hwm-policy-v3.json",
-        "performance": ROOT / "contracts" / "portfolio-performance-policy-v1.json",
+    _preparation_stage_names()
+    code_names = set().union(*_PREPARATION_STAGE_CODE.values())
+    policy_names = set().union(*_PREPARATION_STAGE_POLICY.values())
+    code = {
+        name: _definition(_runtime_path(name))
+        for name in sorted(code_names - {"layered_history_repository_dependencies"})
     }
-    code_paths = {
-        "attended_preparation": Path(__file__),
-        "capital_input": ROOT
-        / "ops"
-        / "mvp2-release"
-        / "scripts"
-        / "build_capital_input.py",
-        "current_dependence": ROOT / "tools" / "portfolio_current_dependence.py",
-        "current_plan": ROOT / "tools" / "portfolio_current_decomposition_plan.py",
-        "financial_outcomes": ROOT / "tools" / "portfolio_financial_outcomes.py",
-        "hwm_inputs": ROOT / "tools" / "portfolio_hwm_selected_inputs.py",
-        "invested_capital": ROOT / "tools" / "portfolio_invested_capital.py",
-        "rebind_current_epoch_crosswalk": ROOT
-        / "tools"
-        / "rebind_current_epoch_crosswalk.py",
-        "release_builder": ROOT / "tools" / "portfolio_release_builder.py",
-        "static_snapshot_coverage_receipts": ROOT
-        / "tools"
-        / "static_snapshot_coverage_receipts.py",
-        "stage_current_epoch_manifest": ROOT
-        / "tools"
-        / "stage_current_epoch_manifest.py",
-        "target_series": ROOT / "tools" / "portfolio_target_series.py",
-        "account_manifest_generation": ROOT
-        / "tools"
-        / "build_account_manifest_generation.py",
-        "account_strategy_manifest": ROOT / "tools" / "account_strategy_manifest.py",
-        "verify_account_manifest_generation": ROOT
-        / "tools"
-        / "verify_account_manifest_generation.py",
-    }
+    code["layered_history_repository_dependencies"] = (
+        _layered_history_repository_dependency_identity()
+    )
     return {
         "schema_version": 1,
-        "code": {name: _definition(path) for name, path in sorted(code_paths.items())},
+        "code": code,
         "financial_data_cutoff": config["financial_data_cutoff"],
         "input_config": _definition(preparation_spec_path.resolve()),
         "policy": {
-            name: _definition(path) for name, path in sorted(policy_paths.items())
+            name: _definition(_runtime_path(name)) for name in sorted(policy_names)
         },
         "release_commit": release_commit,
         "source_phase": plan["source_phase"],
@@ -1063,6 +1152,7 @@ def _stage_identity(
     full_identity: Mapping[str, Any],
     completed: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, Any]:
+    _preparation_stage_names()
     try:
         predecessors = PREPARATION_STAGE_DEPENDENCIES[stage]
         code_names = _PREPARATION_STAGE_CODE[stage]
