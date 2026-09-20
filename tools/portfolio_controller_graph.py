@@ -136,6 +136,7 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "id": "layered-history-generation",
         "source_paths": (
             _TARGET_SERIES,
+            _RELEASE,
             "tools/portfolio_designer_model_curve.py",
             "tools/portfolio_strategy_history.py",
             "tools/portfolio_strategy_backtests.py",
@@ -155,11 +156,15 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "consumers": (
             (_DEPENDENCE, "build_source"),
             (_DECOMPOSITION_PLAN, "build_bundle"),
+            (_RELEASE, "build_attribution"),
         ),
         "validators": ((_TARGET_SERIES, "verify_layered_history_generation"),),
         "writers": ((_TARGET_SERIES, "write_layered_history_generation"),),
         "stages": ("baseline", "attribution", "analytics", "report", "panel"),
-        "tests": ("tests/core/test_attended_preparation.py",),
+        "tests": (
+            "tests/core/test_attended_preparation.py",
+            "tests/core/test_portfolio_release_builder.py",
+        ),
         "sinks": (
             "report-json-html",
             "panel-json-html",
