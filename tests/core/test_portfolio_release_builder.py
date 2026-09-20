@@ -5579,3 +5579,92 @@ def test_private_stage_rejects_production_root_overlap_before_any_write(
         validate_private_stage_target(target, target, portfolio_root)
 
     assert not target.exists()
+
+
+@pytest.mark.parametrize("mode", ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"])
+@pytest.mark.parametrize(
+    "damage", [None, "sha256", "size_bytes", "generation_id", "missing", "duplicate"]
+)
+def test_current_attribution_binds_selected_history_not_legacy_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, damage: str | None
+) -> None:
+    """The real hash reader must bind current targets to their selected ledger."""
+    bundle = tmp_path / "plan-id"
+    history = bundle / "inputs/history/generation.json"
+    history.parent.mkdir(parents=True)
+    ledger = tmp_path / "selected-ledger"
+    ledger.mkdir()
+    (ledger / "generation.json").write_bytes(b'{"fixture":"selected manifest"}')
+    (ledger / "provider-ledger.json").write_bytes(b'{"fixture":"selected catalog"}')
+    bindings = []
+    for input_id, name in (
+        ("provider-ledger-manifest", "generation.json"),
+        ("provider-ledger-catalog", "provider-ledger.json"),
+    ):
+        content = (ledger / name).read_bytes()
+        bindings.append(
+            {
+                "input_id": input_id,
+                "generation_id": "selected-ledger",
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size_bytes": len(content),
+            }
+        )
+    if damage in {"sha256", "size_bytes", "generation_id"}:
+        bindings[0][damage] = 0 if damage == "size_bytes" else "wrong"
+    elif damage == "missing":
+        bindings.pop()
+    elif damage == "duplicate":
+        bindings.append(dict(bindings[0]))
+    history.write_bytes(canonical_json_bytes({"inputs": bindings}))
+    legacy = bundle / "inputs/base/provenance"
+    legacy.mkdir(parents=True)
+    (legacy / "00-provider-ledger-generation.json").write_bytes(
+        b'{"fixture":"old manifest"}'
+    )
+    (legacy / "01-provider-ledger.json").write_bytes(b'{"fixture":"old catalog"}')
+    marker = bundle / "spec.json"
+    marker.write_bytes(b"{}")
+
+    def row(path: Path) -> dict[str, object]:
+        return {
+            "path": path.relative_to(bundle).as_posix(),
+            "sha256": builder._sha(path)[0],
+            "size_bytes": path.stat().st_size,
+        }
+
+    manifest = {
+        "builder": "portfolio-current-decomposition-plan",
+        "bundle_id": bundle.name,
+        "policies": {"strategy_evidence_mode": mode},
+        "inputs": [row(history), *[row(path) for path in sorted(legacy.iterdir())]],
+        "outputs": [row(marker)],
+    }
+    (bundle / "plan-manifest.json").write_bytes(canonical_json_bytes(manifest))
+    monkeypatch.setattr(
+        builder,
+        "_recipe",
+        lambda _: {"decomposition_plan_bundle": {"path": str(bundle)}},
+    )
+    monkeypatch.setattr(
+        builder, "_published_generation", lambda _: (ledger.name, ledger)
+    )
+    output = tmp_path / "attribution"
+    if damage is None:
+        result = builder.build_attribution(tmp_path / "recipe.json", output)
+        proof = json.loads(Path(result["verification"]).read_bytes())
+        assert proof["ledger_generation_id"] == ledger.name
+        assert (
+            proof["ledger_catalog_sha256"]
+            == builder._sha(ledger / "provider-ledger.json")[0]
+        )
+        assert (
+            b"old manifest"
+            in (legacy / "00-provider-ledger-generation.json").read_bytes()
+        )
+    else:
+        with pytest.raises(
+            builder.VerticalBuildError, match="selected history.*ledger"
+        ):
+            builder.build_attribution(tmp_path / "recipe.json", output)
+        assert not output.exists()
