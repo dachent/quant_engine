@@ -918,6 +918,10 @@ def _preparation_function_fixture(
         },
         "source_selection": str(source_selection),
     }
+    for mode in ("LIVE_ONLY", "LIVE_PLUS_BACKTEST"):
+        (tmp_path / f"{mode}-public.json").write_bytes(
+            preparation.canonical_json_bytes({"acquisition_run": {"run_id": "a" * 64}})
+        )
     plan = {
         "data_clock": {"latest_common_eod": "2026-09-17"},
         "history_rebuild_required": history_rebuild_required,

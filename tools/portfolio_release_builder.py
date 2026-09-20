@@ -4914,12 +4914,14 @@ def build_analytics(
         plan.get("schema_version"),
     ) in {("0.17.0", 2), ("0.18.0", 2)}
     if current_plan:
-        correlation_execution_date = (
-            correlation_as_of if current_dependence_receipt.is_file() else recipe_as_of
+        correlation_expected_date = (
+            recipe_evaluated_on
+            if current_dependence_receipt.is_file()
+            else recipe_as_of
         )
         if (
             plan.get("evaluation_date") != recipe_evaluated_on
-            or correlation_execution_date != recipe_evaluated_on
+            or correlation_as_of != correlation_expected_date
         ):
             raise VerticalBuildError("current analytics as-of date differs")
         specs = _current_release_plan_specs(

@@ -2562,6 +2562,41 @@ def test_current_analytics_rejects_recipe_plan_as_of_drift(tmp_path: Path) -> No
         builder.build_analytics(recipe, bundle, tmp_path / "analytics")
 
 
+def test_current_analytics_rejects_legacy_correlation_date_drift_before_producer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A current plan must retain, rather than replace, a legacy observed date."""
+
+    recipe_root = tmp_path / "recipe-fixture"
+    recipe_root.mkdir()
+    recipe = _recipe(recipe_root)
+    recipe_value = json.loads(recipe.read_text(encoding="utf-8"))
+    correlation = Path(recipe_value["correlation_source_root"]["path"])
+    proof_path = correlation / "evidence-proof.json"
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    proof["as_of_date"] = "2026-08-02"
+    proof_path.write_bytes(builder.canonical_json_bytes(proof))
+    recipe_value["correlation_source_root"].update(
+        builder._directory_inventory(correlation)
+    )
+    recipe.write_bytes(builder.canonical_json_bytes(recipe_value))
+    bundle = _current_plan_bundle(tmp_path)
+    _bind_recipe_plan_bundle(recipe, bundle)
+
+    class ReachedNumericalBuild(Exception):
+        pass
+
+    monkeypatch.setattr(
+        builder,
+        "_build_base_analytics",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ReachedNumericalBuild()),
+    )
+    with pytest.raises(
+        builder.VerticalBuildError, match="current analytics as-of date"
+    ):
+        builder.build_analytics(recipe, bundle, tmp_path / "analytics")
+
+
 def test_current_analytics_uses_execution_clock_separate_from_financial_cutoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

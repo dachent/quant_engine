@@ -254,6 +254,37 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         ),
     },
     {
+        "id": "retained-public-factor-capture",
+        "source_paths": (
+            _PREPARATION,
+            _DECOMPOSITION_PLAN,
+            _RELEASE,
+        ),
+        "contracts": ("contracts/portfolio-financial-mvp-source-v1.json",),
+        "producer": (_PREPARATION, "_retained_public_factor_capture"),
+        "artifacts": ("inputs/governance/retained-public-factor-capture.json",),
+        "consumers": (
+            (_DECOMPOSITION_PLAN, "_verify_public_factor_manifest"),
+            (_RELEASE, "_verify_current_plan_upstream_evidence"),
+            (_RELEASE, "_expected_non_spec_data_age"),
+        ),
+        "validators": (
+            (_DECOMPOSITION_PLAN, "_validated_retained_public_factor_capture"),
+            (_RELEASE, "_retained_public_factor_capture"),
+        ),
+        "writers": (
+            (_DECOMPOSITION_PLAN, "build_bundle"),
+            (_DECOMPOSITION_PLAN, "write_bundle"),
+        ),
+        "stages": ("attribution", "analytics", "report", "panel"),
+        "tests": (
+            "tests/core/test_attended_preparation.py",
+            "tests/portfolio_analytics/test_portfolio_current_decomposition_plan.py",
+            "tests/core/test_portfolio_release_builder.py",
+        ),
+        "sinks": ("report-json-html", "panel-json-html"),
+    },
+    {
         "id": "provider-ledger-generation",
         "source_paths": (
             _PROVIDER_LEDGER,
@@ -1043,6 +1074,12 @@ def _critical_relationships(
     )
     _require_local_route_calls(
         preparation_tree,
+        "_validated_inputs",
+        {"_retained_public_factor_capture"},
+        "retained public factor capture preflight route",
+    )
+    _require_local_route_calls(
+        preparation_tree,
         "prepare_attended_inputs",
         {
             "_rebuild_layered_history",
@@ -1104,6 +1141,12 @@ def _critical_relationships(
         {"plans.build_bundle"},
         "attended decomposition-plan producer route",
     )
+    _require_local_route_calls(
+        preparation_tree,
+        "prepare_attended_inputs",
+        {"_retained_public_factor_capture"},
+        "retained public factor capture production route",
+    )
     _require_calls(repo_root, _DEPENDENCE, "write_source", {"build_source"})
     _require_calls(repo_root, _DECOMPOSITION_PLAN, "write_bundle", {"build_bundle"})
     _require_calls(
@@ -1153,6 +1196,18 @@ def _critical_relationships(
         {"read_generation_bundle"},
     )
     release_tree = _tree(repo_root, _RELEASE)
+    _require_local_route_calls(
+        release_tree,
+        "_verify_current_plan_upstream_evidence",
+        {"_retained_public_factor_capture"},
+        "retained public factor capture release evidence route",
+    )
+    _require_local_route_calls(
+        release_tree,
+        "_expected_non_spec_data_age",
+        {"_retained_public_factor_capture"},
+        "retained public factor capture release age route",
+    )
     release_stage_calls = _function_calls(
         _top_level_function(release_tree, "build_stage")
     )
@@ -1260,6 +1315,26 @@ def _critical_relationships(
             "caller": "tools.portfolio_attended_preparation._validated_inputs",
             "callee": "tools.provider_ledger.verify_candidate",
             "kind": "upfront-provider-replay",
+        },
+        {
+            "caller": "tools.portfolio_attended_preparation._validated_inputs",
+            "callee": "tools.portfolio_attended_preparation._retained_public_factor_capture",
+            "kind": "retained-public-factor-preflight",
+        },
+        {
+            "caller": "tools.portfolio_attended_preparation.prepare_attended_inputs",
+            "callee": "tools.portfolio_attended_preparation._retained_public_factor_capture",
+            "kind": "retained-public-factor-production",
+        },
+        {
+            "caller": "tools.portfolio_release_builder._verify_current_plan_upstream_evidence",
+            "callee": "tools.portfolio_release_builder._retained_public_factor_capture",
+            "kind": "retained-public-factor-release-evidence",
+        },
+        {
+            "caller": "tools.portfolio_release_builder._expected_non_spec_data_age",
+            "callee": "tools.portfolio_release_builder._retained_public_factor_capture",
+            "kind": "retained-public-factor-release-age",
         },
         {
             "caller": "tools.portfolio_pipeline_materialize.main",
