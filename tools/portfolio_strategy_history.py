@@ -21,7 +21,7 @@ import math
 from pathlib import Path, PurePosixPath
 import re
 import statistics
-from typing import Any, Final, Iterable, Mapping, Sequence
+from typing import Any, Final, Iterable, Mapping, Sequence, cast
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
 
@@ -2508,6 +2508,350 @@ def build_bundle(
     return returns_content, canonical_json_bytes(manifest)
 
 
+def _bundle_bytes(path_or_content: Path | bytes) -> bytes:
+    if isinstance(path_or_content, bytes):
+        return path_or_content
+    _sha256(path_or_content)
+    return path_or_content.read_bytes()
+
+
+def _validated_retained_bundle(
+    manifest_content: bytes, returns_content: bytes
+) -> tuple[dict[str, Any], list[dict[str, str]]]:
+    """Check the seed without importing its downstream consumer."""
+    try:
+        manifest = json.loads(manifest_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise StrategyHistoryError("QSI refresh bundle manifest is invalid") from exc
+    if (
+        not isinstance(manifest, dict)
+        or canonical_json_bytes(manifest) != manifest_content
+    ):
+        raise StrategyHistoryError("QSI refresh bundle manifest is not canonical")
+    payload = dict(manifest)
+    bundle_id = payload.pop("bundle_id", None)
+    if (
+        bundle_id != hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+        or manifest.get("builder") != "portfolio-strategy-history"
+        or manifest.get("schema_version") != SCHEMA_VERSION
+        or manifest.get("verification") != "VERIFIED"
+    ):
+        raise StrategyHistoryError("QSI refresh bundle identity differs")
+    artifact = manifest.get("returns_artifact")
+    if not isinstance(artifact, dict) or (
+        artifact.get("sha256"),
+        artifact.get("size_bytes"),
+    ) != (hashlib.sha256(returns_content).hexdigest(), len(returns_content)):
+        raise StrategyHistoryError("QSI refresh bundle returns identity differs")
+    try:
+        reader = csv.DictReader(io.StringIO(returns_content.decode("utf-8")))
+        if tuple(reader.fieldnames or ()) != RETURN_FIELDS:
+            raise StrategyHistoryError("QSI refresh bundle return fields differ")
+        rows = list(reader)
+    except (UnicodeDecodeError, csv.Error) as exc:
+        raise StrategyHistoryError("QSI refresh bundle returns are invalid") from exc
+    raw_definitions = manifest.get("series")
+    if (
+        not isinstance(raw_definitions, list)
+        or not raw_definitions
+        or any(not isinstance(item, dict) for item in raw_definitions)
+    ):
+        raise StrategyHistoryError("QSI refresh bundle series are invalid")
+    definitions = {item.get("series_id"): item for item in raw_definitions}
+    if len(definitions) != len(raw_definitions) or "QSI" not in definitions:
+        raise StrategyHistoryError("QSI refresh bundle series differ")
+    cutoff = _date_value(manifest.get("as_of_date"), "retained cutoff")
+    boundaries = manifest.get("live_inceptions_applied")
+    if not isinstance(boundaries, dict) or "QSI" not in boundaries:
+        raise StrategyHistoryError("QSI refresh retained live inception is absent")
+    for series_id, raw_boundary in boundaries.items():
+        _date_value(raw_boundary, "retained live inception")
+        if (
+            series_id not in definitions
+            or definitions[series_id].get("live_inception") != raw_boundary
+        ):
+            raise StrategyHistoryError("QSI refresh retained boundary differs")
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        series_id = row["series_id"]
+        observed = _date_value(row["date"], "retained observation")
+        definition = definitions.get(series_id)
+        key = (series_id, row["date"])
+        if (
+            definition is None
+            or key in seen
+            or observed > cutoff
+            or row["evidence_layer"] != "BACKTEST"
+            or row["strategy_version"] != definition.get("strategy_version")
+            or (series_id in boundaries and row["date"] >= boundaries[series_id])
+            or _decimal(row["return"], "retained return") <= -1
+            or set(row) != set(RETURN_FIELDS)
+        ):
+            raise StrategyHistoryError("QSI refresh retained rows or boundaries differ")
+        seen.add(key)
+    if rows != sorted(rows, key=lambda row: (row["series_id"], row["date"])):
+        raise StrategyHistoryError("QSI refresh retained ordering differs")
+    for series_id, definition in definitions.items():
+        selected = [row for row in rows if row["series_id"] == series_id]
+        if not selected or (
+            len(selected),
+            selected[0]["date"],
+            selected[-1]["date"],
+        ) != (
+            definition.get("return_observations"),
+            definition.get("observed_start"),
+            definition.get("observed_end"),
+        ):
+            raise StrategyHistoryError("QSI refresh retained coverage differs")
+    return manifest, rows
+
+
+def _build_qsi_refresh_bundle(
+    *,
+    retained_manifest_path: Path,
+    retained_returns_path: Path,
+    qsi_subscription_archive: Path,
+    qsi_current_subscription_archive: Path,
+    qsi_appendix_workbook: Path,
+    qsi_price_root: Path,
+    price_extension_json: Path,
+    as_of_date: str,
+) -> tuple[bytes, bytes]:
+    seed_content = _bundle_bytes(retained_manifest_path)
+    seed_returns = _bundle_bytes(retained_returns_path)
+    seed, retained_rows = _validated_retained_bundle(seed_content, seed_returns)
+    if "qsi_source_revision" in seed:
+        raise StrategyHistoryError("QSI refresh requires the accepted original seed")
+    accepted_as_of = _date_value(as_of_date, "QSI refresh cutoff")
+    seed_qsi = next(item for item in seed["series"] if item["series_id"] == "QSI")
+    boundary = seed["live_inceptions_applied"]["QSI"]
+    original_sources = seed_qsi.get("source_artifacts")
+    if not isinstance(original_sources, list) or any(
+        not isinstance(item, dict) for item in original_sources
+    ):
+        raise StrategyHistoryError("QSI refresh original sources are absent")
+    originals = {str(item.get("source_id")): item for item in original_sources}
+    paths = {
+        "qsi-paid-subscription-archive": qsi_subscription_archive,
+        "qsi-current-3x-appendix": qsi_appendix_workbook,
+    }
+    for source_id, identity in originals.items():
+        if source_id.startswith("qsi-price-history-"):
+            filename = str(identity.get("filename", ""))
+            if Path(filename).name != filename or not filename.endswith(".csv"):
+                raise StrategyHistoryError("QSI refresh original price locator differs")
+            paths[source_id] = qsi_price_root / filename
+    if len(paths) < 3 or len(originals) != len(original_sources):
+        raise StrategyHistoryError("QSI refresh original price sources are absent")
+    for source_id, path in paths.items():
+        identity = originals.get(source_id, {})
+        if _sha256(path) != (identity.get("sha256"), identity.get("size_bytes")):
+            raise StrategyHistoryError(
+                f"QSI refresh original source differs: {source_id}"
+            )
+    rows, definition = _qsi(
+        qsi_subscription_archive,
+        qsi_appendix_workbook,
+        qsi_price_root,
+        current_subscription_archive=qsi_current_subscription_archive,
+        price_extension_json=price_extension_json,
+        as_of_date=accepted_as_of,
+    )
+    for source in cast(list[dict[str, Any]], definition["source_artifacts"]):
+        if source["source_id"] in paths and (
+            source["sha256"],
+            source["size_bytes"],
+        ) != (
+            originals[source["source_id"]]["sha256"],
+            originals[source["source_id"]]["size_bytes"],
+        ):
+            raise StrategyHistoryError(
+                "QSI refresh original source changed during reconstruction"
+            )
+        if (
+            source["source_id"].startswith("qsi-price-history-")
+            and source["source_id"] not in paths
+        ):
+            raise StrategyHistoryError(
+                "QSI refresh price source is outside the retained seed"
+            )
+    admitted = [row for row in rows if row["date"] < boundary]
+    if not admitted:
+        raise StrategyHistoryError("QSI refresh has no pre-live history")
+    excluded = len(rows) - len(admitted)
+    definition.update(
+        {
+            "live_inception": boundary,
+            "observed_end": admitted[-1]["date"],
+            "return_observations": len(admitted),
+            "source_rows_excluded_at_or_after_live_inception": excluded,
+        }
+    )
+    if excluded:
+        definition["coverage_disposition"] = (
+            "COMPLETE_STRICTLY_BEFORE_ACCOUNT_LIVE_INCEPTION"
+        )
+    paths.update(
+        {
+            "qsi-current-paid-subscription-archive": qsi_current_subscription_archive,
+            "qsi-yahoo-price-extension": price_extension_json,
+        }
+    )
+    receipt = {
+        "schema_version": 1,
+        "revision_kind": "OWNER_SELECTED_CURRENT_QSI_ARCHIVE_REVISION",
+        "accepted_predecessor": {
+            "bundle_id": seed["bundle_id"],
+            "accepted_strategy_version": seed_qsi["strategy_version"],
+            "manifest_path": retained_manifest_path.resolve().as_posix(),
+            "manifest_sha256": hashlib.sha256(seed_content).hexdigest(),
+            "manifest_size_bytes": len(seed_content),
+            "returns_path": retained_returns_path.resolve().as_posix(),
+            "returns_sha256": hashlib.sha256(seed_returns).hexdigest(),
+            "returns_size_bytes": len(seed_returns),
+        },
+        "sources": [
+            {**_source_identity(path, source_id), "path": path.resolve().as_posix()}
+            for source_id, path in sorted(paths.items())
+        ],
+        "observation_strategy_version": definition["strategy_version"],
+        "live_inception": boundary,
+        "financial_cutoff": accepted_as_of.isoformat(),
+        "source_observed_end": definition["source_observed_end"],
+        "history_revision_validation": definition["history_revision_validation"],
+        "daily_reconstruction_validation": definition[
+            "daily_reconstruction_validation"
+        ],
+    }
+    all_rows = sorted(
+        [*[row for row in retained_rows if row["series_id"] != "QSI"], *admitted],
+        key=lambda row: (row["series_id"], row["date"]),
+    )
+    if any(row["date"] > as_of_date for row in all_rows):
+        raise StrategyHistoryError(
+            "QSI refresh cutoff excludes retained non-QSI history"
+        )
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=RETURN_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(all_rows)
+    returns_content = output.getvalue().encode("utf-8")
+    manifest = {
+        **seed,
+        "as_of_date": accepted_as_of.isoformat(),
+        "series": [
+            definition if item["series_id"] == "QSI" else item
+            for item in seed["series"]
+        ],
+        "returns_artifact": {
+            **seed["returns_artifact"],
+            "sha256": hashlib.sha256(returns_content).hexdigest(),
+            "size_bytes": len(returns_content),
+        },
+        "qsi_source_revision": receipt,
+    }
+    manifest.pop("bundle_id")
+    manifest["bundle_id"] = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
+    return returns_content, canonical_json_bytes(manifest)
+
+
+def verify_qsi_refresh_bundle(
+    manifest_path: Path | bytes,
+    returns_path: Path | bytes | None = None,
+) -> dict[str, Any]:
+    """Replay source QC and compare every byte; return the proven raw rows.
+
+    An independent layered reader may supply its embedded manifest bytes. The
+    reconstructed returns must match that manifest even without a raw CSV path.
+    A VERIFIED label or a newly self-consistent bundle hash is never sufficient.
+    """
+    content = _bundle_bytes(manifest_path)
+    try:
+        manifest = json.loads(content)
+        receipt = manifest["qsi_source_revision"]
+        predecessor = receipt["accepted_predecessor"]
+        seed_manifest = Path(predecessor["manifest_path"])
+        seed_returns = Path(predecessor["returns_path"])
+        for path, prefix in ((seed_manifest, "manifest"), (seed_returns, "returns")):
+            if _sha256(path) != (
+                predecessor[f"{prefix}_sha256"],
+                predecessor[f"{prefix}_size_bytes"],
+            ):
+                raise StrategyHistoryError("QSI refresh predecessor artifact differs")
+        sources = {item["source_id"]: item for item in receipt["sources"]}
+        for source in sources.values():
+            if _sha256(Path(source["path"])) != (
+                source["sha256"],
+                source["size_bytes"],
+            ):
+                raise StrategyHistoryError("QSI refresh source artifact differs")
+        prices = [
+            Path(item["path"]).parent
+            for key, item in sources.items()
+            if key.startswith("qsi-price-history-")
+        ]
+        if not prices or len(set(prices)) != 1:
+            raise StrategyHistoryError("QSI refresh price roots differ")
+        rebuilt_returns, rebuilt_manifest = _build_qsi_refresh_bundle(
+            retained_manifest_path=seed_manifest,
+            retained_returns_path=seed_returns,
+            qsi_subscription_archive=Path(
+                sources["qsi-paid-subscription-archive"]["path"]
+            ),
+            qsi_current_subscription_archive=Path(
+                sources["qsi-current-paid-subscription-archive"]["path"]
+            ),
+            qsi_appendix_workbook=Path(sources["qsi-current-3x-appendix"]["path"]),
+            qsi_price_root=prices[0],
+            price_extension_json=Path(sources["qsi-yahoo-price-extension"]["path"]),
+            as_of_date=receipt["financial_cutoff"],
+        )
+    except (
+        OSError,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise StrategyHistoryError("QSI refresh revision evidence is invalid") from exc
+    if content != rebuilt_manifest or (
+        returns_path is not None and _bundle_bytes(returns_path) != rebuilt_returns
+    ):
+        raise StrategyHistoryError("QSI refresh reconstructed bundle differs")
+    _validated_retained_bundle(content, rebuilt_returns)
+    return {
+        "bundle_id": manifest["bundle_id"],
+        "qsi_source_revision": receipt,
+        "rows": list(csv.DictReader(io.StringIO(rebuilt_returns.decode("utf-8")))),
+    }
+
+
+def write_qsi_refresh_bundle(
+    output_root: Path,
+    *,
+    retained_manifest_path: Path,
+    retained_returns_path: Path,
+    qsi_subscription_archive: Path,
+    qsi_current_subscription_archive: Path,
+    qsi_appendix_workbook: Path,
+    qsi_price_root: Path,
+    price_extension_json: Path,
+    as_of_date: str,
+) -> dict[str, object]:
+    """Create a QSI-only source revision; retain every other seed fact exactly."""
+    returns_content, manifest_content = _build_qsi_refresh_bundle(
+        retained_manifest_path=retained_manifest_path,
+        retained_returns_path=retained_returns_path,
+        qsi_subscription_archive=qsi_subscription_archive,
+        qsi_current_subscription_archive=qsi_current_subscription_archive,
+        qsi_appendix_workbook=qsi_appendix_workbook,
+        qsi_price_root=qsi_price_root,
+        price_extension_json=price_extension_json,
+        as_of_date=as_of_date,
+    )
+    return _write_bundle_contents(output_root, returns_content, manifest_content)
+
+
 def _write_exact(path: Path, content: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -2520,6 +2864,12 @@ def _write_exact(path: Path, content: bytes) -> None:
 
 def write_bundle(output_root: Path, **kwargs: Any) -> dict[str, object]:
     returns_content, manifest_content = build_bundle(**kwargs)
+    return _write_bundle_contents(output_root, returns_content, manifest_content)
+
+
+def _write_bundle_contents(
+    output_root: Path, returns_content: bytes, manifest_content: bytes
+) -> dict[str, object]:
     manifest = json.loads(manifest_content)
     destination = output_root / str(manifest["bundle_id"])
     _write_exact(destination / "returns.csv", returns_content)
@@ -2545,19 +2895,25 @@ def write_bundle(output_root: Path, **kwargs: Any) -> dict[str, object]:
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--grizzly-workbook", type=Path, required=True)
+    parser.add_argument("--grizzly-workbook", type=Path)
     parser.add_argument("--grizzly-original-design-workbook", type=Path)
     parser.add_argument("--grizzly-spx-workbook", type=Path)
     parser.add_argument("--grizzly-spy-workbook", type=Path)
     parser.add_argument("--grizzly-blended-trade-history", type=Path)
     parser.add_argument("--grizzly-live-trade-history", type=Path)
-    parser.add_argument("--tt-workbook", type=Path, required=True)
+    parser.add_argument("--tt-workbook", type=Path)
     parser.add_argument("--qsi-subscription-archive", type=Path, required=True)
     parser.add_argument("--qsi-current-subscription-archive", type=Path)
     parser.add_argument("--qsi-appendix-workbook", type=Path, required=True)
     parser.add_argument("--qsi-price-root", type=Path, required=True)
     parser.add_argument("--price-extension-json", type=Path)
-    parser.add_argument("--volatis-pricehistory-csv", type=Path, required=True)
+    parser.add_argument("--volatis-pricehistory-csv", type=Path)
+    parser.add_argument(
+        "--qsi-refresh-retained-manifest",
+        type=Path,
+        help="Refresh only QSI from this accepted seed; preserves all other histories.",
+    )
+    parser.add_argument("--qsi-refresh-retained-returns", type=Path)
     parser.add_argument("--portfolio123-generation-root", type=Path)
     parser.add_argument("--robuxio-track-record-generation", type=Path)
     parser.add_argument("--robuxio-strategy-version")
@@ -2580,7 +2936,61 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    parser = _parser()
+    args = parser.parse_args(argv)
+    full_only = (
+        "grizzly_workbook",
+        "grizzly_original_design_workbook",
+        "grizzly_spx_workbook",
+        "grizzly_spy_workbook",
+        "grizzly_blended_trade_history",
+        "grizzly_live_trade_history",
+        "tt_workbook",
+        "volatis_pricehistory_csv",
+        "portfolio123_generation_root",
+        "robuxio_track_record_generation",
+        "robuxio_strategy_version",
+        "p123_eu_designer_model_generation",
+        "p123_eu_strategy_version",
+        "live_inception",
+    )
+    if (
+        args.qsi_refresh_retained_manifest is not None
+        or args.qsi_refresh_retained_returns is not None
+    ):
+        required = (
+            "qsi_refresh_retained_manifest",
+            "qsi_refresh_retained_returns",
+            "qsi_current_subscription_archive",
+            "price_extension_json",
+        )
+        if any(getattr(args, name) is None for name in required):
+            parser.error(
+                "QSI refresh requires both retained files, current archive and price extension"
+            )
+        if any(getattr(args, name) for name in full_only):
+            parser.error(
+                "QSI refresh retains the seed boundaries and all non-QSI sources"
+            )
+        try:
+            result = write_qsi_refresh_bundle(
+                args.output_root,
+                retained_manifest_path=args.qsi_refresh_retained_manifest,
+                retained_returns_path=args.qsi_refresh_retained_returns,
+                qsi_subscription_archive=args.qsi_subscription_archive,
+                qsi_current_subscription_archive=args.qsi_current_subscription_archive,
+                qsi_appendix_workbook=args.qsi_appendix_workbook,
+                qsi_price_root=args.qsi_price_root,
+                price_extension_json=args.price_extension_json,
+                as_of_date=args.as_of_date,
+            )
+        except StrategyHistoryError as exc:
+            raise SystemExit(str(exc)) from exc
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 0
+    for name in ("grizzly_workbook", "tt_workbook", "volatis_pricehistory_csv"):
+        if getattr(args, name) is None:
+            parser.error(f"full build requires --{name.replace('_', '-')}")
     try:
         result = write_bundle(
             args.output_root,

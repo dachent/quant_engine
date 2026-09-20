@@ -147,6 +147,8 @@ LAYERED_HISTORY_REPOSITORY_DEPENDENCIES: Final = (
     "schemas/portfolio/financial-mvp-source-contract.schema.json",
     "tools/portfolio_financial_mvp_contract.py",
     "tools/portfolio_pipeline_materialize.py",
+    "tools/portfolio_strategy_history.py",
+    "tools/portfolio_strategy_backtests.py",
     "tools/provider_ledger.py",
 )
 CORE_GENERATION_ADAPTER_BY_SOURCE_SCHEMA: Final = {
@@ -4029,6 +4031,119 @@ def _strategies_without_a_backtest_layer(
     return without
 
 
+def _qsi_source_revision_admission(
+    *,
+    bundle_content: bytes,
+    staged_content: bytes | None,
+    contract: Mapping[str, Any],
+    accepted_as_of: date,
+) -> tuple[dict[str, Any], list[dict[str, str]]] | None:
+    """Replay the QSI revision against the unchanged accepted contract seed.
+
+    Recreating a staging manifest does not recalculate any retained history.
+    Its exact hash binds the predecessor bundle to the contract's generation.
+    The current staging manifest must likewise contain this exact new bundle.
+    """
+    bundle = json.loads(bundle_content)
+    if "qsi_source_revision" not in bundle:
+        return None
+    if staged_content is None:
+        raise TargetSeriesError("QSI source revision requires its staged generation")
+    modules = {}
+    for name in ("portfolio_strategy_history", "portfolio_strategy_backtests"):
+        spec = importlib.util.spec_from_file_location(
+            f"_{name}_for_qsi_revision", Path(__file__).with_name(f"{name}.py")
+        )
+        if spec is None or spec.loader is None:
+            raise TargetSeriesError("QSI source revision verifier is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        modules[name] = module
+    history = modules["portfolio_strategy_history"]
+    backtests = modules["portfolio_strategy_backtests"]
+    try:
+        verified = history.verify_qsi_refresh_bundle(bundle_content)
+        receipt = verified["qsi_source_revision"]
+        predecessor = receipt["accepted_predecessor"]
+        seed_content = Path(predecessor["manifest_path"]).read_bytes()
+        seed_returns = Path(predecessor["returns_path"]).read_bytes()
+        _, _, seed_generation, _ = backtests._build_from_contents(
+            seed_content, seed_returns
+        )
+        current_returns = _correlation_view_bytes(verified["rows"])
+        _, _, current_generation, _ = backtests._build_from_contents(
+            bundle_content, current_returns
+        )
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise TargetSeriesError(
+            f"QSI source revision verification failed: {exc}"
+        ) from exc
+    seed_bytes = seed_generation.to_json_bytes()
+    seed_sha = hashlib.sha256(seed_bytes).hexdigest()
+    seed_source = next(
+        source
+        for source in contract["source_segments"]
+        if source["source_id"] == "strategy-backtests"
+    )
+    strategy = next(
+        item for item in contract["strategies"] if item["strategy_id"] == "qsi"
+    )
+    current = seed_source.get("current_generation", {})
+    if (
+        (
+            seed_generation.generation_id,
+            seed_sha,
+            seed_generation.as_of_date.isoformat(),
+        )
+        != (current.get("generation_id"), current.get("sha256"), current.get("as_of"))
+        or _contract_version(strategy)
+        != ("EVIDENCED", predecessor["accepted_strategy_version"])
+        or seed_source.get("strategy_version", {}).get("version_refs", {}).get("qsi")
+        != predecessor["accepted_strategy_version"]
+    ):
+        raise TargetSeriesError("QSI source revision accepted contract seed differs")
+    if receipt["financial_cutoff"] != accepted_as_of.isoformat():
+        raise TargetSeriesError("QSI source revision financial cutoff differs")
+    if current_generation.to_json_bytes() != staged_content:
+        raise TargetSeriesError("QSI source revision staged generation differs")
+    proof = {
+        "schema_version": 1,
+        "revision_kind": receipt["revision_kind"],
+        "revision_sha256": hashlib.sha256(canonical_json_bytes(receipt)).hexdigest(),
+        "accepted_strategy_version": predecessor["accepted_strategy_version"],
+        "observation_strategy_version": receipt["observation_strategy_version"],
+        "accepted_bundle_id": predecessor["bundle_id"],
+        "accepted_generation_id": seed_generation.generation_id,
+        "accepted_generation_manifest_sha256": seed_sha,
+        "accepted_generation_manifest_size_bytes": len(seed_bytes),
+        "bundle_id": verified["bundle_id"],
+        "generation_id": current_generation.generation_id,
+        "generation_manifest_sha256": hashlib.sha256(staged_content).hexdigest(),
+        "generation_manifest_size_bytes": len(staged_content),
+        "live_inception": receipt["live_inception"],
+        "financial_cutoff": receipt["financial_cutoff"],
+    }
+    return proof, cast(list[dict[str, str]], verified["rows"])
+
+
+def _qsi_revision_sources(
+    sources: Mapping[str, dict[str, Any]],
+    proof: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Select the proven staged receipt locally; never modify the contract."""
+    return {
+        **sources,
+        "strategy-backtests": {
+            **sources["strategy-backtests"],
+            "current_generation": {
+                "generation_id": proof["generation_id"],
+                "sha256": proof["generation_manifest_sha256"],
+                "as_of": proof["financial_cutoff"],
+            },
+        },
+    }
+
+
 def build_layered_history_generation(
     *,
     contract_path: Path,
@@ -4874,6 +4989,20 @@ def build_layered_history_generation(
         manifest_path=strategy_history_manifest_path,
         returns_path=strategy_history_returns_path,
     )
+    qsi_revision = (
+        _qsi_source_revision_admission(
+            bundle_content=strategy_history_manifest_path.read_bytes(),
+            staged_content=(
+                strategy_backtests_generation_path.read_bytes()
+                if strategy_backtests_generation_path is not None
+                else None
+            ),
+            contract=contract,
+            accepted_as_of=accepted_as_of,
+        )
+        if strategy_history_manifest_path is not None
+        else None
+    )
 
     first_live: dict[str, date] = {}
     for strategy_id, rows in live_by_strategy.items():
@@ -4885,6 +5014,10 @@ def build_layered_history_generation(
             seen_dates.add(row["date"])
         if rows:
             first_live[strategy_id] = date.fromisoformat(rows[0]["date"])
+    if qsi_revision is not None and qsi_revision[0]["live_inception"] != str(
+        first_live.get("qsi")
+    ):
+        raise TargetSeriesError("QSI source revision retained live inception differs")
     version_by_strategy: dict[str, str] = {}
     no_backtest_layer = _strategies_without_a_backtest_layer(corrections)
     version_status_by_strategy: dict[str, str] = {}
@@ -4946,9 +5079,16 @@ def build_layered_history_generation(
             raise TargetSeriesError("strategy history series lacks product mapping")
         definition = history_definitions[series_id]
         definition_version = str(definition["strategy_version"])
-        if (
-            version_status_by_strategy[mapped_strategy_id] != "EVIDENCED"
-            or version_by_strategy[mapped_strategy_id] != definition_version
+        # Segment rows retain the design reference. The distinct QSI source
+        # version and its revised history remain bound in the raw bundle/proof.
+        if version_status_by_strategy[mapped_strategy_id] != "EVIDENCED" or (
+            version_by_strategy[mapped_strategy_id] != definition_version
+            and not (
+                mapped_strategy_id == "qsi"
+                and qsi_revision is not None
+                and qsi_revision[0]["observation_strategy_version"]
+                == definition_version
+            )
         ):
             continue
         if (
@@ -5296,6 +5436,8 @@ def build_layered_history_generation(
                 },
             }
         )
+        if strategy_id == "qsi" and qsi_revision is not None:
+            coverage_rows[-1]["source_history_revision"] = qsi_revision[0]
     correction_resolutions: dict[str, dict[str, Any]] = {
         "echotrade-event-only-account-live-rejected": {
             "canonicalization": echo_expected_identity["canonicalization"],
@@ -5737,6 +5879,8 @@ def build_layered_history_generation(
         manifest_without_id["portfolio123_version_equivalence"] = (
             portfolio123_version_equivalence
         )
+    if qsi_revision is not None:
+        manifest_without_id["qsi_source_revision"] = qsi_revision[0]
 
     generation_id = hashlib.sha256(
         canonical_json_bytes(manifest_without_id)
@@ -5868,6 +6012,8 @@ def validate_layered_history_generation(
         expected_manifest_keys.add("current_source_admission")
     if version_evidence_requested:
         expected_manifest_keys.add("portfolio123_version_equivalence")
+    if "qsi_source_revision" in manifest:
+        expected_manifest_keys.add("qsi_source_revision")
     if "source_selection_mode" in manifest:
         expected_manifest_keys.add("source_selection_mode")
     if source_selection_mode == "CURRENT_POINTERS":
@@ -6319,6 +6465,27 @@ def validate_layered_history_generation(
                     "Portfolio123 provider history manifest receipt differs"
                 )
         source_manifests[source_name] = parsed
+    qsi_revision = (
+        _qsi_source_revision_admission(
+            bundle_content=raw_source_manifests["strategy-history"].encode("utf-8"),
+            staged_content=(
+                raw_source_manifests["strategy-backtests"].encode("utf-8")
+                if "strategy-backtests" in raw_source_manifests
+                else None
+            ),
+            contract=contract,
+            accepted_as_of=accepted_as_of,
+        )
+        if "strategy-history" in raw_source_manifests
+        else None
+    )
+    if (qsi_revision is not None) != ("qsi_source_revision" in manifest) or (
+        manifest.get("qsi_source_revision")
+        != (qsi_revision[0] if qsi_revision else None)
+    ):
+        raise TargetSeriesError("QSI source revision proof differs")
+    if qsi_revision is not None:
+        sources = _qsi_revision_sources(sources, qsi_revision[0])
     provider_has_fx = "portfolio/fx-rates/generation.json" in _manifest_artifacts(
         source_manifests["provider-ledger"].get("artifacts")
     )
@@ -6673,6 +6840,90 @@ def validate_layered_history_generation(
     expected_segment_identities = contract["history_corrections"].get(
         "materialized_segment_identities"
     )
+    if qsi_revision is not None:
+        proof, raw_rows = qsi_revision
+        expected_backtests: list[dict[str, str]] = []
+        calendar, frequency = _source_temporal(sources["strategy-backtests"])
+        for strategy_id, strategy in strategies.items():
+            selected = [
+                row
+                for row in raw_rows
+                if row["series_id"] == strategy.get("history_series_id")
+            ]
+            version_status, version = _contract_version(strategy)
+            if (
+                not selected
+                or version_status != "EVIDENCED"
+                or (strategy_id != "qsi" and selected[0]["strategy_version"] != version)
+            ):
+                continue
+            expected_backtests.extend(
+                _segment_rows(
+                    [
+                        {**row, "return_basis": "MODEL", "return_type": "TOTAL"}
+                        for row in selected
+                    ],
+                    strategy_id=strategy_id,
+                    strategy_version=version,
+                    segment_id=f"{strategy_id}:backtest",
+                    source_id="strategy-backtests",
+                    source_generation_id=proof["generation_id"],
+                    mode_admission="INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+                    calendar=calendar,
+                    frequency=frequency,
+                )
+            )
+        actual_backtests = [
+            row for row in segments if row["source_id"] == "strategy-backtests"
+        ]
+        if sorted(
+            actual_backtests, key=lambda row: (row["strategy_id"], row["date"])
+        ) != sorted(
+            expected_backtests, key=lambda row: (row["strategy_id"], row["date"])
+        ):
+            raise TargetSeriesError(
+                "QSI source revision layered rows differ from reconstructed bundle"
+            )
+        qsi_live = [
+            row["date"]
+            for row in segments
+            if row["strategy_id"] == "qsi"
+            and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+        ]
+        if not qsi_live or min(qsi_live) != proof["live_inception"]:
+            raise TargetSeriesError(
+                "QSI source revision retained live inception differs"
+            )
+        revised_identity = _row_identity(
+            [row for row in expected_backtests if row["strategy_id"] == "qsi"]
+        )
+        expected_segment_identities = [
+            {
+                **item,
+                **(
+                    {
+                        "source_generation_id": proof["generation_id"],
+                        "source_generation_sha256": proof["generation_manifest_sha256"],
+                    }
+                    if item["source_id"] == "strategy-backtests"
+                    else {}
+                ),
+                **(
+                    {
+                        key: revised_identity[key]
+                        for key in (
+                            "sha256",
+                            "observed_start",
+                            "observed_end",
+                            "return_observations",
+                        )
+                    }
+                    if item["segment_id"] == "qsi:backtest"
+                    else {}
+                ),
+            }
+            for item in expected_segment_identities
+        ]
     if current_admission is not None:
         selected_targets, _evidence, _proof, _manifest = build_provider_ledger_targets(
             cast(Path, provider_ledger_manifest_path),
@@ -6991,9 +7242,20 @@ def validate_layered_history_generation(
                     "strategy_id",
                     "strategy_version",
                 }
+                | (
+                    {"source_history_revision"}
+                    if strategy_id == "qsi" and qsi_revision is not None
+                    else set()
+                )
             ),
             "layered history strategy coverage",
         )
+        if (
+            strategy_id == "qsi"
+            and qsi_revision is not None
+            and raw.get("source_history_revision") != qsi_revision[0]
+        ):
+            raise TargetSeriesError("QSI source revision coverage differs")
         strategy = strategies[strategy_id]
         if raw.get("series_id") != strategy.get("history_series_id"):
             raise TargetSeriesError(
