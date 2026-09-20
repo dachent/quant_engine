@@ -7007,6 +7007,37 @@ def validate_layered_history_generation(
             raise TargetSeriesError(
                 "QSI source revision retained live inception differs"
             )
+        # Only the QSI segment may move under a QSI revision. A tampered non-QSI backtest
+        # row is caught downstream by the product-authority comparison, but under a
+        # revision it must be refused here, naming the revision -- otherwise the failure
+        # reads as a contract mismatch and the reader looks in the wrong place.
+        pinned_backtests = {
+            item["segment_id"]: item
+            for item in expected_segment_identities
+            if item["source_id"] == "strategy-backtests"
+            and item["segment_id"] != "qsi:backtest"
+        }
+        for segment_id, pinned in pinned_backtests.items():
+            actual = next(
+                (
+                    item
+                    for item in actual_segment_identities
+                    if item["segment_id"] == segment_id
+                ),
+                None,
+            )
+            if actual is None or any(
+                actual[key] != pinned[key]
+                for key in (
+                    "sha256",
+                    "observed_start",
+                    "observed_end",
+                    "return_observations",
+                )
+            ):
+                raise TargetSeriesError(
+                    "QSI source revision altered a non-QSI backtest segment"
+                )
         # The contract pins the pre-revision qsi:backtest identity, so the revision
         # substitutes its own. The producer takes it from the reconstruction it just
         # verified byte for byte; the portable verifier takes it from the materialized
