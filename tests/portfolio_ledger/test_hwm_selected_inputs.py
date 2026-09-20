@@ -1082,6 +1082,116 @@ def _build(paths: dict[str, Path]) -> dict[str, Any]:
     )
 
 
+def test_derives_current_calendar_return_from_verified_selected_rows(
+    tmp_path: Path,
+) -> None:
+    """A stale accepted binding cannot override the selected source return."""
+
+    paths = _fixture(tmp_path)
+    calendar = json.loads(paths["calendar"].read_bytes())
+    original_values = {
+        (
+            row["strategy_id"],
+            row["prior_observation_date"],
+            row["next_observation_date"],
+        ): row["binding_return_value"]
+        for row in calendar["accepted_source_intervals"]
+    }
+    changed_key = next(iter(original_values))
+    for row in calendar["accepted_source_intervals"]:
+        if (
+            row["strategy_id"],
+            row["prior_observation_date"],
+            row["next_observation_date"],
+        ) == changed_key:
+            row["binding_return_value"] = "0.123456789"
+            row["interval_evidence_sha256"] = hashlib.sha256(
+                "\n".join(
+                    [
+                        row["strategy_id"],
+                        row["calendar_id"],
+                        row["prior_observation_date"],
+                        row["next_observation_date"],
+                        row["binding_return_value"],
+                    ]
+                ).encode()
+            ).hexdigest()
+            break
+    calendar.pop("authority_evidence_sha256")
+    calendar["authority_evidence_sha256"] = _sha(
+        json.dumps(calendar, sort_keys=True, separators=(",", ":"))
+    )
+    paths["calendar"].write_bytes(canonical_json_bytes(calendar))
+
+    with pytest.raises(SelectedHwmInputError, match="accepted interval binding"):
+        _build(paths)
+
+    derived = selected_hwm.derive_selected_hwm_calendar_authority(
+        account_manifest_generation_path=paths["generation"],
+        account_manifest_admission_policy_path=paths["admission_policy"],
+        account_manifest_flow_classification_policy_path=paths[
+            "flow_classification_policy"
+        ],
+        provider_ledger_generation_path=paths["provider_generation"],
+        baseline_generation_path=paths["baseline_generation"],
+        financial_contract_path=paths["contract"],
+        calendar_authority_path=paths["calendar"],
+        provider_admission_path=paths["receipt"],
+        hwm_policy_path=paths["policy"],
+    )
+    derived_values = {
+        (
+            row["strategy_id"],
+            row["prior_observation_date"],
+            row["next_observation_date"],
+        ): row["binding_return_value"]
+        for row in derived["accepted_source_intervals"]
+    }
+    assert set(derived_values) == set(original_values)
+    assert derived_values[changed_key] == original_values[changed_key]
+    assert [
+        key for key in derived_values if derived_values[key] != original_values[key]
+    ] == []
+    assert {
+        row["strategy_id"]: row["calendar_kind"] for row in derived["source_calendars"]
+    } == {
+        row["strategy_id"]: row["calendar_kind"] for row in calendar["source_calendars"]
+    }
+
+    derived_path = tmp_path / "current-selected-calendar.json"
+    derived_path.write_bytes(canonical_json_bytes(derived))
+    paths["calendar"] = derived_path
+    assert _build(paths)["schema_version"] == 1
+
+
+def test_rejects_selected_source_gap_without_accepted_topology(tmp_path: Path) -> None:
+    """A selected gap cannot become a closure or binding without prior acceptance."""
+
+    paths = _fixture(tmp_path)
+    calendar = json.loads(paths["calendar"].read_bytes())
+    calendar["accepted_source_intervals"].pop()
+    calendar.pop("authority_evidence_sha256")
+    calendar["authority_evidence_sha256"] = _sha(
+        json.dumps(calendar, sort_keys=True, separators=(",", ":"))
+    )
+    paths["calendar"].write_bytes(canonical_json_bytes(calendar))
+
+    with pytest.raises(SelectedHwmInputError, match="unapproved calendar gap"):
+        selected_hwm.derive_selected_hwm_calendar_authority(
+            account_manifest_generation_path=paths["generation"],
+            account_manifest_admission_policy_path=paths["admission_policy"],
+            account_manifest_flow_classification_policy_path=paths[
+                "flow_classification_policy"
+            ],
+            provider_ledger_generation_path=paths["provider_generation"],
+            baseline_generation_path=paths["baseline_generation"],
+            financial_contract_path=paths["contract"],
+            calendar_authority_path=paths["calendar"],
+            provider_admission_path=paths["receipt"],
+            hwm_policy_path=paths["policy"],
+        )
+
+
 def test_builds_source_bound_seven_strategy_inputs_from_exact_thirteen_epochs(
     tmp_path: Path,
 ) -> None:

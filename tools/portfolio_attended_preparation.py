@@ -81,6 +81,7 @@ PREPARATION_RUNTIME_PATHS: dict[str, str] = {
     "flow_classification": "contracts/account-strategy-flow-classification-policy-v1.json",
     "freshness": "tools/portfolio_freshness.py",
     "hwm_current": "contracts/portfolio-hwm-policy-v4.json",
+    "hwm_calendar_authority": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_calendar_authority.py",
     "hwm_execution": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_governed_execution.py",
     "hwm_governed": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_governed.py",
     "hwm_input_kernel": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_input_builder.py",
@@ -140,6 +141,7 @@ _PREPARATION_STAGE_CODE = {
         "hwm_inputs",
         "invested_capital",
         "hwm_execution",
+        "hwm_calendar_authority",
         "hwm_input_kernel",
         "hwm_governed",
         "hwm_kernel",
@@ -177,7 +179,7 @@ _PREPARATION_STAGE_OUTPUTS = {
     "ledger": ("ledger_generation", "recipe_path", "stage_result"),
     "baseline": ("baseline_generation", "stage_result"),
     "epoch": ("crosswalk", "epoch_generation", "receipt_root", "recipe_path"),
-    "hwm": ("hwm_input", "hwm_result"),
+    "hwm": ("hwm_calendar", "hwm_input", "hwm_result"),
     "capital": ("capital_input", "capital_result"),
     "attribution": ("attribution", "stage_result"),
     "final-handoff": ("handoff", "source_run"),
@@ -1022,20 +1024,34 @@ def _reusable_preparation_handoff(
         flag: _pin(definition, f"prepared {flag}")
         for flag, definition in definitions.items()
     }
-    local_flags = required_flags - {"--hwm-governed-calendar-authority"}
-    # Returned producer outputs must be under this private root. The one
-    # external authority is re-derived from the current selected config below.
-    for path in (source_run, *(financial[flag] for flag in local_flags)):
+    # Returned producer outputs, including the selected-source HWM calendar,
+    # must remain under this run's private checkpointed root.
+    for path in (source_run, *financial.values()):
         try:
             path.resolve().relative_to(root)
         except ValueError as exc:
             raise AttendedPreparationError(
                 "prepared handoff escapes its private root"
             ) from exc
-    if financial["--hwm-governed-calendar-authority"] != _pin(
-        config["calendar_authority"], "calendar authority"
+    calendar_path = financial["--hwm-governed-calendar-authority"]
+    if calendar_path != root / "preparation" / "hwm-calendar-authority.json":
+        raise AttendedPreparationError("prepared selected calendar path differs")
+    calendar = _read(calendar_path, "prepared selected calendar authority")
+    hwm_checkpoint = _read(_checkpoint_path(root, "hwm"), "prepared HWM checkpoint")
+    outputs = hwm_checkpoint.get("outputs")
+    result = hwm_checkpoint.get("result")
+    if (
+        not isinstance(outputs, Mapping)
+        or outputs.get("hwm_calendar") != _definition(calendar_path)
+        or not isinstance(result, Mapping)
+        or result.get("hwm_calendar") != str(calendar_path)
     ):
-        raise AttendedPreparationError("prepared calendar authority differs")
+        raise AttendedPreparationError("prepared selected calendar checkpoint differs")
+    hwm_input = _read(
+        financial["--hwm-governed-input-generation"], "prepared HWM input"
+    )
+    if hwm_input.get("calendar_sha256") != calendar.get("authority_evidence_sha256"):
+        raise AttendedPreparationError("prepared HWM input calendar binding differs")
     expected = {
         "schema_version": 1,
         "source_run": _definition(source_run),
@@ -1278,6 +1294,7 @@ def _preserve_uncheckpointed_stage(root: Path, stage: str) -> None:
             root / "stages" / "epoch",
         ),
         "hwm": (
+            root / "preparation" / "hwm-calendar-authority.json",
             root / "preparation" / "hwm-input-generation.json",
             root / "preparation" / "hwm-governed-result.json",
         ),
@@ -1716,49 +1733,59 @@ def _prepare_attended_inputs(
             },
         )
 
-    calendar_path = _pin(config["calendar_authority"], "calendar authority")
-    calendar = _read(calendar_path, "calendar authority")
+    calendar_seed_path = _pin(config["calendar_authority"], "calendar authority")
+    calendar_seed = _read(calendar_seed_path, "calendar authority")
     current_policy = (ROOT / "contracts" / "portfolio-hwm-policy-v4.json").read_bytes()
     effective_policy = capital.governed_hwm_input_policy(
-        current_policy, contract.read_bytes(), str(calendar["hwm_policy_sha256"])
+        current_policy, contract.read_bytes(), str(calendar_seed["hwm_policy_sha256"])
     )
+    hwm_calendar = root / "preparation" / "hwm-calendar-authority.json"
     hwm_input = root / "preparation" / "hwm-input-generation.json"
     hwm_result = root / "preparation" / "hwm-governed-result.json"
     hwm_checkpoint = reuse("hwm")
     if hwm_checkpoint is not None:
+        hwm_calendar = Path(str(hwm_checkpoint["hwm_calendar"])).resolve()
         hwm_input = Path(str(hwm_checkpoint["hwm_input"])).resolve()
         hwm_result = Path(str(hwm_checkpoint["hwm_result"])).resolve()
+        calendar = _read(hwm_calendar, "prepared selected HWM calendar authority")
     else:
-        hwm_generation = hwm_inputs.build_selected_hwm_inputs(
-            account_manifest_generation_path=epoch_root / "generation.json",
-            account_manifest_admission_policy_path=_pin(
+        selected_hwm_inputs: dict[str, Any] = {
+            "account_manifest_generation_path": epoch_root / "generation.json",
+            "account_manifest_admission_policy_path": _pin(
                 config["epoch_admission_policy"], "epoch admission policy"
             ),
-            account_manifest_flow_classification_policy_path=ROOT
+            "account_manifest_flow_classification_policy_path": ROOT
             / "contracts"
             / "account-strategy-flow-classification-policy-v1.json",
-            provider_ledger_generation_path=root
+            "provider_ledger_generation_path": root
             / "stages"
             / "ledger"
             / "generations"
             / str(ledger_result["generation_id"])
             / "generation.json",
-            baseline_generation_path=root
+            "baseline_generation_path": root
             / "stages"
             / "baseline"
             / "generations"
             / str(baseline_result["generation_id"])
             / "generation.json",
-            financial_contract_path=contract,
-            calendar_authority_path=calendar_path,
-            provider_admission_path=root
+            "financial_contract_path": contract,
+            "calendar_authority_path": calendar_seed_path,
+            "provider_admission_path": root
             / "stages"
             / "ledger"
             / "generations"
             / str(ledger_result["generation_id"])
             / "admit-or-declare-receipt.json",
-            hwm_policy_path=ROOT / "contracts" / "portfolio-hwm-policy-v4.json",
-            hwm_policy_bytes=effective_policy,
+            "hwm_policy_path": ROOT / "contracts" / "portfolio-hwm-policy-v4.json",
+            "hwm_policy_bytes": effective_policy,
+        }
+        calendar = hwm_inputs.derive_selected_hwm_calendar_authority(
+            **selected_hwm_inputs
+        )
+        _write(hwm_calendar, calendar)
+        hwm_generation = hwm_inputs.build_selected_hwm_inputs(
+            **(selected_hwm_inputs | {"calendar_authority_path": hwm_calendar})
         )
         _write(hwm_input, hwm_generation)
         result = compute_governed_as_held_composite_hwm(
@@ -1773,7 +1800,7 @@ def _prepare_attended_inputs(
             legacy_policy_bytes=(
                 ROOT / "contracts" / "portfolio-hwm-policy-v3.json"
             ).read_bytes(),
-            calendar_authority_bytes=calendar_path.read_bytes(),
+            calendar_authority_bytes=hwm_calendar.read_bytes(),
             input_generation_bytes=hwm_input.read_bytes(),
             input_receipt_bytes=(
                 root
@@ -1793,7 +1820,7 @@ def _prepare_attended_inputs(
         verify_governed_hwm_result(
             result,
             hwm_input.read_bytes(),
-            calendar_bytes=calendar_path.read_bytes(),
+            calendar_bytes=hwm_calendar.read_bytes(),
             input_receipt_bytes=(
                 root
                 / "stages"
@@ -1813,8 +1840,16 @@ def _prepare_attended_inputs(
         )
         checkpoint(
             "hwm",
-            {"hwm_input": str(hwm_input), "hwm_result": str(hwm_result)},
-            {"hwm_input": hwm_input, "hwm_result": hwm_result},
+            {
+                "hwm_calendar": str(hwm_calendar),
+                "hwm_input": str(hwm_input),
+                "hwm_result": str(hwm_result),
+            },
+            {
+                "hwm_calendar": hwm_calendar,
+                "hwm_input": hwm_input,
+                "hwm_result": hwm_result,
+            },
         )
 
     capital_input = root / "preparation" / "capital-input-generation.json"
@@ -1926,7 +1961,7 @@ def _prepare_attended_inputs(
     financial = {
         "--hwm-governed-result": hwm_result,
         "--hwm-governed-input-generation": hwm_input,
-        "--hwm-governed-calendar-authority": calendar_path,
+        "--hwm-governed-calendar-authority": hwm_calendar,
         "--hwm-governed-admission-receipt": root
         / "stages"
         / "ledger"

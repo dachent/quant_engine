@@ -224,8 +224,15 @@ governing issue may strengthen them but may not silently omit or weaken them.
    deduplication, reconciliation equations where coverage permits, and
    independent hand-calculated micro-ledgers. Missing NAV, FX, flows, or signs
    makes an affected metric unavailable or explicitly qualified—never silently
-   interpolated. Excel is controlled intake or a generated report, not the
-   calculation authority.
+   interpolated. A governed HWM run preserves its immutable accepted calendar
+   seed, owner decisions, policy binding, interval topology, source perimeter,
+   and calendar kinds, then derives its local calendar authority from the exact
+   selected source rows before numerical production. It writes that local
+   authority into the HWM checkpoint and reuses its exact bytes only after the
+   checkpoint's selected-source bindings and output integrity revalidate; a new
+   hole, closure, perimeter, kind, or interval binding is rejected rather than
+   filled or tolerated. Excel is controlled intake or a generated report, not
+   the calculation authority.
 5. **Broker execution** — initial authority is offline, dry-run, or separately
    approved PAPER only. Every submission requires an immutable order manifest,
    exact ledger/allocation references, environment and account allowlists,
