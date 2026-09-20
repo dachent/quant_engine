@@ -1518,6 +1518,26 @@ def _sync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
+def _inventory_file_refusal(path: Path, directory: Path, name: str) -> str:
+    """Say why this entry is inadmissible, distinguishing unopenable from irregular."""
+    if path.is_symlink():
+        return "generation inventory contains a linked or irregular file"
+    listed = False
+    try:
+        listed = name in os.listdir(directory)
+    except OSError:
+        listed = False
+    if listed:
+        # The directory names it but it cannot be opened. On Windows that is almost always
+        # the 260-character path limit; report the length so the reader can check it.
+        return (
+            "generation inventory entry cannot be opened although its directory lists it: "
+            f"{len(str(path))}-character path, which exceeds the Windows limit of 260 "
+            "unless long paths are enabled"
+        )
+    return "generation inventory contains a linked or irregular file"
+
+
 def generation_inventory_sha256(root: Path, generation_id: str) -> str:
     """Hash the complete regular-file inventory of a staged generation.
 
@@ -1545,8 +1565,14 @@ def generation_inventory_sha256(root: Path, generation_id: str) -> str:
         for name in file_names:
             path = directory / name
             if path.is_symlink() or not path.is_file():
+                # `is_file()` swallows the OSError and answers False, so a path the
+                # platform cannot open is indistinguishable here from an irregular one.
+                # On Windows a generated artifact path can exceed MAX_PATH while its
+                # directory listing still names it -- reporting that as a linked file sends
+                # the reader looking for a symlink that does not exist, which is exactly
+                # what happened when a decomposition published at 261 characters.
                 raise GenerationConflictError(
-                    "generation inventory contains a linked or irregular file"
+                    _inventory_file_refusal(path, directory, name)
                 )
             relative = path.relative_to(generation_dir).as_posix()
             digest = hashlib.sha256()
