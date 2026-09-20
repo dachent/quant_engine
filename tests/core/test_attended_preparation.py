@@ -69,6 +69,81 @@ def test_hwm_policy_admission_precedes_history_and_output_creation(
     assert not output.exists()
 
 
+@pytest.mark.parametrize("resume", [False, True])
+def test_provider_replay_rejects_changed_transitive_authority_before_preparation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume: bool
+) -> None:
+    """A pinned replay spec cannot hide a changed nested authority file."""
+    import provider_ledger
+
+    authority = tmp_path / "mutable-authority.json"
+    authority.write_text("{}", encoding="utf-8")
+    authority_hash = hashlib.sha256(authority.read_bytes()).hexdigest()
+    provider_spec = tmp_path / "provider.json"
+    provider_spec.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "as_of_date": "2026-09-17",
+                "output_root": str(tmp_path / "ledger"),
+                "provenance": {},
+                "providers": {name: {} for name in provider_ledger._PROVIDER_CATALOGS},
+                "strategy_inputs": {},
+                "strategy_provider_map": {},
+                "financial_mvp": {
+                    name + suffix: str(authority)
+                    if suffix == "_path"
+                    else authority_hash
+                    for name in ("contract", "schema", "registry")
+                    for suffix in ("_path", "_sha256")
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    selection = tmp_path / "selection.json"
+    selection.write_text('{"files":{}}', encoding="utf-8")
+    spec = tmp_path / "preparation.json"
+    spec.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "financial_data_cutoff": "2026-09-17",
+                "provider_ledger_spec": preparation._definition(provider_spec),
+                "provider_ledger_generation_root": str(
+                    tmp_path / "ledger" / "generations" / ("a" * 64)
+                ),
+                "source_selection": preparation._definition(selection),
+                "financial_input_contract": preparation._definition(selection),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        preparation, "_validate_hwm_authority_inputs", lambda _config: None
+    )
+    monkeypatch.setattr(preparation, "_selected_history_authorities", lambda _files: {})
+
+    def must_not_start(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("downstream admission reached before provider replay")
+
+    monkeypatch.setattr(materializer, "validate_source_phase", must_not_start)
+    authority.write_text('{"changed":true}', encoding="utf-8")
+    output = tmp_path / "output"
+    with pytest.raises(
+        provider_ledger.ProviderLedgerError, match="financial MVP contract hash differs"
+    ):
+        preparation.prepare_attended_inputs(
+            preparation_spec_path=spec,
+            output_root=output,
+            requested_as_of="2026-09-17",
+            evaluated_on="2026-09-19",
+            release_commit="a" * 40,
+            resume=resume,
+        )
+    assert not output.exists()
+
+
 def _argv(tmp_path: Path, *, execute: bool = False, resume: bool = False) -> list[str]:
     (tmp_path / "workspace" / "dataPortfolio").mkdir(parents=True, exist_ok=True)
     (tmp_path / "cache").mkdir(exist_ok=True)
@@ -266,6 +341,7 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
                 "schema_version": 1,
                 "financial_data_cutoff": "2026-09-17",
                 "financial_input_contract": pin("contract.json"),
+                "provider_ledger_spec": pin("provider-spec.json"),
                 "source_selection": pin(selection_path.name),
                 "provider_ledger_generation_root": str(tmp_path / "ledger"),
                 "retained_verified_generations": {
@@ -299,6 +375,13 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
     plan_calls: list[dict[str, object]] = []
     import portfolio_current_decomposition_plan as plans
     import portfolio_target_series as history
+    import provider_ledger
+
+    monkeypatch.setattr(
+        provider_ledger,
+        "verify_candidate",
+        lambda *_args, **_kwargs: {"state": "VERIFIED_STAGED"},
+    )
 
     monkeypatch.setattr(preparation, "_pins", lambda *_args: None)
     monkeypatch.setattr(preparation, "_pin", fake_pin)
@@ -852,6 +935,7 @@ def _preparation_function_fixture(
                 "ledger_admission",
                 "ledger_hwm_inputs",
                 "ledger_models",
+                "provider_ledger",
                 "layered_history_repository_dependencies",
             )
         },

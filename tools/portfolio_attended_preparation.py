@@ -94,6 +94,7 @@ PREPARATION_RUNTIME_PATHS: dict[str, str] = {
     "ledger_hwm_inputs": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_inputs.py",
     "ledger_models": "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/models.py",
     "performance": "contracts/portfolio-performance-policy-v1.json",
+    "provider_ledger": "tools/provider_ledger.py",
     "rebind_current_epoch_crosswalk": "tools/rebind_current_epoch_crosswalk.py",
     "release_builder": "tools/portfolio_release_builder.py",
     "stage_current_epoch_manifest": "tools/stage_current_epoch_manifest.py",
@@ -149,6 +150,7 @@ _PREPARATION_STAGE_CODE = {
     "capital": (
         "attended_preparation",
         "capital_input",
+        "provider_ledger",
         "financial_outcomes",
         "hwm_inputs",
         "invested_capital",
@@ -697,6 +699,18 @@ def _validated_inputs(
         raise AttendedPreparationError("evaluated_on precedes financial cutoff")
     _pins(config, "preparation specification")
     _validate_hwm_authority_inputs(config)
+    # Capital consumes this replay specification transitively. Verify the exact
+    # selected generation now, while no preparation output or calculation exists.
+    import provider_ledger
+
+    ledger_root = Path(str(config["provider_ledger_generation_root"])).resolve()
+    replay = provider_ledger.verify_candidate(
+        _pin(config["provider_ledger_spec"], "provider ledger replay specification"),
+        ledger_root.name,
+        output_root_override=ledger_root.parent.parent,
+    )
+    if replay.get("state") != "VERIFIED_STAGED":
+        raise AttendedPreparationError("selected provider ledger replay differs")
     source_selection = _pin(config.get("source_selection"), "source selection")
     selection = _read(source_selection, "source selection")
     files = selection.get("files")
