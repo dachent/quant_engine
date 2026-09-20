@@ -53,14 +53,25 @@ def _write_sources(
     target_only_dates: tuple[date, ...] = (),
     mixed_layer: bool = False,
     complete_costs: bool = False,
+    blank_factor: str | None = None,
+    blank_factor_rows: tuple[int, ...] = (),
+    target_skip_leading: int = 0,
 ) -> tuple[Path, list[date]]:
+    """Write a synthetic target/factor pair.
+
+    ``blank_factor`` with ``blank_factor_rows`` leaves that factor column empty on the
+    given ``days`` indices, which is how a real factor source represents a component
+    that had not yet come into existence.  ``target_skip_leading`` drops the first N
+    days from the *target* file only, so the target's own lifetime can start after a
+    later-inception component's first observation.
+    """
     root.mkdir(parents=True)
     days = _days(count, start)
     target_path = root / "targets.csv"
     with target_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(decomposition.TARGET_HEADERS)
-        for index, day in enumerate([*days, *target_only_dates]):
+        for index, day in enumerate([*days[target_skip_leading:], *target_only_dates]):
             f1 = 0.008 * math.sin(index / 5.0) + 0.002 * math.cos(index / 11.0)
             f2 = f1 if identical_factors else 0.006 * math.cos(index / 7.0)
             if formula == "simplex":
@@ -88,9 +99,10 @@ def _write_sources(
         for index, day in enumerate(days):
             f1 = 0.008 * math.sin(index / 5.0) + 0.002 * math.cos(index / 11.0)
             f2 = f1 if identical_factors else 0.006 * math.cos(index / 7.0)
-            writer.writerow(
-                [day.isoformat(), "0.00005", format(f1, ".17g"), format(f2, ".17g")]
-            )
+            cells = {"F1": format(f1, ".17g"), "F2": format(f2, ".17g")}
+            if blank_factor is not None and index in blank_factor_rows:
+                cells[blank_factor] = ""
+            writer.writerow([day.isoformat(), "0.00005", cells["F1"], cells["F2"]])
     return target_path, days
 
 
@@ -2123,3 +2135,99 @@ def test_staging_re_solves_when_the_indexed_result_does_not_verify(
     with pytest.raises(decomposition.DecompositionError):
         decomposition.stage_candidate(spec_path, source_root, output_root)
     assert calls["count"] == 1
+
+
+def test_pre_inception_factor_blanks_bound_anchor_range_and_are_disclosed(
+    tmp_path: Path,
+) -> None:
+    """A component absent before its own inception bounds the fit, it does not stop it.
+
+    The blank-bearing run must reproduce, byte for byte, a control run whose factor
+    file simply begins at the first complete anchor, and must say so in the receipt.
+    """
+    blank = 10
+    source = tmp_path / "source"
+    target_path, days = _write_sources(
+        source,
+        blank_factor="F2",
+        blank_factor_rows=tuple(range(blank)),
+        target_skip_leading=blank,
+    )
+    target_days = days[blank:]
+    spec_path = _spec(source, target_path, target_days, models=[_model(target_days)])
+
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+
+    model_result = _available(result)
+    assert (
+        model_result["coverage"]["factor_observed_start"] == target_days[0].isoformat()
+    )
+    interval = model_result["interval_association"]
+    assert interval["factor_incomplete_anchors_excluded"] == [
+        observed.isoformat() for observed in days[:blank]
+    ]
+    assert all(
+        bucket["prior_factor_anchor"] >= target_days[0].isoformat()
+        for bucket in cast(list[dict[str, Any]], interval["buckets"])
+    )
+
+    # Control: the same target bytes against a factor file whose leading rows are
+    # absent rather than blank.  Excluding an incomplete anchor must be identical to
+    # never having been given it.
+    control = tmp_path / "control"
+    control.mkdir()
+    (control / "targets.csv").write_bytes(target_path.read_bytes())
+    factor_rows = list(
+        csv.reader((source / "factors.csv").read_text(encoding="utf-8").splitlines())
+    )
+    with (control / "factors.csv").open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows([factor_rows[0], *factor_rows[1 + blank :]])
+    control_spec = _spec(
+        control,
+        control / "targets.csv",
+        target_days,
+        models=[_model(target_days)],
+    )
+
+    control_result, _cmanifest, _ccontent = decomposition.build_decomposition(
+        control_spec, control
+    )
+
+    control_model = _available(control_result)
+    assert (
+        control_model["interval_association"]["factor_incomplete_anchors_excluded"]
+        == []
+    )
+    control_interval = dict(control_model["interval_association"])
+    observed_interval = dict(interval)
+    for payload in (control_interval, observed_interval):
+        payload.pop("factor_incomplete_anchors_excluded")
+    assert observed_interval == control_interval
+    observed_payload = dict(model_result)
+    control_payload = dict(control_model)
+    for payload in (observed_payload, control_payload):
+        payload.pop("interval_association")
+    assert observed_payload == control_payload
+
+
+def test_internal_factor_blank_inside_target_scope_stops_the_model(
+    tmp_path: Path,
+) -> None:
+    """A component that disappears mid-life is a gap, not an inception boundary.
+
+    Compounding a bucket across it would associate a multi-session target return with
+    a shorter factor return, so it must stop rather than publish a fitted observation.
+    """
+    source = tmp_path / "source"
+    target_path, days = _write_sources(
+        source,
+        blank_factor="F2",
+        blank_factor_rows=(60,),
+    )
+    spec_path = _spec(source, target_path, days)
+
+    with pytest.raises(
+        decomposition.DecompositionError,
+        match=f"factor anchor {days[60].isoformat()} has incomplete selected components",
+    ):
+        decomposition.build_decomposition(spec_path, source)

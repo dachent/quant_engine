@@ -3076,26 +3076,47 @@ def _factor_anchor_observations(
     future_anchors = [
         observed for observed in all_anchors if observed > effective_factor_availability
     ]
-    anchors = [
+    available_anchors = [
         observed
         for observed in all_anchors
         if observed <= effective_factor_availability
     ]
+    incomplete_anchors = [
+        observed
+        for observed in available_anchors
+        if any(
+            factor_rows[observed].values.get(factor_id) is None
+            for factor_id in model.factor_ids
+        )
+    ]
+    excluded_anchors = set(incomplete_anchors)
+    anchors = [
+        observed for observed in available_anchors if observed not in excluded_anchors
+    ]
     if len(anchors) < 2:
         raise DecompositionError("fewer than two available factor anchors")
-    for observed in anchors:
-        factor_row = factor_rows[observed]
-        if any(
-            factor_row.values.get(factor_id) is None for factor_id in model.factor_ids
-        ):
-            raise DecompositionError(
-                f"factor anchor {observed.isoformat()} has incomplete selected components"
-            )
     target_by_day = {row.day: row for row in usable_rows}
     if len(target_by_day) != len(usable_rows):
         raise DecompositionError("target source contains a duplicate date")
     target_scope_start = min(target_by_day) if target_by_day else None
     target_scope_end = max(target_by_day) if target_by_day else None
+    # A component that is absent before its own inception bounds the fitted window and
+    # is disclosed.  A component absent *after* the first complete anchor, inside target
+    # scope, is an internal gap: compounding a bucket across it would silently associate
+    # a multi-session target return with a shorter factor return, so it still stops here.
+    internal_incomplete = [
+        observed
+        for observed in incomplete_anchors
+        if observed > anchors[0]
+        and target_scope_start is not None
+        and target_scope_end is not None
+        and target_scope_start <= observed <= target_scope_end
+    ]
+    if internal_incomplete:
+        raise DecompositionError(
+            "factor anchor "
+            f"{internal_incomplete[0].isoformat()} has incomplete selected components"
+        )
     if policy.target_calendar == "CALENDAR_DAY_24_7" and any(
         row.return_type != "TOTAL" for row in usable_rows
     ):
@@ -3318,6 +3339,9 @@ def _factor_anchor_observations(
             if policy.evaluation_information_set == "RETROSPECTIVE_SELECTED_SNAPSHOT"
             else "point-in-time factor-conditional holdout association using retained historical vintage"
         ),
+        "factor_incomplete_anchors_excluded": [
+            observed.isoformat() for observed in incomplete_anchors
+        ],
         "pending_factor_anchor_labels": unassignable_tail_labels,
         "periods_per_year": model.periods_per_year,
         "policy_id": (
@@ -3522,6 +3546,9 @@ def _model_result(
         factor_rows=factor_rows,
         policy=interval_policy,
     )
+    # Exact-date factor gaps are impossible under FACTOR_ANCHOR_POLICY: every in-scope
+    # label is assigned to its bucket.  Labels outside the anchor range are disclosed
+    # separately as `pre_anchor_labels` / `pending_factor_anchor_labels`.
     missing_dates: list[date] = []
 
     train = [item for item in aligned if item[0].day <= model.train_end]
