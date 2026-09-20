@@ -11397,8 +11397,12 @@ def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_recei
                 baseline_root=inputs["baseline"],
                 **financial,
             )
+        # The builder stages attended QA into its own directory and names it on the
+        # command line; the coordinated-release receipt records that same directory.
+        # Reading it back from the argument is what production does.
+        producer_qa = Path(str(args[args.index("--qa-dir") + 1]))
         if command == "qa":
-            return panel.validate_qa(candidate, qa)
+            return panel.validate_qa(candidate, producer_qa)
         assert command == "publish"
         assert args[args.index("--strategy-history-contract") + 1] == str(
             dependence_source
@@ -11406,11 +11410,13 @@ def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_recei
         receipt_path = Path(str(args[args.index("--coordinated-release-receipt") + 1]))
         receipt_bytes = receipt_path.read_bytes()
         assert receipt_bytes == canonical_json_bytes(json.loads(receipt_bytes))
+        assert producer_qa == inputs["output"].resolve() / "qa"
+        assert producer_qa != qa
         panel_result = panel.publish_panel(
             inputs["report"],
             inputs["legacy"],
             candidate,
-            qa,
+            producer_qa,
             inputs["output"],
             private_stage_root=inputs["output"],
             portfolio_root=tmp_path / "production",
