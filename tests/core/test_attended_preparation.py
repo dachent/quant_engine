@@ -739,8 +739,14 @@ def _preparation_function_fixture(
                 "financial_outcomes",
                 "hwm_inputs",
                 "invested_capital",
+                "rebind_current_epoch_crosswalk",
                 "release_builder",
+                "static_snapshot_coverage_receipts",
+                "stage_current_epoch_manifest",
                 "target_series",
+                "account_manifest_generation",
+                "account_strategy_manifest",
+                "verify_account_manifest_generation",
             )
         },
         "financial_data_cutoff": "2026-09-17",
@@ -759,7 +765,7 @@ def _preparation_function_fixture(
         "source_phase": plan["source_phase"],
         "source_selection": preparation._definition(source_selection),
     }
-    calls = {"dependence": 0, "plan": 0}
+    calls = {"capital": 0, "dependence": 0, "hwm": 0, "plan": 0, "rebind": 0}
 
     monkeypatch.setattr(preparation, "_validated_inputs", lambda *_args: (config, plan))
     monkeypatch.setattr(
@@ -771,7 +777,12 @@ def _preparation_function_fixture(
         "_selected_dependence_handoff",
         lambda **_kwargs: {"schema_version": 1},
     )
-    monkeypatch.setattr(preparation, "_pin", lambda value, _label: Path(str(value)))
+    def fixture_pin(value: object, _label: str) -> Path:
+        if isinstance(value, dict):
+            return Path(str(value["path"]))
+        return Path(str(value))
+
+    monkeypatch.setattr(preparation, "_pin", fixture_pin)
     monkeypatch.setattr(preparation, "_maximum_age_days", lambda _contract: 1)
 
     def write_dependence(output: Path, **_kwargs: object) -> dict[str, str]:
@@ -823,11 +834,15 @@ def _preparation_function_fixture(
             root / "stage-results" / f"{role}.json", {"role": role}
         ),
     )
-    monkeypatch.setattr(
-        rebind,
-        "rebind_current_epoch_crosswalk",
-        lambda **kwargs: preparation._write(kwargs["output_path"], {}),
-    )
+    def rebind_crosswalk(**kwargs: object) -> None:
+        calls["rebind"] += 1
+        assert kwargs["calculation_cutoff_date"] == "2026-09-17"
+        preparation._write(
+            Path(str(kwargs["output_path"])),
+            {"calculation_cutoff_date": "2026-09-17"},
+        )
+
+    monkeypatch.setattr(rebind, "rebind_current_epoch_crosswalk", rebind_crosswalk)
     monkeypatch.setattr(
         snapshots, "issue_static_snapshot_receipts", lambda **_kwargs: ({}, {})
     )
@@ -838,6 +853,14 @@ def _preparation_function_fixture(
         )
         output.mkdir(parents=True, exist_ok=True)
         (output / "generation.json").write_text("{}", encoding="utf-8")
+        cutoff = json.loads(
+            Path(str(kwargs["crosswalk_path"])).read_text(encoding="utf-8")
+        )["calculation_cutoff_date"]
+        manifest = output / "outputs" / "account-strategy-manifest.json"
+        manifest.parent.mkdir()
+        manifest.write_text(
+            json.dumps({"calculation_cutoff_date": cutoff}), encoding="utf-8"
+        )
         return {"generation_id": output.name}
 
     monkeypatch.setattr(epoch_stage, "stage_current_epoch_manifest", stage_epoch)
@@ -850,17 +873,19 @@ def _preparation_function_fixture(
             "memberships": [{"effective_start": "2026-09-16"}],
         },
     )
-    monkeypatch.setattr(
-        hwm, "compute_governed_as_held_composite_hwm", lambda *_args, **_kwargs: {}
-    )
+    def compute_hwm(*_args: object, **_kwargs: object) -> dict[str, object]:
+        calls["hwm"] += 1
+        return {}
+
+    monkeypatch.setattr(hwm, "compute_governed_as_held_composite_hwm", compute_hwm)
     monkeypatch.setattr(
         hwm, "verify_governed_hwm_result", lambda *_args, **_kwargs: None
     )
-    monkeypatch.setattr(
-        preparation,
-        "_capital_input_builder",
-        lambda: lambda **_kwargs: {},
-    )
+    def build_capital_input(**_kwargs: object) -> dict[str, object]:
+        calls["capital"] += 1
+        return {}
+
+    monkeypatch.setattr(preparation, "_capital_input_builder", lambda: build_capital_input)
     monkeypatch.setattr(capital, "build_governed_capital_result", lambda *_args: {})
     monkeypatch.setattr(capital, "verify_governed_capital_result", lambda *_args: None)
     monkeypatch.setattr(outcomes, "verify_selected_capital_ledger", lambda *_args: None)
@@ -911,6 +936,89 @@ def test_preparation_resume_skips_completed_dependence_after_plan_interruption(
 
     assert calls["dependence"] == 1
     assert result["data_clock"] == {"latest_common_eod": "2026-09-17"}
+
+
+def test_epoch_checkpoint_rejects_stale_cutoff_before_hwm_or_capital(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A recomputed Sep. 2 epoch must stop before HWM or capital can reuse it."""
+
+    spec, calls, identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "prepared"
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+    import rebind_current_epoch_crosswalk as rebind
+
+    def stale_rebind(**kwargs: object) -> None:
+        calls["rebind"] += 1
+        preparation._write(
+            Path(str(kwargs["output_path"])),
+            {"calculation_cutoff_date": "2026-09-02"},
+        )
+
+    monkeypatch.setattr(rebind, "rebind_current_epoch_crosswalk", stale_rebind)
+    assert isinstance(identity["code"], dict)
+    identity["code"]["rebind_current_epoch_crosswalk"] = {"sha256": "changed"}
+
+    with pytest.raises(
+        preparation.AttendedPreparationError, match="epoch calculation cutoff differs"
+    ):
+        preparation.prepare_attended_inputs(
+            preparation_spec_path=spec,
+            output_root=output,
+            requested_as_of="2026-09-17",
+            evaluated_on="2026-09-19",
+            release_commit="a" * 40,
+            resume=True,
+        )
+
+    assert calls["hwm"] == 1
+    assert calls["capital"] == 1
+
+
+def test_epoch_leaf_code_change_rebuilds_epoch_and_dependents_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Changing the rebind leaf invalidates epoch descendants, not prior stages."""
+
+    spec, calls, identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "prepared"
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+    old_epoch = preparation._read(
+        output / "preparation" / "checkpoints" / "epoch.json", "old epoch checkpoint"
+    )
+    assert isinstance(identity["code"], dict)
+    identity["code"]["rebind_current_epoch_crosswalk"] = {"sha256": "changed"}
+
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+        resume=True,
+    )
+
+    new_epoch = preparation._read(
+        output / "preparation" / "checkpoints" / "epoch.json", "new epoch checkpoint"
+    )
+    assert calls["dependence"] == 1
+    assert calls["plan"] == 2
+    assert calls["rebind"] == 2
+    assert calls["hwm"] == 2
+    assert calls["capital"] == 2
+    assert old_epoch["input_identity"] != new_epoch["input_identity"]
 
 
 def test_preparation_resume_archives_partially_written_dependence_output(
