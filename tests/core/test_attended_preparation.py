@@ -777,6 +777,7 @@ def _preparation_function_fixture(
         "_selected_dependence_handoff",
         lambda **_kwargs: {"schema_version": 1},
     )
+
     def fixture_pin(value: object, _label: str) -> Path:
         if isinstance(value, dict):
             return Path(str(value["path"]))
@@ -834,6 +835,7 @@ def _preparation_function_fixture(
             root / "stage-results" / f"{role}.json", {"role": role}
         ),
     )
+
     def rebind_crosswalk(**kwargs: object) -> None:
         calls["rebind"] += 1
         assert kwargs["calculation_cutoff_date"] == "2026-09-17"
@@ -873,6 +875,7 @@ def _preparation_function_fixture(
             "memberships": [{"effective_start": "2026-09-16"}],
         },
     )
+
     def compute_hwm(*_args: object, **_kwargs: object) -> dict[str, object]:
         calls["hwm"] += 1
         return {}
@@ -881,11 +884,14 @@ def _preparation_function_fixture(
     monkeypatch.setattr(
         hwm, "verify_governed_hwm_result", lambda *_args, **_kwargs: None
     )
+
     def build_capital_input(**_kwargs: object) -> dict[str, object]:
         calls["capital"] += 1
         return {}
 
-    monkeypatch.setattr(preparation, "_capital_input_builder", lambda: build_capital_input)
+    monkeypatch.setattr(
+        preparation, "_capital_input_builder", lambda: build_capital_input
+    )
     monkeypatch.setattr(capital, "build_governed_capital_result", lambda *_args: {})
     monkeypatch.setattr(capital, "verify_governed_capital_result", lambda *_args: None)
     monkeypatch.setattr(outcomes, "verify_selected_capital_ledger", lambda *_args: None)

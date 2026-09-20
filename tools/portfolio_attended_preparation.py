@@ -798,9 +798,7 @@ def _preparation_input_identity(
         "account_manifest_generation": ROOT
         / "tools"
         / "build_account_manifest_generation.py",
-        "account_strategy_manifest": ROOT
-        / "tools"
-        / "account_strategy_manifest.py",
+        "account_strategy_manifest": ROOT / "tools" / "account_strategy_manifest.py",
         "verify_account_manifest_generation": ROOT
         / "tools"
         / "verify_account_manifest_generation.py",
