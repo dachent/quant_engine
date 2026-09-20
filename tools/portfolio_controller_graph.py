@@ -489,6 +489,54 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "sinks": ("panel-json-html",),
     },
     {
+        "id": "attended-qa-input-binding",
+        "source_paths": (
+            _MATERIALIZER,
+            "apps/portfolio-control-panel/browser_qa.mjs",
+            "apps/portfolio-control-panel/interaction_qa.mjs",
+        ),
+        "contracts": ("schemas/portfolio/control-panel-data.schema.json",),
+        "producer": (_MATERIALIZER, "_attended_bind_qa"),
+        "artifacts": ("attended-qa.json",),
+        "consumers": ((_MATERIALIZER, "_attended_start_or_resume"),),
+        "validators": ((_MATERIALIZER, "_validate_directory_definition"),),
+        "writers": ((_MATERIALIZER, "_attended_bind_qa"),),
+        "stages": ("panel",),
+        "tests": ("tests/core/test_portfolio_pipeline_materialize.py",),
+        "sinks": ("panel-json-html",),
+    },
+    {
+        "id": "panel-qa-validation-evidence",
+        "source_paths": (
+            _RELEASE,
+            _PANEL,
+            _MATERIALIZER,
+            "packages/core/src/quant_engine/core/publication.py",
+        ),
+        "contracts": ("schemas/portfolio/control-panel-data.schema.json",),
+        "producer": (_RELEASE, "publish_panel"),
+        "artifacts": (
+            "producer-owned QA copy",
+            "evidence/semantic-validation.json",
+            "evidence/qa-validation.json",
+        ),
+        "consumers": (
+            (_PANEL, "publish_panel"),
+            (_MATERIALIZER, "_attended_completed_panel"),
+        ),
+        "validators": (
+            (_PANEL, "validate_qa"),
+            (_MATERIALIZER, "_attended_completed_panel"),
+        ),
+        "writers": ((_RELEASE, "_stage_panel_qa"), (_PANEL, "publish_panel")),
+        "stages": ("panel",),
+        "tests": (
+            "tests/core/test_portfolio_release_builder.py",
+            "tests/core/test_portfolio_pipeline_materialize.py",
+        ),
+        "sinks": ("panel-json-html",),
+    },
+    {
         "id": "coordinated-publication-pointers",
         "source_paths": (_CORE, _MATERIALIZER, _RELEASE, _REPORT, _PANEL),
         "contracts": ("contracts/portfolio-financial-mvp-source-v1.json",),
@@ -1088,6 +1136,22 @@ def _critical_relationships(
     if "portfolio_release_builder.py" not in command_source:
         raise ControllerGraphError("materializer release-producer command is absent")
     _require_calls(repo_root, _RELEASE, "main", {"build_stage"})
+    _require_calls(repo_root, _RELEASE, "publish_panel", {"_stage_panel_qa"})
+    _require_calls(
+        repo_root, _MATERIALIZER, "_attended_start_or_resume", {"_attended_bind_qa"}
+    )
+    _require_calls(
+        repo_root,
+        _MATERIALIZER,
+        "_attended_completed_stage_root",
+        {"_attended_completed_panel"},
+    )
+    _require_calls(
+        repo_root,
+        _MATERIALIZER,
+        "_attended_completed_panel",
+        {"read_generation_bundle"},
+    )
     release_tree = _tree(repo_root, _RELEASE)
     release_stage_calls = _function_calls(
         _top_level_function(release_tree, "build_stage")
@@ -1313,6 +1377,21 @@ def _critical_relationships(
             "caller": "tools.portfolio_release_builder.build_panel_candidate",
             "callee": "tools/portfolio_control_panel.py build",
             "kind": "panel-build-cli",
+        },
+        {
+            "caller": "tools.portfolio_release_builder.publish_panel",
+            "callee": "tools.portfolio_release_builder._stage_panel_qa",
+            "kind": "producer-owned-qa-copy",
+        },
+        {
+            "caller": "tools.portfolio_pipeline_materialize._attended_start_or_resume",
+            "callee": "tools.portfolio_pipeline_materialize._attended_bind_qa",
+            "kind": "immutable-qa-input-binding",
+        },
+        {
+            "caller": "tools.portfolio_pipeline_materialize._attended_completed_panel",
+            "callee": "quant_engine.core.publication.read_generation_bundle",
+            "kind": "retained-panel-qa-verification",
         },
     ]
     relationships.extend(

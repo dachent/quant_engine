@@ -24,6 +24,57 @@ from portfolio_controller_graph import (
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 
+def test_qa_input_and_generated_evidence_have_distinct_controller_flows() -> None:
+    """QA capture binding and retained producer validation have separate owners."""
+
+    graph = build_controller_graph(REPOSITORY_ROOT)
+    flows = {row["id"]: row for row in graph["artifact_flows"]}
+    binding = flows["attended-qa-input-binding"]
+    retained = flows["panel-qa-validation-evidence"]
+    assert binding["producer"] == [
+        "tools/portfolio_pipeline_materialize.py",
+        "_attended_bind_qa",
+    ]
+    assert binding["artifacts"] == ["attended-qa.json"]
+    assert retained["producer"] == [
+        "tools/portfolio_release_builder.py",
+        "publish_panel",
+    ]
+    assert ["tools/portfolio_pipeline_materialize.py", "_attended_completed_panel"] in (
+        retained["validators"]
+    )
+    assert "evidence/qa-validation.json" in retained["artifacts"]
+    assert affected_stages(graph, ["apps/portfolio-control-panel/browser_qa.mjs"]) == [
+        "panel"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("path", "function", "expected", "replacement"),
+    (
+        (
+            "tools/portfolio_release_builder.py",
+            "publish_panel",
+            "_stage_panel_qa(",
+            "missing_qa_copy(",
+        ),
+        (
+            "tools/portfolio_pipeline_materialize.py",
+            "_attended_completed_panel",
+            "read_generation_bundle(",
+            "missing_qa_reader(",
+        ),
+    ),
+)
+def test_graph_rejects_removed_qa_ownership_or_retained_verification(
+    tmp_path: Path, path: str, function: str, expected: str, replacement: str
+) -> None:
+    root = _isolated_projection_root(tmp_path)
+    _replace_function_literal(root / path, function, expected, replacement)
+    with pytest.raises(ControllerGraphError, match="call"):
+        build_controller_graph(root)
+
+
 def _isolated_projection_root(tmp_path: Path) -> Path:
     """Copy only the source-bound controller surface for a mutation test."""
 
