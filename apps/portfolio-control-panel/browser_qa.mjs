@@ -283,6 +283,29 @@ try {
       }
       epochDisplay = { rows, legend };
     }
+    // The payload has always carried leverage_disclosures and nothing rendered them. A
+    // payload assertion cannot catch that, which is why this one reads the DOM: the
+    // producer's own output must reach a reader, and an absent measure must be shown as
+    // not evaluated rather than as zero.
+    const leverageRows = Array.isArray(dashboardData.leverage_disclosures)
+      ? dashboardData.leverage_disclosures
+      : [];
+    const leverageStatus = (await page.locator("#leverage-status").textContent())?.trim() ?? "";
+    const leverageCoverageRows = await page.locator("#leverage-coverage-table tbody tr").count();
+    const leverageObservationKpi = (await page.locator("#leverage-kpis").textContent())?.trim() ?? "";
+    if (!leverageRows.length) {
+      if (leverageStatus !== "Not evaluated") {
+        throw new Error("absent leverage disclosures must render as not evaluated, never as zero");
+      }
+    } else {
+      const declaredClasses = new Set(leverageRows.map((row) => row.data_class));
+      const unavailable = leverageRows.filter((row) => row.coverage_status !== "OBSERVED_ONLY");
+      if (leverageCoverageRows < declaredClasses.size
+        || !leverageObservationKpi.includes(leverageRows.length.toLocaleString("en-US"))
+        || (unavailable.length > 0 && leverageStatus !== "Observed only")) {
+        throw new Error("rendered leverage disclosures diverge from the bound panel payload");
+      }
+    }
     await page.screenshot({ path: path.join(folder, "screenshot.png"), fullPage: true });
     if (capture.pdf) await page.pdf({ path: path.join(folder, "page.pdf"), printBackground: true, preferCSSPageSize: true });
     const manifest = {
