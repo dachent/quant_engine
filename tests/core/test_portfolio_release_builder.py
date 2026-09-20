@@ -2568,13 +2568,39 @@ def test_generation_id_requires_canonical_hash(value: object) -> None:
         builder._generation_id(value, "synthetic generation_id")
 
 
-@pytest.mark.parametrize("include_hybrid", (False, True))
+@pytest.mark.parametrize(
+    ("include_hybrid", "reused", "expected_warm_status"),
+    (
+        (False, True, "ALL_REUSED"),
+        (True, True, "ALL_REUSED"),
+        (False, False, "RECOMPUTED"),
+        (False, None, "UNKNOWN"),
+    ),
+)
 def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, include_hybrid: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    include_hybrid: bool,
+    reused: bool | None,
+    expected_warm_status: str,
 ) -> None:
     recipe_root = tmp_path / "recipe-fixture"
     recipe_root.mkdir()
     recipe = _recipe(recipe_root)
+    correlation_spec = (
+        Path(
+            json.loads(recipe.read_text(encoding="utf-8"))["correlation_source_root"][
+                "path"
+            ]
+        )
+        / "spec.json"
+    )
+    correlation_spec.write_text("{}", encoding="utf-8")
+    recipe_value = json.loads(recipe.read_text(encoding="utf-8"))
+    recipe_value["correlation_source_root"].update(
+        builder._directory_inventory(correlation_spec.parent)
+    )
+    recipe.write_bytes(builder.canonical_json_bytes(recipe_value))
     bundle = _current_plan_bundle(tmp_path)
     _bind_recipe_plan_bundle(recipe, bundle)
     if include_hybrid:
@@ -2607,6 +2633,17 @@ def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter
 
     def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
         calls.append(args)
+        if args[0] in {
+            "portfolio_decomposition.py",
+            "portfolio_correlation.py",
+        } and args[1] in {"stage", "publish"}:
+            output_root = str(args[args.index("--output-root") + 1])
+            result: dict[str, object] = {
+                "generation_id": hashlib.sha256(output_root.encode()).hexdigest()
+            }
+            if reused is not None:
+                result["reused"] = reused
+            return result
         if args[0:2] == ("portfolio_weekly_returns.py", "build"):
             return {"candidate_dir": str(tmp_path / "weekly-candidate")}
         if args[1] == "publish":
@@ -2714,6 +2751,60 @@ def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter
     assert len(correlation_calls) == 2
     for call in correlation_calls:
         assert call[call.index("--retained-cache-root") + 1] == str(retained_cache_root)
+    numerical_calls = [
+        call
+        for call in calls
+        if call[0] in {"portfolio_decomposition.py", "portfolio_correlation.py"}
+        and call[1] in {"stage", "publish"}
+    ]
+    operations = result["numerical_producer_evidence"]["operations"]
+    assert [(row["tool"], row["operation"]) for row in operations] == [
+        (call[0], call[1]) for call in numerical_calls
+    ]
+    assert all(row["producer_result"].get("reused") is reused for row in operations)
+    assert all(len(row["source_identity"]["spec_sha256"]) == 64 for row in operations)
+    assert result["numerical_producer_evidence"]["warm_status"] == expected_warm_status
+
+
+def test_hybrid_analytics_records_actual_stage_and_publish_dispositions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy hybrid helper contributes its producer returns to analytics evidence."""
+
+    source_root = tmp_path / "hybrid-source"
+    source_root.mkdir()
+    hybrid_spec = source_root / "base-spec.json"
+    hybrid_spec.write_text("{}", encoding="utf-8")
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        if args[0] == "portfolio_decomposition_evidence_modes.py":
+            return {"bundle_id": "hybrid-bundle", "destination": str(source_root)}
+        if args[0:2] == ("portfolio_decomposition.py", "stage"):
+            return {"generation_id": "stage-generation", "reused": True}
+        if args[0:2] == ("portfolio_decomposition.py", "publish"):
+            return {"generation_id": "publish-generation", "reused": True}
+        raise AssertionError(f"unexpected tool call: {args}")
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    operations: list[dict[str, object]] = []
+    result = builder._build_hybrid_decomposition(
+        base_spec=tmp_path / "base.json",
+        base_source=tmp_path / "base-source",
+        correlation_source=tmp_path / "correlation-source",
+        bundle_root=tmp_path / "bundle-output",
+        output_root=tmp_path / "analytics-output",
+        producer_operations=operations,
+    )
+
+    assert result["generation_id"] == "publish-generation"
+    assert [(row["tool"], row["operation"]) for row in operations] == [
+        ("portfolio_decomposition.py", "stage"),
+        ("portfolio_decomposition.py", "publish"),
+    ]
+    assert all(row["producer_result"]["reused"] is True for row in operations)
+    assert (
+        builder._numerical_producer_evidence(operations)["warm_status"] == "ALL_REUSED"
+    )
 
 
 def test_current_surface_plan_rejects_missing_surface_before_tools(

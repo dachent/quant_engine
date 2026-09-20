@@ -358,6 +358,23 @@ def test_build_stage_publish_are_deterministic_and_fail_on_drift(
         correlation.stage_candidate(spec, root, output)
 
 
+def test_legacy_publish_without_staged_candidate_rejects_without_output(
+    tmp_path: Path,
+) -> None:
+    """Legacy publication preserves its separate, verified staging boundary."""
+
+    source_root = tmp_path / "source"
+    source, days = _write_returns(source_root)
+    spec = _spec(source_root, source, days)
+    output_root = tmp_path / "output"
+
+    with pytest.raises(correlation.CorrelationError, match="candidate"):
+        correlation.publish(spec, source_root, output_root)
+
+    assert not (output_root / "CURRENT.json").exists()
+    assert not (output_root / "generations").exists()
+
+
 def test_retained_cache_reuses_one_correlation_generation_across_output_roots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

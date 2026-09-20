@@ -1731,6 +1731,61 @@ def _tool(name: str, *args: str, timeout: int = 3600) -> dict[str, Any]:
     )
 
 
+def _record_numerical_producer_operation(
+    operations: list[dict[str, Any]],
+    *,
+    tool: str,
+    operation: str,
+    spec_path: Path,
+    source_root: Path,
+    output_root: Path,
+    producer_result: Mapping[str, Any],
+) -> None:
+    """Keep each numerical producer's returned reuse disposition in the stage result."""
+
+    returned_reused = producer_result.get("reused")
+    reuse_status = (
+        "REUSED"
+        if returned_reused is True
+        else "RECOMPUTED"
+        if returned_reused is False
+        else "UNKNOWN"
+    )
+    spec_sha256, spec_size_bytes = _sha(spec_path)
+    operations.append(
+        {
+            "generation_id": producer_result.get("generation_id"),
+            "operation": operation,
+            "output_root": str(output_root),
+            "producer_result": dict(producer_result),
+            "reuse_status": reuse_status,
+            "source_identity": {
+                "source_root": str(source_root),
+                "spec_path": str(spec_path),
+                "spec_sha256": spec_sha256,
+                "spec_size_bytes": spec_size_bytes,
+            },
+            "tool": tool,
+        }
+    )
+
+
+def _numerical_producer_evidence(
+    operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize only returned producer dispositions; unknown is never zero work."""
+
+    statuses = {str(row["reuse_status"]) for row in operations}
+    warm_status = (
+        "ALL_REUSED"
+        if operations and statuses == {"REUSED"}
+        else "RECOMPUTED"
+        if "RECOMPUTED" in statuses
+        else "UNKNOWN"
+    )
+    return {"operations": operations, "warm_status": warm_status}
+
+
 def _published_generation(root: Path) -> tuple[str, Path]:
     pointer = read_current(root)
     generation = root / "generations" / pointer.generation_id
@@ -2083,6 +2138,7 @@ def _build_hybrid_decomposition(
     bundle_root: Path,
     output_root: Path,
     retained_cache_root: Path | None = None,
+    producer_operations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Publish one version-bound hybrid decomposition from the shared history contract."""
 
@@ -2102,7 +2158,7 @@ def _build_hybrid_decomposition(
     )
     source_root = _path(bundle.get("destination"), "hybrid decomposition bundle")
     hybrid_spec = source_root / "base-spec.json"
-    _tool(
+    staged = _tool(
         "portfolio_decomposition.py",
         "stage",
         "--spec",
@@ -2118,6 +2174,16 @@ def _build_hybrid_decomposition(
         ),
         timeout=7200,
     )
+    if producer_operations is not None:
+        _record_numerical_producer_operation(
+            producer_operations,
+            tool="portfolio_decomposition.py",
+            operation="stage",
+            spec_path=hybrid_spec,
+            source_root=source_root,
+            output_root=output_root,
+            producer_result=staged,
+        )
     published = _tool(
         "portfolio_decomposition.py",
         "publish",
@@ -2134,6 +2200,16 @@ def _build_hybrid_decomposition(
         ),
         timeout=7200,
     )
+    if producer_operations is not None:
+        _record_numerical_producer_operation(
+            producer_operations,
+            tool="portfolio_decomposition.py",
+            operation="publish",
+            spec_path=hybrid_spec,
+            source_root=source_root,
+            output_root=output_root,
+            producer_result=published,
+        )
     return {
         "bundle_id": _text(bundle.get("bundle_id"), "hybrid bundle_id"),
         "bundle_root": str(source_root),
@@ -4520,6 +4596,7 @@ def _build_base_analytics(
     *,
     current_plan: bool,
     retained_cache_root: Path | None,
+    producer_operations: list[dict[str, Any]],
 ) -> tuple[Path, Path, str]:
     """Rebuild the existing base model from one mode's exact selected inputs."""
     base_spec = (
@@ -4587,7 +4664,7 @@ def _build_base_analytics(
             )
         _write_exact(base_source / relative, matches[0].read_bytes())
     _note_progress("decomposition base")
-    _tool(
+    staged = _tool(
         "portfolio_decomposition.py",
         "stage",
         "--spec",
@@ -4602,6 +4679,15 @@ def _build_base_analytics(
             else ()
         ),
         timeout=7200,
+    )
+    _record_numerical_producer_operation(
+        producer_operations,
+        tool="portfolio_decomposition.py",
+        operation="stage",
+        spec_path=base_spec,
+        source_root=base_source,
+        output_root=decomposition_root,
+        producer_result=staged,
     )
     decomposition = _tool(
         "portfolio_decomposition.py",
@@ -4618,6 +4704,15 @@ def _build_base_analytics(
             else ()
         ),
         timeout=7200,
+    )
+    _record_numerical_producer_operation(
+        producer_operations,
+        tool="portfolio_decomposition.py",
+        operation="publish",
+        spec_path=base_spec,
+        source_root=base_source,
+        output_root=decomposition_root,
+        producer_result=decomposition,
     )
     decomposition_generation_id = _generation_id(
         decomposition.get("generation_id"), "decomposition generation_id"
@@ -4722,6 +4817,7 @@ def build_analytics(
         mode_plans["LIVE_PLUS_BACKTEST"] = (hybrid_bundle, hybrid_plan)
         spec_sources.extend((hybrid_bundle, row) for row in hybrid_specs)
     base_factor = _path(recipe["base_factor_file"]["path"], "base factor file")
+    producer_operations: list[dict[str, Any]] = []
     decomposition_root = output_root / "decomposition"
     base_spec, base_source, decomposition_generation_id = _build_base_analytics(
         attribution_bundle,
@@ -4731,6 +4827,7 @@ def build_analytics(
         decomposition_root,
         current_plan=current_plan,
         retained_cache_root=retained_cache_root,
+        producer_operations=producer_operations,
     )
     lenses_root = output_root / "decomposition-lenses"
     lenses: dict[str, str] = {}
@@ -4749,6 +4846,7 @@ def build_analytics(
             hybrid_base_root,
             current_plan=True,
             retained_cache_root=retained_cache_root,
+            producer_operations=producer_operations,
         )
         hybrid_dynamic = {"generation_id": hybrid_generation_id}
         hybrid_bundles["dynamic-style"] = str(hybrid_plan["bundle_id"])
@@ -4766,6 +4864,7 @@ def build_analytics(
             bundle_root=evidence_mode_root / "dynamic-style",
             output_root=hybrid_root / "dynamic-style",
             retained_cache_root=retained_cache_root,
+            producer_operations=producer_operations,
         )
         hybrid_bundles["dynamic-style"] = _text(
             hybrid_dynamic.get("bundle_id"), "hybrid dynamic bundle_id"
@@ -4781,7 +4880,7 @@ def build_analytics(
             lens_root = lenses_root / source_key
         lens_spec = lens_bundle / _text(row.get("path"), "lens spec path")
         _note_progress(f"decomposition lens {lens_root.name}/{lens_spec.stem}")
-        _tool(
+        staged = _tool(
             "portfolio_decomposition.py",
             "stage",
             "--spec",
@@ -4796,6 +4895,15 @@ def build_analytics(
                 else ()
             ),
             timeout=7200,
+        )
+        _record_numerical_producer_operation(
+            producer_operations,
+            tool="portfolio_decomposition.py",
+            operation="stage",
+            spec_path=lens_spec,
+            source_root=lens_bundle,
+            output_root=lens_root,
+            producer_result=staged,
         )
         result = _tool(
             "portfolio_decomposition.py",
@@ -4812,6 +4920,15 @@ def build_analytics(
                 else ()
             ),
             timeout=7200,
+        )
+        _record_numerical_producer_operation(
+            producer_operations,
+            tool="portfolio_decomposition.py",
+            operation="publish",
+            spec_path=lens_spec,
+            source_root=lens_bundle,
+            output_root=lens_root,
+            producer_result=result,
         )
         generation_id = _generation_id(
             result.get("generation_id"), "lens generation_id"
@@ -4842,6 +4959,7 @@ def build_analytics(
                 bundle_root=evidence_mode_root / source_key,
                 output_root=hybrid_root / source_key,
                 retained_cache_root=retained_cache_root,
+                producer_operations=producer_operations,
             )
             hybrid_lenses[source_key] = _text(
                 hybrid.get("generation_id"), "hybrid lens generation_id"
@@ -4850,11 +4968,12 @@ def build_analytics(
                 hybrid.get("bundle_id"), "hybrid lens bundle_id"
             )
     correlation_root = output_root / "correlation"
-    _tool(
+    correlation_spec = correlation_source / "spec.json"
+    correlation_staged = _tool(
         "portfolio_correlation.py",
         "stage",
         "--spec",
-        str(correlation_source / "spec.json"),
+        str(correlation_spec),
         "--source-root",
         str(correlation_source),
         "--output-root",
@@ -4866,11 +4985,20 @@ def build_analytics(
         ),
         timeout=7200,
     )
+    _record_numerical_producer_operation(
+        producer_operations,
+        tool="portfolio_correlation.py",
+        operation="stage",
+        spec_path=correlation_spec,
+        source_root=correlation_source,
+        output_root=correlation_root,
+        producer_result=correlation_staged,
+    )
     correlation = _tool(
         "portfolio_correlation.py",
         "publish",
         "--spec",
-        str(correlation_source / "spec.json"),
+        str(correlation_spec),
         "--source-root",
         str(correlation_source),
         "--output-root",
@@ -4881,6 +5009,15 @@ def build_analytics(
             else ()
         ),
         timeout=7200,
+    )
+    _record_numerical_producer_operation(
+        producer_operations,
+        tool="portfolio_correlation.py",
+        operation="publish",
+        spec_path=correlation_spec,
+        source_root=correlation_source,
+        output_root=correlation_root,
+        producer_result=correlation,
     )
     correlation_generation_id = _generation_id(
         correlation.get("generation_id"), "correlation generation_id"
@@ -4941,6 +5078,9 @@ def build_analytics(
         "decomposition_lenses_root": str(lenses_root),
         "decomposition_root": str(decomposition_root),
         "lens_generations": lenses,
+        "numerical_producer_evidence": _numerical_producer_evidence(
+            producer_operations
+        ),
         "weekly_generation_id": weekly_generation_id,
         "weekly_root": str(weekly_root),
     }
