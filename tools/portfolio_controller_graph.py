@@ -464,12 +464,21 @@ def _required_paths(repo_root: Path) -> list[str]:
     ]
     if (repo_root / _PREPARATION).is_file():
         paths.append(_PREPARATION)
+        bindings = _preparation_stage_bindings(repo_root)
+        for binding_kind in ("code", "policy"):
+            stage_bindings = bindings[binding_kind]
+            if not isinstance(stage_bindings, Mapping):
+                raise ControllerGraphError("preparation stage bindings differ")
+            for bound_paths in stage_bindings.values():
+                if not isinstance(bound_paths, list):
+                    raise ControllerGraphError("preparation stage bindings differ")
+                paths.extend(bound_paths)
     paths.extend(path for path in _TEST_LINKS.values() if (repo_root / path).is_file())
     for flow in _ARTIFACT_FLOW_SPECS:
         paths.extend(cast(Sequence[str], flow["source_paths"]))
         paths.extend(cast(Sequence[str], flow["contracts"]))
         paths.extend(cast(Sequence[str], flow["tests"]))
-    return sorted(paths)
+    return sorted(set(paths))
 
 
 def _tree(repo_root: Path, relative_path: str) -> ast.Module:
@@ -753,17 +762,10 @@ def _require_tool_call(
 def _preparation_stage_dependencies(
     repo_root: Path,
 ) -> tuple[dict[str, object], list[dict[str, str]]]:
-    """Record the worker-owned literal declaration when this checkout has it."""
+    """Record the mandatory executable predecessor declaration."""
 
     preparation = _tree(repo_root, _PREPARATION)
-    try:
-        declared = _literal_assignment(preparation, "PREPARATION_STAGE_DEPENDENCIES")
-    except ControllerGraphError as exc:
-        if str(exc) == (
-            "controller declaration is absent: PREPARATION_STAGE_DEPENDENCIES"
-        ):
-            return {"edges": [], "status": "absent"}, []
-        raise
+    declared = _literal_assignment(preparation, "PREPARATION_STAGE_DEPENDENCIES")
     if not isinstance(declared, dict):
         raise ControllerGraphError(
             "preparation stage dependency declaration is not a mapping"
@@ -795,9 +797,105 @@ def _preparation_stage_dependencies(
     }, edges
 
 
+def _preparation_stage_bindings(repo_root: Path) -> dict[str, object]:
+    """Project the same runtime declarations that preparation hashes on reuse."""
+
+    preparation = _tree(repo_root, _PREPARATION)
+    dependencies = _literal_assignment(preparation, "PREPARATION_STAGE_DEPENDENCIES")
+    code = _literal_assignment(preparation, "_PREPARATION_STAGE_CODE")
+    policy = _literal_assignment(preparation, "_PREPARATION_STAGE_POLICY")
+    outputs = _literal_assignment(preparation, "_PREPARATION_STAGE_OUTPUTS")
+    runtime_paths = _literal_assignment(preparation, "PREPARATION_RUNTIME_PATHS")
+    declarations = (dependencies, code, policy, outputs)
+    if not all(isinstance(declaration, dict) for declaration in declarations):
+        raise ControllerGraphError("preparation stage declarations differ")
+    if not isinstance(runtime_paths, dict):
+        raise ControllerGraphError("preparation runtime path registry differs")
+    stage_names = set(dependencies)
+    if not stage_names or any(
+        set(declaration) != stage_names for declaration in declarations
+    ):
+        raise ControllerGraphError("preparation stage declarations differ")
+
+    def paths_for(alias: object) -> list[str]:
+        if not isinstance(alias, str) or alias not in runtime_paths:
+            raise ControllerGraphError("preparation runtime alias is unresolved")
+        relative_path = runtime_paths[alias]
+        if not isinstance(relative_path, str):
+            raise ControllerGraphError("preparation runtime path registry differs")
+        candidate = Path(relative_path)
+        if candidate.is_absolute() or ".." in candidate.parts:
+            raise ControllerGraphError("preparation runtime path registry differs")
+        if not (repo_root / candidate).is_file():
+            raise ControllerGraphError("preparation runtime path is absent")
+        if alias != "layered_history_repository_dependencies":
+            return [candidate.as_posix()]
+        target = _tree(repo_root, candidate.as_posix())
+        declared_paths = _literal_assignment(
+            target, "LAYERED_HISTORY_REPOSITORY_DEPENDENCIES"
+        )
+        if not isinstance(declared_paths, (list, tuple)) or not declared_paths:
+            raise ControllerGraphError("layered history runtime dependencies differ")
+        resolved: list[str] = []
+        for declared_path in declared_paths:
+            if not isinstance(declared_path, str):
+                raise ControllerGraphError(
+                    "layered history runtime dependencies differ"
+                )
+            dependency = Path(declared_path)
+            if (
+                dependency.is_absolute()
+                or ".." in dependency.parts
+                or not (repo_root / dependency).is_file()
+            ):
+                raise ControllerGraphError(
+                    "layered history runtime dependency is absent"
+                )
+            resolved.append(dependency.as_posix())
+        return resolved
+
+    resolved_relative_paths = {
+        alias: paths_for(alias) for alias in sorted(runtime_paths)
+    }
+    code_bindings: dict[str, list[str]] = {}
+    policy_bindings: dict[str, list[str]] = {}
+    output_bindings: dict[str, list[str]] = {}
+    for stage in sorted(stage_names):
+        predecessors = dependencies[stage]
+        stage_code = code[stage]
+        stage_policy = policy[stage]
+        stage_outputs = outputs[stage]
+        if not all(
+            isinstance(value, (list, tuple))
+            for value in (predecessors, stage_code, stage_policy, stage_outputs)
+        ):
+            raise ControllerGraphError("preparation stage declarations differ")
+        if any(
+            not isinstance(predecessor, str) or predecessor not in stage_names
+            for predecessor in predecessors
+        ):
+            raise ControllerGraphError("preparation stage predecessor differs")
+        if not all(isinstance(output, str) and output for output in stage_outputs):
+            raise ControllerGraphError("preparation stage output declaration differs")
+        code_bindings[stage] = list(
+            dict.fromkeys(path for alias in stage_code for path in paths_for(alias))
+        )
+        policy_bindings[stage] = list(
+            dict.fromkeys(path for alias in stage_policy for path in paths_for(alias))
+        )
+        output_bindings[stage] = list(stage_outputs)
+    return {
+        "code": code_bindings,
+        "outputs": output_bindings,
+        "policy": policy_bindings,
+        "resolved_relative_paths": resolved_relative_paths,
+        "status": "verified",
+    }
+
+
 def _critical_relationships(
     repo_root: Path,
-) -> tuple[list[dict[str, object]], dict[str, object]]:
+) -> tuple[list[dict[str, object]], dict[str, object], dict[str, object]]:
     materializer = _tree(repo_root, _MATERIALIZER)
     main_calls = _function_calls(_top_level_function(materializer, "main"))
     imports = _module_imports(materializer)
@@ -892,6 +990,7 @@ def _critical_relationships(
     preparation_dependencies, preparation_edges = _preparation_stage_dependencies(
         repo_root
     )
+    preparation_bindings = _preparation_stage_bindings(repo_root)
     _require_calls(repo_root, _MATERIALIZER, "_attended_stage_command", {"str"})
     command_source = (repo_root / _MATERIALIZER).read_text(encoding="utf-8")
     if "portfolio_release_builder.py" not in command_source:
@@ -1123,7 +1222,7 @@ def _critical_relationships(
         }
         for edge in preparation_edges
     )
-    return relationships, preparation_dependencies
+    return relationships, preparation_dependencies, preparation_bindings
 
 
 def _artifact_flows(repo_root: Path) -> list[dict[str, object]]:
@@ -1285,8 +1384,22 @@ def _explicit_mapper_evidence(repo_root: Path, path: Path) -> dict[str, str]:
 def _current_graph(repo_root: Path) -> dict[str, object]:
     repo_root = repo_root.resolve()
     dependencies, materializer_dependencies = _stage_declarations(repo_root)
-    relationships, preparation_dependencies = _critical_relationships(repo_root)
+    relationships, preparation_dependencies, preparation_bindings = (
+        _critical_relationships(repo_root)
+    )
     artifact_flows = _artifact_flows(repo_root)
+    preparation_paths: set[str] = set()
+    for binding_kind in ("code", "policy"):
+        stage_bindings = preparation_bindings[binding_kind]
+        assert isinstance(stage_bindings, Mapping)
+        for paths in stage_bindings.values():
+            assert isinstance(paths, list)
+            preparation_paths.update(path for path in paths if isinstance(path, str))
+    for flow in artifact_flows:
+        if flow["id"] == "attended-preparation-checkpoints":
+            source_paths = flow["source_paths"]
+            assert isinstance(source_paths, list)
+            flow["source_paths"] = sorted(set(source_paths) | preparation_paths)
     source_files = {
         path: _sha256(repo_root / path) for path in _required_paths(repo_root)
     }
@@ -1312,6 +1425,7 @@ def _current_graph(repo_root: Path) -> dict[str, object]:
             "core_stage_dependencies": dependencies,
             "materializer_stage_dependencies": materializer_dependencies,
             "attended_stages": list(_ATTENDED_ORDER),
+            "preparation_stage_bindings": preparation_bindings,
             "preparation_stage_dependencies": preparation_dependencies,
             "source_contract": _SOURCE_CONTRACT,
             "source_schema": _SOURCE_SCHEMA,

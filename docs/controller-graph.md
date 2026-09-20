@@ -21,6 +21,20 @@ The product stages remain `ledger`, `baseline`, `attribution`, `analytics`,
 core product stage.  The gate requires the report-to-panel dependency, so the
 MVP path cannot be silently redirected through a workbook.
 
+Preparation checkpoint binding is projected from the one executable runtime
+registry in `tools/portfolio_attended_preparation.py` and its existing
+predecessor, code, policy, and output declarations.  The graph records the
+resolved repository-relative code and policy paths under
+`contracts.preparation_stage_bindings`, includes their source hashes, and uses
+the attended-preparation flow's existing stage ownership when reporting change
+impact.  The layered-history closure is resolved from
+`portfolio_target_series.LAYERED_HISTORY_REPOSITORY_DEPENDENCIES`; the graph
+reads that literal with `ast` and does not import the target-series module.
+Missing declarations, mismatched stage sets, unresolved aliases, unknown
+predecessors, or unavailable declared paths are graph-construction failures.
+This static projection mirrors checkpoint inputs; it does not execute a
+producer or prove a checkpoint was admitted at runtime.
+
 It also binds the actual static seams: attended preflight to the selected-source
 preparation entrypoints (including reachable same-module helpers), materializer
 stage command to the release builder, and the release builder's exact Python and

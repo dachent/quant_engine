@@ -620,7 +620,11 @@ def test_preparation_checkpoint_never_accepts_partially_rewritten_output(
     (output / "selected.json").write_text('{"selected":"verified"}', encoding="utf-8")
     run_identity = {"schema_version": 1, "source": "pinned"}
     full_identity = {
-        "code": {"attended_preparation": {}, "target_series": {}},
+        "code": {
+            "attended_preparation": {},
+            "layered_history_repository_dependencies": {},
+            "target_series": {},
+        },
         "policy": {},
     }
     identity = preparation._stage_identity(
@@ -680,7 +684,14 @@ def test_preparation_checkpoint_rejects_missing_declared_output(
     identity = preparation._stage_identity(
         "selected-history-normalization",
         {"schema_version": 1},
-        {"code": {"attended_preparation": {}, "target_series": {}}, "policy": {}},
+        {
+            "code": {
+                "attended_preparation": {},
+                "layered_history_repository_dependencies": {},
+                "target_series": {},
+            },
+            "policy": {},
+        },
         {},
     )
     checkpoint = (
@@ -711,7 +722,10 @@ def test_preparation_checkpoint_rejects_missing_declared_output(
 
 
 def _preparation_function_fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    history_rebuild_required: bool = False,
 ) -> tuple[Path, dict[str, int], dict[str, object]]:
     """Keep checkpoint control flow real while replacing only numerical producers."""
 
@@ -783,7 +797,7 @@ def _preparation_function_fixture(
     }
     plan = {
         "data_clock": {"latest_common_eod": "2026-09-17"},
-        "history_rebuild_required": False,
+        "history_rebuild_required": history_rebuild_required,
         "source_phase": {"status": "PASS"},
     }
     identity = {
@@ -805,17 +819,31 @@ def _preparation_function_fixture(
                 "account_manifest_generation",
                 "account_strategy_manifest",
                 "verify_account_manifest_generation",
+                "baseline_producer",
+                "core_authority",
+                "core_publication",
+                "freshness",
+                "hwm_execution",
+                "hwm_governed",
+                "hwm_input_kernel",
+                "hwm_kernel",
+                "ledger_admission",
+                "ledger_hwm_inputs",
+                "ledger_models",
+                "layered_history_repository_dependencies",
             )
         },
         "financial_data_cutoff": "2026-09-17",
         "policy": {
             name: {}
             for name in (
+                "account_manifest_schema",
                 "dependence",
                 "flow_classification",
                 "hwm_current",
                 "hwm_legacy",
                 "performance",
+                "dependence_schema",
             )
         },
         "release_commit": "a" * 40,
@@ -823,7 +851,17 @@ def _preparation_function_fixture(
         "source_phase": plan["source_phase"],
         "source_selection": preparation._definition(source_selection),
     }
-    calls = {"capital": 0, "dependence": 0, "hwm": 0, "plan": 0, "rebind": 0}
+    calls = {
+        "baseline": 0,
+        "capital": 0,
+        "dependence": 0,
+        "dependence_verify": 0,
+        "hwm": 0,
+        "history": 0,
+        "ledger": 0,
+        "plan": 0,
+        "rebind": 0,
+    }
 
     monkeypatch.setattr(preparation, "_validated_inputs", lambda *_args: (config, plan))
     monkeypatch.setattr(
@@ -851,9 +889,11 @@ def _preparation_function_fixture(
         return {"destination": str(output)}
 
     monkeypatch.setattr(dependence, "write_source", write_dependence)
-    monkeypatch.setattr(
-        dependence, "verify_packaged_source", lambda *_args, **_kwargs: None
-    )
+
+    def verify_dependence(*_args: object, **_kwargs: object) -> None:
+        calls["dependence_verify"] += 1
+
+    monkeypatch.setattr(dependence, "verify_packaged_source", verify_dependence)
 
     def write_bundle(output: Path, **_kwargs: object) -> dict[str, str]:
         calls["plan"] += 1
@@ -878,14 +918,16 @@ def _preparation_function_fixture(
             )
         return {"generation_id": generation.name}
 
-    monkeypatch.setattr(
-        release, "build_ledger", lambda _recipe, output: staged_generation(output, "l")
-    )
-    monkeypatch.setattr(
-        release,
-        "build_baseline",
-        lambda _recipe, _ledger, output: staged_generation(output, "b"),
-    )
+    def build_ledger(_recipe: Path, output: Path) -> dict[str, str]:
+        calls["ledger"] += 1
+        return staged_generation(output, "l")
+
+    def build_baseline(_recipe: Path, _ledger: Path, output: Path) -> dict[str, str]:
+        calls["baseline"] += 1
+        return staged_generation(output, "b")
+
+    monkeypatch.setattr(release, "build_ledger", build_ledger)
+    monkeypatch.setattr(release, "build_baseline", build_baseline)
     monkeypatch.setattr(
         release,
         "_record_stage",
@@ -1084,6 +1126,227 @@ def test_epoch_leaf_code_change_rebuilds_epoch_and_dependents_only(
     assert calls["hwm"] == 2
     assert calls["capital"] == 2
     assert old_epoch["input_identity"] != new_epoch["input_identity"]
+
+
+@pytest.mark.parametrize(
+    ("identity_section", "leaf", "expected_calls"),
+    [
+        (
+            "code",
+            "baseline_producer",
+            {
+                "baseline": 2,
+                "capital": 2,
+                "dependence": 1,
+                "dependence_verify": 1,
+                "hwm": 2,
+                "ledger": 1,
+                "plan": 2,
+                "rebind": 2,
+            },
+        ),
+        (
+            "code",
+            "hwm_kernel",
+            {
+                "baseline": 1,
+                "capital": 1,
+                "dependence": 1,
+                "dependence_verify": 1,
+                "hwm": 2,
+                "ledger": 1,
+                "plan": 2,
+                "rebind": 1,
+            },
+        ),
+        (
+            "code",
+            "hwm_inputs",
+            {
+                "baseline": 1,
+                "capital": 2,
+                "dependence": 1,
+                "dependence_verify": 1,
+                "hwm": 2,
+                "ledger": 1,
+                "plan": 2,
+                "rebind": 1,
+            },
+        ),
+        (
+            "policy",
+            "dependence_schema",
+            {
+                "baseline": 2,
+                "capital": 2,
+                "dependence": 2,
+                "dependence_verify": 2,
+                "hwm": 2,
+                "ledger": 2,
+                "plan": 2,
+                "rebind": 2,
+            },
+        ),
+        (
+            "code",
+            "freshness",
+            {
+                "baseline": 2,
+                "capital": 2,
+                "dependence": 1,
+                "dependence_verify": 1,
+                "hwm": 2,
+                "ledger": 2,
+                "plan": 2,
+                "rebind": 2,
+            },
+        ),
+        (
+            "policy",
+            "hwm_legacy",
+            {
+                "baseline": 2,
+                "capital": 2,
+                "dependence": 1,
+                "dependence_verify": 1,
+                "hwm": 2,
+                "ledger": 1,
+                "plan": 2,
+                "rebind": 2,
+            },
+        ),
+    ],
+)
+def test_preparation_runtime_leaf_rebuilds_only_its_declared_closure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    identity_section: str,
+    leaf: str,
+    expected_calls: dict[str, int],
+) -> None:
+    """A changed consumed leaf cannot be hidden by a same-HEAD checkpoint hit."""
+
+    spec, calls, identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "prepared"
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+    old_final = preparation._read(
+        output / "preparation" / "checkpoints" / "final-handoff.json",
+        "old final checkpoint",
+    )
+    section = identity[identity_section]
+    assert isinstance(section, dict)
+    section[leaf] = {"sha256": "changed"}
+
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+        resume=True,
+    )
+
+    assert {name: calls[name] for name in expected_calls} == expected_calls
+    assert (
+        preparation._read(
+            output / "preparation" / "checkpoints" / "final-handoff.json",
+            "new final checkpoint",
+        )["input_identity"]
+        != old_final["input_identity"]
+    )
+
+
+def test_preparation_resume_reuses_all_valid_fixture_producers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An unchanged complete resume does not repeat numerical fixture producers."""
+
+    spec, calls, _identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "prepared"
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+    initial_calls = dict(calls)
+
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+        resume=True,
+    )
+
+    assert calls == initial_calls
+
+
+def test_history_native_dependency_mismatch_rebuilds_once_then_reuses_normalization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Original-history mismatch cannot hide a stale normalized checkpoint."""
+
+    spec, calls, identity = _preparation_function_fixture(
+        tmp_path, monkeypatch, history_rebuild_required=True
+    )
+
+    def rebuild(
+        _selection: object,
+        output: Path,
+        _release_commit: str,
+        _contract: Path,
+        _authorities: object,
+    ) -> Path:
+        calls["history"] += 1
+        normalized = output / f"normalized-{calls['history']}"
+        normalized.mkdir(parents=True)
+        (normalized / "generation.json").write_text("{}", encoding="utf-8")
+        return normalized
+
+    monkeypatch.setattr(preparation, "_rebuild_layered_history", rebuild)
+    output = tmp_path / "prepared"
+    for resume in (False, True):
+        preparation.prepare_attended_inputs(
+            preparation_spec_path=spec,
+            output_root=output,
+            requested_as_of="2026-09-17",
+            evaluated_on="2026-09-19",
+            release_commit="a" * 40,
+            resume=resume,
+        )
+    assert calls["history"] == 1
+
+    code = identity["code"]
+    assert isinstance(code, dict)
+    code["layered_history_repository_dependencies"] = {"sha256": "changed"}
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+        resume=True,
+    )
+    assert calls["history"] == 2
+
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+        resume=True,
+    )
+    assert calls["history"] == 2
 
 
 def test_preparation_resume_archives_partially_written_dependence_output(

@@ -361,17 +361,35 @@ def test_financial_source_schema_is_bound_and_has_full_impact() -> None:
 
 
 def test_graph_records_integrated_preparation_declaration() -> None:
-    """The graph consumes the executable preparation declaration as-is."""
+    """The graph projects the executable bindings that checkpoint identity uses."""
 
     graph = build_controller_graph(REPOSITORY_ROOT)
     declaration = graph["contracts"]["preparation_stage_dependencies"]
+    bindings = graph["contracts"]["preparation_stage_bindings"]
 
     assert declaration["status"] == "verified"
     assert declaration["dependencies"]["selected-history-normalization"] == []
+    assert bindings["status"] == "verified"
+    assert bindings["code"]["baseline"] == [
+        "tools/portfolio_attended_preparation.py",
+        "tools/portfolio_release_builder.py",
+        "tools/portfolio_baseline.py",
+        "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/models.py",
+        "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/provider_admission.py",
+        "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_inputs.py",
+    ]
+    assert (
+        "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm.py"
+        in graph["source_files"]
+    )
+    assert affected_stages(
+        graph,
+        ["packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm.py"],
+    ) == list(graph["stages"])
 
 
-def test_graph_records_verified_present_preparation_declaration(tmp_path: Path) -> None:
-    """A worker-provided literal is consumed without changing its source contract."""
+def test_graph_rejects_unknown_preparation_stage_or_predecessor(tmp_path: Path) -> None:
+    """A partial worker declaration cannot silently become a controller edge."""
 
     root = _isolated_projection_root(tmp_path)
     preparation = root / "tools/portfolio_attended_preparation.py"
@@ -385,17 +403,47 @@ def test_graph_records_verified_present_preparation_declaration(tmp_path: Path) 
         encoding="utf-8",
     )
 
-    graph = build_controller_graph(root)
-    declaration = graph["contracts"]["preparation_stage_dependencies"]
+    with pytest.raises(
+        ControllerGraphError, match="preparation stage declarations differ"
+    ):
+        build_controller_graph(root)
 
-    assert declaration["status"] == "verified"
-    assert declaration["dependencies"]["input-qc"] == ["capture"]
-    assert {
-        "caller": "tools.portfolio_attended_preparation.PREPARATION_STAGE_DEPENDENCIES",
-        "callee": "preparation-stage:input-qc",
-        "depends_on": "capture",
-        "kind": "preparation-stage-dependency",
-    } in graph["relationships"]
+
+def test_graph_rejects_missing_mandatory_preparation_declaration(
+    tmp_path: Path,
+) -> None:
+    """Preparation is required; deleting its declaration is never an optional route."""
+
+    root = _isolated_projection_root(tmp_path)
+    preparation = root / "tools/portfolio_attended_preparation.py"
+    preparation.write_text(
+        preparation.read_text(encoding="utf-8").replace(
+            "PREPARATION_STAGE_DEPENDENCIES",
+            "MISSING_PREPARATION_STAGE_DEPENDENCIES",
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ControllerGraphError, match="PREPARATION_STAGE_DEPENDENCIES"):
+        build_controller_graph(root)
+
+
+def test_graph_rejects_unresolved_preparation_runtime_alias(tmp_path: Path) -> None:
+    """Every stage alias must resolve through the one runtime path registry."""
+
+    root = _isolated_projection_root(tmp_path)
+    preparation = root / "tools/portfolio_attended_preparation.py"
+    preparation.write_text(
+        preparation.read_text(encoding="utf-8").replace(
+            '"baseline_producer": "tools/portfolio_baseline.py",',
+            '"missing_baseline_producer": "tools/portfolio_baseline.py",',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ControllerGraphError, match="runtime alias is unresolved"):
+        build_controller_graph(root)
 
 
 def test_affected_stages_uses_declared_downstream_closure() -> None:
