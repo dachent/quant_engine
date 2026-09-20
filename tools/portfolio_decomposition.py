@@ -3100,23 +3100,6 @@ def _factor_anchor_observations(
         raise DecompositionError("target source contains a duplicate date")
     target_scope_start = min(target_by_day) if target_by_day else None
     target_scope_end = max(target_by_day) if target_by_day else None
-    # A component that is absent before its own inception bounds the fitted window and
-    # is disclosed.  A component absent *after* the first complete anchor, inside target
-    # scope, is an internal gap: compounding a bucket across it would silently associate
-    # a multi-session target return with a shorter factor return, so it still stops here.
-    internal_incomplete = [
-        observed
-        for observed in incomplete_anchors
-        if observed > anchors[0]
-        and target_scope_start is not None
-        and target_scope_end is not None
-        and target_scope_start <= observed <= target_scope_end
-    ]
-    if internal_incomplete:
-        raise DecompositionError(
-            "factor anchor "
-            f"{internal_incomplete[0].isoformat()} has incomplete selected components"
-        )
     if policy.target_calendar == "CALENDAR_DAY_24_7" and any(
         row.return_type != "TOTAL" for row in usable_rows
     ):
@@ -3187,6 +3170,21 @@ def _factor_anchor_observations(
                 }
             )
             continue
+        # An anchor excluded for incompleteness that falls inside this bucket means the
+        # bucket's factor return spans a longer period than the target returns it
+        # carries.  That is harmless only when every carried label falls after the hole,
+        # which is the pre-inception case; a label at or before it would have its return
+        # compounded across the hole and associated with the wrong factor period.
+        bridged = [
+            observed
+            for observed in incomplete_anchors
+            if left < observed < right and any(label <= observed for label in labels)
+        ]
+        if bridged:
+            raise DecompositionError(
+                "factor anchor "
+                f"{bridged[0].isoformat()} has incomplete selected components"
+            )
         missing = [label for label in labels if label not in target_by_day]
         if missing and policy.target_calendar != "LEGACY_EXACT_LABEL":
             raise DecompositionError(

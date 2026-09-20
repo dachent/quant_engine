@@ -2231,3 +2231,53 @@ def test_internal_factor_blank_inside_target_scope_stops_the_model(
         match=f"factor anchor {days[60].isoformat()} has incomplete selected components",
     ):
         decomposition.build_decomposition(spec_path, source)
+
+
+def test_factor_blank_after_target_scope_still_stops_a_bucket_that_bridges_it(
+    tmp_path: Path,
+) -> None:
+    """Target scope is the wrong discriminator; what matters is the bucket's labels.
+
+    When factor anchors are sparser than the target schedule, an anchor excluded for
+    incompleteness can sit past the target's last label and still be bridged: the
+    bucket carries earlier in-scope labels whose compounded return would be
+    associated with a factor period twice as long as the one they belong to.
+    """
+    source = tmp_path / "source"
+    target_path, days = _write_sources(
+        source,
+        count=111,
+        blank_factor="F2",
+        blank_factor_rows=(105,),
+    )
+    target_days = days[:103]
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    keep = {day.isoformat() for day in target_days}
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(
+            [rows[0], *(row for row in rows[1:] if row[1] in keep)]
+        )
+    # Anchors every fifth session, so one bucket spans several target labels.
+    factor_path = source / "factors.csv"
+    factor_rows = list(csv.reader(factor_path.read_text(encoding="utf-8").splitlines()))
+    anchor_days = {day.isoformat() for day in days[::5]}
+    with factor_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(
+            [factor_rows[0], *(row for row in factor_rows[1:] if row[0] in anchor_days)]
+        )
+
+    spec_path = _spec(source, target_path, target_days, models=[_model(target_days)])
+    # The factor source stays available past the target's last label, which is what
+    # puts the excluded anchor inside a live bucket rather than among future anchors.
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["as_of_date"] = days[110].isoformat()
+    spec["factor_source"]["interval_policy"]["available_through_anchor"] = days[
+        110
+    ].isoformat()
+    spec_path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+
+    with pytest.raises(
+        decomposition.DecompositionError,
+        match=f"factor anchor {days[105].isoformat()} has incomplete selected components",
+    ):
+        decomposition.build_decomposition(spec_path, source)
