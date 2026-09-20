@@ -952,6 +952,12 @@ def _critical_relationships(
     _top_level_function(preparation_tree, "prepare_attended_inputs")
     _require_local_route_calls(
         preparation_tree,
+        "_validated_inputs",
+        {"provider_ledger.verify_candidate"},
+        "upfront provider replay",
+    )
+    _require_local_route_calls(
+        preparation_tree,
         "prepare_attended_inputs",
         {
             "_rebuild_layered_history",
@@ -1149,6 +1155,11 @@ def _critical_relationships(
         "coordinated publication sink invocation",
     )
     relationships: list[dict[str, object]] = [
+        {
+            "caller": "tools.portfolio_attended_preparation._validated_inputs",
+            "callee": "tools.provider_ledger.verify_candidate",
+            "kind": "upfront-provider-replay",
+        },
         {
             "caller": "tools.portfolio_pipeline_materialize.main",
             "callee": "tools.portfolio_attended_preparation.plan_attended_inputs",

@@ -461,6 +461,28 @@ def test_graph_requires_selected_calendar_producer_and_preparation_call(
         build_controller_graph(root)
 
 
+def test_graph_requires_upfront_provider_replay(tmp_path: Path) -> None:
+    """Retained generation QC must include its actual replay specification."""
+    root = _isolated_projection_root(tmp_path)
+    graph = build_controller_graph(root)
+    assert any(
+        row.get("caller") == "tools.portfolio_attended_preparation._validated_inputs"
+        and row.get("callee") == "tools.provider_ledger.verify_candidate"
+        for row in graph["relationships"]
+    )
+    path = root / "tools/portfolio_attended_preparation.py"
+    source = path.read_text(encoding="utf-8")
+    assert "provider_ledger.verify_candidate(" in source
+    path.write_text(
+        source.replace(
+            "provider_ledger.verify_candidate(", "unchecked_provider_replay("
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ControllerGraphError, match="provider replay"):
+        build_controller_graph(root)
+
+
 def test_graph_rejects_unresolved_preparation_runtime_alias(tmp_path: Path) -> None:
     """Every stage alias must resolve through the one runtime path registry."""
 
