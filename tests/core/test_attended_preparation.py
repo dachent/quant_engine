@@ -537,9 +537,30 @@ def test_reusable_preparation_handoff_preserves_verified_complete_output(
         "--invested-capital-result",
         "--invested-capital-input-generation",
     ):
-        path = root / f"{flag[2:]}.json"
+        path = (
+            preparation_dir / "hwm-calendar-authority.json"
+            if flag == "--hwm-governed-calendar-authority"
+            else root / f"{flag[2:]}.json"
+        )
         path.write_text("{}", encoding="utf-8")
         financial[flag] = path
+    calendar_path = financial["--hwm-governed-calendar-authority"]
+    calendar_path.write_bytes(
+        preparation.canonical_json_bytes({"authority_evidence_sha256": "c" * 64})
+    )
+    financial["--hwm-governed-input-generation"].write_bytes(
+        preparation.canonical_json_bytes({"calendar_sha256": "c" * 64})
+    )
+    checkpoint = preparation._checkpoint_path(root, "hwm")
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(
+        preparation.canonical_json_bytes(
+            {
+                "outputs": {"hwm_calendar": preparation._definition(calendar_path)},
+                "result": {"hwm_calendar": str(calendar_path)},
+            }
+        )
+    )
     handoff = {
         "data_clock": data_clock,
         "financial_stage_inputs": {
