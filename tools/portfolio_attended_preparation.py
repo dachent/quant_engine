@@ -590,6 +590,29 @@ def _rebuild_layered_history(
     return rebuilt
 
 
+def _validate_hwm_authority_inputs(config: Mapping[str, Any]) -> None:
+    """Admit existing HWM policy/calendar bindings before preparation has effects."""
+    import portfolio_invested_capital as capital
+    from quant_engine.portfolio_ledger.hwm_governed import (
+        validate_governed_hwm_calendar_authority,
+    )
+
+    contract = _pin(config["financial_input_contract"], "financial input contract")
+    calendar = _read(
+        _pin(config["calendar_authority"], "calendar authority"), "calendar authority"
+    )
+    effective_policy = capital.governed_hwm_input_policy(
+        (ROOT / "contracts" / "portfolio-hwm-policy-v4.json").read_bytes(),
+        contract.read_bytes(),
+        str(calendar["hwm_policy_sha256"]),
+    )
+    validate_governed_hwm_calendar_authority(
+        calendar,
+        hwm_policy_bytes=effective_policy,
+        accepted_authority_sha256=str(calendar["authority_evidence_sha256"]),
+    )
+
+
 def _validated_inputs(
     preparation_spec_path: Path, requested_as_of: str, evaluated_on: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -604,6 +627,7 @@ def _validated_inputs(
     if _date(evaluated_on, "evaluated_on") < cutoff:
         raise AttendedPreparationError("evaluated_on precedes financial cutoff")
     _pins(config, "preparation specification")
+    _validate_hwm_authority_inputs(config)
     source_selection = _pin(config.get("source_selection"), "source selection")
     selection = _read(source_selection, "source selection")
     files = selection.get("files")
