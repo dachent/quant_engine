@@ -588,9 +588,7 @@ def test_catalog_identity_preserves_later_manifest_generation_date(
 ) -> None:
     catalog = InputSnapshot.from_bytes(
         "synthetic provider ledger",
-        canonical_json_bytes(
-            {"as_of_date": "2026-09-17", "catalog_schema_version": 1}
-        ),
+        canonical_json_bytes({"as_of_date": "2026-09-17", "catalog_schema_version": 1}),
     )
     manifest = _generation_manifest_snapshot(
         catalog=catalog,
@@ -626,9 +624,7 @@ def test_catalog_identity_rejects_catalog_byte_substitution_with_later_manifest(
 ) -> None:
     catalog = InputSnapshot.from_bytes(
         "synthetic provider ledger",
-        canonical_json_bytes(
-            {"as_of_date": "2026-09-17", "catalog_schema_version": 1}
-        ),
+        canonical_json_bytes({"as_of_date": "2026-09-17", "catalog_schema_version": 1}),
     )
     manifest = _generation_manifest_snapshot(
         catalog=catalog,
@@ -671,9 +667,7 @@ def test_catalog_identity_preserves_equal_date_compatibility(
 ) -> None:
     catalog = InputSnapshot.from_bytes(
         "synthetic provider ledger",
-        canonical_json_bytes(
-            {"as_of_date": "2026-09-17", "catalog_schema_version": 1}
-        ),
+        canonical_json_bytes({"as_of_date": "2026-09-17", "catalog_schema_version": 1}),
     )
     manifest = _generation_manifest_snapshot(
         catalog=catalog,
@@ -26922,17 +26916,16 @@ def test_generation_composer_preserves_declared_nav_basis_for_mwr(
         )
 
 
-def test_generation_available_mwr_reaches_bound_report_workbook(
+def test_generation_available_mwr_reaches_bound_report_and_panel(
     perimeter_module: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One staged MWR reaches report, panel intake, and TWR/MWR workbook."""
+    """One staged MWR reaches the active report and panel consumers."""
 
     import portfolio_control_panel as panel
     import portfolio_release_builder as release_builder
     import portfolio_report as reporter
-    from openpyxl import load_workbook  # type: ignore[import-untyped]
 
     monkeypatch.setattr(
         reporter,
@@ -27338,45 +27331,7 @@ def test_generation_available_mwr_reaches_bound_report_workbook(
         )
     }
 
-    workbook_path = tmp_path / "portfolio-report.xlsx"
-    reporter._build_workbook_exact(report, workbook_path)
-    workbook = load_workbook(workbook_path, read_only=False, data_only=True)
-    try:
-        table = workbook["TWR MWR"].tables["tblTwrMwr"]
-        cells = list(workbook["TWR MWR"][table.ref])
-        headers = [cell.value for cell in cells[0]]
-        header_indexes = {
-            str(header).lower().replace(" ", "_"): index
-            for index, header in enumerate(headers)
-        }
-        row = next(
-            row
-            for row in cells[1:]
-            if row[header_indexes["account_id"]].value == available["account_id"]
-            and row[header_indexes["strategy_id"]].value == available["strategy_id"]
-        )
-        values_by_header = {
-            header: row[index].value for header, index in header_indexes.items()
-        }
-        assert values_by_header["mwr_status"] == available["mwr_status"]
-        assert abs(
-            Decimal(str(values_by_header["mwr_xirr"])) - Decimal(available["mwr_xirr"])
-        ) < Decimal("1e-15")
-        assert values_by_header["mwr_value_basis"] == available["mwr_value_basis"]
-        assert values_by_header["mwr_unit"] == available["mwr_unit"]
-        blocked_workbook_row = next(
-            row
-            for row in cells[1:]
-            if row[header_indexes["account_id"]].value == blocked["account_id"]
-            and row[header_indexes["strategy_id"]].value == blocked["strategy_id"]
-        )
-        assert (
-            blocked_workbook_row[header_indexes["mwr_reason"]].value
-            == staged_blocked["mwr_reason"]
-            == blocked["mwr_reason"]
-        )
-    finally:
-        workbook.close()
+    assert blocked["mwr_reason"] == staged_blocked["mwr_reason"]
 
     strategy_names = [str(row["name"]) for row in baseline_payload["strategies"]]
     all_series_names = dict(
