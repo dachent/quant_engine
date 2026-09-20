@@ -77,6 +77,75 @@ def canonical_json_bytes(value: Mapping[str, Any] | Sequence[Any]) -> bytes:
     ).encode("utf-8")
 
 
+# A payload that is hashed for embedding or pinning travels to machines that have never
+# seen this filesystem. An absolute locator inside one is inert at best and a disclosure at
+# worst, and the repository's stated pattern is to anchor by hash without disclosing the
+# locator (docs/providers/grizzlybulls.md, docs/data-policy.md).
+#
+# That rule was enforced in exactly one place, on the consuming side, and no producer checked
+# its own output. A producer consequently embedded absolute user-profile paths into a portable
+# artifact and was rejected by its own repository's guard -- discovered only because the
+# consumer refused the producer's bytes.
+#
+# Deliberately narrow: this is for payloads hashed for embedding or pinning. Specs, recipes,
+# checkpoints and run state legitimately carry absolute paths and must not call it.
+_POSIX_LOCATOR_ROOTS: Final = (
+    "/Users/",
+    "/home/",
+    "/root/",
+    "/mnt/",
+    "/media/",
+    "/tmp/",
+    "/var/",
+)
+
+
+def _is_absolute_locator(value: str) -> bool:
+    """Recognise a path this machine can resolve and another machine cannot."""
+
+    if (
+        len(value) >= 3
+        and value[1] == ":"
+        and value[0].isascii()
+        and value[0].isalpha()
+    ):
+        # A Windows drive-qualified path, in either slash direction.
+        if value[2] in ("\\", "/"):
+            return True
+    if value.startswith("\\\\") or value.startswith("//"):
+        # A UNC share. Two leading slashes in a relative path would be malformed anyway.
+        return True
+    return any(root in value for root in _POSIX_LOCATOR_ROOTS)
+
+
+def assert_no_absolute_locators(
+    value: Mapping[str, Any] | Sequence[Any], *, field_name: str = "payload"
+) -> None:
+    """Refuse a portable payload that names a path only this machine can resolve.
+
+    Walks keys and values alike, so it does not need to know the payload's shape. The text is
+    inspected before serialization, because canonical JSON escapes backslashes and a pattern
+    applied to the serialized form silently misses every Windows locator.
+    """
+
+    def walk(node: object) -> None:
+        if isinstance(node, str):
+            if _is_absolute_locator(node):
+                raise ManifestValidationError(
+                    f"{field_name} embeds an absolute locator {node!r}; portable payloads "
+                    "anchor by hash and keep locators out"
+                )
+        elif isinstance(node, Mapping):
+            for key, child in node.items():
+                walk(key)
+                walk(child)
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                walk(child)
+
+    walk(value)
+
+
 def hash_file(path: Path, *, chunk_size: int = 1024 * 1024) -> tuple[str, int]:
     """Return a lower-case SHA-256 and byte count without retaining file content."""
 
