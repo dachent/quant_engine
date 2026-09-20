@@ -453,6 +453,12 @@ def test_affected_stages_uses_declared_downstream_closure() -> None:
 
     assert affected_stages(graph, ["tools/portfolio_report.py"]) == ["report", "panel"]
     assert affected_stages(graph, ["tools/portfolio_control_panel.py"]) == ["panel"]
+    assert "tools/portfolio_correlation.py" in graph["source_files"]
+    assert affected_stages(graph, ["tools/portfolio_correlation.py"]) == [
+        "analytics",
+        "report",
+        "panel",
+    ]
     assert affected_stages(graph, ["tools/portfolio_attended_preparation.py"]) == [
         "ledger",
         "baseline",

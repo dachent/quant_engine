@@ -40,6 +40,7 @@ _CAPITAL_INPUT = "ops/mvp2-release/scripts/build_capital_input.py"
 _CAPITAL = "tools/portfolio_invested_capital.py"
 _ATTRIBUTION = "tools/portfolio_attribution.py"
 _DECOMPOSITION = "tools/portfolio_decomposition.py"
+_CORRELATION = "tools/portfolio_correlation.py"
 _SOURCE_CONTRACT = "contracts/portfolio-financial-mvp-source-v1.json"
 _SOURCE_SCHEMA = "schemas/portfolio/financial-mvp-source-contract.schema.json"
 _MAPPER_SKIP_DIRECTORIES = frozenset(
@@ -87,6 +88,7 @@ _PATH_STAGES = {
     _CORE: list(_STAGE_ORDER),
     _MATERIALIZER: list(_STAGE_ORDER),
     _RELEASE: list(_STAGE_ORDER),
+    _CORRELATION: ["analytics", "report", "panel"],
     _PREPARATION: list(_STAGE_ORDER),
     _SOURCE_CONTRACT: list(_STAGE_ORDER),
     _SOURCE_SCHEMA: list(_STAGE_ORDER),
@@ -457,6 +459,7 @@ def _required_paths(repo_root: Path) -> list[str]:
         _CORE,
         _MATERIALIZER,
         _RELEASE,
+        _CORRELATION,
         _REPORT,
         _PANEL,
         _SOURCE_CONTRACT,

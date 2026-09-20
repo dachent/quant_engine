@@ -2621,7 +2621,10 @@ def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter
     monkeypatch.setattr(builder, "_build_hybrid_decomposition", reject_hybrid)
 
     output_root = tmp_path / "analytics"
-    result = builder.build_analytics(recipe, bundle, output_root)
+    retained_cache_root = tmp_path / "retained"
+    result = builder.build_analytics(
+        recipe, bundle, output_root, retained_cache_root=retained_cache_root
+    )
 
     expected_specs = {"us-economic:DYNAMIC_FLS", "us-economic:STATIC"}
     assert set(result["lens_generations"]) == (
@@ -2703,6 +2706,14 @@ def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter
     assert not any(
         call[0] == "portfolio_decomposition_evidence_modes.py" for call in calls
     )
+    correlation_calls = [
+        call
+        for call in calls
+        if call[0] == "portfolio_correlation.py" and call[1] in {"stage", "publish"}
+    ]
+    assert len(correlation_calls) == 2
+    for call in correlation_calls:
+        assert call[call.index("--retained-cache-root") + 1] == str(retained_cache_root)
 
 
 def test_current_surface_plan_rejects_missing_surface_before_tools(
