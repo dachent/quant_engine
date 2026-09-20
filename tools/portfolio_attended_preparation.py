@@ -707,6 +707,31 @@ def _retained_public_factor_capture(
     }
 
 
+def _validate_product_contract_currency(config: Mapping[str, Any]) -> None:
+    """Refuse a pinned contract copy that the repository has since superseded.
+
+    Retained inputs deliberately freeze the product contract so a generation stays
+    replayable, but nothing re-derives those copies when the contract itself changes. The
+    copy keeps hashing to its recorded value, so a pin check cannot see the drift; only
+    `portfolio_current_dependence` compares the two, and it does so at the report stage,
+    four stages downstream. This is the same comparison, made before anything executes.
+    """
+    pinned = _pin(config["financial_input_contract"], "financial input contract")
+    product = ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+    pinned_bytes = pinned.read_bytes()
+    product_bytes = product.read_bytes()
+    if pinned_bytes == product_bytes:
+        return
+    pinned_digest = hashlib.sha256(pinned_bytes).hexdigest()
+    product_digest = hashlib.sha256(product_bytes).hexdigest()
+    raise AttendedPreparationError(
+        "selected financial input contract differs from the product contract: "
+        f"pinned {pinned_digest[:16]} at {pinned}, product {product_digest[:16]}. "
+        "The retained copy is stale; re-admit the source chain against the current "
+        "contract rather than relaxing this check."
+    )
+
+
 def _validated_inputs(
     preparation_spec_path: Path, requested_as_of: str, evaluated_on: str
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -721,6 +746,7 @@ def _validated_inputs(
     if _date(evaluated_on, "evaluated_on") < cutoff:
         raise AttendedPreparationError("evaluated_on precedes financial cutoff")
     _pins(config, "preparation specification")
+    _validate_product_contract_currency(config)
     _validate_hwm_authority_inputs(config)
     # Capital consumes this replay specification transitively. Verify the exact
     # selected generation now, while no preparation output or calculation exists.
