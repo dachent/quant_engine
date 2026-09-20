@@ -7007,8 +7007,14 @@ def validate_layered_history_generation(
             raise TargetSeriesError(
                 "QSI source revision retained live inception differs"
             )
+        # The contract pins the pre-revision qsi:backtest identity, so the revision
+        # substitutes its own. The producer takes it from the reconstruction it just
+        # verified byte for byte; the portable verifier takes it from the materialized
+        # rows, which the attested digest above has already proved.
         revised_identity = _row_identity(
             [row for row in expected_backtests if row["strategy_id"] == "qsi"]
+            if raw_rows is not None
+            else [row for row in segments if row.get("segment_id") == "qsi:backtest"]
         )
         expected_segment_identities = [
             {
