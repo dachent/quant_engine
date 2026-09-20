@@ -67,7 +67,16 @@ _PREPARATION_STAGE_CODE = {
     "plan-live-plus-backtest": ("attended_preparation", "current_plan"),
     "ledger": ("attended_preparation", "release_builder"),
     "baseline": ("attended_preparation", "release_builder"),
-    "epoch": ("attended_preparation",),
+    "epoch": (
+        "attended_preparation",
+        "rebind_current_epoch_crosswalk",
+        "static_snapshot_coverage_receipts",
+        "stage_current_epoch_manifest",
+        "account_manifest_generation",
+        "account_strategy_manifest",
+        "verify_account_manifest_generation",
+        "release_builder",
+    ),
     "hwm": ("attended_preparation", "hwm_inputs", "invested_capital"),
     "capital": (
         "attended_preparation",
@@ -775,8 +784,26 @@ def _preparation_input_identity(
         "financial_outcomes": ROOT / "tools" / "portfolio_financial_outcomes.py",
         "hwm_inputs": ROOT / "tools" / "portfolio_hwm_selected_inputs.py",
         "invested_capital": ROOT / "tools" / "portfolio_invested_capital.py",
+        "rebind_current_epoch_crosswalk": ROOT
+        / "tools"
+        / "rebind_current_epoch_crosswalk.py",
         "release_builder": ROOT / "tools" / "portfolio_release_builder.py",
+        "static_snapshot_coverage_receipts": ROOT
+        / "tools"
+        / "static_snapshot_coverage_receipts.py",
+        "stage_current_epoch_manifest": ROOT
+        / "tools"
+        / "stage_current_epoch_manifest.py",
         "target_series": ROOT / "tools" / "portfolio_target_series.py",
+        "account_manifest_generation": ROOT
+        / "tools"
+        / "build_account_manifest_generation.py",
+        "account_strategy_manifest": ROOT
+        / "tools"
+        / "account_strategy_manifest.py",
+        "verify_account_manifest_generation": ROOT
+        / "tools"
+        / "verify_account_manifest_generation.py",
     }
     return {
         "schema_version": 1,
@@ -924,6 +951,32 @@ def _reusable_preparation_handoff(
         "financial_stage_inputs": financial,
         "data_clock": plan["data_clock"],
     }
+
+
+def _verify_epoch_calculation_cutoff(
+    *, crosswalk_path: Path, epoch_root: Path, cutoff: str
+) -> None:
+    """Require the selected cutoff in both the epoch input and produced manifest."""
+
+    expected = _date(cutoff, "requested financial cutoff")
+    crosswalk = _read(crosswalk_path, "prepared current-epoch crosswalk")
+    manifest = _read(
+        epoch_root / "outputs" / "account-strategy-manifest.json",
+        "prepared account-strategy manifest",
+    )
+    if (
+        _date(
+            crosswalk.get("calculation_cutoff_date"),
+            "prepared current-epoch crosswalk calculation cutoff",
+        )
+        != expected
+        or _date(
+            manifest.get("calculation_cutoff_date"),
+            "prepared account-strategy manifest calculation cutoff",
+        )
+        != expected
+    ):
+        raise AttendedPreparationError("epoch calculation cutoff differs")
 
 
 def _preparation_run_identity(identity: Mapping[str, Any]) -> dict[str, Any]:
@@ -1442,6 +1495,7 @@ def _prepare_attended_inputs(
                 / str(baseline_result["generation_id"])
             ),
             output_path=crosswalk,
+            calculation_cutoff_date=cutoff,
         )
         authority, receipts = issue_static_snapshot_receipts(
             ledger_path=root
@@ -1543,6 +1597,10 @@ def _prepare_attended_inputs(
                 "recipe_path": recipe_path,
             },
         )
+
+    _verify_epoch_calculation_cutoff(
+        crosswalk_path=crosswalk, epoch_root=epoch_root, cutoff=cutoff
+    )
 
     calendar_path = _pin(config["calendar_authority"], "calendar authority")
     calendar = _read(calendar_path, "calendar authority")
