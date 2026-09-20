@@ -428,6 +428,39 @@ def test_graph_rejects_missing_mandatory_preparation_declaration(
         build_controller_graph(root)
 
 
+def test_graph_requires_selected_calendar_producer_and_preparation_call(
+    tmp_path: Path,
+) -> None:
+    """A source-derived calendar must not disappear behind a static input pin."""
+
+    root = _isolated_projection_root(tmp_path)
+    graph = build_controller_graph(root)
+    flow = next(
+        row
+        for row in graph["artifact_flows"]
+        if row["id"] == "selected-hwm-calendar-authority"
+    )
+    assert flow["producer"] == [
+        "tools/portfolio_hwm_selected_inputs.py",
+        "derive_selected_hwm_calendar_authority",
+    ]
+    assert "hwm-calendar-authority.json" in flow["artifacts"]
+    assert [
+        "tools/portfolio_hwm_selected_inputs.py",
+        "build_selected_hwm_inputs",
+    ] in flow["consumers"]
+    preparation = root / "tools/portfolio_attended_preparation.py"
+    content = preparation.read_text(encoding="utf-8")
+    before = "hwm_inputs.derive_selected_hwm_calendar_authority("
+    assert before in content
+    preparation.write_text(
+        content.replace(before, "hwm_inputs.build_selected_hwm_inputs("),
+        encoding="utf-8",
+    )
+    with pytest.raises(ControllerGraphError, match="preparation producer"):
+        build_controller_graph(root)
+
+
 def test_graph_rejects_unresolved_preparation_runtime_alias(tmp_path: Path) -> None:
     """Every stage alias must resolve through the one runtime path registry."""
 

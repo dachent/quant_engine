@@ -36,6 +36,11 @@ _EPOCH_MANIFEST = "tools/stage_current_epoch_manifest.py"
 _ACCOUNT_MANIFEST = "tools/build_account_manifest_generation.py"
 _ACCOUNT_MANIFEST_VERIFY = "tools/verify_account_manifest_generation.py"
 _HWM = "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_governed_execution.py"
+_HWM_SELECTED = "tools/portfolio_hwm_selected_inputs.py"
+_HWM_CALENDAR = "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_calendar_authority.py"
+_HWM_GOVERNED = (
+    "packages/portfolio-ledger/src/quant_engine/portfolio_ledger/hwm_governed.py"
+)
 _CAPITAL_INPUT = "ops/mvp2-release/scripts/build_capital_input.py"
 _CAPITAL = "tools/portfolio_invested_capital.py"
 _ATTRIBUTION = "tools/portfolio_attribution.py"
@@ -315,6 +320,31 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "writers": ((_EPOCH_MANIFEST, "stage_current_epoch_manifest"),),
         "stages": ("baseline", "attribution", "analytics", "report", "panel"),
         "tests": ("tests/core/test_attended_preparation.py",),
+        "sinks": ("report-json-html", "panel-json-html"),
+    },
+    {
+        "id": "selected-hwm-calendar-authority",
+        "source_paths": (
+            _HWM_SELECTED,
+            _HWM_CALENDAR,
+            _HWM_GOVERNED,
+            _PREPARATION,
+            "contracts/portfolio-hwm-policy-v4.json",
+        ),
+        "contracts": ("contracts/portfolio-hwm-policy-v4.json",),
+        "producer": (_HWM_SELECTED, "derive_selected_hwm_calendar_authority"),
+        "artifacts": ("hwm-calendar-authority.json",),
+        "consumers": (
+            (_HWM_SELECTED, "build_selected_hwm_inputs"),
+            (_HWM, "compute_governed_as_held_composite_hwm"),
+        ),
+        "validators": ((_HWM_GOVERNED, "validate_governed_hwm_calendar_authority"),),
+        "writers": ((_PREPARATION, "prepare_attended_inputs"),),
+        "stages": ("report", "panel"),
+        "tests": (
+            "tests/core/test_attended_preparation.py",
+            "tests/portfolio_ledger/test_hwm_selected_inputs.py",
+        ),
         "sinks": ("report-json-html", "panel-json-html"),
     },
     {
@@ -931,11 +961,22 @@ def _critical_relationships(
             "release.build_ledger",
             "release.build_baseline",
             "stage_current_epoch_manifest",
+            "hwm_inputs.derive_selected_hwm_calendar_authority",
             "capital.build_governed_capital_result",
             "capital.verify_governed_capital_result",
             "release.build_attribution",
         },
         "attended preparation producer route",
+    )
+    _require_local_route_calls(
+        _tree(repo_root, _HWM_SELECTED),
+        "derive_selected_hwm_calendar_authority",
+        {
+            "_selected_hwm_source_rows",
+            "derive_governed_calendar_authority",
+            "validate_governed_hwm_calendar_authority",
+        },
+        "selected-source calendar derivation route",
     )
     _require_local_route_calls(
         preparation_tree,
@@ -1174,6 +1215,11 @@ def _critical_relationships(
             "caller": "tools.portfolio_attended_preparation.prepare_attended_inputs",
             "callee": "quant_engine.portfolio_ledger.hwm_governed_execution.compute_governed_as_held_composite_hwm",
             "kind": "governed-hwm-producer",
+        },
+        {
+            "caller": "tools.portfolio_attended_preparation.prepare_attended_inputs",
+            "callee": "tools.portfolio_hwm_selected_inputs.derive_selected_hwm_calendar_authority",
+            "kind": "selected-source-calendar-producer",
         },
         {
             "caller": "tools.portfolio_attended_preparation.prepare_attended_inputs",
