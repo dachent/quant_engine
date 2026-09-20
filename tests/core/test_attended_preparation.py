@@ -979,6 +979,7 @@ def test_epoch_checkpoint_rejects_stale_cutoff_before_hwm_or_capital(
 
     assert calls["hwm"] == 1
     assert calls["capital"] == 1
+    assert not (output / "preparation" / "checkpoints" / "epoch.json").exists()
 
 
 def test_epoch_leaf_code_change_rebuilds_epoch_and_dependents_only(

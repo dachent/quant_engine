@@ -1484,6 +1484,9 @@ def _prepare_attended_inputs(
         epoch = dict(epoch_checkpoint["epoch"])
         epoch_root = Path(str(epoch_checkpoint["epoch_root"])).resolve()
         recipe_path = Path(str(epoch_checkpoint["recipe_path"])).resolve()
+        _verify_epoch_calculation_cutoff(
+            crosswalk_path=crosswalk, epoch_root=epoch_root, cutoff=cutoff
+        )
     else:
         rebind_current_epoch_crosswalk(
             template_path=_pin(config["epoch_crosswalk_template"], "epoch template"),
@@ -1554,6 +1557,9 @@ def _prepare_attended_inputs(
         epoch_root = (
             root / "stages" / "epoch" / "generations" / str(epoch["generation_id"])
         )
+        _verify_epoch_calculation_cutoff(
+            crosswalk_path=crosswalk, epoch_root=epoch_root, cutoff=cutoff
+        )
         recipe_path = root / "preparation" / "release-recipe.json"
         release.create_recipe(
             provider_ledger_spec=None,
@@ -1597,10 +1603,6 @@ def _prepare_attended_inputs(
                 "recipe_path": recipe_path,
             },
         )
-
-    _verify_epoch_calculation_cutoff(
-        crosswalk_path=crosswalk, epoch_root=epoch_root, cutoff=cutoff
-    )
 
     calendar_path = _pin(config["calendar_authority"], "calendar authority")
     calendar = _read(calendar_path, "calendar authority")
