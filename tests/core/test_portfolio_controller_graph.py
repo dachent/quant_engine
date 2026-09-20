@@ -155,6 +155,60 @@ def test_build_accepts_the_integrated_layered_history_callable_alias() -> None:
     assert validate_controller_graph(REPOSITORY_ROOT, graph)["valid"] is True
 
 
+def test_graph_declares_retained_public_factor_capture_flow() -> None:
+    """The frozen public-factor receipt has its complete supported route."""
+
+    graph = build_controller_graph(REPOSITORY_ROOT)
+    flow = {row["id"]: row for row in graph["artifact_flows"]}[
+        "retained-public-factor-capture"
+    ]
+
+    assert flow["producer"] == [
+        "tools/portfolio_attended_preparation.py",
+        "_retained_public_factor_capture",
+    ]
+    assert flow["artifacts"] == [
+        "inputs/governance/retained-public-factor-capture.json"
+    ]
+    assert flow["consumers"] == [
+        [
+            "tools/portfolio_current_decomposition_plan.py",
+            "_verify_public_factor_manifest",
+        ],
+        [
+            "tools/portfolio_release_builder.py",
+            "_verify_current_plan_upstream_evidence",
+        ],
+        ["tools/portfolio_release_builder.py", "_expected_non_spec_data_age"],
+    ]
+    assert flow["validators"] == [
+        [
+            "tools/portfolio_current_decomposition_plan.py",
+            "_validated_retained_public_factor_capture",
+        ],
+        ["tools/portfolio_release_builder.py", "_retained_public_factor_capture"],
+    ]
+
+
+def test_graph_rejects_removed_retained_public_factor_capture_binding(
+    tmp_path: Path,
+) -> None:
+    """Preparation preflight must retain the public-factor capture binding."""
+
+    root = _isolated_projection_root(tmp_path)
+    _replace_function_literal(
+        root / "tools/portfolio_attended_preparation.py",
+        "_validated_inputs",
+        "_retained_public_factor_capture(",
+        "missing_retained_public_factor_capture(",
+    )
+
+    with pytest.raises(
+        ControllerGraphError, match="retained public factor capture preflight route"
+    ):
+        build_controller_graph(root)
+
+
 @pytest.mark.parametrize(
     ("expected", "replacement"),
     [
