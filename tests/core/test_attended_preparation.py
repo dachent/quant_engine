@@ -16,6 +16,59 @@ import portfolio_attended_preparation as preparation
 import portfolio_pipeline_materialize as materializer
 
 
+@pytest.mark.parametrize("resume", [False, True])
+def test_hwm_policy_admission_precedes_history_and_output_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, resume: bool
+) -> None:
+    """A pinned but unsupported calendar policy fails before preparation work."""
+    import portfolio_invested_capital as capital
+
+    contract = tmp_path / "contract.json"
+    calendar = tmp_path / "calendar.json"
+    selection = tmp_path / "selection.json"
+    contract.write_text("{}", encoding="utf-8")
+    calendar.write_text(json.dumps({"hwm_policy_sha256": "0" * 64}), encoding="utf-8")
+    selection.write_text('{"files":{}}', encoding="utf-8")
+    spec = tmp_path / "spec.json"
+    spec.write_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "financial_data_cutoff": "2026-09-17",
+                "financial_input_contract": preparation._definition(contract),
+                "calendar_authority": preparation._definition(calendar),
+                "source_selection": preparation._definition(selection),
+                "provider_ledger_generation_root": str(tmp_path / "ledger"),
+                "retained_verified_generations": {
+                    "history": {"root": str(tmp_path / "history")}
+                },
+            }
+        )
+    )
+    monkeypatch.setattr(preparation, "_selected_history_authorities", lambda _files: {})
+    monkeypatch.setattr(
+        materializer, "validate_source_phase", lambda **_kwargs: {"status": "PASS"}
+    )
+
+    def history_must_not_start(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("history reached before policy admission")
+
+    monkeypatch.setattr(
+        preparation, "_retained_history_requires_rebuild", history_must_not_start
+    )
+    output = tmp_path / "output"
+    with pytest.raises(capital.CapitalValidationError, match="HWM policy"):
+        preparation.prepare_attended_inputs(
+            preparation_spec_path=spec,
+            output_root=output,
+            requested_as_of="2026-09-17",
+            evaluated_on="2026-09-19",
+            release_commit="a" * 40,
+            resume=resume,
+        )
+    assert not output.exists()
+
+
 def _argv(tmp_path: Path, *, execute: bool = False, resume: bool = False) -> list[str]:
     (tmp_path / "workspace" / "dataPortfolio").mkdir(parents=True, exist_ok=True)
     (tmp_path / "cache").mkdir(exist_ok=True)
@@ -249,6 +302,11 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
 
     monkeypatch.setattr(preparation, "_pins", lambda *_args: None)
     monkeypatch.setattr(preparation, "_pin", fake_pin)
+    # This test isolates history-authority forwarding; policy admission has
+    # its own actual-reader rejection regression above.
+    monkeypatch.setattr(
+        preparation, "_validate_hwm_authority_inputs", lambda _config: None
+    )
     monkeypatch.setattr(
         materializer, "validate_source_phase", lambda **_kwargs: source_phase
     )
