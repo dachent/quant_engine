@@ -208,12 +208,12 @@ def test_rebind_honors_selected_cutoff_without_mutating_old_template(
         calculation_cutoff_date="2026-09-17",
     )
 
-    assert json.loads(output.read_text(encoding="utf-8"))["calculation_cutoff_date"] == (
-        "2026-09-17"
-    )
-    assert json.loads(template_path.read_text(encoding="utf-8"))["calculation_cutoff_date"] == (
-        "2026-09-02"
-    )
+    assert json.loads(output.read_text(encoding="utf-8"))[
+        "calculation_cutoff_date"
+    ] == ("2026-09-17")
+    assert json.loads(template_path.read_text(encoding="utf-8"))[
+        "calculation_cutoff_date"
+    ] == ("2026-09-02")
 
 
 @pytest.mark.parametrize("selected", ["2026-09-18", "2026-9-17"])

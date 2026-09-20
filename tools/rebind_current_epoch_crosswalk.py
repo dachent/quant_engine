@@ -404,9 +404,7 @@ def rebind_current_epoch_crosswalk(
 
     template = _object_from_path(template_path, "explicit crosswalk")
     baseline, binding = _baseline_binding(baseline_generation_dir)
-    candidate = _candidate_payload(
-        template, baseline, binding, calculation_cutoff_date
-    )
+    candidate = _candidate_payload(template, baseline, binding, calculation_cutoff_date)
     _write_new(output_path, candidate)
     return {
         "baseline_generation_id": binding["generation_id"],
