@@ -2281,3 +2281,35 @@ def test_factor_blank_after_target_scope_still_stops_a_bucket_that_bridges_it(
         match=f"factor anchor {days[105].isoformat()} has incomplete selected components",
     ):
         decomposition.build_decomposition(spec_path, source)
+
+
+def test_factor_blank_on_a_target_non_session_day_inside_scope_stops_the_model(
+    tmp_path: Path,
+) -> None:
+    """Excluding an anchor must not hide a gap the complete-anchor path would refuse.
+
+    Here no carried label falls at or before the hole, so the bucket-bridging test
+    alone accepts it -- but with the anchor present its bucket would have no admitted
+    target labels and be refused. Dropping the anchor must not buy admission.
+    """
+    hole = 60
+    source = tmp_path / "source"
+    target_path, days = _write_sources(
+        source,
+        blank_factor="F2",
+        blank_factor_rows=(hole,),
+    )
+    sessions = [day for index, day in enumerate(days) if index != hole]
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(
+            [rows[0], *(row for row in rows[1:] if row[1] != days[hole].isoformat())]
+        )
+
+    spec_path = _spec(source, target_path, sessions, models=[_model(sessions)])
+
+    with pytest.raises(
+        decomposition.DecompositionError,
+        match=f"factor anchor {days[hole].isoformat()} has incomplete selected components",
+    ):
+        decomposition.build_decomposition(spec_path, source)

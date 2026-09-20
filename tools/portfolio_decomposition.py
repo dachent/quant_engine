@@ -3100,6 +3100,23 @@ def _factor_anchor_observations(
         raise DecompositionError("target source contains a duplicate date")
     target_scope_start = min(target_by_day) if target_by_day else None
     target_scope_end = max(target_by_day) if target_by_day else None
+    # Excluding an anchor is only equivalent to the factor source starting later.  An
+    # excluded anchor inside target scope is not: with the anchor present the bucket it
+    # bounds would be judged on its own admitted labels, and dropping it can hide a
+    # target-side gap the complete-anchor path refuses.  Stop instead.
+    internal_incomplete = [
+        observed
+        for observed in incomplete_anchors
+        if observed > anchors[0]
+        and target_scope_start is not None
+        and target_scope_end is not None
+        and target_scope_start <= observed <= target_scope_end
+    ]
+    if internal_incomplete:
+        raise DecompositionError(
+            "factor anchor "
+            f"{internal_incomplete[0].isoformat()} has incomplete selected components"
+        )
     if policy.target_calendar == "CALENDAR_DAY_24_7" and any(
         row.return_type != "TOTAL" for row in usable_rows
     ):
@@ -4008,6 +4025,16 @@ def _select_models(
         ]
         selections.append(
             {
+                # Candidates of one series need not share a fitted sample: a component
+                # absent before its own inception bounds only the models that select it.
+                # The parsimony comparison below therefore spans unequal samples, so the
+                # sizes it ranked are recorded rather than left for a reader to infer.
+                "candidate_train_observations": {
+                    cast(str, item[0]["model_id"]): cast(
+                        dict[str, Any], item[0]["coverage"]
+                    )["train_observations"]
+                    for item in computable
+                },
                 "factor_count": len(cast(list[object], selected["factor_ids"])),
                 "holdout_predicted_r_squared": holdout["predicted_r_squared"],
                 "model_id": selected["model_id"],
