@@ -2698,22 +2698,36 @@ def _build_qsi_refresh_bundle(
         }
     )
     receipt = {
-        "schema_version": 1,
+        # 2: locator-free. Version 1 carried absolute paths for the predecessor and every
+        # source, which a portable artifact must not, and a portable verifier could not
+        # check the admitted rows at all.
+        "schema_version": 2,
         "revision_kind": "OWNER_SELECTED_CURRENT_QSI_ARCHIVE_REVISION",
         "accepted_predecessor": {
             "bundle_id": seed["bundle_id"],
             "accepted_strategy_version": seed_qsi["strategy_version"],
-            "manifest_path": retained_manifest_path.resolve().as_posix(),
             "manifest_sha256": hashlib.sha256(seed_content).hexdigest(),
             "manifest_size_bytes": len(seed_content),
-            "returns_path": retained_returns_path.resolve().as_posix(),
             "returns_sha256": hashlib.sha256(seed_returns).hexdigest(),
             "returns_size_bytes": len(seed_returns),
+            # The seed's staged generation identity, recorded here because a portable
+            # verifier holds neither the seed bytes nor a path to them. The contract pins
+            # the id, digest and as_of independently, so only the size is attested.
+            **_seed_generation_identity(seed_content, seed_returns),
         },
+        # Identity without locator: filename, digest and size.  The locators live in a
+        # local, unhashed sidecar that only the producer reads, because this receipt is
+        # embedded in a portable artifact and travels to machines that have never seen
+        # this filesystem.
         "sources": [
-            {**_source_identity(path, source_id), "path": path.resolve().as_posix()}
+            _source_identity(path, source_id)
             for source_id, path in sorted(paths.items())
         ],
+        # A portable verifier cannot re-derive the admitted rows from archives it does not
+        # have. Without this digest a mutated QSI return leaves count, start and end
+        # unchanged and nothing hash-bound disagrees, so re-hashing a tampered bundle would
+        # buy admission. This is the row-level anchor that closes that.
+        "admitted_rows_sha256": _admitted_rows_digest(admitted),
         "observation_strategy_version": definition["strategy_version"],
         "live_inception": boundary,
         "financial_cutoff": accepted_as_of.isoformat(),
@@ -2755,39 +2769,89 @@ def _build_qsi_refresh_bundle(
     return returns_content, canonical_json_bytes(manifest)
 
 
+def _seed_generation_identity(
+    seed_content: bytes, seed_returns: bytes
+) -> dict[str, Any]:
+    """Identify the staged generation the accepted seed produces.
+
+    The consumer previously rebuilt this from the seed bytes, which it reached through an
+    absolute path in the receipt. A portable verifier has neither, so the producer records
+    the identity and the contract's `current_generation` pins the id, digest and as_of.
+    """
+
+    import portfolio_strategy_backtests as backtests
+
+    _, _, generation, _ = backtests._build_from_contents(seed_content, seed_returns)
+    manifest_bytes = generation.to_json_bytes()
+    return {
+        "accepted_generation_id": generation.generation_id,
+        "accepted_generation_as_of": generation.as_of_date.isoformat(),
+        "accepted_generation_manifest_sha256": hashlib.sha256(
+            manifest_bytes
+        ).hexdigest(),
+        "accepted_generation_manifest_size_bytes": len(manifest_bytes),
+    }
+
+
+def _admitted_rows_digest(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Digest the admitted rows exactly as the bundle serializes them.
+
+    RETURN_FIELDS and the correlation view's field order are the same tuple, so a portable
+    reader can reproduce this from the rows it already holds without the raw archives.
+    """
+
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(output, fieldnames=RETURN_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    writer.writerows(sorted(rows, key=lambda row: (row["series_id"], row["date"])))
+    return hashlib.sha256(output.getvalue().encode("utf-8")).hexdigest()
+
+
 def verify_qsi_refresh_bundle(
     manifest_path: Path | bytes,
     returns_path: Path | bytes | None = None,
+    *,
+    sources: Mapping[str, Path],
+    seed_manifest_path: Path,
+    seed_returns_path: Path,
 ) -> dict[str, Any]:
-    """Replay source QC and compare every byte; return the proven raw rows.
+    """Replay source QC from the archives and compare every byte.
 
-    An independent layered reader may supply its embedded manifest bytes. The
-    reconstructed returns must match that manifest even without a raw CSV path.
+    This is the producer-side proof and it requires the archives. The receipt no longer
+    carries locators -- it is embedded in a portable artifact -- so the caller supplies
+    them, from the sidecar written beside the bundle. A portable reader without the
+    archives cannot run this and must not pretend to: it verifies the recorded hash chain
+    and the admitted-row digest instead, which is strictly less and is stated as such.
+
     A VERIFIED label or a newly self-consistent bundle hash is never sufficient.
     """
     content = _bundle_bytes(manifest_path)
     try:
         manifest = json.loads(content)
         receipt = manifest["qsi_source_revision"]
+        if receipt.get("schema_version") != 2:
+            raise StrategyHistoryError("QSI refresh receipt schema is unsupported")
         predecessor = receipt["accepted_predecessor"]
-        seed_manifest = Path(predecessor["manifest_path"])
-        seed_returns = Path(predecessor["returns_path"])
+        seed_manifest = Path(seed_manifest_path)
+        seed_returns = Path(seed_returns_path)
         for path, prefix in ((seed_manifest, "manifest"), (seed_returns, "returns")):
             if _sha256(path) != (
                 predecessor[f"{prefix}_sha256"],
                 predecessor[f"{prefix}_size_bytes"],
             ):
                 raise StrategyHistoryError("QSI refresh predecessor artifact differs")
-        sources = {item["source_id"]: item for item in receipt["sources"]}
-        for source in sources.values():
-            if _sha256(Path(source["path"])) != (
+        recorded = {item["source_id"]: item for item in receipt["sources"]}
+        if set(recorded) != set(sources):
+            raise StrategyHistoryError("QSI refresh source set differs")
+        for source_id, source in recorded.items():
+            if _sha256(sources[source_id]) != (
                 source["sha256"],
                 source["size_bytes"],
             ):
                 raise StrategyHistoryError("QSI refresh source artifact differs")
         prices = [
-            Path(item["path"]).parent
-            for key, item in sources.items()
+            sources[key].parent
+            for key in recorded
             if key.startswith("qsi-price-history-")
         ]
         if not prices or len(set(prices)) != 1:
@@ -2795,15 +2859,13 @@ def verify_qsi_refresh_bundle(
         rebuilt_returns, rebuilt_manifest = _build_qsi_refresh_bundle(
             retained_manifest_path=seed_manifest,
             retained_returns_path=seed_returns,
-            qsi_subscription_archive=Path(
-                sources["qsi-paid-subscription-archive"]["path"]
-            ),
-            qsi_current_subscription_archive=Path(
-                sources["qsi-current-paid-subscription-archive"]["path"]
-            ),
-            qsi_appendix_workbook=Path(sources["qsi-current-3x-appendix"]["path"]),
+            qsi_subscription_archive=sources["qsi-paid-subscription-archive"],
+            qsi_current_subscription_archive=sources[
+                "qsi-current-paid-subscription-archive"
+            ],
+            qsi_appendix_workbook=sources["qsi-current-3x-appendix"],
             qsi_price_root=prices[0],
-            price_extension_json=Path(sources["qsi-yahoo-price-extension"]["path"]),
+            price_extension_json=sources["qsi-yahoo-price-extension"],
             as_of_date=receipt["financial_cutoff"],
         )
     except (
@@ -2849,7 +2911,41 @@ def write_qsi_refresh_bundle(
         price_extension_json=price_extension_json,
         as_of_date=as_of_date,
     )
-    return _write_bundle_contents(output_root, returns_content, manifest_content)
+    result = _write_bundle_contents(output_root, returns_content, manifest_content)
+    # The receipt is embedded in a portable artifact and must not name this filesystem, but
+    # the producer-side verifier still needs the archives. The locators therefore live here,
+    # beside the bundle, unhashed and not embedded: staging copies only the manifest and the
+    # returns, so this never travels.
+    sources = {
+        "qsi-paid-subscription-archive": qsi_subscription_archive,
+        "qsi-current-paid-subscription-archive": qsi_current_subscription_archive,
+        "qsi-current-3x-appendix": qsi_appendix_workbook,
+        "qsi-yahoo-price-extension": price_extension_json,
+    }
+    manifest = json.loads(manifest_content)
+    for item in manifest["qsi_source_revision"]["sources"]:
+        source_id = item["source_id"]
+        if source_id.startswith("qsi-price-history-"):
+            sources[source_id] = qsi_price_root / item["filename"]
+    sidecar = Path(str(result["destination"])) / "sources.local.json"
+    _write_exact(
+        sidecar,
+        canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "bundle_id": manifest["bundle_id"],
+                "accepted_predecessor": {
+                    "manifest_path": str(retained_manifest_path.resolve()),
+                    "returns_path": str(retained_returns_path.resolve()),
+                },
+                "sources": {
+                    source_id: str(path.resolve())
+                    for source_id, path in sorted(sources.items())
+                },
+            }
+        ),
+    )
+    return {**result, "sources_local": str(sidecar)}
 
 
 def _write_exact(path: Path, content: bytes) -> None:

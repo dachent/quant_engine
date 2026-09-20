@@ -10,6 +10,8 @@ import sys
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
+
+from quant_engine.core.contracts import assert_no_absolute_locators
 import pyarrow as pa
 import pyarrow.parquet as pq
 import xlsxwriter
@@ -637,6 +639,28 @@ def test_qsi_current_archive_is_newer_overlap_authority(tmp_path: Path) -> None:
     assert revision["max_abs_return_revision"] == pytest.approx(0.001)
 
 
+def _verify_refreshed(
+    bundle_root: Path,
+    *,
+    manifest: object | None = None,
+    returns: object | None = None,
+) -> dict[str, object]:
+    """Verify a refresh bundle using the locators its producer wrote beside it.
+
+    The receipt no longer carries paths -- it is embedded in a portable artifact -- so the
+    producer records them in an unhashed sidecar and the producer-side verifier is handed
+    them. Reading the sidecar here also exercises it.
+    """
+    sidecar = json.loads((bundle_root / "sources.local.json").read_bytes())
+    return history.verify_qsi_refresh_bundle(
+        manifest if manifest is not None else bundle_root / "manifest.json",
+        returns if returns is not None else bundle_root / "returns.csv",
+        sources={key: Path(value) for key, value in sidecar["sources"].items()},
+        seed_manifest_path=Path(sidecar["accepted_predecessor"]["manifest_path"]),
+        seed_returns_path=Path(sidecar["accepted_predecessor"]["returns_path"]),
+    )
+
+
 def test_qsi_refresh_replaces_only_pre_live_qsi_and_rejects_a_tampered_seed(
     tmp_path: Path,
 ) -> None:
@@ -693,7 +717,17 @@ def test_qsi_refresh_replaces_only_pre_live_qsi_and_rejects_a_tampered_seed(
         )
     )
 
-    assert manifest["qsi_source_revision"]["schema_version"] == 1
+    assert manifest["qsi_source_revision"]["schema_version"] == 2
+    # The receipt is embedded in a portable artifact, so no value in it may name a path
+    # only this machine can resolve. Asserted structurally rather than by token, because
+    # the original guard's token list had no /tmp/ and so passed on Linux exactly when the
+    # leak escaped detection.
+    assert_no_absolute_locators(
+        manifest["qsi_source_revision"], field_name="qsi refresh receipt"
+    )
+    sidecar = json.loads((refreshed_path / "sources.local.json").read_bytes())
+    assert sidecar["bundle_id"] == manifest["bundle_id"]
+    assert Path(sidecar["accepted_predecessor"]["manifest_path"]).is_absolute()
     assert (
         manifest["qsi_source_revision"]["accepted_predecessor"]["bundle_id"]
         == retained["bundle_id"]
@@ -723,12 +757,7 @@ def test_qsi_refresh_replaces_only_pre_live_qsi_and_rejects_a_tampered_seed(
     for row in weekly:
         compounded *= 1 + history.Decimal(row["return"])
     assert float(compounded - 1) == pytest.approx(0.012, abs=1e-12)
-    assert (
-        history.verify_qsi_refresh_bundle(
-            refreshed_path / "manifest.json", refreshed_path / "returns.csv"
-        )["bundle_id"]
-        == refreshed["bundle_id"]
-    )
+    assert _verify_refreshed(refreshed_path)["bundle_id"] == refreshed["bundle_id"]
 
     tampered = json.loads(
         (refreshed_path / "manifest.json").read_text(encoding="utf-8")
@@ -741,7 +770,7 @@ def test_qsi_refresh_replaces_only_pre_live_qsi_and_rejects_a_tampered_seed(
     tampered_path = tmp_path / "tampered-manifest.json"
     tampered_path.write_bytes(history.canonical_json_bytes(tampered))
     with pytest.raises(history.StrategyHistoryError, match="QSI refresh predecessor"):
-        history.verify_qsi_refresh_bundle(tampered_path, refreshed_path / "returns.csv")
+        _verify_refreshed(refreshed_path, manifest=tampered_path)
 
 
 @pytest.mark.parametrize(
@@ -838,8 +867,10 @@ def test_qsi_refresh_rejects_rehashed_forgery(tmp_path: Path, mutation: str) -> 
         history.canonical_json_bytes(manifest)
     ).hexdigest()
     with pytest.raises(history.StrategyHistoryError):
-        history.verify_qsi_refresh_bundle(
-            history.canonical_json_bytes(manifest), content
+        _verify_refreshed(
+            refreshed,
+            manifest=history.canonical_json_bytes(manifest),
+            returns=content,
         )
 
 
@@ -883,10 +914,7 @@ def test_qsi_refresh_cli_does_not_require_unrelated_sources(
     )
     result = json.loads(capsys.readouterr().out)
     assert (
-        history.verify_qsi_refresh_bundle(
-            Path(result["destination"]) / "manifest.json",
-            Path(result["destination"]) / "returns.csv",
-        )["bundle_id"]
+        _verify_refreshed(Path(result["destination"]))["bundle_id"]
         == result["bundle_id"]
     )
 

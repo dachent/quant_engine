@@ -4031,24 +4031,75 @@ def _strategies_without_a_backtest_layer(
     return without
 
 
+def _assert_admitted_rows_digest(
+    *, segments: Sequence[Mapping[str, Any]], receipt: Mapping[str, Any]
+) -> None:
+    """Check the materialized QSI backtest rows against the producer's row digest.
+
+    The bundle serializes its admitted rows on RETURN_FIELDS, which is the same tuple as
+    CORRELATION_FIELDS_V2, so a reader holding only the layered generation can reproduce the
+    exact bytes the producer hashed. Segment rows carry the accepted strategy version, so
+    the observation version from the receipt is restored before hashing.
+    """
+
+    declared = receipt.get("admitted_rows_sha256")
+    if not isinstance(declared, str):
+        raise TargetSeriesError("QSI source revision admitted row digest is absent")
+    admitted = [
+        {
+            "series_id": "QSI",
+            "date": row["date"],
+            "return": row["return"],
+            "evidence_layer": row["evidence_layer"],
+            "strategy_version": receipt["observation_strategy_version"],
+        }
+        for row in segments
+        if row.get("segment_id") == "qsi:backtest"
+    ]
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        output, fieldnames=CORRELATION_FIELDS_V2, lineterminator="\n"
+    )
+    writer.writeheader()
+    writer.writerows(sorted(admitted, key=lambda row: (row["series_id"], row["date"])))
+    actual = hashlib.sha256(output.getvalue().encode("utf-8")).hexdigest()
+    if actual != declared:
+        raise TargetSeriesError(
+            "QSI source revision admitted rows differ from the attested digest"
+        )
+
+
 def _qsi_source_revision_admission(
     *,
     bundle_content: bytes,
     staged_content: bytes | None,
     contract: Mapping[str, Any],
     accepted_as_of: date,
-) -> tuple[dict[str, Any], list[dict[str, str]]] | None:
-    """Replay the QSI revision against the unchanged accepted contract seed.
+    sources_path: Path | None = None,
+) -> tuple[dict[str, Any], list[dict[str, str]] | None] | None:
+    """Admit the QSI revision against the unchanged accepted contract seed.
 
-    Recreating a staging manifest does not recalculate any retained history.
-    Its exact hash binds the predecessor bundle to the contract's generation.
-    The current staging manifest must likewise contain this exact new bundle.
+    Two modes, because the two callers have different evidence available and pretending
+    otherwise is what put absolute locators into a portable artifact.
+
+    The PRODUCER holds the archives, so `sources_path` names the sidecar written beside the
+    bundle and the revision is re-derived from the raw sources and compared byte for byte.
+    That is the revision's external anchor and it happens before the generation exists.
+
+    The PORTABLE VERIFIER holds only retained bytes. It proves the receipt's hash chain, the
+    admitted-row digest and the contract's accepted-seed pins. It does NOT prove the revised
+    rows derive from the archives; only the producer proves that, and the docstring says so
+    rather than implying a strength the verifier does not have.
     """
     bundle = json.loads(bundle_content)
     if "qsi_source_revision" not in bundle:
         return None
     if staged_content is None:
         raise TargetSeriesError("QSI source revision requires its staged generation")
+    receipt = bundle["qsi_source_revision"]
+    if receipt.get("schema_version") != 2:
+        raise TargetSeriesError("QSI source revision receipt schema is unsupported")
+    predecessor = receipt["accepted_predecessor"]
     modules = {}
     for name in ("portfolio_strategy_history", "portfolio_strategy_backtests"):
         spec = importlib.util.spec_from_file_location(
@@ -4061,25 +4112,39 @@ def _qsi_source_revision_admission(
         modules[name] = module
     history = modules["portfolio_strategy_history"]
     backtests = modules["portfolio_strategy_backtests"]
+    rows: list[dict[str, str]] | None = None
     try:
-        verified = history.verify_qsi_refresh_bundle(bundle_content)
-        receipt = verified["qsi_source_revision"]
-        predecessor = receipt["accepted_predecessor"]
-        seed_content = Path(predecessor["manifest_path"]).read_bytes()
-        seed_returns = Path(predecessor["returns_path"]).read_bytes()
-        _, _, seed_generation, _ = backtests._build_from_contents(
-            seed_content, seed_returns
-        )
-        current_returns = _correlation_view_bytes(verified["rows"])
-        _, _, current_generation, _ = backtests._build_from_contents(
-            bundle_content, current_returns
-        )
+        if sources_path is not None:
+            sidecar = json.loads(Path(sources_path).read_bytes())
+            if sidecar.get("bundle_id") != bundle["bundle_id"]:
+                raise TargetSeriesError(
+                    "QSI refresh source sidecar names another bundle"
+                )
+            verified = history.verify_qsi_refresh_bundle(
+                bundle_content,
+                sources={key: Path(value) for key, value in sidecar["sources"].items()},
+                seed_manifest_path=Path(
+                    sidecar["accepted_predecessor"]["manifest_path"]
+                ),
+                seed_returns_path=Path(sidecar["accepted_predecessor"]["returns_path"]),
+            )
+            receipt = verified["qsi_source_revision"]
+            predecessor = receipt["accepted_predecessor"]
+            rows = cast(list[dict[str, str]], verified["rows"])
+            current_returns = _correlation_view_bytes(rows)
+        else:
+            current_returns = None
+        if current_returns is not None:
+            _, _, current_generation, _ = backtests._build_from_contents(
+                bundle_content, current_returns
+            )
+            if current_generation.to_json_bytes() != staged_content:
+                raise TargetSeriesError("QSI source revision staged generation differs")
     except (OSError, ValueError, KeyError, TypeError) as exc:
         raise TargetSeriesError(
             f"QSI source revision verification failed: {exc}"
         ) from exc
-    seed_bytes = seed_generation.to_json_bytes()
-    seed_sha = hashlib.sha256(seed_bytes).hexdigest()
+    seed_sha = predecessor["accepted_generation_manifest_sha256"]
     seed_source = next(
         source
         for source in contract["source_segments"]
@@ -4091,9 +4156,9 @@ def _qsi_source_revision_admission(
     current = seed_source.get("current_generation", {})
     if (
         (
-            seed_generation.generation_id,
+            predecessor["accepted_generation_id"],
             seed_sha,
-            seed_generation.as_of_date.isoformat(),
+            predecessor["accepted_generation_as_of"],
         )
         != (current.get("generation_id"), current.get("sha256"), current.get("as_of"))
         or _contract_version(strategy)
@@ -4104,8 +4169,23 @@ def _qsi_source_revision_admission(
         raise TargetSeriesError("QSI source revision accepted contract seed differs")
     if receipt["financial_cutoff"] != accepted_as_of.isoformat():
         raise TargetSeriesError("QSI source revision financial cutoff differs")
-    if current_generation.to_json_bytes() != staged_content:
+    staged_generation = GenerationManifest.from_json_bytes(staged_content)
+    staged_artifacts = {item.artifact_id: item for item in staged_generation.artifacts}
+    bundle_artifact = staged_artifacts.get("raw/strategy-history-manifest.json")
+    if (
+        bundle_artifact is None
+        or bundle_artifact.sha256 != hashlib.sha256(bundle_content).hexdigest()
+        or bundle_artifact.size_bytes != len(bundle_content)
+    ):
         raise TargetSeriesError("QSI source revision staged generation differs")
+    returns_artifact = staged_artifacts.get("returns.csv")
+    declared_returns = bundle["returns_artifact"]
+    if (
+        returns_artifact is None
+        or returns_artifact.sha256 != declared_returns["sha256"]
+        or returns_artifact.size_bytes != declared_returns["size_bytes"]
+    ):
+        raise TargetSeriesError("QSI source revision staged returns differ")
     proof = {
         "schema_version": 1,
         "revision_kind": receipt["revision_kind"],
@@ -4113,17 +4193,19 @@ def _qsi_source_revision_admission(
         "accepted_strategy_version": predecessor["accepted_strategy_version"],
         "observation_strategy_version": receipt["observation_strategy_version"],
         "accepted_bundle_id": predecessor["bundle_id"],
-        "accepted_generation_id": seed_generation.generation_id,
+        "accepted_generation_id": predecessor["accepted_generation_id"],
         "accepted_generation_manifest_sha256": seed_sha,
-        "accepted_generation_manifest_size_bytes": len(seed_bytes),
-        "bundle_id": verified["bundle_id"],
-        "generation_id": current_generation.generation_id,
+        "accepted_generation_manifest_size_bytes": predecessor[
+            "accepted_generation_manifest_size_bytes"
+        ],
+        "bundle_id": bundle["bundle_id"],
+        "generation_id": staged_generation.generation_id,
         "generation_manifest_sha256": hashlib.sha256(staged_content).hexdigest(),
         "generation_manifest_size_bytes": len(staged_content),
         "live_inception": receipt["live_inception"],
         "financial_cutoff": receipt["financial_cutoff"],
     }
-    return proof, cast(list[dict[str, str]], verified["rows"])
+    return proof, rows
 
 
 def _qsi_revision_sources(
@@ -4989,6 +5071,14 @@ def build_layered_history_generation(
         manifest_path=strategy_history_manifest_path,
         returns_path=strategy_history_returns_path,
     )
+    # The producer holds the archives, so it re-derives the revision rather than trusting
+    # the receipt. The locators come from the sidecar beside the bundle, never from the
+    # receipt, which is embedded in a portable artifact.
+    qsi_refresh_sidecar = (
+        strategy_history_manifest_path.with_name("sources.local.json")
+        if strategy_history_manifest_path is not None
+        else None
+    )
     qsi_revision = (
         _qsi_source_revision_admission(
             bundle_content=strategy_history_manifest_path.read_bytes(),
@@ -4999,6 +5089,11 @@ def build_layered_history_generation(
             ),
             contract=contract,
             accepted_as_of=accepted_as_of,
+            sources_path=(
+                qsi_refresh_sidecar
+                if qsi_refresh_sidecar is not None and qsi_refresh_sidecar.is_file()
+                else None
+            ),
         )
         if strategy_history_manifest_path is not None
         else None
@@ -6842,9 +6937,24 @@ def validate_layered_history_generation(
     )
     if qsi_revision is not None:
         proof, raw_rows = qsi_revision
+        if raw_rows is None:
+            # Portable verification: the archives are absent, so the revised rows cannot be
+            # re-derived. Without a row-level anchor a mutated backtest return would leave
+            # count, start and end unchanged and nothing hash-bound would disagree, so
+            # re-hashing a tampered bundle would buy admission. The producer's
+            # admitted_rows_sha256 is that anchor, and it is checked against the rows that
+            # actually materialized here.
+            _assert_admitted_rows_digest(
+                segments=segments,
+                receipt=json.loads(raw_source_manifests["strategy-history"])[
+                    "qsi_source_revision"
+                ],
+            )
         expected_backtests: list[dict[str, str]] = []
         calendar, frequency = _source_temporal(sources["strategy-backtests"])
         for strategy_id, strategy in strategies.items():
+            if raw_rows is None:
+                continue
             selected = [
                 row
                 for row in raw_rows
@@ -6876,7 +6986,10 @@ def validate_layered_history_generation(
         actual_backtests = [
             row for row in segments if row["source_id"] == "strategy-backtests"
         ]
-        if sorted(
+        # Only the producer can compare against a reconstruction, because only the producer
+        # re-derived one. The portable verifier has already checked the attested row digest
+        # above; comparing against an empty reconstruction would fail every generation.
+        if raw_rows is not None and sorted(
             actual_backtests, key=lambda row: (row["strategy_id"], row["date"])
         ) != sorted(
             expected_backtests, key=lambda row: (row["strategy_id"], row["date"])
