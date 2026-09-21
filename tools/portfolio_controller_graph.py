@@ -96,11 +96,19 @@ _PATH_STAGES = {
     _CORRELATION: ["analytics", "report", "panel"],
     # Consumed only by the panel, which reads its weekly series.
     "tools/portfolio_weekly_returns.py": ["panel"],
-    # An audit tool: no producer imports it and it writes no delivery artifact,
-    # so a change to it affects no stage. Declared rather than omitted, because
-    # an omitted `tools/` path raises "unmapped relevant production change"
-    # instead of being treated as harmless.
+    # Audit, guard and CI tooling. None of these is imported by a producer and
+    # none writes a delivery artifact, so a change to any of them affects no
+    # stage. They are declared rather than omitted because an omitted `tools/`
+    # path raises "unmapped relevant production change" instead of being
+    # treated as harmless -- two of these tripped that gate during the #374
+    # integration, one of them on a pure type-annotation change.
+    "tools/check_gitleaks_suppressions.py": [],
+    "tools/check_push_policy.py": [],
+    "tools/check_repository_boundary.py": [],
     "tools/check_retained_authority_pins.py": [],
+    "tools/codex_scope_guard.py": [],
+    "tools/issue_guard.py": [],
+    "tools/merge_readiness.py": [],
     _PREPARATION: list(_STAGE_ORDER),
     _SOURCE_CONTRACT: list(_STAGE_ORDER),
     _SOURCE_SCHEMA: list(_STAGE_ORDER),
