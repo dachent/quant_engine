@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from datetime import date
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
+from quant_engine.core import SourceArtifact
 from quant_engine.schwab.generation import _transactions
 from tools.schwab_transaction_capture import (
     AccountTarget,
@@ -110,6 +113,17 @@ def test_capture_paginates_to_null_and_emits_parser_input(tmp_path: Path) -> Non
     normalized, reconciliations = _transactions(
         [("account-0123456789abcdef", wch_path)],
         [("account-0123456789abcdef", manual_path)],
+        journal_source_artifacts={
+            "account-0123456789abcdef": SourceArtifact(
+                artifact_id="source/wch/transactions.json",
+                sha256=hashlib.sha256(wch_path.read_bytes()).hexdigest(),
+                size_bytes=wch_path.stat().st_size,
+                as_of_date=date(2026, 9, 5),
+                schema_name="schwab-wch-transactions",
+                schema_version="1",
+            )
+        },
+        suffix_to_internal={},
     )
     assert len(normalized) == 2
     assert reconciliations == [

@@ -8985,6 +8985,7 @@ def _panel_data(
         "strategy_underwriting": strategy_underwriting,
         "hwm_summary": hwm_summary,
         "hybrid_mode_gate": hybrid_mode_gate,
+        "leverage_disclosures": list(report["leverage_disclosures"]),
         "weekly_returns": accepted_weekly_returns,
     }
     if portable_hwm_proof is not None:

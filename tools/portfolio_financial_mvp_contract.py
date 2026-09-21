@@ -107,16 +107,6 @@ REQUIRED_PROVIDER_SOURCE_IDS: Final = frozenset(
         "schwab-account-generation",
     }
 )
-# Deferred by owner ruling under issue #396: declared by no segment until a
-# provider can materialize them. `_DATA_CLASS_ADMISSION_FACT` still maps them,
-# so re-adding a class needs only its producer and this set.
-DEFERRED_LEVERAGE_CLASSES: Final = frozenset(
-    {
-        "FINANCING_COST",
-        "FINANCING_LIABILITY",
-        "LEVERAGE_EXPOSURE",
-    }
-)
 REQUIRED_ACCOUNT_PROVIDER_SOURCE_IDS: Final = frozenset(
     {
         "alpaca-account-generation",
@@ -5352,16 +5342,6 @@ def _validate_sources(
         if not classes:
             raise FinancialMvpContractError(
                 f"source segment has no data class: {source_id}"
-            )
-        # Issue #396 defers the leverage facts by owner ruling: no provider has
-        # a materialization path for them, so declaring one would only restore
-        # REQUIRED_DATA_CLASS_NOT_MATERIALIZED and block execution again.
-        # Re-adding a class belongs with its producer, in the same change.
-        deferred_leverage_classes = DEFERRED_LEVERAGE_CLASSES & set(classes)
-        if deferred_leverage_classes:
-            raise FinancialMvpContractError(
-                f"source declares leverage facts deferred by issue 396: "
-                f"{source_id}: {sorted(deferred_leverage_classes)}"
             )
         data_classes.update(classes)
         subjects = _object(row["subjects"], "source_segment.subjects")

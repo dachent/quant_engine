@@ -154,6 +154,7 @@ SHEET_NAMES: Final = (
     "Strategy Summary",
     "Positions",
     "Transactions and Flows",
+    "Leverage Disclosures",
     "TWR MWR",
     "Allocation History",
     "Flow Reconciliation",
@@ -170,6 +171,7 @@ TABLE_NAMES: Final = (
     "tblStrategies",
     "tblPositions",
     "tblTransactionsFlows",
+    "tblLeverageDisclosures",
     "tblTwrMwr",
     "tblAllocations",
     "tblFlowRecon",
@@ -237,6 +239,18 @@ WORKBOOK_TABLE_SPECS: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] =
         "transactions_and_flows",
         "tblTransactionsFlows",
         ("record_id",),
+    ),
+    (
+        "Leverage Disclosures",
+        "leverage_disclosures",
+        "tblLeverageDisclosures",
+        (
+            "provider_id",
+            "account_id",
+            "data_class",
+            "measurement_basis",
+            "coverage_status",
+        ),
     ),
     (
         "TWR MWR",
@@ -4030,11 +4044,12 @@ def _corrections(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda item: str(item["correction_id"]))
 
 
-def _provider_ledger_exceptions(
+def _selected_provider_ledger_catalog(
     catalog: Mapping[str, Any],
     baseline_root: Path,
     provider_ledger_root: Path | None = None,
-) -> list[dict[str, Any]]:
+) -> tuple[Mapping[str, Any], Mapping[str, Any], str, str]:
+    """Load the sole provider ledger catalog bound by the baseline artifact hash."""
     references = [
         item
         for item in _objects(catalog.get("source_artifacts"), "source_artifacts")
@@ -4042,7 +4057,9 @@ def _provider_ledger_exceptions(
         and item.get("schema_name") == "provider-ledger-catalog"
     ]
     if not references:
-        return []
+        raise ReportValidationError(
+            "baseline provider-ledger catalog reference is absent"
+        )
     if len(references) != 1:
         raise ReportValidationError(
             "baseline provider-ledger catalog reference is ambiguous"
@@ -4073,6 +4090,25 @@ def _provider_ledger_exceptions(
     ):
         raise ReportValidationError("provider-ledger generation identity is invalid")
     provider_catalog = _load_json(path, "provider-ledger catalog")
+    return reference, provider_catalog, generation_id, observed_sha256
+
+
+def _provider_ledger_exceptions(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    references = [
+        item
+        for item in _objects(catalog.get("source_artifacts"), "source_artifacts")
+        if item.get("source_key") == "provider-ledger-generation"
+        and item.get("schema_name") == "provider-ledger-catalog"
+    ]
+    if not references:
+        return []
+    reference, provider_catalog, generation_id, observed_sha256 = (
+        _selected_provider_ledger_catalog(catalog, baseline_root, provider_ledger_root)
+    )
     exceptions = [
         item
         for item in _objects(
@@ -4099,6 +4135,139 @@ def _provider_ledger_exceptions(
         }
         for item in exceptions
     ]
+
+
+_LEVERAGE_DISCLOSURE_FACTS: Final[tuple[tuple[str, str], ...]] = (
+    ("FINANCING_COST", "financing_cost_observations"),
+    ("FINANCING_LIABILITY", "financing_liability_observations"),
+    ("LEVERAGE_EXPOSURE", "leverage_exposure_observations"),
+)
+_UNAVAILABLE_LEVERAGE_MEASURES: Final[tuple[tuple[str, str, str], ...]] = (
+    ("FINANCING_COST", "FINANCING_COST", "NO_RECONCILED_FINANCING_COST_BASIS"),
+    (
+        "FINANCING_LIABILITY",
+        "BORROWED_PRINCIPAL",
+        "BORROWED_PRINCIPAL_NOT_PROVED",
+    ),
+    (
+        "LEVERAGE_EXPOSURE",
+        "DERIVATIVE_NOTIONAL",
+        "DERIVATIVE_NOTIONAL_NOT_PROVED",
+    ),
+    (
+        "LEVERAGE_EXPOSURE",
+        "DELTA_EQUIVALENT",
+        "DELTA_EQUIVALENT_NOT_PROVED",
+    ),
+    (
+        "LEVERAGE_EXPOSURE",
+        "EMBEDDED_PRODUCT_EXPOSURE",
+        "EMBEDDED_PRODUCT_EXPOSURE_NOT_PROVED",
+    ),
+)
+
+
+def _leverage_disclosures(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Project additive, source-bound leverage observations without aggregation."""
+    references = [
+        item
+        for item in _objects(catalog.get("source_artifacts"), "source_artifacts")
+        if item.get("source_key") == "provider-ledger-generation"
+        and item.get("schema_name") == "provider-ledger-catalog"
+    ]
+    if not references:
+        return []
+    _reference, provider_catalog, catalog_generation_id, catalog_sha256 = (
+        _selected_provider_ledger_catalog(catalog, baseline_root, provider_ledger_root)
+    )
+    rows: list[dict[str, Any]] = []
+    contexts: dict[tuple[str, str | None, str | None], set[str]] = {}
+    provider_ids: set[str] = set()
+    for item in _objects(
+        provider_catalog.get("provider_generations", []),
+        "provider-ledger provider_generations",
+    ):
+        provider_id = item.get("provider_id")
+        if isinstance(provider_id, str) and provider_id:
+            provider_ids.add(provider_id)
+    for data_class, fact_name in _LEVERAGE_DISCLOSURE_FACTS:
+        facts = provider_catalog.get(fact_name, [])
+        if not isinstance(facts, list):
+            raise ReportValidationError(f"provider-ledger {fact_name} differs")
+        for item in _objects(facts, f"provider-ledger {fact_name}"):
+            provider_id = _text(item.get("provider_id"), f"{fact_name}.provider_id")
+            account_id_value = item.get("account_id")
+            account_id = account_id_value if isinstance(account_id_value, str) else None
+            strategy_id_value = item.get("strategy_id")
+            strategy_id = (
+                strategy_id_value if isinstance(strategy_id_value, str) else None
+            )
+            record_id = _text(item.get("record_id"), f"{fact_name}.record_id")
+            provider_ids.add(provider_id)
+            contexts.setdefault((provider_id, account_id, strategy_id), set()).add(
+                record_id
+            )
+            rows.append(
+                {
+                    **item,
+                    "data_class": data_class,
+                    "account_id": account_id,
+                    "included_in_nav": item.get("included_in_nav"),
+                    "native_source_record_id": item.get("native_source_record_id"),
+                    "security_id": item.get("security_id"),
+                    "source_catalog_generation_id": catalog_generation_id,
+                    "source_catalog_sha256": catalog_sha256,
+                    "source_amount": item.get("source_amount"),
+                    "source_record_ids": [record_id],
+                    "coverage_status": "OBSERVED_ONLY",
+                    "coverage_reason": "SOURCE_OBSERVED_NOT_COMPLETE",
+                    "reason": item.get("reason"),
+                }
+            )
+    for provider_id in provider_ids:
+        contexts.setdefault((provider_id, None, None), set())
+    for (provider_id, account_id, strategy_id), source_record_ids in sorted(
+        contexts.items(),
+        key=lambda item: tuple(value or "" for value in item[0]),
+    ):
+        for data_class, measurement_basis, reason in _UNAVAILABLE_LEVERAGE_MEASURES:
+            rows.append(
+                {
+                    "account_id": account_id,
+                    "amount": {"status": "UNAVAILABLE", "value": None},
+                    "classification": "UNAVAILABLE_MEASURE",
+                    "coverage_reason": reason,
+                    "coverage_status": "UNAVAILABLE",
+                    "data_class": data_class,
+                    "included_in_nav": None,
+                    "measurement_basis": measurement_basis,
+                    "native_source_record_id": None,
+                    "provider_id": provider_id,
+                    "reason": reason,
+                    "security_id": None,
+                    "source_amount": None,
+                    "source_artifact_id": None,
+                    "source_catalog_generation_id": catalog_generation_id,
+                    "source_catalog_sha256": catalog_sha256,
+                    "source_record_ids": sorted(source_record_ids),
+                    "strategy_id": strategy_id,
+                }
+            )
+    return sorted(
+        rows,
+        key=lambda item: (
+            str(item.get("provider_id") or ""),
+            str(item.get("account_id") or ""),
+            str(item.get("strategy_id") or ""),
+            str(item.get("data_class") or ""),
+            str(item.get("measurement_basis") or ""),
+            str(item.get("record_id") or ""),
+        ),
+    )
 
 
 def _reconciliation_checks(
@@ -5682,6 +5851,9 @@ def build_report_data(
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "strategy_summary": strategy_summary,
         "attribution_dispositions": catalog.get("attribution_dispositions", []),
+        "leverage_disclosures": _leverage_disclosures(
+            catalog, baseline_root, provider_ledger_root
+        ),
         "strategy_provider_evidence": strategy_provider_evidence,
         "strategy_returns": strategy_returns,
         "transactions_and_flows": _transactions_and_flows(
@@ -5822,7 +5994,11 @@ def _write_table(
     worksheet.merge_range("A1:H1", title, formats["title"])
     worksheet.merge_range("A2:H2", subtitle, formats["subtitle"])
     worksheet.write("A3", "READ-ONLY / ADVISORY", formats["advisory"])
-    headers = _headers(rows, fallback_headers)
+    headers = (
+        sorted({key for row in rows for key in row})
+        if table_name == "tblLeverageDisclosures" and rows
+        else _headers(rows, fallback_headers)
+    )
     data = [
         [_excel_value(row.get(header), header=header) for header in headers]
         for row in rows
@@ -6460,6 +6636,7 @@ def build_candidate(
             "tblAllocations": 8,
             "tblCoverage": 1,
             "tblDependence": 1 if report["dependence_rows"] else 0,
+            "tblLeverageDisclosures": len(report["leverage_disclosures"]),
             "tblMethodology": 7,
             "tblPortfolioSummary": 9,
             "tblPositions": 1,

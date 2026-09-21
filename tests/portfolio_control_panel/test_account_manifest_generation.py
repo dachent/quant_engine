@@ -27442,6 +27442,18 @@ def test_generation_available_mwr_reaches_bound_report_workbook(
     assert data["counts"]["mwr_available"] == sum(
         row["mwr_status"] == "AVAILABLE" for row in report["twr_mwr"]
     )
+    assert data["leverage_disclosures"] == report["leverage_disclosures"]
+    assert {
+        row["reason"]
+        for row in data["leverage_disclosures"]
+        if row["coverage_status"] == "UNAVAILABLE"
+    } >= {
+        "NO_RECONCILED_FINANCING_COST_BASIS",
+        "BORROWED_PRINCIPAL_NOT_PROVED",
+        "DERIVATIVE_NOTIONAL_NOT_PROVED",
+        "DELTA_EQUIVALENT_NOT_PROVED",
+        "EMBEDDED_PRODUCT_EXPOSURE_NOT_PROVED",
+    }
     panel._validate_panel_data_schema(data)
 
 
