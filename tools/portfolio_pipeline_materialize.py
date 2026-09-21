@@ -2460,6 +2460,14 @@ def _verified_epoch_manifest_materialization_proof(
     account_artifact = _epoch_generation_artifact(
         panel_manifest, "input/account-strategy-manifest.json"
     )
+    physical_input_sha256, physical_input_size = _sha(
+        panel_generation / "input" / "account-strategy-manifest.json"
+    )
+    if (physical_input_sha256, physical_input_size) != (
+        hashlib.sha256(source_bytes).hexdigest(),
+        len(source_bytes),
+    ):
+        raise MaterializationError("physical panel input differs from verified bundle")
     if (
         account_artifact.schema_name != "account-strategy-manifest"
         or account_artifact.schema_version != str(staged_manifest.get("schema_version"))

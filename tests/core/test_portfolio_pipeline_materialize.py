@@ -816,6 +816,17 @@ def test_schema10_materialization_proof_rejects_one_byte_stage_drift(
         materializer._verified_epoch_manifest_materialization_proof(recipe, output_root)
 
 
+def test_schema10_materialization_proof_rejects_physical_panel_input_drift(
+    tmp_path: Path,
+) -> None:
+    recipe, output_root, panel_generation = _verified_materialization_fixture(tmp_path)
+    input_path = panel_generation / "input" / "account-strategy-manifest.json"
+    input_path.write_bytes(input_path.read_bytes() + b" ")
+
+    with pytest.raises(materializer.MaterializationError, match="physical panel input"):
+        materializer._verified_epoch_manifest_materialization_proof(recipe, output_root)
+
+
 def test_schema10_materialization_proof_rejects_invented_bound_contract_authority(
     tmp_path: Path,
 ) -> None:
