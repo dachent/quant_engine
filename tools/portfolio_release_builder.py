@@ -6682,6 +6682,12 @@ def publish_panel(
         "--report-root",
         str(report_root),
         *strategy_history_arguments,
+        # `verify` above already receives these. `publish` re-reads the same
+        # dependence source, and a schema-2 receipt refuses without them
+        # ("selected dependence source requires selected inputs"), so omitting
+        # them here let the panel verify and then fail at the last step of the
+        # last stage.
+        *dependence_selected_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",

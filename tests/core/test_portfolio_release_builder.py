@@ -5892,3 +5892,69 @@ def test_current_attribution_binds_selected_history_not_legacy_template(
         ):
             builder.build_attribution(tmp_path / "recipe.json", output)
         assert not output.exists()
+
+
+def test_publish_panel_forwards_dependence_inputs_to_every_consumer() -> None:
+    """Every control-panel subcommand that accepts the selected inputs gets them.
+
+    `publish_panel` prepares `dependence_selected_arguments` once and forwarded
+    them only to `verify`. `publish` re-reads the same dependence source, and a
+    schema-2 receipt refuses without them, so a real run verified the panel and
+    then failed at the last step of the last stage with "selected dependence
+    source requires selected inputs".
+
+    This derives the expectation from the panel's own parser rather than a list
+    of subcommand names, so a new consumer is covered the moment it accepts the
+    flag.
+    """
+
+    import argparse
+    import importlib.util
+    import re
+    import sys
+
+    module_name = "_panel_for_release_forwarding"
+    spec = importlib.util.spec_from_file_location(
+        module_name, ROOT / "tools" / "portfolio_control_panel.py"
+    )
+    assert spec is not None and spec.loader is not None
+    panel = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = panel
+    spec.loader.exec_module(panel)
+
+    subparsers = next(
+        action
+        for action in panel._parser()._actions  # noqa: SLF001
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    accepts = {
+        name
+        for name, sub in subparsers.choices.items()
+        if any(
+            "--dependence-selected-inputs" in action.option_strings
+            for action in sub._actions
+        )
+    }
+    assert "publish" in accepts and "verify" in accepts
+
+    source = (ROOT / "tools" / "portfolio_release_builder.py").read_text(
+        encoding="utf-8"
+    )
+    body = source[source.index("def publish_panel(") :]
+    body = body[: body.index("\ndef ", 10)]
+
+    missing = []
+    for match in re.finditer(r'"portfolio_control_panel\.py",\s*\n\s*"(\w+)"', body):
+        subcommand = match.group(1)
+        if subcommand not in accepts:
+            continue
+        tail = body[match.end() :]
+        end = tail.find("\n    )")
+        block = tail[: end if end > 0 else len(tail)]
+        if "*dependence_selected_arguments" not in block:
+            missing.append(subcommand)
+
+    assert not missing, (
+        "publish_panel invokes control-panel subcommands that accept "
+        f"--dependence-selected-inputs without forwarding them: {missing}"
+    )
