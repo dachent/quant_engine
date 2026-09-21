@@ -4,6 +4,7 @@ import csv
 import hashlib
 import json
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import pytest
 
@@ -12,7 +13,9 @@ from quant_engine.schwab import (
     SchwabGenerationError,
     build_generation,
     publish_generation_candidate,
+    read_holdings_v2_current_snapshot,
     stage_generation_candidate,
+    write_current_snapshot,
 )
 
 
@@ -424,7 +427,7 @@ def test_build_is_deterministic_partial_and_reconciled(tmp_path: Path) -> None:
     assert len(first["accounts"]) == 8
     assert len(first["transactions"]) == 8
     assert len(first["nav_observations"]) == 16
-    assert first["catalog_schema_version"] == 2
+    assert first["catalog_schema_version"] == 3
     assert {item["value_basis"] for item in first["nav_observations"]} == {
         "ACCOUNT_VALUE"
     }
@@ -504,6 +507,93 @@ def test_current_snapshot_supersedes_manual_current_reference(tmp_path: Path) ->
     )
     assert current_reference["status"] == "PASS_EXACT"
     assert "current_balances" in manifest.coverage.fact_types
+
+
+def _assert_holdings_v2_snapshot_reaches_hash_bound_web_current_consumer(
+    tmp_path: Path,
+) -> None:
+    """Catch producer changes that make a retained Holdings-V2 snapshot unusable."""
+
+    spec_path = _spec_with_current(tmp_path)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    crosswalk = {
+        item["external_account_id"]: item["internal_account_id"]
+        for item in spec["crosswalk"]
+    }
+    holdings = {
+        "accounts": [
+            {
+                "accountId": external_id,
+                "groupedPositions": [
+                    {
+                        "groupName": "Equity",
+                        "securityType": 1,
+                        "holdingsRows": [
+                            {
+                                "dataSymbol": f"SYNTH-{index}",
+                                "qty": {"qty": "1"},
+                                "marketValue": {"val": "99"},
+                                "costBasis": {"cstBasis": "27"},
+                            }
+                        ]
+                        if index < 8
+                        else [],
+                    }
+                ],
+            }
+            for index, external_id in enumerate(crosswalk, start=1)
+        ],
+        "accountTotals": [],
+    }
+    first_group = holdings["accounts"][0]["groupedPositions"]
+    first_group.append(
+        {
+            "groupName": "Cash",
+            "securityType": 9,
+            "holdingsRows": [
+                {
+                    "dataSymbol": "SYNTHETIC-CASH",
+                    "qty": {"qty": "12"},
+                    "marketValue": {"val": "12"},
+                    "costBasis": {"cstBasis": "12"},
+                }
+            ],
+        }
+    )
+    snapshot = read_holdings_v2_current_snapshot(
+        holdings,
+        crosswalk=crosswalk,
+        captured_at="2026-07-31T20:00:00Z",
+    )
+    source_root = Path(spec["roots"]["source"])
+    snapshot_path = source_root / "holdings-v2-current.json"
+    digest, size = write_current_snapshot(snapshot, snapshot_path)
+    spec["current_snapshot"].update(
+        {
+            "expected_sha256": digest,
+            "expected_size_bytes": size,
+            "relative_path": snapshot_path.relative_to(source_root).as_posix(),
+            "schema_version": "2",
+        }
+    )
+    spec["baseline"]["position_count"] = 7
+    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+
+    catalog, _, _ = build_generation(spec_path)
+
+    assert len(catalog["current_accounts"]) == 8
+    assert len(catalog["positions"]) == 7
+    assert {item["evidence_class"] for item in catalog["positions"]} == {"WCH_CURRENT"}
+    assert {item["market_value"]["status"] for item in catalog["positions"]} == {
+        "UNAVAILABLE"
+    }
+
+
+def test_holdings_v2_snapshot_reaches_hash_bound_web_current_consumer() -> None:
+    with TemporaryDirectory(dir=Path.cwd()) as directory:
+        _assert_holdings_v2_snapshot_reaches_hash_bound_web_current_consumer(
+            Path(directory)
+        )
 
 
 def test_complete_api_snapshot_can_reconcile_wch_nav_without_manual_nav(
@@ -750,6 +840,92 @@ def test_source_drift_and_transaction_variance_fail_closed(tmp_path: Path) -> No
     spec.write_text(json.dumps(document), encoding="utf-8")
     with pytest.raises(SchwabGenerationError, match="transaction histories differ"):
         build_generation(spec)
+
+
+def _spec_with_current_journal_pairs(tmp_path: Path) -> Path:
+    """Replace four synthetic purchases with two current native Journal pairs."""
+
+    spec = _spec(tmp_path)
+    document = json.loads(spec.read_text(encoding="utf-8"))
+    source_root = Path(document["roots"]["source"])
+    pairs = {
+        0: ("-100", "JOURNAL TO ...002"),
+        1: ("+100", "IRA REGULAR CONTRIB"),
+        2: ("-100", "JOURNAL TO ...004"),
+        3: ("+100", "JOURNAL FRM ...003"),
+    }
+    for index, (amount, description) in pairs.items():
+        wch_path = source_root / f"wch-transaction-{index}.json"
+        wch_path.write_bytes(
+            canonical_json_bytes(
+                [
+                    {
+                        "action": "Journal",
+                        "amount": amount,
+                        "description": description,
+                        "effectiveDate": "07/30/2026",
+                        "transactionDate": "07/30/2026",
+                    }
+                ]
+            )
+        )
+        manual_path = source_root / f"manual-transaction-{index}.json"
+        manual_path.write_bytes(
+            canonical_json_bytes(
+                {
+                    "BrokerageTransactions": [
+                        {
+                            "Action": "Journal",
+                            "Amount": amount,
+                            "Date": "07/30/2026",
+                            "Description": description,
+                            "Fees & Comm": None,
+                            "Price": None,
+                            "Quantity": None,
+                            "Symbol": None,
+                        }
+                    ]
+                }
+            )
+        )
+    for source in document["sources"]:
+        path = source_root / source["relative_path"]
+        if path.name.startswith(("wch-transaction-", "manual-transaction-")):
+            payload = path.read_bytes()
+            source["expected_sha256"] = hashlib.sha256(payload).hexdigest()
+            source["expected_size_bytes"] = len(payload)
+    spec.write_bytes(canonical_json_bytes(document))
+    return spec
+
+
+def test_current_journal_catalog_binds_selected_native_evidence(tmp_path: Path) -> None:
+    """The adapter binds current Journal semantics to verified source rows."""
+
+    catalog, _, _ = build_generation(_spec_with_current_journal_pairs(tmp_path))
+
+    assert catalog["catalog_schema_version"] == 3
+    crosswalk = catalog["journal_counterparty_crosswalk"]
+    assert crosswalk["basis"] == "SELECTED_SOURCE_SPEC_CROSSWALK"
+    assert len(crosswalk["entries"]) == 8
+    journals = [row for row in catalog["transactions"] if row["kind"] == "Journal"]
+    assert len(journals) == 4
+    by_description = {
+        row["description"]: row["journal_source_evidence"] for row in journals
+    }
+    assert by_description["JOURNAL TO ...002"]["direction"] == "TO"
+    assert by_description["JOURNAL TO ...002"]["counterparty_account_id"] == (
+        "account-0000000000000001"
+    )
+    assert by_description["IRA REGULAR CONTRIB"]["recipient_basis"] == (
+        "IRA_REGULAR_CONTRIB"
+    )
+    assert by_description["JOURNAL FRM ...003"]["direction"] == "FRM"
+    for evidence in by_description.values():
+        assert evidence["currency_basis"] == "SELECTED_ACCOUNT_BASE_CURRENCY"
+        assert (
+            evidence["native_row_sha256"]
+            == hashlib.sha256(canonical_json_bytes(evidence["native_row"])).hexdigest()
+        )
 
 
 def test_account_role_duplication_fails_closed(tmp_path: Path) -> None:
@@ -1661,7 +1837,7 @@ def test_per_account_07_31_catalog_digest(tmp_path: Path) -> None:
     assert len(catalog["transactions"]) == 8
     # Golden digest — must match exactly as long as the per-account code path
     # is unchanged from the reference build.
-    GOLDEN = "fd7a6e9cd67ac138c4d3fe4175fa24c08b2e87865ef75b389072c56bf31fdde4"
+    GOLDEN = "aa0f3aa495f81da0f1fdf0a2b4e555d7e846d2663718d71f13cb45e76568e2bf"
     assert actual_digest == GOLDEN, (
         f"per-account catalog digest changed: {actual_digest} != {GOLDEN}"
     )

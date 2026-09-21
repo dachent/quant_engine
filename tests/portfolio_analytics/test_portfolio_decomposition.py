@@ -6,14 +6,16 @@ import hashlib
 import importlib.util
 import json
 import math
+import os
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 from typing import Any, cast
 
 import numpy as np
 import pytest
 
-from quant_engine.core import read_current
+from quant_engine.core import pipeline, read_current
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -45,6 +47,7 @@ def _write_sources(
     root: Path,
     *,
     count: int = 140,
+    start: date = date(2025, 1, 2),
     formula: str = "unconstrained",
     identical_factors: bool = False,
     target_only_dates: tuple[date, ...] = (),
@@ -52,7 +55,7 @@ def _write_sources(
     complete_costs: bool = False,
 ) -> tuple[Path, list[date]]:
     root.mkdir(parents=True)
-    days = _days(count)
+    days = _days(count, start)
     target_path = root / "targets.csv"
     with target_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
@@ -89,6 +92,28 @@ def _write_sources(
                 [day.isoformat(), "0.00005", format(f1, ".17g"), format(f2, ".17g")]
             )
     return target_path, days
+
+
+def _write_later_target_source(
+    root: Path,
+) -> tuple[Path, list[date], list[date]]:
+    """Keep target lifetime later than the selected factor history."""
+    target_path, days = _write_sources(root, start=date(2026, 1, 2))
+    factor_path = root / "factors.csv"
+    historical_days = _days(40, date(2024, 1, 2))
+    factor_rows = list(csv.reader(factor_path.read_text(encoding="utf-8").splitlines()))
+    factor_rows[1:1] = [
+        [
+            observed.isoformat(),
+            "0.00005",
+            "0.001",
+            "0.002",
+        ]
+        for observed in historical_days
+    ]
+    with factor_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(factor_rows)
+    return target_path, days, historical_days
 
 
 def _model(
@@ -207,6 +232,15 @@ def _spec(
         "as_of_date": max(days).isoformat(),
         "factor_source": {
             "artifact_id": "frozen/factors.csv",
+            "interval_policy": {
+                "available_through_anchor": max(days).isoformat(),
+                "currency": "USD",
+                "finality": "COMPLETE_SELECTED_SNAPSHOT",
+                "native_calendar": "SOURCE_LABELLED_DAILY",
+                "native_label_convention": "PUBLISHED_DAILY_LABEL",
+                "return_basis": "NET",
+                "source_vintage": "SELECTED_SNAPSHOT",
+            },
             "date_column": "date",
             "expected_sha256": factor_hash,
             "expected_size_bytes": factor_size,
@@ -237,6 +271,22 @@ def _spec(
             "relative_path": "targets.csv",
             "schema_name": "synthetic-target-returns",
             "schema_version": "1",
+            "interval_policy": {
+                "currency": "USD",
+                "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+                "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
+                "finalized_through": max(days).isoformat(),
+                "gap_disposition": "REJECT_BUCKET",
+                "native_calendar": "SESSION_LABELLED",
+                "native_label_convention": "SYNTHETIC_EXCHANGE_SESSION_DATE",
+                "return_basis": "NET",
+                "session_schedule_labels": {
+                    "synthetic-strategy": [
+                        item.isoformat() for item in sorted(set(days))
+                    ]
+                },
+                "source_vintage": "SELECTED_SNAPSHOT",
+            },
         },
     }
     if analysis_lens is not None:
@@ -247,6 +297,163 @@ def _spec(
         encoding="utf-8",
     )
     return spec_path
+
+
+def test_24_7_factor_anchor_association_compounds_weekends_and_emits_receipt(
+    tmp_path: Path,
+) -> None:
+    """The real producer must retain Sat/Sun under Monday's one factor row."""
+    source = tmp_path / "source"
+    source.mkdir()
+    anchors = _days(18, date(2026, 1, 2))
+    target_path = source / "targets.csv"
+    factor_path = source / "factors.csv"
+    factor_values = {
+        observed: (
+            0.012 * math.sin(index / 2.0) + 0.003 * math.cos(index / 5.0),
+            0.009 * math.cos(index / 3.0) - 0.002 * math.sin(index / 7.0),
+        )
+        for index, observed in enumerate(anchors)
+    }
+    target_returns: dict[date, float] = {}
+    for left, right in zip(anchors, anchors[1:]):
+        target_labels = [
+            left + timedelta(days=offset)
+            for offset in range(1, (right - left).days + 1)
+        ]
+        for label in target_labels[:-1]:
+            target_returns.setdefault(label, 0.0)
+        if right == date(2026, 1, 5):
+            target_returns[date(2026, 1, 3)] = 0.02
+            target_returns[date(2026, 1, 4)] = -0.01
+        desired_excess = (
+            0.0005 + 0.55 * factor_values[right][0] - 0.30 * factor_values[right][1]
+        )
+        preceding_growth = math.prod(
+            1.0 + target_returns[label] for label in target_labels[:-1]
+        )
+        target_returns[right] = (1.0 + desired_excess + 0.001) / preceding_growth - 1.0
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(decomposition.TARGET_HEADERS)
+        for observed, value in sorted(target_returns.items()):
+            writer.writerow(
+                [
+                    "synthetic-strategy",
+                    observed.isoformat(),
+                    str(value),
+                    "ACCOUNT_LIVE",
+                    "NET",
+                    "TOTAL",
+                    "",
+                ]
+            )
+    with factor_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["date", "RF", "F1", "F2"])
+        for observed in anchors:
+            writer.writerow(
+                [
+                    observed.isoformat(),
+                    "0.001",
+                    format(factor_values[observed][0], ".17g"),
+                    format(factor_values[observed][1], ".17g"),
+                ]
+            )
+    models = [
+        {
+            "constraint": "UNCONSTRAINED",
+            "cost_coverage": "INCOMPLETE",
+            "cv_folds": 2,
+            "factor_ids": ["factor-one", "factor-two"],
+            "minimum_test_observations": 1,
+            "minimum_train_observations": 10,
+            "model_id": "anchor-model",
+            "parsimony_tolerance": "0.000001",
+            "periods_per_year": 252,
+            "ridge_candidates": ["0.0001"],
+            "series_id": "synthetic-strategy",
+            "test_start": anchors[-5].isoformat(),
+            "train_end": anchors[-6].isoformat(),
+        }
+    ]
+    spec_path = _spec(source, target_path, anchors, models=models)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["target_source"]["interval_policy"].update(
+        {
+            "native_calendar": "CALENDAR_DAY_24_7",
+            "native_label_convention": "UTC_CALENDAR_DATE",
+        }
+    )
+    spec["target_source"]["interval_policy"].pop("session_schedule_labels")
+    spec_path.write_text(json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\n")
+
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+
+    model = _available(result)
+    interval = model["interval_association"]
+    monday = next(
+        item for item in interval["buckets"] if item["factor_anchor"] == "2026-01-05"
+    )
+    assert monday["target_labels"] == ["2026-01-03", "2026-01-04", "2026-01-05"]
+    assert float(monday["target_total_return"]) == pytest.approx(
+        math.prod(
+            1.0 + target_returns[date.fromisoformat(label)]
+            for label in monday["target_labels"]
+        )
+        - 1.0
+    )
+    assert float(monday["anchor_adjusted_target_return"]) == pytest.approx(
+        float(monday["target_total_return"]) - 0.001
+    )
+    assert monday["partition"] == "TRAIN"
+    assert interval["policy_id"] == "SOURCE_LABELLED_FACTOR_ANCHOR_ASSOCIATION_V1"
+    assert interval["holdout_display_claim"] == (
+        "holdout association using selected historical snapshot"
+    )
+
+
+def test_later_target_lifetime_uses_prior_factor_anchor_without_early_buckets(
+    tmp_path: Path,
+) -> None:
+    """Earlier factor history is not an implied earlier target lifetime."""
+    source = tmp_path / "source"
+    target_path, days, historical_days = _write_later_target_source(source)
+    spec_path = _spec(source, target_path, days)
+
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+
+    interval = _available(result)["interval_association"]
+    buckets = cast(list[dict[str, Any]], interval["buckets"])
+    assert buckets[0]["prior_factor_anchor"] == historical_days[-1].isoformat()
+    assert buckets[0]["target_labels"] == [days[0].isoformat()]
+    assert all(item["factor_anchor"] >= days[0].isoformat() for item in buckets)
+    assert interval["pre_anchor_labels"] == []
+    assert interval["pending_factor_anchor_labels"] == []
+    assert interval["unassignable_leading_labels"] == []
+    assert interval["unassignable_tail_labels"] == []
+    assert interval["target_source_lifetime_start"] == days[0].isoformat()
+    assert interval["target_source_lifetime_end"] == days[-1].isoformat()
+
+
+def test_later_target_lifetime_rejects_gap_inside_declared_source_bucket(
+    tmp_path: Path,
+) -> None:
+    """A source boundary does not excuse a missing declared target label."""
+    source = tmp_path / "source"
+    target_path, days, _historical_days = _write_later_target_source(source)
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    missing_day = days[20].isoformat()
+    rows = [row for row in rows if len(row) < 2 or row[1] != missing_day]
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source, target_path, days)
+
+    with pytest.raises(
+        decomposition.DecompositionError,
+        match=f"missing expected target label\\(s\\).*{missing_day}",
+    ):
+        decomposition.build_decomposition(spec_path, source)
 
 
 def _available(result: dict[str, object]) -> dict[str, Any]:
@@ -390,7 +597,8 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
     assert inference["default_lag"] == decomposition._newey_west_lag(90)
     assert {row["lag"] for row in inference["lag_sensitivity"]} >= {0}
     assert model["alpha"]["confidence_status"] == inference["status"]
-    assert model["diagnostics"]["residuals"]["train"]["observation_count"] == 90
+    # The first factor label is a named pre-anchor tail, not a fitted bucket.
+    assert model["diagnostics"]["residuals"]["train"]["observation_count"] == 89
     assert model["coverage"]["target_observed_start"] == days[0].isoformat()
     assert model["coverage"]["target_cumulative_return"] is not None
     assert model["coverage"]["target_observed_end"] == days[-1].isoformat()
@@ -412,6 +620,45 @@ def test_unconstrained_truth_alpha_and_contributions_reconcile(tmp_path: Path) -
         assert reconstructed == pytest.approx(
             float(row["actual_excess_return"]), abs=5e-11
         )
+
+
+def test_selected_static_model_emits_separate_train_only_orthogonal_attribution(
+    tmp_path: Path,
+) -> None:
+    """Removing the post-fit surface must not change the raw model receipt."""
+    source = tmp_path / "source"
+    target_path, days = _write_sources(source)
+
+    result, _manifest, _content = decomposition.build_decomposition(
+        _spec(source, target_path, days), source
+    )
+
+    model = _available(result)
+    orthogonal = model["orthogonal_attribution"]
+    assert orthogonal["status"] == "AVAILABLE"
+    assert orthogonal["method_id"] == "TRAINING_ONLY_SYMMETRIC_COVARIANCE_WHITENING_V1"
+    assert orthogonal["raw_factor_ids"] == ["factor-one", "factor-two"]
+    assert orthogonal["mode_ids"] == [
+        "symmetric_mode:factor-one",
+        "symmetric_mode:factor-two",
+    ]
+    assert orthogonal["training_row_identity"]["partition"] == "TRAIN"
+    assert orthogonal["train_fitted_risk_budget"]["interpretation"] == (
+        "EQUAL_FACTOR_ANCHOR_FITTED_COMPONENT_SAMPLE_VARIANCE"
+    )
+    assert (
+        orthogonal["train_fitted_risk_budget"]["cross_mode_covariance_present"] is False
+    )
+    assert all(
+        float(row["fitted_excess_return"])
+        == pytest.approx(float(row["fitted_excess_return"]), abs=5e-11)
+        for row in model["contributions"]
+    )
+    for raw, projected in zip(
+        model["contributions"], orthogonal["per_date"], strict=True
+    ):
+        assert projected["date"] == raw["date"]
+        assert projected["fitted_excess_return"] == raw["fitted_excess_return"]
 
 
 def test_manifest_binds_exact_returned_decomposition_bytes(tmp_path: Path) -> None:
@@ -639,8 +886,10 @@ def test_coverage_separates_missing_weekday_and_weekend_and_short_history(
         item["model_id"]: item
         for item in cast(list[dict[str, Any]], result["model_results"])
     }
-    assert by_id["available"]["coverage"]["factor_missing_weekdays"] == 1
-    assert by_id["available"]["coverage"]["factor_missing_weekends"] == 1
+    # Under the declared session schedule, both labels belong to their right
+    # factor-anchor bucket; neither is an exact-date factor-missing observation.
+    assert by_id["available"]["coverage"]["factor_missing_weekdays"] == 0
+    assert by_id["available"]["coverage"]["factor_missing_weekends"] == 0
     assert by_id["short"]["status"] == "UNAVAILABLE_INSUFFICIENT_TRAIN_HISTORY"
 
 
@@ -779,6 +1028,14 @@ def test_dynamic_fls_recovers_time_varying_path_and_walks_forward(
     assert first_manifest.generation_id == second_manifest.generation_id
     model = _available(first)
     assert model["estimator"] == "DYNAMIC_FLS"
+    orthogonal = model["orthogonal_attribution"]
+    assert orthogonal["status"] == "AVAILABLE"
+    budget = orthogonal["train_fitted_risk_budget"]
+    assert budget["cross_mode_covariance_present"] is True
+    assert budget["intercept_time_varying"] is True
+    assert sum(
+        float(value) for value in budget["euler_allocations"].values()
+    ) == pytest.approx(float(budget["fitted_variance"]), abs=5e-11)
     assert model["method_label"] == "MPI_INFORMED_NON_EQUIVALENT"
     dynamic = model["diagnostics"]["dynamic"]
     assert dynamic["validation"] == "EXACT_LEAVE_ONE_OUT_TRAIN_ONLY"
@@ -858,8 +1115,16 @@ def test_dynamic_selection_and_training_path_do_not_consume_holdout(
     changed_model = _selected(changed)
 
     assert changed_model["selected_smoothness"] == original_model["selected_smoothness"]
-    original_train = original_model["diagnostics"]["dynamic"]["exposure_path"][:105]
-    changed_train = changed_model["diagnostics"]["dynamic"]["exposure_path"][:105]
+    original_train = [
+        row
+        for row in original_model["diagnostics"]["dynamic"]["exposure_path"]
+        if row["date"] <= model_definition["train_end"]
+    ]
+    changed_train = [
+        row
+        for row in changed_model["diagnostics"]["dynamic"]["exposure_path"]
+        if row["date"] <= model_definition["train_end"]
+    ]
     assert changed_train == original_train
     assert float(changed_model["diagnostics"]["holdout"]["predicted_r_squared"]) < 0
     assert changed_model["status"] == "DIAGNOSTIC_ONLY"
@@ -881,6 +1146,7 @@ def test_live_plus_backtest_accepts_declared_model_return_basis(
     spec_path = _spec(source, target_path, days)
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     spec["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    spec["target_source"]["interval_policy"]["return_basis"] = "MIXED_NET_MODEL"
     spec_path.write_text(
         json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\n",
         encoding="utf-8",
@@ -894,10 +1160,91 @@ def test_live_plus_backtest_accepts_declared_model_return_basis(
 
     assert model["evidence_layer"] == "BACKTEST"
     assert model["alpha"]["periodic_intercept"] is not None
+    # A stream that mixes realized and model-basis rows has no observed alpha,
+    # so neither side may claim one. The intercept is still published, on the
+    # live basis, named by what makes it a diagnostic: withholding it left the
+    # hybrid mode with no alpha at all for every strategy carrying backtest
+    # history, which is the only reason anyone builds the hybrid mode.
+    assert model["alpha"]["net_annualized"] is not None
+    assert model["alpha"]["net_status"] == "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
     assert model["alpha"]["gross_annualized"] is None
-    assert model["alpha"]["net_annualized"] is None
     assert model["alpha"]["gross_status"] == "UNAVAILABLE_MODEL_RETURN_BASIS"
-    assert model["alpha"]["net_status"] == "UNAVAILABLE_MODEL_RETURN_BASIS"
+
+
+def test_mixed_basis_source_layer_boundary_is_retained_but_not_fitted(
+    tmp_path: Path,
+) -> None:
+    """A complete MODEL-to-NET anchor is a rejected receipt, never a mixed fit."""
+    source = tmp_path / "mixed-basis-boundary"
+    weekend = (date(2025, 1, 4), date(2025, 1, 5))
+    weekday_days = _days(140)
+    calendar_only_days = tuple(
+        observed
+        for observed in (
+            weekday_days[0] + timedelta(days=offset)
+            for offset in range((weekday_days[-1] - weekday_days[0]).days + 1)
+        )
+        if observed not in set(weekday_days)
+    )
+    target_path, days = _write_sources(
+        source,
+        count=len(weekday_days),
+        target_only_dates=calendar_only_days,
+    )
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    for row in rows[1:]:
+        if row[1] <= weekend[0].isoformat():
+            row[3] = "BACKTEST"
+            row[4] = "MODEL"
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source, target_path, days)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    policy = spec["target_source"]["interval_policy"]
+    policy.update(
+        native_calendar="CALENDAR_DAY_24_7",
+        native_label_convention="UTC_CALENDAR_DATE",
+        return_basis="MIXED_NET_MODEL",
+    )
+    policy.pop("session_schedule_labels")
+    spec_path.write_text(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+
+    interval = _available(result)["interval_association"]
+    assert all(item["factor_anchor"] != "2025-01-06" for item in interval["buckets"])
+    rejected_buckets = interval["rejected_buckets"]
+    assert len(rejected_buckets) == 1
+    rejected = rejected_buckets[0]
+    assert {
+        field: rejected[field]
+        for field in (
+            "factor_anchor",
+            "factor_source_snapshot_identity",
+            "prior_factor_anchor",
+            "reason",
+            "target_labels",
+            "target_return_bases",
+            "target_source_snapshot_identity",
+            "target_source_layers",
+        )
+    } == {
+        "factor_anchor": "2025-01-06",
+        "factor_source_snapshot_identity": "SELECTED_SNAPSHOT",
+        "prior_factor_anchor": "2025-01-03",
+        "reason": "INCOMPATIBLE_RETURN_BASIS_SOURCE_LAYER_BOUNDARY",
+        "target_labels": ["2025-01-04", "2025-01-05", "2025-01-06"],
+        "target_return_bases": ["MODEL", "NET"],
+        "target_source_snapshot_identity": "SELECTED_SNAPSHOT",
+        "target_source_layers": ["BACKTEST", "ACCOUNT_LIVE"],
+    }
+    assert _available(result)["coverage"]["aligned_observations"] == len(
+        interval["buckets"]
+    )
 
 
 def test_canonical_live_series_digest_has_a_literal_live_series_oracle(
@@ -991,3 +1338,728 @@ def test_model_quality_gate_uses_the_published_holdout_value(
         assert result["exposures"] == []
         assert result["alpha"]["periodic_intercept"] is None
         assert result["diagnostic_outputs"]["alpha"]["periodic_intercept"] == "0.001"
+
+
+def _loo_reference(module, matrix, target, *, smoothness, ridge):
+    """Recompute leave-one-out the way the quadratic implementation did.
+
+    One right-hand side per observation, materializing the whole smoother. It
+    is the definition the linear-time scorer has to reproduce, and it is only
+    tractable at these sizes.
+    """
+
+    import numpy as np
+
+    fit = module._dynamic_fit(matrix, target, smoothness=smoothness, ridge=ridge)
+    observations, factors = matrix.shape
+    identity = np.eye(factors, dtype=np.float64)
+    diagonal = [
+        np.outer(matrix[i], matrix[i])
+        + (ridge + smoothness * (1.0 if i in {0, observations - 1} else 2.0)) * identity
+        for i in range(observations)
+    ]
+    off_diagonal = [(-smoothness * identity).copy() for _ in range(observations - 1)]
+    right = np.zeros((observations, factors, observations + 1), dtype=np.float64)
+    for i in range(observations):
+        right[i, :, i] = matrix[i]
+        right[i, :, -1] = matrix[i]
+    solved, _status = module._block_tridiagonal_solve(diagonal, off_diagonal, right)
+    influence = solved[:, :, :-1]
+    intercept_solution = solved[:, :, -1]
+    denominator = float(observations) - float(np.sum(matrix * intercept_solution))
+    projected = np.einsum("tk,tkn->n", matrix, influence)
+    intercept_influence = (1.0 - projected) / denominator
+    local = np.einsum("ik,iki->i", matrix, influence, optimize=False)
+    local_projection = np.sum(matrix * intercept_solution, axis=1)
+    leverage = local + intercept_influence * (1.0 - local_projection)
+    predictions = (fit.fitted - leverage * target) / (1.0 - leverage)
+    return module._r_squared(target, predictions, float(np.mean(target))), predictions
+
+
+@pytest.mark.parametrize("smoothness", [0.05, 0.5])
+@pytest.mark.parametrize("shape", [(40, 3), (120, 5)])
+def test_dynamic_loo_matches_the_explicit_smoother(shape, smoothness):
+    """The linear-time scorer reproduces the per-observation refit exactly."""
+
+    import numpy as np
+
+    observations, factors = shape
+    rng = np.random.default_rng(20260912)
+    matrix = rng.normal(size=(observations, factors))
+    target = matrix @ rng.normal(size=factors) + rng.normal(
+        scale=0.1, size=observations
+    )
+
+    score, predictions = decomposition._dynamic_loo_score(
+        matrix, target, smoothness=smoothness, ridge=1e-6
+    )
+    expected_score, expected_predictions = _loo_reference(
+        decomposition, matrix, target, smoothness=smoothness, ridge=1e-6
+    )
+
+    assert score == pytest.approx(expected_score, abs=1e-9)
+    assert predictions == pytest.approx(expected_predictions, abs=1e-8)
+
+
+def test_inverse_diagonal_matches_a_dense_inverse():
+    """The Takahashi recursion returns the true diagonal blocks."""
+
+    import numpy as np
+
+    rng = np.random.default_rng(11)
+    count, size = 7, 3
+    identity = np.eye(size)
+    diagonal = []
+    for _ in range(count):
+        block = rng.normal(size=(size, size))
+        diagonal.append(block @ block.T + 4.0 * identity)
+    off_diagonal = [(-0.3 * identity).copy() for _ in range(count - 1)]
+
+    dense = np.zeros((count * size, count * size))
+    for i, block in enumerate(diagonal):
+        dense[i * size : (i + 1) * size, i * size : (i + 1) * size] = block
+    for i, block in enumerate(off_diagonal):
+        dense[i * size : (i + 1) * size, (i + 1) * size : (i + 2) * size] = block
+        dense[(i + 1) * size : (i + 2) * size, i * size : (i + 1) * size] = block.T
+    inverse = np.linalg.inv(dense)
+
+    blocks, status = decomposition._block_tridiagonal_inverse_diagonal(
+        diagonal, off_diagonal
+    )
+
+    assert status == "BLOCK_TRIDIAGONAL_FULL_RANK"
+    for i, block in enumerate(blocks):
+        expected = inverse[i * size : (i + 1) * size, i * size : (i + 1) * size]
+        assert block == pytest.approx(expected, abs=1e-10)
+
+
+def test_dynamic_loo_stays_linear_in_the_series_length():
+    """A spliced series must not cost the square of its length.
+
+    The previous implementation allocated one smoother column per observation;
+    at this length that array alone is 18 GB, so the guard is that the call
+    completes at all rather than any particular duration.
+    """
+
+    import numpy as np
+
+    rng = np.random.default_rng(3)
+    observations, factors = 6000, 8
+    matrix = rng.normal(size=(observations, factors))
+    target = matrix @ rng.normal(size=factors) + rng.normal(
+        scale=0.1, size=observations
+    )
+
+    score, predictions = decomposition._dynamic_loo_score(
+        matrix, target, smoothness=0.2, ridge=1e-6
+    )
+
+    assert score is not None
+    assert len(predictions) == observations
+
+
+def test_dynamic_fit_repeats_exactly_so_the_holdout_prior_can_be_carried():
+    """The next step's prior is the step's posterior, bit for bit.
+
+    The holdout walk used to solve for both. They are the same call on the same
+    arrays with the same smoothness, ridge and fixed intercept, so the walk now
+    carries the posterior forward and solves once per step instead of twice.
+    If `_dynamic_fit` ever stops being pure -- an internal cache, a random
+    initialisation, an in-place write into the arrays it is handed -- that
+    optimisation would silently change published exposures, and this fails.
+    """
+
+    import numpy as np
+
+    rng = np.random.default_rng(11)
+    observations, factors = 60, 3
+    matrix = rng.normal(size=(observations, factors))
+    target = matrix @ rng.normal(size=factors) + rng.normal(
+        scale=0.05, size=observations
+    )
+    intercept = 0.004
+
+    posterior = decomposition._dynamic_fit(
+        matrix, target, smoothness=0.3, ridge=1e-6, fixed_intercept=intercept
+    )
+    matrix_after = matrix.copy()
+    target_after = target.copy()
+    next_prior = decomposition._dynamic_fit(
+        matrix, target, smoothness=0.3, ridge=1e-6, fixed_intercept=intercept
+    )
+
+    # The inputs survive the call, so the second caller really does hand over
+    # the same arrays the first one did.
+    assert np.array_equal(matrix, matrix_after)
+    assert np.array_equal(target, target_after)
+    # And the result is identical, not merely close.
+    assert next_prior.intercept == posterior.intercept
+    assert next_prior.rank_status == posterior.rank_status
+    assert np.array_equal(next_prior.exposures, posterior.exposures)
+    assert np.array_equal(next_prior.fitted, posterior.fitted)
+
+
+def test_carried_holdout_prior_reproduces_the_double_solve_walk():
+    """Carrying the posterior forward changes cost, never a single forecast.
+
+    The walk the scorer runs is reproduced here twice on the same arrays: once
+    solving for the prior at every step, as it did before, and once carrying
+    the previous step's posterior, as it does now. Every forecast exposure and
+    every holdout prediction must agree exactly -- not approximately -- because
+    the optimisation claims to be the same computation rather than a cheaper
+    estimate of it.
+    """
+
+    import numpy as np
+
+    def walk(matrix, target, split, *, carry):
+        train_matrix, train_target = matrix[:split], target[:split]
+        test_matrix, test_target = matrix[split:], target[split:]
+        train_fit = decomposition._dynamic_fit(
+            train_matrix, train_target, smoothness=1e-5, ridge=1e-6
+        )
+        history_matrix = train_matrix.copy()
+        history_target = train_target.copy()
+        carried = None
+        predictions, forecasts = [], []
+        for index in range(len(test_target)):
+            if carry and carried is not None:
+                prior_fit = carried
+            else:
+                prior_fit = decomposition._dynamic_fit(
+                    history_matrix,
+                    history_target,
+                    smoothness=1e-5,
+                    ridge=1e-6,
+                    fixed_intercept=train_fit.intercept,
+                )
+            forecast_exposure = prior_fit.exposures[-1].copy()
+            forecasts.append(forecast_exposure)
+            predictions.append(
+                float(train_fit.intercept + test_matrix[index] @ forecast_exposure)
+            )
+            history_matrix = np.vstack((history_matrix, test_matrix[index]))
+            history_target = np.append(history_target, test_target[index])
+            carried = decomposition._dynamic_fit(
+                history_matrix,
+                history_target,
+                smoothness=1e-5,
+                ridge=1e-6,
+                fixed_intercept=train_fit.intercept,
+            )
+        return np.array(predictions), np.array(forecasts)
+
+    rng = np.random.default_rng(7)
+    observations, factors, split = 260, 4, 200
+    matrix = rng.normal(size=(observations, factors))
+    # Exposures that actually move, so a stale carried prior would show up.
+    drift = np.cumsum(rng.normal(scale=0.02, size=(observations, factors)), axis=0)
+    target = np.einsum("ij,ij->i", matrix, 0.5 + drift) + rng.normal(
+        scale=0.05, size=observations
+    )
+
+    resolved_predictions, resolved_forecasts = walk(matrix, target, split, carry=False)
+    carried_predictions, carried_forecasts = walk(matrix, target, split, carry=True)
+
+    assert np.array_equal(resolved_predictions, carried_predictions)
+    assert np.array_equal(resolved_forecasts, carried_forecasts)
+
+
+def test_staging_reuses_a_solved_decomposition_for_unchanged_inputs(
+    tmp_path, monkeypatch
+):
+    """The same inputs must not be solved twice, and must not change hands.
+
+    The spec pins every source's digest, so identical spec bytes mean identical
+    inputs; the solver's own bytes are the only other variable. A second stage
+    therefore has nothing new to compute, and the release builder's separate
+    stage and publish steps used to solve the same lens twice per run.
+    """
+
+    calls = {"count": 0}
+    original = decomposition.build_decomposition
+
+    def counted(spec_path, source_root, **kwargs):
+        calls["count"] += 1
+        return original(spec_path, source_root, **kwargs)
+
+    monkeypatch.setattr(decomposition, "build_decomposition", counted)
+
+    source_root = tmp_path / "source"
+    target_path, days = _write_sources(source_root, complete_costs=True)
+    spec_path = _spec(
+        source_root,
+        target_path,
+        days,
+        models=[_model(days, cost_coverage="COMPLETE")],
+    )
+    output_root = tmp_path / "out"
+
+    first = decomposition.stage_candidate(spec_path, source_root, output_root)
+    second = decomposition.stage_candidate(spec_path, source_root, output_root)
+
+    assert first["generation_id"] == second["generation_id"]
+    assert first["reused"] is False
+    assert second["reused"] is True
+    assert calls["count"] == 1
+
+
+def test_staging_reuses_verified_generation_from_retained_root(tmp_path, monkeypatch):
+    """A second disposable output root must reuse the retained verified result."""
+
+    calls = {"count": 0}
+    original = decomposition.build_decomposition
+
+    def counted(spec_path, source_root, **kwargs):
+        calls["count"] += 1
+        return original(spec_path, source_root, **kwargs)
+
+    monkeypatch.setattr(decomposition, "build_decomposition", counted)
+    source_root = tmp_path / "source"
+    target_path, days = _write_sources(source_root, complete_costs=True)
+    spec_path = _spec(
+        source_root,
+        target_path,
+        days,
+        models=[_model(days, cost_coverage="COMPLETE")],
+    )
+    retained_root = tmp_path / "retained"
+
+    first = decomposition.stage_candidate(
+        spec_path,
+        source_root,
+        tmp_path / "first-output",
+        retained_cache_root=retained_root,
+    )
+    second = decomposition.stage_candidate(
+        spec_path,
+        source_root,
+        tmp_path / "second-output",
+        retained_cache_root=retained_root,
+    )
+
+    assert first["reused"] is False
+    assert second["reused"] is True
+    assert first["generation_id"] == second["generation_id"]
+    assert calls["count"] == 1
+
+
+def test_publish_reuses_retained_candidate_across_output_roots(tmp_path):
+    """Stage and publish share the retained candidate while outputs stay distinct."""
+
+    source_root = tmp_path / "source"
+    target_path, days = _write_sources(source_root, complete_costs=True)
+    spec_path = _spec(
+        source_root,
+        target_path,
+        days,
+        models=[_model(days, cost_coverage="COMPLETE")],
+    )
+    retained_root = tmp_path / "retained"
+    first_root = tmp_path / "first-output"
+    second_root = tmp_path / "second-output"
+
+    first_stage = decomposition.stage_candidate(
+        spec_path, source_root, first_root, retained_cache_root=retained_root
+    )
+    first_publish = decomposition.publish(
+        spec_path, source_root, first_root, retained_cache_root=retained_root
+    )
+    second_stage = decomposition.stage_candidate(
+        spec_path, source_root, second_root, retained_cache_root=retained_root
+    )
+    second_publish = decomposition.publish(
+        spec_path, source_root, second_root, retained_cache_root=retained_root
+    )
+
+    assert first_stage["reused"] is False
+    assert second_stage["reused"] is True
+    assert first_publish["generation_id"] == second_publish["generation_id"]
+    assert (first_root / "CURRENT.json").is_file()
+    assert (second_root / "CURRENT.json").is_file()
+
+
+def test_staging_rejects_valid_generation_b_for_requested_identity_a(
+    tmp_path, monkeypatch
+):
+    """A matching result hash cannot substitute a different requested spec."""
+
+    source_root = tmp_path / "source"
+    target_path, days = _write_sources(source_root, complete_costs=True)
+    spec_a = _spec(
+        source_root,
+        target_path,
+        days,
+        models=[_model(days, cost_coverage="COMPLETE")],
+    )
+    spec_b_payload = json.loads(spec_a.read_text(encoding="utf-8"))
+    spec_b_payload["analysis_lens"] = "ETF_STYLE"
+    spec_b = tmp_path / "spec-b.json"
+    spec_b.write_text(
+        json.dumps(spec_b_payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    retained_root = tmp_path / "retained"
+    staged_b = decomposition.stage_candidate(
+        spec_b,
+        source_root,
+        tmp_path / "b-output",
+        retained_cache_root=retained_root,
+    )
+    key_a = decomposition._input_key(spec_a, source_root)
+    b_bytes = (Path(staged_b["candidate"]) / "decomposition.json").read_bytes()
+    (retained_root / ".decomposition-index" / f"{key_a}.json").write_bytes(
+        decomposition.canonical_json_bytes(
+            {
+                "generation_id": staged_b["generation_id"],
+                "key": key_a,
+                "result_sha256": hashlib.sha256(b_bytes).hexdigest(),
+                "result_size_bytes": len(b_bytes),
+            }
+        )
+    )
+    calls = {"count": 0}
+    original = decomposition.build_decomposition
+
+    def counted(spec_path, source_root):
+        calls["count"] += 1
+        return original(spec_path, source_root)
+
+    monkeypatch.setattr(decomposition, "build_decomposition", counted)
+
+    with pytest.raises(
+        decomposition.DecompositionError, match="different requested identity"
+    ):
+        decomposition.stage_candidate(
+            spec_a,
+            source_root,
+            tmp_path / "a-output",
+            retained_cache_root=retained_root,
+        )
+    assert calls["count"] == 0
+
+
+def test_dynamic_grid_reuses_each_candidate_fit_for_sensitivity_and_winner(
+    tmp_path, monkeypatch
+):
+    """Removing the retained candidate fit would restore the old 2G+1 work."""
+
+    source = tmp_path / "dynamic"
+    target_path, days, _truth = _write_dynamic_sources(source)
+    model = _dynamic_model(days)
+    spec_path = _spec(source, target_path, days, models=[model])
+    calls = {"count": 0}
+    original = decomposition._dynamic_fit
+
+    def counted(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(decomposition, "_dynamic_fit", counted)
+
+    decomposition.build_decomposition(spec_path, source)
+
+    assert calls["count"] == len(model["smoothness_candidates"])
+
+
+def test_staging_rejects_extra_cached_candidate_before_numerical_build(
+    tmp_path, monkeypatch
+):
+    """Candidate inventory failure is a rejection, never a refit fallback."""
+
+    source_root = tmp_path / "source"
+    target_path, days = _write_sources(source_root, complete_costs=True)
+    spec_path = _spec(
+        source_root,
+        target_path,
+        days,
+        models=[_model(days, cost_coverage="COMPLETE")],
+    )
+    output_root = tmp_path / "output"
+    staged = decomposition.stage_candidate(spec_path, source_root, output_root)
+    (Path(staged["candidate"]) / "unexpected.txt").write_text(
+        "not manifest-bound", encoding="utf-8"
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("invalid candidate reached numerical build")
+
+    monkeypatch.setattr(decomposition, "build_decomposition", forbidden)
+    with pytest.raises(decomposition.DecompositionError, match="candidate file set"):
+        decomposition.stage_candidate(spec_path, source_root, output_root)
+
+
+def test_retained_dynamic_training_reuses_fit_for_evaluation_only_change(
+    tmp_path, monkeypatch
+):
+    """Changing only a holdout row recalculates it without another dynamic fit."""
+
+    source_root = tmp_path / "source"
+    target_path, days, _truth = _write_dynamic_sources(source_root)
+    model = _dynamic_model(days)
+    spec_path = _spec(source_root, target_path, days, models=[model])
+    retained_root = tmp_path / "retained"
+    original = decomposition._dynamic_fit
+    calls = {"count": 0}
+
+    def counted(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(decomposition, "_dynamic_fit", counted)
+    first = decomposition.stage_candidate(
+        spec_path,
+        source_root,
+        tmp_path / "first",
+        retained_cache_root=retained_root,
+    )
+    first_row = next(
+        row
+        for row in json.loads(
+            (Path(first["candidate"]) / "decomposition.json").read_text("utf-8")
+        )["model_results"]
+        if row["selected_for_series"]
+    )
+    calls["count"] = 0
+    rows = list(csv.reader(target_path.open(newline="", encoding="utf-8")))
+    rows[-1][2] = format(float(rows[-1][2]) + 0.000001, ".17g")
+    with target_path.open("w", newline="", encoding="utf-8") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source_root, target_path, days, models=[model])
+
+    second = decomposition.stage_candidate(
+        spec_path,
+        source_root,
+        tmp_path / "second",
+        retained_cache_root=retained_root,
+    )
+    second_row = next(
+        row
+        for row in json.loads(
+            (Path(second["candidate"]) / "decomposition.json").read_text("utf-8")
+        )["model_results"]
+        if row["selected_for_series"]
+    )
+    assert calls["count"] == 0
+    assert second["generation_id"] != first["generation_id"]
+    assert second_row["diagnostics"]["holdout"] != first_row["diagnostics"]["holdout"]
+
+
+def test_retained_dynamic_training_rejects_modified_cached_fit_values(
+    tmp_path, monkeypatch
+):
+    """A shape-valid altered fit cannot change an evaluation-only result."""
+
+    source_root = tmp_path / "source"
+    target_path, days, _truth = _write_dynamic_sources(source_root)
+    model = _dynamic_model(days)
+    spec_path = _spec(source_root, target_path, days, models=[model])
+    retained_root = tmp_path / "retained"
+    decomposition.stage_candidate(
+        spec_path,
+        source_root,
+        tmp_path / "cold",
+        retained_cache_root=retained_root,
+    )
+    receipt = next((retained_root / ".decomposition-training").glob("*.json"))
+    value = json.loads(receipt.read_bytes())
+    for fit in value["candidate_fits"].values():
+        fit["exposures"] = [
+            [float(float.fromhex(item) + 0.5).hex() for item in row]
+            for row in fit["exposures"]
+        ]
+    receipt.write_bytes(decomposition.canonical_json_bytes(value))
+
+    evaluation_model = dict(model)
+    evaluation_model["test_start"] = days[106].isoformat()
+    evaluation_spec = _spec(source_root, target_path, days, models=[evaluation_model])
+    calls = {"count": 0}
+    original = decomposition._dynamic_fit
+
+    def counted(*args, **kwargs):
+        calls["count"] += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(decomposition, "_dynamic_fit", counted)
+    changed = decomposition.stage_candidate(
+        evaluation_spec,
+        source_root,
+        tmp_path / "changed",
+        retained_cache_root=retained_root,
+    )
+    assert calls["count"] == len(model["smoothness_candidates"])
+    fresh = decomposition.stage_candidate(
+        evaluation_spec, source_root, tmp_path / "fresh"
+    )
+
+    changed_result = json.loads(
+        (Path(changed["candidate"]) / "decomposition.json").read_bytes()
+    )
+    fresh_result = json.loads(
+        (Path(fresh["candidate"]) / "decomposition.json").read_bytes()
+    )
+    assert changed_result == fresh_result
+
+
+def test_financial_replay_rederives_after_consumed_methodology_changes(
+    tmp_path, monkeypatch
+):
+    """A retained replay receipt must not survive changed producer methodology."""
+
+    import portfolio_financial_outcomes as outcomes
+
+    source_root = tmp_path / "source"
+    target_path, days, _truth = _write_dynamic_sources(source_root)
+    spec_path = _spec(source_root, target_path, days, models=[_dynamic_model(days)])
+    output_root = tmp_path / "output"
+    staged = decomposition.stage_candidate(spec_path, source_root, output_root)
+    candidate = Path(staged["candidate"])
+    candidate_files = tuple(
+        pipeline.FileExpectation(path.name, *_hash(path))
+        for path in sorted(candidate.iterdir())
+        if path.is_file()
+    )
+    generation = pipeline.GenerationNode(
+        "decomposition-generation",
+        (),
+        "analytics",
+        str(staged["generation_id"]),
+        _hash(candidate / "generation.json")[0],
+        candidate_files,
+        candidate,
+        False,
+    )
+    result = candidate / "decomposition.json"
+    artifact = pipeline.ArtifactNode(
+        "selected-decomposition", (generation.node_id,), result, *_hash(result)
+    )
+    nodes = (
+        generation,
+        artifact,
+        *(
+            pipeline.ArtifactNode(name, (), path, *_hash(path))
+            for name, path in (
+                ("spec", spec_path),
+                ("target", target_path),
+                ("factor", source_root / "factors.csv"),
+            )
+        ),
+    )
+    invocation = SimpleNamespace(
+        nodes=nodes,
+        roots={"analytics": output_root},
+        state_root=tmp_path / "financial-state",
+    )
+    cold = {
+        "correlation_build_calls": 0,
+        "full_rederivation_count": 0,
+        "grid_search_calls": 0,
+        "model_fit_calls": 0,
+        "receipt_reuse_count": 0,
+    }
+    outcomes._replay_model(
+        invocation,
+        artifact,
+        "DECOMPOSITION",
+        source_root=source_root,
+        work_counters=cold,
+    )
+    methodology = json.loads(decomposition.METHODOLOGY_PATH.read_bytes())
+    methodology["test_consumed_methodology_revision"] = "changed"
+    changed_methodology = tmp_path / "changed-methodology.json"
+    changed_methodology.write_bytes(decomposition.canonical_json_bytes(methodology))
+    monkeypatch.setattr(decomposition, "METHODOLOGY_PATH", changed_methodology)
+    warm = {key: 0 for key in cold}
+
+    with pytest.raises(
+        outcomes.FinancialOutcomeError,
+        match="financial model differs from selected-source recomputation",
+    ):
+        outcomes._replay_model(
+            invocation,
+            artifact,
+            "DECOMPOSITION",
+            source_root=source_root,
+            work_counters=warm,
+        )
+    assert warm["full_rederivation_count"] == 1
+    assert warm["receipt_reuse_count"] == 0
+
+
+def test_dynamic_all_unavailable_cv_returns_supported_status_without_cache(
+    tmp_path: Path,
+) -> None:
+    """An unavailable dynamic fit is a result, never a missing-cache exception."""
+
+    source_root = tmp_path / "source"
+    target_path, days, _truth = _write_dynamic_sources(source_root)
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    for row in rows[1:]:
+        row[2] = "0.00005"
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(rows)
+    spec_path = _spec(source_root, target_path, days, models=[_dynamic_model(days)])
+    cache_root = tmp_path / "retained"
+
+    result, _manifest, _content = decomposition.build_decomposition(
+        spec_path, source_root, training_cache_root=cache_root
+    )
+
+    assert (
+        result["model_results"][0]["status"] == "UNAVAILABLE_DYNAMIC_CROSS_VALIDATION"
+    )
+    assert not (cache_root / ".decomposition-training").exists()
+
+
+def test_cache_root_rejects_actual_symlinks_before_resolution(tmp_path: Path) -> None:
+    """A linked caller root cannot redirect retained state outside its boundary."""
+
+    real = tmp_path / "real"
+    real.mkdir()
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(real, target_is_directory=True)
+    except OSError as exc:
+        if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+            pytest.skip("native Windows symlink capability is unavailable")
+        raise
+
+    for output_root, retained_root in ((tmp_path / "output", linked), (linked, None)):
+        with pytest.raises(
+            decomposition.DecompositionError,
+            match="retained cache root must not be a symlink",
+        ):
+            decomposition._cache_root(output_root, retained_root)
+
+
+def test_staging_re_solves_when_the_indexed_result_does_not_verify(
+    tmp_path, monkeypatch
+):
+    """A stored result is served only while it still hashes to its manifest."""
+
+    source_root = tmp_path / "source"
+    target_path, days = _write_sources(source_root, complete_costs=True)
+    spec_path = _spec(
+        source_root,
+        target_path,
+        days,
+        models=[_model(days, cost_coverage="COMPLETE")],
+    )
+    output_root = tmp_path / "out"
+    first = decomposition.stage_candidate(spec_path, source_root, output_root)
+
+    candidate = output_root / "candidates" / str(first["generation_id"])
+    (candidate / "decomposition.json").write_text("{}", encoding="utf-8")
+
+    calls = {"count": 0}
+    original = decomposition.build_decomposition
+
+    def counted(spec_path_, source_root_):
+        calls["count"] += 1
+        return original(spec_path_, source_root_)
+
+    monkeypatch.setattr(decomposition, "build_decomposition", counted)
+
+    with pytest.raises(decomposition.DecompositionError):
+        decomposition.stage_candidate(spec_path, source_root, output_root)
+    assert calls["count"] == 1

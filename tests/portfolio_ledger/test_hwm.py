@@ -255,6 +255,75 @@ def test_freshness_cannot_advance_beyond_the_accepted_hwm_series() -> None:
     assert rows[0]["hwm_freshness_state"] == "FRESH"
 
 
+def test_evidence_truncated_at_the_common_boundary_still_qualifies() -> None:
+    """A provider publishing past the boundary is not a stale series.
+
+    Every series is truncated to the common end date. Robuxio's Matrixport NAV
+    held both 2026-09-02 and 2026-09-03 while the boundary was 09-02, set by
+    IBKR's two-day publication lag on p123-ai-factor. Comparing the freshness
+    date to the evidence end with a bare `!=` disqualified it for being one
+    day fresher than the boundary, leaving 11.13% of the perimeter uncovered
+    and the governed HWM UNAVAILABLE.
+    """
+
+    strategies = [
+        {
+            "current_value_usd": "50.17",
+            "nav_evidence_layer": "ACCOUNT_LIVE",
+            "nav_observed_end": "2026-09-02",
+            "nav_status": "AVAILABLE",
+            "strategy_id": "strategy-live",
+            "strategy_name": "Live",
+            "systematic_weight": "1",
+        }
+    ]
+    policy = _policy()
+    policy["excluded_strategy_ids"] = []
+    policy["material_perimeter"] = {"default": "INCLUDED", "exclusions": []}
+    freshness = [
+        {
+            "blocks_current_consumers": False,
+            "fact_type": "strategy-returns",
+            "lane": "ACCOUNT",
+            "last_accepted_date": "2026-09-03",
+            "reason": "accepted observation is within cadence and grace",
+            "required_for_current": True,
+            "state": "FRESH",
+            "subject_id": "strategy-live",
+            "subject_type": "STRATEGY",
+        }
+    ]
+
+    rows, summary = governed_hwm_coverage(
+        strategies,
+        policy,
+        freshness,
+        require_freshness=True,
+        calculation_boundary="2026-09-02",
+    )
+
+    assert summary["covered_value_usd"] == "50.17"
+    assert summary["uncovered_value_usd"] == "0"
+    assert summary["uncovered_details"] == []
+    assert rows[0]["hwm_freshness_boundary_matches_evidence"] is True
+
+    # Evidence that stops SHORT of the boundary is still stale: the provider
+    # has days this series does not, and a missing point can hide a peak.
+    short = [{**strategies[0], "nav_observed_end": "2026-08-20"}]
+    _rows, stale = governed_hwm_coverage(
+        short,
+        policy,
+        freshness,
+        require_freshness=True,
+        calculation_boundary="2026-09-02",
+    )
+
+    assert stale["uncovered_value_usd"] == "50.17"
+    assert stale["uncovered_details"][0]["qualification_gap"] == (
+        "FRESHNESS_EVIDENCE_BOUNDARY_MISMATCH"
+    )
+
+
 def test_governed_hwm_rejects_unknown_policy_exclusion() -> None:
     policy = _policy()
     policy["excluded_strategy_ids"] = ["unknown"]

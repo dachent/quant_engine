@@ -621,9 +621,66 @@ def build_shared_history_source(
         paths["provider_generation"],
     )
     contract = json.loads(prepared["contract_path"].read_bytes())
+    history._update_source_generation(
+        contract,
+        "owner-account-live-history",
+        paths["provider_generation"],
+        prepared["as_of_date"],
+    )
+    history._update_correction_generations(
+        contract,
+        "owner-account-live-history",
+        paths["provider_generation"],
+        prepared["as_of_date"],
+        "PROVIDER_LEDGER",
+    )
+    history._restore_retained_echo_correction(contract)
+    _write_json(prepared["contract_path"], contract)
+    selected_ledger = json.loads(prepared["provider_ledger_catalog_path"].read_bytes())
+    live_starts = {
+        strategy_id: min(
+            row["date"]
+            for row in selected_ledger["strategy_returns"]
+            if row["strategy_id"] == strategy_id
+        )
+        for strategy_id in REQUIRED_STRATEGIES
+    }
+    eu_dates = [
+        row["date"]
+        for row in selected_ledger["strategy_returns"]
+        if row["strategy_id"] == "p123-eu"
+    ]
+    contract = json.loads(prepared["contract_path"].read_bytes())
+    history._update_correction_interval(
+        contract,
+        "p123-eu-account-live",
+        observed_start=min(eu_dates),
+        observed_end=max(eu_dates),
+        effective_start=min(eu_dates),
+        effective_end=None,
+    )
+    _write_json(prepared["contract_path"], contract)
+    # The shared selected account source, not the intermediate fixture, owns
+    # each live boundary.  Rebuild only explicitly synthetic prehistory through
+    # the day before those actual selected boundaries.
+    _install_hybrid_source(
+        prepared,
+        live_starts=live_starts,
+        align_live_sources=False,
+    )
+    contract = json.loads(prepared["contract_path"].read_bytes())
     selected_contract = json.loads(paths["contract"].read_bytes())
     contract["contract_schema_version"] = 7
     contract["epoch_manifest_source"] = selected_contract["epoch_manifest_source"]
+    # hwm._fixture(..., daily=True) emits a declared synthetic NAV for every
+    # calendar date; this fixture-only source is therefore 24/7 daily, unlike
+    # the generic production account/provider-publication declaration.
+    owner_account_live = next(
+        source
+        for source in contract["source_segments"]
+        if source["source_id"] == "owner-account-live-history"
+    )
+    owner_account_live["temporal"].update(calendar="ALWAYS_ON", cadence="DAILY")
     history._update_source_generation(
         contract,
         "owner-account-live-history",
@@ -1282,19 +1339,37 @@ def _align_live_source_dates(fixture: dict[str, Any], contract: dict[str, Any]) 
     history._restore_retained_echo_correction(contract)
 
 
-def _install_hybrid_source(fixture: dict[str, Any]) -> dict[str, Any]:
+def _install_hybrid_source(
+    fixture: dict[str, Any],
+    *,
+    live_starts: dict[str, str] | None = None,
+    align_live_sources: bool = True,
+) -> dict[str, Any]:
     """Add exact-version BACKTEST rows before the existing governed live rows."""
 
     history = plan_tests.history_tests
     fixture["as_of_date"] = "2026-09-04"
     returns_path = fixture["portfolio123_returns_path"]
     p123_rows = history.pq.read_table(returns_path).to_pylist()
-    for row, observed in zip(
-        p123_rows,
-        ("2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"),
-        strict=True,
-    ):
-        row["period_date"] = observed
+    prehistory_start = date(2024, 1, 2)
+    ai_live_start = date.fromisoformat(
+        (live_starts or {}).get("p123-ai-factor", "2024-01-06")
+    )
+    p123_dates = [
+        prehistory_start + timedelta(days=offset)
+        for offset in range((ai_live_start - prehistory_start).days)
+    ]
+    if not p123_dates:
+        raise AssertionError("synthetic AI prehistory must precede selected live start")
+    p123_template = p123_rows[0]
+    p123_rows = [
+        {
+            **p123_template,
+            "model_return": float(100 + index / 100),
+            "period_date": observed.isoformat(),
+        }
+        for index, observed in enumerate(p123_dates)
+    ]
     history.pq.write_table(history.pa.Table.from_pylist(p123_rows), returns_path)
     p123_manifest_path = fixture["portfolio123_manifest_path"]
     p123_manifest = json.loads(p123_manifest_path.read_text(encoding="utf-8"))
@@ -1340,7 +1415,8 @@ def _install_hybrid_source(fixture: dict[str, Any]) -> dict[str, Any]:
         returns_path,
         fixture["portfolio123_relationships_path"],
     )
-    _align_live_source_dates(fixture, contract)
+    if align_live_sources:
+        _align_live_source_dates(fixture, contract)
 
     _targets, strategy_evidence, _proof, _ledger_manifest = (
         history.target_series.build_provider_ledger_targets(
@@ -1388,15 +1464,31 @@ def _install_hybrid_source(fixture: dict[str, Any]) -> dict[str, Any]:
         for key, value in REQUIRED_STRATEGIES.items()
         if key != "p123-ai-factor"
     }
+    external_start_dates = {
+        strategy_id: date.fromisoformat(
+            (live_starts or {}).get(strategy_id, "2024-01-04")
+        )
+        for strategy_id in external_strategies
+    }
     for strategy_index, (strategy_id, series_id) in enumerate(
         external_strategies.items(), 1
     ):
-        for day_index, observed in enumerate(("2024-01-02", "2024-01-03"), 1):
+        dates = [
+            prehistory_start + timedelta(days=offset)
+            for offset in range(
+                (external_start_dates[strategy_id] - prehistory_start).days
+            )
+        ]
+        if not dates:
+            raise AssertionError(
+                "synthetic prehistory must precede selected live start"
+            )
+        for day_index, observed in enumerate(dates, 1):
             rows.append(
                 {
-                    "date": observed,
+                    "date": observed.isoformat(),
                     "evidence_layer": "BACKTEST",
-                    "return": f"{(strategy_index * day_index) / 10000:.8f}",
+                    "return": f"{strategy_index * (1 + day_index % 11) / 1000000:.8f}",
                     "series_id": series_id,
                     "strategy_version": versions[strategy_id],
                 }
@@ -1420,13 +1512,17 @@ def _install_hybrid_source(fixture: dict[str, Any]) -> dict[str, Any]:
         "series": [
             {
                 "compatibility_basis": "SYNTHETIC_OWNER_ACCEPTED_VERSION",
-                "frequency": "DAILY_TRADING",
+                "frequency": "DAILY",
                 "history_status": "ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
                 "implementation_reconciliation_status": "RECONCILED_SYNTHETIC",
-                "observed_end": "2024-01-03",
-                "observed_start": "2024-01-02",
+                "observed_end": (
+                    external_start_dates[strategy_id] - timedelta(days=1)
+                ).isoformat(),
+                "observed_start": prehistory_start.isoformat(),
                 "required_for_analysis": True,
-                "return_observations": 2,
+                "return_observations": (
+                    external_start_dates[strategy_id] - prehistory_start
+                ).days,
                 "series_id": series_id,
                 "strategy_version": versions[strategy_id],
             }
@@ -1460,7 +1556,22 @@ def _install_hybrid_source(fixture: dict[str, Any]) -> dict[str, Any]:
         existence_status="EXISTS",
         capture_status="CAPTURED_GOVERNED",
     )
-    backtest["interval"].update(observed_start="2024-01-02", observed_end="2024-01-03")
+    backtest["interval"].update(
+        observed_start=prehistory_start.isoformat(),
+        observed_end=max(
+            external_start - timedelta(days=1)
+            for external_start in external_start_dates.values()
+        ).isoformat(),
+    )
+    for source_id in (
+        "portfolio123-model-generation",
+        "quantbase-account-generation",
+        "strategy-backtests",
+    ):
+        source = next(
+            row for row in contract["source_segments"] if row["source_id"] == source_id
+        )
+        source["temporal"].update(calendar="ALWAYS_ON", cadence="DAILY")
     live = next(
         row
         for row in contract["source_segments"]
@@ -1566,6 +1677,14 @@ def build_decomposition_vertical(
 
     monkeypatch.setattr(history, "_history_fixture", hybrid_history_fixture)
     inputs = plan_tests._fixture(root / "inputs", plan_mutator=_complete_plan)
+    # This vertical expands the two-series planner fixture to all seven series.
+    # Its synthetic factor calendar uses the same declared 252-anchor year.
+    base_spec = json.loads(inputs["base_spec_path"].read_bytes())
+    base_spec["models"] = [
+        {"series_id": series_id, "periods_per_year": 252}
+        for series_id in REQUIRED_STRATEGIES.values()
+    ]
+    _write_json(inputs["base_spec_path"], base_spec)
 
     candidates_by_universe: dict[str, set[str]] = {}
     for _key, (_lens, universe, _input, factor) in SOURCE_FACTORS.items():

@@ -1022,3 +1022,126 @@ def test_completed_command_receipt_rejects_declared_output_drift(
 
     with pytest.raises(PipelineValidationError, match="command outputs drifted"):
         execute_pipeline(spec, command_runner=runner)
+
+
+def test_wait_for_progress_allows_work_that_outlives_its_budget() -> None:
+    """A child that keeps reporting progress is not killed for being slow.
+
+    This is the whole point of the change: `timeout_seconds` bounds silence,
+    not runtime. The child here runs several times its budget while progress
+    keeps being observed, and must be allowed to finish.
+    """
+
+    import subprocess
+    import time
+
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(3)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        return_code = pipeline_module._wait_for_progress(process, 1, time.monotonic)
+    finally:
+        if process.poll() is None:  # pragma: no cover - only on failure
+            process.kill()
+            process.wait()
+
+    assert return_code == 0
+
+
+def test_wait_for_progress_kills_a_child_that_has_gone_quiet() -> None:
+    """A child that stops making progress still dies on its budget."""
+
+    import subprocess
+    import time
+
+    stalled = time.monotonic() - 3600
+    process = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            pipeline_module._wait_for_progress(process, 1, lambda: stalled)
+    finally:
+        process.kill()
+        process.wait()
+
+
+def test_command_node_accepts_a_budget_above_the_former_ceiling(
+    tmp_path: Path,
+) -> None:
+    """The 3600 ceiling bounded duration, and duration is no longer the budget.
+
+    A decomposition lens is allowed 7200s one layer down, so a node that wraps
+    several of them has to be able to declare at least as much silence.
+    """
+
+    command = {
+        "argv": ["synthetic", "build"],
+        "cwd": str(tmp_path),
+        "declared_reads": [],
+        "declared_writes": [],
+        "depends_on": [],
+        "effect": "LOCAL_ONLY",
+        "kind": "COMMAND",
+        "node_id": "local-build",
+        "request_identity": None,
+        "retry_limit": 0,
+        "timeout_seconds": 7200,
+    }
+    raw, _, _, _ = _spec_dict(tmp_path, command=command)
+
+    spec = _parse(raw)
+    bounded = [node for node in spec.nodes if node.node_id == "local-build"]
+
+    assert bounded[0].timeout_seconds == 7200
+
+
+def test_capture_stream_observes_a_trickle_before_the_pipe_fills(
+    tmp_path: Path,
+) -> None:
+    """Progress must be seen as it is written, not once 64 KB has piled up.
+
+    `read` on a pipe blocks until the full request is satisfied, so a node
+    that reports one line at a time looked completely silent and the idle
+    budget decayed into a duration budget. A blocking read sees a single
+    block at EOF; this must see several.
+    """
+
+    import subprocess
+
+    child = tmp_path / "trickle.py"
+    child.write_text(
+        "import sys, time"
+        + chr(10)
+        + "for _ in range(5):"
+        + chr(10)
+        + "    print('tick', file=sys.stderr, flush=True)"
+        + chr(10)
+        + "    time.sleep(0.1)"
+        + chr(10),
+        encoding="utf-8",
+    )
+    process = subprocess.Popen(
+        [sys.executable, str(child)],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    observed = 0
+
+    def seen() -> None:
+        nonlocal observed
+        observed += 1
+
+    try:
+        assert process.stderr is not None
+        captured = pipeline_module._capture_stream(process.stderr, seen)
+    finally:
+        process.wait()
+
+    assert process.returncode == 0
+    assert captured.size_bytes < 64 * 1024
+    assert observed > 1

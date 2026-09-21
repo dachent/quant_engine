@@ -205,6 +205,28 @@ def _artifact_for_digest(
     return node
 
 
+def _first_difference(actual: Any, expected: Any, path: str = "") -> str:
+    """Name the first place two projections diverge, so a failure is actionable."""
+
+    if isinstance(actual, Mapping) and isinstance(expected, Mapping):
+        for key in sorted(set(actual) | set(expected)):
+            if key not in actual:
+                return f"{path}.{key} missing from panel"
+            if key not in expected:
+                return f"{path}.{key} unexpected in panel"
+            if actual[key] != expected[key]:
+                return _first_difference(actual[key], expected[key], f"{path}.{key}")
+        return f"{path} equal"
+    if isinstance(actual, list) and isinstance(expected, list):
+        if len(actual) != len(expected):
+            return f"{path} length {len(actual)} != {len(expected)}"
+        for index, (left, right) in enumerate(zip(actual, expected)):
+            if left != right:
+                return _first_difference(left, right, f"{path}[{index}]")
+        return f"{path} equal"
+    return f"{path or 'value'} panel={actual!r} expected={expected!r}"
+
+
 def _generation(spec: Any, artifact: ArtifactNode) -> GenerationNode:
     matches = [
         node
@@ -233,6 +255,105 @@ def _generation_file(generation: GenerationNode, filename: str) -> tuple[Path, b
     file = matches[0]
     path = generation.source_dir / file.relative_path
     return path, _verified_file(path, file.sha256, file.size_bytes)
+
+
+EPOCH_MANIFEST_CALCULATION_MEMBERS = {
+    "account_strategy_ledger": "calculation_ledger",
+    "account_strategy_ledger_identity": "calculation_ledger_identity",
+    "account_strategy_classified_flows": "calculation_classified_flows",
+    "account_strategy_flow_coverage": "calculation_flow_coverage",
+}
+
+
+def _optional_gate(spec: Any, gate_id: str) -> tuple[Path, dict[str, Any]] | None:
+    """The gate if the specification carries it, rather than insisting on it."""
+
+    if not any(gate.gate_id == gate_id for gate in spec.gates):
+        return None
+    return _gate(spec, gate_id)
+
+
+def _generation_artifact_path(
+    generation_dir: Path, manifest: Any, sha256: str, size_bytes: int
+) -> Path:
+    """Find the artifact a generation pins by digest, without trusting a name."""
+
+    matches = [
+        artifact
+        for artifact in manifest.artifacts
+        if artifact.sha256 == sha256 and artifact.size_bytes == size_bytes
+    ]
+    if len(matches) != 1:
+        raise FinancialOutcomeError("selected epoch generation artifact differs")
+    parts = matches[0].artifact_id.split("/")
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise FinancialOutcomeError("selected epoch generation artifact differs")
+    path = generation_dir.joinpath(*parts)
+    _verified_file(path, sha256, size_bytes)
+    return path
+
+
+def _epoch_manifest_profile(spec: Any) -> dict[str, Any]:
+    """Resolve the five epoch-manifest inputs for whichever profile is in force.
+
+    Schema 9 names them in the gate. Schema 10 has no gate -- by design -- and
+    the same five are projected out of the bound generation, which is exactly
+    how `_rebuild_selected_epochs` defines them.
+    """
+
+    from portfolio_pipeline_materialize import ACCOUNT_STRATEGY_CLASSIFICATION_POLICY
+
+    gate = _optional_gate(spec, "financial-epoch-manifest-input-authority")
+    if gate is not None:
+        _path, payload = gate
+        inputs = payload["inputs"]
+        selected_bytes: dict[str, bytes] = {
+            key: _verified_file(
+                Path(definition["path"]),
+                definition["sha256"],
+                definition["size_bytes"],
+            )
+            for key, definition in inputs.items()
+        }
+        return {
+            "selected_bytes": selected_bytes,
+            "admission_policy_path": Path(
+                inputs["account_strategy_admission_policy"]["path"]
+            ),
+            "classification_policy_path": ACCOUNT_STRATEGY_CLASSIFICATION_POLICY,
+        }
+
+    _keys, generation_dir, manifest = _selected_epoch_assignment_keys(spec)
+    _identity_path, identity_bytes = _manifest_artifact(
+        generation_dir, manifest, "authority/selected-input-identities.json"
+    )
+    identities = json.loads(identity_bytes)
+    _calculation_path, calculation_bytes = _manifest_artifact(
+        generation_dir, manifest, "authority/calculation-inputs.json"
+    )
+    calculation = json.loads(calculation_bytes)
+    selected_bytes = {}
+    for key, member in EPOCH_MANIFEST_CALCULATION_MEMBERS.items():
+        if member not in calculation:
+            raise FinancialOutcomeError("selected epoch calculation inputs differ")
+        selected_bytes[key] = canonical_json_bytes(calculation[member])
+    admission = identities.get("admission_policy")
+    if not isinstance(admission, Mapping):
+        raise FinancialOutcomeError("selected epoch admission policy identity differs")
+    admission_path = _generation_artifact_path(
+        generation_dir, manifest, admission["sha256"], admission["size_bytes"]
+    )
+    selected_bytes["account_strategy_admission_policy"] = admission_path.read_bytes()
+    # The classification policy stays the repository copy for both profiles:
+    # it is what the generation pins as its selected `flow_classification_policy`,
+    # and the selected-input checker verifies the file it is handed against that
+    # pin. (The bundle also carries a differently-shaped policy document of its
+    # own, which the classified flows name; that one is not this input.)
+    return {
+        "selected_bytes": selected_bytes,
+        "admission_policy_path": admission_path,
+        "classification_policy_path": ACCOUNT_STRATEGY_CLASSIFICATION_POLICY,
+    }
 
 
 def _selected_epoch_assignment_keys(
@@ -316,7 +437,6 @@ def _manifest_artifact(
 
 def selected_hwm_source_paths(spec: Any) -> dict[str, Path]:
     """Resolve the already selected account, provider and baseline authorities."""
-    from portfolio_pipeline_materialize import ACCOUNT_STRATEGY_CLASSIFICATION_POLICY
 
     account = [
         node
@@ -348,14 +468,11 @@ def selected_hwm_source_paths(spec: Any) -> dict[str, Path]:
         if manifest.generation_id != generation.generation_id:
             raise FinancialOutcomeError("selected HWM source generation differs")
         result[key] = path
-    _, epoch_gate = _gate(spec, "financial-epoch-manifest-input-authority")
-    policy = epoch_gate["inputs"]["account_strategy_admission_policy"]
-    path = Path(policy["path"])
-    _verified_file(path, policy["sha256"], policy["size_bytes"])
-    result["account_manifest_admission_policy_path"] = path
-    result["account_manifest_flow_classification_policy_path"] = (
-        ACCOUNT_STRATEGY_CLASSIFICATION_POLICY
-    )
+    profile = _epoch_manifest_profile(spec)
+    result["account_manifest_admission_policy_path"] = profile["admission_policy_path"]
+    result["account_manifest_flow_classification_policy_path"] = profile[
+        "classification_policy_path"
+    ]
     return result
 
 
@@ -425,10 +542,90 @@ def verify_selected_hwm_generation(
     return {"portfolio-calendars", "portfolio-fx-rates", "portfolio-security-master"}
 
 
+def _replay_receipt_path(spec: Any, calculation_identity: str) -> Path | None:
+    """Locate the existing retained state surface without coupling to run roots."""
+
+    state_root = getattr(spec, "state_root", None)
+    if not isinstance(state_root, Path):
+        return None
+    return (
+        state_root.resolve()
+        / "financial-replay-receipts"
+        / f"{calculation_identity}.json"
+    )
+
+
+def _read_replay_receipt(path: Path | None, expected: Mapping[str, object]) -> bool:
+    if path is None or path.is_symlink() or not path.is_file():
+        return False
+    try:
+        value: object = json.loads(path.read_bytes())
+        return isinstance(value, dict) and value == expected
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+
+def _write_replay_receipt(path: Path | None, value: Mapping[str, object]) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink():
+        raise FinancialOutcomeError("financial replay receipt is linked")
+    content = canonical_json_bytes(value)
+    if path.exists():
+        if path.read_bytes() != content:
+            raise FinancialOutcomeError("financial replay receipt identity differs")
+        return
+    try:
+        with path.open("xb") as handle:
+            handle.write(content)
+    except FileExistsError:
+        if path.is_symlink() or path.read_bytes() != content:
+            raise FinancialOutcomeError(
+                "financial replay receipt identity differs"
+            ) from None
+
+
+def financial_outcomes_semantic_identity(proof: Mapping[str, Any]) -> str:
+    """Hash immutable financial outcomes without per-invocation work evidence."""
+
+    semantic_proof = {
+        key: value for key, value in proof.items() if key != "work_counters"
+    }
+    return hashlib.sha256(canonical_json_bytes(semantic_proof)).hexdigest()
+
+
+def _correlation_consumed_producer_identity(
+    producer: Any,
+) -> dict[str, str]:
+    """Hash the repository bytes the correlation replay actually imports."""
+
+    producer_path = Path(cast(str, producer.__file__)).resolve()
+    paths = {
+        "core_contracts": Path(
+            producer.canonical_json_bytes.__code__.co_filename
+        ).resolve(),
+        "decimal_text": Path(producer.decimal_text.__code__.co_filename).resolve(),
+        "producer": producer_path,
+    }
+    lock = producer_path.parents[1] / "uv.lock"
+    paths["dependency_lock"] = lock
+    return {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in sorted(paths.items())
+    }
+
+
 def _replay_model(
-    spec: Any, artifact: ArtifactNode, kind: str, *, source_root: Path | None = None
+    spec: Any,
+    artifact: ArtifactNode,
+    kind: str,
+    *,
+    source_root: Path | None = None,
+    work_counters: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """Delegate numerical replay to the existing domain producer, once per file."""
+    artifact_bytes = _verified_file(artifact.path, artifact.sha256, artifact.size_bytes)
     generation = _generation(spec, artifact)
     assert generation.source_dir is not None
     manifest_path = generation.source_dir / "generation.json"
@@ -453,6 +650,9 @@ def _replay_model(
     specification = _artifact_for_digest(
         spec, definition.sha256, definition.size_bytes, source_root=source_root
     )
+    specification_bytes = _verified_file(
+        specification.path, definition.sha256, definition.size_bytes
+    )
     import portfolio_decomposition
     import portfolio_correlation
 
@@ -467,12 +667,17 @@ def _replay_model(
             parsed.factor_source,
             *parsed.provenance_sources,
         ]
-        build = portfolio_decomposition.build_decomposition
+        build = cast(Any, portfolio_decomposition.build_decomposition)
+        producer_dependencies = portfolio_decomposition._consumed_producer_identity()
     else:
         correlation_spec = portfolio_correlation._load_spec(specification.path)
         source_definitions = [correlation_spec.source]
-        build = portfolio_correlation.build_correlation
+        build = cast(Any, portfolio_correlation.build_correlation)
+        producer_dependencies = _correlation_consumed_producer_identity(
+            portfolio_correlation
+        )
     roots = set()
+    source_bindings: list[dict[str, object]] = []
     for source in source_definitions:
         node = _artifact_for_digest(
             spec,
@@ -488,19 +693,100 @@ def _replay_model(
                 "financial source path differs from producer specification"
             )
         roots.add(root)
+        source_bytes = _verified_file(
+            node.path, source.expected_sha256, source.expected_size_bytes
+        )
+        source_bindings.append(
+            {
+                "relative_path": source.relative_path,
+                "sha256": hashlib.sha256(source_bytes).hexdigest(),
+                "size_bytes": len(source_bytes),
+            }
+        )
     if len(roots) != 1:
         raise FinancialOutcomeError("financial producer source roots conflict")
-    result, rebuilt_manifest, result_bytes = build(
-        specification.path, next(iter(roots))
-    )
+    receipt_base: dict[str, object] = {
+        "kind": kind,
+        "producer_sha256": hashlib.sha256(
+            (
+                Path(portfolio_decomposition.__file__)
+                if kind == "DECOMPOSITION"
+                else Path(portfolio_correlation.__file__)
+            ).read_bytes()
+        ).hexdigest(),
+        "producer_dependencies": producer_dependencies,
+        "result_sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+        "result_size_bytes": len(artifact_bytes),
+        "source_bindings": sorted(
+            source_bindings, key=lambda row: str(row["relative_path"])
+        ),
+        "spec_sha256": hashlib.sha256(specification_bytes).hexdigest(),
+        "spec_size_bytes": len(specification_bytes),
+        "validator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "verification_scope": "SOURCE_PRODUCER_RESULT_AND_CONSUMER_PROJECTION_V1",
+    }
+    calculation_identity = hashlib.sha256(
+        canonical_json_bytes(receipt_base)
+    ).hexdigest()
+    receipt = {
+        "calculation_identity": calculation_identity,
+        "schema_version": 1,
+        **receipt_base,
+    }
+    receipt_path = _replay_receipt_path(spec, calculation_identity)
+    if _read_replay_receipt(receipt_path, receipt):
+        if work_counters is not None:
+            work_counters["receipt_reuse_count"] += 1
+        return cast(dict[str, Any], json.loads(artifact_bytes.decode("utf-8")))
+    if work_counters is not None:
+        work_counters["full_rederivation_count"] += 1
+    if kind == "DECOMPOSITION" and work_counters is not None:
+        original_dynamic_fit: Any = portfolio_decomposition._dynamic_fit
+        original_fit: Any = portfolio_decomposition._fit
+
+        def counted_dynamic_fit(*args: object, **kwargs: object) -> Any:
+            work_counters["model_fit_calls"] += 1
+            return original_dynamic_fit(*args, **kwargs)
+
+        def counted_fit(*args: object, **kwargs: object) -> Any:
+            work_counters["model_fit_calls"] += 1
+            return original_fit(*args, **kwargs)
+
+        work_counters["grid_search_calls"] += len(parsed.models)
+        portfolio_decomposition._dynamic_fit = cast(Any, counted_dynamic_fit)
+        portfolio_decomposition._fit = cast(Any, counted_fit)
+        try:
+            result, rebuilt_manifest, result_bytes = build(
+                specification.path, next(iter(roots))
+            )
+        finally:
+            portfolio_decomposition._dynamic_fit = original_dynamic_fit
+            portfolio_decomposition._fit = original_fit
+    else:
+        if kind == "DEPENDENCE" and work_counters is not None:
+            work_counters["correlation_build_calls"] += 1
+        result, rebuilt_manifest, result_bytes = build(
+            specification.path, next(iter(roots))
+        )
     if (
         rebuilt_manifest.to_json_bytes() != manifest.to_json_bytes()
-        or result_bytes != artifact.path.read_bytes()
+        or result_bytes != artifact_bytes
     ):
         raise FinancialOutcomeError(
             "financial model differs from selected-source recomputation"
         )
-    return result
+    _write_replay_receipt(receipt_path, receipt)
+    # Hand back what every consumer actually read, not the in-memory object.
+    # They all loaded the published bytes, and `canonical_json_bytes` sorts keys,
+    # so a deserialized mapping iterates its factors in sorted order while the
+    # freshly built one iterates them in `model.factor_ids` order. That only
+    # matters because a consumer sums factor contributions in iteration order
+    # (`portfolio_control_panel._factor_analysis`), and a different summand order
+    # rounds differently in the last bits -- enough to move a `.12g` string and
+    # fail the consumer comparison against a projection that is otherwise exactly
+    # equal. The bytes were just proved identical above, so this changes nothing
+    # except the iteration order the comparison inherits.
+    return cast(dict[str, Any], json.loads(result_bytes.decode("utf-8")))
 
 
 def _required_series(
@@ -683,16 +969,38 @@ def _verify_decomposition_consumers(
             "source_label": producer.DECOMPOSITION_LENS_SOURCES[source_key][1],
             "surface": surface,
         }
-        if (
-            displayed != [expected]
-            or len(source_rows) != 1
-            or source_rows[0].get("source_sha256") != node.sha256
-            or source_rows[0].get("generation_id")
-            != _generation(spec, node).generation_id
-            or source_rows[0].get("plan_spec")
-            != plan_bindings[(source_key, surface, mode)]
+        # Reported one clause at a time. As a single `or` chain this said only
+        # "values differ", which cost hours to attribute -- the tripped clause
+        # and the differing field were both invisible.
+        if displayed != [expected]:
+            raise FinancialOutcomeError(
+                f"panel decomposition values differ: {node_id}: "
+                + _first_difference(displayed, [expected])
+            )
+        if len(source_rows) != 1:
+            raise FinancialOutcomeError(
+                f"panel decomposition source rows differ: {node_id}: "
+                f"{len(source_rows)} rows for {source_key}"
+            )
+        observed_source = source_rows[0]
+        for label, actual, wanted in (
+            ("source_sha256", observed_source.get("source_sha256"), node.sha256),
+            (
+                "generation_id",
+                observed_source.get("generation_id"),
+                _generation(spec, node).generation_id,
+            ),
+            (
+                "plan_spec",
+                observed_source.get("plan_spec"),
+                plan_bindings[(source_key, surface, mode)],
+            ),
         ):
-            raise FinancialOutcomeError(f"panel decomposition values differ: {node_id}")
+            if actual != wanted:
+                raise FinancialOutcomeError(
+                    f"panel decomposition {label} differs: {node_id}: "
+                    f"panel={actual!r} expected={wanted!r}"
+                )
         checked[node_id] = hashlib.sha256(
             json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
@@ -771,14 +1079,7 @@ def _rebuild_selected_epochs(
 
 
 def _verify_epochs(spec: Any, contract: Mapping[str, Any]) -> dict[str, Any]:
-    _path, gate = _gate(spec, "financial-epoch-manifest-input-authority")
-    inputs = gate["inputs"]
-    selected_bytes = {}
-    for key, definition in inputs.items():
-        path = Path(definition["path"])
-        selected_bytes[key] = _verified_file(
-            path, definition["sha256"], definition["size_bytes"]
-        )
+    selected_bytes = _epoch_manifest_profile(spec)["selected_bytes"]
     baselines = [
         node
         for node in spec.nodes
@@ -938,8 +1239,14 @@ def _verify_consumers(
     )
     if downloadable_report != report_bytes:
         raise FinancialOutcomeError("downloaded report differs from selected report")
-    _path, workbook = _generation_file(
-        epochs["panel_generation"], panel_producer.WORKBOOK_DOWNLOAD
+    # The panel carries the workbook inline rather than as a file beside the
+    # page: an .xlsx inside a published generation is rewritten in place by the
+    # SharePoint sync client, and a sealed directory cannot tolerate a file that
+    # changes under it. Parity is therefore checked against the bytes the panel
+    # actually delivers, which is what the browser downloads too.
+    _index_path, index_html = _generation_file(epochs["panel_generation"], "index.html")
+    workbook = panel_producer.embedded_download_bytes(
+        index_html.decode("utf-8"), panel_producer.WORKBOOK_DOWNLOAD
     )
     parity = report_producer._workbook_parity_receipt(report_bytes, workbook)
     correlation_node = nodes["financial-outcome-dependence-live-only"]
@@ -1090,6 +1397,13 @@ def validate_financial_outcomes(
         not allow_synthetic and capital.get("authority_profile") != "ACCEPTED_GOVERNED"
     ):
         raise FinancialOutcomeError("capital result is unavailable or synthetic")
+    work_counters = {
+        "model_fit_calls": 0,
+        "grid_search_calls": 0,
+        "correlation_build_calls": 0,
+        "full_rederivation_count": 0,
+        "receipt_reuse_count": 0,
+    }
     replays: dict[tuple[str, Path], dict[str, Any]] = {}
     plan_bindings = {}
     plan_artifacts: dict[tuple[str, str, str], tuple[Path, str, int]] = {}
@@ -1105,6 +1419,7 @@ def validate_financial_outcomes(
                 node,
                 key[0],
                 source_root=plans[key[-1]] if key[0] == "DECOMPOSITION" else None,
+                work_counters=work_counters,
             )
         value = replays[cache_key]
         if key[0] == "DECOMPOSITION":
@@ -1218,4 +1533,5 @@ def validate_financial_outcomes(
         "selected_cells": selected_cells,
         "consumers": consumers,
         "artifact_sha256s": {key: node.sha256 for key, node in sorted(nodes.items())},
+        "work_counters": work_counters,
     }

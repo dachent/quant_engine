@@ -27,6 +27,7 @@
     "gates",
     "hwm_summary",
     "hybrid_mode_gate",
+    "leverage_disclosures",
     "limitations",
     "meta",
     "observation_windows",
@@ -341,7 +342,7 @@
       "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "series", "series_composition", "source_sha256", "sources", "unavailable_count"],
       "properties": {
         "analytics_hash": { "$ref": "#/$defs/hash" },
-        "analytics_schema_version": { "enum": [1, 2] },
+        "analytics_schema_version": { "enum": [1, 2, 3] },
         "as_of_date": { "type": "string", "format": "date" },
         "available_count": { "type": "integer", "minimum": 0 },
         "available_source_keys": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
@@ -424,6 +425,7 @@
       "items": { "type": "object" }
     },
     "positions": { "$ref": "#/$defs/rows" },
+    "leverage_disclosures": { "type": "array", "items": { "$ref": "#/$defs/leverage_disclosure" } },
     "provenance": { "$ref": "#/$defs/rows" },
     "provider_counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
     "reconciliation_checks": { "$ref": "#/$defs/rows" },
@@ -787,12 +789,65 @@
     }
   ],
   "$defs": {
+    "leverage_disclosure": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["account_id", "amount", "classification", "coverage_reason", "coverage_status", "data_class", "included_in_nav", "measurement_basis", "native_source_record_id", "provider_id", "reason", "security_id", "source_amount", "source_catalog_generation_id", "source_catalog_sha256", "source_record_ids", "strategy_id"],
+      "properties": {
+        "account_id": {"type": ["string", "null"]},
+        "amount": {"$ref": "#/$defs/leverage_amount"},
+        "classification": {"type": "string", "minLength": 1},
+        "coverage_reason": {"type": "string", "minLength": 1},
+        "coverage_status": {"enum": ["OBSERVED_ONLY", "COMPLETE_WITHIN_DECLARED_BOUNDARY", "UNAVAILABLE"]},
+        "data_class": {"enum": ["FINANCING_COST", "FINANCING_LIABILITY", "LEVERAGE_EXPOSURE"]},
+        "included_in_nav": {"type": ["boolean", "null"]},
+        "measurement_basis": {"type": "string", "minLength": 1},
+        "native_source_record_id": {"type": ["string", "null"]},
+        "provider_id": {"type": "string", "minLength": 1},
+        "reason": {"type": ["string", "null"]},
+        "security_id": {"type": ["string", "null"]},
+        "source_amount": {"anyOf": [{"$ref": "#/$defs/leverage_amount"}, {"type": "null"}]},
+        "source_catalog_generation_id": {"$ref": "#/$defs/hash"},
+        "source_catalog_sha256": {"$ref": "#/$defs/hash"},
+        "source_record_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "strategy_id": {"type": ["string", "null"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"coverage_status": {"const": "OBSERVED_ONLY"}}, "required": ["coverage_status"]},
+          "then": {"properties": {"source_record_ids": {"minItems": 1}}}
+        },
+        {
+          "if": {"properties": {"coverage_status": {"const": "UNAVAILABLE"}}, "required": ["coverage_status"]},
+          "then": {"properties": {"amount": {"properties": {"status": {"const": "UNAVAILABLE"}, "value": {"type": "null"}}, "required": ["status", "value"]}}}
+        }
+      ]
+    },
+    "leverage_amount": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["status", "value"],
+      "properties": {
+        "status": {"enum": ["AVAILABLE", "UNAVAILABLE"]},
+        "value": {"type": ["string", "null"]}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "AVAILABLE"}}, "required": ["status"]},
+          "then": {"properties": {"value": {"type": "string"}}, "required": ["value"]}
+        },
+        {
+          "if": {"properties": {"status": {"const": "UNAVAILABLE"}}, "required": ["status"]},
+          "then": {"properties": {"value": {"type": "null"}}, "required": ["value"]}
+        }
+      ]
+    },
     "decomposition_lens": {
       "type": "object",
       "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "lens_id", "lens_label", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "return_basis", "series", "source_sha256", "sources", "unavailable_count"],
       "properties": {
         "analytics_hash": { "$ref": "#/$defs/hash" },
-        "analytics_schema_version": { "enum": [1, 2] },
+        "analytics_schema_version": { "enum": [1, 2, 3] },
         "as_of_date": { "type": "string", "format": "date" },
         "available_count": { "type": "integer", "minimum": 0 },
         "available_surfaces": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["STATIC", "DYNAMIC_FLS"] } },
@@ -830,7 +885,7 @@
       "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "available_source_keys", "default_source_key", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "lens_id", "lens_label", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "return_basis", "series", "source_sha256", "sources", "surface", "unavailable_count"],
       "properties": {
         "analytics_hash": { "$ref": "#/$defs/hash" },
-        "analytics_schema_version": { "enum": [1, 2] },
+        "analytics_schema_version": { "enum": [1, 2, 3] },
         "as_of_date": { "type": "string", "format": "date" },
         "available_count": { "type": "integer", "minimum": 0 },
         "available_source_keys": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },

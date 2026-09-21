@@ -584,9 +584,9 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
-    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+    "version_ref": "account-live-segment:3475b976c4139a6b39ffb7ff0b536e9942846b0d474b1a5d97c23516e2796803",
+    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -603,8 +603,8 @@
     "effective_end": null
    },
    "strategy_version": {
-    "status": "UNRESOLVED",
-    "version_ref": null
+    "status": "EVIDENCED",
+    "version_ref": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc"
    },
    "funded_membership": {
     "status": "EVIDENCED",
@@ -626,8 +626,8 @@
    "live_implementation_identity": {
     "status": "EVIDENCED",
     "version_ref": "account-live-segment:63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
-    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -666,9 +666,9 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:de46b08ec45f4096ae5bf501b39e6efa71ae51ae825bee63161aa804422067b3",
-    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+    "version_ref": "account-live-segment:0b0fa4a9fdd79ca2028d07e587909d21d1fab1aa1acd9e440f1eb6e85047ce64",
+    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -685,8 +685,8 @@
     "effective_end": null
    },
    "strategy_version": {
-    "status": "UNRESOLVED",
-    "version_ref": null
+    "status": "EVIDENCED",
+    "version_ref": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99"
    },
    "funded_membership": {
     "status": "EVIDENCED",
@@ -707,9 +707,9 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:4235428716b167f3c21e2843a7e16dd8ea50d8e542cd465e0cf6887b89072435",
-    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+    "version_ref": "account-live-segment:05b87493c092a28bd819d785982921feffee72169883aae9a768bf60e7d21dc4",
+    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -726,8 +726,8 @@
     "effective_end": null
    },
    "strategy_version": {
-    "status": "UNRESOLVED",
-    "version_ref": null
+    "status": "EVIDENCED",
+    "version_ref": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
    },
    "funded_membership": {
     "status": "EVIDENCED",
@@ -789,9 +789,9 @@
    "lifecycle_status": "ACTIVE",
    "live_implementation_identity": {
     "status": "EVIDENCED",
-    "version_ref": "account-live-segment:a7271e772c6d21ee4b3b2ed76149ddd9639d10c5c8be371550203fc2d67c9b61",
-    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "receipt_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+    "version_ref": "account-live-segment:fa7223035eaebb6d5d00e90247eae188b90e9386b940e440a76792f3eef6b1fe",
+    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "receipt_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
    },
    "product_requirement": "REQUIRED",
    "readiness": "REQUIRED_NOT_READY",
@@ -808,8 +808,8 @@
     "effective_end": null
    },
    "strategy_version": {
-    "status": "UNRESOLVED",
-    "version_ref": null
+    "status": "EVIDENCED",
+    "version_ref": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0"
    },
    "funded_membership": {
     "status": "EVIDENCED",
@@ -954,12 +954,31 @@
     "return_observations": 243,
     "return_type": "TOTAL",
     "segment_id": "grizzlybears-vtma:account-live",
-    "sha256": "a7271e772c6d21ee4b3b2ed76149ddd9639d10c5c8be371550203fc2d67c9b61",
-    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+    "sha256": "fa7223035eaebb6d5d00e90247eae188b90e9386b940e440a76792f3eef6b1fe",
+    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "grizzlybears-vtma",
-    "strategy_version": "UNRESOLVED"
+    "strategy_version": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0"
+   },
+   {
+    "calendar": "SOURCE_DECLARED_NO_COERCION",
+    "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+    "evidence_layer": "BACKTEST",
+    "frequency": "VERSION_SNAPSHOT",
+    "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+    "observed_end": "2025-05-06",
+    "observed_start": "2009-04-20",
+    "return_basis": "MODEL",
+    "return_observations": 4038,
+    "return_type": "TOTAL",
+    "segment_id": "grizzlybears-vtma:backtest",
+    "sha256": "3e54cda040f3435a852c5dbcb7bd4eaf2e50811dae7a5f4721f23a9b8483fab5",
+    "source_generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+    "source_generation_sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+    "source_id": "strategy-backtests",
+    "strategy_id": "grizzlybears-vtma",
+    "strategy_version": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0"
    },
    {
     "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
@@ -973,12 +992,50 @@
     "return_observations": 160,
     "return_type": "TOTAL",
     "segment_id": "p123-ai-factor:account-live",
-    "sha256": "7bf0db3b4903878490d675c987a770bd6015f1cbc883a770c07771d98d7d479c",
-    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+    "sha256": "3475b976c4139a6b39ffb7ff0b536e9942846b0d474b1a5d97c23516e2796803",
+    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "p123-ai-factor",
-    "strategy_version": "UNRESOLVED"
+    "strategy_version": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc"
+   },
+   {
+    "calendar": "MODEL_DECLARED",
+    "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+    "evidence_layer": "BACKTEST",
+    "frequency": "MODEL_CAPTURE",
+    "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+    "observed_end": "2026-01-21",
+    "observed_start": "2020-05-13",
+    "return_basis": "MODEL",
+    "return_observations": 1486,
+    "return_type": "TOTAL",
+    "segment_id": "p123-ai-factor:backtest",
+    "sha256": "84cdabd841e31a4764e47788a23ff49a89b4d753ad25ad419ad5cca0b7238057",
+    "source_generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
+    "source_generation_sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
+    "source_id": "portfolio123-model-generation",
+    "strategy_id": "p123-ai-factor",
+    "strategy_version": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc"
+   },
+   {
+    "calendar": "MODEL_DECLARED",
+    "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+    "evidence_layer": "BACKTEST",
+    "frequency": "MODEL_CAPTURE",
+    "mode_admission": "REQUIRED_NOT_READY_OVERLAP",
+    "observed_end": "2026-06-26",
+    "observed_start": "2026-01-22",
+    "return_basis": "MODEL",
+    "return_observations": 112,
+    "return_type": "TOTAL",
+    "segment_id": "p123-ai-factor:backtest-not-admitted",
+    "sha256": "bd56f55e9874d4226ee2b733eb9e52c5504e81807144a802c41113dfb5c9579e",
+    "source_generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
+    "source_generation_sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
+    "source_id": "portfolio123-model-generation",
+    "strategy_id": "p123-ai-factor",
+    "strategy_version": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc"
    },
    {
     "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
@@ -993,9 +1050,28 @@
     "return_type": "TOTAL",
     "segment_id": "p123-eu:account-live",
     "sha256": "63a2e4a52668d8c4c94e33a19b3a8bd1b020a070bf519ab35187001f6d99b8f7",
-    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
+    "strategy_id": "p123-eu",
+    "strategy_version": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"
+   },
+   {
+    "calendar": "SOURCE_DECLARED_NO_COERCION",
+    "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+    "evidence_layer": "BACKTEST",
+    "frequency": "VERSION_SNAPSHOT",
+    "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+    "observed_end": "2024-02-16",
+    "observed_start": "2008-01-02",
+    "return_basis": "MODEL",
+    "return_observations": 4208,
+    "return_type": "TOTAL",
+    "segment_id": "p123-eu:backtest",
+    "sha256": "e97caac4be038f9d207e8e1c1ec886437276a4fbbe41bbc491567a69ed608356",
+    "source_generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+    "source_generation_sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+    "source_id": "strategy-backtests",
     "strategy_id": "p123-eu",
     "strategy_version": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"
    },
@@ -1011,12 +1087,31 @@
     "return_observations": 241,
     "return_type": "TOTAL",
     "segment_id": "qsi:account-live",
-    "sha256": "de46b08ec45f4096ae5bf501b39e6efa71ae51ae825bee63161aa804422067b3",
-    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+    "sha256": "0b0fa4a9fdd79ca2028d07e587909d21d1fab1aa1acd9e440f1eb6e85047ce64",
+    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "qsi",
-    "strategy_version": "UNRESOLVED"
+    "strategy_version": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99"
+   },
+   {
+    "calendar": "SOURCE_DECLARED_NO_COERCION",
+    "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+    "evidence_layer": "BACKTEST",
+    "frequency": "VERSION_SNAPSHOT",
+    "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+    "observed_end": "2025-12-19",
+    "observed_start": "2013-10-21",
+    "return_basis": "MODEL",
+    "return_observations": 3061,
+    "return_type": "TOTAL",
+    "segment_id": "qsi:backtest",
+    "sha256": "3c8056b16764090bcf62eababd6146d35fda7731482ff1884fd7b42f2ea1fa20",
+    "source_generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+    "source_generation_sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+    "source_id": "strategy-backtests",
+    "strategy_id": "qsi",
+    "strategy_version": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99"
    },
    {
     "calendar": "ALWAYS_ON",
@@ -1034,6 +1129,25 @@
     "source_generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
     "source_generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
     "source_id": "matrixport-account-generation",
+    "strategy_id": "robuxio-crypto",
+    "strategy_version": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041"
+   },
+   {
+    "calendar": "SOURCE_DECLARED_NO_COERCION",
+    "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+    "evidence_layer": "BACKTEST",
+    "frequency": "VERSION_SNAPSHOT",
+    "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+    "observed_end": "2025-12-05",
+    "observed_start": "2020-01-02",
+    "return_basis": "MODEL",
+    "return_observations": 2165,
+    "return_type": "TOTAL",
+    "segment_id": "robuxio-crypto:backtest",
+    "sha256": "336313dfbfb46c82f8ac2f083921e4736dd8bb77c7ef645c7976df1e733e5aaf",
+    "source_generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+    "source_generation_sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+    "source_id": "strategy-backtests",
     "strategy_id": "robuxio-crypto",
     "strategy_version": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041"
    },
@@ -1068,12 +1182,31 @@
     "return_observations": 282,
     "return_type": "TOTAL",
     "segment_id": "tt-portfolio:account-live",
-    "sha256": "4235428716b167f3c21e2843a7e16dd8ea50d8e542cd465e0cf6887b89072435",
-    "source_generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "source_generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+    "sha256": "05b87493c092a28bd819d785982921feffee72169883aae9a768bf60e7d21dc4",
+    "source_generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "source_generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "source_id": "owner-account-live-history",
     "strategy_id": "tt-portfolio",
-    "strategy_version": "UNRESOLVED"
+    "strategy_version": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
+   },
+   {
+    "calendar": "SOURCE_DECLARED_NO_COERCION",
+    "canonicalization": "CORRELATION_FIELDS_V2_CANONICAL_CSV_V1",
+    "evidence_layer": "BACKTEST",
+    "frequency": "VERSION_SNAPSHOT",
+    "mode_admission": "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+    "observed_end": "2025-11-24",
+    "observed_start": "2007-01-05",
+    "return_basis": "MODEL",
+    "return_observations": 4753,
+    "return_type": "TOTAL",
+    "segment_id": "tt-portfolio:backtest",
+    "sha256": "7a7edc608f13040ef4073b986f425f33192eeb2590431270efaab57e5577f3f7",
+    "source_generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+    "source_generation_sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+    "source_id": "strategy-backtests",
+    "strategy_id": "tt-portfolio",
+    "strategy_version": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
    },
    {
     "calendar": "SOURCE_DECLARED",
@@ -1097,196 +1230,208 @@
   ],
   "corrections": [
    {
-    "correction_id": "robuxio-provider-track-record",
-    "strategy_id": "robuxio-crypto",
-    "source_id": "provider-track-record",
-    "evidence_layer": "PROVIDER_TRACK_RECORD",
+    "correction_id": "echotrade-event-only-account-live-rejected",
+    "strategy_id": "echotrade-growth-pivots",
+    "source_id": "owner-account-live-history",
+    "evidence_layer": "ACCOUNT_LIVE",
     "history_existence": {
      "status": "EXISTS",
-     "authority": "PROVIDER_PERFORMANCE_REPORT_EXISTENCE_AND_CURRENT_MATRIXPORT_CATALOG"
+     "authority": "HASH_BOUND_PROVIDER_LEDGER_EVENT_ONLY_RECONSTRUCTION"
     },
     "capture": {
-     "status": "NOT_CAPTURED",
-     "capture_defect": "PROVIDER_REPORT_EXISTS_WITHOUT_A_GOVERNED_TRACK_RECORD_GENERATION",
-     "generation_id": null,
-     "generation_sha256": null,
-     "as_of": null
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
+     "generation_sha256": "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db",
+     "as_of": "2026-08-16"
     },
     "strategy_version": {
      "status": "UNRESOLVED",
      "version_ref": null,
      "compatibility": "UNRESOLVED",
-     "authority": "EXACT_REPORT_TO_CURRENT_PRODUCT_VERSION_RELATIONSHIP_NOT_CAPTURED"
+     "authority": "EVENT_ONLY_RECONSTRUCTION_DOES_NOT_EVIDENCE_A_CURRENT_STRATEGY_VERSION"
     },
     "interval": {
-     "assignment_date": "2025-08-26",
-     "observed_start": null,
-     "observed_end": null,
+     "assignment_date": "2025-09-27",
+     "observed_start": "2025-10-01",
+     "observed_end": "2025-11-24",
      "effective_start": null,
      "effective_end": null
     },
     "funding_event": {
-     "status": "NOT_APPLICABLE",
+     "status": "UNRESOLVED",
      "event_date": null,
      "account_live_start": null,
-     "authority": "PROVIDER_TRACK_RECORD_IS_NOT_OWNER_FUNDING"
+     "authority": "TRACKER_ONLY_INITIAL_DEPOSIT_IS_NOT_ACCEPTED_PROVIDER_FUNDING_EVIDENCE"
     },
     "mode_admission": {
-     "LIVE_ONLY": "EXCLUDE_COMPARISON_ONLY",
-     "LIVE_PLUS_BACKTEST": "EXCLUDE_COMPARISON_ONLY"
+     "LIVE_ONLY": "EXCLUDE_EVENT_ONLY_RECONSTRUCTION",
+     "LIVE_PLUS_BACKTEST": "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
     },
     "source_receipts": [
      {
-      "artifact_role": "matrixport-current-pointer",
-      "artifact_selector": "CURRENT.json",
-      "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-      "locator_kind": "CURRENT_POINTER",
-      "manifest_artifact_id": null,
-      "sha256": "2b76a70db6ccbc9181930d94d95bfc70af61278f8145a36a7f63dfdb76cfcc0d"
-     },
-     {
-      "artifact_role": "matrixport-generation-manifest",
-      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
-      "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "artifact_role": "provider-ledger-generation-manifest",
+      "artifact_selector": "generations/07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e/generation.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
-     }
-    ],
-    "disposition_reason": "History existence is not capture. The uncaptured provider report remains comparison evidence and cannot become owner account-live or hybrid backtest input.",
-    "readiness": "REQUIRED_NOT_READY",
-    "blockers": [
-     302,
-     303
-    ]
-   },
-   {
-    "correction_id": "robuxio-provider-live-before-funding",
-    "strategy_id": "robuxio-crypto",
-    "source_id": "matrixport-account-generation",
-    "evidence_layer": "PROVIDER_LIVE",
-    "history_existence": {
-     "status": "EXISTS",
-     "authority": "HASH_BOUND_MATRIXPORT_PRODUCT_NAV"
-    },
-    "capture": {
-     "status": "CAPTURED_GOVERNED",
-     "capture_defect": null,
-     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-     "generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
-     "as_of": "2026-09-03"
-    },
-    "strategy_version": {
-     "status": "EVIDENCED",
-     "version_ref": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
-     "compatibility": "EXACT_MATCH",
-     "authority": "GENERATION_AND_PRIVATE_PRODUCT_ID_HASH"
-    },
-    "interval": {
-     "assignment_date": "2025-08-26",
-     "observed_start": "2025-08-14",
-     "observed_end": "2025-12-05",
-     "effective_start": "2025-08-14",
-     "effective_end": "2025-12-05"
-    },
-    "funding_event": {
-     "status": "NOT_APPLICABLE",
-     "event_date": null,
-     "account_live_start": null,
-     "authority": "PROVIDER_LIVE_PRECEDES_OWNER_FUNDING"
-    },
-    "mode_admission": {
-     "LIVE_ONLY": "EXCLUDE_COMPARISON_ONLY",
-     "LIVE_PLUS_BACKTEST": "EXCLUDE_COMPARISON_ONLY"
-    },
-    "source_receipts": [
-     {
-      "artifact_role": "matrixport-current-pointer",
-      "artifact_selector": "CURRENT.json",
-      "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-      "locator_kind": "CURRENT_POINTER",
-      "manifest_artifact_id": null,
-      "sha256": "2b76a70db6ccbc9181930d94d95bfc70af61278f8145a36a7f63dfdb76cfcc0d"
+      "sha256": "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db"
      },
      {
-      "artifact_role": "matrixport-generation-manifest",
-      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
-      "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-      "locator_kind": "GENERATION_MANIFEST",
-      "manifest_artifact_id": null,
-      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
+      "artifact_role": "provider-ledger-catalog",
+      "artifact_selector": "generations/07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e/provider-ledger.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "normalized/provider-ledger.json",
+      "sha256": "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
      }
     ],
-    "disposition_reason": "Product NAV before the proved held observation is provider-live comparison evidence. It is never relabeled as owner account-live.",
+    "rejected_evidence_identity": {
+     "canonicalization": "TARGET_FIELDS_CANONICAL_JSON_V1",
+     "return_observations": 13,
+     "sha256": "55d339e5299607daf72b44be72a03cc13998d34e81fc42d8e0a756152347ef4f",
+     "source_receipt_sha256": "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
+    },
+    "disposition_reason": "The captured rows occur only on transaction/fill dates and reproduce the event-to-event sparse-pool formula using last-trade marks. They are retained as rejected evidence, not admitted as daily account-live returns.",
     "readiness": "READY",
     "blockers": []
    },
    {
-    "correction_id": "robuxio-account-live-after-funding",
-    "strategy_id": "robuxio-crypto",
-    "source_id": "matrixport-account-generation",
-    "evidence_layer": "ACCOUNT_LIVE",
-    "history_existence": {
-     "status": "EXISTS",
-     "authority": "SUCCESSFUL_POSITIVE_SUBSCRIPTION_AND_HELD_PRODUCT_NAV"
-    },
+    "blockers": [],
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-     "generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
-     "as_of": "2026-09-03"
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+     "as_of": "2026-09-04"
     },
-    "strategy_version": {
-     "status": "EVIDENCED",
-     "version_ref": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
-     "compatibility": "ACCOUNT_OWNED",
-     "authority": "GENERATION_AND_PRIVATE_PRODUCT_ID_HASH"
-    },
-    "interval": {
-     "assignment_date": "2025-08-26",
-     "observed_start": "2025-12-07",
-     "observed_end": "2026-09-03",
-     "effective_start": "2025-12-06",
-     "effective_end": null
-    },
+    "correction_id": "grizzlybears-vtma-account-live",
+    "disposition_reason": "The account-live path is the selected provider-ledger generation this release admits.",
+    "evidence_layer": "ACCOUNT_LIVE",
     "funding_event": {
      "status": "EVIDENCED",
-     "event_date": "2025-12-06",
-     "account_live_start": "2025-12-06",
-     "authority": "SUCCESSFUL_POSITIVE_SUBSCRIPTION_CONFIRMATION_AND_FIRST_POSITIVE_HELD_NAV"
+     "event_date": "2026-01-02",
+     "account_live_start": "2026-01-02",
+     "authority": "OWNER_302_COMMENT_5349926811_AND_HASH_BOUND_SCHWAB_NAV"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "OWNER_302_COMMENT_5349926811_AND_HASH_BOUND_SCHWAB_NAV"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2026-01-03",
+     "observed_end": "2026-09-02",
+     "effective_start": "2026-01-02",
+     "effective_end": null
     },
     "mode_admission": {
      "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
      "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
     },
+    "readiness": "READY",
+    "source_id": "owner-account-live-history",
     "source_receipts": [
      {
-      "artifact_role": "matrixport-generation-manifest",
-      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
-      "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "artifact_role": "provider-ledger-generation-manifest",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
      },
      {
-      "artifact_role": "matrixport-subscription-details",
-      "artifact_selector": "output/20260903T051029.331Z/csv/subscription_details.csv",
-      "authority_root": "MATRIXPORT",
-      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
-      "locator_kind": "GENERATION_ARTIFACT",
-      "manifest_artifact_id": "csv/subscription_details.csv",
-      "sha256": "5ce7c6e3780df78a3f3b684329dbf4b382265a3411b0db9b036965e2c75db800"
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab"
      }
     ],
-    "disposition_reason": "Funding becomes effective on the first confirmed held observation. The boundary return is excluded; measurable account-live returns begin the following day.",
+    "strategy_id": "grizzlybears-vtma",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0",
+     "compatibility": "ACCOUNT_OWNED",
+     "authority": "SAME_SELECTED_PROVIDER_LEDGER_ACCOUNT_PATH"
+    }
+   },
+   {
+    "blockers": [],
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+     "generation_sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+     "as_of": "2026-09-04"
+    },
+    "correction_id": "grizzlybears-vtma-backtest",
+    "disposition_reason": "The retained vendor history is normalized into the governed strategy-backtests generation and admitted strictly before this strategy's own account-live inception.",
+    "evidence_layer": "BACKTEST",
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "BACKTEST_IS_NOT_OWNER_FUNDING"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_RETAINED_VENDOR_HISTORY_NORMALIZED_BY_PORTFOLIO_STRATEGY_HISTORY"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2009-04-20",
+     "observed_end": "2025-05-06",
+     "effective_start": null,
+     "effective_end": null
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "NOT_APPLICABLE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
+    },
     "readiness": "READY",
-    "blockers": []
+    "source_id": "strategy-backtests",
+    "source_receipts": [
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab"
+     },
+     {
+      "artifact_role": "strategy-backtests-catalog",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/catalog.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "catalog.json",
+      "sha256": "1c9d14c180ef715dc4bbfa41ab47588c5bebde82c30bd16ea7d896b696cc70a5"
+     },
+     {
+      "artifact_role": "strategy-backtests-returns",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/returns.csv",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "returns.csv",
+      "sha256": "b7d66345d5223b007051b1be042b822d399267cce04af798ae75c3367c80af75"
+     }
+    ],
+    "strategy_id": "grizzlybears-vtma",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0",
+     "compatibility": "EXACT_MATCH",
+     "authority": "EXACT_RETAINED_VENDOR_VERSION_STRICTLY_BEFORE_LIVE_INCEPTION"
+    }
    },
    {
     "correction_id": "p123-ai-backtest-candidate",
@@ -1305,15 +1450,15 @@
      "as_of": "2026-09-02"
     },
     "strategy_version": {
-     "status": "UNRESOLVED",
-     "version_ref": null,
-     "compatibility": "UNRESOLVED",
-     "authority": "CURRENT_PRODUCT_EXACT_VERSION_AND_LIVE_SIM_TWIN_COMPATIBILITY_NOT_APPROVED"
+     "status": "EVIDENCED",
+     "version_ref": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc",
+     "compatibility": "EXACT_MATCH",
+     "authority": "EXACT_LIVE_SIM_TWIN_VERSION_DERIVED_FROM_THE_SELECTED_GENERATION"
     },
     "interval": {
      "assignment_date": null,
      "observed_start": "2020-05-12",
-     "observed_end": "2026-06-26",
+     "observed_end": "2026-01-21",
      "effective_start": null,
      "effective_end": null
     },
@@ -1325,7 +1470,7 @@
     },
     "mode_admission": {
      "LIVE_ONLY": "NOT_APPLICABLE",
-     "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"
+     "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
     },
     "source_receipts": [
      {
@@ -1366,61 +1511,54 @@
       "api"
      ]
     },
-    "disposition_reason": "The governed generation contains one hash-bound live/simulation twin and a reproducible model-return candidate. The current product version and compatibility remain unresolved, so the candidate is retained as evidence but cannot enter LIVE_ONLY or LIVE_PLUS_BACKTEST.",
-    "readiness": "REQUIRED_NOT_READY",
-    "blockers": [
-     302,
-     303
-    ]
+    "disposition_reason": "The governed generation contains one hash-bound live/simulation twin and a reproducible model-return candidate. The exact product version the producer derives is now asserted, and the twin is split at this strategy's own account-live inception: the rows before it are version-matched prehistory, and the simulation that continues beside the live book after it is retained as the not-admitted overlap.",
+    "readiness": "READY",
+    "blockers": []
    },
    {
-    "correction_id": "p123-eu-backtest-not-captured",
-    "strategy_id": "p123-eu",
-    "source_id": "strategy-backtests",
-    "evidence_layer": "BACKTEST",
+    "blockers": [],
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+     "as_of": "2026-09-04"
+    },
+    "correction_id": "p123-ai-factor-account-live",
+    "disposition_reason": "The account-live path is the selected provider-ledger generation this release admits.",
+    "evidence_layer": "ACCOUNT_LIVE",
+    "funding_event": {
+     "status": "EVIDENCED",
+     "event_date": "2026-01-22",
+     "account_live_start": "2026-01-22",
+     "authority": "OWNER_302_COMMENT_5349926811_AND_HASH_BOUND_IBKR_ACCOUNT_LIVE_HISTORY"
+    },
     "history_existence": {
      "status": "EXISTS",
-     "authority": "OWNER_RECORDED_LONG_BACKTEST_EXISTENCE; EXACT_CONNECTED_MODEL_CAPTURE_REQUIRED"
-    },
-    "capture": {
-     "status": "NOT_CAPTURED",
-     "capture_defect": "EXACT_CONNECTED_MODEL_BACKTEST_NOT_PRESENT_IN_CURRENT_GENERATION",
-     "generation_id": null,
-     "generation_sha256": null,
-     "as_of": null
-    },
-    "strategy_version": {
-     "status": "EVIDENCED",
-     "version_ref": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
-     "compatibility": "UNRESOLVED",
-     "authority": "CURRENT_CONNECTED_MODEL_VERSION; BACKTEST_RELATIONSHIP_NOT_CAPTURED"
+     "authority": "OWNER_302_COMMENT_5349926811_AND_HASH_BOUND_IBKR_ACCOUNT_LIVE_HISTORY"
     },
     "interval": {
-     "assignment_date": "2025-11-12",
-     "observed_start": null,
-     "observed_end": null,
-     "effective_start": null,
+     "assignment_date": null,
+     "observed_start": "2026-01-22",
+     "observed_end": "2026-09-02",
+     "effective_start": "2026-01-22",
      "effective_end": null
     },
-    "funding_event": {
-     "status": "NOT_APPLICABLE",
-     "event_date": null,
-     "account_live_start": null,
-     "authority": "BACKTEST_IS_NOT_OWNER_FUNDING"
-    },
     "mode_admission": {
-     "LIVE_ONLY": "NOT_APPLICABLE",
-     "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"
+     "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
     },
+    "readiness": "READY",
+    "source_id": "owner-account-live-history",
     "source_receipts": [
      {
-      "artifact_role": "portfolio123-current-pointer",
-      "artifact_selector": "CURRENT.json",
-      "authority_root": "PORTFOLIO123",
-      "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
-      "locator_kind": "CURRENT_POINTER",
+      "artifact_role": "provider-ledger-generation-manifest",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "79024a424f05eae38fcb57c0db4853359e2beaf9103a3c385436433c54422431"
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
      },
      {
       "artifact_role": "portfolio123-generation-manifest",
@@ -1432,12 +1570,148 @@
       "sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb"
      }
     ],
-    "disposition_reason": "The exact provider-live model is captured, but the exact-version backtest is not. Other European books are different models and cannot be substituted.",
-    "readiness": "REQUIRED_NOT_READY",
-    "blockers": [
-     302,
-     303
-    ]
+    "strategy_id": "p123-ai-factor",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc",
+     "compatibility": "ACCOUNT_OWNED",
+     "authority": "SAME_SELECTED_PROVIDER_LEDGER_ACCOUNT_PATH"
+    }
+   },
+   {
+    "correction_id": "p123-eu-account-live",
+    "strategy_id": "p123-eu",
+    "source_id": "owner-account-live-history",
+    "evidence_layer": "ACCOUNT_LIVE",
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_IBKR_INTERNAL_TRANSFER_MEMBERSHIP_AND_ACCOUNT_RETURN_LEDGER"
+    },
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+     "as_of": "2026-09-04"
+    },
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
+     "compatibility": "ACCOUNT_OWNED",
+     "authority": "ACCEPTED_ACCOUNT_TO_CONNECTED_MODEL_MAPPING"
+    },
+    "interval": {
+     "assignment_date": "2025-11-12",
+     "observed_start": "2025-11-21",
+     "observed_end": "2026-09-02",
+     "effective_start": "2025-11-20",
+     "effective_end": null
+    },
+    "funding_event": {
+     "status": "EVIDENCED",
+     "event_date": "2025-11-20",
+     "account_live_start": "2025-11-20",
+     "authority": "FIRST_HASH_BOUND_IBKR_INTERNAL_TRANSFER_IN; MEMBERSHIP_ONLY; ZERO_AGGREGATE_INVESTED_CAPITAL_EFFECT"
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
+    },
+    "source_receipts": [
+     {
+      "artifact_role": "provider-ledger-generation-manifest",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+     },
+     {
+      "artifact_role": "provider-ledger-catalog",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/provider-ledger.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "normalized/provider-ledger.json",
+      "sha256": "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb"
+     }
+    ],
+    "disposition_reason": "Owner funding precedes the first measurable account return by one day. Provider-live history remains a separate comparison and never overwrites this path.",
+    "readiness": "READY",
+    "blockers": []
+   },
+   {
+    "correction_id": "p123-eu-backtest",
+    "strategy_id": "p123-eu",
+    "source_id": "strategy-backtests",
+    "evidence_layer": "BACKTEST",
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_RETAINED_VENDOR_HISTORY_NORMALIZED_BY_PORTFOLIO_STRATEGY_HISTORY"
+    },
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+     "generation_sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+     "as_of": "2026-09-04"
+    },
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
+     "compatibility": "EXACT_MATCH",
+     "authority": "EXACT_RETAINED_VENDOR_VERSION_STRICTLY_BEFORE_LIVE_INCEPTION"
+    },
+    "interval": {
+     "assignment_date": "2025-11-12",
+     "observed_start": "2008-01-02",
+     "observed_end": "2024-02-16",
+     "effective_start": null,
+     "effective_end": null
+    },
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "BACKTEST_IS_NOT_OWNER_FUNDING"
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "NOT_APPLICABLE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
+    },
+    "source_receipts": [
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab"
+     },
+     {
+      "artifact_role": "strategy-backtests-catalog",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/catalog.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "catalog.json",
+      "sha256": "1c9d14c180ef715dc4bbfa41ab47588c5bebde82c30bd16ea7d896b696cc70a5"
+     },
+     {
+      "artifact_role": "strategy-backtests-returns",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/returns.csv",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "returns.csv",
+      "sha256": "b7d66345d5223b007051b1be042b822d399267cce04af798ae75c3367c80af75"
+     }
+    ],
+    "disposition_reason": "The designer model the owner subscribes to publishes its own equity curve from its 2008 inception, and that capture is now a governed generation. Only the segment strictly before the provider-stated launch of 2024-02-18 is admitted; the model-live segment after it is a separate layer and the owner account path is separate again. The model publishes in EUR while the owner holds it in a USD account, so this is design history for the model, never a longer version of the owner account series.",
+    "readiness": "READY",
+    "blockers": []
    },
    {
     "correction_id": "p123-eu-provider-live",
@@ -1533,39 +1807,591 @@
     ]
    },
    {
-    "correction_id": "p123-eu-account-live",
-    "strategy_id": "p123-eu",
+    "blockers": [],
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+     "as_of": "2026-09-04"
+    },
+    "correction_id": "qsi-account-live",
+    "disposition_reason": "The account-live path is the selected provider-ledger generation this release admits.",
+    "evidence_layer": "ACCOUNT_LIVE",
+    "funding_event": {
+     "status": "EVIDENCED",
+     "event_date": "2026-01-05",
+     "account_live_start": "2026-01-05",
+     "authority": "OWNER_302_COMMENT_5349926811_TT_TO_QSI_BOUNDARY"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "OWNER_302_COMMENT_5349926811_TT_TO_QSI_BOUNDARY"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2026-01-05",
+     "observed_end": "2026-09-02",
+     "effective_start": "2026-01-05",
+     "effective_end": null
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
+    },
+    "readiness": "READY",
     "source_id": "owner-account-live-history",
+    "source_receipts": [
+     {
+      "artifact_role": "provider-ledger-generation-manifest",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+     },
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab"
+     }
+    ],
+    "strategy_id": "qsi",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99",
+     "compatibility": "ACCOUNT_OWNED",
+     "authority": "SAME_SELECTED_PROVIDER_LEDGER_ACCOUNT_PATH"
+    }
+   },
+   {
+    "blockers": [],
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+     "generation_sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+     "as_of": "2026-09-04"
+    },
+    "correction_id": "qsi-backtest",
+    "disposition_reason": "The retained vendor history is normalized into the governed strategy-backtests generation and admitted strictly before this strategy's own account-live inception.",
+    "evidence_layer": "BACKTEST",
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "BACKTEST_IS_NOT_OWNER_FUNDING"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_RETAINED_VENDOR_HISTORY_NORMALIZED_BY_PORTFOLIO_STRATEGY_HISTORY"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2013-10-21",
+     "observed_end": "2025-12-19",
+     "effective_start": null,
+     "effective_end": null
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "NOT_APPLICABLE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
+    },
+    "readiness": "READY",
+    "source_id": "strategy-backtests",
+    "source_receipts": [
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab"
+     },
+     {
+      "artifact_role": "strategy-backtests-catalog",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/catalog.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "catalog.json",
+      "sha256": "1c9d14c180ef715dc4bbfa41ab47588c5bebde82c30bd16ea7d896b696cc70a5"
+     },
+     {
+      "artifact_role": "strategy-backtests-returns",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/returns.csv",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "returns.csv",
+      "sha256": "b7d66345d5223b007051b1be042b822d399267cce04af798ae75c3367c80af75"
+     }
+    ],
+    "strategy_id": "qsi",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99",
+     "compatibility": "EXACT_MATCH",
+     "authority": "EXACT_RETAINED_VENDOR_VERSION_STRICTLY_BEFORE_LIVE_INCEPTION"
+    }
+   },
+   {
+    "correction_id": "robuxio-account-live-after-funding",
+    "strategy_id": "robuxio-crypto",
+    "source_id": "matrixport-account-generation",
     "evidence_layer": "ACCOUNT_LIVE",
     "history_existence": {
      "status": "EXISTS",
-     "authority": "HASH_BOUND_IBKR_INTERNAL_TRANSFER_MEMBERSHIP_AND_ACCOUNT_RETURN_LEDGER"
+     "authority": "SUCCESSFUL_POSITIVE_SUBSCRIPTION_AND_HELD_PRODUCT_NAV"
     },
     "capture": {
      "status": "CAPTURED_GOVERNED",
      "capture_defect": null,
-     "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-     "generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
-     "as_of": "2026-09-04"
+     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+     "generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
+     "as_of": "2026-09-03"
     },
     "strategy_version": {
      "status": "EVIDENCED",
-     "version_ref": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
+     "version_ref": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
      "compatibility": "ACCOUNT_OWNED",
-     "authority": "ACCEPTED_ACCOUNT_TO_CONNECTED_MODEL_MAPPING"
+     "authority": "GENERATION_AND_PRIVATE_PRODUCT_ID_HASH"
     },
     "interval": {
-     "assignment_date": "2025-11-12",
-     "observed_start": "2025-11-21",
-     "observed_end": "2026-09-02",
-     "effective_start": "2025-11-20",
+     "assignment_date": "2025-08-26",
+     "observed_start": "2025-12-07",
+     "observed_end": "2026-09-03",
+     "effective_start": "2025-12-06",
      "effective_end": null
     },
     "funding_event": {
      "status": "EVIDENCED",
-     "event_date": "2025-11-20",
-     "account_live_start": "2025-11-20",
-     "authority": "FIRST_HASH_BOUND_IBKR_INTERNAL_TRANSFER_IN; MEMBERSHIP_ONLY; ZERO_AGGREGATE_INVESTED_CAPITAL_EFFECT"
+     "event_date": "2025-12-06",
+     "account_live_start": "2025-12-06",
+     "authority": "SUCCESSFUL_POSITIVE_SUBSCRIPTION_CONFIRMATION_AND_FIRST_POSITIVE_HELD_NAV"
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
+    },
+    "source_receipts": [
+     {
+      "artifact_role": "matrixport-generation-manifest",
+      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
+      "authority_root": "MATRIXPORT",
+      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
+     },
+     {
+      "artifact_role": "matrixport-subscription-details",
+      "artifact_selector": "output/20260903T051029.331Z/csv/subscription_details.csv",
+      "authority_root": "MATRIXPORT",
+      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "csv/subscription_details.csv",
+      "sha256": "5ce7c6e3780df78a3f3b684329dbf4b382265a3411b0db9b036965e2c75db800"
+     }
+    ],
+    "disposition_reason": "Funding becomes effective on the first confirmed held observation. The boundary return is excluded; measurable account-live returns begin the following day.",
+    "readiness": "READY",
+    "blockers": []
+   },
+   {
+    "blockers": [],
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+     "generation_sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+     "as_of": "2026-09-04"
+    },
+    "correction_id": "robuxio-crypto-backtest",
+    "disposition_reason": "The retained vendor history is normalized into the governed strategy-backtests generation and admitted strictly before this strategy's own account-live inception.",
+    "evidence_layer": "BACKTEST",
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "BACKTEST_IS_NOT_OWNER_FUNDING"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_RETAINED_VENDOR_HISTORY_NORMALIZED_BY_PORTFOLIO_STRATEGY_HISTORY"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2020-01-02",
+     "observed_end": "2025-12-05",
+     "effective_start": null,
+     "effective_end": null
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "NOT_APPLICABLE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
+    },
+    "readiness": "READY",
+    "source_id": "strategy-backtests",
+    "source_receipts": [
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab"
+     },
+     {
+      "artifact_role": "strategy-backtests-catalog",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/catalog.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "catalog.json",
+      "sha256": "1c9d14c180ef715dc4bbfa41ab47588c5bebde82c30bd16ea7d896b696cc70a5"
+     },
+     {
+      "artifact_role": "strategy-backtests-returns",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/returns.csv",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "returns.csv",
+      "sha256": "b7d66345d5223b007051b1be042b822d399267cce04af798ae75c3367c80af75"
+     }
+    ],
+    "strategy_id": "robuxio-crypto",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
+     "compatibility": "EXACT_MATCH",
+     "authority": "EXACT_RETAINED_VENDOR_VERSION_STRICTLY_BEFORE_LIVE_INCEPTION"
+    }
+   },
+   {
+    "correction_id": "robuxio-provider-live-before-funding",
+    "strategy_id": "robuxio-crypto",
+    "source_id": "matrixport-account-generation",
+    "evidence_layer": "PROVIDER_LIVE",
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_MATRIXPORT_PRODUCT_NAV"
+    },
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+     "generation_sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b",
+     "as_of": "2026-09-03"
+    },
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
+     "compatibility": "EXACT_MATCH",
+     "authority": "GENERATION_AND_PRIVATE_PRODUCT_ID_HASH"
+    },
+    "interval": {
+     "assignment_date": "2025-08-26",
+     "observed_start": "2025-08-14",
+     "observed_end": "2025-12-05",
+     "effective_start": "2025-08-14",
+     "effective_end": "2025-12-05"
+    },
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "PROVIDER_LIVE_PRECEDES_OWNER_FUNDING"
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "EXCLUDE_COMPARISON_ONLY",
+     "LIVE_PLUS_BACKTEST": "EXCLUDE_COMPARISON_ONLY"
+    },
+    "source_receipts": [
+     {
+      "artifact_role": "matrixport-current-pointer",
+      "artifact_selector": "CURRENT.json",
+      "authority_root": "MATRIXPORT",
+      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "locator_kind": "CURRENT_POINTER",
+      "manifest_artifact_id": null,
+      "sha256": "2b76a70db6ccbc9181930d94d95bfc70af61278f8145a36a7f63dfdb76cfcc0d"
+     },
+     {
+      "artifact_role": "matrixport-generation-manifest",
+      "artifact_selector": "generations/3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc/generation.json",
+      "authority_root": "MATRIXPORT",
+      "generation_id": "3badac0513e74e6b57a4f8cd1b4b30fe834ddffc1c372515af23a4e3225d9ccc",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "7d63c77e6bed9b1d14083f8c44fa2a6b8b57c29dee51e4b937f1dae447c8b69b"
+     }
+    ],
+    "disposition_reason": "Product NAV before the proved held observation is provider-live comparison evidence. It is never relabeled as owner account-live.",
+    "readiness": "READY",
+    "blockers": []
+   },
+   {
+    "correction_id": "robuxio-provider-track-record",
+    "strategy_id": "robuxio-crypto",
+    "source_id": "provider-track-record",
+    "evidence_layer": "PROVIDER_TRACK_RECORD",
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_PROVIDER_PUBLISHED_CUMULATIVE_RETURN_PATH"
+    },
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c",
+     "generation_sha256": "da845e5459a12ada72e3f23297671ca1cb39e8c597c882a6da78591e6a383de8",
+     "as_of": "2026-09-04"
+    },
+    "strategy_version": {
+     "status": "UNRESOLVED",
+     "version_ref": null,
+     "compatibility": "UNRESOLVED",
+     "authority": "EXACT_REPORT_TO_CURRENT_PRODUCT_VERSION_RELATIONSHIP_NOT_CAPTURED"
+    },
+    "interval": {
+     "assignment_date": "2025-08-26",
+     "observed_start": "2020-01-01",
+     "observed_end": "2026-09-10",
+     "effective_start": null,
+     "effective_end": null
+    },
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "PROVIDER_TRACK_RECORD_IS_NOT_OWNER_FUNDING"
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "EXCLUDE_COMPARISON_ONLY",
+     "LIVE_PLUS_BACKTEST": "EXCLUDE_COMPARISON_ONLY"
+    },
+    "source_receipts": [
+     {
+      "artifact_role": "provider-track-record-current-pointer",
+      "artifact_selector": "CURRENT.json",
+      "authority_root": "PROVIDER_TRACK_RECORD",
+      "generation_id": "63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c",
+      "locator_kind": "CURRENT_POINTER",
+      "manifest_artifact_id": null,
+      "sha256": "da845e5459a12ada72e3f23297671ca1cb39e8c597c882a6da78591e6a383de8"
+     },
+     {
+      "artifact_role": "provider-track-record-generation-manifest",
+      "artifact_selector": "generations/63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c/generation.json",
+      "authority_root": "PROVIDER_TRACK_RECORD",
+      "generation_id": "63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "da845e5459a12ada72e3f23297671ca1cb39e8c597c882a6da78591e6a383de8"
+     },
+     {
+      "artifact_role": "provider-track-record-returns",
+      "artifact_selector": "generations/63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c/returns.csv",
+      "authority_root": "PROVIDER_TRACK_RECORD",
+      "generation_id": "63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "returns.csv",
+      "sha256": "c0d28752d260503e3e42b7c297dc062b705e77ac9cf40a72b293bd3417f9440e"
+     },
+     {
+      "artifact_role": "provider-track-record-report",
+      "artifact_selector": "generations/63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c/raw/track-record-report.json",
+      "authority_root": "PROVIDER_TRACK_RECORD",
+      "generation_id": "63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "raw/track-record-report.json",
+      "sha256": "ab734e3c069d576545eb192d625b29889216aba2737720e33bf6cbdb69c2581d"
+     }
+    ],
+    "disposition_reason": "The provider report is captured as a governed generation and its published total return is reproduced from the daily path. Capture is not compatibility: the report remains comparison evidence and cannot become owner account-live or hybrid backtest input until the exact report-to-product version relationship is proved.",
+    "readiness": "REQUIRED_NOT_READY",
+    "blockers": [
+     302,
+     303
+    ]
+   },
+   {
+    "blockers": [],
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+     "as_of": "2026-09-04"
+    },
+    "correction_id": "tt-portfolio-account-live",
+    "disposition_reason": "The account-live path is the selected provider-ledger generation this release admits.",
+    "evidence_layer": "ACCOUNT_LIVE",
+    "funding_event": {
+     "status": "EVIDENCED",
+     "event_date": "2025-11-25",
+     "account_live_start": "2025-11-25",
+     "authority": "OWNER_302_COMMENT_5349926811_CONTINUOUS_MEMBERSHIP"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "OWNER_302_COMMENT_5349926811_CONTINUOUS_MEMBERSHIP"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2025-11-25",
+     "observed_end": "2026-09-02",
+     "effective_start": "2025-11-25",
+     "effective_end": null
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
+    },
+    "readiness": "READY",
+    "source_id": "owner-account-live-history",
+    "source_receipts": [
+     {
+      "artifact_role": "provider-ledger-generation-manifest",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
+      "authority_root": "PROVIDER_LEDGER",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
+     },
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab"
+     }
+    ],
+    "strategy_id": "tt-portfolio",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68",
+     "compatibility": "ACCOUNT_OWNED",
+     "authority": "SAME_SELECTED_PROVIDER_LEDGER_ACCOUNT_PATH"
+    }
+   },
+   {
+    "blockers": [],
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+     "generation_sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+     "as_of": "2026-09-04"
+    },
+    "correction_id": "tt-portfolio-backtest",
+    "disposition_reason": "The retained vendor history is normalized into the governed strategy-backtests generation and admitted strictly before this strategy's own account-live inception.",
+    "evidence_layer": "BACKTEST",
+    "funding_event": {
+     "status": "NOT_APPLICABLE",
+     "event_date": null,
+     "account_live_start": null,
+     "authority": "BACKTEST_IS_NOT_OWNER_FUNDING"
+    },
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "HASH_BOUND_RETAINED_VENDOR_HISTORY_NORMALIZED_BY_PORTFOLIO_STRATEGY_HISTORY"
+    },
+    "interval": {
+     "assignment_date": null,
+     "observed_start": "2007-01-05",
+     "observed_end": "2025-11-24",
+     "effective_start": null,
+     "effective_end": null
+    },
+    "mode_admission": {
+     "LIVE_ONLY": "NOT_APPLICABLE",
+     "LIVE_PLUS_BACKTEST": "INCLUDE_EXACT_VERSION_BACKTEST_PREHISTORY"
+    },
+    "readiness": "READY",
+    "source_id": "strategy-backtests",
+    "source_receipts": [
+     {
+      "artifact_role": "strategy-backtests-generation-manifest",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/generation.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_MANIFEST",
+      "manifest_artifact_id": null,
+      "sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab"
+     },
+     {
+      "artifact_role": "strategy-backtests-catalog",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/catalog.json",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "catalog.json",
+      "sha256": "1c9d14c180ef715dc4bbfa41ab47588c5bebde82c30bd16ea7d896b696cc70a5"
+     },
+     {
+      "artifact_role": "strategy-backtests-returns",
+      "artifact_selector": "generations/84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2/returns.csv",
+      "authority_root": "STRATEGY_BACKTESTS",
+      "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "returns.csv",
+      "sha256": "b7d66345d5223b007051b1be042b822d399267cce04af798ae75c3367c80af75"
+     }
+    ],
+    "strategy_id": "tt-portfolio",
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68",
+     "compatibility": "EXACT_MATCH",
+     "authority": "EXACT_RETAINED_VENDOR_VERSION_STRICTLY_BEFORE_LIVE_INCEPTION"
+    }
+   },
+   {
+    "correction_id": "volatis-account-live",
+    "strategy_id": "volatis-strategy",
+    "source_id": "owner-account-live-history",
+    "evidence_layer": "ACCOUNT_LIVE",
+    "history_existence": {
+     "status": "EXISTS",
+     "authority": "FIRST_CAPITAL_RECONCILED_POSITIVE_NAV_AND_COST_BASIS"
+    },
+    "capture": {
+     "status": "CAPTURED_GOVERNED",
+     "capture_defect": null,
+     "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+     "generation_sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+     "as_of": "2026-09-04"
+    },
+    "strategy_version": {
+     "status": "EVIDENCED",
+     "version_ref": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7",
+     "compatibility": "ACCOUNT_OWNED",
+     "authority": "SAME_CURRENT_QUANTBASE_FUND_PATH"
+    },
+    "interval": {
+     "assignment_date": "2024-07-24",
+     "observed_start": "2024-10-16",
+     "observed_end": "2026-09-02",
+     "effective_start": "2024-10-15",
+     "effective_end": null
+    },
+    "funding_event": {
+     "status": "EVIDENCED",
+     "event_date": "2024-10-15",
+     "account_live_start": "2024-10-15",
+     "authority": "FIRST_CAPITAL_RECONCILED_POSITIVE_NAV_AND_COST_BASIS; EARLIER_PURCHASE_LACKED_ACCEPTED_EVENT_TIME_VALUE"
     },
     "mode_admission": {
      "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
@@ -1574,39 +2400,48 @@
     "source_receipts": [
      {
       "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb/generation.json",
+      "artifact_selector": "generations/59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34/generation.json",
       "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+      "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
       "locator_kind": "GENERATION_MANIFEST",
       "manifest_artifact_id": null,
-      "sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
+      "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838"
      },
      {
-      "artifact_role": "provider-ledger-catalog",
-      "artifact_selector": "generations/30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb/provider-ledger.json",
-      "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+      "artifact_role": "quantbase-account-activity",
+      "artifact_selector": "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/account_activity.csv",
+      "authority_root": "QUANTBASE",
+      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
       "locator_kind": "GENERATION_ARTIFACT",
-      "manifest_artifact_id": "normalized/provider-ledger.json",
-      "sha256": "66e97d05ebe4d7cbd394254089ab9b7db4a2d40c0df8c0d483e89dc55514cd65"
+      "manifest_artifact_id": "source/csv/account_activity.csv",
+      "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
+     },
+     {
+      "artifact_role": "quantbase-dashboard-history",
+      "artifact_selector": "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+      "authority_root": "QUANTBASE",
+      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
+      "locator_kind": "GENERATION_ARTIFACT",
+      "manifest_artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
+      "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
      }
     ],
-    "disposition_reason": "Owner funding precedes the first measurable account return by one day. Provider-live history remains a separate comparison and never overwrites this path.",
+    "disposition_reason": "The earlier purchase does not establish funded membership without an accepted event-time value. Membership begins with the first capital-reconciled positive NAV and cost basis; measurable account returns begin the following day.",
     "readiness": "READY",
     "blockers": []
    },
    {
-    "correction_id": "volatis-backtest-not-proved",
+    "correction_id": "volatis-backtest-does-not-exist",
     "strategy_id": "volatis-strategy",
     "source_id": "strategy-backtests",
     "evidence_layer": "BACKTEST",
     "history_existence": {
-     "status": "UNRESOLVED",
-     "authority": "CURRENT_QUANTBASE_GENERATION_CONTAINS_ACCOUNT_PROVIDER_PATH_NOT_A_PROVED_BACKTEST"
+     "status": "DOES_NOT_EXIST",
+     "authority": "OWNER_LAYER_RULING_MODEL_LIVE_PLUS_FUNDED_LIVE_ONLY"
     },
     "capture": {
      "status": "NOT_CAPTURED",
-     "capture_defect": "EXACT_VERSION_BACKTEST_NOT_PROVED_BY_CURRENT_GENERATION",
+     "capture_defect": "NO_BACKTEST_LAYER_EXISTS_FOR_THIS_STRATEGY",
      "generation_id": null,
      "generation_sha256": null,
      "as_of": null
@@ -1615,10 +2450,10 @@
      "status": "UNRESOLVED",
      "version_ref": null,
      "compatibility": "UNRESOLVED",
-     "authority": "BACKTEST_VERSION_RELATIONSHIP_NOT_CAPTURED"
+     "authority": "NO_BACKTEST_LAYER_EXISTS_TO_VERSION"
     },
     "interval": {
-     "assignment_date": "2024-07-24",
+     "assignment_date": null,
      "observed_start": null,
      "observed_end": null,
      "effective_start": null,
@@ -1632,7 +2467,7 @@
     },
     "mode_admission": {
      "LIVE_ONLY": "NOT_APPLICABLE",
-     "LIVE_PLUS_BACKTEST": "REQUIRED_NOT_READY"
+     "LIVE_PLUS_BACKTEST": "NOT_APPLICABLE"
     },
     "source_receipts": [
      {
@@ -1654,12 +2489,9 @@
       "sha256": "ad04ff78841badc6deb375100428629e9795c36a2a760deb319e042a79001a0c"
      }
     ],
-    "disposition_reason": "The current price path is provider/account live, not a backtest. A hybrid backtest remains unavailable until exact-version evidence is captured.",
-    "readiness": "REQUIRED_NOT_READY",
-    "blockers": [
-     302,
-     303
-    ]
+    "disposition_reason": "Volatis is model live plus funded live. Quantbase publishes the fund's own per-share track record before the owner funded it, and the owner's account path after; no simulated design history exists behind either, so there is no backtest layer to admit and none to prove. The pre-funding series is carried as PROVIDER_LIVE comparison evidence by volatis-provider-live.",
+    "readiness": "READY",
+    "blockers": []
    },
    {
     "correction_id": "volatis-provider-live",
@@ -1732,147 +2564,6 @@
     "disposition_reason": "The two provider curves are equality evidence for one economic path. They are not duplicate return series and are not relabeled as backtest.",
     "readiness": "READY",
     "blockers": []
-   },
-   {
-    "correction_id": "volatis-account-live",
-    "strategy_id": "volatis-strategy",
-    "source_id": "owner-account-live-history",
-    "evidence_layer": "ACCOUNT_LIVE",
-    "history_existence": {
-     "status": "EXISTS",
-     "authority": "FIRST_CAPITAL_RECONCILED_POSITIVE_NAV_AND_COST_BASIS"
-    },
-    "capture": {
-     "status": "CAPTURED_GOVERNED",
-     "capture_defect": null,
-     "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-     "generation_sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
-     "as_of": "2026-09-04"
-    },
-    "strategy_version": {
-     "status": "EVIDENCED",
-     "version_ref": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7",
-     "compatibility": "ACCOUNT_OWNED",
-     "authority": "SAME_CURRENT_QUANTBASE_FUND_PATH"
-    },
-    "interval": {
-     "assignment_date": "2024-07-24",
-     "observed_start": "2024-10-16",
-     "observed_end": "2026-09-02",
-     "effective_start": "2024-10-15",
-     "effective_end": null
-    },
-    "funding_event": {
-     "status": "EVIDENCED",
-     "event_date": "2024-10-15",
-     "account_live_start": "2024-10-15",
-     "authority": "FIRST_CAPITAL_RECONCILED_POSITIVE_NAV_AND_COST_BASIS; EARLIER_PURCHASE_LACKED_ACCEPTED_EVENT_TIME_VALUE"
-    },
-    "mode_admission": {
-     "LIVE_ONLY": "INCLUDE_SELECTED_LIVE",
-     "LIVE_PLUS_BACKTEST": "INCLUDE_SELECTED_LIVE"
-    },
-    "source_receipts": [
-     {
-      "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb/generation.json",
-      "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-      "locator_kind": "GENERATION_MANIFEST",
-      "manifest_artifact_id": null,
-      "sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6"
-     },
-     {
-      "artifact_role": "quantbase-account-activity",
-      "artifact_selector": "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/account_activity.csv",
-      "authority_root": "QUANTBASE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-      "locator_kind": "GENERATION_ARTIFACT",
-      "manifest_artifact_id": "source/csv/account_activity.csv",
-      "sha256": "f1960b5338b3db15cff7a98cc8cde20b7a6d09a9bd77e6341657cfb35f968bd0"
-     },
-     {
-      "artifact_role": "quantbase-dashboard-history",
-      "artifact_selector": "source-runs/legacy-20260902-b1b5dcff331f/artifacts/csv/dashboard_Volatis_Strategy_pricehistory.csv",
-      "authority_root": "QUANTBASE",
-      "generation_id": "d3a8f2da5a02b84fcc016981c04e4b8fec501cb902c019cfb8f9dc80e6b2d1fe",
-      "locator_kind": "GENERATION_ARTIFACT",
-      "manifest_artifact_id": "source/csv/dashboard_Volatis_Strategy_pricehistory.csv",
-      "sha256": "7b12647cbe0b728dcd4808bccf009ee2eaf46569f34cee57963b2eb87fcb749e"
-     }
-    ],
-    "disposition_reason": "The earlier purchase does not establish funded membership without an accepted event-time value. Membership begins with the first capital-reconciled positive NAV and cost basis; measurable account returns begin the following day.",
-    "readiness": "READY",
-    "blockers": []
-   },
-   {
-    "correction_id": "echotrade-event-only-account-live-rejected",
-    "strategy_id": "echotrade-growth-pivots",
-    "source_id": "owner-account-live-history",
-    "evidence_layer": "ACCOUNT_LIVE",
-    "history_existence": {
-     "status": "EXISTS",
-     "authority": "HASH_BOUND_PROVIDER_LEDGER_EVENT_ONLY_RECONSTRUCTION"
-    },
-    "capture": {
-     "status": "CAPTURED_GOVERNED",
-     "capture_defect": null,
-     "generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
-     "generation_sha256": "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db",
-     "as_of": "2026-08-16"
-    },
-    "strategy_version": {
-     "status": "UNRESOLVED",
-     "version_ref": null,
-     "compatibility": "UNRESOLVED",
-     "authority": "EVENT_ONLY_RECONSTRUCTION_DOES_NOT_EVIDENCE_A_CURRENT_STRATEGY_VERSION"
-    },
-    "interval": {
-     "assignment_date": "2025-09-27",
-     "observed_start": "2025-10-01",
-     "observed_end": "2025-11-24",
-     "effective_start": null,
-     "effective_end": null
-    },
-    "funding_event": {
-     "status": "UNRESOLVED",
-     "event_date": null,
-     "account_live_start": null,
-     "authority": "TRACKER_ONLY_INITIAL_DEPOSIT_IS_NOT_ACCEPTED_PROVIDER_FUNDING_EVIDENCE"
-    },
-    "mode_admission": {
-     "LIVE_ONLY": "EXCLUDE_EVENT_ONLY_RECONSTRUCTION",
-     "LIVE_PLUS_BACKTEST": "EXCLUDE_EVENT_ONLY_RECONSTRUCTION"
-    },
-    "source_receipts": [
-     {
-      "artifact_role": "provider-ledger-generation-manifest",
-      "artifact_selector": "generations/07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e/generation.json",
-      "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
-      "locator_kind": "GENERATION_MANIFEST",
-      "manifest_artifact_id": null,
-      "sha256": "1e8dcc72327dde1c4165b881a2f9b3c3843f063a415a0006b9cf54b9186be0db"
-     },
-     {
-      "artifact_role": "provider-ledger-catalog",
-      "artifact_selector": "generations/07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e/provider-ledger.json",
-      "authority_root": "PROVIDER_LEDGER",
-      "generation_id": "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
-      "locator_kind": "GENERATION_ARTIFACT",
-      "manifest_artifact_id": "normalized/provider-ledger.json",
-      "sha256": "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
-     }
-    ],
-    "rejected_evidence_identity": {
-     "canonicalization": "TARGET_FIELDS_CANONICAL_JSON_V1",
-     "return_observations": 13,
-     "sha256": "55d339e5299607daf72b44be72a03cc13998d34e81fc42d8e0a756152347ef4f",
-     "source_receipt_sha256": "0ec0ea74948da163295524be56afadc4ed485f25f10ed8dac6d329aac6772b56"
-    },
-    "disposition_reason": "The captured rows occur only on transaction/fill dates and reproduce the event-to-event sparse-pool formula using last-trade marks. They are retained as rejected evidence, not admitted as daily account-live returns.",
-    "readiness": "READY",
-    "blockers": []
    }
   ]
  },
@@ -1937,7 +2628,7 @@
      "current_policy_path": "docs/decisions/0002-portfolio-performance-policy.md",
      "current_policy_sha256": "8543c3281a6d37c3506ebe90bdcf25902d641a4974c53553ed76b0bf60f820cb",
      "conformance_vectors_path": "contracts/portfolio-performance-policy-v1.json",
-     "conformance_vectors_sha256": "b9153ddb6bbaff9d707b0d160d88bf7d43383ce1880ea27339103adc74040809",
+     "conformance_vectors_sha256": "12862e2f53604807a338f027394d10ed50983365b9a91a2cc82adc5c0efe5c14",
      "extension_authority_issue": 324,
      "extension_status": "REQUIRED_NOT_READY"
     },
@@ -2547,9 +3238,15 @@
    "source_id": "strategy-backtests",
    "source_version": "history-segment-v1",
    "strategy_version": {
-    "status": "UNRESOLVED",
+    "status": "MIXED",
     "binding": "EXACT_VERSION_COMPATIBILITY_REQUIRED",
-    "version_refs": {}
+    "version_refs": {
+     "grizzlybears-vtma": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0",
+     "p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
+     "qsi": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99",
+     "robuxio-crypto": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
+     "tt-portfolio": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68"
+    }
    },
    "subjects": {
     "account_scope": "NOT_APPLICABLE",
@@ -2575,8 +3272,8 @@
    },
    "evidence_layer": "BACKTEST",
    "interval": {
-    "observed_start": null,
-    "observed_end": null,
+    "observed_start": "2007-01-05",
+    "observed_end": "2025-12-19",
     "effective_start": null,
     "effective_end": null,
     "splice_policy": "ONLY_VERSION_COMPATIBLE_PREHISTORY_STRICTLY_BEFORE_LIVE_INCEPTION"
@@ -2615,18 +3312,15 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": null,
-    "sha256": null,
-    "as_of": null
+    "as_of": "2026-09-04",
+    "generation_id": "84f6f3ba8d3067d6d661b64ed77f71229df53a815f96882baa8d0eb1e7b581c2",
+    "sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab"
    },
-   "existence_status": "UNRESOLVED",
-   "capture_status": "UNRESOLVED",
+   "existence_status": "EXISTS",
+   "capture_status": "CAPTURED_GOVERNED",
    "absence_behavior": "LIVE_ONLY_REMAINS_REQUIRED; LIVE_PLUS_BACKTEST_FAILS_UNLESS_OWNER_ACCEPTS_NOT_APPLICABLE_FOR_THE_STRATEGY",
-   "readiness": "REQUIRED_NOT_READY",
-   "blockers": [
-    302,
-    303
-   ],
+   "readiness": "READY",
+   "blockers": [],
    "invalidated_outputs": [
     "LAYERED_HISTORY_LIVE_PLUS_BACKTEST",
     "DECOMPOSITION",
@@ -2670,8 +3364,8 @@
    },
    "evidence_layer": "PROVIDER_TRACK_RECORD",
    "interval": {
-    "observed_start": null,
-    "observed_end": null,
+    "observed_start": "2020-01-01",
+    "observed_end": "2026-09-10",
     "effective_start": null,
     "effective_end": null,
     "splice_policy": "RETAIN_AS_PROVIDER_EVIDENCE; NEVER_RELABEL_AS_ACCOUNT_LIVE"
@@ -2709,12 +3403,12 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": null,
-    "sha256": null,
-    "as_of": null
+    "as_of": "2026-09-04",
+    "generation_id": "63bb347ddc80e44fc65f79561856615464674f379f1cdc38b325365a9c1ce22c",
+    "sha256": "da845e5459a12ada72e3f23297671ca1cb39e8c597c882a6da78591e6a383de8"
    },
-   "existence_status": "UNRESOLVED",
-   "capture_status": "UNRESOLVED",
+   "existence_status": "EXISTS",
+   "capture_status": "CAPTURED_GOVERNED",
    "absence_behavior": "FAIL_ANY_REQUIRED_PROVIDER_HISTORY_CELL_WITH_A_NAMED_CAPTURE_OR_EXISTENCE_STATUS",
    "readiness": "REQUIRED_NOT_READY",
    "blockers": [
@@ -2828,10 +3522,11 @@
    "source_id": "portfolio123-model-generation",
    "source_version": "portfolio123-generation-v1",
    "strategy_version": {
-    "status": "MIXED",
+    "status": "EVIDENCED",
     "binding": "EXACT_CONNECTED_MODEL_VERSION_REQUIRED",
     "version_refs": {
-     "p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb"
+     "p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
+     "p123-ai-factor": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc"
     }
    },
    "subjects": {
@@ -2894,9 +3589,9 @@
      "effective_end": null,
      "upstream_inventory_sha256": "9ea70645cc8f40dd38148fc115fa65ca02ef6d43eb932ece404c989fde555da1",
      "product_data_class_count": 1,
-     "product_data_class_set_sha256": "923a4cb2ed9de485c824a0893df30c9b0cf8b839da3b037115db79c8b4eeab9f",
+     "product_data_class_set_sha256": "8855be07f869e61d3eeef1a2dd1b97e8645c48f99c01205f113d5b7cd8382cd7",
      "admitted_item_count": 2,
-     "admitted_item_set_sha256": "1ed305c46dc831fb820947bee3e468d3994eec9e3ef124fec88da5be42430731",
+     "admitted_item_set_sha256": "c9a66669fe0cd411dee0b2d99c79f063a3c7c026bc671ce5ec97d58de6f6aa0f",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -2944,12 +3639,16 @@
    "source_id": "owner-account-live-history",
    "source_version": "history-segment-v1",
    "strategy_version": {
-    "status": "MIXED",
+    "status": "EVIDENCED",
     "binding": "EFFECTIVE_FUNDED_SUBJECT_VERSION_REQUIRED",
     "version_refs": {
      "p123-eu": "p123-eu-connected-model:4a52e5450e389af30fe844a2c26897322d9fa1861aaf20e3a2838a42799275eb",
      "robuxio-crypto": "robuxio-matrixport-product:e7c0a8dce07e93745e08cb6a89f3b9363d340c4c2639efae3e5e00437da09041",
-     "volatis-strategy": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7"
+     "volatis-strategy": "volatis-quantbase-provider-path:9ad0d09db2b3506cc911e40c1fe09411b8663788ceb33f3daa3d530f212eb3a7",
+     "grizzlybears-vtma": "grizzlybears-vtma-current-model:3e74f59afa19b982bfe8b9741f1d08aa8f476884af580c213bc1c9b67a491aa0",
+     "qsi": "qsi-stratum-current-3x:3387ff4f95e99debf515fe86a68595723b85e1c91f7d2d810f0bb252b9721e99",
+     "tt-portfolio": "tt-current-six-equal-weight:258909436c0a085fa7abf006fdc0563d915161da6ddb7e39bb73403d3e344c68",
+     "p123-ai-factor": "p123-live-sim-twin:4a38f02ca7233545212b96e9ab64e3267fdf374713d99aa2564b347bfa2220bc"
     }
    },
    "subjects": {
@@ -2966,10 +3665,7 @@
    },
    "data_classes": [
     "ACCOUNT_NAV",
-    "CAPITAL_ANCHOR",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
-    "FINANCING_COST"
+    "CAPITAL_ANCHOR"
    ],
    "authority": "OWNER_ACCOUNT_LEDGER_AND_ACTUAL_FUNDING_EVENTS",
    "endpoint_or_artifact_selector": "accepted provider-ledger ACCOUNT_LIVE facts and funding/subscription evidence",
@@ -3011,10 +3707,7 @@
      "ACCOUNT_NAV",
      "ACCOUNT_LIVE_RETURN",
      "CAPITAL_ANCHOR",
-     "FUNDED_MEMBERSHIP",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST"
+     "FUNDED_MEMBERSHIP"
     ]
    },
    "product_requirement": "REQUIRED",
@@ -3029,8 +3722,8 @@
     "RELEASE_RECEIPT"
    ],
    "current_generation": {
-    "generation_id": "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-    "sha256": "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+    "generation_id": "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+    "sha256": "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
     "as_of": "2026-09-04"
    },
    "existence_status": "EXISTS",
@@ -3072,10 +3765,7 @@
    "data_classes": [
     "ACCOUNT_NAV",
     "POSITION",
-    "TRANSACTION",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
-    "FINANCING_COST"
+    "TRANSACTION"
    ],
    "authority": "ALPACA_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "alpaca-generation.json in an exact governed generation",
@@ -3116,10 +3806,7 @@
     "facts": [
      "NAV_OBSERVATION",
      "POSITION",
-     "TRANSACTION",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST"
+     "TRANSACTION"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -3129,8 +3816,8 @@
      "effective_start": "2026-07-17",
      "effective_end": null,
      "upstream_inventory_sha256": "786045f1bf7df06e759ab73b2eaf61527965101be3e958e9e234d4290c8892da",
-     "product_data_class_count": 6,
-     "product_data_class_set_sha256": "2198604e07fd211964a07ddce98a0f7e13bae0ea9a5a9caba539a315bd08ae3e",
+     "product_data_class_count": 3,
+     "product_data_class_set_sha256": "00b0e89f027127d602ce526c9d76cf35dcc5cd4a87ad409b29bd720da2dda79d",
      "admitted_item_count": 0,
      "admitted_item_set_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
      "allowed_exclusion_reasons": [
@@ -3170,10 +3857,7 @@
    "data_classes": [
     "EXTERNAL_FLOW",
     "CORPORATE_ACTION",
-    "TRANSACTION",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
-    "FINANCING_COST"
+    "TRANSACTION"
    ],
    "authority": "FIDELITY_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "fidelity-generation.json in an exact governed generation",
@@ -3214,10 +3898,7 @@
     "facts": [
      "EXTERNAL_FLOW",
      "CORPORATE_ACTION",
-     "TRANSACTION",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST"
+     "TRANSACTION"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -3227,8 +3908,8 @@
      "effective_start": "2024-10-03",
      "effective_end": null,
      "upstream_inventory_sha256": "c62cd179cd721a06a1dafd0ac8c646d77370089781ed6b5c7a3a776d16548514",
-     "product_data_class_count": 6,
-     "product_data_class_set_sha256": "42a2267ad7b849073b6a163b8bb8c9db9b176236d7576935375bd3d484ac86b9",
+     "product_data_class_count": 3,
+     "product_data_class_set_sha256": "14b8b16404dc44bae1068a4ed8b3ed4a7b683ca786f7fd3879625b43eace9402",
      "admitted_item_count": 0,
      "admitted_item_set_sha256": "37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570",
      "allowed_exclusion_reasons": [
@@ -3272,14 +3953,14 @@
    },
    "data_classes": [
     "ACCOUNT_NAV",
-    "POSITION",
-    "TRANSACTION",
-    "EXTERNAL_FLOW",
-    "CORPORATE_ACTION",
     "CAPITAL_ANCHOR",
+    "CORPORATE_ACTION",
+    "EXTERNAL_FLOW",
+    "FINANCING_COST",
     "FINANCING_LIABILITY",
     "LEVERAGE_EXPOSURE",
-    "FINANCING_COST"
+    "POSITION",
+    "TRANSACTION"
    ],
    "authority": "IBKR_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "ibkr-catalog.json in an exact governed generation",
@@ -3318,15 +3999,15 @@
     "transform": "provider-ledger",
     "version": "1",
     "facts": [
-     "NAV_OBSERVATION",
-     "POSITION",
-     "TRANSACTION",
-     "EXTERNAL_FLOW",
-     "CORPORATE_ACTION",
      "CAPITAL_ANCHOR",
+     "CORPORATE_ACTION",
+     "EXTERNAL_FLOW",
+     "FINANCING_COST",
      "FINANCING_LIABILITY",
      "LEVERAGE_EXPOSURE",
-     "FINANCING_COST"
+     "NAV_OBSERVATION",
+     "POSITION",
+     "TRANSACTION"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -3337,9 +4018,9 @@
      "effective_end": null,
      "upstream_inventory_sha256": "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8",
      "product_data_class_count": 9,
-     "product_data_class_set_sha256": "eaeee09eac3d4f358f875c89b8c03e1b0ac3a3b509f9f715189b2981cf7a7153",
+     "product_data_class_set_sha256": "c8fa73170b7176c8d31ffe9b0d2ffb25aceed4193361930270e9e92a8968bfc5",
      "admitted_item_count": 25,
-     "admitted_item_set_sha256": "e74f64b3e344b0dad5ba2c08d366a7171a32837b0901056c8a6930d2ced66f9c",
+     "admitted_item_set_sha256": "0b8c38b8dcfcc551ac38dae244b47fd431488cc57d220656c5223967cd6892c2",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -3407,10 +4088,7 @@
    },
    "data_classes": [
     "ACCOUNT_NAV",
-    "CAPITAL_ANCHOR",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
-    "FINANCING_COST"
+    "CAPITAL_ANCHOR"
    ],
    "authority": "MATRIXPORT_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "catalog.json in an exact governed Matrixport generation",
@@ -3451,9 +4129,6 @@
     "facts": [
      "NAV_OBSERVATION",
      "CAPITAL_ANCHOR",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST",
      "EXTERNAL_FLOW"
     ],
     "dataset_disposition_policy": {
@@ -3464,10 +4139,10 @@
      "effective_start": "2026-08-16",
      "effective_end": null,
      "upstream_inventory_sha256": "24f77dcf8c81b5c4906f66013568c2ec205e46752117c9bad56aba2e65d3b98e",
-     "product_data_class_count": 5,
-     "product_data_class_set_sha256": "e9caeb93ca23707bdc1d9b261c847fd72e42a07f2b3b962085585b738ac72837",
+     "product_data_class_count": 2,
+     "product_data_class_set_sha256": "792f5bd0bbca0836b4e25a3559adf6f69aab248a4289959925bc0d1caa05c978",
      "admitted_item_count": 6,
-     "admitted_item_set_sha256": "1593ef013cdd8cc192cdaca2a6bd7b2eced0e3315975b101129fdcaa807838d7",
+     "admitted_item_set_sha256": "1c00617f3db60ee5b1571ef822261c39c02cf0c620604a66a35c45616f82141c",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -3592,10 +4267,7 @@
    "data_classes": [
     "ACCOUNT_NAV",
     "EXTERNAL_FLOW",
-    "CAPITAL_ANCHOR",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
-    "FINANCING_COST"
+    "CAPITAL_ANCHOR"
    ],
    "authority": "QUANTBASE_PROVIDER_GENERATION",
    "endpoint_or_artifact_selector": "quantbase-generation.json in an exact governed generation",
@@ -3636,10 +4308,7 @@
     "facts": [
      "NAV_OBSERVATION",
      "EXTERNAL_FLOW",
-     "CAPITAL_ANCHOR",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST"
+     "CAPITAL_ANCHOR"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -3649,10 +4318,10 @@
      "effective_start": "2026-08-16",
      "effective_end": null,
      "upstream_inventory_sha256": "2abcd635064683b61f71e11b07893a52029c7bb32d2a7d5ceb38e27a1aa9020f",
-     "product_data_class_count": 6,
-     "product_data_class_set_sha256": "bba034d63f9689fab27403bcdf233476cd7215a9a74dd56c4137133bd0b1e5ab",
+     "product_data_class_count": 3,
+     "product_data_class_set_sha256": "70fcf851a90a424642d944bf3e0a5c7fe984bde6506c9e284e4463c5d8a69ce1",
      "admitted_item_count": 6,
-     "admitted_item_set_sha256": "50fcb8d5a059f3496d56561f178d8f1b53fdeda620d733cf6e5f9a5c9b188923",
+     "admitted_item_set_sha256": "c08d7a42db964d459235cf0071a843a6b3b703c03932b5c3b72b0ccab7b1843b",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
@@ -3722,8 +4391,6 @@
     "ACCOUNT_NAV",
     "EXTERNAL_FLOW",
     "FINANCING_COST",
-    "FINANCING_LIABILITY",
-    "LEVERAGE_EXPOSURE",
     "POSITION",
     "TRANSACTION"
    ],
@@ -3764,13 +4431,11 @@
     "transform": "provider-ledger",
     "version": "1",
     "facts": [
+     "EXTERNAL_FLOW",
+     "FINANCING_COST",
      "NAV_OBSERVATION",
      "POSITION",
-     "TRANSACTION",
-     "EXTERNAL_FLOW",
-     "FINANCING_LIABILITY",
-     "LEVERAGE_EXPOSURE",
-     "FINANCING_COST"
+     "TRANSACTION"
     ],
     "dataset_disposition_policy": {
      "policy_id": "PROVIDER_ADMIT_OR_DECLARE_V1",
@@ -3780,10 +4445,10 @@
      "effective_start": "2026-08-14",
      "effective_end": null,
      "upstream_inventory_sha256": "548db85021b3a735b9145934795c37d7d99f51360fba94f0548120f1828eaf33",
-     "product_data_class_count": 7,
-     "product_data_class_set_sha256": "1c25b5de8b23eb2d740ca250610df635f304a61b2fcfe1c0f0fc7070b98e4a0a",
+     "product_data_class_count": 5,
+     "product_data_class_set_sha256": "5e40f0cb78ec90654003fc71947b77a34effd3c4d3ba7f0c6656008d93413304",
      "admitted_item_count": 22,
-     "admitted_item_set_sha256": "e179a13eb016d9163be8b2c781d2bac9ac70f0b7d6a5d23294d38d5d85a7dc0b",
+     "admitted_item_set_sha256": "c736740e96e30517af5597c8819332d8e1020b45e0a8e35c646897f6b2bf4a26",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
       "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"

@@ -23,6 +23,7 @@ DATASET_DESCRIPTIONS: dict[str, str] = {
     "wallet_bills": "Wallet accounting ledger entries.",
     "wallet_deposits": "Deposit history across all enumerated currencies.",
     "wallet_withdrawals": "Withdrawal history across all enumerated currencies.",
+    "wallet_currency_dispositions": "Terminal provider-structured parameter rejections by wallet currency and dataset.",
     "rfq_symbols": "RFQ symbol metadata.",
     "rfq_orders": "RFQ historical orders across all enumerated symbols.",
     "prime_accounts": "Prime Broker account enumeration.",
@@ -75,4 +76,5 @@ AUDIT_WORKBOOK_DATASETS = (
     "quality_checks",
     "schema_drift",
     "data_dictionary",
+    "wallet_currency_dispositions",
 )

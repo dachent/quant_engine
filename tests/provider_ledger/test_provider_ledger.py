@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+import csv
 from datetime import date
 from decimal import Decimal, ROUND_DOWN, localcontext
 import hashlib
@@ -25,6 +26,8 @@ from quant_engine.core import (
     VerificationStatus,
     hash_file,
 )
+from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.ibkr import build_generation as build_ibkr_generation
 from quant_engine.portfolio_ledger import (
     DatasetItemKind,
     GenerationQualification,
@@ -41,6 +44,123 @@ if SPEC is None or SPEC.loader is None:
 ledger = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = ledger
 SPEC.loader.exec_module(ledger)
+
+
+def _actual_ibkr_period_catalog(
+    tmp_path: Path,
+) -> tuple[dict[str, Any], GenerationManifest]:
+    """Build an L1 catalog from the tracked native-source fixture helpers."""
+
+    fixture_path = REPOSITORY_ROOT / "tests" / "ibkr" / "test_ibkr_generation.py"
+    fixture_spec = importlib.util.spec_from_file_location(
+        "ibkr_generation_fixture_for_provider_ledger", fixture_path
+    )
+    if fixture_spec is None or fixture_spec.loader is None:
+        raise RuntimeError("unable to load IBKR generation fixture")
+    fixture = importlib.util.module_from_spec(fixture_spec)
+    sys.modules[fixture_spec.name] = fixture
+    fixture_spec.loader.exec_module(fixture)
+
+    source_spec_path = fixture._spec(tmp_path)
+    source_spec = json.loads(source_spec_path.read_text(encoding="utf-8"))
+    native_path = Path(source_spec["roots"]["legacy"]) / "flex-2.xml"
+    native_path.write_text(
+        fixture._xml(
+            "SYNTH-RAW",
+            date(2026, 1, 3),
+            "102",
+            native_sections=(
+                "<InterestAccruals><InterestAccrualsCurrency "
+                'accountId="SYNTH-RAW" currency="USD" fromDate="20260102" '
+                'toDate="20260103" startingAccrualBalance="0" '
+                'interestAccrued="-1" accrualReversal="1" '
+                'endingAccrualBalance="0" fxTranslation="0" />'
+                "</InterestAccruals>"
+            ),
+        ),
+        encoding="utf-8",
+    )
+    native_bytes = native_path.read_bytes()
+    source = next(
+        row for row in source_spec["sources"] if row["relative_path"] == "flex-2.xml"
+    )
+    source["expected_sha256"] = hashlib.sha256(native_bytes).hexdigest()
+    source["expected_size_bytes"] = len(native_bytes)
+    source_spec_path.write_bytes(canonical_json_bytes(source_spec))
+    catalog, manifest, _ = build_ibkr_generation(source_spec_path)
+    return catalog, manifest
+
+
+def test_ibkr_future_unquantified_capital_cannot_erase_cutoff_anchor() -> None:
+    catalog = {
+        "flows": [
+            _ibkr_flow(_IBKR_ACCOUNT, "2025-09-14", "DEPOSIT_OR_WITHDRAWAL", "100"),
+            _ibkr_flow(_IBKR_ACCOUNT, "2025-09-30", "TRANSFER:ACATS:IN", None),
+        ],
+        "nav_observations": [_ibkr_nav(_IBKR_ACCOUNT, "2025-09-14", "100")],
+        "positions": [],
+        "corporate_actions": [],
+        "transactions": [],
+    }
+    facts, findings = ledger._project_account_facts(
+        "ibkr",
+        "synthetic-generation",
+        catalog,
+        {_IBKR_ACCOUNT},
+        {"p123-eu"},
+        _IBKR_ASSIGNMENTS,
+        financial_cutoff=date(2025, 9, 14),
+    )
+    assert len(facts["capital_anchors"]) == 1
+    assert facts["capital_anchors"][0]["amount"]["value"] == "100"
+    assert any(row.get("original_source_date") == "2025-09-30" for row in findings)
+
+
+def test_retained_csv_cutoff_keeps_model_history_and_source_evidence(
+    tmp_path: Path,
+) -> None:
+    returns = tmp_path / "returns.csv"
+    returns.write_text(
+        "series_id,date,return,evidence_layer\n"
+        "Synthetic,2026-09-16,0.01,ACCOUNT_LIVE\n"
+        "Synthetic,2026-09-17,0.99,ACCOUNT_LIVE\n"
+        "Synthetic,2026-09-17,0.02,BACKTEST\n",
+        encoding="utf-8",
+    )
+    evidence = tmp_path / "evidence.json"
+    evidence.write_text(json.dumps({"as_of_date": "2026-09-17", "strategies": []}))
+    findings: list[dict[str, Any]] = []
+    rows, _, artifacts = ledger._strategy_inputs(
+        {
+            "returns_path": str(returns),
+            "returns_sha256": hash_file(returns)[0],
+            "strategy_evidence_path": str(evidence),
+            "strategy_evidence_sha256": hash_file(evidence)[0],
+        },
+        {
+            "strategies": [{"strategy_id": "synthetic", "name": "Synthetic"}],
+            "assignments": [
+                {
+                    "account_id": "synthetic-account",
+                    "strategy_id": "synthetic",
+                    "mapping_status": "MAPPED",
+                    "effective_start": "2026-01-01",
+                }
+            ],
+        },
+        date(2026, 9, 17),
+        {"synthetic": "alpaca"},
+        financial_cutoffs={"alpaca": date(2026, 9, 16)},
+        cutoff_findings=findings,
+    )
+    assert [(r["date"], r["return"], r["evidence_layer"]) for r in rows] == [
+        ("2026-09-16", "0.01", "ACCOUNT_LIVE"),
+        ("2026-09-17", "0.02", "BACKTEST"),
+    ]
+    assert artifacts[0].sha256 == hash_file(returns)[0]
+    assert len(findings) == 1
+    assert findings[0]["original_source_date"] == "2026-09-17"
+    assert findings[0]["financial_cutoff"] == "2026-09-16"
 
 
 def _current_census_provider_fixture() -> tuple[
@@ -98,6 +218,37 @@ def test_candidate_provider_inputs_match_every_frozen_current_census_lane() -> N
     ledger._validate_current_census_provider_generations(
         authority, identities, manifests
     )
+
+
+def test_observed_ibkr_statement_label_binds_partial_generation_without_utc_capture(
+    tmp_path: Path,
+) -> None:
+    """A native statement day is finality evidence, not a made-up UTC time."""
+
+    spec = importlib.util.spec_from_file_location(
+        "native_admission_fixture",
+        REPOSITORY_ROOT / "tests/provider_ledger/test_admit_or_declare.py",
+    )
+    assert spec is not None and spec.loader is not None
+    fixtures = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixtures)
+    _, identities, manifests, catalogs, _ = fixtures._fixture()
+    refs, selections = fixtures._staged_observation(
+        tmp_path, identities, manifests, catalogs
+    )
+    observation = {
+        "financial_cutoff": fixtures.DAY.isoformat(),
+        "providers": selections,
+    }
+    identity, manifest, *_ = ledger._provider(
+        "ibkr", refs["ibkr"], fixtures.DAY, run_observation=observation
+    )
+    assert identity.qualification is GenerationQualification.ACCEPTED_PARTIAL
+    assert manifest.generation_id == refs["ibkr"]["generation_id"]
+    finality = ledger._validate_observed_finality_evidence("ibkr", selections["ibkr"])
+    assert finality["native_timezone"] is None
+    assert finality["capture_start_utc"] is None
+    assert finality["provider_finality_guarantee"] is False
 
 
 @pytest.mark.parametrize("mutation", ("generation", "manifest", "as_of"))
@@ -178,20 +329,54 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
         "p123-eu-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-                "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
             ),
             (
                 "provider-ledger-catalog",
-                "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-                "66e97d05ebe4d7cbd394254089ab9b7db4a2d40c0df8c0d483e89dc55514cd65",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "f10e204e7ba13adcecf8fa29b11f166ddf412d85388a0d9d816ea4c1ca9bbfeb",
             ),
         },
         "volatis-account-live": {
             (
                 "provider-ledger-generation-manifest",
-                "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
-                "a63fbb3620f30c37b78a8a9ceac03446bf179f17b01d87669d68d76a94d32be6",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+            ),
+        },
+        # These four gained ACCOUNT_LIVE corrections when the three
+        # Schwab-sleeve strategies and the P123 twin were bound to
+        # governed evidence. Each reads the same accepted ledger
+        # generation as volatis above, which is the point: the retained
+        # history stayed one generation rather than becoming a second
+        # candidate authority.
+        "grizzlybears-vtma-account-live": {
+            (
+                "provider-ledger-generation-manifest",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+            ),
+        },
+        "p123-ai-factor-account-live": {
+            (
+                "provider-ledger-generation-manifest",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+            ),
+        },
+        "qsi-account-live": {
+            (
+                "provider-ledger-generation-manifest",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
+            ),
+        },
+        "tt-portfolio-account-live": {
+            (
+                "provider-ledger-generation-manifest",
+                "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
+                "31679e117c8be2854eafdbe3e05fc98027b4f172609b5e90e144530a82182838",
             ),
         },
         "echotrade-event-only-account-live-rejected": {
@@ -282,7 +467,7 @@ def test_accepted_ledger_a_is_history_not_candidate_provider_authority() -> None
     }
     assert expected_history_generations == {
         "07c590e5b4958c9902304f813489fbc81dad1bee7a3be36e0c15e2598949f15e",
-        "30c08b2ac601ece09c2cad3ed2e7e34a8cc8c2faee367115aa0974d245debacb",
+        "59d04004d44a30ed912afc95350d22810137689ac2525dca85704b7297664a34",
     }
     accepted_history_generations = {
         receipt["generation_id"]
@@ -2171,9 +2356,152 @@ def test_ibkr_finalized_history_rejects_gap_or_out_of_scope_account() -> None:
 
     coverage["known_gaps"] = []
     coverage["status"] = "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    with pytest.raises(ledger.ProviderLedgerError, match="not contiguous"):
+        ledger._ibkr_flow_coverage({"fact_coverage": [coverage]}, {"account-one"})
     coverage["accounts"][0]["intervals"] = coverage["accounts"][0]["intervals"][:1]
     with pytest.raises(ledger.ProviderLedgerError, match="account scope differs"):
         ledger._ibkr_flow_coverage({"fact_coverage": [coverage]}, {"account-other"})
+
+
+def test_ibkr_scoped_partial_history_returns_only_required_contiguous_accounts() -> (
+    None
+):
+    coverage = {
+        "accounts": [
+            {
+                "account_id": "account-required",
+                "intervals": [
+                    {
+                        "effective_end": "2026-09-02",
+                        "effective_start": "2025-09-15",
+                        "source_artifact_ids": ["selected/required.xml"],
+                    }
+                ],
+                "statement_count": 240,
+            },
+            {
+                "account_id": "account-reserve",
+                "intervals": [
+                    {
+                        "effective_end": "2025-12-31",
+                        "effective_start": "2025-09-15",
+                        "source_artifact_ids": ["selected/reserve-old.xml"],
+                    },
+                    {
+                        "effective_end": "2026-09-02",
+                        "effective_start": "2026-03-02",
+                        "source_artifact_ids": ["selected/reserve-new.xml"],
+                    },
+                ],
+                "statement_count": 198,
+            },
+        ],
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "fact_type": "FLEX_FINALIZED_HISTORY",
+        "known_gaps": ["account-reserve has a native Jan-Feb gap"],
+        "status": "PARTIAL",
+    }
+
+    result = ledger._ibkr_flow_coverage(
+        {"fact_coverage": [coverage]},
+        {"account-required", "account-reserve"},
+        required_accounts={"account-required"},
+    )
+
+    assert set(result) == {"account-required"}
+    assert result["account-required"]["effective_start"] == "2025-09-15"
+    assert result["account-required"]["effective_end"] == "2026-09-02"
+
+
+def test_ibkr_scoped_partial_history_rejects_unknown_or_missing_required_account() -> (
+    None
+):
+    coverage = {
+        "accounts": [
+            {
+                "account_id": "account-required",
+                "intervals": [
+                    {
+                        "effective_end": "2026-09-02",
+                        "effective_start": "2025-09-15",
+                        "source_artifact_ids": ["selected/required.xml"],
+                    }
+                ],
+                "statement_count": 240,
+            }
+        ],
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "fact_type": "FLEX_FINALIZED_HISTORY",
+        "known_gaps": ["unrequired native gap"],
+        "status": "PARTIAL",
+    }
+
+    with pytest.raises(ledger.ProviderLedgerError, match="unknown requested account"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [coverage]},
+            {"account-required"},
+            required_accounts={"account-unknown"},
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="missing requested account"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [coverage]},
+            {"account-required", "account-missing"},
+            required_accounts={"account-missing"},
+        )
+
+
+def test_ibkr_scoped_partial_history_rejects_duplicate_and_malformed_accounts() -> None:
+    base_account = {
+        "account_id": "account-required",
+        "intervals": [
+            {
+                "effective_end": "2026-09-02",
+                "effective_start": "2025-09-15",
+                "source_artifact_ids": ["selected/required.xml"],
+            }
+        ],
+        "statement_count": 240,
+    }
+    duplicate = {
+        "accounts": [base_account, dict(base_account)],
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "fact_type": "FLEX_FINALIZED_HISTORY",
+        "known_gaps": [],
+        "status": "PARTIAL",
+    }
+    with pytest.raises(ledger.ProviderLedgerError, match="duplicate account"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [duplicate]},
+            {"account-required"},
+            required_accounts={"account-required"},
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="duplicate account"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [duplicate]},
+            {"account-required"},
+            required_accounts=set(),
+        )
+
+    malformed = {
+        **duplicate,
+        "accounts": [
+            {
+                **base_account,
+                "intervals": [
+                    {
+                        **base_account["intervals"][0],
+                        "effective_end": "not-a-date",
+                    }
+                ],
+            }
+        ],
+    }
+    with pytest.raises(ledger.ProviderLedgerError, match="malformed interval"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [malformed]},
+            {"account-required"},
+            required_accounts={"account-required"},
+        )
 
 
 def test_declared_provider_fact_collection_cannot_fall_back_to_empty() -> None:
@@ -2189,6 +2517,383 @@ def test_declared_provider_fact_collection_cannot_fall_back_to_empty() -> None:
             set(),
             {},
         )
+
+
+def test_ibkr_native_period_projection_requires_one_strategy_epoch(
+    tmp_path: Path,
+) -> None:
+    """An actual L1 accrual crossing epochs stays unallocated, not reassigned."""
+
+    catalog, manifest = _actual_ibkr_period_catalog(tmp_path)
+    account_id = "account-ibkr-synthetic"
+    crossing_assignments = {
+        account_id: [
+            {
+                "account_id": account_id,
+                "effective_end": "2026-01-02",
+                "effective_start": "2025-12-27",
+                "mapping_status": "MAPPED",
+                "strategy_id": "strategy-before",
+            },
+            {
+                "account_id": account_id,
+                "effective_end": None,
+                "effective_start": "2026-01-03",
+                "mapping_status": "MAPPED",
+                "strategy_id": "strategy-after",
+            },
+        ]
+    }
+    projected, findings = ledger._project_account_facts(
+        "ibkr",
+        manifest.generation_id,
+        catalog,
+        {account_id},
+        {"strategy-before", "strategy-after"},
+        crossing_assignments,
+        manifest=manifest,
+        financial_cutoff=date(2026, 1, 3),
+    )
+
+    source = next(
+        row
+        for row in catalog["financing_cost_observations"]
+        if row["measurement_basis"] == "PERIOD_ACCRUAL"
+    )
+    period = next(
+        row
+        for row in projected["financing_cost_observations"]
+        if row["source_record_id"] == source["record_id"]
+    )
+    assert period["period_start"] == "2026-01-02"
+    assert period["period_end"] == "2026-01-03"
+    assert period["amount"] == source["amount"]
+    assert period["strategy_id"] is None
+    assert period["mapping_status"] == "UNMAPPED"
+    assert period["mapping_reason"] == "PERIOD_CROSSES_STRATEGY_EPOCH"
+    assert {
+        "fact_type": "financing_cost_observations",
+        "mapping_reason": "PERIOD_CROSSES_STRATEGY_EPOCH",
+        "record_id": period["record_id"],
+        "status": "UNMAPPED",
+    }.items() <= next(
+        row for row in findings if row["record_id"] == period["record_id"]
+    ).items()
+
+    same_epoch, _ = ledger._project_account_facts(
+        "ibkr",
+        manifest.generation_id,
+        catalog,
+        {account_id},
+        {"strategy-before"},
+        {
+            account_id: [
+                {
+                    "account_id": account_id,
+                    "effective_end": None,
+                    "effective_start": "2025-12-27",
+                    "mapping_status": "MAPPED",
+                    "strategy_id": "strategy-before",
+                }
+            ]
+        },
+        manifest=manifest,
+        financial_cutoff=date(2026, 1, 3),
+    )
+    same_period = next(
+        row
+        for row in same_epoch["financing_cost_observations"]
+        if row["source_record_id"] == source["record_id"]
+    )
+    assert same_period["strategy_id"] == "strategy-before"
+    assert same_period["mapping_status"] == "MAPPED"
+
+    for assignments, reason in (
+        (
+            {
+                account_id: [
+                    {
+                        "account_id": account_id,
+                        "effective_end": None,
+                        "effective_start": "2025-12-27",
+                        "mapping_status": "MAPPED",
+                        "strategy_id": "strategy-before",
+                    },
+                    {
+                        "account_id": account_id,
+                        "effective_end": None,
+                        "effective_start": "2025-12-27",
+                        "mapping_status": "MAPPED",
+                        "strategy_id": "strategy-after",
+                    },
+                ]
+            },
+            "PERIOD_MAPPING_AMBIGUOUS_INTERVAL",
+        ),
+        (
+            {
+                account_id: [
+                    {
+                        "account_id": account_id,
+                        "effective_end": "2026-01-02",
+                        "effective_start": "2025-12-27",
+                        "mapping_status": "MAPPED",
+                        "strategy_id": "strategy-before",
+                    }
+                ]
+            },
+            "PERIOD_MAPPING_MISSING_VALIDATED_INTERVAL",
+        ),
+    ):
+        unavailable, _ = ledger._project_account_facts(
+            "ibkr",
+            manifest.generation_id,
+            catalog,
+            {account_id},
+            {"strategy-before", "strategy-after"},
+            assignments,
+            manifest=manifest,
+            financial_cutoff=date(2026, 1, 3),
+        )
+        unavailable_period = next(
+            row
+            for row in unavailable["financing_cost_observations"]
+            if row["source_record_id"] == source["record_id"]
+        )
+        assert unavailable_period["strategy_id"] is None
+        assert unavailable_period["mapping_status"] == "UNMAPPED"
+        assert unavailable_period["mapping_reason"] == reason
+
+
+def test_ibkr_native_leverage_projection_preserves_raw_lineage_and_cutoff() -> None:
+    """Native leverage observations remain facts, never reconstructed balances."""
+
+    account_id = "account-ibkr-leverage"
+    tier = {
+        "account_id": account_id,
+        "accounting_date": "2026-01-16",
+        "allocation_scope": "HASHED_NATIVE_ACCOUNTS",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-2"},
+        "balance_threshold": "-10000",
+        "classification": "BROKER_DEBIT_INTEREST",
+        "code": "USD",
+        "included_in_nav": None,
+        "measurement_basis": "VALUE_DATE_INTEREST_DETAIL",
+        "period_end": "2026-01-15",
+        "period_start": "2026-01-15",
+        "record_id": "catalog-tier-cost",
+        "source_account_scope": "STATEMENT_ACCOUNT",
+        "source_artifact_id": "selected/ibkr.xml",
+        "source_field": "totalInterest",
+        "source_record_id": "native-tier-cost",
+        "source_section": "TierInterestDetail",
+        "tier_break": "TIER_ONE",
+        "total_interest": "2",
+        "total_principal": "-10000",
+        "value_date": "2026-01-15",
+    }
+    ambiguous_cost = {
+        **tier,
+        "record_id": "catalog-ambiguous-cost",
+        "source_account_scope": "AMBIGUOUS_REPORTED_ACCOUNT",
+        "source_record_id": "native-ambiguous-cost",
+    }
+    future_cash_cost = {
+        "account_id": account_id,
+        "accounting_date": "2026-01-17",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-3"},
+        "classification": "BROKER_INTEREST_PAID_UNCLASSIFIED",
+        "event_date": "2026-01-15",
+        "measurement_basis": "CASH_POSTING",
+        "record_id": "catalog-future-cash-cost",
+        "settlement_date": "2026-01-16",
+        "source_account_scope": "STATEMENT_ACCOUNT",
+        "source_artifact_id": "selected/ibkr.xml",
+        "source_field": "amount",
+        "source_record_id": "native-future-cash-cost",
+        "source_section": "CashTransaction",
+    }
+    liability = {
+        "account_id": account_id,
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-90"},
+        "as_of_date": "2026-01-15",
+        "classification": "CASH_DEBIT_BALANCE",
+        "measurement_basis": "SETTLED_CASH_BALANCE",
+        "period_end": "2026-01-15",
+        "period_start": "2026-01-01",
+        "record_id": "catalog-liability",
+        "source_account_scope": "STATEMENT_ACCOUNT",
+        "source_artifact_id": "selected/ibkr.xml",
+        "source_field": "endingSettledCash",
+        "source_record_id": "native-liability",
+        "source_section": "CashReportCurrency",
+    }
+    exposure = {
+        "account_id": account_id,
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "214"},
+        "as_of_date": "2026-01-15",
+        "classification": "HOLDINGS_GROSS_MARKET_VALUE",
+        "measurement_basis": "GROSS_POSITION_MARKET_VALUE",
+        "record_id": "catalog-exposure",
+        "scope": "SUMMARY_HOLDINGS",
+        "source_account_scope": "STATEMENT_ACCOUNT",
+        "source_artifact_id": "selected/ibkr.xml",
+        "source_field": "positionValue",
+        "source_record_id": "native-exposure",
+        "source_section": "OpenPosition",
+    }
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["ibkr"]}
+    catalog.update(
+        {
+            "financing_cost_observations": [tier, ambiguous_cost, future_cash_cost],
+            "financing_liability_observations": [liability],
+            "leverage_exposure_observations": [exposure],
+        }
+    )
+
+    projected, findings = ledger._project_account_facts(
+        "ibkr",
+        "generation-ibkr-leverage",
+        catalog,
+        {account_id},
+        {"strategy-leverage"},
+        {
+            account_id: [
+                {
+                    "effective_start": "2026-01-01",
+                    "effective_end": None,
+                    "strategy_id": "strategy-leverage",
+                }
+            ]
+        },
+        financial_cutoff=date(2026, 1, 16),
+    )
+
+    tier_row = next(
+        row
+        for row in projected["financing_cost_observations"]
+        if row["record_id"] == "ibkr:catalog-tier-cost"
+    )
+    assert {
+        key: tier_row[key]
+        for key in tier
+        if key not in {"record_id", "source_record_id"}
+    } == {
+        key: value
+        for key, value in tier.items()
+        if key not in {"record_id", "source_record_id"}
+    }
+    assert tier_row["source_record_id"] == "catalog-tier-cost"
+    assert tier_row["native_source_record_id"] == "native-tier-cost"
+    assert tier_row["generation_id"] == "generation-ibkr-leverage"
+    assert tier_row["mapping_status"] == "MAPPED"
+    assert tier_row["strategy_id"] == "strategy-leverage"
+    assert (
+        next(
+            row
+            for row in projected["financing_cost_observations"]
+            if row["record_id"] == "ibkr:catalog-ambiguous-cost"
+        )["mapping_status"]
+        == "UNMAPPED"
+    )
+    assert projected["financing_liability_observations"][0]["source_record_id"] == (
+        "catalog-liability"
+    )
+    assert projected["leverage_exposure_observations"][0][
+        "native_source_record_id"
+    ] == ("native-exposure")
+    assert {
+        "financial_cutoff": "2026-01-16",
+        "fact_type": "financing_cost_observations",
+        "original_record_id": "catalog-future-cash-cost",
+        "original_source_date": "2026-01-17",
+        "provider_id": "ibkr",
+        "record_id": "ibkr:catalog-future-cash-cost",
+        "source_record_id": "catalog-future-cash-cost",
+        "status": "OUTSIDE_FINANCIAL_CUTOFF",
+    }.items() <= next(
+        row
+        for row in findings
+        if row.get("original_record_id") == "catalog-future-cash-cost"
+    ).items()
+
+
+def test_schwab_margin_interest_projects_as_source_bound_financing_cost() -> None:
+    """A native margin charge is an investment-cost observation, never owner flow."""
+
+    account_id = "account-schwab-margin"
+    transaction = {
+        "account_id": account_id,
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "-1.25"},
+        "effective_date": "2026-01-15",
+        "event_date": "2026-01-14",
+        "kind": "MARGIN INTEREST",
+        "record_id": "schwab-margin-interest-1",
+        "source_artifact_id": "wch/transactions/account-schwab-margin.json",
+        "source_ordinal": 7,
+        "source_record_id": "native-schwab-margin-interest-1",
+    }
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    catalog["transactions"] = [transaction]
+
+    projected, findings = ledger._project_account_facts(
+        "schwab",
+        "generation-schwab-margin",
+        catalog,
+        {account_id},
+        {"strategy-schwab-margin"},
+        {
+            account_id: [
+                {
+                    "effective_start": "2026-01-01",
+                    "strategy_id": "strategy-schwab-margin",
+                }
+            ]
+        },
+    )
+
+    assert findings == []
+    assert projected.get("flows", []) == []
+    cost = projected["financing_cost_observations"]
+    assert len(cost) == 1
+    assert {
+        key: cost[0][key]
+        for key in (
+            "account_id",
+            "amount",
+            "classification",
+            "effective_date",
+            "event_date",
+            "generation_id",
+            "included_in_nav",
+            "measurement_basis",
+            "native_source_record_id",
+            "provider_id",
+            "record_id",
+            "source_amount",
+            "source_artifact_id",
+            "source_ordinal",
+            "source_record_id",
+            "strategy_id",
+        )
+    } == {
+        "account_id": account_id,
+        "amount": transaction["amount"],
+        "classification": "BROKER_DEBIT_INTEREST",
+        "effective_date": "2026-01-15",
+        "event_date": "2026-01-14",
+        "generation_id": "generation-schwab-margin",
+        "included_in_nav": None,
+        "measurement_basis": "CASH_POSTING",
+        "native_source_record_id": "native-schwab-margin-interest-1",
+        "provider_id": "schwab",
+        "record_id": "schwab-financing-cost:schwab-margin-interest-1",
+        "source_amount": transaction["amount"],
+        "source_artifact_id": "wch/transactions/account-schwab-margin.json",
+        "source_ordinal": 7,
+        "source_record_id": "schwab-margin-interest-1",
+        "strategy_id": "strategy-schwab-margin",
+    }
 
 
 @pytest.mark.parametrize(
@@ -2228,6 +2933,257 @@ def test_projected_provider_nav_preserves_source_proven_value_basis(
     )
 
     assert projected["nav_observations"][0]["value_basis"] == value_basis
+
+
+def test_financial_cutoff_excludes_future_schwab_nav_with_source_lineage() -> None:
+    """A capture can contain a later NAV without changing the financial cutoff."""
+
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    catalog["nav_observations"] = [
+        {
+            "account_id": "synthetic-cutoff-account",
+            "as_of_date": "2026-09-17",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "100"},
+            "record_id": "cutoff-nav",
+            "source_artifact_id": "synthetic/nav.json",
+            "value_basis": "ACCOUNT_VALUE",
+        },
+        {
+            "account_id": "synthetic-cutoff-account",
+            "as_of_date": "2026-09-18",
+            "nav": {"currency": "USD", "status": "AVAILABLE", "value": "999"},
+            "record_id": "future-nav",
+            "source_artifact_id": "synthetic/nav.json",
+            "value_basis": "ACCOUNT_VALUE",
+        },
+    ]
+
+    projected, findings = ledger._project_account_facts(
+        "schwab",
+        "a" * 64,
+        catalog,
+        {"synthetic-cutoff-account"},
+        {"synthetic-cutoff-strategy"},
+        {
+            "synthetic-cutoff-account": [
+                {
+                    "effective_start": "2026-01-01",
+                    "effective_end": None,
+                    "strategy_id": "synthetic-cutoff-strategy",
+                }
+            ]
+        },
+        financial_cutoff=date(2026, 9, 17),
+    )
+
+    assert [row["nav"]["value"] for row in projected["nav_observations"]] == ["100"]
+    assert {
+        "financial_cutoff": "2026-09-17",
+        "fact_type": "nav_observations",
+        "original_record_id": "future-nav",
+        "original_source_date": "2026-09-18",
+        "provider_id": "schwab",
+        "record_id": "schwab:future-nav",
+        "source_record_id": "future-nav",
+        "status": "OUTSIDE_FINANCIAL_CUTOFF",
+    } in findings
+
+
+@pytest.mark.parametrize(
+    "future_dates, future_kind",
+    [
+        (
+            {"event_date": "2026-09-17", "effective_date": "2026-09-18"},
+            "MoneyLink Transfer",
+        ),
+        (
+            {
+                "event_date": "2026-09-17",
+                "effective_date": "2026-09-17",
+                "nav_recognition_date": "2026-09-18",
+            },
+            "MoneyLink Transfer",
+        ),
+        (
+            {"event_date": "2026-09-17", "effective_date": "2026-09-18"},
+            "Journaled Shares",
+        ),
+        (
+            {"event_date": "2026-09-18", "effective_date": "2026-09-17"},
+            "Journaled Shares",
+        ),
+    ],
+)
+def test_schwab_cutoff_precedes_pairing_and_preserves_effective_mapping(
+    future_dates: dict[str, str],
+    future_kind: str,
+) -> None:
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    receipt = {
+        "account_id": "synthetic-sleeve",
+        "record_id": "prior-receipt",
+        "kind": "Journaled Shares",
+        "event_date": "2026-09-16",
+        "effective_date": "2026-09-17",
+        "amount": {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+        "quantity": "2",
+        "execution_price": "25",
+        "security_id": "SYNTHETIC",
+        "source_artifact_id": "synthetic/transactions.json",
+    }
+    catalog["transactions"] = [
+        receipt,
+        {
+            **receipt,
+            "account_id": "synthetic-reserve",
+            "record_id": "prior-delivery",
+            "quantity": "-2",
+        },
+    ]
+    assignments = {
+        "synthetic-sleeve": [
+            {
+                "effective_start": "2026-01-01",
+                "effective_end": "2026-09-16",
+                "strategy_id": "prior-strategy",
+            },
+            {"effective_start": "2026-09-17", "strategy_id": "current-strategy"},
+        ],
+    }
+    arguments = (
+        "schwab",
+        "a" * 64,
+        catalog,
+        {"synthetic-sleeve", "synthetic-reserve"},
+        {"prior-strategy", "current-strategy"},
+        assignments,
+    )
+    prior, prior_findings = ledger._project_account_facts(
+        *arguments,
+        financial_cutoff=date(2026, 9, 17),
+    )
+    future = {
+        **receipt,
+        **future_dates,
+        "account_id": "synthetic-future",
+        "record_id": "future-transfer",
+        "kind": future_kind,
+        "quantity": "invalid-future-quantity",
+        "execution_price": "invalid-future-price",
+    }
+    if future_kind == "MoneyLink Transfer":
+        future["amount"] = {
+            "currency": "USD",
+            "status": "AVAILABLE",
+            "value": "15000",
+        }
+    catalog["transactions"].append(future)
+    original = json.dumps(catalog, sort_keys=True)
+    projected, findings = ledger._project_account_facts(
+        *arguments,
+        financial_cutoff=date(2026, 9, 17),
+    )
+    assert projected == prior
+    assert json.dumps(catalog, sort_keys=True) == original
+    flow = next(
+        row for row in projected["flows"] if row["account_id"] == "synthetic-sleeve"
+    )
+    assert (
+        flow["event_date"],
+        flow["effective_date"],
+        flow["nav_recognition_date"],
+    ) == (
+        "2026-09-16",
+        "2026-09-17",
+        "2026-09-17",
+    )
+    assert flow["strategy_id"] == "current-strategy"
+    assert flow["mapping_status"] == "MAPPED"
+    assert flow["flow_type"] == "ACCOUNT_TRANSFER"
+    assert flow["amount"] == {"currency": "USD", "status": "AVAILABLE", "value": "50"}
+    excluded = [row for row in findings if row["status"] == "OUTSIDE_FINANCIAL_CUTOFF"]
+    assert [row for row in findings if row not in excluded] == prior_findings
+    assert excluded == [
+        {
+            "financial_cutoff": "2026-09-17",
+            "fact_type": "transactions",
+            "original_record_id": "future-transfer",
+            "original_source_date": future_dates["event_date"],
+            "original_source_dates": future_dates,
+            "provider_id": "schwab",
+            "record_id": "schwab:future-transfer",
+            "source_artifact_id": "synthetic/transactions.json",
+            "source_record_id": "future-transfer",
+            "source_row_sha256": hashlib.sha256(
+                ledger.canonical_json_bytes(future)
+            ).hexdigest(),
+            "status": "OUTSIDE_FINANCIAL_CUTOFF",
+        }
+    ]
+
+
+def test_schwab_cutoff_precedes_cross_provider_security_valuation() -> None:
+    catalog = {fact: [] for fact in ledger._ACCOUNT_FACTS["schwab"]}
+    receipt = {
+        "account_id": "synthetic-schwab",
+        "record_id": "prior-receipt",
+        "kind": "Security Transfer",
+        "event_date": "2026-09-17",
+        "effective_date": "2026-09-17",
+        "quantity": "2",
+        "symbol": "SYNTHETIC",
+        "amount": {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+        "source_artifact_id": "synthetic/transactions.json",
+    }
+    catalog["transactions"] = [
+        receipt,
+        {
+            **receipt,
+            "record_id": "future-receipt",
+            "effective_date": "2026-09-18",
+            "quantity": "invalid-future-quantity",
+        },
+    ]
+    facts, _ = ledger._project_account_facts(
+        "schwab",
+        "a" * 64,
+        catalog,
+        {"synthetic-schwab"},
+        set(),
+        {},
+        financial_cutoff=date(2026, 9, 17),
+    )
+    ledger._complete_schwab_security_transfer_values(
+        facts["flows"],
+        catalog,
+        {
+            "corporate_actions": [
+                {
+                    "record_id": "synthetic-fidelity-delivery",
+                    "kind": "ASSET_TRANSFER",
+                    "event_date": "2026-09-17",
+                    "quantity": "-2",
+                    "symbol": "SYNTHETIC",
+                    "amount": {
+                        "currency": "USD",
+                        "status": "AVAILABLE",
+                        "value": "-50",
+                    },
+                }
+            ]
+        },
+        "b" * 64,
+        {"synthetic-schwab"},
+        financial_cutoff=date(2026, 9, 17),
+    )
+    assert len(facts["flows"]) == 1
+    flow = facts["flows"][0]
+    assert flow["amount"] == {"currency": "USD", "status": "AVAILABLE", "value": "50"}
+    assert flow["recorded_amount"] == receipt["amount"]
+    assert (
+        flow["transfer_valuation"]["receipt_record_sha256"]
+        == hashlib.sha256(ledger.canonical_json_bytes(receipt)).hexdigest()
+    )
 
 
 def test_projected_ibkr_flow_retains_activity_identity_and_zero_noncapital_semantics() -> (
@@ -2495,6 +3451,404 @@ def _schwab_journal_row(
         "kind": "Journal",
         "record_id": record_id,
     }
+
+
+def _current_schwab_journal_catalog() -> tuple[
+    dict[str, object], GenerationManifest, dict[str, str]
+]:
+    """Build two disjoint synthetic current-source Journal pairs."""
+
+    accounts = {
+        "001": "account-0000000000000000",
+        "002": "account-0000000000000001",
+        "003": "account-0000000000000002",
+        "004": "account-0000000000000003",
+    }
+    source_hashes = {
+        account_id: f"{index:x}" * 64
+        for index, account_id in enumerate(accounts.values(), start=1)
+    }
+    rows = (
+        (
+            "001",
+            "current-to-ira",
+            "-100",
+            "JOURNAL TO ...002",
+            "TO",
+            "002",
+            "NATIVE_JOURNAL_TO",
+        ),
+        (
+            "002",
+            "current-ira",
+            "+100",
+            "IRA REGULAR CONTRIB",
+            None,
+            None,
+            "IRA_REGULAR_CONTRIB",
+        ),
+        (
+            "003",
+            "current-to-frm",
+            "-100",
+            "JOURNAL TO ...004",
+            "TO",
+            "004",
+            "NATIVE_JOURNAL_TO",
+        ),
+        (
+            "004",
+            "current-frm",
+            "+100",
+            "JOURNAL FRM ...003",
+            "FRM",
+            "003",
+            "NATIVE_JOURNAL_FRM",
+        ),
+    )
+    transactions: list[dict[str, object]] = []
+    for (
+        suffix,
+        record_id,
+        amount,
+        description,
+        direction,
+        counterparty,
+        recipient_basis,
+    ) in rows:
+        native_row = {
+            "action": "Journal",
+            "amount": amount,
+            "description": description,
+            "effectiveDate": "07/30/2026",
+            "transactionDate": "07/30/2026",
+        }
+        account_id = accounts[suffix]
+        transactions.append(
+            {
+                **_schwab_journal_row(account_id, record_id, "2026-07-30", amount),
+                "description": description,
+                "journal_source_evidence": {
+                    "counterparty_account_id": (
+                        accounts[counterparty] if counterparty is not None else None
+                    ),
+                    "currency_basis": "SELECTED_ACCOUNT_BASE_CURRENCY",
+                    "direction": direction,
+                    "native_row": native_row,
+                    "native_row_sha256": hashlib.sha256(
+                        canonical_json_bytes(native_row)
+                    ).hexdigest(),
+                    "recipient_basis": recipient_basis,
+                    "source_artifact_id": f"wch/transactions/{account_id}.json",
+                    "source_artifact_sha256": source_hashes[account_id],
+                },
+                "source_ordinal": 1,
+            }
+        )
+    entries = [
+        {"account_id": account_id, "native_suffix": suffix}
+        for suffix, account_id in sorted(accounts.items())
+    ]
+    catalog = {
+        "accounts": [
+            {"account_id": account_id, "base_currency": "USD", "provider": "SCHWAB"}
+            for account_id in accounts.values()
+        ],
+        "catalog_schema_version": 3,
+        "journal_counterparty_crosswalk": {
+            "basis": "SELECTED_SOURCE_SPEC_CROSSWALK",
+            "entries": entries,
+            "source_crosswalk_sha256": hashlib.sha256(
+                canonical_json_bytes(entries)
+            ).hexdigest(),
+        },
+        "nav_observations": [],
+        "positions": [],
+        "transactions": transactions,
+    }
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 7, 31),
+        adapter=AdapterIdentity(name="test-provider-ledger", version="1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic current Schwab Journal evidence",
+            fact_types=("transactions",),
+            observed_start=date(2026, 7, 30),
+            observed_end=date(2026, 7, 31),
+        ),
+        artifacts=tuple(
+            SourceArtifact(
+                artifact_id=f"wch/transactions/{account_id}.json",
+                sha256=source_hashes[account_id],
+                size_bytes=1,
+                as_of_date=date(2026, 7, 31),
+                schema_name="synthetic-wch-transaction",
+                schema_version="1",
+            )
+            for account_id in accounts.values()
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    return catalog, manifest, accounts
+
+
+def test_current_schwab_journal_evidence_pairs_equal_same_day_transfers() -> None:
+    """Current native evidence disambiguates equal-value Journal transfers."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    assignments = {
+        account_id: [
+            {
+                "effective_start": "2026-07-30",
+                "effective_end": None,
+                "strategy_id": f"strategy-{suffix}",
+            }
+        ]
+        for suffix, account_id in accounts.items()
+    }
+
+    projected, _ = ledger._project_account_facts(
+        "schwab",
+        "current-schwab-generation",
+        catalog,
+        set(accounts.values()),
+        {row[0]["strategy_id"] for row in assignments.values()},
+        assignments,
+        manifest=manifest,
+    )
+
+    flows = projected["flows"]
+    assert len(flows) == 4
+    assert {flow["flow_type"] for flow in flows} == {"ACCOUNT_TRANSFER"}
+    assert {flow["mapping_basis"] for flow in flows} == {
+        "CURRENT_SOURCE_PAIRED_PROVIDER_JOURNAL"
+    }
+    assert sum(Decimal(flow["amount"]["value"]) for flow in flows) == 0
+    assert {flow["strategy_id"] for flow in flows} == {
+        "strategy-001",
+        "strategy-002",
+        "strategy-003",
+        "strategy-004",
+    }
+    pairs: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for flow in flows:
+        pairs[str(flow["provider_activity_id_sha256"])].append(flow)
+    assert len(pairs) == 2
+    assert all(len(pair) == 2 for pair in pairs.values())
+
+
+def _project_current_schwab_journal_catalog(
+    catalog: Mapping[str, object],
+    manifest: GenerationManifest,
+    accounts: Mapping[str, str],
+) -> None:
+    assignments = {
+        account_id: [
+            {
+                "effective_start": "2026-07-30",
+                "effective_end": None,
+                "strategy_id": f"strategy-{suffix}",
+            }
+        ]
+        for suffix, account_id in accounts.items()
+    }
+    ledger._project_account_facts(
+        "schwab",
+        "current-schwab-generation",
+        catalog,
+        set(accounts.values()),
+        {row[0]["strategy_id"] for row in assignments.values()},
+        assignments,
+        manifest=manifest,
+    )
+
+
+def _refresh_current_schwab_native_row_hash(transaction: Mapping[str, Any]) -> None:
+    """Keep the synthetic native evidence internally hash-bound after a mutation."""
+
+    evidence = transaction["journal_source_evidence"]
+    evidence["native_row_sha256"] = hashlib.sha256(
+        canonical_json_bytes(evidence["native_row"])
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda catalog: catalog["transactions"][0][
+                "journal_source_evidence"
+            ].update({"counterparty_account_id": "account-not-selected"}),
+            "native semantics differ",
+        ),
+        (
+            lambda catalog: catalog["transactions"][0]["amount"].update(
+                {"value": "-101"}
+            ),
+            "native amount differs",
+        ),
+        (
+            lambda catalog: catalog["transactions"][0].update(
+                {"effective_date": "2026-07-31"}
+            ),
+            "native effective date differs",
+        ),
+        (
+            lambda catalog: catalog["transactions"][0]["amount"].update(
+                {"currency": "EUR"}
+            ),
+            "currency binding differs",
+        ),
+    ],
+)
+def test_current_schwab_journal_evidence_rejects_malformed_binding(
+    mutation: Callable[[dict[str, Any]], None], message: str
+) -> None:
+    """A changed native semantic binding cannot reach a weaker Journal route."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    mutation(catalog)
+
+    with pytest.raises(ledger.ProviderLedgerError, match=message):
+        _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_rejects_duplicate_recipient() -> None:
+    """A named IRA recipient must remain unique across the selected Journal rows."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    duplicate = json.loads(json.dumps(catalog["transactions"][1]))
+    duplicate["record_id"] = "current-ira-duplicate"
+    duplicate["source_ordinal"] = 2
+    catalog["transactions"].append(duplicate)
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="recipient pairing is ambiguous"
+    ):
+        _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_rejects_ambiguous_crosswalk() -> None:
+    """A duplicate selected suffix is not a valid Journal counterpart binding."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    catalog["journal_counterparty_crosswalk"]["entries"].append(
+        {"account_id": accounts["001"], "native_suffix": "002"}
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="crosswalk is ambiguous"):
+        _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_does_not_fall_back_when_missing() -> None:
+    """A v3 cash Journal without native evidence cannot use the generic route."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    del catalog["transactions"][0]["journal_source_evidence"]
+
+    with pytest.raises(ledger.ProviderLedgerError, match="source evidence is missing"):
+        _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_does_not_fall_back_when_all_missing() -> None:
+    """All v3 cash Journal rows require bound native evidence before projection."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    for transaction in catalog["transactions"]:
+        del transaction["journal_source_evidence"]
+
+    with pytest.raises(ledger.ProviderLedgerError, match="source evidence is missing"):
+        _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_preserves_outside_perimeter_receipt() -> None:
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    external = json.loads(json.dumps(catalog["transactions"][3]))
+    external["record_id"] = "current-external-receipt"
+    external["source_ordinal"] = 2
+    external["description"] = "JOURNAL FRM ...999"
+    evidence = external["journal_source_evidence"]
+    evidence["counterparty_account_id"] = None
+    evidence["native_row"]["description"] = external["description"]
+    _refresh_current_schwab_native_row_hash(external)
+    catalog["transactions"].append(external)
+    paired = ledger._schwab_current_journal_transfers(
+        catalog, catalog["transactions"], manifest
+    )
+    assert len(paired) == 4
+    assert external["record_id"] not in paired
+    _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_does_not_require_non_cash_native_rows() -> (
+    None
+):
+    """A v3 native Journal row without a cash amount remains outside this route."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    catalog["transactions"].append(
+        {
+            **_schwab_journal_row(
+                accounts["001"], "current-noncash-journal", "2026-07-30", "0"
+            ),
+            "amount": {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+            "description": "JOURNAL TO ...002",
+            "source_ordinal": 2,
+        }
+    )
+
+    _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+@pytest.mark.parametrize(
+    ("transaction_index", "native_transaction_date", "native_amount"),
+    [
+        (3, "07/30/2026 as of 08/01/2026", "$100.00"),
+        (0, "2026-07-30", "(100.00)"),
+    ],
+)
+def test_current_schwab_journal_evidence_preserves_native_producer_parsers(
+    transaction_index: int, native_transaction_date: str, native_amount: str
+) -> None:
+    """Ledger reparse accepts the producer's native date suffix and money syntax."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    transaction = catalog["transactions"][transaction_index]
+    native_row = transaction["journal_source_evidence"]["native_row"]
+    native_row["amount"] = native_amount
+    native_row["transactionDate"] = native_transaction_date
+    _refresh_current_schwab_native_row_hash(transaction)
+
+    _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_rejects_invented_effective_date() -> None:
+    """An absent native effectiveDate requires the producer's normalized absence."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    for transaction in catalog["transactions"]:
+        transaction["journal_source_evidence"]["native_row"]["effectiveDate"] = ""
+        transaction["effective_date"] = "2026-07-31"
+        _refresh_current_schwab_native_row_hash(transaction)
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="native effective date is absent"
+    ):
+        _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_uses_event_date_when_native_effective_date_absent() -> (
+    None
+):
+    """Producer-normalized absent effective dates pair by the native event date."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    for transaction in catalog["transactions"]:
+        transaction["journal_source_evidence"]["native_row"]["effectiveDate"] = ""
+        transaction["effective_date"] = None
+        _refresh_current_schwab_native_row_hash(transaction)
+
+    _project_current_schwab_journal_catalog(catalog, manifest, accounts)
 
 
 def test_schwab_pinned_journal_flows_require_exact_record_and_retained_source() -> None:
@@ -3116,6 +4470,13 @@ def test_provider_ledger_schema_requires_exact_known_provider_nav_basis() -> Non
                 "properties": {"value_basis": {"const": "ACCOUNT_TOTAL"}},
             },
         },
+        "quantbase": {
+            "if_required": ["value_basis"],
+            "then": {
+                "required": ["source_artifact_id"],
+                "properties": {"value_basis": {"const": "STRATEGY_NAV"}},
+            },
+        },
         "schwab": {
             "if_required": ["value_basis"],
             "then": {
@@ -3186,7 +4547,10 @@ def test_provider_ledger_schema_accepts_capital_anchor_catalog_surface() -> None
                 "transactions",
             )
         ],
+        "financing_cost_observations": [],
+        "financing_liability_observations": [],
         "flows": [],
+        "leverage_exposure_observations": [],
         "nav_observations": [],
         "positions": [],
         "provider_coverage": [{} for _ in range(7)],
@@ -3212,6 +4576,9 @@ def test_provider_ledger_schema_accepts_capital_anchor_catalog_surface() -> None
 
     Draft202012Validator.check_schema(schema)
     Draft202012Validator(schema).validate(catalog)
+    old_catalog = dict(catalog)
+    old_catalog.pop("financing_cost_observations")
+    assert not list(Draft202012Validator(schema).iter_errors(old_catalog))
     assert catalog["fact_counts"][0] == {
         "fact_type": "capital_anchors",
         "mapped_count": 1,
@@ -3717,11 +5084,55 @@ def test_matrixport_daily_holdings_use_selected_daily_fx_without_parity(
     ]
 
 
-def test_quantbase_dashboard_nav_declares_account_total_basis(
+def test_matrixport_cutoff_excludes_future_holdings_before_fx_valuation(
     tmp_path: Path,
 ) -> None:
-    """Volatis dashboard NAV is an authoritative account total and must carry
-    the same source-proven basis contract as Matrixport (#359/#361 class)."""
+    """An excluded capture tail must not require unavailable future-day FX."""
+
+    run_id = "20260816T141010.494Z"
+    output_root = tmp_path / "output" / run_id
+    (output_root / "csv").mkdir(parents=True)
+    totals_path = output_root / "csv/daily_portfolio_totals.csv"
+    totals_path.write_text(
+        "utc_date,portfolio_value_usd_observed,portfolio_value_usd_strict,strict_complete\n"
+        "2026-09-17,100,100,true\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_matrixport_manifest(
+        totals_path,
+        component_date="2026-09-17",
+        component_usd_values=("100",),
+        additional_components=(("2026-09-18", "999"),),
+    )
+    findings: list[dict[str, Any]] = []
+    rows = ledger._matrixport_nav_observations(
+        "gen-1",
+        manifest,
+        {
+            "catalog_schema_version": 2,
+            "observed_boundary_date": "2026-09-18",
+            "source_run_id": run_id,
+        },
+        tmp_path,
+        {"account-d2e5821e608e25f1"},
+        {"robuxio-crypto"},
+        {},
+        fx_rates=("f" * 64, {("USDT", date(2026, 9, 17)): Decimal("1")}, ()),
+        financial_cutoff=date(2026, 9, 17),
+        cutoff_findings=findings,
+    )
+
+    assert [row["as_of_date"] for row in rows] == ["2026-09-17"]
+    assert len(findings) == 1
+    assert findings[0]["original_source_date"] == "2026-09-18"
+    assert findings[0]["source_artifact_id"] == "csv/daily_holdings.csv"
+    assert findings[0]["status"] == "OUTSIDE_FINANCIAL_CUTOFF"
+
+
+def test_quantbase_dashboard_nav_declares_strategy_nav_basis(
+    tmp_path: Path,
+) -> None:
+    """Volatis dashboard NAV is fund-scoped, not a linked brokerage total."""
 
     run_id = "20260816T141010.494Z"
     artifacts_root = tmp_path / "output" / "source-runs" / run_id / "artifacts" / "csv"
@@ -3751,7 +5162,7 @@ def test_quantbase_dashboard_nav_declares_account_total_basis(
     )
 
     assert len(rows) == 1
-    assert rows[0]["value_basis"] == "ACCOUNT_TOTAL"
+    assert rows[0]["value_basis"] == "STRATEGY_NAV"
     assert (
         rows[0]["source_artifact_id"]
         == "source/csv/dashboard_Volatis_Strategy_pricehistory.csv"
@@ -4235,9 +5646,8 @@ def test_quantbase_volatis_dashboard_admitted_as_nav_observations(
     )
     assert rows[0]["strategy_id"] == "volatis-strategy"
     assert rows[0]["mapping_status"] == "MAPPED"
-    # The Volatis dashboard total is an authoritative account NAV: it must
-    # declare its basis under the #359/#361 value-basis contract.
-    assert rows[0]["value_basis"] == "ACCOUNT_TOTAL"
+    # Fund dashboard NAV is a strategy valuation, never an account total.
+    assert rows[0]["value_basis"] == "STRATEGY_NAV"
     assert rows[1]["as_of_date"] == "2026-08-14"
 
 
@@ -4630,6 +6040,91 @@ def test_quantbase_dispatch_projects_fund_anchors_account_flows_and_nav(
             "provider_id": "quantbase",
             "record_id": "quantbase-flow:deposit-1",
             "status": "UNMAPPED",
+        }
+    ]
+
+
+@pytest.mark.parametrize("future_defect", ["duplicate", "units", "linked_account"])
+def test_quantbase_cutoff_precedes_transfer_validation(
+    tmp_path: Path,
+    future_defect: str,
+) -> None:
+    root, catalog, price_path, activity_path = _quantbase_fixture(tmp_path)
+    artifacts = {
+        "source/csv/dashboard_Volatis_Strategy_pricehistory.csv": price_path,
+        "source/csv/account_activity.csv": activity_path,
+    }
+    account_id = ledger._CSV_FACT_ACCOUNT["quantbase"]
+    assignments = {
+        account_id: [
+            {
+                "effective_start": "2024-10-01",
+                "strategy_id": "volatis-strategy",
+            }
+        ]
+    }
+    prior, prior_findings = ledger._project_account_facts(
+        "quantbase",
+        "gen-1",
+        catalog,
+        {account_id},
+        {"volatis-strategy"},
+        assignments,
+        _make_two_artifact_manifest(artifacts),
+        root,
+        financial_cutoff=date(2026, 9, 17),
+    )
+    with activity_path.open(encoding="utf-8-sig", newline="") as stream:
+        source_rows = list(csv.DictReader(stream))
+    future = {
+        **source_rows[-1],
+        "created_at": "2026-09-18T20:01:00Z",
+        "id": "future-transfer",
+    }
+    if future_defect == "duplicate":
+        future["id"] = "deposit-1"
+    elif future_defect == "units":
+        future["amount_cents"] = "1"
+    else:
+        future["destination_account_id"] = "different-synthetic-account"
+    with activity_path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=list(source_rows[0]))
+        writer.writeheader()
+        writer.writerows([*source_rows, future])
+    source_hash = hash_file(activity_path)
+    projected, findings = ledger._project_account_facts(
+        "quantbase",
+        "gen-1",
+        catalog,
+        {account_id},
+        {"volatis-strategy"},
+        assignments,
+        _make_two_artifact_manifest(artifacts),
+        root,
+        financial_cutoff=date(2026, 9, 17),
+    )
+    assert projected == prior
+    assert hash_file(activity_path) == source_hash
+    assert projected["flows"][0]["amount"]["value"] == "2000"
+    assert projected["flows"][0]["provider_account_scope"] == "ACCOUNT_ONLY"
+    assert projected["flows"][0]["strategy_id"] is None
+    excluded = [row for row in findings if row["status"] == "OUTSIDE_FINANCIAL_CUTOFF"]
+    assert [row for row in findings if row not in excluded] == prior_findings
+    assert excluded == [
+        {
+            "financial_cutoff": "2026-09-17",
+            "fact_type": "flows",
+            "original_record_id": future["id"],
+            "original_source_date": "2026-09-18",
+            "original_source_dates": {"created_at": "2026-09-18T20:01:00Z"},
+            "provider_id": "quantbase",
+            "record_id": f"quantbase:{future['id']}",
+            "source_artifact_id": "source/csv/account_activity.csv",
+            "source_record_id": future["id"],
+            "source_row_sha256": hashlib.sha256(
+                ledger.canonical_json_bytes(future)
+            ).hexdigest(),
+            "status": "OUTSIDE_FINANCIAL_CUTOFF",
         }
     ]
 
@@ -5181,6 +6676,48 @@ def test_quantbase_unreconciled_contribution_fails_closed(tmp_path: Path) -> Non
 
     with pytest.raises(
         ledger.ProviderLedgerError, match="capital additions do not reconcile"
+    ):
+        ledger._quantbase_capital_anchors(
+            "gen-1",
+            manifest,
+            catalog,
+            root,
+            {"account-58e75e8d952fa1b8"},
+            {"volatis-strategy"},
+            assignments,
+        )
+
+
+def test_quantbase_non_fee_fund_sell_fails_closed_without_withdrawal_admission(
+    tmp_path: Path,
+) -> None:
+    """A fund redemption cannot silently become a zero strategy flow."""
+    root, catalog, price_path, activity_path = _quantbase_fixture(tmp_path)
+    activity_path.write_text(
+        "activity_type,amount,fund,is_rebalance,time,type,created_to_cover_fees\n"
+        "filled_txn,100000,107,False,2026-08-12T20:00:00Z,BUY,False\n"
+        "filled_txn,100,107,False,2026-08-14T20:00:00Z,SELL,False\n",
+        encoding="utf-8-sig",
+    )
+    manifest = _make_two_artifact_manifest(
+        {
+            "source/csv/dashboard_Volatis_Strategy_pricehistory.csv": price_path,
+            "source/csv/account_activity.csv": activity_path,
+        }
+    )
+    assignments = {
+        "account-58e75e8d952fa1b8": [
+            {
+                "effective_start": "2024-10-01",
+                "mapping_status": "MAPPED",
+                "strategy_id": "volatis-strategy",
+            }
+        ]
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError,
+        match="non-fee fund sell requires admitted withdrawal",
     ):
         ledger._quantbase_capital_anchors(
             "gen-1",
@@ -5807,16 +7344,17 @@ _IBKR_ASSIGNMENTS = {
 }
 
 
-def test_ibkr_reversed_deposit_advance_does_not_open_the_capital_anchor(
+def test_ibkr_deposit_advance_opens_on_the_date_nav_recognises_it(
     tmp_path: Path,
 ) -> None:
-    """A deposit advance and its cancellation share an event date and net out.
+    """A deposit advance is real capital from the day NAV recognises it.
 
     IBKR credits an advance against a pending wire so the account can trade,
-    then reverses it when the wire lands.  Reading either row on its own makes
-    money that never funded the account look like its opening capital, and the
-    reversal's own NAV-recognition date is a week later, so a date-keyed rule
-    does not catch it either.  Netting the event date is what does.
+    then reverses it when the wire lands.  The advance and its reversal share
+    an event date but recognise eight days apart, and the account's NAV rises
+    by the advance on the day it recognises.  Netting the shared event date
+    would cancel the pair and hide that capital for the whole window; netting
+    the recognition date reproduces what NAV shows.
     """
 
     catalog = {
@@ -5848,13 +7386,17 @@ def test_ibkr_reversed_deposit_advance_does_not_open_the_capital_anchor(
         "gen-1", catalog, {_IBKR_ACCOUNT}, {"p123-eu"}, _IBKR_ASSIGNMENTS
     )
 
-    assert [(item["event_date"], item["capital_type"]) for item in anchors] == [
-        ("2025-11-25", "OPENING_CAPITAL_ANCHOR")
-    ]
-    assert anchors[0]["amount"]["value"] == "5250"
-    assert anchors[0]["nav_recognition_date"] == "2025-12-02"
-    assert anchors[0]["opening_nav"]["value"] == "10081.673628706"
+    assert [
+        (item["nav_recognition_date"], item["capital_type"], item["amount"]["value"])
+        for item in anchors
+    ] == [("2025-11-24", "OPENING_CAPITAL_ANCHOR", "3572.46")]
+    # The opening is dated by the advance's own entry, and corroborated by the
+    # NAV of the day it recognises.
+    assert anchors[0]["event_date"] == "2025-11-24"
+    assert anchors[0]["opening_nav"]["value"] == "8417.9359133"
     assert anchors[0]["strategy_id"] == "p123-eu"
+    # The reversal and the wire that replaced it both recognise 2025-12-02 and
+    # net to 1,677.54, which stays where it already is: on the flow rows.
 
 
 def test_ibkr_sibling_account_transfers_fund_the_receiving_account(
@@ -5917,6 +7459,60 @@ def test_ibkr_in_kind_transfer_yields_no_anchors_for_that_account(
     )
 
 
+def test_ibkr_capital_before_the_first_epoch_opens_that_epoch(
+    tmp_path: Path,
+) -> None:
+    """Money already in the account when its strategy starts is its opening capital.
+
+    Owner rule HWM-003 makes capital continuous across epochs.  IBKR account
+    ...9e47 was funded with 35,000 on 2026-01-05 and its only assignment starts
+    2026-01-22; booking that deposit to nothing would open the epoch 35,000
+    short of the capital it actually traded.
+    """
+
+    account = "account-1b44c987969b9e47"
+    catalog = {
+        "flows": [
+            _ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "35000"),
+            _ibkr_flow(account, "2026-01-23", "DEPOSIT_OR_WITHDRAWAL", "15346.15"),
+        ],
+        "nav_observations": [_ibkr_nav(account, "2026-01-05", "35000")],
+    }
+    assignments = {
+        account: [
+            {
+                "effective_start": "2026-01-22",
+                "mapping_status": "MAPPED",
+                "strategy_id": "p123-ai-factor",
+            }
+        ]
+    }
+
+    anchors = ledger._ibkr_capital_anchors(
+        "gen-1", catalog, {account}, {"p123-ai-factor"}, assignments
+    )
+
+    assert [
+        (item["nav_recognition_date"], item["capital_type"], item["strategy_id"])
+        for item in anchors
+    ] == [("2026-01-05", "OPENING_CAPITAL_ANCHOR", "p123-ai-factor")]
+    assert anchors[0]["mapping_status"] == "MAPPED"
+
+
+def test_ibkr_account_with_no_assignment_yields_no_anchors(tmp_path: Path) -> None:
+    """An anchor names the epoch it funds, and an unassigned account has none."""
+
+    account = "account-2d0a996cf7ab4876"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2025-10-19", "DEPOSIT_OR_WITHDRAWAL", "2674.3")],
+        "nav_observations": [_ibkr_nav(account, "2025-10-20", "2741.2")],
+    }
+
+    assert (
+        ledger._ibkr_capital_anchors("gen-1", catalog, {account}, {"p123-eu"}, {}) == []
+    )
+
+
 def test_ibkr_capital_returned_before_funding_fails_closed(tmp_path: Path) -> None:
     catalog = {
         "flows": [
@@ -5934,6 +7530,36 @@ def test_ibkr_capital_returned_before_funding_fails_closed(tmp_path: Path) -> No
         )
 
 
+def test_ibkr_capital_after_the_opening_stays_on_the_flow_rows(
+    tmp_path: Path,
+) -> None:
+    """Only the opening is an anchor, because the rest is already a flow.
+
+    Quantbase anchors come from fund activity the ledger does not project as
+    flows, so they can be capital in their own right. Every IBKR anchor is
+    netted out of IBKR flow rows, so emitting the later ones as
+    STRATEGY_CAPITAL_ALLOCATION would add the same money to an epoch's
+    invested capital twice.
+    """
+
+    catalog = {
+        "flows": [
+            _ibkr_flow(_IBKR_ACCOUNT, "2025-11-20", "DEPOSIT_OR_WITHDRAWAL", "5000"),
+            _ibkr_flow(_IBKR_ACCOUNT, "2026-02-23", "DEPOSIT_OR_WITHDRAWAL", "2111.14"),
+            _ibkr_flow(_IBKR_ACCOUNT, "2026-02-24", "DEPOSIT_OR_WITHDRAWAL", "-1981.4"),
+        ],
+        "nav_observations": [_ibkr_nav(_IBKR_ACCOUNT, "2025-11-20", "5000")],
+    }
+
+    anchors = ledger._ibkr_capital_anchors(
+        "gen-1", catalog, {_IBKR_ACCOUNT}, {"p123-eu"}, _IBKR_ASSIGNMENTS
+    )
+
+    assert [(item["capital_type"], item["amount"]["value"]) for item in anchors] == [
+        ("OPENING_CAPITAL_ANCHOR", "5000")
+    ]
+
+
 def test_ibkr_opening_anchor_requires_a_positive_nav_on_recognition(
     tmp_path: Path,
 ) -> None:
@@ -5949,6 +7575,380 @@ def test_ibkr_opening_anchor_requires_a_positive_nav_on_recognition(
     ):
         ledger._ibkr_capital_anchors(
             "gen-1", catalog, {_IBKR_ACCOUNT}, {"p123-eu"}, _IBKR_ASSIGNMENTS
+        )
+
+
+def _ibkr_change_in_nav(
+    account_id: str,
+    accounting_date: str,
+    starting_value: str,
+    ending_value: str,
+    *components: tuple[str, str],
+) -> dict[str, object]:
+    """Synthetic, source-bound ChangeInNAV interval for B1 regressions."""
+
+    return {
+        "account_id": account_id,
+        "accounting_date": accounting_date,
+        "components": [
+            {"source_component_key": key, "value": value} for key, value in components
+        ],
+        "currency": "USD",
+        "ending_nav": ending_value,
+        "opening_nav": starting_value,
+        "source_artifact_id": "synthetic/b1-change-in-nav.xml",
+        "source_record_id": f"synthetic-change-in-nav-{accounting_date}",
+    }
+
+
+def _ibkr_b1_assignments(account: str) -> dict[str, list[dict[str, str]]]:
+    return {
+        account: [
+            {
+                "effective_start": "2026-01-22",
+                "mapping_status": "MAPPED",
+                "strategy_id": "synthetic-b1-strategy",
+            }
+        ]
+    }
+
+
+def test_ibkr_offsetting_pre_epoch_capital_does_not_open_epoch() -> None:
+    """A fully returned synthetic pre-epoch contribution creates no anchor."""
+
+    account = "synthetic-b1-offsetting-account"
+    catalog = {
+        "flows": [
+            _ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "35000"),
+            _ibkr_flow(account, "2026-01-12", "DEPOSIT_OR_WITHDRAWAL", "-35000"),
+        ],
+        "nav_observations": [
+            _ibkr_nav(account, "2026-01-05", "35000"),
+            _ibkr_nav(account, "2026-01-12", "0"),
+        ],
+    }
+
+    assert (
+        ledger._ibkr_capital_anchors(
+            "synthetic-b1-generation",
+            catalog,
+            {account},
+            {"synthetic-b1-strategy"},
+            _ibkr_b1_assignments(account),
+        )
+        == []
+    )
+
+
+def test_ibkr_pre_epoch_net_capital_matches_opening_nav() -> None:
+    """Synthetic net pre-epoch capital, not the first deposit, opens the epoch."""
+
+    account = "synthetic-b1-net-account"
+    catalog = {
+        "flows": [
+            _ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "35000"),
+            _ibkr_flow(account, "2026-01-12", "DEPOSIT_OR_WITHDRAWAL", "-5000"),
+        ],
+        "nav_observations": [
+            _ibkr_nav(account, "2026-01-05", "35000"),
+            _ibkr_nav(account, "2026-01-12", "30000"),
+        ],
+    }
+
+    anchors = ledger._ibkr_capital_anchors(
+        "synthetic-b1-generation",
+        catalog,
+        {account},
+        {"synthetic-b1-strategy"},
+        _ibkr_b1_assignments(account),
+    )
+
+    assert [
+        (item["amount"]["value"], item["opening_nav"]["value"]) for item in anchors
+    ] == [("30000", "30000")]
+
+
+@pytest.mark.parametrize(("ending_nav", "mtm"), [("38000", "3000"), ("32000", "-3000")])
+def test_ibkr_pre_epoch_pnl_does_not_change_contributed_capital(
+    ending_nav: str, mtm: str
+) -> None:
+    """Covered synthetic P&L changes governed NAV, never contributed capital."""
+
+    account = "synthetic-b1-pnl-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "35000")],
+        "nav_observations": [_ibkr_nav(account, "2026-01-06", ending_nav)],
+        "change_in_nav_observations": [
+            _ibkr_change_in_nav(
+                account,
+                "2026-01-05",
+                "0",
+                "35000",
+                ("depositsWithdrawals", "35000"),
+            ),
+            _ibkr_change_in_nav(
+                account,
+                "2026-01-06",
+                "35000",
+                ending_nav,
+                ("mtm", mtm),
+            ),
+        ],
+    }
+
+    anchor = ledger._ibkr_capital_anchors(
+        "synthetic-b1-generation",
+        catalog,
+        {account},
+        {"synthetic-b1-strategy"},
+        _ibkr_b1_assignments(account),
+    )[0]
+
+    assert anchor["amount"]["value"] == "35000"
+    assert anchor["opening_nav"]["value"] == ending_nav
+
+
+def test_ibkr_pre_epoch_friday_to_monday_preserves_statement_continuity() -> None:
+    """Synthetic weekday coverage admits a Friday-to-Monday NAV bridge."""
+
+    account = "synthetic-b1-weekday-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-09", "DEPOSIT_OR_WITHDRAWAL", "35000")],
+        "nav_observations": [_ibkr_nav(account, "2026-01-12", "35000")],
+        "change_in_nav_observations": [
+            _ibkr_change_in_nav(
+                account,
+                "2026-01-09",
+                "0",
+                "35000",
+                ("depositsWithdrawals", "35000"),
+            ),
+            _ibkr_change_in_nav(account, "2026-01-12", "35000", "35000"),
+        ],
+    }
+
+    anchors = ledger._ibkr_capital_anchors(
+        "synthetic-b1-generation",
+        catalog,
+        {account},
+        {"synthetic-b1-strategy"},
+        _ibkr_b1_assignments(account),
+    )
+
+    assert [
+        (item["amount"]["value"], item["opening_nav"]["value"]) for item in anchors
+    ] == [("35000", "35000")]
+
+
+def test_ibkr_pre_epoch_missing_weekday_statement_interval_is_rejected() -> None:
+    """Synthetic Tuesday omission remains a source-coverage failure."""
+
+    account = "synthetic-b1-missing-weekday-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-09", "DEPOSIT_OR_WITHDRAWAL", "35000")],
+        "nav_observations": [_ibkr_nav(account, "2026-01-13", "35000")],
+        "change_in_nav_observations": [
+            _ibkr_change_in_nav(
+                account,
+                "2026-01-09",
+                "0",
+                "35000",
+                ("depositsWithdrawals", "35000"),
+            ),
+            _ibkr_change_in_nav(account, "2026-01-13", "35000", "35000"),
+        ],
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="IBKR_PRE_EPOCH_ACCOUNTING_GAP"
+    ):
+        ledger._ibkr_capital_anchors(
+            "synthetic-b1-generation",
+            catalog,
+            {account},
+            {"synthetic-b1-strategy"},
+            _ibkr_b1_assignments(account),
+        )
+
+
+def test_ibkr_pre_epoch_source_precision_is_not_unexplained_residual() -> None:
+    """Synthetic source-display precision is distinct from an unclassified residual."""
+
+    account = "synthetic-b1-precision-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "100")],
+        "nav_observations": [_ibkr_nav(account, "2026-01-05", "100.005")],
+        "change_in_nav_observations": [
+            {
+                **_ibkr_change_in_nav(
+                    account,
+                    "2026-01-05",
+                    "0",
+                    "100.005",
+                    ("depositsWithdrawals", "100"),
+                    ("fxTranslation", "0"),
+                ),
+                "identity_tolerance": "0.01",
+            }
+        ],
+    }
+
+    anchor = ledger._ibkr_capital_anchors(
+        "synthetic-b1-generation",
+        catalog,
+        {account},
+        {"synthetic-b1-strategy"},
+        _ibkr_b1_assignments(account),
+    )[0]
+
+    assert anchor["amount"]["value"] == "100"
+    assert anchor["opening_nav"]["value"] == "100.005"
+
+
+def test_ibkr_pre_epoch_rejects_excess_identity_tolerance() -> None:
+    """Synthetic residuals cannot be hidden behind a broader tolerance."""
+
+    account = "synthetic-b1-excess-tolerance-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "100")],
+        "nav_observations": [_ibkr_nav(account, "2026-01-05", "100.015")],
+        "change_in_nav_observations": [
+            {
+                **_ibkr_change_in_nav(
+                    account,
+                    "2026-01-05",
+                    "0",
+                    "100.015",
+                    ("depositsWithdrawals", "100"),
+                ),
+                "identity_tolerance": "0.02",
+            }
+        ],
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="IBKR_PRE_EPOCH_INVALID_IDENTITY_TOLERANCE"
+    ):
+        ledger._ibkr_capital_anchors(
+            "synthetic-b1-generation",
+            catalog,
+            {account},
+            {"synthetic-b1-strategy"},
+            _ibkr_b1_assignments(account),
+        )
+
+
+def test_ibkr_pre_epoch_nonadditive_twr_component_is_rejected() -> None:
+    """Synthetic TWR is informational and cannot be used in the NAV identity."""
+
+    account = "synthetic-b1-nonadditive-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "100")],
+        "nav_observations": [_ibkr_nav(account, "2026-01-05", "100")],
+        "change_in_nav_observations": [
+            _ibkr_change_in_nav(
+                account,
+                "2026-01-05",
+                "0",
+                "100",
+                ("depositsWithdrawals", "100"),
+                ("twr", "0"),
+            )
+        ],
+    }
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="IBKR_PRE_EPOCH_NONADDITIVE_COMPONENT"
+    ):
+        ledger._ibkr_capital_anchors(
+            "synthetic-b1-generation",
+            catalog,
+            {account},
+            {"synthetic-b1-strategy"},
+            _ibkr_b1_assignments(account),
+        )
+
+
+def test_ibkr_pre_epoch_governed_in_kind_market_value_opens_epoch() -> None:
+    """A synthetic source-valued in-kind transfer is capital exactly once."""
+
+    account = "synthetic-b1-in-kind-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-05", "TRANSFER:ACATS:IN", None)],
+        "nav_observations": [_ibkr_nav(account, "2026-01-05", "15000")],
+        "change_in_nav_observations": [
+            _ibkr_change_in_nav(
+                account,
+                "2026-01-05",
+                "0",
+                "15000",
+                ("assetTransfers", "15000"),
+            )
+        ],
+    }
+
+    anchor = ledger._ibkr_capital_anchors(
+        "synthetic-b1-generation",
+        catalog,
+        {account},
+        {"synthetic-b1-strategy"},
+        _ibkr_b1_assignments(account),
+    )[0]
+
+    assert anchor["amount"]["value"] == "15000"
+    assert anchor["opening_nav"]["value"] == "15000"
+
+
+@pytest.mark.parametrize(
+    "intervals",
+    [
+        [
+            _ibkr_change_in_nav(
+                "synthetic-b1-reject-account",
+                "2026-01-05",
+                "0",
+                "38000",
+                ("depositsWithdrawals", "35000"),
+            )
+        ],
+        [
+            _ibkr_change_in_nav(
+                "synthetic-b1-reject-account",
+                "2026-01-05",
+                "0",
+                "35000",
+                ("depositsWithdrawals", "35000"),
+            ),
+            _ibkr_change_in_nav(
+                "synthetic-b1-reject-account",
+                "2026-01-07",
+                "35000",
+                "35000",
+            ),
+        ],
+    ],
+)
+def test_ibkr_pre_epoch_unexplained_residual_or_gap_is_rejected(
+    intervals: list[dict[str, object]],
+) -> None:
+    """Synthetic P&L/transfer rows cannot hide a residual or source-day gap."""
+
+    account = "synthetic-b1-reject-account"
+    catalog = {
+        "flows": [_ibkr_flow(account, "2026-01-05", "DEPOSIT_OR_WITHDRAWAL", "35000")],
+        "nav_observations": [
+            _ibkr_nav(account, intervals[-1]["accounting_date"], "38000")
+        ],
+        "change_in_nav_observations": intervals,
+    }
+
+    with pytest.raises(ledger.ProviderLedgerError, match="IBKR_PRE_EPOCH"):
+        ledger._ibkr_capital_anchors(
+            "synthetic-b1-generation",
+            catalog,
+            {account},
+            {"synthetic-b1-strategy"},
+            _ibkr_b1_assignments(account),
         )
 
 

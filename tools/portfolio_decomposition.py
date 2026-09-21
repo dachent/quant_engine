@@ -5,10 +5,11 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
+import re
 import math
 import os
 from pathlib import Path, PurePosixPath
@@ -34,9 +35,9 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-ANALYTICS_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "1.11.0"
-METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-3"
+ANALYTICS_SCHEMA_VERSION: Final = 3
+BUILDER_VERSION: Final = "1.13.0"
+METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-6"
 METHOD_LABEL: Final = "MPI_INFORMED_NON_EQUIVALENT"
 ANALYSIS_LENSES: Final = {
     "ECONOMIC_FACTOR",
@@ -73,11 +74,24 @@ EVIDENCE_LAYERS: Final = {
     "CONCEPTUAL_STRESS",
 }
 RETURN_BASES: Final = {"GROSS", "MODEL", "NET"}
+TARGET_RETURN_BASIS_POLICIES: Final = {"MIXED_NET_MODEL"}
+FACTOR_RETURN_BASIS_POLICIES: Final = {"SOURCE_PUBLISHED"}
 RETURN_TYPES: Final = {"EXCESS", "TOTAL"}
 CONSTRAINTS: Final = {"UNCONSTRAINED", "LONG_ONLY_SUM_TO_ONE"}
 COST_COVERAGE: Final = {"COMPLETE", "INCOMPLETE"}
 ESTIMATORS: Final = {"STATIC_RBSA", "DYNAMIC_FLS"}
 EVIDENCE_MODES: Final = {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}
+TARGET_CALENDARS: Final = {
+    "CALENDAR_DAY_24_7",
+    "LEGACY_EXACT_LABEL",
+    "SESSION_LABELLED",
+}
+FACTOR_CALENDARS: Final = {"SOURCE_LABELLED_DAILY"}
+EVALUATION_INFORMATION_SETS: Final = {
+    "RETROSPECTIVE_SELECTED_SNAPSHOT",
+    "POINT_IN_TIME_VINTAGE",
+}
+FACTOR_ANCHOR_POLICY: Final = "SOURCE_LABELLED_FACTOR_ANCHOR_ASSOCIATION_V1"
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -130,6 +144,28 @@ class FactorRow:
 
 
 @dataclass(frozen=True)
+class IntervalAssociationPolicy:
+    target_calendar: str
+    target_label_convention: str
+    target_finality: str
+    target_finalized_through: date
+    target_source_vintage: str
+    target_currency: str
+    target_return_basis: str
+    target_gap_disposition: str
+    factor_calendar: str
+    factor_label_convention: str
+    factor_finality: str
+    factor_available_through_anchor: date
+    factor_source_vintage: str
+    factor_currency: str
+    factor_return_basis: str
+    evaluation_information_set: str
+    point_in_time_vintage: str | None
+    target_session_labels: Mapping[str, tuple[date, ...]]
+
+
+@dataclass(frozen=True)
 class ModelDefinition:
     model_id: str
     series_id: str
@@ -163,6 +199,8 @@ class Specification:
     models: tuple[ModelDefinition, ...]
     provenance_sources: tuple[SourceDefinition, ...]
     series_composition: Mapping[str, Mapping[str, object]]
+    interval_association: Mapping[str, IntervalAssociationPolicy]
+    default_interval_association: IntervalAssociationPolicy | None
 
 
 @dataclass(frozen=True)
@@ -255,16 +293,19 @@ def _portable(value: object, name: str) -> str:
 
 def _source_definition(value: object, name: str) -> SourceDefinition:
     source = _object(value, name)
+    expected_keys = {
+        "artifact_id",
+        "expected_sha256",
+        "expected_size_bytes",
+        "relative_path",
+        "schema_name",
+        "schema_version",
+    }
+    if "interval_policy" in source:
+        expected_keys.add("interval_policy")
     _strict_keys(
         source,
-        {
-            "artifact_id",
-            "expected_sha256",
-            "expected_size_bytes",
-            "relative_path",
-            "schema_name",
-            "schema_version",
-        },
+        expected_keys,
         name,
     )
     digest = _text(source["expected_sha256"], f"{name}.expected_sha256")
@@ -482,6 +523,217 @@ def _model_definition(value: Mapping[str, Any], index: int) -> ModelDefinition:
     )
 
 
+def _interval_association_policy(
+    target_source: Mapping[str, Any], factor_source: Mapping[str, Any]
+) -> IntervalAssociationPolicy:
+    """Parse declared source-label semantics without manufacturing a clock cut-off."""
+    target = _object(target_source["interval_policy"], "target_source.interval_policy")
+    factor = _object(factor_source["interval_policy"], "factor_source.interval_policy")
+    target_keys = {
+        "currency",
+        "evaluation_information_set",
+        "finality",
+        "finalized_through",
+        "gap_disposition",
+        "native_calendar",
+        "native_label_convention",
+        "return_basis",
+        "source_vintage",
+    }
+    if target.get("native_calendar") == "SESSION_LABELLED":
+        target_keys.add("session_schedule_labels")
+    if target.get("native_calendar") == "LEGACY_EXACT_LABEL":
+        target_keys.add("legacy_alignment_policy")
+    if "point_in_time_vintage" in target:
+        target_keys.add("point_in_time_vintage")
+        target_keys.update(
+            {
+                "causal_feature_cutoff_proved",
+                "retained_historical_availability_proved",
+            }
+        )
+    _strict_keys(target, target_keys, "target_source.interval_policy")
+    _strict_keys(
+        factor,
+        {
+            "available_through_anchor",
+            "currency",
+            "finality",
+            "native_calendar",
+            "native_label_convention",
+            "return_basis",
+            "source_vintage",
+        },
+        "factor_source.interval_policy",
+    )
+    target_calendar = _text(
+        target["native_calendar"], "target_source.interval_policy.native_calendar"
+    )
+    if target_calendar not in TARGET_CALENDARS:
+        raise DecompositionError("target native calendar is unsupported")
+    if (
+        target_calendar == "LEGACY_EXACT_LABEL"
+        and _text(
+            target["legacy_alignment_policy"],
+            "target_source.interval_policy.legacy_alignment_policy",
+        )
+        != "EXACT_TARGET_FACTOR_LABEL_INTERSECTION_NO_CALENDAR_INFERENCE"
+    ):
+        raise DecompositionError("legacy target interval alignment policy differs")
+    factor_calendar = _text(
+        factor["native_calendar"], "factor_source.interval_policy.native_calendar"
+    )
+    if factor_calendar not in FACTOR_CALENDARS:
+        raise DecompositionError("factor native calendar is unsupported")
+    information_set = _text(
+        target["evaluation_information_set"],
+        "target_source.interval_policy.evaluation_information_set",
+    )
+    if information_set not in EVALUATION_INFORMATION_SETS:
+        raise DecompositionError("evaluation information set is unsupported")
+    point_in_time_vintage = target.get("point_in_time_vintage")
+    if point_in_time_vintage is not None:
+        point_in_time_vintage = _text(
+            point_in_time_vintage,
+            "target_source.interval_policy.point_in_time_vintage",
+        )
+    if information_set == "POINT_IN_TIME_VINTAGE" and (
+        not point_in_time_vintage
+        or target.get("retained_historical_availability_proved") is not True
+        or target.get("causal_feature_cutoff_proved") is not True
+    ):
+        raise DecompositionError(
+            "point-in-time evaluation requires retained historical availability and causal feature proof"
+        )
+    target_basis = _text(
+        target["return_basis"], "target_source.interval_policy.return_basis"
+    )
+    factor_basis = _text(
+        factor["return_basis"], "factor_source.interval_policy.return_basis"
+    )
+    if target_basis not in RETURN_BASES | TARGET_RETURN_BASIS_POLICIES:
+        raise DecompositionError("target interval return basis is unsupported")
+    if factor_basis not in RETURN_BASES | FACTOR_RETURN_BASIS_POLICIES:
+        raise DecompositionError("interval return basis is unsupported")
+    target_currency = _text(
+        target["currency"], "target_source.interval_policy.currency"
+    )
+    factor_currency = _text(
+        factor["currency"], "factor_source.interval_policy.currency"
+    )
+    if target_currency != factor_currency:
+        raise DecompositionError("target and factor interval currencies differ")
+    if (
+        _text(
+            target["gap_disposition"], "target_source.interval_policy.gap_disposition"
+        )
+        != "REJECT_BUCKET"
+    ):
+        raise DecompositionError("target interval gaps must reject the affected bucket")
+    target_session_labels: dict[str, tuple[date, ...]] = {}
+    if target_calendar == "SESSION_LABELLED":
+        raw_schedule = _object(
+            target["session_schedule_labels"],
+            "target_source.interval_policy.session_schedule_labels",
+        )
+        for series_id, raw_labels in raw_schedule.items():
+            if not isinstance(raw_labels, list) or not raw_labels:
+                raise DecompositionError(
+                    "target session schedule labels must be non-empty arrays"
+                )
+            labels = tuple(
+                _day(
+                    raw_label,
+                    "target_source.interval_policy.session_schedule_labels[]",
+                )
+                for raw_label in raw_labels
+            )
+            if tuple(sorted(set(labels))) != labels:
+                raise DecompositionError(
+                    "target session schedule labels must be unique and sorted"
+                )
+            target_session_labels[
+                _text(series_id, "target session schedule series")
+            ] = labels
+    return IntervalAssociationPolicy(
+        target_calendar=target_calendar,
+        target_label_convention=_text(
+            target["native_label_convention"],
+            "target_source.interval_policy.native_label_convention",
+        ),
+        target_finality=_text(
+            target["finality"], "target_source.interval_policy.finality"
+        ),
+        target_finalized_through=_day(
+            target["finalized_through"],
+            "target_source.interval_policy.finalized_through",
+        ),
+        target_source_vintage=_text(
+            target["source_vintage"], "target_source.interval_policy.source_vintage"
+        ),
+        target_currency=target_currency,
+        target_return_basis=target_basis,
+        target_gap_disposition="REJECT_BUCKET",
+        factor_calendar=factor_calendar,
+        factor_label_convention=_text(
+            factor["native_label_convention"],
+            "factor_source.interval_policy.native_label_convention",
+        ),
+        factor_finality=_text(
+            factor["finality"], "factor_source.interval_policy.finality"
+        ),
+        factor_available_through_anchor=_day(
+            factor["available_through_anchor"],
+            "factor_source.interval_policy.available_through_anchor",
+        ),
+        factor_source_vintage=_text(
+            factor["source_vintage"], "factor_source.interval_policy.source_vintage"
+        ),
+        factor_currency=factor_currency,
+        factor_return_basis=factor_basis,
+        evaluation_information_set=information_set,
+        point_in_time_vintage=point_in_time_vintage,
+        target_session_labels=target_session_labels,
+    )
+
+
+def _interval_association_policies(
+    target_source: Mapping[str, Any], factor_source: Mapping[str, Any]
+) -> tuple[Mapping[str, IntervalAssociationPolicy], IntervalAssociationPolicy | None]:
+    """Load either a legacy shared policy or declared per-series policies."""
+    target = _object(target_source["interval_policy"], "target_source.interval_policy")
+    if "series_policies" not in target:
+        return {}, _interval_association_policy(target_source, factor_source)
+    _strict_keys(
+        target,
+        {"currency", "evaluation_information_set", "series_policies"},
+        "target_source.interval_policy",
+    )
+    raw_policies = _object(
+        target["series_policies"], "target_source.interval_policy.series_policies"
+    )
+    policies: dict[str, IntervalAssociationPolicy] = {}
+    for series_id, raw_policy in raw_policies.items():
+        series = _text(
+            series_id, "target_source.interval_policy.series_policies series_id"
+        )
+        policy = _object(
+            raw_policy,
+            f"target_source.interval_policy.series_policies.{series}",
+        )
+        policies[series] = _interval_association_policy(
+            {
+                "interval_policy": {
+                    **policy,
+                    "currency": target["currency"],
+                    "evaluation_information_set": target["evaluation_information_set"],
+                }
+            },
+            factor_source,
+        )
+    return policies, None
+
+
 def _load_spec(path: Path) -> Specification:
     try:
         decoded = json.loads(path.read_text(encoding="utf-8"))
@@ -527,6 +779,7 @@ def _load_spec(path: Path) -> Specification:
             "expected_sha256",
             "expected_size_bytes",
             "factors",
+            "interval_policy",
             "relative_path",
             "risk_free_column",
             "schema_name",
@@ -579,6 +832,9 @@ def _load_spec(path: Path) -> Specification:
         for key, value in raw_composition.items()
     ):
         raise DecompositionError("specification.series_composition must be an object")
+    interval_association, default_interval_association = _interval_association_policies(
+        _object(root["target_source"], "target_source"), factor_source_object
+    )
     return Specification(
         analysis_lens=analysis_lens,
         as_of_date=spec_as_of_date,
@@ -605,6 +861,8 @@ def _load_spec(path: Path) -> Specification:
             )
         ),
         series_composition=cast(Mapping[str, Mapping[str, object]], raw_composition),
+        interval_association=interval_association,
+        default_interval_association=default_interval_association,
     )
 
 
@@ -785,6 +1043,268 @@ def _number(value: float | np.floating[Any] | None) -> str | None:
     if abs(accepted) < 5e-16:
         accepted = 0.0
     return format(accepted, ".12g")
+
+
+def _orthogonal_attribution(
+    *,
+    model: ModelDefinition,
+    train_matrix: FloatArray,
+    aligned_matrix: FloatArray,
+    aligned: Sequence[tuple[TargetRow, FactorRow, tuple[float, ...]]],
+    exposures: FloatArray,
+    intercept: float,
+) -> dict[str, object]:
+    """Project an already-fitted raw model into frozen train-only symmetric modes."""
+    observation_count, factor_count = train_matrix.shape
+    factor_ids = list(model.factor_ids)
+    mean = np.mean(train_matrix, axis=0)
+    scale = np.std(train_matrix, axis=0, ddof=1)
+    if np.any(~np.isfinite(scale)) or np.any(scale <= 0.0):
+        eigenvalues = np.full(factor_count, np.nan, dtype=np.float64)
+        maximum = 0.0
+        tolerance = 0.0
+        rank = 0
+        covariance = np.full((factor_count, factor_count), np.nan, dtype=np.float64)
+    else:
+        standardized_train = (train_matrix - mean) / scale
+        covariance = (standardized_train.T @ standardized_train) / (
+            observation_count - 1
+        )
+        eigenvalues, vectors = np.linalg.eigh(covariance)
+        maximum = float(eigenvalues[-1])
+        tolerance = float(
+            np.finfo(np.float64).eps * max(observation_count, factor_count) * maximum
+        )
+        rank = int(np.sum(eigenvalues > tolerance)) if math.isfinite(maximum) else 0
+    mode_ids = [f"symmetric_mode:{factor_id}" for factor_id in factor_ids]
+    common: dict[str, object] = {
+        "method_id": "TRAINING_ONLY_SYMMETRIC_COVARIANCE_WHITENING_V1",
+        "raw_factor_ids": factor_ids,
+        "train_end": model.train_end.isoformat(),
+        "train_mean": {
+            factor_id: _number(mean[index])
+            for index, factor_id in enumerate(factor_ids)
+        },
+        "train_scale": {
+            factor_id: _number(scale[index])
+            for index, factor_id in enumerate(factor_ids)
+        },
+        "covariance": [[_number(value) for value in row] for row in covariance],
+        "eigenvalues": [_number(value) for value in eigenvalues],
+        "rank": rank,
+        "rank_tolerance": _number(tolerance),
+        "mode_ids": mode_ids,
+        "raw_exposures": (
+            {
+                factor_id: _number(exposures[index])
+                for index, factor_id in enumerate(factor_ids)
+            }
+            if exposures.ndim == 1
+            else [
+                {
+                    factor_id: _number(row[index])
+                    for index, factor_id in enumerate(factor_ids)
+                }
+                for row in exposures
+            ]
+        ),
+        "training_row_identity": {
+            "dates": [
+                item[0].day.isoformat()
+                for item in aligned
+                if item[0].day <= model.train_end
+            ],
+            "partition": "TRAIN",
+        },
+        "train_start": min(
+            item[0].day for item in aligned if item[0].day <= model.train_end
+        ).isoformat(),
+    }
+    if (
+        maximum <= 0.0
+        or not math.isfinite(maximum)
+        or np.any(~np.isfinite(eigenvalues))
+        or np.any(eigenvalues <= tolerance)
+    ):
+        return {
+            **common,
+            "status": "UNAVAILABLE_ORTHOGONAL_RANK_DEFICIENT",
+            "raw_to_mode_weights": None,
+            "mode_coefficients": None,
+            "orthogonal_intercept": None,
+            "train_fitted_risk_budget": None,
+            "per_date": [],
+            "raw_prediction_reconciliation": "UNAVAILABLE_ORTHOGONAL_RANK_DEFICIENT",
+        }
+    square_root = (vectors * np.sqrt(eigenvalues)) @ vectors.T
+    whitening = (vectors * (1.0 / np.sqrt(eigenvalues))) @ vectors.T
+    if exposures.ndim == 2:
+        coefficients_by_date = (square_root @ (scale * exposures).T).T
+        orthogonal_intercepts = intercept + exposures @ mean
+        modes = ((aligned_matrix - mean) / scale) @ whitening
+        mode_components = modes * coefficients_by_date
+        fitted = orthogonal_intercepts + np.sum(mode_components, axis=1)
+        raw_fitted = intercept + np.sum(aligned_matrix * exposures, axis=1)
+        if not np.allclose(raw_fitted, fitted, rtol=0.0, atol=5e-11):
+            raise DecompositionError(
+                "dynamic orthogonal projection does not reconcile raw prediction"
+            )
+        train_count = sum(item[0].day <= model.train_end for item in aligned)
+        include_intercept = not np.allclose(
+            orthogonal_intercepts[:train_count],
+            orthogonal_intercepts[0],
+            rtol=0.0,
+            atol=5e-15,
+        )
+        component_ids = (
+            ["orthogonal_intercept"] if include_intercept else []
+        ) + mode_ids
+        component_rows = mode_components[:train_count]
+        if include_intercept:
+            component_rows = np.column_stack(
+                (orthogonal_intercepts[:train_count], component_rows)
+            )
+        component_covariance = np.cov(component_rows, rowvar=False, ddof=1)
+        if len(component_ids) == 1:
+            component_covariance = np.asarray(
+                [[float(component_covariance)]], dtype=np.float64
+            )
+        ones = np.ones(len(component_ids), dtype=np.float64)
+        euler = component_covariance @ ones
+        fitted_variance = float(ones @ component_covariance @ ones)
+        if not math.isclose(
+            fitted_variance,
+            float(np.var(np.sum(component_rows, axis=1), ddof=1)),
+            rel_tol=0.0,
+            abs_tol=5e-11,
+        ):
+            raise DecompositionError(
+                "dynamic orthogonal fitted-risk budget does not reconcile"
+            )
+        return {
+            **common,
+            "status": "AVAILABLE",
+            "raw_to_mode_weights": {
+                factor_id: {
+                    mode_id: _number(whitening[row, column])
+                    for column, mode_id in enumerate(mode_ids)
+                }
+                for row, factor_id in enumerate(factor_ids)
+            },
+            "mode_coefficients": [
+                {
+                    mode_id: _number(coefficients_by_date[row, column])
+                    for column, mode_id in enumerate(mode_ids)
+                }
+                for row in range(len(aligned))
+            ],
+            "orthogonal_intercept": [_number(value) for value in orthogonal_intercepts],
+            "train_fitted_risk_budget": {
+                "component_ids": component_ids,
+                "component_covariance": [
+                    [_number(value) for value in row] for row in component_covariance
+                ],
+                "cross_mode_covariance_present": True,
+                "euler_allocations": {
+                    component_id: _number(euler[index])
+                    for index, component_id in enumerate(component_ids)
+                },
+                "fitted_variance": _number(fitted_variance),
+                "intercept_time_varying": include_intercept,
+                "interpretation": "EQUAL_FACTOR_ANCHOR_FITTED_COMPONENT_SAMPLE_VARIANCE",
+            },
+            "per_date": [
+                {
+                    "date": observation[0].day.isoformat(),
+                    "fitted_excess_return": _number(fitted[index]),
+                    "mode_contributions": {
+                        mode_id: _number(mode_components[index, column])
+                        for column, mode_id in enumerate(mode_ids)
+                    },
+                    "partition": "TRAIN"
+                    if observation[0].day <= model.train_end
+                    else "TEST"
+                    if observation[0].day >= model.test_start
+                    else "GAP",
+                }
+                for index, observation in enumerate(aligned)
+            ],
+            "raw_prediction_reconciliation": "EXACT_WITHIN_5E-11",
+        }
+    coefficients = square_root @ (scale * exposures)
+    orthogonal_intercept = float(intercept + mean @ exposures)
+    modes = ((aligned_matrix - mean) / scale) @ whitening
+    fitted = orthogonal_intercept + modes @ coefficients
+    raw_fitted = intercept + aligned_matrix @ exposures
+    if not np.allclose(raw_fitted, fitted, rtol=0.0, atol=5e-11):
+        raise DecompositionError(
+            "orthogonal projection does not reconcile raw prediction"
+        )
+    train_count = sum(item[0].day <= model.train_end for item in aligned)
+    train_components = modes[:train_count] * coefficients
+    component_covariance = np.cov(train_components, rowvar=False, ddof=1)
+    if factor_count == 1:
+        component_covariance = np.asarray(
+            [[float(component_covariance)]], dtype=np.float64
+        )
+    ones = np.ones(factor_count, dtype=np.float64)
+    euler = component_covariance @ ones
+    fitted_variance = float(ones @ component_covariance @ ones)
+    if not math.isclose(
+        fitted_variance,
+        float(np.var(train_components @ ones, ddof=1)),
+        rel_tol=0.0,
+        abs_tol=5e-11,
+    ):
+        raise DecompositionError("orthogonal fitted-risk budget does not reconcile")
+    return {
+        **common,
+        "status": "AVAILABLE",
+        "raw_to_mode_weights": {
+            factor_id: {
+                mode_id: _number(whitening[row, column])
+                for column, mode_id in enumerate(mode_ids)
+            }
+            for row, factor_id in enumerate(factor_ids)
+        },
+        "mode_coefficients": {
+            mode_id: _number(coefficients[index])
+            for index, mode_id in enumerate(mode_ids)
+        },
+        "orthogonal_intercept": _number(orthogonal_intercept),
+        "train_fitted_risk_budget": {
+            "component_ids": mode_ids,
+            "component_covariance": [
+                [_number(value) for value in row] for row in component_covariance
+            ],
+            "cross_mode_covariance_present": False,
+            "euler_allocations": {
+                mode_id: _number(euler[index]) for index, mode_id in enumerate(mode_ids)
+            },
+            "fitted_variance": _number(fitted_variance),
+            "intercept_time_varying": False,
+            "interpretation": "EQUAL_FACTOR_ANCHOR_FITTED_COMPONENT_SAMPLE_VARIANCE",
+        },
+        "per_date": [
+            {
+                "date": observation[0].day.isoformat(),
+                "fitted_excess_return": _number(fitted[index]),
+                "mode_contributions": {
+                    mode_id: _number(modes[index, column] * coefficients[column])
+                    for column, mode_id in enumerate(mode_ids)
+                },
+                "partition": (
+                    "TRAIN"
+                    if observation[0].day <= model.train_end
+                    else "TEST"
+                    if observation[0].day >= model.test_start
+                    else "GAP"
+                ),
+            }
+            for index, observation in enumerate(aligned)
+        ],
+        "raw_prediction_reconciliation": "EXACT_WITHIN_5E-11",
+    }
 
 
 def _canonical_decimal_text(value: str, name: str) -> str:
@@ -1125,6 +1645,55 @@ def _block_tridiagonal_solve(
     return solution, status
 
 
+def _block_tridiagonal_inverse_diagonal(
+    diagonal: Sequence[FloatArray],
+    off_diagonal: Sequence[FloatArray],
+) -> tuple[list[FloatArray], str]:
+    """Return the diagonal blocks of a symmetric block-tridiagonal inverse.
+
+    The forward pass is the same block Thomas elimination the solver performs,
+    so ``schur[i]`` is that block's Schur complement and ``upper[i]`` is
+    ``schur[i]^-1 @ off_diagonal[i]``. The backward pass is the Takahashi
+    recursion, which reconstructs each diagonal inverse block from the one
+    after it without ever forming the whole inverse.
+    """
+
+    count = len(diagonal)
+    if count == 0 or len(off_diagonal) != count - 1:
+        raise DecompositionError("dynamic system dimensions are invalid")
+    used_pseudoinverse = False
+    schur: list[FloatArray] = []
+    upper: list[FloatArray] = []
+    for index in range(count):
+        effective = diagonal[index].copy()
+        if index:
+            effective -= off_diagonal[index - 1].T @ upper[index - 1]
+        schur.append(effective)
+        if index < count - 1:
+            solved_upper, fallback = _linear_solve(effective, off_diagonal[index])
+            used_pseudoinverse = used_pseudoinverse or fallback
+            upper.append(solved_upper)
+    identity = np.eye(diagonal[0].shape[0], dtype=np.float64)
+    inverse_diagonal: list[FloatArray] = [
+        cast(FloatArray, np.empty_like(identity)) for _ in range(count)
+    ]
+    last, fallback = _linear_solve(schur[-1], identity)
+    used_pseudoinverse = used_pseudoinverse or fallback
+    inverse_diagonal[-1] = last
+    for index in range(count - 2, -1, -1):
+        schur_inverse, fallback = _linear_solve(schur[index], identity)
+        used_pseudoinverse = used_pseudoinverse or fallback
+        inverse_diagonal[index] = (
+            schur_inverse + upper[index] @ inverse_diagonal[index + 1] @ upper[index].T
+        )
+    status = (
+        "BLOCK_TRIDIAGONAL_PSEUDOINVERSE"
+        if used_pseudoinverse
+        else "BLOCK_TRIDIAGONAL_FULL_RANK"
+    )
+    return inverse_diagonal, status
+
+
 def _dynamic_fit(
     matrix: FloatArray,
     target: FloatArray,
@@ -1223,7 +1792,9 @@ def _dynamic_loo_score(
     *,
     smoothness: float,
     ridge: float,
-) -> tuple[float | None, FloatArray]:
+    return_fit: bool = False,
+    fit: DynamicFit | None = None,
+) -> tuple[float | None, FloatArray] | tuple[float | None, FloatArray, DynamicFit]:
     """Compute exact leave-one-out predictions from linear-smoother leverage.
 
     The penalized FLS estimator is linear in the target for fixed smoothness
@@ -1232,12 +1803,13 @@ def _dynamic_loo_score(
     block solves.
     """
 
-    fit = _dynamic_fit(
-        matrix,
-        target,
-        smoothness=smoothness,
-        ridge=ridge,
-    )
+    if fit is None:
+        fit = _dynamic_fit(
+            matrix,
+            target,
+            smoothness=smoothness,
+            ridge=ridge,
+        )
     observation_count, factor_count = matrix.shape
     identity = np.eye(factor_count, dtype=np.float64)
     diagonal = [
@@ -1257,38 +1829,41 @@ def _dynamic_loo_score(
     off_diagonal = [
         (-smoothness * identity).copy() for _ in range(observation_count - 1)
     ]
-    right = np.zeros(
-        (observation_count, factor_count, observation_count + 1),
-        dtype=np.float64,
-    )
-    for index in range(observation_count):
-        right[index, :, index] = matrix[index]
-        right[index, :, -1] = matrix[index]
+    right = np.zeros((observation_count, factor_count, 1), dtype=np.float64)
+    right[:, :, 0] = matrix
     solved, _rank_status = _block_tridiagonal_solve(
         diagonal,
         off_diagonal,
         cast(FloatArray, right),
     )
-    influence = solved[:, :, :-1]
-    intercept_solution = solved[:, :, -1]
+    intercept_solution = solved[:, :, 0]
     denominator = float(observation_count) - float(np.sum(matrix * intercept_solution))
     if abs(denominator) <= 1e-12:
         raise DecompositionError("dynamic intercept is not identifiable")
-    projected_influence = np.einsum("tk,tkn->n", matrix, influence)
-    intercept_influence = (1.0 - projected_influence) / denominator
-    local_influence = np.einsum("ik,iki->i", matrix, influence, optimize=False)
+    inverse_diagonal, _inverse_status = _block_tridiagonal_inverse_diagonal(
+        diagonal, off_diagonal
+    )
+    local_influence = np.einsum(
+        "ik,ikl,il->i", matrix, np.stack(inverse_diagonal), matrix, optimize=True
+    )
+    # The n-th right-hand side is e_n x_n, so the n-th column sum of the hat
+    # matrix is b^T A^-1 e_n x_n = (A^-1 b)_n . x_n -- the same quantity as the
+    # local intercept projection below, computed from the one solve above.
     local_intercept_projection = np.sum(matrix * intercept_solution, axis=1)
+    intercept_influence = (1.0 - local_intercept_projection) / denominator
     leverage = local_influence + intercept_influence * (
         1.0 - local_intercept_projection
     )
     remaining = 1.0 - leverage
     if np.any(np.abs(remaining) <= 1e-12):
-        return None, cast(FloatArray, np.full(observation_count, np.nan))
+        unavailable = cast(FloatArray, np.full(observation_count, np.nan))
+        return (None, unavailable, fit) if return_fit else (None, unavailable)
     predictions = (fit.fitted - leverage * target) / remaining
-    return (
+    result = (
         _r_squared(target, predictions, float(np.mean(target))),
         cast(FloatArray, predictions.astype(np.float64)),
     )
+    return (*result, fit) if return_fit else result
 
 
 def _r_squared(
@@ -1298,6 +1873,303 @@ def _r_squared(
     if denominator <= 1e-24:
         return None
     return 1.0 - float(np.sum((actual - predicted) ** 2)) / denominator
+
+
+def _identity_number(value: float) -> str:
+    """Preserve a consumed float exactly when it participates in an identity."""
+
+    return float(value).hex()
+
+
+def _consumed_producer_identity() -> dict[str, str]:
+    """Hash only the local bytes the decomposition producer actually consumes."""
+
+    paths = {
+        "canonical_json": Path(canonical_json_bytes.__code__.co_filename).resolve(),
+        "methodology": METHODOLOGY_PATH.resolve(),
+        "producer": Path(__file__).resolve(),
+    }
+    lock = Path(__file__).resolve().parents[1] / "uv.lock"
+    if lock.is_file() and not lock.is_symlink():
+        paths["dependency_lock"] = lock
+    return {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in sorted(paths.items())
+    }
+
+
+def _training_identity(
+    model: ModelDefinition,
+    target_rows: Sequence[TargetRow],
+    train: Sequence[tuple[TargetRow, FactorRow, tuple[float, ...]]],
+    train_matrix: FloatArray,
+    train_target: FloatArray,
+    interval_association: Mapping[str, object],
+) -> str:
+    """Bind the numerical inputs that may legitimately share fitted state."""
+
+    policy_identity = {
+        key: interval_association[key]
+        for key in (
+            "evaluation_information_set",
+            "factor_native_calendar",
+            "factor_native_label_convention",
+            "point_in_time_vintage",
+            "policy_id",
+            "response_label",
+        )
+        if key in interval_association
+    }
+    payload = {
+        "consumed_producer_identity": _consumed_producer_identity(),
+        "interval_association": policy_identity,
+        "model": {
+            "constraint": model.constraint,
+            "cv_folds": model.cv_folds,
+            "estimator": model.estimator,
+            "factor_ids": list(model.factor_ids),
+            "minimum_train_observations": model.minimum_train_observations,
+            "model_id": model.model_id,
+            "parsimony_tolerance": _identity_number(model.parsimony_tolerance),
+            "periods_per_year": model.periods_per_year,
+            "ridge_candidates": [
+                _identity_number(value) for value in model.ridge_candidates
+            ],
+            "smoothness_candidates": [
+                _identity_number(value) for value in model.smoothness_candidates
+            ],
+            "train_end": model.train_end.isoformat(),
+        },
+        "rows": [
+            {
+                "cost": None if row.cost is None else _identity_number(row.cost),
+                "day": row.day.isoformat(),
+                "evidence_layer": row.evidence_layer,
+                "return_basis": row.return_basis,
+                "return_type": row.return_type,
+            }
+            for row, _factor, _values in train
+        ],
+        "training_target_rows": [
+            {
+                "canonical_return": row.canonical_return,
+                "cost": None if row.cost is None else _identity_number(row.cost),
+                "day": row.day.isoformat(),
+                "evidence_layer": row.evidence_layer,
+                "return_basis": row.return_basis,
+                "return_type": row.return_type,
+                "value": _identity_number(row.value),
+            }
+            for row in target_rows
+            if row.day <= model.train_end
+        ],
+        "target": [_identity_number(value) for value in train_target],
+        "transformed_factors": [
+            [_identity_number(value) for value in row] for row in train_matrix
+        ],
+    }
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def _evaluation_identity(
+    training_identity: str,
+    model: ModelDefinition,
+    test: Sequence[tuple[TargetRow, FactorRow, tuple[float, ...]]],
+    test_matrix: FloatArray,
+    test_target: FloatArray,
+) -> str:
+    """Bind evaluation rows and projections separately from fitted training work."""
+
+    payload = {
+        "evaluation_rows": [
+            {
+                "cost": None if row.cost is None else _identity_number(row.cost),
+                "day": row.day.isoformat(),
+                "evidence_layer": row.evidence_layer,
+                "return_basis": row.return_basis,
+                "return_type": row.return_type,
+            }
+            for row, _factor, _values in test
+        ],
+        "minimum_test_observations": model.minimum_test_observations,
+        "test_matrix": [
+            [_identity_number(value) for value in row] for row in test_matrix
+        ],
+        "test_start": model.test_start.isoformat(),
+        "test_target": [_identity_number(value) for value in test_target],
+        "training_identity": training_identity,
+    }
+    return hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
+
+
+def _dynamic_fit_to_cache(fit: DynamicFit) -> dict[str, object]:
+    return {
+        "exposures": [
+            [_identity_number(value) for value in row] for row in fit.exposures
+        ],
+        "fitted": [_identity_number(value) for value in fit.fitted],
+        "intercept": _identity_number(fit.intercept),
+        "rank_status": fit.rank_status,
+    }
+
+
+def _dynamic_fit_from_cache(
+    value: object, expected_shape: tuple[int, int]
+) -> DynamicFit | None:
+    if not isinstance(value, dict) or set(value) != {
+        "exposures",
+        "fitted",
+        "intercept",
+        "rank_status",
+    }:
+        return None
+    try:
+        exposures = np.asarray(
+            [[float.fromhex(item) for item in row] for row in value["exposures"]],
+            dtype=np.float64,
+        )
+        fitted = np.asarray(
+            [float.fromhex(item) for item in value["fitted"]], dtype=np.float64
+        )
+        intercept = float.fromhex(cast(str, value["intercept"]))
+    except (TypeError, ValueError):
+        return None
+    if (
+        exposures.shape != expected_shape
+        or fitted.shape != (expected_shape[0],)
+        or not isinstance(value["rank_status"], str)
+    ):
+        return None
+    return DynamicFit(
+        intercept=intercept,
+        exposures=exposures,
+        fitted=fitted,
+        rank_status=value["rank_status"],
+    )
+
+
+def _fit_to_cache(fit: Fit) -> dict[str, object]:
+    return {
+        "exposures": [_identity_number(value) for value in fit.exposures],
+        "intercept": _identity_number(fit.intercept),
+        "rank": fit.rank,
+        "rank_status": fit.rank_status,
+    }
+
+
+def _fit_from_cache(value: object, factor_count: int) -> Fit | None:
+    if not isinstance(value, dict) or set(value) != {
+        "exposures",
+        "intercept",
+        "rank",
+        "rank_status",
+    }:
+        return None
+    try:
+        exposures = np.asarray(
+            [float.fromhex(item) for item in value["exposures"]], dtype=np.float64
+        )
+        intercept = float.fromhex(cast(str, value["intercept"]))
+    except (TypeError, ValueError):
+        return None
+    if (
+        exposures.shape != (factor_count,)
+        or not isinstance(value["rank"], int)
+        or not isinstance(value["rank_status"], str)
+    ):
+        return None
+    return Fit(
+        intercept=intercept,
+        exposures=exposures,
+        rank=value["rank"],
+        rank_status=value["rank_status"],
+    )
+
+
+def _training_cache_path(cache_root: Path, training_identity: str) -> Path:
+    return cache_root / ".decomposition-training" / f"{training_identity}.json"
+
+
+def _training_evidence_path(cache_root: Path, training_identity: str) -> Path:
+    return cache_root / ".decomposition-training-evidence" / f"{training_identity}.json"
+
+
+def _training_cache_evidence(
+    training_identity: str, content: bytes
+) -> dict[str, object]:
+    """Bind retained fit/CV bytes to the producer output that verified them."""
+
+    return {
+        "cache_sha256": hashlib.sha256(content).hexdigest(),
+        "schema_version": 1,
+        "training_identity": training_identity,
+    }
+
+
+def _read_training_cache(
+    cache_root: Path | None, training_identity: str
+) -> dict[str, object] | None:
+    if cache_root is None:
+        return None
+    path = _training_cache_path(cache_root, training_identity)
+    evidence_path = _training_evidence_path(cache_root, training_identity)
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or evidence_path.is_symlink()
+        or not evidence_path.is_file()
+    ):
+        return None
+    try:
+        content = path.read_bytes()
+        value = json.loads(content)
+        evidence = json.loads(evidence_path.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(value, dict)
+        or value.get("training_identity") != training_identity
+        or value.get("schema_version") != 1
+        or evidence != _training_cache_evidence(training_identity, content)
+    ):
+        return None
+    return value
+
+
+def _write_training_cache(
+    cache_root: Path | None, training_identity: str, value: Mapping[str, object]
+) -> None:
+    if cache_root is None:
+        return
+    directory = _training_cache_path(cache_root, training_identity).parent
+    directory.mkdir(parents=True, exist_ok=True)
+    path = _training_cache_path(cache_root, training_identity)
+    if path.is_symlink():
+        raise DecompositionError("training receipt is linked")
+    content = canonical_json_bytes(
+        {"schema_version": 1, "training_identity": training_identity, **value}
+    )
+    if path.exists():
+        if path.read_bytes() != content:
+            # An altered cache cannot be overwritten or promoted to evidence.
+            # The caller has just rebuilt from verified inputs, so it may stage
+            # that result while leaving the untrusted retained bytes untouched.
+            return
+    else:
+        _write_new(path, content)
+
+    evidence_path = _training_evidence_path(cache_root, training_identity)
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    if evidence_path.is_symlink():
+        raise DecompositionError("training evidence is linked")
+    evidence = canonical_json_bytes(
+        _training_cache_evidence(training_identity, content)
+    )
+    if evidence_path.exists():
+        if evidence_path.read_bytes() != evidence:
+            raise DecompositionError("training evidence identity differs")
+        return
+    _write_new(evidence_path, evidence)
 
 
 def _cv_score(
@@ -1517,6 +2389,82 @@ def _annualize_coefficient_standard_error(
     return periodic_standard_error * periods_per_year
 
 
+class _TerminalStateRecursion:
+    """Carry the block-Thomas forward pass while a history grows one row at a time.
+
+    `_block_tridiagonal_solve` reads the terminal block straight off its forward
+    pass -- `solution[-1] = transformed_right[-1]` -- and the backward pass never
+    touches it. The walk-forward holdout below reads nothing but
+    `exposures[-1]`, so re-solving the whole path for each appended observation
+    repeats work already carried in `(transformed_upper, transformed_right)`.
+
+    Appending an observation makes the previously terminal block interior, which
+    changes only that block's own neighbour penalty -- endpoints appear in one
+    adjacent-state difference, interior states in two. Every earlier block, and
+    therefore the carried state, is untouched, so the pass resumes rather than
+    restarts: O(k^3) a step instead of O(t k^3).
+
+    The arithmetic is written to match `_dynamic_fit` and
+    `_block_tridiagonal_solve` operation for operation, because the acceptance
+    test is that every generation id stays byte-identical.
+    """
+
+    def __init__(
+        self,
+        *,
+        smoothness: float,
+        ridge: float,
+        intercept: float,
+        factor_count: int,
+    ) -> None:
+        self.smoothness = smoothness
+        self.ridge = ridge
+        self.intercept = intercept
+        self.identity = np.eye(factor_count, dtype=np.float64)
+        self.off_diagonal = (-smoothness * self.identity).copy()
+        self.transformed_upper: FloatArray | None = None
+        self.transformed_right: FloatArray | None = None
+        self.processed = 0
+
+    def _block(
+        self, factor_row: FloatArray, target_value: float, penalty: float
+    ) -> tuple[FloatArray, FloatArray]:
+        # The loop never passes observation weights, so every weight is one.
+        weight = 1.0
+        effective = cast(
+            FloatArray,
+            (
+                weight * np.outer(factor_row, factor_row)
+                + (self.ridge + self.smoothness * penalty) * self.identity
+            ).astype(np.float64),
+        )
+        rhs = (
+            weight * factor_row * target_value - (weight * factor_row) * self.intercept
+        )[:, None]
+        if self.transformed_upper is not None and self.transformed_right is not None:
+            lower = self.off_diagonal.T
+            effective = effective - lower @ self.transformed_upper
+            rhs = rhs - lower @ self.transformed_right
+        return effective, rhs
+
+    def advance(self, factor_row: FloatArray, target_value: float) -> None:
+        """Fold one observation in as an interior block and keep the carry."""
+
+        effective, rhs = self._block(
+            factor_row, target_value, 1.0 if self.processed == 0 else 2.0
+        )
+        self.transformed_right, _fallback = _linear_solve(effective, rhs)
+        self.transformed_upper, _fallback = _linear_solve(effective, self.off_diagonal)
+        self.processed += 1
+
+    def terminal(self, factor_row: FloatArray, target_value: float) -> FloatArray:
+        """Exposures of the final block, without disturbing the carried state."""
+
+        effective, rhs = self._block(factor_row, target_value, 1.0)
+        solved, _fallback = _linear_solve(effective, rhs)
+        return cast(FloatArray, solved[:, 0].astype(np.float64))
+
+
 def _dynamic_model_result(
     model: ModelDefinition,
     target_rows: Sequence[TargetRow],
@@ -1531,23 +2479,37 @@ def _dynamic_model_result(
     test_target: FloatArray,
     coverage: Mapping[str, object],
     training_design: Mapping[str, object],
+    cached_training: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     ridge = model.ridge_candidates[0]
     sensitivity: list[dict[str, object]] = []
     scored: list[tuple[float, float]] = []
+    candidate_fits: dict[float, DynamicFit] = {}
+    cached_candidates = (
+        cached_training.get("candidate_fits")
+        if isinstance(cached_training, Mapping)
+        else None
+    )
     for smoothness in model.smoothness_candidates:
-        predicted_r_squared, _predictions = _dynamic_loo_score(
+        cached_fit = (
+            _dynamic_fit_from_cache(
+                cached_candidates.get(_identity_number(smoothness)), train_matrix.shape
+            )
+            if isinstance(cached_candidates, Mapping)
+            else None
+        )
+        score = _dynamic_loo_score(
             train_matrix,
             train_target,
             smoothness=smoothness,
             ridge=ridge,
+            return_fit=True,
+            fit=cached_fit,
         )
-        fit = _dynamic_fit(
-            train_matrix,
-            train_target,
-            smoothness=smoothness,
-            ridge=ridge,
+        predicted_r_squared, _predictions, fit = cast(
+            tuple[float | None, FloatArray, DynamicFit], score
         )
+        candidate_fits[smoothness] = fit
         differences = np.diff(fit.exposures, axis=0)
         roughness = float(np.sum(differences**2))
         turnover = float(np.sum(np.abs(differences)))
@@ -1574,39 +2536,35 @@ def _dynamic_model_result(
         item for item in scored if best_score - item[0] <= model.parsimony_tolerance
     ]
     selected_score, selected_smoothness = max(eligible, key=lambda item: item[1])
-    train_fit = _dynamic_fit(
-        train_matrix,
-        train_target,
-        smoothness=selected_smoothness,
-        ridge=ridge,
-    )
+    train_fit = candidate_fits[selected_smoothness]
 
-    history_matrix = train_matrix.copy()
-    history_target = train_target.copy()
     test_predictions: list[float] = []
     filtered_exposures: dict[date, FloatArray] = {}
     holdout_forecasts: list[dict[str, object]] = []
+    # Nothing here reads more than `exposures[-1]`, and the block-Thomas forward
+    # pass already carries everything needed to extend a path by one row. Solving
+    # the whole history again on every step made this loop O(T^2 k^3) -- 97% of a
+    # refresh, and worse every week as history grows. Resuming the pass costs
+    # O(k^3) a step and produces the same bytes.
+    recursion = _TerminalStateRecursion(
+        smoothness=selected_smoothness,
+        ridge=ridge,
+        intercept=train_fit.intercept,
+        factor_count=train_matrix.shape[1],
+    )
+    for position in range(len(train_target) - 1):
+        recursion.advance(train_matrix[position], train_target[position])
+    forecast_exposure = recursion.terminal(train_matrix[-1], train_target[-1])
+    previous_row = train_matrix[-1]
+    previous_value = train_target[-1]
     for index, observation in enumerate(test):
-        prior_fit = _dynamic_fit(
-            history_matrix,
-            history_target,
-            smoothness=selected_smoothness,
-            ridge=ridge,
-            fixed_intercept=train_fit.intercept,
-        )
-        forecast_exposure = prior_fit.exposures[-1].copy()
         prediction = float(train_fit.intercept + test_matrix[index] @ forecast_exposure)
         test_predictions.append(prediction)
-        history_matrix = np.vstack((history_matrix, test_matrix[index]))
-        history_target = np.append(history_target, test_target[index])
-        posterior_fit = _dynamic_fit(
-            history_matrix,
-            history_target,
-            smoothness=selected_smoothness,
-            ridge=ridge,
-            fixed_intercept=train_fit.intercept,
-        )
-        filtered_exposure = posterior_fit.exposures[-1].copy()
+        # The block that was terminal becomes interior once a row follows it.
+        recursion.advance(previous_row, previous_value)
+        filtered_exposure = recursion.terminal(test_matrix[index], test_target[index])
+        previous_row = test_matrix[index]
+        previous_value = test_target[index]
         day = observation[0].day
         filtered_exposures[day] = filtered_exposure
         holdout_forecasts.append(
@@ -1620,16 +2578,26 @@ def _dynamic_model_result(
                 "predicted_excess_return": _number(prediction),
             }
         )
+        # The posterior of one step is the prior of the next.
+        forecast_exposure = filtered_exposure
     test_predicted = np.asarray(test_predictions, dtype=np.float64)
     holdout_r_squared = _r_squared(
         test_target, test_predicted, float(np.mean(train_target))
     )
-    static_benchmark_fit = _fit(
-        train_matrix,
-        train_target,
-        constraint="UNCONSTRAINED",
-        ridge=ridge,
+    static_benchmark_fit = (
+        _fit_from_cache(
+            cached_training.get("static_benchmark_fit"), train_matrix.shape[1]
+        )
+        if isinstance(cached_training, Mapping)
+        else None
     )
+    if static_benchmark_fit is None:
+        static_benchmark_fit = _fit(
+            train_matrix,
+            train_target,
+            constraint="UNCONSTRAINED",
+            ridge=ridge,
+        )
     static_benchmark_predictions = _predict(static_benchmark_fit, test_matrix)
     static_benchmark_r_squared = _r_squared(
         test_target,
@@ -1656,6 +2624,7 @@ def _dynamic_model_result(
     last_train_exposure = train_fit.exposures[-1].copy()
     exposure_path: list[dict[str, object]] = []
     contributions: list[dict[str, object]] = []
+    orthogonal_exposure_path: list[FloatArray] = []
     previous_exposure: FloatArray | None = None
     change_rows: list[tuple[float, str]] = []
     for index, observation in enumerate(aligned):
@@ -1727,6 +2696,7 @@ def _dynamic_model_result(
                 "residual": _number(residual),
             }
         )
+        orthogonal_exposure_path.append(exposure.copy())
         previous_exposure = exposure
 
     latest_exposure = previous_exposure
@@ -1759,9 +2729,31 @@ def _dynamic_model_result(
     gross_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     net_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     annualized_observed = train_fit.intercept * model.periods_per_year
+    live_basis = next(
+        (row.return_basis for row in target_rows if row.evidence_layer != "BACKTEST"),
+        None,
+    )
+    # A return stream that mixes realized and model-basis rows has no observed
+    # alpha, so this is never published as one. But withholding it entirely left
+    # the hybrid mode with no alpha at all for every strategy that actually has
+    # backtest history -- 42 of 52 series -- while the only populated hybrid
+    # alphas belonged to the one strategy whose hybrid path is exactly
+    # live-only. The fitted intercept is a real estimate of a real model; it is
+    # published as a diagnostic, named by what makes it one.
+    #
+    # The basis it is attributed to is the LIVE basis, not `target_rows[0]`:
+    # the target loader already proves live rows carry exactly one basis and
+    # that it is never MODEL, whereas the first row of a hybrid series is the
+    # earliest, which is backtest and may itself be MODEL.
     if has_model_basis:
         gross_status = "UNAVAILABLE_MODEL_RETURN_BASIS"
         net_status = "UNAVAILABLE_MODEL_RETURN_BASIS"
+        if live_basis == "GROSS":
+            gross_alpha = annualized_observed
+            gross_status = "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
+        elif live_basis is not None:
+            net_alpha = annualized_observed
+            net_status = "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
     elif observed_basis == "GROSS":
         gross_alpha = annualized_observed
         gross_status = "AVAILABLE_OBSERVED_BASIS"
@@ -1879,6 +2871,21 @@ def _dynamic_model_result(
         "smoothness_sensitivity": sensitivity,
         "status": "AVAILABLE",
     }
+    result["orthogonal_attribution"] = _orthogonal_attribution(
+        model=model,
+        train_matrix=train_matrix,
+        aligned_matrix=aligned_matrix,
+        aligned=aligned,
+        exposures=np.asarray(orthogonal_exposure_path, dtype=np.float64),
+        intercept=train_fit.intercept,
+    )
+    result["_retained_training_state"] = {
+        "candidate_fits": {
+            _identity_number(smoothness): _dynamic_fit_to_cache(fit)
+            for smoothness, fit in candidate_fits.items()
+        },
+        "static_benchmark_fit": _fit_to_cache(static_benchmark_fit),
+    }
     return _apply_model_quality_gate(result, holdout_r_squared)
 
 
@@ -1926,12 +2933,287 @@ def _unavailable_result(
     }
 
 
+def _factor_anchor_observations(
+    *,
+    model: ModelDefinition,
+    target_rows: Sequence[TargetRow],
+    factor_rows: Mapping[date, FactorRow],
+    policy: IntervalAssociationPolicy,
+) -> tuple[list[tuple[TargetRow, FactorRow, tuple[float, ...]]], dict[str, object]]:
+    """Associate target labels to one right-hand published factor anchor.
+
+    This preserves the source row as published: only the target series is
+    compounded across a multi-label bucket, and RF/factor spreads remain one
+    value from the right-hand source-labelled row.
+    """
+    effective_target_finality = min(
+        policy.target_finalized_through,
+        model.as_of_date or policy.target_finalized_through,
+    )
+    effective_factor_availability = min(
+        policy.factor_available_through_anchor,
+        model.as_of_date or policy.factor_available_through_anchor,
+    )
+    if policy.target_return_basis in RETURN_BASES and any(
+        row.return_basis != policy.target_return_basis for row in target_rows
+    ):
+        raise DecompositionError(
+            "target rows differ from declared interval return basis"
+        )
+    if policy.target_return_basis == "MIXED_NET_MODEL" and any(
+        row.return_basis not in {"NET", "MODEL"} for row in target_rows
+    ):
+        raise DecompositionError(
+            "target rows are outside the declared mixed NET/MODEL return basis"
+        )
+    usable_rows = [row for row in target_rows if row.day <= effective_target_finality]
+    all_anchors = sorted(factor_rows)
+    future_anchors = [
+        observed for observed in all_anchors if observed > effective_factor_availability
+    ]
+    anchors = [
+        observed
+        for observed in all_anchors
+        if observed <= effective_factor_availability
+    ]
+    if len(anchors) < 2:
+        raise DecompositionError("fewer than two available factor anchors")
+    for observed in anchors:
+        factor_row = factor_rows[observed]
+        if any(
+            factor_row.values.get(factor_id) is None for factor_id in model.factor_ids
+        ):
+            raise DecompositionError(
+                f"factor anchor {observed.isoformat()} has incomplete selected components"
+            )
+    target_by_day = {row.day: row for row in usable_rows}
+    if len(target_by_day) != len(usable_rows):
+        raise DecompositionError("target source contains a duplicate date")
+    target_scope_start = min(target_by_day) if target_by_day else None
+    target_scope_end = max(target_by_day) if target_by_day else None
+    if policy.target_calendar == "CALENDAR_DAY_24_7" and any(
+        row.return_type != "TOTAL" for row in usable_rows
+    ):
+        raise DecompositionError("24/7 target intervals require simple total returns")
+    observations: list[tuple[TargetRow, FactorRow, tuple[float, ...]]] = []
+    bucket_receipts: list[dict[str, object]] = []
+    rejected_bucket_receipts: list[dict[str, object]] = []
+    assigned: set[date] = set()
+    for left, right in zip(anchors, anchors[1:]):
+        if policy.target_calendar == "CALENDAR_DAY_24_7":
+            labels: list[date] = []
+            cursor = left + timedelta(days=1)
+            while cursor <= right:
+                labels.append(cursor)
+                cursor += timedelta(days=1)
+        elif policy.target_calendar == "SESSION_LABELLED":
+            schedule = policy.target_session_labels.get(model.series_id)
+            if schedule is None:
+                raise DecompositionError(
+                    f"target session schedule is absent for {model.series_id}"
+                )
+            labels = [label for label in schedule if left < label <= right]
+        else:
+            # A schema-1 producer without a retained native calendar can still
+            # describe its historic exact-label join.  It cannot be promoted to
+            # a session schedule or a 24/7 bucket from observed rows alone.
+            labels = [right] if right in target_by_day else []
+        bucket_intersects_target_scope = (
+            target_scope_start is None
+            or target_scope_end is None
+            or (left < target_scope_end and right >= target_scope_start)
+        )
+        if target_scope_start is not None and target_scope_end is not None:
+            labels = [
+                label
+                for label in labels
+                if target_scope_start <= label <= target_scope_end
+            ]
+        missing = [label for label in labels if label not in target_by_day]
+        if missing and policy.target_calendar != "LEGACY_EXACT_LABEL":
+            raise DecompositionError(
+                "missing expected target label(s) for factor anchor "
+                f"{right.isoformat()}: {[item.isoformat() for item in missing]}"
+            )
+        if not labels:
+            if policy.target_calendar == "LEGACY_EXACT_LABEL":
+                continue
+            if not bucket_intersects_target_scope:
+                continue
+            raise DecompositionError(
+                f"factor anchor {right.isoformat()} has no admitted target labels"
+            )
+        if policy.target_calendar == "SESSION_LABELLED":
+            scheduled = set(policy.target_session_labels[model.series_id])
+            unscheduled = [
+                row.day
+                for row in usable_rows
+                if left < row.day <= right and row.day not in scheduled
+            ]
+            if unscheduled:
+                raise DecompositionError(
+                    "target source has labels outside its declared session schedule: "
+                    f"{[item.isoformat() for item in unscheduled]}"
+                )
+        if assigned.intersection(labels):
+            raise DecompositionError(
+                "target label assigned to more than one factor anchor"
+            )
+        assigned.update(labels)
+        bucket_rows = [target_by_day[label] for label in labels]
+        if len({row.return_type for row in bucket_rows}) != 1:
+            raise DecompositionError("target bucket mixes return types")
+        return_bases = list(dict.fromkeys(row.return_basis for row in bucket_rows))
+        source_layers = list(dict.fromkeys(row.evidence_layer for row in bucket_rows))
+        if len(return_bases) != 1:
+            source_layer_boundary = (
+                set(return_bases) == {"MODEL", "NET"}
+                and len(source_layers) > 1
+                and all(
+                    (row.return_basis == "MODEL" and row.evidence_layer == "BACKTEST")
+                    or (row.return_basis == "NET" and row.evidence_layer != "BACKTEST")
+                    for row in bucket_rows
+                )
+            )
+            if source_layer_boundary:
+                rejected_bucket_receipts.append(
+                    {
+                        "calendar_day_duration": (right - left).days,
+                        "factor_anchor": right.isoformat(),
+                        "factor_return_basis": policy.factor_return_basis,
+                        "factor_source_snapshot_identity": policy.factor_source_vintage,
+                        "prior_factor_anchor": left.isoformat(),
+                        "reason": "INCOMPATIBLE_RETURN_BASIS_SOURCE_LAYER_BOUNDARY",
+                        "target_calendar": policy.target_calendar,
+                        "target_currency": policy.target_currency,
+                        "target_label_convention": policy.target_label_convention,
+                        "target_labels": [label.isoformat() for label in labels],
+                        "target_return_bases": return_bases,
+                        "target_source_layers": source_layers,
+                        "target_source_snapshot_identity": policy.target_source_vintage,
+                    }
+                )
+                continue
+            raise DecompositionError("target bucket mixes declared return bases")
+        target_return = math.prod(1.0 + row.value for row in bucket_rows) - 1.0
+        factor_row = factor_rows[right]
+        anchor_adjusted = (
+            target_return - factor_row.risk_free
+            if bucket_rows[0].return_type == "TOTAL"
+            else target_return
+        )
+        partition = (
+            "TRAIN"
+            if right <= model.train_end
+            else "HOLDOUT"
+            if right >= model.test_start
+            else "GAP"
+        )
+        values = tuple(
+            cast(float, factor_row.values[factor_id]) for factor_id in model.factor_ids
+        )
+        observations.append(
+            (
+                TargetRow(
+                    day=right,
+                    value=target_return,
+                    canonical_return=_canonical_decimal_text(
+                        format(target_return, ".17g"), "anchor adjusted target return"
+                    ),
+                    evidence_layer=bucket_rows[-1].evidence_layer,
+                    return_basis=bucket_rows[0].return_basis,
+                    return_type=bucket_rows[0].return_type,
+                    cost=(
+                        None
+                        if any(row.cost is None for row in bucket_rows)
+                        else sum(cast(float, row.cost) for row in bucket_rows)
+                    ),
+                ),
+                factor_row,
+                values,
+            )
+        )
+        bucket_receipts.append(
+            {
+                "anchor_adjusted_target_return": _number(anchor_adjusted),
+                "calendar_day_duration": (right - left).days,
+                "factor_anchor": right.isoformat(),
+                "factor_source_snapshot_identity": policy.factor_source_vintage,
+                "partition": partition,
+                "prior_factor_anchor": left.isoformat(),
+                "risk_free": _number(factor_row.risk_free),
+                "factor_return_basis": policy.factor_return_basis,
+                "target_currency": policy.target_currency,
+                "target_return_basis": bucket_rows[0].return_basis,
+                "target_calendar": policy.target_calendar,
+                "target_label_convention": policy.target_label_convention,
+                "target_labels": [label.isoformat() for label in labels],
+                "target_source_snapshot_identity": policy.target_source_vintage,
+                "target_total_return": _number(target_return),
+            }
+        )
+    last_anchor = anchors[-1]
+    unassignable_leading_labels = [
+        row.day.isoformat() for row in usable_rows if row.day <= anchors[0]
+    ]
+    unassignable_tail_labels = [
+        row.day.isoformat() for row in usable_rows if row.day > last_anchor
+    ]
+    return observations, {
+        "buckets": bucket_receipts,
+        "evaluation_information_set": policy.evaluation_information_set,
+        "factor_anchor_availability_boundary": effective_factor_availability.isoformat(),
+        "factor_native_calendar": policy.factor_calendar,
+        "factor_native_label_convention": policy.factor_label_convention,
+        "future_factor_anchors": [item.isoformat() for item in future_anchors],
+        "holdout_display_claim": (
+            "holdout association using selected historical snapshot"
+            if policy.evaluation_information_set == "RETROSPECTIVE_SELECTED_SNAPSHOT"
+            else "point-in-time factor-conditional holdout association using retained historical vintage"
+        ),
+        "pending_factor_anchor_labels": unassignable_tail_labels,
+        "periods_per_year": model.periods_per_year,
+        "policy_id": (
+            FACTOR_ANCHOR_POLICY
+            if policy.target_calendar != "LEGACY_EXACT_LABEL"
+            else "LEGACY_EXACT_LABEL_ASSOCIATION_V1"
+        ),
+        "point_in_time_vintage": policy.point_in_time_vintage,
+        "pre_anchor_labels": unassignable_leading_labels,
+        "response_label": "ANCHOR_ADJUSTED_TARGET_RETURN",
+        "rejected_buckets": rejected_bucket_receipts,
+        "SIMULTANEOUS_MARKS_NOT_PROVED": True,
+        "target_source_lifetime_end": (
+            target_scope_end.isoformat() if target_scope_end is not None else None
+        ),
+        "target_source_lifetime_start": (
+            target_scope_start.isoformat() if target_scope_start is not None else None
+        ),
+        "unfinalized_tail_labels": [
+            row.day.isoformat()
+            for row in target_rows
+            if row.day > effective_target_finality
+        ],
+        "unassignable_leading_labels": unassignable_leading_labels,
+        "unassignable_tail_labels": unassignable_tail_labels,
+        "variable_bucket_duration_calendar_days": sorted(
+            {
+                int(cast(int | str, item["calendar_day_duration"]))
+                for item in bucket_receipts
+            }
+        ),
+    }
+
+
 def _model_result(
     model: ModelDefinition,
     target_rows: Sequence[TargetRow] | None,
     factor_rows: Mapping[date, FactorRow],
     factor_definitions: Mapping[str, FactorDefinition],
     maximum_staleness_days: int,
+    interval_policy: IntervalAssociationPolicy | None,
+    *,
+    training_cache_root: Path | None = None,
 ) -> dict[str, object]:
     if model.as_of_date is not None:
         target_rows = tuple(
@@ -1999,25 +3281,21 @@ def _model_result(
         return _unavailable_result(
             model, None, "UNAVAILABLE_UNKNOWN_TARGET_SERIES", empty_coverage
         )
-
-    aligned: list[tuple[TargetRow, FactorRow, tuple[float, ...]]] = []
-    missing_dates: list[date] = []
-    for target_row in target_rows:
-        factor_row = factor_rows.get(target_row.day)
-        if factor_row is None:
-            missing_dates.append(target_row.day)
-            continue
-        values = tuple(factor_row.values[factor_id] for factor_id in model.factor_ids)
-        if any(value is None for value in values):
-            missing_dates.append(target_row.day)
-            continue
-        aligned.append(
-            (
-                target_row,
-                factor_row,
-                tuple(cast(float, value) for value in values),
-            )
+    if interval_policy is None:
+        return _unavailable_result(
+            model,
+            None,
+            "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+            empty_coverage,
         )
+
+    aligned, interval_association = _factor_anchor_observations(
+        model=model,
+        target_rows=target_rows,
+        factor_rows=factor_rows,
+        policy=interval_policy,
+    )
+    missing_dates: list[date] = []
 
     train = [item for item in aligned if item[0].day <= model.train_end]
     test = [item for item in aligned if item[0].day >= model.test_start]
@@ -2139,8 +3417,15 @@ def _model_result(
     test_matrix, test_target = arrays(test)
     aligned_matrix, aligned_target = arrays(aligned)
     training_design = _training_design_diagnostics(train_matrix, model.factor_ids)
+    training_identity = _training_identity(
+        model, target_rows, train, train_matrix, train_target, interval_association
+    )
+    evaluation_identity = _evaluation_identity(
+        training_identity, model, test, test_matrix, test_target
+    )
     if model.estimator == "DYNAMIC_FLS":
-        return _dynamic_model_result(
+        cached_training = _read_training_cache(training_cache_root, training_identity)
+        result = _dynamic_model_result(
             model,
             target_rows,
             aligned,
@@ -2154,7 +3439,23 @@ def _model_result(
             test_target,
             coverage,
             training_design,
+            cached_training,
         )
+        training_state = result.pop("_retained_training_state", None)
+        if training_state is None and result.get("status") == (
+            "UNAVAILABLE_DYNAMIC_CROSS_VALIDATION"
+        ):
+            pass
+        elif not isinstance(training_state, Mapping):
+            raise DecompositionError("dynamic training state is unavailable")
+        else:
+            _write_training_cache(
+                training_cache_root, training_identity, training_state
+            )
+        result["training_identity"] = training_identity
+        result["evaluation_identity"] = evaluation_identity
+        result["interval_association"] = interval_association
+        return result
     sensitivity: list[dict[str, object]] = []
     scored: list[tuple[float, float]] = []
     for ridge in model.ridge_candidates:
@@ -2286,9 +3587,31 @@ def _model_result(
     gross_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     net_status = "UNAVAILABLE_INCOMPLETE_COST_COVERAGE"
     annualized_observed = fit.intercept * model.periods_per_year
+    live_basis = next(
+        (row.return_basis for row in target_rows if row.evidence_layer != "BACKTEST"),
+        None,
+    )
+    # A return stream that mixes realized and model-basis rows has no observed
+    # alpha, so this is never published as one. But withholding it entirely left
+    # the hybrid mode with no alpha at all for every strategy that actually has
+    # backtest history -- 42 of 52 series -- while the only populated hybrid
+    # alphas belonged to the one strategy whose hybrid path is exactly
+    # live-only. The fitted intercept is a real estimate of a real model; it is
+    # published as a diagnostic, named by what makes it one.
+    #
+    # The basis it is attributed to is the LIVE basis, not `target_rows[0]`:
+    # the target loader already proves live rows carry exactly one basis and
+    # that it is never MODEL, whereas the first row of a hybrid series is the
+    # earliest, which is backtest and may itself be MODEL.
     if has_model_basis:
         gross_status = "UNAVAILABLE_MODEL_RETURN_BASIS"
         net_status = "UNAVAILABLE_MODEL_RETURN_BASIS"
+        if live_basis == "GROSS":
+            gross_alpha = annualized_observed
+            gross_status = "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
+        elif live_basis is not None:
+            net_alpha = annualized_observed
+            net_status = "DIAGNOSTIC_ONLY_MIXED_MODEL_BASIS"
     elif observed_basis == "GROSS":
         gross_alpha = annualized_observed
         gross_status = "AVAILABLE_OBSERVED_BASIS"
@@ -2306,7 +3629,7 @@ def _model_result(
         None if standard_errors is None else float(standard_errors[0]),
         model.periods_per_year,
     )
-    result: dict[str, object] = {
+    result = {
         "alpha": {
             "annualized_standard_error": _number(alpha_standard_error),
             "confidence_status": confidence_status,
@@ -2363,6 +3686,17 @@ def _model_result(
         "series_id": model.series_id,
         "status": "AVAILABLE",
     }
+    result["orthogonal_attribution"] = _orthogonal_attribution(
+        model=model,
+        train_matrix=train_matrix,
+        aligned_matrix=aligned_matrix,
+        aligned=aligned,
+        exposures=fit.exposures,
+        intercept=fit.intercept,
+    )
+    result["training_identity"] = training_identity
+    result["evaluation_identity"] = evaluation_identity
+    result["interval_association"] = interval_association
     return _apply_model_quality_gate(result, holdout_r2)
 
 
@@ -2515,7 +3849,7 @@ def _proxy_governance(
 
 
 def build_decomposition(
-    spec_path: Path, source_root: Path
+    spec_path: Path, source_root: Path, *, training_cache_root: Path | None = None
 ) -> tuple[dict[str, object], GenerationManifest, bytes]:
     spec = _load_spec(spec_path)
     target_path = _verify_source(source_root, spec.target_source)
@@ -2534,6 +3868,10 @@ def build_decomposition(
             factors,
             definitions,
             spec.maximum_factor_staleness_days,
+            spec.interval_association.get(
+                model.series_id, spec.default_interval_association
+            ),
+            training_cache_root=training_cache_root,
         )
         for model in spec.models
     ]
@@ -2549,7 +3887,25 @@ def build_decomposition(
             spec.series_composition.get(str(model_result.get("series_id")), {})
         )
     selections = _select_models(results, spec.models)
+    selected_model_ids = {str(item["model_id"]) for item in selections}
+    for model_result in results:
+        if str(model_result["model_id"]) not in selected_model_ids:
+            model_result.pop("orthogonal_attribution", None)
     methodology_hash, methodology_size = hash_file(METHODOLOGY_PATH)
+    for model_result in results:
+        model_id = str(model_result["model_id"])
+        model_result["analytics_identities"] = {
+            "orthogonal": {
+                "methodology_manifest_sha256": methodology_hash,
+                "model_id": model_id,
+                "surface": "ORTHOGONAL_RISK_ATTRIBUTION",
+            },
+            "raw": {
+                "methodology_manifest_sha256": methodology_hash,
+                "model_id": model_id,
+                "surface": "RAW_MODEL",
+            },
+        }
     source_summary = {
         "factor": {
             "artifact_id": spec.factor_source.artifact_id,
@@ -2587,6 +3943,21 @@ def build_decomposition(
         },
         "sources": source_summary,
     }
+    payload["calculation_identity"] = hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "models": [
+                    {
+                        "evaluation_identity": row.get("evaluation_identity"),
+                        "model_id": row["model_id"],
+                        "training_identity": row.get("training_identity"),
+                    }
+                    for row in results
+                ],
+                "sources": source_summary,
+            }
+        )
+    ).hexdigest()
     analytics_hash = hashlib.sha256(canonical_json_bytes(payload)).hexdigest()
     result: dict[str, object] = {"analytics_hash": analytics_hash, **payload}
     result_bytes = canonical_json_bytes(result)
@@ -2694,13 +4065,174 @@ def _verify_candidate(
             raise DecompositionError(f"candidate {name} differs from the exact build")
 
 
+def _input_key(spec_path: Path, source_root: Path) -> str:
+    """Verify the consumed inputs before deriving their reuse identity."""
+
+    spec_bytes = spec_path.read_bytes()
+    spec = _load_spec(spec_path)
+    declared_sources = (
+        spec.target_source,
+        spec.factor_source,
+        *spec.provenance_sources,
+    )
+    # A declared source digest is only an expectation until its bytes are read.
+    # This must happen before an index lookup so a changed source cannot serve a
+    # previously valid candidate from another root.
+    for source in declared_sources:
+        _verify_source(source_root, source)
+
+    digest = hashlib.sha256()
+    digest.update(spec_bytes)
+    # These are the producer bytes consumed for this result.  Execution roots,
+    # capture timestamps, and unrelated commits deliberately remain outside the
+    # numerical identity.
+    digest.update(canonical_json_bytes(_consumed_producer_identity()))
+    return digest.hexdigest()
+
+
+def _cache_root(output_root: Path, retained_cache_root: Path | None) -> Path:
+    root = retained_cache_root or output_root
+    if root.is_symlink():
+        raise DecompositionError("retained cache root must not be a symlink")
+    return root.resolve()
+
+
+def _indexed_generation(
+    cache_root: Path, key: str, kind: str, requested_spec_bytes: bytes
+) -> Path | None:
+    """The generation a previous run produced from these inputs, if it survives.
+
+    Returns the directory only when it still verifies against itself, so a
+    partially written or edited artifact re-solves rather than being served.
+    """
+
+    pointer = cache_root / ".decomposition-index" / f"{key}.json"
+    if pointer.is_symlink() or not pointer.is_file():
+        return None
+    try:
+        index = json.loads(pointer.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if set(index) != {"generation_id", "key", "result_sha256", "result_size_bytes"}:
+        return None
+    if index.get("key") != key:
+        return None
+    generation_id = index.get("generation_id")
+    if not isinstance(generation_id, str):
+        return None
+    if not re.fullmatch(r"[0-9a-f]{64}", generation_id):
+        return None
+    root = (cache_root / kind).resolve()
+    candidate = (root / generation_id).resolve()
+    if not candidate.is_relative_to(root):
+        return None
+    result = candidate / "decomposition.json"
+    manifest_path = candidate / "generation.json"
+    if (
+        candidate.is_symlink()
+        or not candidate.is_dir()
+        or result.is_symlink()
+        or not result.is_file()
+        or manifest_path.is_symlink()
+        or not manifest_path.is_file()
+    ):
+        return None
+    try:
+        manifest = GenerationManifest.from_json_bytes(manifest_path.read_bytes())
+    except ValueError:
+        return None
+    if manifest.generation_id != generation_id:
+        return None
+    requested_spec = [
+        item
+        for item in manifest.artifacts
+        if item.artifact_id == "spec/decomposition-spec.json"
+    ]
+    if (
+        len(requested_spec) != 1
+        or requested_spec[0].sha256 != hashlib.sha256(requested_spec_bytes).hexdigest()
+        or requested_spec[0].size_bytes != len(requested_spec_bytes)
+    ):
+        raise DecompositionError(
+            "indexed generation is bound to a different requested identity"
+        )
+    if {item.name for item in candidate.iterdir()} != {
+        "decomposition.json",
+        "generation.json",
+    }:
+        raise DecompositionError(
+            "candidate file set differs from manifest-bound result"
+        )
+    content = result.read_bytes()
+    # The manifest names the result under its role, not its filename.
+    declared = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "analytics/decomposition.json"
+        ),
+        None,
+    )
+    if (
+        declared is None
+        or declared.sha256 != hashlib.sha256(content).hexdigest()
+        or declared.size_bytes != len(content)
+        or index["result_sha256"] != declared.sha256
+        or index["result_size_bytes"] != declared.size_bytes
+    ):
+        return None
+    return candidate
+
+
+def _record_input_key(
+    cache_root: Path, key: str, generation_id: str, result_bytes: bytes
+) -> None:
+    index = cache_root / ".decomposition-index"
+    index.mkdir(parents=True, exist_ok=True)
+    pointer = index / f"{key}.json"
+    if pointer.is_symlink():
+        raise DecompositionError("decomposition index entry is linked")
+    record = canonical_json_bytes(
+        {
+            "generation_id": generation_id,
+            "key": key,
+            "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+            "result_size_bytes": len(result_bytes),
+        }
+    )
+    if pointer.exists():
+        if pointer.read_bytes() != record:
+            raise DecompositionError("decomposition index identity differs")
+        return
+    _write_new(pointer, record)
+
+
 def stage_candidate(
-    spec_path: Path, source_root: Path, output_root: Path
+    spec_path: Path,
+    source_root: Path,
+    output_root: Path,
+    *,
+    retained_cache_root: Path | None = None,
 ) -> dict[str, object]:
-    result, manifest, result_bytes = build_decomposition(spec_path, source_root)
-    candidates = output_root.resolve() / "candidates"
-    if output_root.exists() and output_root.is_symlink():
-        raise DecompositionError("output root must not be a symlink")
+    key = _input_key(spec_path, source_root)
+    cache_root = _cache_root(output_root, retained_cache_root)
+    cached = _indexed_generation(cache_root, key, "candidates", spec_path.read_bytes())
+    if cached is not None:
+        payload = json.loads((cached / "decomposition.json").read_text("utf-8"))
+        return {
+            "analytics_hash": payload["analytics_hash"],
+            "candidate": str(cached),
+            "generation_id": cached.name,
+            "model_count": len(cast(list[object], payload["model_results"])),
+            "reused": True,
+        }
+    if retained_cache_root is None:
+        result, manifest, result_bytes = build_decomposition(spec_path, source_root)
+    else:
+        result, manifest, result_bytes = build_decomposition(
+            spec_path, source_root, training_cache_root=cache_root
+        )
+    candidates = cache_root / "candidates"
     candidates.mkdir(parents=True, exist_ok=True)
     candidate = candidates / manifest.generation_id
     if candidate.exists():
@@ -2714,11 +4246,13 @@ def stage_candidate(
         finally:
             if temporary.exists():
                 shutil.rmtree(temporary)
+    _record_input_key(cache_root, key, manifest.generation_id, result_bytes)
     return {
         "analytics_hash": result["analytics_hash"],
         "candidate": str(candidate),
         "generation_id": manifest.generation_id,
         "model_count": len(cast(list[object], result["model_results"])),
+        "reused": False,
     }
 
 
@@ -2746,15 +4280,48 @@ def _publish_candidate(
     return publish_generation(output_root, manifest.generation_id)
 
 
-def publish(spec_path: Path, source_root: Path, output_root: Path) -> dict[str, object]:
-    result, manifest, result_bytes = build_decomposition(spec_path, source_root)
-    candidate = output_root.resolve() / "candidates" / manifest.generation_id
+def publish(
+    spec_path: Path,
+    source_root: Path,
+    output_root: Path,
+    *,
+    retained_cache_root: Path | None = None,
+) -> dict[str, object]:
+    # Publishing normally follows staging in a separate process, so the answer
+    # is usually already on disk. Re-reading the staged candidate is the same
+    # verification a freshly solved one receives, at none of the cost.
+    key = _input_key(spec_path, source_root)
+    cache_root = _cache_root(output_root, retained_cache_root)
+    cached = _indexed_generation(cache_root, key, "candidates", spec_path.read_bytes())
+    if cached is not None:
+        manifest = GenerationManifest.from_json_bytes(
+            (cached / "generation.json").read_bytes()
+        )
+        result_bytes = (cached / "decomposition.json").read_bytes()
+        payload = json.loads(result_bytes.decode("utf-8"))
+        pointer = _publish_candidate(cached, output_root, manifest, result_bytes)
+        return {
+            "analytics_hash": payload["analytics_hash"],
+            "generation_id": manifest.generation_id,
+            "model_count": len(cast(list[object], payload["model_results"])),
+            "publication_state": pointer.state.value,
+            "reused": True,
+        }
+    if retained_cache_root is None:
+        result, manifest, result_bytes = build_decomposition(spec_path, source_root)
+    else:
+        result, manifest, result_bytes = build_decomposition(
+            spec_path, source_root, training_cache_root=cache_root
+        )
+    candidate = cache_root / "candidates" / manifest.generation_id
     pointer = _publish_candidate(candidate, output_root, manifest, result_bytes)
+    _record_input_key(cache_root, key, manifest.generation_id, result_bytes)
     return {
         "analytics_hash": result["analytics_hash"],
         "generation_id": manifest.generation_id,
         "model_count": len(cast(list[object], result["model_results"])),
         "publication_state": pointer.state.value,
+        "reused": False,
     }
 
 
@@ -2780,6 +4347,8 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--source-root", required=True, type=Path)
         if command != "build":
             item.add_argument("--output-root", required=True, type=Path)
+        if command in {"stage", "publish"}:
+            item.add_argument("--retained-cache-root", type=Path)
     return parser
 
 
@@ -2788,9 +4357,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "build":
         result = _summary(args.spec, args.source_root)
     elif args.command == "stage":
-        result = stage_candidate(args.spec, args.source_root, args.output_root)
+        result = stage_candidate(
+            args.spec,
+            args.source_root,
+            args.output_root,
+            retained_cache_root=args.retained_cache_root,
+        )
     else:
-        result = publish(args.spec, args.source_root, args.output_root)
+        result = publish(
+            args.spec,
+            args.source_root,
+            args.output_root,
+            retained_cache_root=args.retained_cache_root,
+        )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 

@@ -9,6 +9,7 @@ import shutil
 from collections.abc import Callable
 from pathlib import Path
 import sys
+from types import SimpleNamespace
 import zipfile
 
 import pytest
@@ -1170,6 +1171,13 @@ def test_release_stages_route_recipe_hybrid_plan_to_all_consumers(
         capture("report", {"candidate_dir": str(tmp_path / "report-candidate")}),
     )
     monkeypatch.setattr(builder, "build_workbook", capture("workbook", {}))
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        builder,
+        "_resolve_workbook_runtime",
+        lambda _path: SimpleNamespace(identity={"synthetic": True}),
+    )
     monkeypatch.setattr(
         builder, "build_panel_candidate", capture("panel-candidate", panel_result)
     )
@@ -1183,7 +1191,12 @@ def test_release_stages_route_recipe_hybrid_plan_to_all_consumers(
     )
 
     builder.build_stage(recipe_path, output_root, "report")
-    builder.build_stage(recipe_path, output_root, "workbook")
+    builder.build_stage(
+        recipe_path,
+        output_root,
+        "workbook",
+        workbook_runtime_path=runtime,
+    )
     builder.build_stage(recipe_path, output_root, "panel-candidate")
     builder.build_stage(recipe_path, output_root, "panel", qa_dir=tmp_path / "qa")
 
@@ -1398,6 +1411,195 @@ def test_xlsx_startup_extension_rejects_unvalidated_job_shape() -> None:
         )
 
 
+def test_derived_runner_job_resolves_paths_and_keeps_type_first(
+    tmp_path: Path,
+) -> None:
+    """The supervisor needs the discriminator first and absolute paths.
+
+    `xlsx-job.json` is candidate-relative so the report generation identity
+    does not depend on the output root. The C# supervisor resolves nothing
+    and deserializes JobStep polymorphically, so the derived job must be
+    absolute AND must keep `type` as the first key of every step -- canonical
+    sorted JSON puts `read_only` first and the supervisor rejects it with
+    "must specify a type discriminator".
+    """
+
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    job = {
+        "idempotency_key": "synthetic",
+        "schema_version": "2.0",
+        "steps": [
+            {
+                "type": "open",
+                "read_only": False,
+                "workbook_path": "excel-input/portfolio-report.xlsx",
+            },
+            {"type": "recalc", "mode": "full_rebuild"},
+            {"type": "save_as", "output_path": "excel/portfolio-report.xlsx"},
+        ],
+    }
+    (candidate / "xlsx-job.json").write_text(json.dumps(job), encoding="utf-8")
+
+    runner_job = builder._xlsx_runner_job(candidate)
+    text = runner_job.read_text(encoding="utf-8")
+    resolved = json.loads(text)
+
+    for step in resolved["steps"]:
+        assert next(iter(step)) == "type"
+    assert '{"type":"open"' in text
+    assert resolved["steps"][0]["workbook_path"] == str(
+        (candidate / "excel-input" / "portfolio-report.xlsx").resolve()
+    )
+    assert resolved["steps"][2]["output_path"] == str(
+        (candidate / "excel" / "portfolio-report.xlsx").resolve()
+    )
+    # The bound job is untouched and still relative.
+    assert json.loads((candidate / "xlsx-job.json").read_text(encoding="utf-8")) == job
+
+
+def test_workbook_runtime_is_an_explicit_cli_argument_and_missing_config_is_redacted(
+    tmp_path: Path,
+) -> None:
+    for command, tail in (("build", ()), ("stage", ("--role", "workbook"))):
+        args = builder._parser().parse_args(
+            [
+                command,
+                "--recipe",
+                "recipe.json",
+                "--output-root",
+                "output",
+                *tail,
+                "--workbook-runtime",
+                "runtime.json",
+            ]
+        )
+        assert args.workbook_runtime == Path("runtime.json")
+
+    missing = tmp_path / "PRIVATE-MISSING-RUNTIME.json"
+    with pytest.raises(builder.VerticalBuildError) as error:
+        builder._resolve_workbook_runtime(missing)
+    message = str(error.value)
+    assert "runtime" in message.lower()
+    assert str(missing) not in message
+
+
+def test_public_build_and_stage_forward_workbook_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_build_all(*_args: object, **kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {"state": "synthetic"}
+
+    def fake_build_stage(*_args: object, **kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {"state": "synthetic"}
+
+    monkeypatch.setattr(builder, "build_all", fake_build_all)
+    monkeypatch.setattr(builder, "build_stage", fake_build_stage)
+    runtime = tmp_path / "runtime.json"
+
+    assert (
+        builder.main(
+            [
+                "build",
+                "--recipe",
+                "recipe.json",
+                "--output-root",
+                "output",
+                "--workbook-runtime",
+                str(runtime),
+            ]
+        )
+        == 0
+    )
+    assert (
+        builder.main(
+            [
+                "stage",
+                "--recipe",
+                "recipe.json",
+                "--output-root",
+                "output",
+                "--role",
+                "workbook",
+                "--workbook-runtime",
+                str(runtime),
+            ]
+        )
+        == 0
+    )
+    assert [call["workbook_runtime_path"] for call in calls] == [runtime, runtime]
+
+
+def test_runtime_contract_validation_uses_configured_python_and_cli(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runtime = SimpleNamespace(
+        python_executable=tmp_path / "python.exe",
+        cli=tmp_path / "control_plane" / "cli.py",
+    )
+    job = tmp_path / "xlsx-job-resolved.json"
+    job.write_text("{}", encoding="utf-8")
+    calls: list[tuple[object, ...]] = []
+
+    def fake_run(command: tuple[object, ...], **_kwargs: object) -> dict[str, object]:
+        calls.append(command)
+        return {"valid": True, "states": []}
+
+    monkeypatch.setattr(builder, "_run", fake_run)
+    builder._validate_workbook_runtime_job(runtime, job)
+    assert [call[2] for call in calls] == ["validate", "dry-run"]
+    assert all(call[0] == str(runtime.python_executable) for call in calls)
+    assert all(call[1] == str(runtime.cli) for call in calls)
+
+
+def test_runtime_execution_receipt_binds_resume_to_runtime_identity(
+    tmp_path: Path,
+) -> None:
+    candidate = tmp_path / "candidate"
+    (candidate / "excel").mkdir(parents=True)
+    job = {
+        "idempotency_key": "synthetic-runtime",
+        "schema_version": "2.0",
+        "steps": [{"type": "open"}],
+    }
+    result = {
+        "final_state": "SUCCEEDED",
+        "idempotency_key": "synthetic-runtime",
+        "ok": True,
+        "schema_version": "2.0",
+        "steps": [{"status": "succeeded"}],
+    }
+    (candidate / "xlsx-job.json").write_text(json.dumps(job), encoding="utf-8")
+    (candidate / "xlsx-result.json").write_text(json.dumps(result), encoding="utf-8")
+    (candidate / "excel" / "portfolio-report.xlsx").write_bytes(b"xlsx")
+    for name in (
+        "workbook-validation.json",
+        "workbook-contract.json",
+        "workbook-evidence-binding.json",
+    ):
+        (candidate / name).write_text("{}", encoding="utf-8")
+    runtime = SimpleNamespace(
+        descriptor_path=tmp_path / "runtime.json",
+        identity={"descriptor_sha256": "a" * 64},
+    )
+    original = builder._current_workbook_runtime
+    try:
+        builder._current_workbook_runtime = lambda _runtime: runtime
+        builder._record_workbook_runtime_execution(candidate, runtime)
+        assert builder._accepted_xlsx_evidence(candidate, workbook_runtime=runtime)
+        result["idempotency_key"] = "tampered"
+        (candidate / "xlsx-result.json").write_text(
+            json.dumps(result), encoding="utf-8"
+        )
+        assert not builder._accepted_xlsx_evidence(candidate, workbook_runtime=runtime)
+    finally:
+        builder._current_workbook_runtime = original
+
+
 def test_successful_xlsx_evidence_is_resumable_and_identity_bound(
     tmp_path: Path,
 ) -> None:
@@ -1516,6 +1718,7 @@ def test_hybrid_decomposition_uses_shared_version_bound_history_contract(
         correlation_source=correlation_source,
         bundle_root=bundle_root,
         output_root=output_root,
+        retained_cache_root=tmp_path / "retained-decomposition",
     )
 
     assert result["bundle_id"] == "b" * 64
@@ -1535,6 +1738,14 @@ def test_hybrid_decomposition_uses_shared_version_bound_history_contract(
     )
     assert calls[1][0][0:2] == ("portfolio_decomposition.py", "stage")
     assert calls[2][0][0:2] == ("portfolio_decomposition.py", "publish")
+    assert calls[1][0][-2:] == (
+        "--retained-cache-root",
+        str(tmp_path / "retained-decomposition"),
+    )
+    assert calls[2][0][-2:] == (
+        "--retained-cache-root",
+        str(tmp_path / "retained-decomposition"),
+    )
 
 
 def _legacy_plan_manifest(specs: list[dict[str, object]]) -> dict[str, object]:
@@ -1855,6 +2066,15 @@ def _current_plan_bundle(
                 "evidence_mode": "LIVE_ONLY",
                 "factor_source": {
                     "artifact_id": f"market/{source_key}.csv",
+                    "interval_policy": {
+                        "available_through_anchor": "2026-08-03",
+                        "currency": "USD",
+                        "finality": "COMPLETE_SELECTED_SNAPSHOT",
+                        "native_calendar": "SOURCE_LABELLED_DAILY",
+                        "native_label_convention": "PUBLISHED_DAILY_LABEL",
+                        "return_basis": "NET",
+                        "source_vintage": "SELECTED_SNAPSHOT",
+                    },
                     "date_column": "date",
                     "expected_sha256": hashlib.sha256(
                         model_sources[source_key]["factor_content"]
@@ -1901,6 +2121,17 @@ def _current_plan_bundle(
                 },
                 "target_source": {
                     "artifact_id": f"target/{source_key}.csv",
+                    "interval_policy": {
+                        "currency": "USD",
+                        "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+                        "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
+                        "finalized_through": "2026-08-03",
+                        "gap_disposition": "REJECT_BUCKET",
+                        "native_calendar": "CALENDAR_DAY_24_7",
+                        "native_label_convention": "SYNTHETIC_CALENDAR_DAY",
+                        "return_basis": "NET",
+                        "source_vintage": "SELECTED_SNAPSHOT",
+                    },
                     "expected_sha256": hashlib.sha256(
                         model_sources[source_key]["target_content"]
                     ).hexdigest(),
@@ -3178,7 +3409,7 @@ def test_current_surface_plan_rejects_required_surface_policy_drift(
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    (("builder_version", "0.18.0"), ("schema_version", 3)),
+    (("builder_version", "0.19.0"), ("schema_version", 3)),
 )
 def test_current_surface_plan_rejects_unsupported_contract(
     tmp_path: Path, field: str, value: object
@@ -4071,17 +4302,29 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
     monkeypatch.setattr(builder, "_financial_mvp_module", lambda: SourceBinder)
     candidate = tmp_path / "report-candidate"
     candidate.mkdir()
-    runtime = tmp_path / "xlsx-runtime.exe"
-    cli = tmp_path / "xlsx-cli.py"
-    runtime.write_bytes(b"runtime")
-    cli.write_bytes(b"cli")
-    monkeypatch.setattr(builder, "XLSX_RUNTIME", runtime)
-    monkeypatch.setattr(builder, "XLSX_CLI", cli)
-    monkeypatch.setattr(builder, "_accepted_xlsx_evidence", lambda _path: True)
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text("{}", encoding="utf-8")
+    fake_runtime = SimpleNamespace(identity={"synthetic": True})
+    monkeypatch.setattr(
+        builder, "_resolve_workbook_runtime", lambda _path: fake_runtime
+    )
+    monkeypatch.setattr(
+        builder, "_current_workbook_runtime", lambda _runtime: fake_runtime
+    )
+    monkeypatch.setattr(
+        builder, "_record_workbook_runtime_execution", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        builder, "_accepted_xlsx_evidence", lambda _path, **_kwargs: True
+    )
+    recovered_result = candidate / "xlsx-result-startup-extension.json"
+    monkeypatch.setattr(
+        builder, "_successful_xlsx_result_path", lambda _candidate: recovered_result
+    )
     monkeypatch.setattr(
         builder,
         "_accepted_workbook_validation",
-        lambda _path, _candidate: {"all_passed": True},
+        lambda _path, _candidate, **_kwargs: {"all_passed": True},
     )
     calls: list[tuple[object, ...]] = []
 
@@ -4124,6 +4367,7 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
         tmp_path / "correlation",
         epoch_manifest_generation_root=generation_root,
         epoch_manifest_generation_id=manifest.generation_id,
+        workbook_runtime_path=runtime,
     )
 
     manifest_path = candidate / "account-strategy-manifest.json"
@@ -4147,6 +4391,13 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
             generation_root
         )
     bind = next(call for call in calls if call[1] == "bind-workbook-evidence")
+    canonicalize_result = next(
+        call for call in calls if call[1] == "canonicalize-xlsx-result"
+    )
+    assert canonicalize_result[canonicalize_result.index("--result") + 1] == str(
+        recovered_result
+    )
+    assert bind[bind.index("--xlsx-result") + 1] == str(recovered_result)
     assert bind[bind.index("--baseline-root") + 1] == str(tmp_path / "baseline")
     assert bind[bind.index("--baseline-generation-id") + 1] == "b" * 64
     assert result["epoch_manifest_generation_id"] == manifest.generation_id
@@ -4216,17 +4467,30 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
 ) -> None:
     candidate = tmp_path / "report-candidate"
     candidate.mkdir()
-    runtime = tmp_path / "xlsx-runtime.exe"
-    cli = tmp_path / "xlsx-cli.py"
-    runtime.write_bytes(b"runtime")
-    cli.write_bytes(b"cli")
-    monkeypatch.setattr(builder, "XLSX_RUNTIME", runtime)
-    monkeypatch.setattr(builder, "XLSX_CLI", cli)
-    monkeypatch.setattr(builder, "_accepted_xlsx_evidence", lambda _path: True)
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text("{}", encoding="utf-8")
+    fake_runtime = SimpleNamespace(identity={"synthetic": True})
+    monkeypatch.setattr(
+        builder, "_resolve_workbook_runtime", lambda _path: fake_runtime
+    )
+    monkeypatch.setattr(
+        builder, "_current_workbook_runtime", lambda _runtime: fake_runtime
+    )
+    monkeypatch.setattr(
+        builder, "_record_workbook_runtime_execution", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        builder, "_accepted_xlsx_evidence", lambda _path, **_kwargs: True
+    )
+    monkeypatch.setattr(
+        builder,
+        "_successful_xlsx_result_path",
+        lambda selected: selected / "xlsx-result.json",
+    )
     monkeypatch.setattr(
         builder,
         "_accepted_workbook_validation",
-        lambda _path, _candidate: {"all_passed": True},
+        lambda _path, _candidate, **_kwargs: {"all_passed": True},
     )
     calls: list[tuple[object, ...]] = []
 
@@ -4258,6 +4522,7 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
         tmp_path / "return-attribution.json",
         None,
         tmp_path / "report-output",
+        workbook_runtime_path=runtime,
     )
 
     report_calls = [call for call in calls if call[0] == "portfolio_report.py"]
@@ -4278,17 +4543,30 @@ def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
 ) -> None:
     candidate = tmp_path / "report-candidate"
     candidate.mkdir()
-    runtime = tmp_path / "xlsx-runtime.exe"
-    cli = tmp_path / "xlsx-cli.py"
-    runtime.write_bytes(b"runtime")
-    cli.write_bytes(b"cli")
-    monkeypatch.setattr(builder, "XLSX_RUNTIME", runtime)
-    monkeypatch.setattr(builder, "XLSX_CLI", cli)
-    monkeypatch.setattr(builder, "_accepted_xlsx_evidence", lambda _path: True)
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text("{}", encoding="utf-8")
+    fake_runtime = SimpleNamespace(identity={"synthetic": True})
+    monkeypatch.setattr(
+        builder, "_resolve_workbook_runtime", lambda _path: fake_runtime
+    )
+    monkeypatch.setattr(
+        builder, "_current_workbook_runtime", lambda _runtime: fake_runtime
+    )
+    monkeypatch.setattr(
+        builder, "_record_workbook_runtime_execution", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        builder, "_accepted_xlsx_evidence", lambda _path, **_kwargs: True
+    )
+    monkeypatch.setattr(
+        builder,
+        "_successful_xlsx_result_path",
+        lambda selected: selected / "xlsx-result.json",
+    )
     monkeypatch.setattr(
         builder,
         "_accepted_workbook_validation",
-        lambda _path, _candidate: {"all_passed": True},
+        lambda _path, _candidate, **_kwargs: {"all_passed": True},
     )
     calls: list[tuple[object, ...]] = []
 
@@ -4333,6 +4611,7 @@ def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
         hwm_governed_calendar_authority_path=tmp_path / "hwm-calendar.json",
         hwm_governed_admission_receipt_path=tmp_path / "hwm-receipt.json",
         portfolio_root=portfolio_root,
+        workbook_runtime_path=runtime,
     )
 
     report_calls = [
@@ -4369,6 +4648,13 @@ def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
 
     monkeypatch.setattr(builder, "build_report_candidate", fake_candidate)
     monkeypatch.setattr(builder, "build_workbook", fake_workbook)
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        builder,
+        "_resolve_workbook_runtime",
+        lambda _path: SimpleNamespace(identity={"synthetic": True}),
+    )
     generation_root = tmp_path / "epoch-generation"
     result = builder.build_report(
         tmp_path / "baseline",
@@ -4382,6 +4668,7 @@ def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
         tmp_path / "correlation",
         epoch_manifest_generation_root=generation_root,
         epoch_manifest_generation_id="b" * 64,
+        workbook_runtime_path=runtime,
     )
 
     assert result == {"generation_id": "a" * 64}
@@ -4396,6 +4683,7 @@ def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
     assert calls["workbook_kwargs"] == {
         **expected_epoch,
         "hybrid_decomposition_plan_bundle": None,
+        "workbook_runtime_path": runtime,
     }
 
 
@@ -4445,6 +4733,13 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
 
     monkeypatch.setattr(builder, "build_report_candidate", real_candidate_boundary)
     monkeypatch.setattr(builder, "build_workbook", workbook_boundary)
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        builder,
+        "_resolve_workbook_runtime",
+        lambda _path: SimpleNamespace(identity={"synthetic": True}),
+    )
     result = builder.build_report(
         baseline_root,
         tmp_path / "ledger",
@@ -4456,6 +4751,7 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
         tmp_path / "report",
         epoch_manifest_generation_root=epoch_root,
         epoch_manifest_generation_id="d" * 64,
+        workbook_runtime_path=runtime,
     )
 
     assert result == {"generation_id": "c" * 64}
@@ -4465,6 +4761,7 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
         "hybrid_decomposition_plan_bundle": None,
         "epoch_manifest_generation_root": epoch_root,
         "epoch_manifest_generation_id": "d" * 64,
+        "workbook_runtime_path": runtime,
     }
 
 
@@ -4841,6 +5138,13 @@ def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
 
     monkeypatch.setattr(builder, "build_report_candidate", report_candidate)
     monkeypatch.setattr(builder, "build_workbook", workbook)
+    runtime = tmp_path / "runtime.json"
+    runtime.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(
+        builder,
+        "_resolve_workbook_runtime",
+        lambda _path: SimpleNamespace(identity={"synthetic": True}),
+    )
     builder.build_report(
         tmp_path / "baseline",
         tmp_path / "ledger",
@@ -4857,6 +5161,7 @@ def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
         portfolio_root=tmp_path / "portfolio",
         invested_capital_result_path=capital_result_path,
         invested_capital_input_generation_path=capital_input_path,
+        workbook_runtime_path=runtime,
     )
     expected = {
         "hwm_governed_result_path": paths["result"],

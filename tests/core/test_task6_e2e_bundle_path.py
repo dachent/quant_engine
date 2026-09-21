@@ -200,47 +200,35 @@ def test_task6_real_mixed_bundle_preserves_exact_bytes_across_all_consumers(
             encoding="utf-8"
         )
     )
-    materialized, materialized_identity = (
-        materializer._stage_epoch_manifest_bundle_prewire(
-            generation_root,
-            bundle.manifest.generation_id,
-            financial_contract,
-            tmp_path / "materialized",
-        )
+    materialized = materializer._bind_epoch_manifest_bundle(
+        generation_root,
+        bundle.manifest.generation_id,
+        financial_contract,
     )
     release_path, release_source, release_identity = (
         release._stage_verified_epoch_manifest_bundle(
             generation_root, bundle.manifest.generation_id, tmp_path / "release"
         )
     )
+    # The release builder is the only consumer that stages the manifest as a
+    # file; the materializer binds the contract to the same bundle without
+    # writing, so the panel consumer reads what the release stage produced.
     panel_value, panel_identity = panel._verified_bundle_account_manifest(
-        tmp_path
-        / "materialized"
-        / "stages"
-        / "panel"
-        / "account-strategy-manifest.json",
+        release_path,
         generation_root,
         bundle.manifest.generation_id,
     )
 
-    materialized_path = (
-        tmp_path
-        / "materialized"
-        / "stages"
-        / "panel"
-        / "account-strategy-manifest.json"
-    )
+    materialized_path = release_path
     assert materialized["epoch_manifest_source"] == expected_source
     assert release_source == expected_source
     assert panel_identity["epoch_manifest_source"] == expected_source
     assert materialized_path.read_bytes() == payload
     assert release_path.read_bytes() == payload
     assert panel_value == candidate
-    assert materialized_identity == {
-        "path": str(materialized_path.resolve()),
-        "sha256": payload_sha256,
-        "size_bytes": len(payload),
-    }
+    assert materialized["epoch_manifest_source"]["artifact"]["sha256"] == (
+        payload_sha256
+    )
     assert release_identity == {
         "path": str(release_path.resolve()),
         "sha256": payload_sha256,

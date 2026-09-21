@@ -541,6 +541,11 @@ def _selected_inputs(
                 )
             ] = record_ids
 
+    # These fixtures generate whole synthetic account values, including cash.
+    # Declare that perimeter before binding the ledger and calculation receipts.
+    for observation in navs.values():
+        observation["value_basis"] = "ACCOUNT_TOTAL"
+
     provider_ids = sorted({row["provider"] for row in specs})
     provider_generations = {
         provider: {
@@ -1201,6 +1206,59 @@ def test_rejects_non_native_usd_without_exact_accepted_fx() -> None:
     calculation["nav_observations"][0]["nav"]["currency"] = "USDT"
     with pytest.raises(SelectedHwmInputError, match="source-native USD"):
         _validated_account_links(key, calculation, output)
+
+
+def _stablecoin_anchor_epoch() -> tuple[
+    tuple[str, str, str, str | None], dict[str, Any], dict[str, Any]
+]:
+    contract = json.loads(
+        (REPO / "contracts" / "portfolio-financial-mvp-source-v1.json").read_bytes()
+    )
+    docs = _docs(contract)
+    calculation = docs["authority/calculation-inputs.json"]["rows"][0]
+    output = docs["outputs/account-strategy-manifest.json"]["rows"][0]
+    epoch = calculation["epoch"]
+    key = tuple(
+        epoch[name]
+        for name in ("account_id", "strategy_id", "effective_start", "effective_end")
+    )
+    observed = sorted(row["as_of_date"] for row in calculation["nav_observations"])
+    calculation["capital_anchors"] = [
+        {
+            "account_id": epoch["account_id"],
+            "amount": {
+                "currency": "USDT",
+                "status": "AVAILABLE",
+                "value": "49891.55",
+            },
+            "capital_type": "OPENING_CAPITAL_ANCHOR",
+            "event_date": observed[0],
+            "nav_recognition_date": observed[0],
+            "record_id": "stablecoin-subscription",
+        }
+    ]
+    return key, calculation, output
+
+
+def test_opening_anchor_may_carry_a_source_native_stablecoin_amount() -> None:
+    """An opening anchor contributes no flow, so its native amount is unread.
+
+    Matrixport subscribes in USDT and the epoch's beginning capital comes from
+    the NAV series. Demanding USD of a value this branch discards rejected a
+    fully evidenced epoch over an unused field.
+    """
+    key, calculation, output = _stablecoin_anchor_epoch()
+    _links, _navs, flows, _evidence = selected_hwm._validated_account_sources(
+        key, calculation, output
+    )
+    assert not flows
+
+
+def test_allocation_anchor_still_requires_source_native_usd() -> None:
+    key, calculation, output = _stablecoin_anchor_epoch()
+    calculation["capital_anchors"][0]["capital_type"] = "STRATEGY_CAPITAL_ALLOCATION"
+    with pytest.raises(SelectedHwmInputError, match="source-native USD"):
+        selected_hwm._validated_account_sources(key, calculation, output)
 
 
 def _zero_nav_strategy_rows() -> tuple[

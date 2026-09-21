@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
+import hashlib
 import importlib.util
 import io
 import json
@@ -366,6 +367,42 @@ def _p123_generation(path: Path) -> None:
     )
 
 
+def _bundle_inputs(tmp_path: Path) -> dict[str, Path]:
+    """The minimum retained-source set `build_bundle` requires."""
+    grizzly = tmp_path / "grizzly.xlsx"
+    tt = tmp_path / "tt.xlsx"
+    qsi_archive = tmp_path / "qsi.zip"
+    qsi_appendix = tmp_path / "qsi.xlsx"
+    qsi_prices = tmp_path / "qsi-prices"
+    volatis = tmp_path / "volatis.csv"
+    _grizzly(grizzly)
+    _tt(tt)
+    _qsi_subscription_archive(qsi_archive)
+    _qsi_appendix(qsi_appendix)
+    _qsi_prices(qsi_prices)
+    volatis.write_text(
+        "\n".join(
+            [
+                "time,value,cost_basis,profit_loss",
+                "10/15/2024,990,1000,-0.01",
+                "10/16/2024,1000,1000,0",
+                "10/17/2024,1010,1000,0.01",
+                "08/04/2026,1100,1000,0.1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "grizzly_workbook": grizzly,
+        "tt_workbook": tt,
+        "qsi_subscription_archive": qsi_archive,
+        "qsi_appendix_workbook": qsi_appendix,
+        "qsi_price_root": qsi_prices,
+        "volatis_pricehistory_csv": volatis,
+    }
+
+
 def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> None:
     grizzly = tmp_path / "grizzly.xlsx"
     tt = tmp_path / "tt.xlsx"
@@ -404,7 +441,7 @@ def test_build_bundle_wires_all_retained_strategy_histories(tmp_path: Path) -> N
 
     assert manifest["verification"] == "VERIFIED"
     assert manifest["builder"] == "portfolio-strategy-history"
-    assert manifest["builder_version"] == "1.4.0"
+    assert manifest["builder_version"] == "1.7.0"
     assert {item["series_id"] for item in manifest["series"]} == {
         "GrizzlyBears VTMA",
         "QSI",
@@ -574,6 +611,95 @@ def test_qsi_current_archive_is_newer_overlap_authority(tmp_path: Path) -> None:
     assert revision["max_abs_return_revision"] == pytest.approx(0.001)
 
 
+def test_each_series_is_capped_at_its_own_live_inception(tmp_path: Path) -> None:
+    """Prehistory is admitted per strategy, not against one global boundary.
+
+    `portfolio_target_series` rejects a series whose last row reaches that
+    strategy's own account-live start, so capping every series at a single
+    as-of discards evidence that is still admissible for the later-starting
+    strategies. A name that is not in this bundle is recorded, not fatal: the
+    caller supplies the whole product's inception map.
+    """
+    tt_path = tmp_path / "tt.xlsx"
+    _tt(tt_path)
+    uncapped, definition = history._tt(tt_path)
+    last = date.fromisoformat(max(row["date"] for row in uncapped))
+    boundary = last - timedelta(days=3)
+
+    returns, manifest = history.build_bundle(
+        **_bundle_inputs(tmp_path),
+        as_of_date="2026-08-03",
+        live_inceptions={
+            definition["series_id"]: boundary.isoformat(),
+            "Series That Is Not In This Bundle": "2020-01-01",
+        },
+    )
+    payload = json.loads(manifest)
+    assert payload["live_inceptions_applied"] == {
+        definition["series_id"]: boundary.isoformat()
+    }
+    assert payload["live_inceptions_not_in_bundle"] == [
+        "Series That Is Not In This Bundle"
+    ]
+    capped = [
+        row
+        for row in history.csv.DictReader(io.StringIO(returns.decode("utf-8")))
+        if row["series_id"] == definition["series_id"]
+    ]
+    assert capped
+    assert max(date.fromisoformat(row["date"]) for row in capped) < boundary
+    entry = next(
+        item
+        for item in payload["series"]
+        if item["series_id"] == definition["series_id"]
+    )
+    assert entry["live_inception"] == boundary.isoformat()
+    assert entry["return_observations"] == len(capped)
+    assert entry["observed_end"] == capped[-1]["date"]
+    assert entry["source_rows_excluded_at_or_after_live_inception"] > 0
+    assert entry["coverage_disposition"] == (
+        "COMPLETE_STRICTLY_BEFORE_ACCOUNT_LIVE_INCEPTION"
+    )
+
+
+def test_readers_do_not_admit_rows_after_the_as_of_date(tmp_path: Path) -> None:
+    """Both readers used to emit rows the bundle's own guard then rejected.
+
+    The TT sheet is a live API export that runs to the pull date, and the QSI
+    appendix carries weeks past the declared boundary. Neither was truncated on
+    the path this build uses, so `build_bundle` failed with "history contains
+    observations after as_of_date" and no bundle could be produced at all.
+    """
+    tt_path = tmp_path / "tt.xlsx"
+    _tt(tt_path)
+    uncapped, _definition = history._tt(tt_path)
+    # The reader still requires a substantial history, so trim only a little.
+    boundary = date.fromisoformat(max(row["date"] for row in uncapped)) - timedelta(
+        days=2
+    )
+    capped, _definition = history._tt(tt_path, as_of_date=boundary)
+    assert capped
+    assert len(capped) < len(uncapped)
+    assert max(date.fromisoformat(row["date"]) for row in capped) <= boundary
+
+    archive = tmp_path / "qsi.zip"
+    appendix = tmp_path / "qsi.xlsx"
+    prices = tmp_path / "qsi-prices"
+    _qsi_subscription_archive(archive)
+    _qsi_appendix(appendix)
+    _qsi_prices(prices)
+    qsi_uncapped, _definition = history._qsi(archive, appendix, prices)
+    qsi_boundary = date.fromisoformat(
+        max(row["date"] for row in qsi_uncapped)
+    ) - timedelta(days=14)
+    qsi_capped, _definition = history._qsi(
+        archive, appendix, prices, as_of_date=qsi_boundary
+    )
+    assert qsi_capped
+    assert len(qsi_capped) < len(qsi_uncapped)
+    assert max(date.fromisoformat(row["date"]) for row in qsi_capped) <= qsi_boundary
+
+
 def test_grizzly_manual_live_file_is_validated_as_combined_subset(
     tmp_path: Path,
 ) -> None:
@@ -604,3 +730,217 @@ def test_grizzly_manual_live_file_is_validated_as_combined_subset(
         "grizzlybulls-all-backtest-live-trade-history",
         "grizzlybulls-live-only-trade-history",
     }
+
+
+def _eu_curve(start, days, *, step="0.01"):
+    """A provider equity curve: one continuous level path, no layer marker."""
+
+    level = history.Decimal("100000")
+    ordered = []
+    for index in range(days):
+        if index:
+            level *= history.Decimal(1) + history.Decimal(step)
+        ordered.append((start + timedelta(days=index), (level, history.Decimal(0))))
+    return ordered
+
+
+EU_ARTIFACT = {"sha256": "a" * 64, "size_bytes": 4096}
+
+
+def _eu_backtest(ordered):
+    return history._p123_eu_backtest(
+        ordered,
+        generation_id="b" * 64,
+        exact_ids={"1764562", "1897754"},
+        strategy_name="EU multifactor microcap model",
+        equity_artifact=EU_ARTIFACT,
+    )
+
+
+def test_eu_prehistory_stops_strictly_before_the_provider_launch() -> None:
+    launch = history.P123_EU_PROVIDER_LAUNCH
+    ordered = _eu_curve(launch - timedelta(days=5), 11)
+
+    rows, definition = _eu_backtest(ordered)
+
+    assert definition["series_id"] == "EU [P123]"
+    assert definition["provider_launch"] == launch.isoformat()
+    # Five observations before the launch yield four returns, and the last one
+    # lands the day before it: the launch day itself is live, never prehistory.
+    assert definition["observed_end"] == (launch - timedelta(days=1)).isoformat()
+    assert definition["return_observations"] == 4
+    assert definition["source_rows_excluded_at_or_after_provider_launch"] == 6
+    assert {row["evidence_layer"] for row in rows} == {"BACKTEST"}
+    assert all(row["return"] == "0.01" for row in rows)
+    assert {row["strategy_version"] for row in rows} == {definition["strategy_version"]}
+    assert definition["source_artifacts"][0]["sha256"] == EU_ARTIFACT["sha256"]
+
+
+def test_eu_prehistory_is_absent_when_the_capture_starts_after_the_launch() -> None:
+    """The subscribed copy's curve begins when the copy was created."""
+
+    ordered = _eu_curve(history.P123_EU_PROVIDER_LAUNCH + timedelta(days=30), 40)
+
+    assert _eu_backtest(ordered) is None
+
+
+def test_a_launch_on_a_non_trading_day_admits_only_earlier_sessions() -> None:
+    launch = history.P123_EU_PROVIDER_LAUNCH
+    ordered = [
+        item for item in _eu_curve(launch - timedelta(days=4), 9) if item[0] != launch
+    ]
+
+    rows, definition = _eu_backtest(ordered)
+
+    assert definition["observed_end"] < launch.isoformat()
+    assert all(row["date"] < launch.isoformat() for row in rows)
+
+
+def test_eu_prehistory_needs_two_observations_to_form_a_return() -> None:
+    assert (
+        _eu_backtest(_eu_curve(history.P123_EU_PROVIDER_LAUNCH - timedelta(days=1), 5))
+        is None
+    )
+
+
+DESIGNER_VERSION = "p123-eu-connected-model:" + "c" * 64
+
+
+def _designer_generation(root: Path, rows: list[tuple[str, str, str]]) -> Path:
+    """A staged designer-model generation: returns bound by a manifest digest."""
+
+    body = "series_id,date,return,evidence_layer,return_basis\n" + "".join(
+        "EU multifactor microcap model,%s,%s,%s,"
+        "PROVIDER_PUBLISHED_MODEL_EQUITY_CURVE\n" % row
+        for row in rows
+    )
+    payload = body.encode("utf-8")
+    generation_id = "d" * 64
+    generation = root / generation_id
+    generation.mkdir(parents=True)
+    (generation / "returns.csv").write_bytes(payload)
+    (generation / "generation.json").write_text(
+        json.dumps(
+            {
+                "generation_id": generation_id,
+                "verification": "VERIFIED",
+                "artifacts": [
+                    {
+                        "artifact_id": "returns.csv",
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                        "size_bytes": len(payload),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (generation / "catalog.json").write_text(
+        json.dumps(
+            {
+                "series": {
+                    "currency": "EUR",
+                    "provider_launch": "2024-02-18",
+                    "provider_revision_dates": ["2025-09-06"],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return generation
+
+
+def test_designer_curve_admits_only_the_pre_launch_segment(tmp_path: Path) -> None:
+    generation = _designer_generation(
+        tmp_path,
+        [
+            ("2024-02-15", "0.01", "BACKTEST"),
+            ("2024-02-16", "0.02", "BACKTEST"),
+            ("2024-02-19", "0.03", "PROVIDER_MODEL_LIVE"),
+            ("2024-02-20", "0.04", "PROVIDER_MODEL_LIVE"),
+        ],
+    )
+
+    rows, definition = history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+    assert [row["date"] for row in rows] == ["2024-02-15", "2024-02-16"]
+    assert {row["evidence_layer"] for row in rows} == {"BACKTEST"}
+    assert {row["series_id"] for row in rows} == {"EU [P123]"}
+    assert definition["return_observations"] == 2
+    assert definition["provider_model_live_observations_not_admitted"] == 2
+    assert definition["observed_end"] == "2024-02-16"
+    assert definition["provider_launch"] == "2024-02-18"
+    assert definition["strategy_version"] == DESIGNER_VERSION
+
+
+def test_designer_curve_carries_the_currency_and_revision_dates(
+    tmp_path: Path,
+) -> None:
+    """The model publishes in EUR while the owner holds it in a USD account."""
+
+    generation = _designer_generation(
+        tmp_path,
+        [("2024-02-15", "0.01", "BACKTEST"), ("2024-02-16", "0.02", "BACKTEST")],
+    )
+
+    _rows, definition = history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+    assert definition["provider_currency"] == "EUR"
+    assert definition["provider_revision_dates"] == ["2025-09-06"]
+    assert definition["implementation_reconciliation_status"] == (
+        "MODEL_TO_ACCOUNT_RECONCILIATION_RETAINED_SEPARATELY"
+    )
+
+
+def test_designer_curve_refuses_returns_that_differ_from_the_manifest(
+    tmp_path: Path,
+) -> None:
+    generation = _designer_generation(
+        tmp_path,
+        [("2024-02-15", "0.01", "BACKTEST"), ("2024-02-16", "0.02", "BACKTEST")],
+    )
+    (generation / "returns.csv").write_text("series_id,date\n", encoding="utf-8")
+
+    with pytest.raises(
+        history.StrategyHistoryError, match="differ from the generation"
+    ):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+
+def test_designer_curve_refuses_an_unverified_generation(tmp_path: Path) -> None:
+    generation = _designer_generation(
+        tmp_path,
+        [("2024-02-15", "0.01", "BACKTEST"), ("2024-02-16", "0.02", "BACKTEST")],
+    )
+    manifest = json.loads((generation / "generation.json").read_text(encoding="utf-8"))
+    manifest["verification"] = "UNVERIFIED"
+    (generation / "generation.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(history.StrategyHistoryError, match="not verified"):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+
+def test_designer_curve_refuses_prehistory_that_reaches_the_launch(
+    tmp_path: Path,
+) -> None:
+    """A row on the launch day is live evidence, so admitting it would relabel."""
+
+    generation = _designer_generation(
+        tmp_path,
+        [("2024-02-16", "0.01", "BACKTEST"), ("2024-02-18", "0.02", "BACKTEST")],
+    )
+
+    with pytest.raises(
+        history.StrategyHistoryError, match="reaches the provider launch"
+    ):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)
+
+
+def test_designer_curve_refuses_an_unexpected_evidence_layer(tmp_path: Path) -> None:
+    generation = _designer_generation(
+        tmp_path,
+        [("2024-02-15", "0.01", "BACKTEST"), ("2024-02-16", "0.02", "ACCOUNT_LIVE")],
+    )
+
+    with pytest.raises(history.StrategyHistoryError, match="unexpected evidence layer"):
+        history._p123_eu_designer_curve(generation, DESIGNER_VERSION)

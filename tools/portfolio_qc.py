@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, cast
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 TOOLS_ROOT = REPOSITORY_ROOT / "tools"
@@ -269,7 +269,7 @@ def _candidate_qa(spec: Any, proof: Mapping[str, Any]) -> dict[str, object]:
         raise PrerequisiteUnavailable("pipeline planner") from exc
     except (OSError, ValueError, TypeError, KeyError) as exc:
         raise QualityControlFailure(f"pipeline plan validation failed: {exc}") from exc
-    expected = _expected_plan(spec)
+    expected = cast(dict[str, list[dict[str, str]]], _expected_plan(spec))
     expected_effects = [
         *[
             {
@@ -309,6 +309,8 @@ def _candidate_qa(spec: Any, proof: Mapping[str, Any]) -> dict[str, object]:
 
 
 def _financial_evidence(proof: Mapping[str, Any]) -> dict[str, object]:
+    from portfolio_financial_outcomes import financial_outcomes_semantic_identity
+
     if (
         proof.get("status") != "PASS"
         or tuple(proof.get("outcome_ids", ())) != REQUIRED_OUTCOMES
@@ -318,6 +320,7 @@ def _financial_evidence(proof: Mapping[str, Any]) -> dict[str, object]:
     selected_cells = proof.get("selected_cells")
     consumers = proof.get("consumers")
     capital_result_id = proof.get("capital_result_id")
+    work_counters = proof.get("work_counters")
     if (
         not isinstance(artifact_sha256s, dict)
         or not artifact_sha256s
@@ -327,11 +330,24 @@ def _financial_evidence(proof: Mapping[str, Any]) -> dict[str, object]:
         or not consumers
         or not isinstance(capital_result_id, str)
         or len(capital_result_id) != 64
+        or not isinstance(work_counters, dict)
+        or set(work_counters)
+        != {
+            "model_fit_calls",
+            "grid_search_calls",
+            "correlation_build_calls",
+            "full_rederivation_count",
+            "receipt_reuse_count",
+        }
+        or any(
+            not isinstance(value, int) or value < 0 for value in work_counters.values()
+        )
     ):
         raise QualityControlFailure("financial outcome proof is incomplete")
     return {
         "artifact_sha256s": dict(sorted(artifact_sha256s.items())),
         "capital_result_id": capital_result_id,
+        "financial_outcomes_sha256": financial_outcomes_semantic_identity(proof),
         "consumer_proof_sha256": hashlib.sha256(
             _canonical_bytes(consumers)
         ).hexdigest(),
@@ -339,6 +355,7 @@ def _financial_evidence(proof: Mapping[str, Any]) -> dict[str, object]:
         "selected_cells_sha256": hashlib.sha256(
             _canonical_bytes(selected_cells)
         ).hexdigest(),
+        "work_counters": dict(sorted(work_counters.items())),
     }
 
 
@@ -683,7 +700,8 @@ def _post_release(args: argparse.Namespace) -> Path:
     manifest = _read_committed_release(spec)
     committed = _verify_committed_manifest(spec, manifest)
     state = _production_snapshot(spec)
-    if not state["authority"].get("exists"):
+    authority = cast(Mapping[str, object], state["authority"])
+    if authority.get("exists") is not True:
         raise QualityControlFailure("committed coordination authority is unavailable")
     if _production_snapshot(spec) != state:
         raise QualityControlFailure("production state changed during post-release QA")

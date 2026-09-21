@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 from collections import Counter, defaultdict
 import copy
 from datetime import date, datetime, timedelta
@@ -343,7 +344,14 @@ def _closed_frontend_resources(candidate_dir: Path) -> tuple[bool, object]:
     actual = Counter(parser.references)
     expected = Counter(_ALLOWED_FRONTEND_REFERENCES)
     for relative in (REPORT_DOWNLOAD, WORKBOOK_DOWNLOAD):
-        if _filesystem_path(candidate_dir / relative).is_file():
+        # A download is offered either as a file beside the page or as base64
+        # payload elements inside it. The workbook is only ever the latter, so
+        # presence on disk no longer decides whether its link is expected.
+        payload_prefix = _DOWNLOAD_METADATA[relative][2]
+        offered = _filesystem_path(candidate_dir / relative).is_file() or (
+            f'data-download-payload-prefix="{payload_prefix}"' in html
+        )
+        if offered:
             expected[("a", "href", relative)] += 1
     css_has_dynamic_resource = _css_has_dynamic_resource(styles)
     is_closed = (
@@ -1116,6 +1124,42 @@ def _report_downloads(
     files[WORKBOOK_DOWNLOAD] = workbook_bytes
     bindings["report_workbook"] = (workbook_path, workbook_sha256)
     return files, bindings
+
+
+def embedded_download_bytes(html: str, relative_path: str) -> bytes:
+    """Recover a download the page carries inline rather than as a file.
+
+    The workbook is delivered only as base64 payload elements inside
+    `index.html`, because an .xlsx written into a published generation is
+    rewritten in place by the SharePoint sync client and a sealed directory
+    cannot tolerate that. Anything that needs those bytes -- the browser, and
+    the financial-outcome validator's workbook parity receipt -- reads them from
+    here, so all of them see the same bytes by construction.
+    """
+
+    metadata = _DOWNLOAD_METADATA.get(relative_path)
+    if metadata is None:
+        raise ControlPanelValidationError("embedded download is not a known payload")
+    prefix = metadata[2]
+    pattern = re.compile(
+        r'<script type="application/octet-stream" id="'
+        + re.escape(prefix)
+        + r'-(\d{5})"[^>]*>([^<]*)</script>'
+    )
+    chunks = sorted(
+        ((int(index), payload) for index, payload in pattern.findall(html)),
+        key=lambda item: item[0],
+    )
+    if not chunks or [index for index, _ in chunks] != list(range(len(chunks))):
+        raise ControlPanelValidationError("embedded download payload is incomplete")
+    try:
+        return base64.b64decode(
+            "".join(payload for _, payload in chunks), validate=True
+        )
+    except (ValueError, binascii.Error) as exc:
+        raise ControlPanelValidationError(
+            "embedded download payload is not valid base64"
+        ) from exc
 
 
 def _report_download_link(relative_path: str, label: str, content: bytes) -> str:
@@ -2963,6 +3007,17 @@ def _suppress_unmatched_report_performance(
             "flow_count",
             "flow_timing",
             "mwr_xirr",
+            "mwr_opening_date",
+            "mwr_opening_value",
+            "mwr_terminal_date",
+            "mwr_terminal_value",
+            "mwr_currency",
+            "mwr_label",
+            "mwr_value_basis",
+            "mwr_valuation_timing",
+            "mwr_day_count",
+            "mwr_unit",
+            "mwr_source_binding",
             "nav_observations",
             "observed_start",
             "observed_end",
@@ -2979,10 +3034,71 @@ def _suppress_unmatched_report_performance(
             "twr",
         ):
             row[field] = None
+        row["mwr_reason"] = "SOURCE_LINEAGE_MISMATCH"
+        row["mwr_coverage_status"] = "BLOCKED"
+        row["mwr_cashflows"] = []
         for field in ("twr_status", "mwr_status", "return_path_status"):
             row[field] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         suppressed.append(row)
     return suppressed
+
+
+def _validate_mwr_perimeter(rows: Sequence[Mapping[str, Any]]) -> None:
+    """Keep the panel a strict projection of governed report MWR facts."""
+    for row in rows:
+        status = row.get("mwr_status")
+        if status == "AVAILABLE":
+            required = (
+                "mwr_xirr",
+                "mwr_opening_date",
+                "mwr_opening_value",
+                "mwr_terminal_date",
+                "mwr_terminal_value",
+                "mwr_currency",
+                "mwr_coverage_status",
+                "mwr_cashflows",
+                "mwr_label",
+                "mwr_value_basis",
+                "mwr_valuation_timing",
+                "mwr_day_count",
+                "mwr_unit",
+                "mwr_source_binding",
+            )
+            if any(row.get(field) is None for field in required):
+                raise ControlPanelValidationError("available MWR payload is incomplete")
+            if row.get("mwr_coverage_status") != "COMPLETE":
+                raise ControlPanelValidationError(
+                    "available MWR coverage is incomplete"
+                )
+            basis = row.get("mwr_value_basis")
+            label = row.get("mwr_label")
+            if (basis == "STRATEGY_NAV") != (label == "STRATEGY_EPOCH_MWR"):
+                raise ControlPanelValidationError(
+                    "MWR label differs from valuation perimeter"
+                )
+            cashflows = _objects(row.get("mwr_cashflows"), "MWR cashflows")
+            if not cashflows or any(
+                not isinstance(flow.get("source_record_ids"), list)
+                or not flow["source_record_ids"]
+                or not all(
+                    isinstance(source_id, str) and source_id
+                    for source_id in flow["source_record_ids"]
+                )
+                for flow in cashflows
+            ):
+                raise ControlPanelValidationError(
+                    "MWR cashflow source identities are absent"
+                )
+        elif status not in {
+            "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
+            "BLOCKED_ADMISSION",
+        }:
+            if row.get("mwr_xirr") is not None or not isinstance(
+                row.get("mwr_reason"), str
+            ):
+                raise ControlPanelValidationError(
+                    "unavailable MWR must retain reason and null rate"
+                )
 
 
 def _suppress_unmatched_strategy_performance(
@@ -3257,6 +3373,7 @@ def _governed_hwm_coverage(
     freshness_health: Sequence[Mapping[str, Any]] | None = None,
     *,
     require_freshness: bool = False,
+    calculation_boundary: str | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     try:
         return governed_hwm_coverage(
@@ -3264,6 +3381,7 @@ def _governed_hwm_coverage(
             policy,
             freshness_health,
             require_freshness=require_freshness,
+            calculation_boundary=calculation_boundary,
         )
     except HwmCoverageError as exc:
         raise ControlPanelValidationError(str(exc)) from exc
@@ -3867,13 +3985,48 @@ def _factor_contribution_summary(model: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _schema_three_orthogonal_surface(
+    model: Mapping[str, Any], model_id: str, methodology_manifest_sha256: str
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Accept only the producer's named raw and orthogonal analytics receipts."""
+    orthogonal = _object(
+        model.get("orthogonal_attribution"), "model.orthogonal_attribution"
+    )
+    identities = _object(
+        model.get("analytics_identities"), "model.analytics_identities"
+    )
+    raw_identity = _object(identities.get("raw"), "model.analytics_identities.raw")
+    orthogonal_identity = _object(
+        identities.get("orthogonal"), "model.analytics_identities.orthogonal"
+    )
+    if (
+        raw_identity.get("model_id") != model_id
+        or raw_identity.get("methodology_manifest_sha256")
+        != methodology_manifest_sha256
+        or raw_identity.get("surface") not in {"RAW_MODEL", "RAW_CONSTRAINED_RBSA"}
+        or orthogonal_identity.get("model_id") != model_id
+        or orthogonal_identity.get("methodology_manifest_sha256")
+        != methodology_manifest_sha256
+        or orthogonal_identity.get("surface") != "ORTHOGONAL_RISK_ATTRIBUTION"
+    ):
+        raise ControlPanelValidationError("schema-three orthogonal identity differs")
+    interval = _object(model.get("interval_association"), "model.interval_association")
+    if (
+        interval.get("evaluation_information_set") != "RETROSPECTIVE_SELECTED_SNAPSHOT"
+        or interval.get("holdout_display_claim")
+        != "holdout association using selected historical snapshot"
+    ):
+        raise ControlPanelValidationError("schema-three orthogonal interval differs")
+    return orthogonal, identities, interval
+
+
 def _factor_analysis(
     decomposition: Mapping[str, Any],
     identity: Mapping[str, str],
     strategy_names: set[str],
 ) -> dict[str, Any]:
     analytics_schema_version = decomposition.get("analytics_schema_version")
-    if analytics_schema_version not in {1, 2}:
+    if analytics_schema_version not in {1, 2, 3}:
         raise ControlPanelValidationError("factor analytics schema is unsupported")
     method_label = _text(decomposition.get("method_label"), "factor.method_label")
     methodology_version = _text(
@@ -3998,6 +4151,31 @@ def _factor_analysis(
             model_quality.get("decision_status"), "model_quality.decision_status"
         )
         model_status = _text(model.get("status"), "model.status")
+        orthogonal_attribution: dict[str, Any] | None = None
+        analytics_identities: dict[str, Any] | None = None
+        interval_association: dict[str, Any] | None = None
+        if analytics_schema_version == 3:
+            (
+                orthogonal_attribution,
+                analytics_identities,
+                interval_association,
+            ) = _schema_three_orthogonal_surface(
+                model,
+                model_id,
+                _text(
+                    decomposition.get("methodology_manifest_sha256"),
+                    "factor.methodology_manifest_sha256",
+                ),
+            )
+        orthogonal_surface_fields = (
+            {
+                "analytics_identities": analytics_identities,
+                "interval_association": interval_association,
+                "orthogonal_attribution": orthogonal_attribution,
+            }
+            if analytics_schema_version == 3
+            else {}
+        )
         if computational_status != "AVAILABLE":
             raise ControlPanelValidationError(
                 f"selected factor model was not computed: {series_id}"
@@ -4055,6 +4233,7 @@ def _factor_analysis(
                     "exposures": diagnostic_exposures,
                     "model_id": model_id,
                     "model_quality": model_quality,
+                    **orthogonal_surface_fields,
                     "selection_status": _text(
                         selection.get("status"), "selection.status"
                     ),
@@ -4097,6 +4276,7 @@ def _factor_analysis(
                 "exposures": _objects(model.get("exposures"), "model.exposures"),
                 "model_id": model_id,
                 "model_quality": model_quality,
+                **orthogonal_surface_fields,
                 "selection_status": _text(selection.get("status"), "selection.status"),
                 "series_composition": series_composition.get(series_id, {}),
                 "series_id": series_id,
@@ -4122,7 +4302,7 @@ def _factor_analysis(
         )
         if accepted_proxy_governance.get("candidate_count") != len(proxies):
             raise ControlPanelValidationError("factor proxy candidate count differs")
-    if analytics_schema_version == 2 and not accepted_proxy_governance["proxies"]:
+    if analytics_schema_version in {2, 3} and not accepted_proxy_governance["proxies"]:
         raise ControlPanelValidationError("schema-v2 factor proxy governance is absent")
     return {
         "analytics_schema_version": analytics_schema_version,
@@ -4266,8 +4446,8 @@ def verify_decomposition_surface_against_plan(
     )
     if (
         manifest.get("builder") != "portfolio-current-decomposition-plan"
-        or manifest.get("builder_version") != "0.17.0"
-        or manifest.get("schema_version") != 2
+        or (manifest.get("builder_version"), manifest.get("schema_version"))
+        not in {("0.17.0", 2), ("0.18.0", 2)}
         or manifest.get("bundle_id") != plan_bundle.name
     ):
         raise ControlPanelValidationError("current decomposition plan identity differs")
@@ -4583,11 +4763,12 @@ def _decomposition_lenses_for_mode(
     dispositions, _dispositions_content, dispositions_sha256 = _json_snapshot(
         dispositions_path, "candidate dispositions"
     )
-    current_plan = (
-        manifest.get("builder") == "portfolio-current-decomposition-plan"
-        and manifest.get("builder_version") == "0.17.0"
-        and manifest.get("schema_version") == 2
-    )
+    current_plan = manifest.get(
+        "builder"
+    ) == "portfolio-current-decomposition-plan" and (
+        manifest.get("builder_version"),
+        manifest.get("schema_version"),
+    ) in {("0.17.0", 2), ("0.18.0", 2)}
     if current_plan:
         if manifest.get("bundle_id") != plan_bundle.name:
             raise ControlPanelValidationError(
@@ -4734,13 +4915,13 @@ def _decomposition_lenses_for_mode(
                 static_root,
                 filename="decomposition.json",
                 field_name=f"{source_label} STATIC decomposition",
-                expected_schema_version=(1, 2),
+                expected_schema_version=(1, 2, 3),
             )
             dynamic, dynamic_identity, dynamic_path = _current_analytics(
                 dynamic_surface_root,
                 filename="decomposition.json",
                 field_name=f"{source_label} DYNAMIC_FLS decomposition",
-                expected_schema_version=(1, 2),
+                expected_schema_version=(1, 2, 3),
             )
             surface_inputs = (
                 ("STATIC", decomposition, identity, path),
@@ -4751,7 +4932,7 @@ def _decomposition_lenses_for_mode(
                 root / source_key,
                 filename="decomposition.json",
                 field_name=f"{source_label} decomposition",
-                expected_schema_version=(1, 2),
+                expected_schema_version=(1, 2, 3),
             )
             surface_inputs = (("STATIC", decomposition, identity, path),)
         for surface, surface_value, surface_identity, surface_path in surface_inputs:
@@ -4919,7 +5100,7 @@ def _decomposition_lenses(
                 dynamic_root,
                 filename="decomposition.json",
                 field_name="hybrid dynamic-style decomposition",
-                expected_schema_version=(1, 2),
+                expected_schema_version=(1, 2, 3),
             )
             if dynamic.get("evidence_mode") != "LIVE_PLUS_BACKTEST":
                 raise ControlPanelValidationError(
@@ -5346,11 +5527,14 @@ def _report_hybrid_mode_gate(
             in dependence_names
         ]
     )
-    globally_eligible = (
-        gate["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
-        and len(gate.get("eligible_strategies", [])) == len(dependence_names)
-        and not gate.get("blocked_strategies")
-    )
+    # Partial coverage opens the hybrid sources; the per-strategy readers below
+    # keep a blocked strategy live-only inside the mode. See the note beside
+    # the builder's gate for why requiring full coverage here stripped the mode
+    # from the whole release.
+    globally_eligible = gate["status"] in {
+        "ELIGIBLE_PROVEN_COMPATIBLE",
+        "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
+    }
     return gate, globally_eligible
 
 
@@ -5363,11 +5547,15 @@ def _govern_weekly_hybrid_modes(
         and isinstance(source_modes, list)
         and "LIVE_PLUS_BACKTEST" in source_modes
     )
-    hybrid_eligible = (
-        gate["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
-        and bool(gate.get("eligible_strategies"))
-        and not gate.get("blocked_strategies")
-    )
+    # Partial coverage is expressed per strategy below: an eligible strategy
+    # keeps its hybrid coverage and must match the registry version, and a
+    # blocked one keeps its live history with no hybrid value, calendar,
+    # metadata or coverage claim. Requiring a globally clean gate here skipped
+    # that machinery entirely and stripped the mode from every strategy.
+    hybrid_eligible = bool(gate.get("eligible_strategies")) and gate["status"] in {
+        "ELIGIBLE_PROVEN_COMPATIBLE",
+        "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
+    }
     accepted = {
         **weekly,
         "hybrid_mode_reason": (
@@ -7722,6 +7910,7 @@ def _panel_data(
         # rejected-lineage representation; otherwise a post-cutoff value could
         # be erased and silently admitted.
         performance = _suppress_unmatched_report_performance(performance)
+    _validate_mwr_perimeter(performance)
     referenced_account_ids = _referenced_current_account_ids((*performance, *positions))
     missing_account_ids = referenced_account_ids - set(account_ids)
     if missing_account_ids:
@@ -7752,12 +7941,21 @@ def _panel_data(
         in dependence_strategy_names
     ]
     hybrid_mode_gate = _hybrid_mode_gate(dependence_strategies)
-    globally_hybrid_eligible = (
-        hybrid_mode_gate["status"] == "ELIGIBLE_PROVEN_COMPATIBLE"
-        and len(hybrid_mode_gate.get("eligible_strategies", []))
-        == len(dependence_strategy_names)
-        and not hybrid_mode_gate.get("blocked_strategies")
-    )
+    # Partial coverage publishes. `_hybrid_mode_gate` returns
+    # ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY when some strategies have an
+    # accepted version-bound history and others do not, and that is the status
+    # the published 2026-08-16 panel (control-panel generation 41f41362) shipped
+    # under: LIVE_PLUS_BACKTEST enabled for five strategy history paths, four
+    # blocked and live-only inside the hybrid mode. Requiring every dependence
+    # strategy to be eligible discarded that status and silently downgraded the
+    # whole release to LIVE_ONLY, which the contract's REQUIRED evidence_modes
+    # then refuse. A strategy without accepted prehistory is still represented;
+    # it is represented by its live-only segments, which is what the gate's
+    # blocked list records.
+    globally_hybrid_eligible = hybrid_mode_gate["status"] in {
+        "ELIGIBLE_PROVEN_COMPATIBLE",
+        "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
+    }
     evidence_by_strategy, evidence_identity = _strategy_evidence(
         report,
         report_identity,
@@ -7883,6 +8081,20 @@ def _panel_data(
                             series.get("series_id"), "hybrid decomposition series_id"
                         )
                         if strategy_name in eligible_versions:
+                            # A lens the strategy is method-scoped out of still
+                            # emits a row for it, with no model and no
+                            # composition. There is no hybrid version to check
+                            # because the lens decomposed nothing, and a row
+                            # without a model cannot have consumed backtest
+                            # history.
+                            if (
+                                series.get("model_id") is None
+                                and _text(
+                                    series.get("status"), "hybrid decomposition status"
+                                )
+                                == "UNAVAILABLE"
+                            ):
+                                continue
                             composition = _object(
                                 series.get("series_composition"),
                                 f"hybrid decomposition composition {strategy_name}",
@@ -8118,6 +8330,13 @@ def _panel_data(
         effective_hwm_policy,
         freshness_health,
         require_freshness=True,
+        # The same common end date the report truncated every series to, so
+        # the panel qualifies the perimeter exactly as the report did.
+        calculation_boundary=(
+            str(report["calculation_cutoff_date"])
+            if report.get("calculation_cutoff_date") is not None
+            else None
+        ),
     )
     # Governed authority: the retained baseline named by the report is the
     # source, while owner controls independently project its seven-strategy
@@ -8603,7 +8822,7 @@ def _panel_data(
                 if position_count
                 else "Positions and FX remain unavailable; the panel does not infer either."
             ),
-            "MWR remains unavailable when complete external-flow coverage is absent.",
+            "MWR is annualized ACTUAL_365 and remains unavailable unless its declared valuation perimeter and complete dated source-bound flows are present.",
             *(
                 [
                     "Report-derived performance is unavailable because its provider-ledger lineage differs from the verified epoch manifest."
@@ -8829,6 +9048,7 @@ def _panel_data(
         "strategy_underwriting": strategy_underwriting,
         "hwm_summary": hwm_summary,
         "hybrid_mode_gate": hybrid_mode_gate,
+        "leverage_disclosures": list(report["leverage_disclosures"]),
         "weekly_returns": accepted_weekly_returns,
     }
     if portable_hwm_proof is not None:
@@ -9823,7 +10043,7 @@ def _rendered_files(
         resolved_decomposition,
         filename="decomposition.json",
         field_name="portfolio factor decomposition",
-        expected_schema_version=(1, 2),
+        expected_schema_version=(1, 2, 3),
     )
     correlation, correlation_identity, correlation_path = _current_analytics(
         resolved_correlation,
@@ -10182,7 +10402,24 @@ def _rendered_files(
     files["index.html"] = files["index.html"].replace(
         _DOWNLOAD_PLACEHOLDER, " ".join(links).encode("utf-8")
     )
-    files.update(downloads)
+    # The workbook is served from the base64 payload inlined above, never from a
+    # file beside the page: `app.js` intercepts the click and rebuilds it from
+    # those chunks, and only reads the href as an identifier. Keeping an .xlsx in
+    # the generation directory is therefore pure liability -- the production
+    # roots live under a SharePoint sync root, and the sync client rewrites
+    # Office documents in place, injecting `customXml` document properties. That
+    # silently changes bytes inside a published, content-addressed generation:
+    # it is what left the 2026-08-16 report pointer unverifiable, and what made
+    # two byte-identical copies of this workbook diverge from each other during
+    # materialisation. Every other artifact this pipeline publishes is a format
+    # the sync client leaves alone.
+    files.update(
+        {
+            relative: content
+            for relative, content in downloads.items()
+            if relative != WORKBOOK_DOWNLOAD
+        }
+    )
     bound_inputs: dict[str, tuple[Path, str]] = {
         "report": (report_path, report_identity_values["sha256"]),
         "decomposition": (decomposition_path, decomposition_identity["sha256"]),
@@ -11490,12 +11727,12 @@ def verify_candidate(
             "decomposition lens modes",
         )
     )
-    globally_hybrid_eligible = (
-        hybrid_status == "ELIGIBLE_PROVEN_COMPATIBLE"
-        and len(_objects(hybrid_gate.get("eligible_strategies"), "eligible strategies"))
-        == len(required_analysis_series)
-        and not hybrid_gate.get("blocked_strategies")
-    )
+    # The verifier has to accept exactly what the builder publishes, including
+    # partial coverage; see the note beside the builder's own gate.
+    globally_hybrid_eligible = hybrid_status in {
+        "ELIGIBLE_PROVEN_COMPATIBLE",
+        "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY",
+    }
     checks.append(
         _check(
             "Hybrid analytics fail closed on strategy-version compatibility",
@@ -11537,8 +11774,13 @@ def verify_candidate(
         "report_generation_id": data["meta"]["report_generation_id"],
     }
     if not result["all_passed"]:
-        failed = ", ".join(
-            str(row["check"]) for row in checks if row["status"] != "PASS"
+        # Name the observed values, not just the check. Every one of these
+        # checks already carries the detail that decided it, and printing only
+        # the title turns a one-line diagnosis into a bisect.
+        failed = "; ".join(
+            "%s %s" % (row["check"], json.dumps(row.get("evidence"), sort_keys=True))
+            for row in checks
+            if row["status"] != "PASS"
         )
         raise ControlPanelValidationError(f"candidate verification failed: {failed}")
     return result

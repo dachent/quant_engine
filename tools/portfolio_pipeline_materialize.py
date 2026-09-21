@@ -106,6 +106,13 @@ SCHEMA_9_VERTICAL_RECIPE_KEYS = frozenset(
     }
 )
 RELEASE_ROLES = ("ledger", "baseline", "report", "panel")
+# Roles whose release-builder path validates the private stage target against
+# production and therefore requires --portfolio-root on a financial run.
+_PORTFOLIO_ROOT_STAGES: Final = ("workbook", "panel")
+# The roles whose staged output depends on the governed numerical results. A
+# run that binds them into one of these and not the others produces two
+# different semantic validations of the same release.
+_GOVERNED_OUTCOME_STAGES: Final = ("report", "workbook", "panel")
 ROOT_IDS = {
     "ledger": "provider-ledger",
     "baseline": "baseline",
@@ -221,6 +228,92 @@ def _hwm_binding_paths(
     return {key: Path(value).resolve() for key, value in values.items() if value}
 
 
+def _governed_stage_paths(
+    hwm_governed_result_path: Path | None,
+    hwm_governed_input_generation_path: Path | None,
+    hwm_governed_calendar_authority_path: Path | None,
+    hwm_governed_admission_receipt_path: Path | None,
+    invested_capital_result_path: Path | None,
+    invested_capital_input_generation_path: Path | None,
+) -> dict[str, Path]:
+    """Resolve the governed numerical results the staging roles read.
+
+    All six move together. A run that gave the report an invested-capital
+    result but not a governed HWM would publish a report the panel cannot
+    verify, so a partial set is refused rather than silently narrowed.
+    """
+    values = {
+        "--hwm-governed-result": hwm_governed_result_path,
+        "--hwm-governed-input-generation": hwm_governed_input_generation_path,
+        "--hwm-governed-calendar-authority": hwm_governed_calendar_authority_path,
+        "--hwm-governed-admission-receipt": hwm_governed_admission_receipt_path,
+        "--invested-capital-result": invested_capital_result_path,
+        "--invested-capital-input-generation": (invested_capital_input_generation_path),
+    }
+    if all(value is None for value in values.values()):
+        return {}
+    if any(value is None for value in values.values()):
+        raise MaterializationError(
+            "governed numerical results must be supplied together"
+        )
+    resolved = {}
+    for flag, value in values.items():
+        assert value is not None
+        path = Path(value).resolve()
+        if path.is_symlink() or not path.is_file():
+            raise MaterializationError(f"governed result is absent or linked: {flag}")
+        resolved[flag] = path
+    return resolved
+
+
+def _generation_admission_policy(generation_root: Path) -> Path:
+    """Resolve the admission policy a schema-10 recipe binds through its generation.
+
+    A schema-9 recipe names the five epoch-manifest inputs as files, and the
+    admission policy is one of them. Schema 10 binds the verified generation
+    instead, so the policy travels inside it and there is no separate input to
+    name -- which is why demanding one refused every schema-10 release here.
+
+    Nothing trusts a file name. The generation pins the policy digest in its own
+    `selected-input-identities.json`, the manifest says which artifact carries
+    that digest, and the bytes on disk have to agree with both.
+    """
+
+    identities = _load(
+        generation_root / "authority" / "selected-input-identities.json",
+        "selected input identities",
+    )
+    declared = identities.get("admission_policy")
+    if not isinstance(declared, Mapping):
+        raise MaterializationError("selected HWM admission policy binding is absent")
+    manifest = _load(generation_root / "generation.json", "account manifest generation")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise MaterializationError("selected HWM admission policy binding differs")
+    matches = [
+        row
+        for row in artifacts
+        if isinstance(row, Mapping)
+        and row.get("sha256") == declared.get("sha256")
+        and row.get("size_bytes") == declared.get("size_bytes")
+    ]
+    if len(matches) != 1:
+        raise MaterializationError("selected HWM admission policy binding differs")
+    relative = _text(matches[0].get("artifact_id"), "admission policy artifact_id")
+    parts = relative.split("/")
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise MaterializationError("selected HWM admission policy binding differs")
+    policy = generation_root.joinpath(*parts)
+    if policy.is_symlink() or not policy.is_file():
+        raise MaterializationError("selected HWM admission policy binding is absent")
+    content = policy.read_bytes()
+    if hashlib.sha256(content).hexdigest() != declared.get("sha256") or len(
+        content
+    ) != declared.get("size_bytes"):
+        raise MaterializationError("selected HWM admission policy binding differs")
+    return policy
+
+
 def _production_hwm_source_paths(
     sources: Mapping[str, Path],
     artifact_rows: Sequence[Mapping[str, Any]],
@@ -250,12 +343,13 @@ def _production_hwm_source_paths(
         != account_path.resolve()
     ):
         raise MaterializationError("selected HWM account generation binding differs")
-    if not isinstance(manifest_inputs, Mapping):
-        raise MaterializationError("selected HWM admission policy binding is absent")
-    admission = manifest_inputs.get("account_strategy_admission_policy")
-    admission_path = _validate_file_definition(
-        admission, "account strategy admission policy"
-    )
+    if isinstance(manifest_inputs, Mapping):
+        admission_path = _validate_file_definition(
+            manifest_inputs.get("account_strategy_admission_policy"),
+            "account strategy admission policy",
+        )
+    else:
+        admission_path = _generation_admission_policy(account_path.parent)
     try:
         provider_path = sources["provider-ledger"] / "generation.json"
         baseline_path = sources["portfolio-baseline"] / "generation.json"
@@ -740,13 +834,19 @@ def _financial_mvp_module() -> Any:
     return module
 
 
-def _stage_epoch_manifest_bundle_prewire(
+def _bind_epoch_manifest_bundle(
     generation_root: Path,
     generation_id: str,
     financial_contract: Mapping[str, Any],
-    output_root: Path,
-) -> tuple[dict[str, Any], dict[str, object]]:
-    """Bind and stage one verified epoch-manifest generation bundle."""
+) -> dict[str, Any]:
+    """Bind the financial contract to one verified epoch-manifest generation.
+
+    This binds and validates; it does not stage the manifest into the run
+    root. The panel command writes that file itself from the same verified
+    bundle, and `build-panel` declares the directory it writes, so seeding it
+    here made the node's own output pre-exist its pipeline receipt and every
+    plan refused the run before it started.
+    """
 
     try:
         bundle = read_generation_bundle(generation_root, generation_id)
@@ -757,7 +857,10 @@ def _stage_epoch_manifest_bundle_prewire(
     financial_module = _financial_mvp_module()
     try:
         source = financial_module.epoch_manifest_source_from_bundle(bundle)
-        payload = bundle.payloads["outputs/account-strategy-manifest.json"]
+        # The lookup is the check: a bundle that verified but carries no
+        # manifest payload raises KeyError here rather than binding a source
+        # document to a generation that does not contain it.
+        _manifest_payload = bundle.payloads["outputs/account-strategy-manifest.json"]
     except (
         AttributeError,
         KeyError,
@@ -799,9 +902,7 @@ def _stage_epoch_manifest_bundle_prewire(
     if canonical_json_bytes(validated) != canonical_json_bytes(augmented):
         raise MaterializationError("bound financial MVP contract validation differs")
 
-    staged_path = output_root / "stages" / "panel" / "account-strategy-manifest.json"
-    _write_exact(staged_path, payload)
-    return augmented, _file_definition(staged_path)
+    return augmented
 
 
 def _account_strategy_manifest_module() -> Any:
@@ -862,6 +963,127 @@ def _manifest_artifact_bytes(
             f"provider ledger artifact identity differs: {artifact_id}"
         )
     return content
+
+
+def _schwab_selected_point_positions(
+    manifest: GenerationManifest,
+    source: Mapping[str, Any],
+    requested_as_of: date,
+) -> dict[str, dict[str, Any]] | None:
+    """Reconstruct point facts from reopened source authority, not ledger flags."""
+    metadata = source.get("position_snapshot_as_of")
+    if not isinstance(metadata, dict) or "observed_at" not in metadata:
+        return None
+    try:
+        clock = metadata["observed_at"]
+        captured = datetime.fromisoformat(clock)
+        day = captured.date()
+        transport = source["current_transport"]
+        artifacts = [
+            item
+            for item in source["source_artifacts"]
+            if item["schema"]["name"] == "schwab-api-current-snapshot"
+        ]
+        if (
+            captured.tzinfo is None
+            or captured.utcoffset() is None
+            or day != manifest.as_of_date
+            or source["as_of_date"] != day.isoformat()
+            or source["catalog_schema_version"] not in {2, 3}
+            or manifest.adapter.name != "quant-engine-schwab"
+            or len(artifacts) != 1
+            or transport not in {"WEB_CONTRACT", "DEVELOPER_API"}
+        ):
+            raise ValueError("point clock/date/transport differs")
+        artifact = artifacts[0]
+        if (
+            artifact["as_of_date"] != day.isoformat()
+            or artifact["schema"]["version"] not in {"1", "2"}
+            or (artifact["schema"]["version"] == "1" and transport != "DEVELOPER_API")
+            or type(artifact["size_bytes"]) is not int
+            or artifact["size_bytes"] < 1
+            or [
+                a.to_dict()
+                for a in manifest.artifacts
+                if a.artifact_id == artifact["artifact_id"]
+            ]
+            != [artifact]
+            or len(
+                [
+                    a
+                    for a in source["source_artifacts"]
+                    if a["artifact_id"] == artifact["artifact_id"]
+                ]
+            )
+            != 1
+        ):
+            raise ValueError("point selected artifact differs")
+        accounts = {row["account_id"] for row in source["accounts"]}
+        current = source["current_accounts"]
+        if (
+            not accounts
+            or len(accounts) != len(source["accounts"])
+            or {row["account_id"] for row in current} != accounts
+            or len(current) != len(accounts)
+            or any(row["observed_at"] != clock for row in current)
+        ):
+            raise ValueError("point account/clock scope differs")
+        expected = {}
+        for native in source["positions"]:
+            identity = {
+                "account_id": native["account_id"],
+                "as_of_date": native["as_of_date"],
+                "security_id": native["security_id"],
+            }
+            record_id = native["record_id"]
+            if (
+                native["account_id"] not in accounts
+                or native["as_of_date"] != day.isoformat()
+                or native["observed_at"] != clock
+                or native["security_id"]
+                != "security-schwab-"
+                + hashlib.sha256(native["symbol"].encode()).hexdigest()[:24]
+                or record_id
+                != "position-"
+                + hashlib.sha256(canonical_json_bytes(identity)).hexdigest()[:24]
+                or record_id in expected
+                or native.get("source_artifact_id", artifact["artifact_id"])
+                != artifact["artifact_id"]
+                or native["evidence_class"]
+                != (
+                    "WCH_CURRENT"
+                    if transport == "WEB_CONTRACT"
+                    else "DEVELOPER_API_CURRENT"
+                )
+            ):
+                raise ValueError("point native row scope differs")
+            expected[record_id] = {
+                **{
+                    key: native[key]
+                    for key in (
+                        "account_id",
+                        "as_of_date",
+                        "observed_at",
+                        "quantity",
+                        "market_value",
+                        "average_price",
+                        "security_id",
+                    )
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "schwab",
+                "record_id": "schwab:" + record_id,
+                "source_record_id": record_id,
+                "source_artifact_id": artifact["artifact_id"],
+                "generation_id": manifest.generation_id,
+            }
+        if source["current_position_account_count"] != len(
+            {row["account_id"] for row in expected.values()}
+        ):
+            raise ValueError("point position account count differs")
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        raise MaterializationError("Schwab selected point authority differs") from exc
+    return expected if day <= requested_as_of else None
 
 
 def _provider_admission_authority(
@@ -966,6 +1188,219 @@ def _provider_admission_authority(
         )
     except (RuntimeError, ValueError) as exc:
         raise MaterializationError("provider admission receipt is invalid") from exc
+    observation = receipt.get("run_observation")
+    if observation is not None:
+        # Reopen selection and inputs independently. Receipt counts/hashes and
+        # candidate dispositions are outputs, never the source inventory oracle.
+        module_spec = importlib.util.spec_from_file_location(
+            "_admission_source_reader", Path(__file__).with_name("provider_ledger.py")
+        )
+        if module_spec is None or module_spec.loader is None:
+            raise MaterializationError("provider source reader is unavailable")
+        reader = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(reader)
+        try:
+            observation = reader._object(observation, "provider run observation")
+            observation_path = reader._absolute_regular_path(
+                observation["path"], "provider run observation"
+            )
+            observed, digest, size = reader._verified_json(
+                observation_path,
+                observation["sha256"],
+                "provider run observation",
+            )
+            if (
+                size != observation["size_bytes"]
+                or set(observed)
+                != {
+                    "schema_version",
+                    "policy_contract_sha256",
+                    "financial_cutoff",
+                    "captured_at_utc",
+                    "providers",
+                }
+                or observed.get("schema_version") != 1
+                or observed.get("policy_contract_sha256") != contract_raw_sha256
+                or observed.get("financial_cutoff") != catalog["as_of_date"]
+                or any(
+                    observed.get(key) != observation.get(key)
+                    for key in (
+                        "captured_at_utc",
+                        "financial_cutoff",
+                        "policy_contract_sha256",
+                    )
+                )
+            ):
+                raise MaterializationError("provider run observation identity differs")
+            reader._utc_timestamp(
+                observed["captured_at_utc"], "run observation capture"
+            )
+            selected = reader._object(
+                observed["providers"], "run observation providers"
+            )
+            if set(selected) != set(reader._PROVIDER_CATALOGS):
+                raise MaterializationError("provider run observation selection differs")
+            identities, manifests, catalogs = [], {}, {}
+            facts: dict[str, dict[str, list[dict[str, Any]]]] = {}
+            cutoff = date.fromisoformat(observed["financial_cutoff"])
+            for provider_id, selection in sorted(selected.items()):
+                reference = {
+                    key: selection[key]
+                    for key in (
+                        "root",
+                        "generation_id",
+                        "manifest_sha256",
+                        "catalog_sha256",
+                        "qualification",
+                    )
+                }
+                identity, source_manifest, source_catalog, _, _ = reader._provider(
+                    provider_id,
+                    reference,
+                    cutoff,
+                    run_observation=observed,
+                )
+                identities.append(identity)
+                manifests[provider_id] = source_manifest
+                catalogs[provider_id] = source_catalog
+                facts[provider_id] = {}
+                effective = min(
+                    cutoff, date.fromisoformat(selection["finalized_through"])
+                )
+                point_positions = (
+                    _schwab_selected_point_positions(
+                        source_manifest, source_catalog, cutoff
+                    )
+                    if provider_id == "schwab"
+                    else None
+                )
+                for fact_name in reader._TARGET_ADMISSION_FACT:
+                    rows = reader._objects(catalog.get(fact_name, []), fact_name)
+                    if any(row.get("provider_id") not in selected for row in rows):
+                        raise MaterializationError(
+                            "materialized provider fact scope differs"
+                        )
+                    if fact_name == "provider_strategy_returns":
+                        continue
+                    rows = [row for row in rows if row["provider_id"] == provider_id]
+                    point_bound = (
+                        fact_name == "positions" and point_positions is not None
+                    )
+                    if point_bound:
+                        assert point_positions is not None
+                        if (
+                            len(rows) != len(point_positions)
+                            or {row.get("source_record_id") for row in rows}
+                            != set(point_positions)
+                            or any(
+                                {
+                                    key: value
+                                    for key, value in row.items()
+                                    if key not in {"mapping_status", "strategy_id"}
+                                }
+                                != point_positions.get(row.get("source_record_id"))
+                                for row in rows
+                            )
+                        ):
+                            raise MaterializationError(
+                                "materialized Schwab point differs from selected native positions"
+                            )
+                    if (
+                        provider_id == "ibkr"
+                        and fact_name in reader._NATIVE_LEVERAGE_OBSERVATION_FACTS
+                        and not rows
+                    ):
+                        continue
+                    for row in rows:
+                        days = [
+                            date.fromisoformat(row[field])
+                            for field in (
+                                "as_of_date",
+                                "event_date",
+                                "effective_date",
+                                "nav_recognition_date",
+                                "value_date",
+                                "accounting_date",
+                                "settlement_date",
+                                "period_start",
+                                "period_end",
+                                "report_date",
+                            )
+                            if row.get(field) not in {None, ""}
+                        ]
+                        if row.get("generation_id") != identity.generation_id or (
+                            any(
+                                day > (cutoff if point_bound else effective)
+                                for day in days
+                            )
+                        ):
+                            raise MaterializationError(
+                                "materialized provider fact cutoff or generation differs"
+                            )
+                    facts[provider_id][fact_name] = rows
+                for fact_name in ("strategy_returns", "provider_strategy_returns"):
+                    for row in reader._objects(catalog.get(fact_name, []), fact_name):
+                        if (
+                            row.get("provider_id") == provider_id
+                            and (
+                                fact_name == "provider_strategy_returns"
+                                or row.get("evidence_layer") == "ACCOUNT_LIVE"
+                            )
+                            and date.fromisoformat(row["date"]) > effective
+                        ):
+                            raise MaterializationError(
+                                "materialized strategy return cutoff differs"
+                            )
+            authority = {
+                "census_id": census["census_id"],
+                "census_sha256": census_sha256,
+                "contract": contract,
+                "sources": source_segments,
+                "contract_raw_sha256": contract_raw_sha256,
+                "contract_semantic_sha256": contract_semantic_sha256,
+                "product_id": product["product_id"],
+                "product_version": product["product_version"],
+                "run_observation": observed,
+                "run_observation_path": str(observation_path),
+                "run_observation_sha256": digest,
+                "run_observation_size_bytes": size,
+            }
+            reader._validate_current_census_provider_generations(
+                authority, identities, manifests
+            )
+            expected_receipt, _ = reader._admit_or_declare_receipt(
+                authority,
+                identities,
+                manifests,
+                catalogs,
+                facts,
+                reader._objects(
+                    catalog.get("provider_strategy_returns", []), "provider returns"
+                ),
+            )
+            if receipt != expected_receipt:
+                raise MaterializationError(
+                    "provider admission differs from independent source inventory or materialized facts"
+                )
+            expected_generations = [
+                {
+                    **identity.to_dict(),
+                    "generation_as_of_date": manifests[
+                        identity.provider_id
+                    ].as_of_date.isoformat(),
+                }
+                for identity in identities
+            ]
+            if catalog.get("provider_generations") != expected_generations:
+                raise MaterializationError(
+                    "provider ledger selected generations differ"
+                )
+        except MaterializationError:
+            raise
+        except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
+            raise MaterializationError(
+                "provider source admission verification failed"
+            ) from exc
     manifest_artifacts = tuple(manifest.artifacts)
     for row in provider_generations.values():
         if not isinstance(row, dict):
@@ -2359,6 +2794,14 @@ def _verified_epoch_manifest_materialization_proof(
     account_artifact = _epoch_generation_artifact(
         panel_manifest, "input/account-strategy-manifest.json"
     )
+    physical_input_sha256, physical_input_size = _sha(
+        panel_generation / "input" / "account-strategy-manifest.json"
+    )
+    if (physical_input_sha256, physical_input_size) != (
+        hashlib.sha256(source_bytes).hexdigest(),
+        len(source_bytes),
+    ):
+        raise MaterializationError("physical panel input differs from verified bundle")
     if (
         account_artifact.schema_name != "account-strategy-manifest"
         or account_artifact.schema_version != str(staged_manifest.get("schema_version"))
@@ -2717,25 +3160,34 @@ def _semantic_gate_payload(
         if epoch_manifest_proof is not None
         else None
     )
+    if financial_outcomes is not None:
+        from portfolio_financial_outcomes import financial_outcomes_semantic_identity
+
     return {
         "as_of_date": recipe["as_of_date"],
         "checks": checks,
         **(
             {
-                "financial_outcomes_sha256": hashlib.sha256(
-                    canonical_json_bytes(financial_outcomes)
-                ).hexdigest()
+                "financial_outcomes_sha256": financial_outcomes_semantic_identity(
+                    financial_outcomes
+                )
             }
             if financial_outcomes is not None
             else {}
         ),
-        "financial_epoch_manifest_inputs_sha256": (
-            hashlib.sha256(canonical_json_bytes(manifest_inputs)).hexdigest()
-            if manifest_inputs is not None
-            else None
-        ),
+        # Both epoch keys appear only with the raw-five inputs they describe.
+        # This one used to be emitted unconditionally as null, so a schema-10
+        # vertical -- which has no epoch-manifest input gate -- produced a
+        # semantic gate carrying a key the reader does not allow, and every
+        # run failed its last node with "post-build semantic gate keys differ
+        # from the contract".
         **(
-            {"financial_epoch_manifest_proof_sha256": proof_sha256}
+            {
+                "financial_epoch_manifest_inputs_sha256": hashlib.sha256(
+                    canonical_json_bytes(manifest_inputs)
+                ).hexdigest(),
+                "financial_epoch_manifest_proof_sha256": proof_sha256,
+            }
             if manifest_inputs is not None
             else {}
         ),
@@ -3178,6 +3630,14 @@ def semantic(
     return {"details": str(details_path), "state": "PASS"}
 
 
+# `timeout_seconds` bounds a node by time without progress. The analytics stage
+# reports once per decomposition lens, and `portfolio_release_builder` allows a
+# single lens 7200s, so one lens solve is the longest silence that stage can
+# legitimately produce. A smaller budget would kill a lens the layer below it
+# still considers healthy.
+ANALYTICS_SILENCE_SECONDS = 7200
+
+
 def _command(
     *,
     node_id: str,
@@ -3251,13 +3711,27 @@ def build_spec(
     hwm_governed_calendar_authority_path: Path | None = None,
     hwm_governed_admission_receipt_path: Path | None = None,
     financial_input_contract_path: Path | None = None,
+    portfolio_root: Path | None = None,
+    invested_capital_result_path: Path | None = None,
+    invested_capital_input_generation_path: Path | None = None,
+    retained_cache_root: Path | None = None,
+    workbook_runtime_path: Path | None = None,
 ) -> dict[str, Any]:
+    if portfolio_root is None:
+        # Fail here rather than four nodes into the run. `build_workbook` and
+        # `build_panel` refuse a financial publication without this root, and
+        # every schema-3 vertical is financial, so an omitted root is always a
+        # blocked execute with an opaque node failure.
+        raise MaterializationError(
+            "financial pipeline specification requires a portfolio root"
+        )
     recipe = _recipe(recipe_path)
     if recipe.get("schema_version") != 3:
         raise MaterializationError(
             "schema-2 recipe is recovery-only and cannot create a current specification"
         )
     _validate_output_path_budget(output_root.resolve(), recipe)
+    retained_cache_root = (retained_cache_root or output_root / "state").resolve()
     repo = Path(__file__).resolve().parents[1]
     release_commit = _git(repo, "rev-parse", "HEAD")
     if release_commit != recipe["release_commit"] or _git(
@@ -3300,13 +3774,10 @@ def build_spec(
             _absolute(contract_definition["path"], "financial MVP contract"),
             "financial MVP contract",
         )
-        bound_financial_contract, _staged_manifest_identity = (
-            _stage_epoch_manifest_bundle_prewire(
-                Path(epoch_generation["runtime_root"]),
-                epoch_generation["generation_id"],
-                financial_contract,
-                output_root,
-            )
+        bound_financial_contract = _bind_epoch_manifest_bundle(
+            Path(epoch_generation["runtime_root"]),
+            epoch_generation["generation_id"],
+            financial_contract,
         )
         bound_contract_path = output_root / "financial-mvp-bound-contract.json"
         bound_contract_bytes = canonical_json_bytes(bound_financial_contract)
@@ -3408,6 +3879,7 @@ def build_spec(
         "analytics": [
             output_root / "stages" / "analytics",
             output_root / "stage-results" / "analytics.json",
+            retained_cache_root,
         ],
         "report": [
             report_candidate / "portfolio-report-data.json",
@@ -3426,6 +3898,19 @@ def build_spec(
             output_root / "stage-results" / "panel.json",
         ],
     }
+    governed_stage_paths = _governed_stage_paths(
+        hwm_governed_result_path,
+        hwm_governed_input_generation_path,
+        hwm_governed_calendar_authority_path,
+        hwm_governed_admission_receipt_path,
+        invested_capital_result_path,
+        invested_capital_input_generation_path,
+    )
+    governed_stage_args = [
+        value
+        for flag, path in governed_stage_paths.items()
+        for value in (flag, str(path))
+    ]
     previous_node = "authority-snapshot"
     previous_outputs: list[Path] = [authority_path]
     generation_nodes: dict[str, str] = {}
@@ -3445,11 +3930,37 @@ def build_spec(
                 args.extend((flag, str(manifest_input_paths[key])))
         if role == "panel":
             args.extend(("--qa-dir", str(qa_dir)))
+        if role == "analytics":
+            args.extend(("--retained-cache-root", str(retained_cache_root)))
+        if role == "workbook" and workbook_runtime_path is not None:
+            args.extend(("--workbook-runtime", str(workbook_runtime_path)))
+        # `build_workbook` and `build_panel` treat any run carrying governed
+        # HWM, invested capital or decomposition lenses as a financial
+        # publication and refuse it without a portfolio root, which is what
+        # proves the stage output root is disjoint from production. Every
+        # financial vertical has lenses, so both roles always need it.
+        needs_portfolio_root = role in _PORTFOLIO_ROOT_STAGES or (
+            bool(governed_stage_paths) and role in _GOVERNED_OUTCOME_STAGES
+        )
+        if needs_portfolio_root and portfolio_root is not None:
+            args.extend(("--portfolio-root", str(portfolio_root)))
+        # The governed numerical results are stage inputs, not merely gate
+        # evidence: `build_report`, `build_workbook` and `build_panel` each read
+        # them and each refuses to verify a candidate that was built with them
+        # when it is re-run without. Omitting them here made the pipeline's own
+        # panel node recompute a semantic validation that differed from the one
+        # the proof wrote into the shared QA directory.
+        if role in _GOVERNED_OUTCOME_STAGES:
+            args.extend(governed_stage_args)
         reads = [*previous_outputs, *source_paths]
+        if role in _GOVERNED_OUTCOME_STAGES:
+            reads.extend(governed_stage_paths.values())
         for dependency in STAGE_DEPENDENCIES[role]:
             reads.extend(stage_writes[dependency])
         if role == "panel":
             reads.append(qa_dir)
+        if role == "workbook" and workbook_runtime_path is not None:
+            reads.append(workbook_runtime_path)
         reads = list(dict.fromkeys(reads))
         command = _command(
             node_id=command_id,
@@ -3462,6 +3973,9 @@ def build_spec(
             reads=reads,
             writes=stage_writes[role],
             retry_limit=1 if role == "workbook" else 0,
+            timeout_seconds=(
+                ANALYTICS_SILENCE_SECONDS if role == "analytics" else 3600
+            ),
         )
         nodes.append(command)
         release_role = next(
@@ -3551,6 +4065,12 @@ def build_spec(
         "schema_version": (
             3
             if manifest_inputs is not None
+            # A reused verified epoch-manifest generation is its own
+            # profile: it carries one generation identity where schema 3
+            # carries the five raw role files, and the consumer has to
+            # know which of the two it is reading.
+            else 4
+            if recipe.get("epoch_manifest_generation") is not None
             else 2
             if recipe.get("schema_version") == 3
             else 1
@@ -3598,15 +4118,15 @@ def build_spec(
     contract_bytes = canonical_json_bytes(contract)
     _write_exact(contract_path, contract_bytes)
     product_path = spec_path.with_name("financial-mvp-product-conformance.json")
+    # The private proof run stages the governed results but does not assess
+    # them: `_hwm_input_authority_assessment` verifies the selected-source
+    # replay against generations that are pinned as artifact nodes, and only
+    # the production specification carries those. The assessment therefore
+    # stays PENDING_GOVERNED_HWM_RESULT here and becomes AVAILABLE in
+    # `build_production_spec`, which has both the bindings and the sources.
     product_gates = _product_gate_rows(
         product_authority,
         product_path,
-        hwm_bindings=_hwm_binding_paths(
-            hwm_governed_result_path,
-            hwm_governed_input_generation_path,
-            hwm_governed_calendar_authority_path,
-            hwm_governed_admission_receipt_path,
-        ),
         input_contract_path=financial_input_contract_path,
     )
     manifest_gate_path = spec_path.with_name(
@@ -3670,7 +4190,7 @@ def build_spec(
             for role in RELEASE_ROLES
         },
         "schema_version": 1,
-        "state_root": str(output_root / "state"),
+        "state_root": str(retained_cache_root),
     }
     _write_exact(spec_path, canonical_json_bytes(spec))
     return {"contract": str(contract_path), "nodes": len(nodes), "spec": str(spec_path)}
@@ -3748,7 +4268,9 @@ def _production_lens_nodes(
 
 
 def _verify_panel_lens_nodes(
-    panel: Mapping[str, Any], nodes: Mapping[tuple[str, str, str], Mapping[str, Any]]
+    panel: Mapping[str, Any],
+    nodes: Mapping[tuple[str, str, str], Mapping[str, Any]],
+    decomposition_generation_id: str,
 ) -> None:
     """Require the panel to select every bound surface and evidence mode exactly."""
     lenses = panel.get("decomposition_lenses")
@@ -3762,6 +4284,17 @@ def _verify_panel_lens_nodes(
         for group in groups:
             surfaces = group.get("surfaces") if isinstance(group, dict) else None
             if not isinstance(surfaces, dict):
+                # The dynamic style path is a lens in its own right rather than
+                # a surface split of one, so it carries no `surfaces`. It is not
+                # part of the current-surface binding and must not be compared
+                # against it -- its generation is the decomposition authority
+                # the caller has already verified against `meta`, which is what
+                # makes skipping it here safe rather than merely lenient.
+                if (
+                    isinstance(group, dict)
+                    and group.get("generation_id") == decomposition_generation_id
+                ):
+                    continue
                 raise MaterializationError("prepared panel lens authority differs")
             for surface, value in surfaces.items():
                 sources = value.get("sources") if isinstance(value, dict) else None
@@ -3795,6 +4328,7 @@ def build_production_spec(
     hwm_governed_admission_receipt_path: Path | None = None,
     financial_artifacts_path: Path | None = None,
     financial_input_contract_path: Path | None = None,
+    predecessor_repair_gate_path: Path | None = None,
 ) -> dict[str, Any]:
     """Bind a verified private proof to the stable production root set."""
 
@@ -3946,7 +4480,11 @@ def build_production_spec(
     ):
         raise MaterializationError("prepared panel analytics authority differs")
     if current_lenses:
-        _verify_panel_lens_nodes(panel_payload, current_lenses)
+        _verify_panel_lens_nodes(
+            panel_payload,
+            current_lenses,
+            generation_ids["factor-decomposition"],
+        )
         # Reuse financial inventory identities so its ArtifactNode dependencies
         # remain exact, while preventing a duplicate immutable-generation copy.
         for lens in current_lenses.values():
@@ -4095,6 +4633,22 @@ def build_production_spec(
         hwm_governed_calendar_authority_path,
         hwm_governed_admission_receipt_path,
     )
+    # A generation an external agent rewrote after publication can never
+    # reproduce the inventory its release sealed, which stops every successor
+    # being prepared. The pipeline already knows how to admit exactly that,
+    # under `predecessor-authority-repair`: it re-derives the drift itself and
+    # refuses a gate that does not match, or that reuses a drifted generation.
+    # This only carries the reviewed evidence through to the production spec.
+    predecessor_repair_gates: list[dict[str, Any]] = []
+    if predecessor_repair_gate_path is not None:
+        repair_bytes = predecessor_repair_gate_path.read_bytes()
+        predecessor_repair_gates.append(
+            {
+                "gate_id": "predecessor-authority-repair",
+                "path": str(predecessor_repair_gate_path),
+                "sha256": hashlib.sha256(repair_bytes).hexdigest(),
+            }
+        )
     product_gates = _product_gate_rows(
         production_product_authority,
         product_path,
@@ -4142,6 +4696,7 @@ def build_production_spec(
             },
             *product_gates,
             *manifest_gates,
+            *predecessor_repair_gates,
         ],
         "nodes": [*nodes, *artifact_rows],
         "pipeline_id": f"{recipe['pipeline_id']}-production",
@@ -4217,6 +4772,8 @@ def _parser() -> argparse.ArgumentParser:
     spec_cmd.add_argument("--hwm-governed-input-generation", type=Path)
     spec_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
     spec_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
+    spec_cmd.add_argument("--invested-capital-result", type=Path)
+    spec_cmd.add_argument("--invested-capital-input-generation", type=Path)
     spec_cmd.add_argument(
         "--financial-input-contract",
         type=Path,
@@ -4224,6 +4781,20 @@ def _parser() -> argparse.ArgumentParser:
             "The contract the provider ledger was ADMITTED under, when it differs from the product contract. Defaults to the product contract."
         ),
     )
+    spec_cmd.add_argument(
+        "--portfolio-root",
+        type=Path,
+        required=True,
+        help=(
+            "The production portfolio root. Every schema-3 recipe is financial "
+            "and `build_spec` refuses without this root, so requiring it here "
+            "refuses at parse time rather than after the recipe is read. The "
+            "workbook and panel roles prove their stage output is disjoint "
+            "from it before publishing governed HWM."
+        ),
+    )
+    spec_cmd.add_argument("--retained-cache-root", type=Path)
+    spec_cmd.add_argument("--workbook-runtime", type=Path)
     production_cmd = commands.add_parser("production-spec")
     production_cmd.add_argument("--recipe", type=Path, required=True)
     production_cmd.add_argument("--prepared-root", type=Path, required=True)
@@ -4235,6 +4806,16 @@ def _parser() -> argparse.ArgumentParser:
     production_cmd.add_argument("--hwm-governed-input-generation", type=Path)
     production_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
     production_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
+    production_cmd.add_argument(
+        "--predecessor-repair-gate",
+        type=Path,
+        help=(
+            "Reviewed predecessor-authority-repair gate admitting the artifact "
+            "inventory drift of an already published generation that an external "
+            "agent rewrote. The pipeline re-derives the drift and refuses any gate "
+            "that does not match it exactly."
+        ),
+    )
     production_cmd.add_argument(
         "--financial-input-contract",
         type=Path,
@@ -4283,6 +4864,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.hwm_governed_calendar_authority,
                 args.hwm_governed_admission_receipt,
                 args.financial_input_contract,
+                args.portfolio_root,
+                args.invested_capital_result,
+                args.invested_capital_input_generation,
+                args.retained_cache_root,
+                workbook_runtime_path=args.workbook_runtime,
             )
         else:
             result = build_production_spec(
@@ -4298,6 +4884,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.hwm_governed_admission_receipt,
                 args.financial_artifacts,
                 args.financial_input_contract,
+                args.predecessor_repair_gate,
             )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"portfolio-pipeline: FAIL: {exc}", file=sys.stderr)

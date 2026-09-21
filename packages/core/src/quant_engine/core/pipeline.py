@@ -17,6 +17,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from typing import Any, BinaryIO, Callable, Final, Mapping, Self, cast
 
 from quant_engine.core.authority import FreshnessPolicy
@@ -53,6 +54,7 @@ _FINANCIAL_MVP_PRODUCT_GATE: Final = "financial-mvp-product-conformance"
 _FINANCIAL_MVP_HWM_INPUT_AUTHORITY_GATE: Final = "financial-mvp-hwm-input-authority"
 _OWNER_PUBLICATION_AUTHORIZATION_GATE: Final = "owner-publication-authorization"
 _FINANCIAL_EPOCH_MANIFEST_GATE: Final = "financial-epoch-manifest-input-authority"
+_FINANCIAL_MVP_BOUND_CONTRACT_GATE: Final = "financial-mvp-bound-contract"
 _FINANCIAL_EPOCH_MANIFEST_INPUTS: Final = {
     "account_strategy_admission_policy",
     "account_strategy_classified_flows",
@@ -689,8 +691,8 @@ def _parse_node(value: Mapping[str, Any], roots: Mapping[str, Path]) -> Pipeline
         raise PipelineValidationError(f"{node_id}.retry_limit must be 0..2")
     if (
         not isinstance(timeout_seconds, int)
+        or isinstance(timeout_seconds, bool)
         or timeout_seconds < 1
-        or timeout_seconds > 3600
     ):
         raise PipelineValidationError(f"{node_id}.timeout_seconds is invalid")
     request = value["request_identity"]
@@ -1130,6 +1132,55 @@ def _gate_json(spec: PipelineSpec, gate_id: str) -> tuple[dict[str, Any], bytes]
             f"pipeline gate is unreadable: {gate_id}"
         ) from exc
     return value, content
+
+
+def _verified_epoch_manifest_orchestration(
+    spec: PipelineSpec, raw: Mapping[str, Any]
+) -> None:
+    """Bind the contract's epoch-manifest identity to the bound contract's own.
+
+    A schema-10 vertical recipe reuses one verified epoch-manifest generation
+    rather than the five raw role files, so there is no epoch-manifest input
+    gate to compare against. What the run does have is the bound financial-MVP
+    contract, which carries the same `epoch_manifest_source` the release
+    builder read out of that generation's bundle. Requiring the two to agree,
+    and the contract's own digests to be digests of what it states, is what
+    stops an orchestration contract naming one epoch manifest while the build
+    consumes another.
+    """
+
+    generation = _object(
+        raw["epoch_manifest_generation"], "portfolio epoch manifest generation"
+    )
+    _strict(
+        generation,
+        {"generation_id", "runtime_root", "source"},
+        "portfolio epoch manifest generation",
+    )
+    source = _object(generation["source"], "portfolio epoch manifest source")
+    declared = _hash(
+        raw["epoch_manifest_source_sha256"], "portfolio epoch manifest source sha256"
+    )
+    if hashlib.sha256(canonical_json_bytes(source)).hexdigest() != declared:
+        raise PipelineValidationError("portfolio epoch manifest source sha256 differs")
+    bound_contract, bound_bytes = _gate_json(spec, _FINANCIAL_MVP_BOUND_CONTRACT_GATE)
+    if (
+        _hash(
+            raw["financial_mvp_bound_contract_sha256"],
+            "portfolio financial MVP bound contract sha256",
+        )
+        != hashlib.sha256(bound_bytes).hexdigest()
+    ):
+        raise PipelineValidationError(
+            "portfolio financial MVP bound contract sha256 differs"
+        )
+    bound_source = bound_contract.get("epoch_manifest_source")
+    if not isinstance(bound_source, dict) or canonical_json_bytes(
+        bound_source
+    ) != canonical_json_bytes(source):
+        raise PipelineValidationError(
+            "portfolio epoch manifest source differs from the bound contract"
+        )
 
 
 def _financial_epoch_manifest_authority(
@@ -2378,7 +2429,7 @@ def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
         "source_acquisitions",
         "stages",
     }
-    if schema_version in {2, 3}:
+    if schema_version in {2, 3, 4}:
         expected_keys.add("product_authority")
     if schema_version == 3:
         expected_keys.update(
@@ -2387,11 +2438,22 @@ def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
                 "financial_epoch_manifest_proof_sha256",
             }
         )
+    if schema_version == 4:
+        # A schema-10 vertical recipe reuses one verified epoch-manifest
+        # generation instead of the five raw role files, so the contract
+        # carries that generation's identity rather than the input set.
+        expected_keys.update(
+            {
+                "epoch_manifest_generation",
+                "epoch_manifest_source_sha256",
+                "financial_mvp_bound_contract_sha256",
+            }
+        )
     _strict(raw, expected_keys, "portfolio orchestration contract")
-    if schema_version not in {1, 2, 3} or raw["profile"] != _PORTFOLIO_PROFILE:
+    if schema_version not in {1, 2, 3, 4} or raw["profile"] != _PORTFOLIO_PROFILE:
         raise PipelineValidationError("portfolio orchestration profile is unsupported")
     product_authority = _financial_mvp_product_authority(spec)
-    if schema_version in {2, 3}:
+    if schema_version in {2, 3, 4}:
         if product_authority is None or canonical_json_bytes(
             raw["product_authority"]
         ) != canonical_json_bytes(product_authority["raw"]):
@@ -2402,6 +2464,8 @@ def _portfolio_contract(spec: PipelineSpec) -> dict[str, Any] | None:
         raise PipelineValidationError(
             "financial MVP product gate requires portfolio contract schema 2"
         )
+    if schema_version == 4:
+        _verified_epoch_manifest_orchestration(spec, raw)
     epoch_authority = _financial_epoch_manifest_authority(spec)
     if schema_version == 3:
         if epoch_authority is None or (
@@ -2939,9 +3003,10 @@ def _verify_post_build_semantic_gate(spec: PipelineSpec, path: Path) -> None:
     if financial_check:
         expected_checks.add("financial_outcomes")
         proof = _verify_financial_outcomes(spec)
-        if (
-            payload["financial_outcomes_sha256"]
-            != hashlib.sha256(canonical_json_bytes(proof)).hexdigest()
+        from portfolio_financial_outcomes import financial_outcomes_semantic_identity
+
+        if payload["financial_outcomes_sha256"] != financial_outcomes_semantic_identity(
+            proof
         ):
             raise PipelineValidationError(
                 "financial outcomes semantic identity differs"
@@ -3297,12 +3362,22 @@ def _capture_bytes(value: bytes) -> _CapturedStream:
     )
 
 
-def _capture_stream(stream: BinaryIO) -> _CapturedStream:
+def _capture_stream(
+    stream: BinaryIO, on_progress: Callable[[], None] | None = None
+) -> _CapturedStream:
     digest = hashlib.sha256()
     size = 0
-    for block in iter(lambda: stream.read(64 * 1024), b""):
+    # `read` on a pipe blocks until the whole request is satisfied, so output
+    # written a line at a time is not seen until 64 KB has piled up -- which
+    # made progress unobservable and turned the idle budget back into a
+    # duration budget. `read1` returns what a single syscall yields. The bytes
+    # and the digest are identical either way.
+    read = getattr(stream, "read1", stream.read)
+    for block in iter(lambda: read(64 * 1024), b""):
         digest.update(block)
         size += len(block)
+        if on_progress is not None:
+            on_progress()
     return _CapturedStream(
         sha256=digest.hexdigest(),
         size_bytes=size,
@@ -3336,6 +3411,30 @@ def _stream_evidence(run: _CommandRun) -> dict[str, object]:
     return result
 
 
+_PROGRESS_POLL_SECONDS: Final = 5.0
+
+
+def _wait_for_progress(
+    process: subprocess.Popen[bytes],
+    idle_budget: int,
+    last_progress: Callable[[], float],
+) -> int:
+    """Wait for the child, killing it only once it has gone quiet for too long.
+
+    The budget is time without progress, not total runtime, so a node that keeps
+    producing output runs as long as its work takes. `TimeoutExpired` is still
+    what a kill raises, so every caller and every receipt field is unchanged.
+    """
+
+    slice_seconds = min(float(idle_budget), _PROGRESS_POLL_SECONDS)
+    while True:
+        try:
+            return process.wait(timeout=slice_seconds)
+        except subprocess.TimeoutExpired:
+            if time.monotonic() - last_progress() >= idle_budget:
+                raise
+
+
 def _default_command_runner(node: CommandNode) -> _CommandRun:
     process = subprocess.Popen(
         node.argv,
@@ -3349,10 +3448,17 @@ def _default_command_runner(node: CommandNode) -> _CommandRun:
         raise PipelineExecutionError("command output pipes are unavailable")
     captured: dict[str, _CapturedStream] = {}
     failures: list[BaseException] = []
+    last_progress = [time.monotonic()]
+
+    def note_progress() -> None:
+        # A bare store, no lock: under the GIL the float write is atomic, and
+        # the only consequence of reading a stale value is that a kill waits
+        # one more poll interval.
+        last_progress[0] = time.monotonic()
 
     def drain(name: str, stream: BinaryIO) -> None:
         try:
-            captured[name] = _capture_stream(stream)
+            captured[name] = _capture_stream(stream, note_progress)
         except BaseException as exc:
             failures.append(exc)
 
@@ -3365,7 +3471,9 @@ def _default_command_runner(node: CommandNode) -> _CommandRun:
     stdout_thread.start()
     stderr_thread.start()
     try:
-        return_code = process.wait(timeout=node.timeout_seconds)
+        return_code = _wait_for_progress(
+            process, node.timeout_seconds, lambda: last_progress[0]
+        )
     except BaseException:
         process.kill()
         process.wait()

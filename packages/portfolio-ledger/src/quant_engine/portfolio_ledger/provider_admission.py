@@ -9,7 +9,7 @@ scope, evidence layer, and effective interval.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 from enum import StrEnum
 import hashlib
 import json
@@ -63,6 +63,7 @@ class GenerationQualification(StrEnum):
     """Why an exact provider generation is eligible for bounded admission."""
 
     PUBLISHED_COMPLETE = "PUBLISHED_COMPLETE"
+    STAGED_COMPLETE = "STAGED_COMPLETE"
     ACCEPTED_PARTIAL = "ACCEPTED_PARTIAL"
     FINITE_STATIC = "FINITE_STATIC"
 
@@ -154,6 +155,17 @@ def _date(value: object, name: str) -> date:
 
 def _optional_date(value: object, name: str) -> date | None:
     return None if value is None else _date(value, name)
+
+
+def _utc_timestamp(value: object, name: str) -> str:
+    text = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ProviderAdmissionError(f"{name} is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ProviderAdmissionError(f"{name} must be timezone-aware UTC")
+    return text
 
 
 @dataclass(frozen=True)
@@ -812,7 +824,10 @@ def validate_admit_or_declare_receipt(
         "receipt_type",
         "schema_version",
     }
-    if set(value) != expected:
+    has_run_observation = "run_observation" in value
+    if set(value) != (
+        expected | ({"run_observation"} if has_run_observation else set())
+    ):
         raise ProviderAdmissionError("provider admission receipt keys differ")
     if value["admission_gate_status"] != "PASS":
         raise ProviderAdmissionError("provider admission gate did not pass")
@@ -908,6 +923,143 @@ def validate_admit_or_declare_receipt(
             raise ProviderAdmissionError(
                 "provider generation receipt differs from trusted authority"
             )
+
+    observation_rows: dict[str, Mapping[str, object]] = {}
+    observation_cutoff: date | None = None
+    if has_run_observation:
+        observation = _mapping(value["run_observation"], "run observation")
+        if set(observation) != {
+            "captured_at_utc",
+            "financial_cutoff",
+            "path",
+            "policy_contract_sha256",
+            "providers",
+            "sha256",
+            "size_bytes",
+        }:
+            raise ProviderAdmissionError("run observation receipt keys differ")
+        _utc_timestamp(observation["captured_at_utc"], "run observation capture")
+        observation_cutoff = _date(
+            observation["financial_cutoff"], "run observation cutoff"
+        )
+        if observation["policy_contract_sha256"] != value["contract_raw_sha256"]:
+            raise ProviderAdmissionError("run observation policy contract differs")
+        _hash(observation["sha256"], "run observation sha256")
+        _text(observation["path"], "run observation path")
+        if (
+            isinstance(observation["size_bytes"], bool)
+            or not isinstance(observation["size_bytes"], int)
+            or observation["size_bytes"] < 1
+        ):
+            raise ProviderAdmissionError("run observation size differs")
+        observation_provider_keys = {
+            "catalog_sha256",
+            "finality_evidence",
+            "finality_interpretation",
+            "finalized_through",
+            "generation_as_of_date",
+            "generation_id",
+            "historical_admitted_item_count",
+            "historical_admitted_item_set_sha256",
+            "historical_inventory_sha256",
+            "manifest_sha256",
+            "observed_admitted_item_count",
+            "observed_admitted_item_set_sha256",
+            "observed_inventory_count",
+            "observed_inventory_sha256",
+            "provider_id",
+            "qualification",
+        }
+        for raw in _sequence(observation["providers"], "run observation providers"):
+            row = _mapping(raw, "run observation provider")
+            if set(row) != observation_provider_keys:
+                raise ProviderAdmissionError(
+                    "run observation provider receipt keys differ"
+                )
+            provider_id = _text(row["provider_id"], "run observation provider_id")
+            if provider_id in observation_rows:
+                raise ProviderAdmissionError("run observation provider is duplicated")
+            observation_rows[provider_id] = row
+            observed_provider_row = provider_rows.get(provider_id)
+            if observed_provider_row is None:
+                raise ProviderAdmissionError(
+                    "run observation provider identity differs"
+                )
+            if any(
+                row[field] != observed_provider_row[field]
+                for field in (
+                    "catalog_sha256",
+                    "generation_as_of_date",
+                    "generation_id",
+                    "manifest_sha256",
+                    "qualification",
+                )
+            ):
+                raise ProviderAdmissionError(
+                    "run observation provider identity differs"
+                )
+            # A run observation seals every selected provider identity and its
+            # source-finality evidence.  It does not recast the selected
+            # generation: published, finite-static, and accepted-partial
+            # qualifications retain their original admission semantics.
+            GenerationQualification(_text(row["qualification"], "qualification"))
+            _date(row["finalized_through"], "run observation finality")
+            interpretation = _mapping(
+                row["finality_interpretation"], "source finality interpretation"
+            )
+            if (
+                set(interpretation)
+                != {
+                    "basis",
+                    "provider_finality_guarantee",
+                    "native_timezone",
+                    "native_calendar",
+                    "capture_start_utc",
+                    "capture_end_utc",
+                }
+                or interpretation["provider_finality_guarantee"] is not False
+            ):
+                raise ProviderAdmissionError("source finality interpretation differs")
+            _text(interpretation["basis"], "source finality basis")
+            for field in ("native_timezone", "native_calendar"):
+                if interpretation[field] is not None:
+                    _text(interpretation[field], field)
+            for field in ("capture_start_utc", "capture_end_utc"):
+                if interpretation[field] is not None:
+                    _utc_timestamp(interpretation[field], field)
+            finality = _mapping(
+                row["finality_evidence"], "run observation finality evidence"
+            )
+            if set(finality) != {"path", "sha256", "size_bytes"}:
+                raise ProviderAdmissionError("run observation finality binding differs")
+            _text(finality["path"], "run observation finality path")
+            _hash(finality["sha256"], "run observation finality sha256")
+            if (
+                isinstance(finality["size_bytes"], bool)
+                or not isinstance(finality["size_bytes"], int)
+                or finality["size_bytes"] < 1
+            ):
+                raise ProviderAdmissionError("run observation finality size differs")
+            for field in (
+                "historical_admitted_item_set_sha256",
+                "historical_inventory_sha256",
+                "observed_admitted_item_set_sha256",
+                "observed_inventory_sha256",
+            ):
+                _hash(row[field], field)
+            for field in (
+                "historical_admitted_item_count",
+                "observed_admitted_item_count",
+                "observed_inventory_count",
+            ):
+                if (
+                    isinstance(row[field], bool)
+                    or not isinstance(row[field], int)
+                    or row[field] < 0
+                ):
+                    raise ProviderAdmissionError("run observation count differs")
+        if set(observation_rows) != _CURRENT_PROVIDERS:
+            raise ProviderAdmissionError("run observation provider set differs")
 
     inventory_keys = {
         "item_id",
@@ -1120,14 +1272,25 @@ def validate_admit_or_declare_receipt(
         expected_invalidated = tuple(
             sorted(_strings(source.get("invalidated_outputs"), "invalidated outputs"))
         ) or ("NO_CURRENT_PRODUCT_OUTPUT",)
+        # A run observation limits consumed facts, not the immutable capture
+        # envelope recorded by the selected generation.  In particular a
+        # Matrixport Sep18 capture may legitimately feed a Sep17 cutoff.
+        expected_source_observed_end = _date(
+            provider_row["observed_end"], "observed_end"
+        )
         if (
             item.source_segment_id != source_segment_id
             or item.source_segment_sha256 != source_segment_sha256
             or source_segment_sha256 != expected_source_sha256
             or item.authority_ref != expected_authority_ref
-            or generation.get("generation_id") != provider_row["generation_id"]
-            or generation.get("sha256") != provider_row["manifest_sha256"]
-            or generation.get("as_of") != provider_row["generation_as_of_date"]
+            or (
+                not has_run_observation
+                and (
+                    generation.get("generation_id") != provider_row["generation_id"]
+                    or generation.get("sha256") != provider_row["manifest_sha256"]
+                    or generation.get("as_of") != provider_row["generation_as_of_date"]
+                )
+            )
             or item.evidence_layer != source.get("evidence_layer")
             or item.consumers != expected_consumers
             or item.units != units.get("measurement")
@@ -1136,8 +1299,7 @@ def validate_admit_or_declare_receipt(
             or item.calendar != temporal.get("calendar")
             or item.source_observed_start
             != _date(provider_row["observed_start"], "observed_start")
-            or item.source_observed_end
-            != _date(provider_row["observed_end"], "observed_end")
+            or item.source_observed_end != expected_source_observed_end
         ):
             raise ProviderAdmissionError(
                 "provider disposition authority differs from provider generation"
@@ -1154,9 +1316,12 @@ def validate_admit_or_declare_receipt(
             raise ProviderAdmissionError(
                 "provider disposition policy differs from product authority"
             )
-        generation_as_of = _date(
-            provider_row["generation_as_of_date"], "generation_as_of_date"
+        generation_as_of = (
+            observation_cutoff
+            if has_run_observation
+            else _date(provider_row["generation_as_of_date"], "generation_as_of_date")
         )
+        assert generation_as_of is not None
         if item.policy_effective_start > generation_as_of or (
             item.policy_effective_end is not None
             and item.policy_effective_end < generation_as_of
@@ -1211,9 +1376,38 @@ def validate_admit_or_declare_receipt(
         product_count, product_digest = product_data_class_set_digest(
             provider_inventory
         )
-        if (
-            provider_upstream_inventory_digest(provider_inventory)
-            != policy.get("upstream_inventory_sha256")
+        inventory_digest = provider_upstream_inventory_digest(provider_inventory)
+        if has_run_observation:
+            observation_row = observation_rows[provider_id]
+            if (
+                len(provider_inventory) != observation_row["observed_inventory_count"]
+                or inventory_digest != observation_row["observed_inventory_sha256"]
+                or admitted_count != observation_row["observed_admitted_item_count"]
+                or admitted_digest
+                != observation_row["observed_admitted_item_set_sha256"]
+            ):
+                raise ProviderAdmissionError(
+                    "run observation receipt counts or digests differ"
+                )
+            if (
+                observation_row["historical_inventory_sha256"]
+                != policy.get("upstream_inventory_sha256")
+                or observation_row["historical_admitted_item_count"]
+                != policy.get("admitted_item_count")
+                or observation_row["historical_admitted_item_set_sha256"]
+                != policy.get("admitted_item_set_sha256")
+            ):
+                raise ProviderAdmissionError(
+                    "run observation historical comparison differs"
+                )
+            if product_count != policy.get(
+                "product_data_class_count"
+            ) or product_digest != policy.get("product_data_class_set_sha256"):
+                raise ProviderAdmissionError(
+                    "provider receipt product data-class set differs from product authority"
+                )
+        elif (
+            inventory_digest != policy.get("upstream_inventory_sha256")
             or product_count != policy.get("product_data_class_count")
             or product_digest != policy.get("product_data_class_set_sha256")
             or admitted_count != policy.get("admitted_item_count")

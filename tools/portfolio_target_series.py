@@ -69,7 +69,9 @@ QUANTBASE_ACTIVITY_FIELDS: Final = frozenset(
 CORRELATION_FIELDS: Final = ("series_id", "date", "return", "evidence_layer")
 CORRELATION_FIELDS_V2: Final = (*CORRELATION_FIELDS, "strategy_version")
 STRATEGY_HISTORY_MANIFEST_SCHEMA_VERSION: Final = 1
-STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset({"1.2.0", "1.3.0", "1.4.0"})
+STRATEGY_HISTORY_BUILDER_VERSIONS: Final = frozenset(
+    {"1.2.0", "1.3.0", "1.4.0", "1.5.0", "1.6.0", "1.7.0"}
+)
 MATRIXPORT_TARGET_BUILDER: Final = "portfolio-target-series/matrixport-4"
 LAYERED_HISTORY_BUILDER: Final = "portfolio-target-series/layered-history-1"
 LAYERED_HISTORY_BUILDER_VERSION: Final = "1.14.0"
@@ -2120,10 +2122,10 @@ def _history_contract(
         "robuxio-provider-live-before-funding",
         "robuxio-account-live-after-funding",
         "p123-ai-backtest-candidate",
-        "p123-eu-backtest-not-captured",
+        "p123-eu-backtest",
         "p123-eu-provider-live",
         "p123-eu-account-live",
-        "volatis-backtest-not-proved",
+        "volatis-backtest-does-not-exist",
         "volatis-provider-live",
         "volatis-account-live",
     }
@@ -3485,6 +3487,31 @@ def _matrixport_account_is_unadmitted(
     return True
 
 
+def _strategies_without_a_backtest_layer(
+    corrections: Mapping[str, Mapping[str, object]],
+) -> set[str]:
+    """Strategies whose BACKTEST layer the product records as non-existent.
+
+    This is not the same as a backtest that has not been captured or proved: it
+    is a ruling that none exists to capture. Such a strategy is complete in
+    LIVE_PLUS_BACKTEST the moment its live layer is, because the mode admits
+    prehistory where prehistory exists and there is none to admit.
+    """
+
+    without: set[str] = set()
+    for row in corrections.values():
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("evidence_layer") != "BACKTEST":
+            continue
+        existence = row.get("history_existence")
+        if not isinstance(existence, Mapping):
+            continue
+        if existence.get("status") == "DOES_NOT_EXIST":
+            without.add(str(row.get("strategy_id")))
+    return without
+
+
 def build_layered_history_generation(
     *,
     contract_path: Path,
@@ -3514,6 +3541,7 @@ def build_layered_history_generation(
     portfolio123_relationships_path: Path,
     strategy_history_manifest_path: Path | None = None,
     strategy_history_returns_path: Path | None = None,
+    strategy_backtests_generation_path: Path | None = None,
     portfolio_fx_rates_manifest_path: Path | None = None,
     source_selection_mode: str = "CURRENT_POINTERS",
 ) -> tuple[dict[str, bytes], bytes]:
@@ -4176,6 +4204,17 @@ def build_layered_history_generation(
         ) = _strategy_history_returns(
             strategy_history_manifest_path, strategy_history_returns_path
         )
+    # The bundle is hash-bound evidence but it is not a governed generation,
+    # so the contract's `strategy-backtests` segment names the generation
+    # staged from it instead. The segments have to cite that same generation
+    # or the source receipt will not resolve, and that generation has to be
+    # provably the one built from THIS bundle -- otherwise the citation
+    # would be a label rather than evidence.
+    strategy_backtests_generation = _strategy_backtests_generation(
+        strategy_backtests_generation_path,
+        manifest_path=strategy_history_manifest_path,
+        returns_path=strategy_history_returns_path,
+    )
 
     first_live: dict[str, date] = {}
     for strategy_id, rows in live_by_strategy.items():
@@ -4188,6 +4227,7 @@ def build_layered_history_generation(
         if rows:
             first_live[strategy_id] = date.fromisoformat(rows[0]["date"])
     version_by_strategy: dict[str, str] = {}
+    no_backtest_layer = _strategies_without_a_backtest_layer(corrections)
     version_status_by_strategy: dict[str, str] = {}
     for strategy_id, strategy in strategies.items():
         status, version = _contract_version(strategy)
@@ -4196,21 +4236,43 @@ def build_layered_history_generation(
 
     admitted_backtests: dict[str, list[dict[str, str]]] = {}
     unadmitted_backtests: dict[str, list[dict[str, str]]] = {}
+    # A prehistory refused because the version it was derived under does not
+    # match the product's own assertion is a different answer from one that was
+    # simply never admitted, and the strategy-level reason has to say which.
+    # The product assertion can be EVIDENCED and still not be the version the
+    # evidence carries, so its status alone cannot distinguish them.
+    version_mismatched_backtests: set[str] = set()
     p123_ai_exact_version = (
         version_status_by_strategy["p123-ai-factor"] == "EVIDENCED"
         and version_by_strategy["p123-ai-factor"] == p123_ai_version
     )
-    p123_ai_overlaps_live = (
-        date.fromisoformat(p123_ai_backtest[-1]["date"]) >= first_live["p123-ai-factor"]
-    )
+    # Split the twin at this strategy's own account-live inception rather than
+    # judging the series as a whole. The rows at or after it are a simulation
+    # running beside the live book, never prehistory, and they are retained as
+    # the not-admitted overlap; the rows before it are the version-matched
+    # prehistory LIVE_PLUS_BACKTEST exists to admit.
+    p123_ai_live_start = first_live["p123-ai-factor"]
+    p123_ai_prehistory = [
+        row
+        for row in p123_ai_backtest
+        if date.fromisoformat(row["date"]) < p123_ai_live_start
+    ]
+    p123_ai_overlap = p123_ai_backtest[len(p123_ai_prehistory) :]
     if not p123_ai_exact_version:
+        version_mismatched_backtests.add("p123-ai-factor")
         p123_ai_disposition = "DERIVED_NOT_ADMITTED_VERSION_UNRESOLVED_OR_MISMATCHED"
-    elif p123_ai_overlaps_live:
+    elif not p123_ai_prehistory:
         unadmitted_backtests["p123-ai-factor"] = p123_ai_backtest
         p123_ai_disposition = "DERIVED_NOT_ADMITTED_OVERLAP"
     else:
-        admitted_backtests["p123-ai-factor"] = p123_ai_backtest
-        p123_ai_disposition = "ADMITTED_EXACT_VERSION_PREHISTORY"
+        admitted_backtests["p123-ai-factor"] = p123_ai_prehistory
+        if p123_ai_overlap:
+            unadmitted_backtests["p123-ai-factor"] = p123_ai_overlap
+            p123_ai_disposition = (
+                "ADMITTED_EXACT_VERSION_PREHISTORY_STRICTLY_BEFORE_LIVE_INCEPTION"
+            )
+        else:
+            p123_ai_disposition = "ADMITTED_EXACT_VERSION_PREHISTORY"
     for series_id, rows in history_rows.items():
         mapped_strategy_id = series_to_strategy.get(series_id)
         if mapped_strategy_id is None:
@@ -4302,7 +4364,10 @@ def build_layered_history_generation(
         source_generation_id = (
             p123_generation
             if is_portfolio123_backtest
-            else str((history_proof or {}).get("bundle_id") or "NOT_CAPTURED")
+            else (
+                strategy_backtests_generation
+                or str((history_proof or {}).get("bundle_id") or "NOT_CAPTURED")
+            )
         )
         source_id = (
             "portfolio123-model-generation"
@@ -4481,13 +4546,17 @@ def build_layered_history_generation(
             exclusion_reason is None
             and hybrid_state == "AVAILABLE"
             and not backtest_rows
+            and strategy_id not in no_backtest_layer
         ):
             hybrid_state = "REQUIRED_NOT_READY"
             if strategy_id in unadmitted_backtests:
                 hybrid_reason = (
                     "REQUIRED_NOT_READY_BACKTEST_SOURCE_OVERLAPS_ACCOUNT_LIVE"
                 )
-            elif version_status_by_strategy[strategy_id] != "EVIDENCED":
+            elif (
+                version_status_by_strategy[strategy_id] != "EVIDENCED"
+                or strategy_id in version_mismatched_backtests
+            ):
                 hybrid_reason = "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED"
             else:
                 hybrid_reason = "REQUIRED_EXACT_VERSION_BACKTEST_NOT_ADMITTED"
@@ -4573,6 +4642,13 @@ def build_layered_history_generation(
         },
         "p123-ai-backtest": {
             **p123_ai_proof,
+            "admitted_prehistory_observations": len(
+                admitted_backtests.get("p123-ai-factor", [])
+            ),
+            "live_inception": p123_ai_live_start.isoformat(),
+            "overlap_observations_not_admitted": len(
+                unadmitted_backtests.get("p123-ai-factor", [])
+            ),
             "status": p123_ai_disposition,
         },
         "p123-eu-provider-live": {
@@ -4816,6 +4892,17 @@ def build_layered_history_generation(
                 ),
             ]
         )
+        if strategy_backtests_generation_path is not None:
+            inputs.append(
+                _artifact_identity(
+                    input_id="strategy-backtests-generation",
+                    artifact_role="GENERATION_MANIFEST",
+                    path=strategy_backtests_generation_path,
+                    generation_id=strategy_backtests_generation,
+                    as_of_date=str((history_proof or {}).get("as_of_date") or "")
+                    or None,
+                )
+            )
     if p123_history_receipts is not None:
         inputs.append(
             _artifact_identity(
@@ -4884,6 +4971,10 @@ def build_layered_history_generation(
     if strategy_history_manifest_path is not None:
         source_manifest_contents["strategy-history"] = (
             strategy_history_manifest_path.read_text(encoding="utf-8")
+        )
+    if strategy_backtests_generation_path is not None:
+        source_manifest_contents["strategy-backtests"] = (
+            strategy_backtests_generation_path.read_text(encoding="utf-8")
         )
     contract_sha = hashlib.sha256(canonical_json_bytes(contract)).hexdigest()
     manifest_without_id: dict[str, object] = {
@@ -5247,6 +5338,13 @@ def validate_layered_history_generation(
                 ),
             }
         )
+    # Declared only when the bundle was staged as a governed generation; the
+    # backtest segments then cite that generation rather than the bundle id.
+    if "strategy-backtests-generation" in inputs:
+        expected_input_contracts["strategy-backtests-generation"] = (
+            "GENERATION_MANIFEST",
+            None,
+        )
     if {"portfolio-fx-rates-manifest", "portfolio-fx-rates"} & set(inputs):
         expected_input_contracts.update(
             {
@@ -5317,6 +5415,10 @@ def validate_layered_history_generation(
         )
     if "strategy-history-manifest" in inputs:
         source_manifest_input_ids["strategy-history"] = "strategy-history-manifest"
+    if "strategy-backtests-generation" in inputs:
+        source_manifest_input_ids["strategy-backtests"] = (
+            "strategy-backtests-generation"
+        )
     if "portfolio-fx-rates-manifest" in inputs:
         source_manifest_input_ids["portfolio-fx-rates"] = "portfolio-fx-rates-manifest"
     if not isinstance(raw_source_manifests, dict) or set(raw_source_manifests) != set(
@@ -5442,6 +5544,8 @@ def validate_layered_history_generation(
                 "strategy-history-returns": "strategy-history",
             }
         )
+    if "strategy-backtests" in source_manifests:
+        input_source_names["strategy-backtests-generation"] = "strategy-backtests"
     if "portfolio-fx-rates" in source_manifests:
         input_source_names.update(
             {
@@ -5904,6 +6008,7 @@ def validate_layered_history_generation(
         raise TargetSeriesError(
             "layered history output metadata differs: coverage.json"
         )
+    no_backtest_layer = _strategies_without_a_backtest_layer(corrections)
     expected_modes_by_strategy: dict[str, dict[str, dict[str, str | None]]] = {}
     source_generation_inputs = {
         "owner-account-live-history": "provider-ledger-manifest",
@@ -5911,6 +6016,15 @@ def validate_layered_history_generation(
         "quantbase-account-generation": "quantbase-manifest",
         "portfolio123-model-generation": "portfolio123-manifest",
     }
+    # The twin's prehistory can be refused because the version it was derived
+    # under is not the version the product asserts, and the strategy-level
+    # reason has to say so. The product status alone cannot tell: it is
+    # EVIDENCED either way. The correction resolution already records the
+    # refusal, so the verifier reads it there rather than needing a new field.
+    raw_resolutions = coverage.get("correction_resolutions")
+    p123_ai_version_refused = isinstance(raw_resolutions, dict) and str(
+        (raw_resolutions.get("p123-ai-backtest") or {}).get("status")
+    ).endswith("VERSION_UNRESOLVED_OR_MISMATCHED")
     for strategy_id, raw in coverage_by_strategy.items():
         _require_exact_keys(
             raw,
@@ -6085,7 +6199,11 @@ def validate_layered_history_generation(
                 raise TargetSeriesError("layered history segment is not authorized")
             calendar, frequency = _source_temporal(sources[source_id])
             if source_id == "strategy-backtests":
-                generation_input_id = "strategy-history-manifest"
+                generation_input_id = (
+                    "strategy-backtests-generation"
+                    if "strategy-backtests-generation" in inputs
+                    else "strategy-history-manifest"
+                )
             else:
                 generation_input_id = source_generation_inputs[source_id]
             generation_input = inputs.get(generation_input_id)
@@ -6215,6 +6333,7 @@ def validate_layered_history_generation(
             exclusion_reason is None
             and hybrid_status == "AVAILABLE"
             and not admitted_backtest
+            and strategy_id not in no_backtest_layer
         ):
             hybrid_status = "REQUIRED_NOT_READY"
             if any(
@@ -6224,7 +6343,9 @@ def validate_layered_history_generation(
                 hybrid_reason = (
                     "REQUIRED_NOT_READY_BACKTEST_SOURCE_OVERLAPS_ACCOUNT_LIVE"
                 )
-            elif strategy_version.get("product_status") != "EVIDENCED":
+            elif strategy_version.get("product_status") != "EVIDENCED" or (
+                strategy_id == "p123-ai-factor" and p123_ai_version_refused
+            ):
                 hybrid_reason = "REQUIRED_NOT_READY_VERSION_UNRESOLVED_OR_MISMATCHED"
             else:
                 hybrid_reason = "REQUIRED_EXACT_VERSION_BACKTEST_NOT_ADMITTED"
@@ -6384,9 +6505,12 @@ def validate_layered_history_generation(
         p123_ai_resolution,
         frozenset(
             {
+                "admitted_prehistory_observations",
                 "index_observations",
+                "live_inception",
                 "observed_end",
                 "observed_start",
+                "overlap_observations_not_admitted",
                 "relationship_type",
                 "return_observations",
                 "source_labels",
@@ -6416,7 +6540,14 @@ def validate_layered_history_generation(
         row["mode_admission"] == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
         for row in p123_ai_rows
     ):
-        expected_p123_ai_status = "ADMITTED_EXACT_VERSION_PREHISTORY"
+        expected_p123_ai_status = (
+            "ADMITTED_EXACT_VERSION_PREHISTORY_STRICTLY_BEFORE_LIVE_INCEPTION"
+            if any(
+                row["mode_admission"] == "REQUIRED_NOT_READY_OVERLAP"
+                for row in p123_ai_rows
+            )
+            else "ADMITTED_EXACT_VERSION_PREHISTORY"
+        )
     elif any(
         row["mode_admission"] == "REQUIRED_NOT_READY_OVERLAP" for row in p123_ai_rows
     ):
@@ -6431,11 +6562,35 @@ def validate_layered_history_generation(
         if isinstance(p123_ai_correction, dict)
         else None
     )
+    admitted_rows = [
+        row
+        for row in p123_ai_rows
+        if row["mode_admission"] == "INCLUDE_VERSION_COMPATIBLE_PREHISTORY"
+    ]
+    overlap_rows = [
+        row
+        for row in p123_ai_rows
+        if row["mode_admission"] == "REQUIRED_NOT_READY_OVERLAP"
+    ]
+    live_inception = str(p123_ai_resolution.get("live_inception") or "")
     if not isinstance(p123_ai_identity, dict) or p123_ai_resolution != {
         **p123_ai_identity,
+        "admitted_prehistory_observations": len(admitted_rows),
+        "live_inception": live_inception,
+        "overlap_observations_not_admitted": len(overlap_rows),
         "status": expected_p123_ai_status,
     }:
         raise TargetSeriesError("Portfolio123 AI backtest disposition differs")
+    # The boundary has to separate the two sides, or the counts describe nothing.
+    if admitted_rows or overlap_rows:
+        if (
+            not live_inception
+            or any(row["date"] >= live_inception for row in admitted_rows)
+            or any(row["date"] < live_inception for row in overlap_rows)
+        ):
+            raise TargetSeriesError(
+                "Portfolio123 AI backtest split does not hold its live inception"
+            )
     robuxio_resolution = resolutions.get("robuxio-account-live-after-funding")
     if not isinstance(robuxio_resolution, dict):
         raise TargetSeriesError("Matrixport source gap resolution differs")
@@ -6891,6 +7046,48 @@ def _portfolio123_simulation_returns(
     }
 
 
+def _strategy_backtests_generation(
+    generation_manifest_path: Path | None,
+    *,
+    manifest_path: Path | None,
+    returns_path: Path | None,
+) -> str | None:
+    """Resolve the governed generation staged from this exact history bundle.
+
+    Citing a generation without checking it was built from the bundle in hand
+    would let any generation id stand in for the evidence. The staged
+    generation retains the bundle manifest and returns verbatim, so proving the
+    relationship is a digest comparison, not a claim.
+    """
+
+    if generation_manifest_path is None:
+        return None
+    if manifest_path is None or returns_path is None:
+        raise TargetSeriesError(
+            "strategy backtests generation requires the history bundle"
+        )
+    manifest = _load_json(generation_manifest_path, "strategy backtests generation")
+    generation_id = str(manifest.get("generation_id") or "")
+    if len(generation_id) != 64:
+        raise TargetSeriesError("strategy backtests generation identity differs")
+    artifacts = _manifest_artifacts(manifest.get("artifacts"))
+    for artifact_id, path in (
+        ("raw/strategy-history-manifest.json", manifest_path),
+        ("returns.csv", returns_path),
+    ):
+        artifact = artifacts.get(artifact_id)
+        observed_sha256, observed_size = _sha256(path)
+        if artifact is None or (artifact.sha256, artifact.size_bytes) != (
+            observed_sha256,
+            observed_size,
+        ):
+            raise TargetSeriesError(
+                "strategy backtests generation was not staged from this bundle: "
+                f"{artifact_id}"
+            )
+    return generation_id
+
+
 def _strategy_history_returns(
     manifest_path: Path,
     returns_path: Path,
@@ -7030,6 +7227,13 @@ def _strategy_history_returns(
                 in {
                     "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_NOT_ACCEPTED",
                     "CAPTURED_EXACT_VERSION_PROVIDER_LIVE_RETURN_TRANSFORM_DERIVED_NOT_ADMITTED",
+                    # A retained-but-rejected deprecated history is a declared
+                    # non-history in the same sense as the UNAVAILABLE_ family:
+                    # the bytes exist and are kept, and the builder has already
+                    # ruled they are not admissible return evidence. The
+                    # allow-list stays narrow so an available history cannot
+                    # hide inside a disposition, which this status does not.
+                    "RETAINED_REJECTED_HISTORY_DEPRECATED",
                 }
             )
             or not version
@@ -7792,6 +7996,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--quantbase-series-id")
     parser.add_argument("--portfolio123-manifest", type=Path)
     parser.add_argument("--portfolio123-equity", type=Path)
+    parser.add_argument("--strategy-backtests-generation", type=Path)
     parser.add_argument("--portfolio123-metadata", type=Path)
     parser.add_argument("--portfolio123-performance", type=Path)
     parser.add_argument("--portfolio123-returns", type=Path)
@@ -7935,6 +8140,7 @@ def main() -> int:
                 portfolio_fx_rates_manifest_path=args.portfolio_fx_rates_manifest,
                 strategy_history_manifest_path=args.strategy_history_manifest,
                 strategy_history_returns_path=args.strategy_history_returns,
+                strategy_backtests_generation_path=(args.strategy_backtests_generation),
                 source_selection_mode=(
                     "IMMUTABLE_GENERATIONS"
                     if args.immutable_generations

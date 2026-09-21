@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import argparse
+import copy
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, localcontext
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 from typing import Callable
@@ -659,11 +663,10 @@ def test_epoch_manifest_bundle_prewire_binds_once_and_stages_exact_bytes(
     original_contract = json.loads(json.dumps(supplied_contract))
     output_root = tmp_path / "output"
 
-    augmented, staged_identity = materializer._stage_epoch_manifest_bundle_prewire(
+    augmented = materializer._bind_epoch_manifest_bundle(
         generation_root,
         manifest.generation_id,
         supplied_contract,
-        output_root,
     )
 
     literal_source = {
@@ -686,7 +689,6 @@ def test_epoch_manifest_bundle_prewire_binds_once_and_stages_exact_bytes(
             "schema": {"name": "account-strategy-manifest", "version": "8"},
         },
     }
-    staged_path = output_root / "stages" / "panel" / "account-strategy-manifest.json"
     assert reader_calls == [(generation_root, manifest.generation_id)]
     assert len(binder_calls) == 1
     assert binder_calls[0] is reader_results[0]
@@ -701,12 +703,10 @@ def test_epoch_manifest_bundle_prewire_binds_once_and_stages_exact_bytes(
     assert validator_calls[0][0] is augmented
     assert validator_calls[0][2] is reader_results[0]
     assert augmented["nested"] is not supplied_contract["nested"]
-    assert staged_path.read_bytes() == PREWIRE_MANIFEST_BYTES
-    assert staged_identity == {
-        "path": str(staged_path.resolve()),
-        "sha256": PREWIRE_MANIFEST_SHA256,
-        "size_bytes": 43,
-    }
+    # Binding stages nothing: the panel command writes the manifest itself
+    # from this same verified bundle, and `build-panel` declares that
+    # directory as its own output.
+    assert not (output_root / "stages").exists()
     augmented["nested"]["rows"][0]["value"] = "changed"
     assert supplied_contract == original_contract
 
@@ -726,11 +726,10 @@ def test_epoch_manifest_bundle_prewire_passes_real_financial_contract_validator(
         ).read_text(encoding="utf-8")
     )
 
-    bound, staged = materializer._stage_epoch_manifest_bundle_prewire(
+    bound = materializer._bind_epoch_manifest_bundle(
         generation_root,
         manifest.generation_id,
         contract,
-        tmp_path / "output",
     )
 
     assert bound["contract_schema_version"] == 7
@@ -745,7 +744,9 @@ def test_epoch_manifest_bundle_prewire_passes_real_financial_contract_validator(
         )
         == bound
     )
-    assert staged["sha256"] == PREWIRE_MANIFEST_SHA256
+    assert bound["epoch_manifest_source"]["artifact"]["sha256"] == (
+        PREWIRE_MANIFEST_SHA256
+    )
 
 
 def test_real_financial_v7_contract_rejects_shape_only_or_invented_authority(
@@ -819,6 +820,17 @@ def test_schema10_materialization_proof_rejects_one_byte_stage_drift(
         materializer._verified_epoch_manifest_materialization_proof(recipe, output_root)
 
 
+def test_schema10_materialization_proof_rejects_physical_panel_input_drift(
+    tmp_path: Path,
+) -> None:
+    recipe, output_root, panel_generation = _verified_materialization_fixture(tmp_path)
+    input_path = panel_generation / "input" / "account-strategy-manifest.json"
+    input_path.write_bytes(input_path.read_bytes() + b" ")
+
+    with pytest.raises(materializer.MaterializationError, match="physical panel input"):
+        materializer._verified_epoch_manifest_materialization_proof(recipe, output_root)
+
+
 def test_schema10_materialization_proof_rejects_invented_bound_contract_authority(
     tmp_path: Path,
 ) -> None:
@@ -854,11 +866,10 @@ def test_epoch_manifest_bundle_prewire_rejects_missing_detached_controls(
     output_root = tmp_path / "output"
 
     with pytest.raises(materializer.MaterializationError, match="bundle"):
-        materializer._stage_epoch_manifest_bundle_prewire(
+        materializer._bind_epoch_manifest_bundle(
             tmp_path / "broken",
             manifest.generation_id,
             {"schema_version": 3},
-            output_root,
         )
 
     assert not output_root.exists()
@@ -874,11 +885,10 @@ def test_epoch_manifest_bundle_prewire_rejects_bare_generation_manifest(
     output_root = tmp_path / "output"
 
     with pytest.raises(materializer.MaterializationError, match="bundle"):
-        materializer._stage_epoch_manifest_bundle_prewire(
+        materializer._bind_epoch_manifest_bundle(
             generation_root,
             manifest,  # type: ignore[arg-type]
             {"schema_version": 3},
-            output_root,
         )
 
     assert not output_root.exists()
@@ -904,11 +914,10 @@ def test_epoch_manifest_bundle_prewire_rejects_mutation_before_staging(
     output_root = tmp_path / "output"
 
     with pytest.raises(materializer.MaterializationError, match="bundle"):
-        materializer._stage_epoch_manifest_bundle_prewire(
+        materializer._bind_epoch_manifest_bundle(
             generation_root,
             manifest.generation_id,
             {"schema_version": 3},
-            output_root,
         )
 
     assert not output_root.exists()
@@ -931,45 +940,13 @@ def test_epoch_manifest_bundle_prewire_wraps_binder_failure_before_staging(
     output_root = tmp_path / "output"
 
     with pytest.raises(materializer.MaterializationError, match="binding"):
-        materializer._stage_epoch_manifest_bundle_prewire(
+        materializer._bind_epoch_manifest_bundle(
             generation_root,
             manifest.generation_id,
             {"schema_version": 3},
-            output_root,
         )
 
     assert not output_root.exists()
-
-
-def test_epoch_manifest_bundle_prewire_preserves_different_staged_file(
-    tmp_path: Path,
-) -> None:
-    """Replacing create-only staging with overwrite would destroy prior evidence."""
-
-    generation_root = tmp_path / "accepted"
-    manifest, _bundle = _stage_prewire_generation(generation_root)
-    staged_path = (
-        tmp_path / "output" / "stages" / "panel" / "account-strategy-manifest.json"
-    )
-    staged_path.parent.mkdir(parents=True)
-    prior_bytes = b'{"different":true}\n'
-    staged_path.write_bytes(prior_bytes)
-
-    with pytest.raises(materializer.MaterializationError, match="create-only"):
-        materializer._stage_epoch_manifest_bundle_prewire(
-            generation_root,
-            manifest.generation_id,
-            json.loads(
-                (
-                    materializer.REPOSITORY_ROOT
-                    / "contracts"
-                    / "portfolio-financial-mvp-source-v1.json"
-                ).read_text(encoding="utf-8")
-            ),
-            tmp_path / "output",
-        )
-
-    assert staged_path.read_bytes() == prior_bytes
 
 
 def test_schema10_pipeline_recipe_accepts_exact_epoch_manifest_generation(
@@ -1088,15 +1065,13 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
         financial_mvp_source_matrix=product.matrix_path,
     )
     calls: list[tuple[Path, str]] = []
-    real_prewire = materializer._stage_epoch_manifest_bundle_prewire
+    real_prewire = materializer._bind_epoch_manifest_bundle
 
     def observed_prewire(*args: object, **kwargs: object) -> object:
         calls.append((args[0], args[1]))  # type: ignore[arg-type]
         return real_prewire(*args, **kwargs)
 
-    monkeypatch.setattr(
-        materializer, "_stage_epoch_manifest_bundle_prewire", observed_prewire
-    )
+    monkeypatch.setattr(materializer, "_bind_epoch_manifest_bundle", observed_prewire)
     monkeypatch.setenv("QE_PIPELINE_PYTHON", sys.executable)
     monkeypatch.setattr(
         materializer,
@@ -1109,11 +1084,67 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
     output_root = tmp_path / "schema10-dag"
     spec_path = output_root / "pipeline-spec.json"
 
-    materializer.build_spec(pipeline_recipe, output_root, spec_path)
+    governed = {
+        name: _write_json(tmp_path / "governed" / f"{name}.json", {"name": name})
+        or (tmp_path / "governed" / f"{name}.json")
+        for name in (
+            "as-held-hwm",
+            "hwm-input",
+            "calendar",
+            "admission",
+            "invested-capital",
+            "capital-input",
+        )
+    }
+    materializer.build_spec(
+        pipeline_recipe,
+        output_root,
+        spec_path,
+        governed["as-held-hwm"],
+        governed["hwm-input"],
+        governed["calendar"],
+        governed["admission"],
+        portfolio_root=tmp_path / "portfolio",
+        invested_capital_result_path=governed["invested-capital"],
+        invested_capital_input_generation_path=governed["capital-input"],
+    )
 
-    staged = output_root / "stages" / "panel" / "account-strategy-manifest.json"
     assert calls == [(generation_root, epoch_manifest.generation_id)]
-    assert staged.read_bytes() == PREWIRE_MANIFEST_BYTES
+    # The panel command writes the manifest from the same verified bundle, so
+    # the spec build leaves that node's declared output untouched.
+    assert not (output_root / "stages" / "panel").exists()
+    # `build_workbook` and `build_panel` refuse a financial publication
+    # without a portfolio root, so the nodes that run them must carry it.
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    argv_by_node = {row["node_id"]: row.get("argv", []) for row in spec["nodes"]}
+    for node_id in ("build-workbook", "build-panel"):
+        argv = argv_by_node[node_id]
+        assert "--portfolio-root" in argv
+        assert argv[argv.index("--portfolio-root") + 1] == str(tmp_path / "portfolio")
+    for node_id in ("build-ledger", "build-baseline"):
+        assert "--portfolio-root" not in argv_by_node[node_id]
+    # `build_report` also refuses a governed staging run without the root, so a
+    # run that binds the governed results has to carry it on the report node.
+    assert "--portfolio-root" in argv_by_node["build-report"]
+    # The governed numerical results are stage inputs for every role that reads
+    # them, and each has to be a declared absolute read or the plan refuses.
+    reads_by_node = {
+        row["node_id"]: row.get("declared_reads", []) for row in spec["nodes"]
+    }
+    for node_id in ("build-report", "build-workbook", "build-panel"):
+        argv = argv_by_node[node_id]
+        for flag, path in (
+            ("--hwm-governed-result", governed["as-held-hwm"]),
+            ("--hwm-governed-input-generation", governed["hwm-input"]),
+            ("--hwm-governed-calendar-authority", governed["calendar"]),
+            ("--hwm-governed-admission-receipt", governed["admission"]),
+            ("--invested-capital-result", governed["invested-capital"]),
+            ("--invested-capital-input-generation", governed["capital-input"]),
+        ):
+            assert argv[argv.index(flag) + 1] == str(path.resolve())
+            assert str(path.resolve()) in reads_by_node[node_id]
+    for node_id in ("build-ledger", "build-baseline"):
+        assert "--hwm-governed-result" not in argv_by_node[node_id]
     orchestration = json.loads(
         spec_path.with_name("portfolio-orchestration-contract.json").read_text(
             encoding="utf-8"
@@ -1135,6 +1166,70 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
             (output_root / "financial-mvp-bound-contract.json").read_bytes()
         ).hexdigest()
     )
+
+
+def test_governed_results_reach_every_role_that_reads_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The report, workbook and panel roles each read the governed results.
+
+    Binding them into the proof but not into the pipeline's own nodes made the
+    panel node recompute a semantic validation that differed from the one the
+    proof had already written into the shared QA directory, which failed the
+    run at `build-panel` with a create-only conflict.
+    """
+
+    flags = {
+        "--hwm-governed-result": tmp_path / "as-held-hwm.json",
+        "--hwm-governed-input-generation": tmp_path / "hwm-input.json",
+        "--hwm-governed-calendar-authority": tmp_path / "calendar.json",
+        "--hwm-governed-admission-receipt": tmp_path / "admission.json",
+        "--invested-capital-result": tmp_path / "invested-capital.json",
+        "--invested-capital-input-generation": tmp_path / "capital-input.json",
+    }
+    for path in flags.values():
+        _write_json(path, {"present": True})
+
+    resolved = materializer._governed_stage_paths(*flags.values())
+    assert set(resolved) == set(flags)
+    assert all(resolved[flag] == path.resolve() for flag, path in flags.items())
+
+    assert materializer._governed_stage_paths(*([None] * 6)) == {}
+
+    partial = [*flags.values()]
+    partial[-1] = None
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="governed numerical results must be supplied together",
+    ):
+        materializer._governed_stage_paths(*partial)
+
+    missing = [*flags.values()]
+    missing[0] = tmp_path / "absent.json"
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="governed result is absent or linked",
+    ):
+        materializer._governed_stage_paths(*missing)
+
+    assert materializer._GOVERNED_OUTCOME_STAGES == ("report", "workbook", "panel")
+
+
+def test_financial_spec_without_a_portfolio_root_fails_before_the_dag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Omitting it used to surface four nodes in, as an opaque node failure."""
+
+    recipe_path = tmp_path / "recipe.json"
+    _write_json(recipe_path, {"schema_version": 3})
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="financial pipeline specification requires a portfolio root",
+    ):
+        materializer.build_spec(
+            recipe_path, tmp_path / "out", tmp_path / "out" / "pipeline-spec.json"
+        )
 
 
 def _write_json(path: Path, payload: object) -> None:
@@ -1874,7 +1969,12 @@ def test_create_recipe_binds_financial_mvp_authority_and_admission_receipt(
     )
     spec_path = tmp_path / "financial-mvp-dag" / "pipeline-spec.json"
 
-    materializer.build_spec(output, tmp_path / "financial-mvp-dag", spec_path)
+    materializer.build_spec(
+        output,
+        tmp_path / "financial-mvp-dag",
+        spec_path,
+        portfolio_root=tmp_path / "portfolio",
+    )
 
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     PipelineSpec.from_json_bytes(spec_path.read_bytes())
@@ -2046,7 +2146,12 @@ def test_schema_v9_rebinds_exact_epoch_manifest_inputs_into_every_stage(
     )
     output_root = tmp_path / "schema-v9-dag"
     spec_path = output_root / "pipeline-spec.json"
-    materializer.build_spec(pipeline_recipe, output_root, spec_path)
+    materializer.build_spec(
+        pipeline_recipe,
+        output_root,
+        spec_path,
+        portfolio_root=tmp_path / "portfolio",
+    )
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     nodes = {node["node_id"]: node for node in spec["nodes"]}
     expected_flags = {
@@ -2342,7 +2447,12 @@ def test_schema_v9_declares_the_authority_snapshot_it_emits(
     )
     output_root = tmp_path / "schema-v9-dag"
     spec_path = output_root / "pipeline-spec.json"
-    materializer.build_spec(pipeline_recipe, output_root, spec_path)
+    materializer.build_spec(
+        pipeline_recipe,
+        output_root,
+        spec_path,
+        portfolio_root=tmp_path / "portfolio",
+    )
 
     declared = next(
         node
@@ -2488,6 +2598,166 @@ def test_financial_mvp_authority_rejects_receipt_outside_manifest(
                 "panel": "d" * 64,
             },
         )
+
+
+def test_current_admission_reopens_sources_and_rejects_coherent_omissions(
+    tmp_path: Path,
+) -> None:
+    """Real small stage output crosses the materializer's independent boundary."""
+    fixture_spec = importlib.util.spec_from_file_location(
+        "current_source_stage_fixture",
+        ROOT / "tests/provider_ledger/test_admit_or_declare.py",
+    )
+    assert fixture_spec is not None and fixture_spec.loader is not None
+    fixture = importlib.util.module_from_spec(fixture_spec)
+    fixture_spec.loader.exec_module(fixture)
+    generation, authority, _ = fixture._source_bound_stage(tmp_path)
+    arguments = {
+        key: authority[key]
+        for key in ("contract_raw_sha256", "contract_semantic_sha256", "census_sha256")
+    }
+    accepted = materializer._provider_admission_authority(
+        generation, authority["contract"], **arguments
+    )
+    assert accepted["provider_count"] == 7
+    assert accepted["inventory_count"] == accepted["disposition_count"]
+    original_receipt = json.loads(
+        (generation / "admit-or-declare-receipt.json").read_bytes()
+    )
+    original_catalog = json.loads((generation / "provider-ledger.json").read_bytes())
+    original_manifest = GenerationManifest.from_json_bytes(
+        (generation / "generation.json").read_bytes()
+    )
+    provider_generations = {
+        row["provider_id"]: row for row in original_receipt["provider_generations"]
+    }
+    inventory, _ = fixture.ledger.validate_admit_or_declare_receipt(
+        original_receipt,
+        product_authority=authority,
+        source_segments=authority["sources"],
+        provider_generations=provider_generations,
+    )
+    for attack in (
+        "omitted_dataset",
+        "changed_materialized_nav",
+        "changed_finality",
+        "unselected_provider_return",
+        "future_effective_date",
+        "future_nav_recognition_date",
+        "provider_future_nav_recognition_date",
+    ):
+        receipt = copy.deepcopy(original_receipt)
+        catalog = copy.deepcopy(original_catalog)
+        if attack == "omitted_dataset":
+            omitted = next(
+                item
+                for item in inventory
+                if item.provider_id == "schwab"
+                and item.item_id == "unreferenced_collection"
+            )
+            for field in ("inventory", "dispositions"):
+                receipt[field] = [
+                    row
+                    for row in receipt[field]
+                    if not (
+                        row["provider_id"] == omitted.provider_id
+                        and row["item_kind"] == omitted.item_kind.value
+                        and row["item_id"] == omitted.item_id
+                    )
+                ]
+            observed = next(
+                row
+                for row in receipt["run_observation"]["providers"]
+                if row["provider_id"] == "schwab"
+            )
+            observed["observed_inventory_count"] -= 1
+            observed["observed_inventory_sha256"] = fixture.ledger._inventory_digest(
+                [
+                    item
+                    for item in inventory
+                    if item.provider_id == "schwab" and item != omitted
+                ]
+            )
+            fixture._rehash_receipt(receipt)
+        elif attack == "changed_materialized_nav":
+            row = next(
+                row
+                for row in catalog["nav_observations"]
+                if row["provider_id"] == "matrixport"
+            )
+            row["nav"]["value"] = "101"
+        elif attack == "unselected_provider_return":
+            catalog["provider_strategy_returns"].append(
+                {
+                    "provider_id": "synthetic-unselected-provider",
+                    "strategy_id": "synthetic-unselected-strategy",
+                    "date": "2026-08-14",
+                    "return": "0.99",
+                }
+            )
+        elif "future_" in attack:
+            row = next(
+                row
+                for row in catalog["capital_anchors"]
+                if row["provider_id"] == "quantbase"
+            )
+            field = attack.removeprefix("provider_").removeprefix("future_")
+            row[field] = (
+                "2026-08-15" if attack.startswith("provider_") else "2026-09-18"
+            )
+        else:
+            observed = next(
+                row
+                for row in receipt["run_observation"]["providers"]
+                if row["provider_id"] == "schwab"
+            )
+            observed["finalized_through"] = "2026-08-13"
+        # All candidate-only receipt checks still pass. Rehash both emitted
+        # artifacts and the outer generation so rejection must use the selected
+        # source bytes and the actual materialized rows, not a stale outer hash.
+        fixture.ledger.validate_admit_or_declare_receipt(
+            receipt,
+            product_authority=authority,
+            source_segments=authority["sources"],
+            provider_generations=provider_generations,
+        )
+        contents = {
+            "normalized/admit-or-declare-receipt.json": canonical_json_bytes(receipt),
+            "normalized/provider-ledger.json": canonical_json_bytes(catalog),
+        }
+        manifest = GenerationManifest.build(
+            as_of_date=original_manifest.as_of_date,
+            adapter=original_manifest.adapter,
+            coverage=original_manifest.coverage,
+            verification=original_manifest.verification,
+            artifacts=tuple(
+                replace(
+                    artifact,
+                    sha256=hashlib.sha256(contents[artifact.artifact_id]).hexdigest(),
+                    size_bytes=len(contents[artifact.artifact_id]),
+                )
+                if artifact.artifact_id in contents
+                else artifact
+                for artifact in original_manifest.artifacts
+            ),
+        )
+        forged = tmp_path / attack / manifest.generation_id
+        forged.mkdir(parents=True)
+        (forged / "generation.json").write_bytes(manifest.to_json_bytes())
+        for artifact_id, content in contents.items():
+            (forged / Path(artifact_id).name).write_bytes(content)
+        reason = (
+            "materialized provider fact scope differs"
+            if attack == "unselected_provider_return"
+            else "materialized provider fact cutoff or generation differs"
+            if "future_" in attack
+            else "independent source inventory or materialized facts"
+        )
+        with pytest.raises(materializer.MaterializationError, match=reason):
+            materializer._provider_admission_authority(
+                forged, authority["contract"], **arguments
+            )
+    assert not (tmp_path / "staged/CURRENT.json").exists()
 
 
 def _runtime_registry(
@@ -2931,6 +3201,9 @@ def _current_lens_release_fixture(tmp_path: Path) -> tuple[dict, dict]:
     return contract, {"decomposition_lenses": {"modes": modes}}
 
 
+DECOMPOSITION_AUTHORITY = "d" * 64
+
+
 def test_current_lens_generations_share_existing_release_roots(tmp_path: Path) -> None:
     if sys.platform == "win32":
         tmp_path = Path("\\\\?\\" + str(tmp_path.resolve()))
@@ -2942,7 +3215,7 @@ def test_current_lens_generations_share_existing_release_roots(tmp_path: Path) -
         materializer.PRODUCTION_ROOTS
     )
     assert sum(row["release_target"] for row in nodes.values()) == 12
-    materializer._verify_panel_lens_nodes(panel, nodes)
+    materializer._verify_panel_lens_nodes(panel, nodes, DECOMPOSITION_AUTHORITY)
     for (mode, surface, source_key), row in nodes.items():
         assert row["release_target"] is (surface == "STATIC")
         assert row["root_id"] == (
@@ -2953,7 +3226,7 @@ def test_current_lens_generations_share_existing_release_roots(tmp_path: Path) -
         "sources"
     ][0]["generation_id"] = "0" * 64
     with pytest.raises(materializer.MaterializationError, match="panel lens"):
-        materializer._verify_panel_lens_nodes(panel, nodes)
+        materializer._verify_panel_lens_nodes(panel, nodes, DECOMPOSITION_AUTHORITY)
 
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "pointer", "root"])
@@ -3148,6 +3421,31 @@ def test_production_spec_binds_stable_twenty_root_authority(
             *supplied_lenses,
         ],
     )
+    # A published generation an external agent rewrote can only be superseded
+    # through the pipeline's own `predecessor-authority-repair` gate, and the
+    # production specification is the only place that gate can enter. The gate
+    # id has to be the one the pipeline verifies, so it is asserted against
+    # that constant rather than against a copy of the string.
+    repair_gate_path = tmp_path / "predecessor-authority-repair.json"
+    repair_gate_path.write_bytes(
+        canonical_json_bytes(
+            {
+                "authority_sha256": "a" * 64,
+                "disposition": "SUPERSEDE_WITH_VERIFIED_GENERATIONS",
+                "expected_inventory_drifts": [
+                    {
+                        "generation_id": "b" * 64,
+                        "observed_inventory_sha256": "c" * 64,
+                        "recorded_inventory_sha256": "d" * 64,
+                        "root_id": "portfolio-report",
+                    }
+                ],
+                "release_id": "e" * 64,
+                "release_manifest_sha256": "f" * 64,
+                "schema_version": 1,
+            }
+        )
+    )
     result = materializer.build_production_spec(
         recipe_path,
         prepared_root,
@@ -3156,9 +3454,45 @@ def test_production_spec_binds_stable_twenty_root_authority(
         tmp_path / "production-state",
         spec_path,
         financial_artifacts_path=financial_artifacts,
+        predecessor_repair_gate_path=repair_gate_path,
     )
 
     spec = PipelineSpec.from_json_bytes(spec_path.read_bytes())
+    repair_gates = [
+        gate
+        for gate in spec.gates
+        if gate.gate_id == core_pipeline._PREDECESSOR_REPAIR_GATE
+    ]
+    assert len(repair_gates) == 1
+    assert repair_gates[0].path == repair_gate_path
+    assert (
+        repair_gates[0].sha256
+        == hashlib.sha256(repair_gate_path.read_bytes()).hexdigest()
+    )
+
+    # Omitting it must leave the gate list exactly as it was; the repair is an
+    # explicit, evidenced act and never a default.
+    plain_spec_path = tmp_path / "production-spec-no-repair.json"
+    materializer.build_production_spec(
+        recipe_path,
+        prepared_root,
+        prepared_root / "evidence" / "post-build-semantic.json",
+        production_root,
+        tmp_path / "production-state-no-repair",
+        plain_spec_path,
+        financial_artifacts_path=financial_artifacts,
+    )
+    plain = PipelineSpec.from_json_bytes(plain_spec_path.read_bytes())
+    assert not [
+        gate
+        for gate in plain.gates
+        if gate.gate_id == core_pipeline._PREDECESSOR_REPAIR_GATE
+    ]
+    assert [gate.gate_id for gate in spec.gates] == [
+        *[gate.gate_id for gate in plain.gates],
+        core_pipeline._PREDECESSOR_REPAIR_GATE,
+    ]
+
     assert result["root_count"] == 20
     assert set(spec.roots) == set(materializer.PRODUCTION_ROOTS)
     if current_surfaces:
@@ -3815,8 +4149,18 @@ def test_generated_semantic_command_declares_exact_gate_file(
     )
     output_root = tmp_path / "dag"
     spec_path = output_root / "pipeline-spec.json"
+    retained_cache_root = tmp_path / "retained-decomposition"
+    workbook_runtime = tmp_path / "workbook-runtime.json"
+    workbook_runtime.write_text("{}\n", encoding="utf-8")
 
-    materializer.build_spec(recipe_path, output_root, spec_path)
+    materializer.build_spec(
+        recipe_path,
+        output_root,
+        spec_path,
+        portfolio_root=tmp_path / "portfolio",
+        retained_cache_root=retained_cache_root,
+        workbook_runtime_path=workbook_runtime,
+    )
 
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     semantic = next(
@@ -3834,6 +4178,15 @@ def test_generated_semantic_command_declares_exact_gate_file(
     )
 
     nodes = {node["node_id"]: node for node in spec["nodes"]}
+    analytics_command = nodes["build-analytics"]
+    retained_index = analytics_command["argv"].index("--retained-cache-root")
+    assert analytics_command["argv"][retained_index + 1] == str(retained_cache_root)
+    assert str(retained_cache_root) in analytics_command["declared_writes"]
+    assert spec["state_root"] == str(retained_cache_root)
+    workbook_command = nodes["build-workbook"]
+    runtime_index = workbook_command["argv"].index("--workbook-runtime")
+    assert workbook_command["argv"][runtime_index + 1] == str(workbook_runtime)
+    assert str(workbook_runtime) in workbook_command["declared_reads"]
     assert nodes["build-workbook"]["retry_limit"] == 1
     assert all(
         node["retry_limit"] == 0
@@ -3932,3 +4285,133 @@ def test_governed_hwm_assessment_binds_the_admitted_input_contract() -> None:
     assert signature.parameters["input_contract_path"].default is None
     for entry in (materializer.build_spec, materializer.build_production_spec):
         assert "financial_input_contract_path" in inspect.signature(entry).parameters
+
+
+def test_panel_lens_authority_admits_the_dynamic_style_path(tmp_path: Path) -> None:
+    """The dynamic style path is a lens, not a surface split, so it has no surfaces.
+
+    It is bound through `meta.decomposition_generation_id`, which the caller
+    verifies separately; requiring a `surfaces` mapping from it made the gate
+    unsatisfiable for any panel that publishes it.
+    """
+
+    if sys.platform == "win32":
+        tmp_path = Path("\\\\?\\" + str(tmp_path.resolve()))
+    contract, panel = _current_lens_release_fixture(tmp_path)
+    nodes = materializer._production_lens_nodes(tmp_path, contract)
+    panel["decomposition_lenses"]["modes"]["LIVE_ONLY"].append(
+        {"lens_id": "DYNAMIC_STYLE", "generation_id": DECOMPOSITION_AUTHORITY}
+    )
+
+    materializer._verify_panel_lens_nodes(panel, nodes, DECOMPOSITION_AUTHORITY)
+
+    # The skip is not a licence to carry any unbound lens: a group with no
+    # surfaces that is not the decomposition authority is still a mismatch.
+    panel["decomposition_lenses"]["modes"]["LIVE_ONLY"][-1]["generation_id"] = "0" * 64
+    with pytest.raises(materializer.MaterializationError, match="panel lens"):
+        materializer._verify_panel_lens_nodes(panel, nodes, DECOMPOSITION_AUTHORITY)
+
+
+# The tool must be the thing being run, not merely named. `docs/ci.md:108`
+# passes it to mypy inside a long file list, where the following token is the
+# next path rather than a subcommand.
+_MATERIALIZE = re.compile(
+    r"(?:\S*[Pp]ython\S*|\"?\$\{?PY\}?\"?)\s+"
+    r"\S*portfolio_pipeline_materialize\.py\s+([a-z][a-z-]*)"
+)
+
+
+def _subcommand_parsers() -> dict[str, argparse.ArgumentParser]:
+    parser = materializer._parser()
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return dict(action.choices)
+    raise AssertionError("the materializer parser declares no subcommands")
+
+
+def _required_options(parser: argparse.ArgumentParser) -> list[str]:
+    return [
+        action.option_strings[0]
+        for action in parser._actions
+        if action.required and action.option_strings
+    ]
+
+
+def _documented_invocations() -> list[tuple[Path, int, str, str]]:
+    """Every checked-in `portfolio_pipeline_materialize.py <subcommand>` call.
+
+    Continuations are joined by fence language -- PowerShell continues a
+    command with a trailing backtick, sh with a trailing backslash -- and
+    prose is skipped entirely. Markdown prose ends in a backtick whenever it
+    closes an inline code span, so a scan that ignored fences would splice an
+    unrelated sentence onto a command and check the wrong string.
+    """
+
+    found: list[tuple[Path, int, str, str]] = []
+    targets = sorted((ROOT / "docs").rglob("*.md")) + sorted(
+        (ROOT / "ops").rglob("*.sh")
+    )
+    for path in targets:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if path.suffix == ".sh":
+            languages: list[str | None] = ["sh"] * len(lines)
+        else:
+            languages = []
+            language: str | None = None
+            for line in lines:
+                if line.startswith("```"):
+                    language = (
+                        None if language is not None else line[3:].strip().lower()
+                    )
+                    languages.append(None)
+                else:
+                    languages.append(language)
+        for index, line in enumerate(lines):
+            language = languages[index]
+            if language is None or not _MATERIALIZE.search(line):
+                continue
+            terminator = "`" if language in {"powershell", "pwsh"} else "\\"
+            block = [line]
+            cursor = index
+            while block[-1].rstrip().endswith(terminator) and cursor + 1 < len(lines):
+                cursor += 1
+                block.append(lines[cursor])
+            command = " ".join(part.rstrip().removesuffix(terminator) for part in block)
+            match = _MATERIALIZE.search(command)
+            assert match is not None
+            found.append((path, index + 1, match.group(1), command))
+    return found
+
+
+def test_documented_cli_invocations_supply_every_required_option() -> None:
+    """A checked-in procedure that omits a required option cannot start.
+
+    Both rollforward runbooks invoked `spec` without `--portfolio-root` from
+    2026-08 onward. `build_spec` refuses unconditionally without that root, but
+    the CLI declared the option optional, so the two contracts disagreed and
+    only a live run could tell. The requirement is read off the real parser
+    here rather than a hand-maintained list, so a newly required option cannot
+    land without its documented callers moving with it.
+    """
+
+    parsers = _subcommand_parsers()
+    invocations = _documented_invocations()
+    assert invocations, "no documented invocation was found, so this proves nothing"
+
+    missing: list[str] = []
+    for path, line, subcommand, command in invocations:
+        assert subcommand in parsers, (
+            f"{path.name}:{line} names unknown subcommand {subcommand!r}"
+        )
+        tokens = set(command.split())
+        for option in _required_options(parsers[subcommand]):
+            if option in tokens or any(
+                token.startswith(f"{option}=") for token in tokens
+            ):
+                continue
+            location = path.relative_to(ROOT).as_posix()
+            missing.append(f"{location}:{line} `{subcommand}` omits {option}")
+
+    assert not missing, "documented invocations omit required options: " + "; ".join(
+        missing
+    )

@@ -1,0 +1,598 @@
+{
+  "as_of_date": "2026-09-03",
+  "factor_source": {
+    "artifact_id": "audit-proof/factors.csv",
+    "date_column": "date",
+    "expected_sha256": "359f0ef25f6ba466cab4118c54db4b2d1cbacff429fc345a3cc054cf676161a1",
+    "expected_size_bytes": 163251,
+    "factors": [
+      {
+        "column": "SPY_XS",
+        "factor_id": "SPY_XS",
+        "return_type": "EXCESS"
+      },
+      {
+        "column": "IWM_XS",
+        "factor_id": "IWM_XS",
+        "return_type": "EXCESS"
+      },
+      {
+        "column": "HYG_XS",
+        "factor_id": "HYG_XS",
+        "return_type": "EXCESS"
+      }
+    ],
+    "relative_path": "factors.csv",
+    "risk_free_column": "RF",
+    "schema_name": "audit-market-proxy-returns",
+    "schema_version": "1"
+  },
+  "maximum_factor_staleness_days": 10,
+  "models": [
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "01-market-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "TT Portfolio",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-08",
+      "train_end": "2026-05-07"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS",
+        "IWM_XS",
+        "HYG_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "01-market-size-credit-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "TT Portfolio",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-08",
+      "train_end": "2026-05-07"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "02-market-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "Volatis Strategy",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-04",
+      "train_end": "2026-05-03"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS",
+        "IWM_XS",
+        "HYG_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "02-market-size-credit-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "Volatis Strategy",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-04",
+      "train_end": "2026-05-03"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "03-market-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "QSI",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-20",
+      "train_end": "2026-05-19"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS",
+        "IWM_XS",
+        "HYG_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "03-market-size-credit-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "QSI",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-20",
+      "train_end": "2026-05-19"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "04-market-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "AI Factor [P123]",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-22",
+      "train_end": "2026-05-21"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS",
+        "IWM_XS",
+        "HYG_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "04-market-size-credit-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "AI Factor [P123]",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-22",
+      "train_end": "2026-05-21"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "05-market-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "GrizzlyBears VTMA",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-20",
+      "train_end": "2026-05-19"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS",
+        "IWM_XS",
+        "HYG_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "05-market-size-credit-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "GrizzlyBears VTMA",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-20",
+      "train_end": "2026-05-19"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "06-market-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "Robuxio Crypto (High Sharpe High Vol)",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-04",
+      "train_end": "2026-05-03"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS",
+        "IWM_XS",
+        "HYG_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "06-market-size-credit-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "Robuxio Crypto (High Sharpe High Vol)",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-04",
+      "train_end": "2026-05-03"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "07-market-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "EU [P123]",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-05",
+      "train_end": "2026-05-04"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS",
+        "IWM_XS",
+        "HYG_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "07-market-size-credit-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "EU [P123]",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-05",
+      "train_end": "2026-05-04"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "08-market-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "[Composer] - The Holy Grail (Buy Copy)",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-04",
+      "train_end": "2026-05-03"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS",
+        "IWM_XS",
+        "HYG_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "08-market-size-credit-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "[Composer] - The Holy Grail (Buy Copy)",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2026-05-04",
+      "train_end": "2026-05-03"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "09-market-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "Growth at Market Pivot Points [EchoTrade]",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2025-11-10",
+      "train_end": "2025-11-03"
+    },
+    {
+      "constraint": "UNCONSTRAINED",
+      "cost_coverage": "INCOMPLETE",
+      "cv_folds": 3,
+      "estimator": "DYNAMIC_FLS",
+      "factor_ids": [
+        "SPY_XS",
+        "IWM_XS",
+        "HYG_XS"
+      ],
+      "minimum_test_observations": 10,
+      "minimum_train_observations": 30,
+      "model_id": "09-market-size-credit-dynamic-fls",
+      "parsimony_tolerance": "0.01",
+      "periods_per_year": 252,
+      "ridge_candidates": [
+        "0.0000000001"
+      ],
+      "series_id": "Growth at Market Pivot Points [EchoTrade]",
+      "smoothness_candidates": [
+        "0.00000001",
+        "0.0000001",
+        "0.000001",
+        "0.00001",
+        "0.0001",
+        "0.001"
+      ],
+      "test_start": "2025-11-10",
+      "train_end": "2025-11-03"
+    }
+  ],
+  "provenance_sources": [
+    {
+      "artifact_id": "provider-ledger/provider-ledger-generation.json",
+      "expected_sha256": "8e0b4498234c3b3de0e14af0a3a0e957554582edc00f1bb2d224ba904cc6e037",
+      "expected_size_bytes": 5607,
+      "relative_path": "provider-ledger-generation.json",
+      "schema_name": "generation-manifest",
+      "schema_version": "1"
+    },
+    {
+      "artifact_id": "provider-ledger/provider-ledger.json",
+      "expected_sha256": "6438ceebf7abce7faa534b07e299322df169be2c3fac55c8b6357e50183978c5",
+      "expected_size_bytes": 26484546,
+      "relative_path": "provider-ledger.json",
+      "schema_name": "provider-ledger-catalog",
+      "schema_version": "1"
+    },
+    {
+      "artifact_id": "provider-ledger/provider-ledger-source-proof.json",
+      "expected_sha256": "089b874ff9323bf0ea73efb594e5f17aa94e808395924865c7c5a99ea96c82d5",
+      "expected_size_bytes": 2878,
+      "relative_path": "provider-ledger-source-proof.json",
+      "schema_name": "portfolio-canonical-series-proof",
+      "schema_version": "1"
+    },
+    {
+      "artifact_id": "provider-ledger/strategy-evidence.json",
+      "expected_sha256": "639e0b7ee6b76d1e229517d402eb06357311fc0116260e48ea1e43ac33d92779",
+      "expected_size_bytes": 11887,
+      "relative_path": "strategy-evidence.json",
+      "schema_name": "portfolio-strategy-provider-evidence",
+      "schema_version": "1"
+    }
+  ],
+  "schema_version": 1,
+  "target_source": {
+    "artifact_id": "provider-ledger/canonical-strategy-returns.csv",
+    "expected_sha256": "f79d7510cb66fa4ba2d1102b461ec230cc941e8a39551d401adde8591ac63fe7",
+    "expected_size_bytes": 155427,
+    "relative_path": "targets.csv",
+    "schema_name": "portfolio-canonical-strategy-returns",
+    "schema_version": "1"
+  }
+}

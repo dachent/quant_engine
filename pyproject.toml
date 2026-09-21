@@ -68,6 +68,10 @@ pythonpath = [".", "tools"]
 [tool.ruff]
 target-version = "py311"
 line-length = 88
+# Recovered scripts are kept byte-for-byte as they ran. Reformatting them would
+# destroy the evidence they exist to preserve, so they are excluded from style
+# enforcement rather than rewritten. See ops/preserved-scripts/README.md and #421.
+extend-exclude = ["ops/preserved-scripts"]
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F"]

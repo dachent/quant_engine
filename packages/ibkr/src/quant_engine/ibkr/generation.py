@@ -50,6 +50,7 @@ from quant_engine.portfolio_ledger import (
 SPEC_SCHEMA_VERSION = 3
 CATALOG_SCHEMA_VERSION = 4
 ADAPTER_VERSION = "0.4.0"
+_CHANGE_IN_NAV_SOURCE_PRECISION = Decimal("0.01")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _SOURCE_ROLES = {
@@ -148,6 +149,14 @@ def _root(value: object, name: str) -> Path:
 
 def _record_id(prefix: str, payload: Mapping[str, Any]) -> str:
     return f"{prefix}-{hashlib.sha256(canonical_json_bytes(payload)).hexdigest()[:24]}"
+
+
+def _optional_decimal_text(value: Decimal | None) -> str | None:
+    return decimal_text(value) if value is not None else None
+
+
+def _optional_sha256_text(value: str | None) -> str | None:
+    return hashlib.sha256(value.encode()).hexdigest() if value is not None else None
 
 
 def _security_id(conid: str) -> str:
@@ -367,6 +376,33 @@ def _statements_equal(left: FlexDailyStatement, right: FlexDailyStatement) -> bo
         and left.base_currency == right.base_currency
         and left.nav == right.nav
         and left.change_in_nav_ending_value == right.change_in_nav_ending_value
+        and left.change_in_nav_accounting_date == right.change_in_nav_accounting_date
+        and left.change_in_nav_starting_value == right.change_in_nav_starting_value
+        and (
+            left.change_in_nav_deposits_withdrawals
+            == right.change_in_nav_deposits_withdrawals
+        )
+        and left.change_in_nav_asset_transfers == right.change_in_nav_asset_transfers
+        and (
+            left.change_in_nav_internal_cash_transfers
+            == right.change_in_nav_internal_cash_transfers
+        )
+        and left.change_in_nav_mtm == right.change_in_nav_mtm
+        and left.change_in_nav_components == right.change_in_nav_components
+        and left.cash_reports == right.cash_reports
+        and left.interest_accruals == right.interest_accruals
+        and left.tier_interest == right.tier_interest
+        and left.nav_cash == right.nav_cash
+        and left.nav_broker_cash_component == right.nav_broker_cash_component
+        and left.nav_interest_accruals == right.nav_interest_accruals
+        and (
+            left.nav_broker_interest_accruals_component
+            == right.nav_broker_interest_accruals_component
+        )
+        and (
+            left.nav_margin_financing_charge_accruals
+            == right.nav_margin_financing_charge_accruals
+        )
         and Counter(left.positions) == Counter(right.positions)
         and Counter(left.trades) == Counter(right.trades)
         and Counter(left.cash_transactions) == Counter(right.cash_transactions)
@@ -737,8 +773,12 @@ def _normalize(
     assignments = _objects(baseline.get("assignments"), "baseline.assignments")
     securities: dict[str, dict[str, Any]] = {}
     nav: list[dict[str, Any]] = []
+    change_in_nav_observations: list[dict[str, Any]] = []
     positions: list[dict[str, Any]] = []
     transactions: list[dict[str, Any]] = []
+    financing_cost_observations: list[dict[str, Any]] = []
+    financing_liability_observations: list[dict[str, Any]] = []
+    leverage_exposure_observations: list[dict[str, Any]] = []
     flows: list[dict[str, Any]] = []
     corporate_actions: list[dict[str, Any]] = []
     rates: list[dict[str, Any]] = []
@@ -764,6 +804,42 @@ def _normalize(
         )
         return security_id
 
+    def observed_amount(
+        value: Decimal | None, currency: str, available: bool = True
+    ) -> dict[str, str | None]:
+        return (
+            {
+                "currency": currency,
+                "status": "AVAILABLE",
+                "value": decimal_text(value),
+            }
+            if value is not None and available
+            else {"currency": currency, "status": "UNAVAILABLE", "value": None}
+        )
+
+    def source_row(
+        prefix: str,
+        payload: dict[str, Any],
+        *,
+        available: bool,
+        value: Decimal | None,
+        currency: str,
+    ) -> dict[str, Any]:
+        row = {
+            "account_id": account_id,
+            "amount": observed_amount(value, currency, available),
+            "classification": payload["classification"],
+            "measurement_basis": payload["measurement_basis"],
+            "source_account_scope": (
+                "STATEMENT_ACCOUNT" if available else "AMBIGUOUS_REPORTED_ACCOUNT"
+            ),
+            "source_artifact_id": statement.artifact_id,
+            "source_record_id": payload["source_record_id"],
+            "source_section": payload["source_section"],
+            "source_field": payload["source_field"],
+        }
+        return {"record_id": _record_id(prefix, row), **row}
+
     for statement in statements:
         account_id = crosswalk[statement.raw_account_id]
         account = accounts_by_id.get(account_id)
@@ -782,6 +858,188 @@ def _normalize(
             "value_basis": "ACCOUNT_TOTAL",
         }
         nav.append({"record_id": _record_id("nav", nav_payload), **nav_payload})
+
+        for report in statement.cash_reports:
+            if report.level_of_detail != "Currency":
+                continue
+            report_available = report.reported_account_matches_statement
+            for basis, field, value in (
+                ("TRADE_DATE_CASH_BALANCE", "endingCash", report.ending_cash),
+                (
+                    "SETTLED_CASH_BALANCE",
+                    "endingSettledCash",
+                    report.ending_settled_cash,
+                ),
+            ):
+                if value is None:
+                    continue
+                row = source_row(
+                    "financing-liability",
+                    {
+                        "classification": (
+                            "CASH_DEBIT_BALANCE" if value < 0 else "CASH_BALANCE"
+                        ),
+                        "measurement_basis": basis,
+                        "source_record_id": (
+                            f"cash-report:{account_id}:{report.to_date.isoformat()}"
+                            f":{report.currency}:{report.level_of_detail}:{basis}"
+                        ),
+                        "source_section": "CashReportCurrency",
+                        "source_field": field,
+                    },
+                    available=report_available,
+                    value=value,
+                    currency=report.currency,
+                )
+                row["as_of_date"] = report.to_date.isoformat()
+                row["period_start"] = report.from_date.isoformat()
+                row["period_end"] = report.to_date.isoformat()
+                financing_liability_observations.append(row)
+
+        for accrual in statement.interest_accruals:
+            accrual_available = accrual.reported_account_matches_statement
+            for basis, field, value in (
+                ("PERIOD_ACCRUAL", "interestAccrued", accrual.interest_accrued),
+                ("ACCRUAL_REVERSAL", "accrualReversal", accrual.accrual_reversal),
+                (
+                    "ACCRUAL_BALANCE",
+                    "endingAccrualBalance",
+                    accrual.ending_accrual_balance,
+                ),
+            ):
+                if value is None:
+                    continue
+                row = source_row(
+                    "financing-cost",
+                    {
+                        "classification": "INTEREST_ACCRUAL_UNCLASSIFIED",
+                        "measurement_basis": basis,
+                        "source_record_id": (
+                            f"interest-accrual:{account_id}:{accrual.from_date.isoformat()}"
+                            f":{accrual.to_date.isoformat()}:{accrual.currency}:{basis}"
+                        ),
+                        "source_section": "InterestAccrualsCurrency",
+                        "source_field": field,
+                    },
+                    available=accrual_available,
+                    value=-value,
+                    currency=accrual.currency,
+                )
+                row["source_amount"] = observed_amount(
+                    value, accrual.currency, accrual_available
+                )
+                row["period_start"] = accrual.from_date.isoformat()
+                row["period_end"] = accrual.to_date.isoformat()
+                financing_cost_observations.append(row)
+
+        for tier in statement.tier_interest:
+            if tier.total_interest is None:
+                continue
+            tier_available = tier.reported_account_matches_statement
+            native_tier_identity = {
+                "balance_threshold": _optional_decimal_text(tier.balance_threshold),
+                "code": tier.code,
+                "commodities_interest": _optional_decimal_text(
+                    tier.commodities_interest
+                ),
+                "commodities_principal": _optional_decimal_text(
+                    tier.commodities_principal
+                ),
+                "from_account_sha256": _optional_sha256_text(tier.from_account),
+                "ibukl_interest": _optional_decimal_text(tier.ibukl_interest),
+                "ibukl_principal": _optional_decimal_text(tier.ibukl_principal),
+                "rate": _optional_decimal_text(tier.rate),
+                "securities_interest": _optional_decimal_text(tier.securities_interest),
+                "securities_principal": _optional_decimal_text(
+                    tier.securities_principal
+                ),
+                "tier_break": tier.tier_break,
+                "to_account_sha256": _optional_sha256_text(tier.to_account),
+                "total_interest": _optional_decimal_text(tier.total_interest),
+                "total_principal": _optional_decimal_text(tier.total_principal),
+            }
+            native_tier_hash = hashlib.sha256(
+                canonical_json_bytes(native_tier_identity)
+            ).hexdigest()
+            row = source_row(
+                "financing-cost",
+                {
+                    "classification": (
+                        "BROKER_DEBIT_INTEREST"
+                        if tier.interest_type == "Debit Interest"
+                        else "INTEREST_DETAIL_UNCLASSIFIED"
+                    ),
+                    "measurement_basis": "VALUE_DATE_INTEREST_DETAIL",
+                    "source_record_id": (
+                        f"tier-interest:{account_id}:{tier.value_date.isoformat()}"
+                        f":{tier.report_date.isoformat()}:{tier.currency}:"
+                        f"{tier.interest_type}:{native_tier_hash}"
+                    ),
+                    "source_section": "TierInterestDetail",
+                    "source_field": "totalInterest",
+                },
+                available=tier_available,
+                value=-tier.total_interest,
+                currency=tier.currency,
+            )
+            row["source_amount"] = observed_amount(
+                tier.total_interest, tier.currency, tier_available
+            )
+            row["value_date"] = tier.value_date.isoformat()
+            row["accounting_date"] = tier.report_date.isoformat()
+            row["tier_break"] = tier.tier_break
+            row["balance_threshold"] = _optional_decimal_text(tier.balance_threshold)
+            row["rate"] = _optional_decimal_text(tier.rate)
+            row["securities_principal"] = _optional_decimal_text(
+                tier.securities_principal
+            )
+            row["securities_interest"] = _optional_decimal_text(
+                tier.securities_interest
+            )
+            row["commodities_principal"] = _optional_decimal_text(
+                tier.commodities_principal
+            )
+            row["commodities_interest"] = _optional_decimal_text(
+                tier.commodities_interest
+            )
+            row["ibukl_principal"] = _optional_decimal_text(tier.ibukl_principal)
+            row["ibukl_interest"] = _optional_decimal_text(tier.ibukl_interest)
+            row["total_principal"] = _optional_decimal_text(tier.total_principal)
+            row["total_interest"] = _optional_decimal_text(tier.total_interest)
+            row["code"] = tier.code
+            row["allocation_scope"] = (
+                "HASHED_NATIVE_ACCOUNTS"
+                if tier.from_account is not None or tier.to_account is not None
+                else "NO_NATIVE_ACCOUNT_ALLOCATION"
+            )
+            row["from_account_sha256"] = native_tier_identity["from_account_sha256"]
+            row["to_account_sha256"] = native_tier_identity["to_account_sha256"]
+            row["included_in_nav"] = None
+            financing_cost_observations.append(row)
+        if statement.change_in_nav_starting_value is not None:
+            source_record_id = (
+                f"change-in-nav:{account_id}:"
+                f"{statement.change_in_nav_accounting_date.isoformat()}"
+            )
+            change_in_nav_observations.append(
+                {
+                    "account_id": account_id,
+                    "accounting_date": statement.change_in_nav_accounting_date.isoformat(),
+                    "components": [
+                        {
+                            "source_component_key": key,
+                            "value": decimal_text(value),
+                        }
+                        for key, value in statement.change_in_nav_components
+                    ],
+                    "currency": statement.base_currency,
+                    "ending_nav": decimal_text(statement.change_in_nav_ending_value),
+                    "identity_tolerance": decimal_text(_CHANGE_IN_NAV_SOURCE_PRECISION),
+                    "opening_nav": decimal_text(statement.change_in_nav_starting_value),
+                    "source_artifact_id": statement.artifact_id,
+                    "source_record_id": source_record_id,
+                }
+            )
         for position in statement.positions:
             security_id = security(position.conid, position.currency)
             assert security_id is not None
@@ -791,7 +1049,7 @@ def _normalize(
             if not position.reported_account_matches_statement:
                 status, strategy_id = "UNMAPPED", None
                 account_scope_mismatches += 1
-            payload = {
+            position_payload: dict[str, Any] = {
                 "account_id": account_id,
                 "as_of_date": position.report_date.isoformat(),
                 "mapping_status": status,
@@ -812,7 +1070,60 @@ def _normalize(
                 "source_artifact_id": statement.artifact_id,
                 "strategy_id": strategy_id,
             }
-            positions.append({"record_id": _record_id("position", payload), **payload})
+            position_fields: dict[str, object] = {
+                "asset_category": position.asset_category,
+                "sub_category": position.sub_category,
+                "multiplier": _optional_decimal_text(position.multiplier),
+                "mark_price": _optional_decimal_text(position.mark_price),
+                "side": position.side,
+                "underlying_conid_sha256": (
+                    hashlib.sha256(position.underlying_conid.encode()).hexdigest()
+                    if position.underlying_conid is not None
+                    else None
+                ),
+                "expiry": position.expiry,
+                "strike": _optional_decimal_text(position.strike),
+                "put_call": position.put_call,
+            }
+            for field_key, field_value in position_fields.items():
+                if field_value is not None:
+                    position_payload[field_key] = field_value
+            positions.append(
+                {
+                    "record_id": _record_id("position", position_payload),
+                    **position_payload,
+                }
+            )
+        gross_value = sum(
+            (
+                abs(position.position_value * position.fx_rate_to_base)
+                for position in statement.positions
+            ),
+            Decimal("0"),
+        )
+        gross_available = bool(statement.positions) and all(
+            position.reported_account_matches_statement
+            for position in statement.positions
+        )
+        exposure_payload = {
+            "classification": "HOLDINGS_GROSS_MARKET_VALUE",
+            "measurement_basis": "GROSS_POSITION_MARKET_VALUE",
+            "source_record_id": (
+                f"gross-position-market-value:{account_id}:{statement.report_date.isoformat()}"
+            ),
+            "source_section": "OpenPosition",
+            "source_field": "positionValue",
+        }
+        exposure = source_row(
+            "leverage-exposure",
+            exposure_payload,
+            available=gross_available,
+            value=gross_value if statement.positions else None,
+            currency=statement.base_currency,
+        )
+        exposure["as_of_date"] = statement.report_date.isoformat()
+        exposure["scope"] = "SUMMARY_HOLDINGS"
+        leverage_exposure_observations.append(exposure)
         for trade in statement.trades:
             security_id = security(trade.conid, trade.currency)
             status, strategy_id = _strategy_for_date(
@@ -821,7 +1132,7 @@ def _normalize(
             if not trade.reported_account_matches_statement:
                 status, strategy_id = "UNMAPPED", None
                 account_scope_mismatches += 1
-            payload = {
+            payload: dict[str, Any] = {
                 "account_id": account_id,
                 "amount": {
                     "currency": trade.currency,
@@ -858,7 +1169,7 @@ def _normalize(
             if not cash.reported_account_matches_statement:
                 status, strategy_id = "UNMAPPED", None
                 account_scope_mismatches += 1
-            common = {
+            common: dict[str, Any] = {
                 "account_id": account_id,
                 "amount": {
                     "currency": cash.currency,
@@ -879,6 +1190,57 @@ def _normalize(
                 "source_artifact_id": statement.artifact_id,
                 "strategy_id": strategy_id,
             }
+            cash_fields: dict[str, object] = {
+                "level_of_detail": cash.level_of_detail,
+                "activity_type": cash.activity_type,
+                "description": cash.description,
+                "settlement_date": (
+                    cash.settlement_date.isoformat()
+                    if cash.settlement_date is not None
+                    else None
+                ),
+                "fx_rate_to_base": _optional_decimal_text(cash.fx_rate_to_base),
+            }
+            for field_key, field_value in cash_fields.items():
+                if field_value is not None:
+                    common[field_key] = field_value
+            if cash.activity_type in {
+                "Broker Interest Paid",
+                "Broker Interest Received",
+            }:
+                paid_row = source_row(
+                    "financing-cost",
+                    {
+                        "classification": (
+                            "BROKER_INTEREST_PAID_UNCLASSIFIED"
+                            if cash.activity_type == "Broker Interest Paid"
+                            else "BROKER_INTEREST_NET_UNCLASSIFIED"
+                        ),
+                        "measurement_basis": "CASH_POSTING",
+                        "source_record_id": (
+                            "cash-transaction:"
+                            f"{account_id}:{hashlib.sha256(cash.transaction_id.encode()).hexdigest()}"
+                        ),
+                        "source_section": "CashTransaction",
+                        "source_field": "amount",
+                    },
+                    available=cash.reported_account_matches_statement,
+                    value=-cash.amount,
+                    currency=cash.currency,
+                )
+                paid_row["event_date"] = cash.event_date.isoformat()
+                paid_row["accounting_date"] = cash.nav_recognition_date.isoformat()
+                paid_row["settlement_date"] = (
+                    cash.settlement_date.isoformat()
+                    if cash.settlement_date is not None
+                    else None
+                )
+                paid_row["source_amount"] = observed_amount(
+                    cash.amount,
+                    cash.currency,
+                    cash.reported_account_matches_statement,
+                )
+                financing_cost_observations.append(paid_row)
             if cash.activity_type in _EXTERNAL_FLOW_TYPES:
                 payload = {**common, "flow_type": "DEPOSIT_OR_WITHDRAWAL"}
                 flows.append({"record_id": _record_id("flow", payload), **payload})
@@ -1266,6 +1628,10 @@ def _normalize(
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
         "corporate_actions": _dedupe(corporate_actions, "corporate action"),
         "crosswalk_proof": list(proof),
+        "change_in_nav_observations": sorted(
+            change_in_nav_observations,
+            key=lambda item: (item["account_id"], item["accounting_date"]),
+        ),
         "fact_coverage": [
             dict(flex_history_coverage)
             if flex_history_coverage is not None
@@ -1301,7 +1667,16 @@ def _normalize(
             },
         ],
         "flows": _dedupe(flows, "flow"),
+        "financing_cost_observations": _dedupe(
+            financing_cost_observations, "financing cost observation"
+        ),
+        "financing_liability_observations": _dedupe(
+            financing_liability_observations, "financing liability observation"
+        ),
         "fx_observations": _dedupe(rates, "FX"),
+        "leverage_exposure_observations": _dedupe(
+            leverage_exposure_observations, "leverage exposure observation"
+        ),
         "nav_observations": _dedupe(nav, "NAV"),
         "positions": _dedupe(positions, "position"),
         "provider_id": "ibkr",

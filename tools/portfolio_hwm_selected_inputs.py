@@ -690,12 +690,17 @@ def _validated_account_sources(
         anchor = dict(raw_anchor)
         if anchor.get("account_id") != key[0]:
             raise SelectedHwmInputError("capital anchor account differs from epoch")
-        amount = _available_usd_amount(anchor.get("amount"), f"capital anchor {index}")
         capital_type = anchor.get("capital_type")
         if capital_type == "OPENING_CAPITAL_ANCHOR":
+            # An opening anchor contributes no flow: the epoch's beginning
+            # capital comes from the NAV series, not from this row.  Its
+            # `amount` is the subscription's own source-native fact, which for
+            # a stablecoin product is not USD, so demanding USD of a value this
+            # branch never reads rejects the epoch over an unused field.
             continue
         if capital_type != "STRATEGY_CAPITAL_ALLOCATION":
             raise SelectedHwmInputError("capital anchor type is unsupported")
+        amount = _available_usd_amount(anchor.get("amount"), f"capital anchor {index}")
         event_day = _day(anchor.get("event_date"), f"capital anchor {index}.event_date")
         recognition_day = _day(
             anchor.get("nav_recognition_date"),

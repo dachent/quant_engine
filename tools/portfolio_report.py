@@ -154,6 +154,7 @@ SHEET_NAMES: Final = (
     "Strategy Summary",
     "Positions",
     "Transactions and Flows",
+    "Leverage Disclosures",
     "TWR MWR",
     "Allocation History",
     "Flow Reconciliation",
@@ -170,6 +171,7 @@ TABLE_NAMES: Final = (
     "tblStrategies",
     "tblPositions",
     "tblTransactionsFlows",
+    "tblLeverageDisclosures",
     "tblTwrMwr",
     "tblAllocations",
     "tblFlowRecon",
@@ -192,7 +194,7 @@ CAPITAL_RECONCILIATION_FORMULA: Final = (
     'tblInvestedCapitalCurrent[Strategy Id],"TOTAL"))<0.01,"PASS","FAIL")'
 )
 WORKBOOK_CANONICALIZATION_VERSION: Final = "1"
-XLSX_RESULT_CANONICALIZATION_VERSION: Final = "1"
+XLSX_RESULT_CANONICALIZATION_VERSION: Final = "2"
 WORKBOOK_EVIDENCE_BINDING_VERSION: Final = 1
 WORKBOOK_PARITY_VERSION: Final = 1
 WORKBOOK_DELIVERY_EVIDENCE_STATUS: Final = "WORKBOOK_DELIVERY_EVIDENCE_ACCEPTED"
@@ -237,6 +239,18 @@ WORKBOOK_TABLE_SPECS: Final[tuple[tuple[str, str, str, tuple[str, ...]], ...]] =
         "transactions_and_flows",
         "tblTransactionsFlows",
         ("record_id",),
+    ),
+    (
+        "Leverage Disclosures",
+        "leverage_disclosures",
+        "tblLeverageDisclosures",
+        (
+            "provider_id",
+            "account_id",
+            "data_class",
+            "measurement_basis",
+            "coverage_status",
+        ),
     ),
     (
         "TWR MWR",
@@ -1124,7 +1138,20 @@ def _account_strategy_performance(
             "flow_count": 0,
             "flow_timing": "DATE_ONLY_END_OF_DAY_INFERRED_TIMING",
             "last_four": None,
+            "mwr_cashflows": [],
+            "mwr_coverage_status": "BLOCKED",
+            "mwr_day_count": "ACTUAL_365",
+            "mwr_label": None,
+            "mwr_opening_date": None,
+            "mwr_opening_value": None,
+            "mwr_reason": "FLOW_COVERAGE_NOT_GOVERNED",
+            "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
             "mwr_status": "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
+            "mwr_terminal_date": None,
+            "mwr_terminal_value": None,
+            "mwr_unit": "ANNUALIZED_RETURN",
+            "mwr_valuation_timing": None,
+            "mwr_value_basis": None,
             "mwr_xirr": None,
             "nav_observations": 0,
             "observed_end": None,
@@ -1176,6 +1203,8 @@ def _account_strategy_performance(
                 }
             )
             if detail is not None and detail["epoch_admission_status"] == "BLOCKED":
+                if detail.get("mwr_payload") is not None:
+                    base.update(cast(Mapping[str, Any], detail["mwr_payload"]))
                 base.update(
                     {
                         "flow_count": None,
@@ -1202,6 +1231,8 @@ def _account_strategy_performance(
                 )
                 rows.append(base)
                 continue
+            if detail is not None and detail.get("mwr_payload") is not None:
+                base.update(cast(Mapping[str, Any], detail["mwr_payload"]))
         if mapping_status != "MAPPED" or assignment.get("strategy_id") is None:
             base["twr_status"] = "UNMAPPED"
             rows.append(base)
@@ -4013,11 +4044,12 @@ def _corrections(catalog: Mapping[str, Any]) -> list[dict[str, Any]]:
     return sorted(rows, key=lambda item: str(item["correction_id"]))
 
 
-def _provider_ledger_exceptions(
+def _selected_provider_ledger_catalog(
     catalog: Mapping[str, Any],
     baseline_root: Path,
     provider_ledger_root: Path | None = None,
-) -> list[dict[str, Any]]:
+) -> tuple[Mapping[str, Any], Mapping[str, Any], str, str]:
+    """Load the sole provider ledger catalog bound by the baseline artifact hash."""
     references = [
         item
         for item in _objects(catalog.get("source_artifacts"), "source_artifacts")
@@ -4025,7 +4057,9 @@ def _provider_ledger_exceptions(
         and item.get("schema_name") == "provider-ledger-catalog"
     ]
     if not references:
-        return []
+        raise ReportValidationError(
+            "baseline provider-ledger catalog reference is absent"
+        )
     if len(references) != 1:
         raise ReportValidationError(
             "baseline provider-ledger catalog reference is ambiguous"
@@ -4056,6 +4090,25 @@ def _provider_ledger_exceptions(
     ):
         raise ReportValidationError("provider-ledger generation identity is invalid")
     provider_catalog = _load_json(path, "provider-ledger catalog")
+    return reference, provider_catalog, generation_id, observed_sha256
+
+
+def _provider_ledger_exceptions(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    references = [
+        item
+        for item in _objects(catalog.get("source_artifacts"), "source_artifacts")
+        if item.get("source_key") == "provider-ledger-generation"
+        and item.get("schema_name") == "provider-ledger-catalog"
+    ]
+    if not references:
+        return []
+    reference, provider_catalog, generation_id, observed_sha256 = (
+        _selected_provider_ledger_catalog(catalog, baseline_root, provider_ledger_root)
+    )
     exceptions = [
         item
         for item in _objects(
@@ -4082,6 +4135,139 @@ def _provider_ledger_exceptions(
         }
         for item in exceptions
     ]
+
+
+_LEVERAGE_DISCLOSURE_FACTS: Final[tuple[tuple[str, str], ...]] = (
+    ("FINANCING_COST", "financing_cost_observations"),
+    ("FINANCING_LIABILITY", "financing_liability_observations"),
+    ("LEVERAGE_EXPOSURE", "leverage_exposure_observations"),
+)
+_UNAVAILABLE_LEVERAGE_MEASURES: Final[tuple[tuple[str, str, str], ...]] = (
+    ("FINANCING_COST", "FINANCING_COST", "NO_RECONCILED_FINANCING_COST_BASIS"),
+    (
+        "FINANCING_LIABILITY",
+        "BORROWED_PRINCIPAL",
+        "BORROWED_PRINCIPAL_NOT_PROVED",
+    ),
+    (
+        "LEVERAGE_EXPOSURE",
+        "DERIVATIVE_NOTIONAL",
+        "DERIVATIVE_NOTIONAL_NOT_PROVED",
+    ),
+    (
+        "LEVERAGE_EXPOSURE",
+        "DELTA_EQUIVALENT",
+        "DELTA_EQUIVALENT_NOT_PROVED",
+    ),
+    (
+        "LEVERAGE_EXPOSURE",
+        "EMBEDDED_PRODUCT_EXPOSURE",
+        "EMBEDDED_PRODUCT_EXPOSURE_NOT_PROVED",
+    ),
+)
+
+
+def _leverage_disclosures(
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None = None,
+) -> list[dict[str, Any]]:
+    """Project additive, source-bound leverage observations without aggregation."""
+    references = [
+        item
+        for item in _objects(catalog.get("source_artifacts"), "source_artifacts")
+        if item.get("source_key") == "provider-ledger-generation"
+        and item.get("schema_name") == "provider-ledger-catalog"
+    ]
+    if not references:
+        return []
+    _reference, provider_catalog, catalog_generation_id, catalog_sha256 = (
+        _selected_provider_ledger_catalog(catalog, baseline_root, provider_ledger_root)
+    )
+    rows: list[dict[str, Any]] = []
+    contexts: dict[tuple[str, str | None, str | None], set[str]] = {}
+    provider_ids: set[str] = set()
+    for item in _objects(
+        provider_catalog.get("provider_generations", []),
+        "provider-ledger provider_generations",
+    ):
+        provider_id = item.get("provider_id")
+        if isinstance(provider_id, str) and provider_id:
+            provider_ids.add(provider_id)
+    for data_class, fact_name in _LEVERAGE_DISCLOSURE_FACTS:
+        facts = provider_catalog.get(fact_name, [])
+        if not isinstance(facts, list):
+            raise ReportValidationError(f"provider-ledger {fact_name} differs")
+        for item in _objects(facts, f"provider-ledger {fact_name}"):
+            provider_id = _text(item.get("provider_id"), f"{fact_name}.provider_id")
+            account_id_value = item.get("account_id")
+            account_id = account_id_value if isinstance(account_id_value, str) else None
+            strategy_id_value = item.get("strategy_id")
+            strategy_id = (
+                strategy_id_value if isinstance(strategy_id_value, str) else None
+            )
+            record_id = _text(item.get("record_id"), f"{fact_name}.record_id")
+            provider_ids.add(provider_id)
+            contexts.setdefault((provider_id, account_id, strategy_id), set()).add(
+                record_id
+            )
+            rows.append(
+                {
+                    **item,
+                    "data_class": data_class,
+                    "account_id": account_id,
+                    "included_in_nav": item.get("included_in_nav"),
+                    "native_source_record_id": item.get("native_source_record_id"),
+                    "security_id": item.get("security_id"),
+                    "source_catalog_generation_id": catalog_generation_id,
+                    "source_catalog_sha256": catalog_sha256,
+                    "source_amount": item.get("source_amount"),
+                    "source_record_ids": [record_id],
+                    "coverage_status": "OBSERVED_ONLY",
+                    "coverage_reason": "SOURCE_OBSERVED_NOT_COMPLETE",
+                    "reason": item.get("reason"),
+                }
+            )
+    for provider_id in provider_ids:
+        contexts.setdefault((provider_id, None, None), set())
+    for (provider_id, account_id, strategy_id), source_record_ids in sorted(
+        contexts.items(),
+        key=lambda item: tuple(value or "" for value in item[0]),
+    ):
+        for data_class, measurement_basis, reason in _UNAVAILABLE_LEVERAGE_MEASURES:
+            rows.append(
+                {
+                    "account_id": account_id,
+                    "amount": {"status": "UNAVAILABLE", "value": None},
+                    "classification": "UNAVAILABLE_MEASURE",
+                    "coverage_reason": reason,
+                    "coverage_status": "UNAVAILABLE",
+                    "data_class": data_class,
+                    "included_in_nav": None,
+                    "measurement_basis": measurement_basis,
+                    "native_source_record_id": None,
+                    "provider_id": provider_id,
+                    "reason": reason,
+                    "security_id": None,
+                    "source_amount": None,
+                    "source_artifact_id": None,
+                    "source_catalog_generation_id": catalog_generation_id,
+                    "source_catalog_sha256": catalog_sha256,
+                    "source_record_ids": sorted(source_record_ids),
+                    "strategy_id": strategy_id,
+                }
+            )
+    return sorted(
+        rows,
+        key=lambda item: (
+            str(item.get("provider_id") or ""),
+            str(item.get("account_id") or ""),
+            str(item.get("strategy_id") or ""),
+            str(item.get("data_class") or ""),
+            str(item.get("measurement_basis") or ""),
+            str(item.get("record_id") or ""),
+        ),
+    )
 
 
 def _reconciliation_checks(
@@ -5066,6 +5252,14 @@ def build_report_data(
                         row["effective_end"],
                     )
                 ]["epoch_blocking_reason"],
+                "mwr_payload": verified_epoch_details[
+                    (
+                        row["account_id"],
+                        row["strategy_id"],
+                        row["effective_start"],
+                        row["effective_end"],
+                    )
+                ]["mwr_payload"],
             }
             for row in crosswalk_payload["rows"]
             if row["product_epoch_disposition"] == "INCLUDED_PRODUCT_EPOCH"
@@ -5399,6 +5593,7 @@ def build_report_data(
                 effective_hwm_policy,
                 freshness,
                 require_freshness=True,
+                calculation_boundary=calculation_cutoff_date,
             )
         except HwmCoverageError as exc:
             raise ReportValidationError(str(exc)) from exc
@@ -5656,6 +5851,9 @@ def build_report_data(
         "report_schema_version": REPORT_SCHEMA_VERSION,
         "strategy_summary": strategy_summary,
         "attribution_dispositions": catalog.get("attribution_dispositions", []),
+        "leverage_disclosures": _leverage_disclosures(
+            catalog, baseline_root, provider_ledger_root
+        ),
         "strategy_provider_evidence": strategy_provider_evidence,
         "strategy_returns": strategy_returns,
         "transactions_and_flows": _transactions_and_flows(
@@ -5796,7 +5994,11 @@ def _write_table(
     worksheet.merge_range("A1:H1", title, formats["title"])
     worksheet.merge_range("A2:H2", subtitle, formats["subtitle"])
     worksheet.write("A3", "READ-ONLY / ADVISORY", formats["advisory"])
-    headers = _headers(rows, fallback_headers)
+    headers = (
+        sorted({key for row in rows for key in row})
+        if table_name == "tblLeverageDisclosures" and rows
+        else _headers(rows, fallback_headers)
+    )
     data = [
         [_excel_value(row.get(header), header=header) for header in headers]
         for row in rows
@@ -5904,6 +6106,7 @@ def _decomposition_workbook_rows(
                         ("alpha", row.get("alpha")),
                         ("contribution", contribution),
                         ("coverage", row.get("coverage")),
+                        ("orthogonal", row.get("orthogonal_attribution")),
                         ("train", diagnostics.get("train")),
                         ("holdout", diagnostics.get("holdout")),
                         ("model_quality", row.get("model_quality")),
@@ -5917,6 +6120,26 @@ def _decomposition_workbook_rows(
                                     if not isinstance(field, (Mapping, list, tuple))
                                 }
                             )
+                    identities = row.get("analytics_identities")
+                    if isinstance(identities, Mapping):
+                        for name, identity in identities.items():
+                            if isinstance(identity, Mapping):
+                                cell.update(
+                                    {
+                                        f"{name}_identity_{key}": value
+                                        for key, value in identity.items()
+                                        if not isinstance(value, (Mapping, list, tuple))
+                                    }
+                                )
+                    interval = row.get("interval_association")
+                    if isinstance(interval, Mapping):
+                        cell.update(
+                            {
+                                f"interval_{name}": value
+                                for name, value in interval.items()
+                                if not isinstance(value, (Mapping, list, tuple))
+                            }
+                        )
                     cells.append(cell)
                     means = (
                         contribution.get("factor_means", {})
@@ -5945,12 +6168,146 @@ def _decomposition_workbook_rows(
                                 "series_id": series_id,
                                 "source_key": source_key,
                                 "surface": surface,
+                                "analytics_surface": (
+                                    _object(identities, "analytics identities")
+                                    .get("raw", {})
+                                    .get("surface")
+                                    if isinstance(identities, Mapping)
+                                    and isinstance(identities.get("raw"), Mapping)
+                                    else None
+                                ),
+                                "factor_kind": "RAW_FACTOR",
                             }
                         )
+                    orthogonal = row.get("orthogonal_attribution")
+                    orthogonal_identity = (
+                        identities.get("orthogonal")
+                        if isinstance(identities, Mapping)
+                        and isinstance(identities.get("orthogonal"), Mapping)
+                        else {}
+                    )
+                    if isinstance(orthogonal, Mapping) and orthogonal_identity:
+                        coefficients = orthogonal.get("mode_coefficients")
+                        per_date = orthogonal.get("per_date")
+                        budget = orthogonal.get("train_fitted_risk_budget")
+                        euler = (
+                            budget.get("euler_allocations", {})
+                            if isinstance(budget, Mapping)
+                            else {}
+                        )
+                        per_date_rows = per_date if isinstance(per_date, list) else []
+                        if per_date_rows:
+                            for index, dated in enumerate(per_date_rows):
+                                if not isinstance(dated, Mapping):
+                                    continue
+                                contributions = dated.get("mode_contributions")
+                                dated_coefficients = (
+                                    coefficients[index]
+                                    if isinstance(coefficients, list)
+                                    and index < len(coefficients)
+                                    and isinstance(coefficients[index], Mapping)
+                                    else coefficients
+                                    if isinstance(coefficients, Mapping)
+                                    else {}
+                                )
+                                mode_ids = set(
+                                    contributions
+                                    if isinstance(contributions, Mapping)
+                                    else {}
+                                ) | set(
+                                    dated_coefficients
+                                    if isinstance(dated_coefficients, Mapping)
+                                    else {}
+                                )
+                                for mode_id in sorted(mode_ids):
+                                    factors.append(
+                                        {
+                                            "analytics_identity_model_id": orthogonal_identity.get(
+                                                "model_id"
+                                            ),
+                                            "analytics_identity_methodology_manifest_sha256": orthogonal_identity.get(
+                                                "methodology_manifest_sha256"
+                                            ),
+                                            "analytics_surface": orthogonal_identity.get(
+                                                "surface"
+                                            ),
+                                            "date": dated.get("date"),
+                                            "evidence_mode": evidence_mode,
+                                            "factor_id": mode_id,
+                                            "factor_kind": "MIXED_ORTHOGONAL_MODE",
+                                            "generation_id": source.get(
+                                                "generation_id"
+                                            ),
+                                            "lens_id": lens_id,
+                                            "mode_coefficient": dated_coefficients.get(
+                                                mode_id
+                                            ),
+                                            "mode_contribution": contributions.get(
+                                                mode_id
+                                            )
+                                            if isinstance(contributions, Mapping)
+                                            else None,
+                                            "mode_id": mode_id,
+                                            "model_id": row.get("model_id"),
+                                            "partition": dated.get("partition"),
+                                            "risk_euler_allocation": euler.get(mode_id)
+                                            if isinstance(euler, Mapping)
+                                            else None,
+                                            "series_id": series_id,
+                                            "source_key": source_key,
+                                            "source_sha256": source.get(
+                                                "source_sha256"
+                                            ),
+                                            "status": orthogonal.get("status"),
+                                            "surface": surface,
+                                        }
+                                    )
+                        elif isinstance(coefficients, Mapping) or isinstance(
+                            euler, Mapping
+                        ):
+                            mode_ids = set(
+                                coefficients
+                                if isinstance(coefficients, Mapping)
+                                else {}
+                            ) | set(euler if isinstance(euler, Mapping) else {})
+                            for mode_id in sorted(mode_ids):
+                                factors.append(
+                                    {
+                                        "analytics_identity_model_id": orthogonal_identity.get(
+                                            "model_id"
+                                        ),
+                                        "analytics_identity_methodology_manifest_sha256": orthogonal_identity.get(
+                                            "methodology_manifest_sha256"
+                                        ),
+                                        "analytics_surface": orthogonal_identity.get(
+                                            "surface"
+                                        ),
+                                        "evidence_mode": evidence_mode,
+                                        "factor_id": mode_id,
+                                        "factor_kind": "MIXED_ORTHOGONAL_MODE",
+                                        "generation_id": source.get("generation_id"),
+                                        "lens_id": lens_id,
+                                        "mode_coefficient": coefficients.get(mode_id)
+                                        if isinstance(coefficients, Mapping)
+                                        else None,
+                                        "mode_id": mode_id,
+                                        "model_id": row.get("model_id"),
+                                        "risk_euler_allocation": euler.get(mode_id)
+                                        if isinstance(euler, Mapping)
+                                        else None,
+                                        "series_id": series_id,
+                                        "source_key": source_key,
+                                        "source_sha256": source.get("source_sha256"),
+                                        "status": orthogonal.get("status"),
+                                        "surface": surface,
+                                    }
+                                )
     # Some valid diagnostics apply to only one surface. Keep their columns
     # even when the first result has no value for that diagnostic.
     columns = sorted({key for cell in cells for key in cell})
     cells = [{key: cell.get(key) for key in columns} for cell in cells]
+    factor_columns = sorted({key for factor in factors for key in factor})
+    factors = [{key: factor.get(key) for key in factor_columns} for factor in factors]
     return cells, factors
 
 
@@ -6277,6 +6634,26 @@ def _write_exact(path: Path, content: bytes) -> None:
         os.fsync(handle.fileno())
 
 
+def _replace_disposable_json(path: Path, content: bytes) -> None:
+    """Atomically reset a writable, non-authority JSON sidecar."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists() and path.is_symlink():
+        raise GenerationConflictError(f"disposable sidecar is linked: {path.name}")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=".engine-run-", suffix=".json", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def _replace_disposable(path: Path, content: bytes) -> None:
     """Atomically reset a writable, non-authority staging file."""
 
@@ -6414,6 +6791,7 @@ def build_candidate(
             "tblAllocations": 8,
             "tblCoverage": 1,
             "tblDependence": 1 if report["dependence_rows"] else 0,
+            "tblLeverageDisclosures": len(report["leverage_disclosures"]),
             "tblMethodology": 7,
             "tblPortfolioSummary": 9,
             "tblPositions": 1,
@@ -6484,6 +6862,11 @@ def build_candidate(
             ),
         ],
     }
+    # Candidate-relative, not absolute. These two fields are the only thing
+    # that differed between two builds of identical content into different
+    # output roots, and the job is bound into the report generation identity,
+    # so an absolute path made the identity depend on where the build ran.
+    # The runner receives an absolute job derived from this one.
     job = {
         "idempotency_key": f"portfolio-report-{report_id[:32]}",
         "schema_version": "2.0",
@@ -6492,10 +6875,14 @@ def build_candidate(
                 "type": "open",
                 "read_only": False,
                 "update_links": False,
-                "workbook_path": str(excel_input_path),
+                "workbook_path": excel_input_path.relative_to(candidate).as_posix(),
             },
             {"type": "recalc", "mode": "full_rebuild", "timeout_seconds": 120},
-            {"type": "save_as", "output_path": str(excel_path), "overwrite": True},
+            {
+                "type": "save_as",
+                "output_path": excel_path.relative_to(candidate).as_posix(),
+                "overwrite": True,
+            },
         ],
     }
     _write_exact(candidate / "workbook-contract.json", canonical_json_bytes(contract))
@@ -7089,7 +7476,19 @@ def canonicalize_workbook(
 def canonicalize_xlsx_result(
     path: Path, evidence_path: Path | None = None
 ) -> dict[str, Any]:
-    """Normalize volatile xlsx-win messages without changing the real run ID."""
+    """Normalize the volatile xlsx-win messages and the engine's run ID.
+
+    The engine mints `run_id` at random, so binding it made the report
+    generation identity differ between two builds of identical content --
+    the mismatch #293 was opened for. Every other `run_id` in this repository
+    is a digest of its own payload (`portfolio_current_decomposition_plan`,
+    `portfolio_public_decomposition_sources`), and this one now is too.
+
+    This reverses the earlier decision to canonicalize "without changing the
+    real run ID". The engine's value is not discarded: it is preserved beside
+    the result in `xlsx-engine-run.json`, which nothing binds, so the run
+    remains traceable to the supervisor that produced it.
+    """
     payload = _load_json(path, "xlsx-win result")
     if payload.get("schema_version") != "2.0":
         raise ReportValidationError("xlsx-win result schema differs")
@@ -7120,6 +7519,42 @@ def canonicalize_xlsx_result(
     invariants = payload.get("invariants")
     if not isinstance(invariants, list):
         raise ReportValidationError("xlsx-win result invariants are invalid")
+    engine_run_id = run_id
+    identity_payload = {key: value for key, value in payload.items() if key != "run_id"}
+    canonical_run_id = hashlib.sha256(
+        canonical_json_bytes(identity_payload)
+    ).hexdigest()[:32]
+    sidecar_path = path.with_name(f"{path.stem}.engine-run.json")
+    sidecar_content = canonical_json_bytes(
+        {
+            "engine_run_id": engine_run_id,
+            "idempotency_key": payload["idempotency_key"],
+            "schema_version": "1",
+        }
+    )
+    if run_id == canonical_run_id:
+        if not sidecar_path.exists():
+            raise ReportValidationError("original engine run sidecar is missing")
+        existing_sidecar = _load_json(sidecar_path, "original engine run sidecar")
+        if (
+            existing_sidecar.get("schema_version") != "1"
+            or existing_sidecar.get("idempotency_key") != payload["idempotency_key"]
+            or re.fullmatch(r"[0-9a-f]{32}", str(existing_sidecar.get("engine_run_id")))
+            is None
+        ):
+            raise ReportValidationError("original engine run sidecar conflicts")
+    else:
+        if sidecar_path.exists():
+            existing_sidecar = _load_json(sidecar_path, "original engine run sidecar")
+            if (
+                existing_sidecar.get("schema_version") != "1"
+                or existing_sidecar.get("idempotency_key") != payload["idempotency_key"]
+                or existing_sidecar.get("engine_run_id") != engine_run_id
+            ):
+                raise ReportValidationError("original engine run sidecar conflicts")
+        else:
+            _write_exact(sidecar_path, sidecar_content)
+    payload["run_id"] = canonical_run_id
     content = canonical_json_bytes(payload)
     if path.read_bytes() != content:
         descriptor, temporary_name = tempfile.mkstemp(
@@ -7137,6 +7572,7 @@ def canonicalize_xlsx_result(
     result = {
         "canonicalization_version": XLSX_RESULT_CANONICALIZATION_VERSION,
         "normalized_message_count": 2,
+        "normalized_run_id": True,
         "xlsx_result_sha256": hashlib.sha256(content).hexdigest(),
     }
     if evidence_path is not None:
@@ -7235,11 +7671,12 @@ def _workbook_evidence_binding_from_snapshots(
         or not all(isinstance(item, dict) for item in job["steps"])
         or [item.get("type") for item in job["steps"] if isinstance(item, dict)]
         != ["open", "recalc", "save_as"]
-        or not isinstance(job["steps"][0].get("workbook_path"), str)
-        or Path(job["steps"][0]["workbook_path"]).resolve()
-        != (candidate_dir / "excel-input" / WORKBOOK_NAME).resolve()
-        or not isinstance(job["steps"][2].get("output_path"), str)
-        or Path(job["steps"][2]["output_path"]).resolve() != final_workbook.resolve()
+        or job["steps"][0].get("workbook_path")
+        != (candidate_dir / "excel-input" / WORKBOOK_NAME)
+        .relative_to(candidate_dir)
+        .as_posix()
+        or job["steps"][2].get("output_path")
+        != final_workbook.resolve().relative_to(candidate_dir.resolve()).as_posix()
     ):
         raise ReportValidationError("xlsx-win job binding differs")
     binding: dict[str, Any] = {
@@ -8299,6 +8736,29 @@ def _verified_epoch_authority_details(
             "epoch_admission_status": admission["status"],
             "epoch_output_status": output["status"],
             "epoch_blocking_reason": output["blocking_reason"],
+            "mwr_payload": {
+                field: manifest_row.get(field)
+                for field in (
+                    "mwr_status",
+                    "mwr_xirr",
+                    "mwr_reason",
+                    "mwr_opening_date",
+                    "mwr_opening_value",
+                    "mwr_terminal_date",
+                    "mwr_terminal_value",
+                    "mwr_currency",
+                    "mwr_coverage_status",
+                    "mwr_cashflows",
+                    "mwr_label",
+                    "mwr_value_basis",
+                    "mwr_valuation_timing",
+                    "mwr_day_count",
+                    "mwr_unit",
+                    "mwr_source_binding",
+                )
+            }
+            if "mwr_status" in manifest_row
+            else None,
         }
     if (
         set(details) != set(by_key)

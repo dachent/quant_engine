@@ -36,7 +36,13 @@ RETURN_FIELDS: Final = (
     "strategy_version",
 )
 SCHEMA_VERSION: Final = 1
-BUILDER_VERSION: Final = "1.4.0"
+BUILDER_VERSION: Final = "1.7.0"
+# The provider publishes the EU model's launch date on its page and the owner
+# states it as the date the model went live. Everything the provider shows
+# before it is simulated design history, not a live track record, which is the
+# split this builder has to make: the equity curve is one continuous path and
+# nothing in its bytes marks where simulation ends.
+P123_EU_PROVIDER_LAUNCH: Final = date(2024, 2, 18)
 _SHEET_NS: Final = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 _REL_NS: Final = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 _PKG_REL_NS: Final = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -45,6 +51,14 @@ _SLUG = re.compile(r"\((tt-[^)]+)\)\s*$")
 
 class StrategyHistoryError(ValueError):
     """A retained history source or transformation violates the contract."""
+
+
+def _date_value(value: object, field: str) -> date:
+    try:
+        parsed = date.fromisoformat(str(value))
+    except ValueError as exc:
+        raise StrategyHistoryError(f"{field} must be a canonical date") from exc
+    return parsed
 
 
 def _sha256(path: Path) -> tuple[str, int]:
@@ -453,8 +467,17 @@ def _verified_generation_artifact(
     return path, dict(expected), manifest
 
 
-def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]:
+def _p123_history_dispositions(
+    generation_root: Path,
+) -> tuple[
+    list[dict[str, object]], tuple[list[dict[str, str]], dict[str, object]] | None
+]:
     """Classify the exact EU capture and retain deliberate non-history decisions.
+
+    Also returns the EU backtest part -- the prehistory strictly before the
+    provider's own launch -- in the same ``(rows, definition)`` shape the
+    vendor-workbook readers use, or ``None`` when the capture holds no such
+    history.
 
     Provider entity identifiers are used only in memory to test exact capture.
     They are never written to the bundle. Similar European books are inventoried
@@ -703,6 +726,56 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
             "transform_id": "P123_MANAGED_STRATEGY_PERFORMANCE_LEVEL_TO_RETURN_V1",
         }
 
+    eu_backtest: tuple[list[dict[str, str]], dict[str, object]] | None = None
+    prehistory_disposition: dict[str, object] = {
+        "provider_launch": P123_EU_PROVIDER_LAUNCH.isoformat(),
+        "status": "NO_EXACT_MODEL_CAPTURE_BEFORE_PROVIDER_LAUNCH",
+    }
+    if provider_summary is not None:
+        eu_backtest = _p123_eu_backtest(
+            ordered,
+            generation_id=generation_id,
+            exact_ids=exact_ids,
+            strategy_name=str(exact.get("assetName") or ""),
+            equity_artifact=equity_artifact,
+        )
+        if eu_backtest is None:
+            # The designer model the owner subscribes to states its launch on
+            # the provider's page, and its own history runs from well before
+            # it. What this generation captured is the SUBSCRIBED COPY, whose
+            # curve begins when the copy was created, plus several similarly
+            # named European books that carry long curves but no captured
+            # relationship to the subscribed model. Splicing one of those in
+            # would be substituting a different book for the model, which is
+            # the substitution this builder exists to refuse -- so the gap is
+            # recorded as a capture gap rather than filled.
+            prehistory_disposition.update(
+                {
+                    "exact_model_observed_start": ordered[0][0].isoformat(),
+                    "exact_model_observed_end": ordered[-1][0].isoformat(),
+                    "required_capture": (
+                        "DESIGNER_MODEL_HISTORY_AND_LAUNCH_SNAPSHOT_FOR_THE_"
+                        "SUBSCRIBED_MODEL"
+                    ),
+                    "reason": (
+                        "The captured provider history for the exact connected "
+                        "model begins after the provider's stated launch, so no "
+                        "pre-launch prehistory exists to admit. Long European "
+                        "curves captured for other books are not substitutes "
+                        "without a captured version relationship."
+                    ),
+                }
+            )
+        else:
+            prehistory_disposition.update(
+                {
+                    "observed_end": eu_backtest[1]["observed_end"],
+                    "observed_start": eu_backtest[1]["observed_start"],
+                    "return_observations": eu_backtest[1]["return_observations"],
+                    "status": "ADMITTED_STRICTLY_BEFORE_PROVIDER_LAUNCH",
+                }
+            )
+
     registry = {
         str(row.get("entity_id") or ""): str(row.get("canonical_name") or "")
         for row in parquet.read_table(registry_path).to_pylist()
@@ -806,6 +879,7 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
         {
             **exact_disposition,
             "connected_model_currency": str(exact.get("currency") or ""),
+            "backtest_prehistory": prehistory_disposition,
             "connected_model_holding_count": int(
                 str(exact.get("strategyTotalHoldCount") or exact.get("posCnt") or 0)
             ),
@@ -844,7 +918,293 @@ def _p123_history_dispositions(generation_root: Path) -> list[dict[str, object]]
             "status": "IMMATERIAL_HISTORY_NOT_CONNECTED_BY_GOVERNANCE",
             "strategy_version": "composer-immaterial-unconnected:2026-08-08",
         },
-    ]
+    ], eu_backtest
+
+
+def _robuxio_track_record(
+    generation_root: Path, strategy_version: str
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    """Read the governed provider track-record generation as design history.
+
+    The generation retains the provider's published return path with its own
+    manifest digest, so admitting it is a digest check plus a relabel of the
+    evidence layer -- no return is recomputed here.
+    """
+
+    manifest_path = generation_root / "generation.json"
+    returns_path = generation_root / "returns.csv"
+    for candidate in (manifest_path, returns_path):
+        if candidate.is_symlink() or not candidate.is_file():
+            raise StrategyHistoryError(
+                f"Robuxio track-record artifact is not a regular file: {candidate.name}"
+            )
+    manifest = json.loads(manifest_path.read_bytes())
+    if manifest.get("verification") != "VERIFIED":
+        raise StrategyHistoryError("Robuxio track-record generation is not verified")
+    if str(manifest.get("generation_id")) != generation_root.name:
+        raise StrategyHistoryError(
+            "Robuxio track-record generation identity differs from its directory"
+        )
+    artifacts = {
+        str(row.get("artifact_id")): row for row in manifest.get("artifacts") or []
+    }
+    returns_bytes = returns_path.read_bytes()
+    artifact = artifacts.get("returns.csv")
+    if (
+        not isinstance(artifact, dict)
+        or artifact.get("sha256") != hashlib.sha256(returns_bytes).hexdigest()
+        or artifact.get("size_bytes") != len(returns_bytes)
+    ):
+        raise StrategyHistoryError(
+            "Robuxio track-record returns differ from the generation manifest"
+        )
+
+    rows: list[dict[str, str]] = []
+    reader = csv.DictReader(io.StringIO(returns_bytes.decode("utf-8")))
+    for row in reader:
+        if row.get("evidence_layer") != "PROVIDER_TRACK_RECORD":
+            raise StrategyHistoryError(
+                "Robuxio track-record carries an unexpected evidence layer"
+            )
+        observed = _date_value(row.get("date"), "Robuxio track-record date")
+        value = _decimal(row.get("return"), "Robuxio track-record return")
+        if value <= -1:
+            raise StrategyHistoryError("Robuxio track-record return is invalid")
+        rows.append(
+            {
+                "series_id": "Robuxio Crypto (High Sharpe High Vol)",
+                "date": observed.isoformat(),
+                "return": format(value.normalize(), "f"),
+                "evidence_layer": "BACKTEST",
+                "strategy_version": strategy_version,
+            }
+        )
+    if len(rows) < 2:
+        raise StrategyHistoryError("Robuxio track-record history is insufficient")
+    dates = [row["date"] for row in rows]
+    if dates != sorted(set(dates)):
+        raise StrategyHistoryError("Robuxio track-record calendar is not ordered")
+    definition: dict[str, object] = {
+        "compatibility_basis": "OWNER_LAYER_RULING_SITE_SERIES_IS_PRODUCT_DESIGN_HISTORY",
+        "coverage_disposition": "COMPLETE_WITHIN_RETAINED_CAPTURE_BOUNDARY",
+        "frequency": "DAILY_CONTINUOUS",
+        "history_status": "ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
+        "implementation_reconciliation_status": (
+            "MODEL_TO_ACCOUNT_RECONCILIATION_RETAINED_SEPARATELY"
+        ),
+        "method": "PROVIDER_PUBLISHED_CUMULATIVE_RETURN_TO_DAILY_RETURN",
+        "observed_end": dates[-1],
+        "observed_start": dates[0],
+        "required_for_analysis": True,
+        "return_observations": len(rows),
+        "series_id": "Robuxio Crypto (High Sharpe High Vol)",
+        "source_artifacts": [
+            {
+                "artifact_id": "returns.csv",
+                "sha256": artifact["sha256"],
+                "size_bytes": artifact["size_bytes"],
+                "source_id": "robuxio-published-track-record-generation",
+            }
+        ],
+        "strategy_version": strategy_version,
+    }
+    return rows, definition
+
+
+def _p123_eu_designer_curve(
+    generation_root: Path, strategy_version: str
+) -> tuple[list[dict[str, str]], dict[str, object]]:
+    """Read the governed designer-model generation as the EU design history.
+
+    The generation retains the provider's own published curve for the model the
+    owner subscribes to, split at the launch the provider states on its own
+    page, with a manifest digest over the returns. Admitting it is a digest
+    check plus a relabel of the pre-launch segment -- no return is recomputed.
+
+    The model publishes in EUR and the owner holds it in a USD account, and the
+    two series differ by about one percent a day over their overlap, which is
+    implementation and currency together. That is why this is design history in
+    its own layer and not a longer version of the owner's series.
+    """
+
+    manifest_path = generation_root / "generation.json"
+    returns_path = generation_root / "returns.csv"
+    catalog_path = generation_root / "catalog.json"
+    for candidate in (manifest_path, returns_path, catalog_path):
+        if candidate.is_symlink() or not candidate.is_file():
+            raise StrategyHistoryError(
+                f"EU designer-model artifact is not a regular file: {candidate.name}"
+            )
+    manifest = json.loads(manifest_path.read_bytes())
+    if manifest.get("verification") != "VERIFIED":
+        raise StrategyHistoryError("EU designer-model generation is not verified")
+    if str(manifest.get("generation_id")) != generation_root.name:
+        raise StrategyHistoryError(
+            "EU designer-model generation identity differs from its directory"
+        )
+    artifacts = {
+        str(row.get("artifact_id")): row for row in manifest.get("artifacts") or []
+    }
+    returns_bytes = returns_path.read_bytes()
+    artifact = artifacts.get("returns.csv")
+    if (
+        not isinstance(artifact, dict)
+        or artifact.get("sha256") != hashlib.sha256(returns_bytes).hexdigest()
+        or artifact.get("size_bytes") != len(returns_bytes)
+    ):
+        raise StrategyHistoryError(
+            "EU designer-model returns differ from the generation manifest"
+        )
+    catalog = json.loads(catalog_path.read_bytes())
+    series = catalog.get("series")
+    if not isinstance(series, dict):
+        raise StrategyHistoryError("EU designer-model catalog series differs")
+
+    rows: list[dict[str, str]] = []
+    model_live = 0
+    reader = csv.DictReader(io.StringIO(returns_bytes.decode("utf-8")))
+    for row in reader:
+        layer = row.get("evidence_layer")
+        if layer == "PROVIDER_MODEL_LIVE":
+            model_live += 1
+            continue
+        if layer != "BACKTEST":
+            raise StrategyHistoryError(
+                "EU designer-model carries an unexpected evidence layer"
+            )
+        observed = _date_value(row.get("date"), "EU designer-model date")
+        value = _decimal(row.get("return"), "EU designer-model return")
+        if value <= -1:
+            raise StrategyHistoryError("EU designer-model return is invalid")
+        rows.append(
+            {
+                "series_id": "EU [P123]",
+                "date": observed.isoformat(),
+                "return": format(value.normalize(), "f"),
+                "evidence_layer": "BACKTEST",
+                "strategy_version": strategy_version,
+            }
+        )
+    if len(rows) < 2:
+        raise StrategyHistoryError("EU designer-model history is insufficient")
+    dates = [row["date"] for row in rows]
+    if dates != sorted(set(dates)):
+        raise StrategyHistoryError("EU designer-model calendar is not ordered")
+    provider_launch = str(series.get("provider_launch") or "")
+    if not provider_launch or dates[-1] >= provider_launch:
+        raise StrategyHistoryError(
+            "EU designer-model prehistory reaches the provider launch"
+        )
+    definition: dict[str, object] = {
+        "compatibility_basis": "OWNER_LAYER_RULING_DESIGNER_MODEL_IS_PRODUCT_DESIGN_HISTORY",
+        "coverage_disposition": "COMPLETE_STRICTLY_BEFORE_PROVIDER_LAUNCH",
+        "frequency": "DAILY_TRADING",
+        "history_status": "ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
+        "implementation_reconciliation_status": (
+            "MODEL_TO_ACCOUNT_RECONCILIATION_RETAINED_SEPARATELY"
+        ),
+        "method": "PROVIDER_PUBLISHED_MODEL_EQUITY_CURVE_TO_DAILY_RETURN",
+        "observed_end": dates[-1],
+        "observed_start": dates[0],
+        "provider_currency": str(series.get("currency") or ""),
+        "provider_launch": provider_launch,
+        "provider_model_live_observations_not_admitted": model_live,
+        "provider_revision_dates": list(series.get("provider_revision_dates") or []),
+        "required_for_analysis": True,
+        "return_observations": len(rows),
+        "series_id": "EU [P123]",
+        "source_artifacts": [
+            {
+                "artifact_id": "returns.csv",
+                "sha256": artifact["sha256"],
+                "size_bytes": artifact["size_bytes"],
+                "source_id": "portfolio123-designer-model-curve-generation",
+            }
+        ],
+        "strategy_version": strategy_version,
+    }
+    return rows, definition
+
+
+def _p123_eu_backtest(
+    ordered: Sequence[tuple[date, tuple[Decimal, Decimal]]],
+    *,
+    generation_id: str,
+    exact_ids: Iterable[str],
+    strategy_name: str,
+    equity_artifact: Mapping[str, object],
+) -> tuple[list[dict[str, str]], dict[str, object]] | None:
+    """Admit the EU prehistory strictly before the provider's own launch.
+
+    The provider publishes one continuous equity curve from 1999. Only the part
+    after its launch is a live track record; the rest is the design simulated
+    before the model existed, which is exactly what LIVE_PLUS_BACKTEST admits
+    and LIVE_ONLY must not see. The boundary is the last observation strictly
+    before the published launch date, so a launch that falls on a non-trading
+    day cannot pull a live session into the prehistory.
+
+    Returns are level ratios. The one funding event in the path is the
+    simulation's opening capital on its first day, which no ratio spans, so no
+    flow adjustment applies.
+    """
+
+    prehistory = [item for item in ordered if item[0] < P123_EU_PROVIDER_LAUNCH]
+    if len(prehistory) < 2:
+        return None
+    version = _version(
+        "p123-eu-connected-model",
+        {
+            "generation_id": generation_id,
+            "provider_entity_ids": sorted(exact_ids),
+            "strategy_name": strategy_name,
+        },
+    )
+    rows: list[dict[str, str]] = []
+    for (_previous_day, previous), (observed, current) in zip(
+        prehistory, prehistory[1:], strict=False
+    ):
+        period_return = current[0] / previous[0] - Decimal(1)
+        if period_return <= -1:
+            raise StrategyHistoryError(
+                "Portfolio123 exact EU backtest return is invalid"
+            )
+        rows.append(
+            {
+                "series_id": "EU [P123]",
+                "date": observed.isoformat(),
+                "return": format(period_return.normalize(), "f"),
+                "evidence_layer": "BACKTEST",
+                "strategy_version": version,
+            }
+        )
+    definition: dict[str, object] = {
+        "compatibility_basis": "EXACT_CONNECTED_MODEL_EQUITY_CURVE_IDENTITY",
+        "coverage_disposition": "COMPLETE_STRICTLY_BEFORE_PROVIDER_LAUNCH",
+        "frequency": "DAILY_TRADING",
+        "history_status": "ACCEPTED_CURRENT_SPECIFICATION_HISTORY",
+        "implementation_reconciliation_status": (
+            "MODEL_TO_ACCOUNT_RECONCILIATION_RETAINED_SEPARATELY"
+        ),
+        "method": "PROVIDER_EQUITY_CURVE_LEVEL_TO_RETURN",
+        "observed_end": rows[-1]["date"],
+        "observed_start": rows[0]["date"],
+        "provider_launch": P123_EU_PROVIDER_LAUNCH.isoformat(),
+        "required_for_analysis": True,
+        "return_observations": len(rows),
+        "series_id": "EU [P123]",
+        "source_artifacts": [
+            {
+                "artifact_id": "tables/har_equity_curve.parquet",
+                "sha256": equity_artifact["sha256"],
+                "size_bytes": equity_artifact["size_bytes"],
+                "source_id": "portfolio123-exact-connected-eu-equity-curve",
+            }
+        ],
+        "source_rows_excluded_at_or_after_provider_launch": len(ordered)
+        - len(prehistory),
+        "strategy_version": version,
+    }
+    return rows, definition
 
 
 def _grizzly_trade_history(
@@ -1244,7 +1604,9 @@ def _grizzly(
     }
 
 
-def _tt(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
+def _tt(
+    path: Path, *, as_of_date: date | None = None
+) -> tuple[list[dict[str, str]], dict[str, object]]:
     source = _source_identity(path, "turingtrader-current-api-workbook")
     index_rows = _xlsx_rows(path, "Index")
     components: list[tuple[str, Decimal]] = []
@@ -1300,8 +1662,16 @@ def _tt(path: Path) -> tuple[list[dict[str, str]], dict[str, object]]:
             )
             values.append((_excel_date(raw_date, "TT date"), portfolio_return))
         previous = levels
+    # This guard exists to catch a truncated or broken workbook, so it reads
+    # the source history rather than the admitted window.
     if len(values) < 1_000:
         raise StrategyHistoryError("TT current-six history is unexpectedly short")
+    if as_of_date is not None:
+        # The TT sheet is a live API export and runs to the day it was pulled.
+        # Rows after the declared as-of date are provenance, not admitted
+        # returns, exactly as the QSI reader already treats them; emitting them
+        # made the bundle's own post-as-of guard reject the whole build.
+        values = [item for item in values if item[0] <= as_of_date]
     definition = {
         "components": [
             {"allocation": str(weight), "slug": slug} for slug, weight in components
@@ -1783,6 +2153,13 @@ def _qsi(
         current_archive_sources = [latest_archive_source, latest_member_source]
     else:
         weeks = [*historical, *current]
+        # The appendix carries weeks past the declared as-of date. They are
+        # provenance, not admitted returns, the same way the current archive's
+        # later weeks are on the branch above; admitting them made the bundle
+        # reject its own output against the post-as-of guard.
+        if as_of_date is not None:
+            excluded_after_as_of = sum(item["end"] > as_of_date for item in weeks)
+            weeks = [item for item in weeks if item["end"] <= as_of_date]
     ends = [week["end"] for week in weeks]
     if len(set(ends)) != len(ends):
         raise StrategyHistoryError("QSI weekly histories overlap")
@@ -1829,7 +2206,7 @@ def _qsi(
         source=archive_source,
         coverage_disposition=(
             "COMPLETE_THROUGH_DECLARED_AS_OF_WITH_LATER_SOURCE_ROWS_EXCLUDED"
-            if current_subscription_archive is not None and excluded_after_as_of
+            if excluded_after_as_of
             else "COMPLETE_WITHIN_RETAINED_2013_2025_MODEL_BOUNDARY"
         ),
     )
@@ -1838,11 +2215,14 @@ def _qsi(
     definition["exact_weekly_observed_start"] = min(ends).isoformat()
     definition["exact_weekly_observed_end"] = max(ends).isoformat()
     definition["source_artifacts"] = sources
+    # Excluding source rows is a provenance fact on every branch, not only when
+    # a current subscription archive supplied them. Recording it solely on that
+    # branch let the appendix path drop weeks silently.
+    definition["source_rows_excluded_after_as_of"] = excluded_after_as_of
     if revision_validation is not None:
         assert source_observed_end is not None
         definition["history_revision_validation"] = revision_validation
         definition["source_observed_end"] = source_observed_end.isoformat()
-        definition["source_rows_excluded_after_as_of"] = excluded_after_as_of
     return accepted, definition
 
 
@@ -1937,6 +2317,11 @@ def build_bundle(
     volatis_pricehistory_csv: Path,
     as_of_date: str,
     portfolio123_generation_root: Path | None = None,
+    robuxio_track_record_generation: Path | None = None,
+    robuxio_strategy_version: str | None = None,
+    p123_eu_designer_model_generation: Path | None = None,
+    p123_eu_strategy_version: str | None = None,
+    live_inceptions: Mapping[str, str] | None = None,
 ) -> tuple[bytes, bytes]:
     try:
         accepted_as_of = date.fromisoformat(as_of_date)
@@ -1945,6 +2330,65 @@ def build_bundle(
     volatis_disposition = _volatis_disposition(
         volatis_pricehistory_csv, accepted_as_of=accepted_as_of
     )
+    robuxio_part: tuple[list[dict[str, str]], dict[str, object]] | None = None
+    if (robuxio_track_record_generation is None) != (robuxio_strategy_version is None):
+        raise StrategyHistoryError(
+            "Robuxio track-record generation and product version are one input"
+        )
+    if robuxio_track_record_generation is not None:
+        robuxio_part = _robuxio_track_record(
+            robuxio_track_record_generation, str(robuxio_strategy_version)
+        )
+    p123_eu_designer_part: tuple[list[dict[str, str]], dict[str, object]] | None = None
+    if (p123_eu_designer_model_generation is None) != (
+        p123_eu_strategy_version is None
+    ):
+        raise StrategyHistoryError(
+            "EU designer-model generation and strategy version are one input"
+        )
+    if p123_eu_designer_model_generation is not None:
+        p123_eu_designer_part = _p123_eu_designer_curve(
+            p123_eu_designer_model_generation, str(p123_eu_strategy_version)
+        )
+    p123_dispositions: list[dict[str, object]] = []
+    p123_eu_part: tuple[list[dict[str, str]], dict[str, object]] | None = None
+    if portfolio123_generation_root is not None:
+        p123_dispositions, p123_eu_part = _p123_history_dispositions(
+            portfolio123_generation_root
+        )
+    if p123_eu_designer_part is not None:
+        # The copy-derived prehistory only ever existed as a fallback for a
+        # capture that had not been taken. Now that the designer model the
+        # copy follows is a governed generation, it is the authority for the
+        # design layer and the fallback is not used alongside it.
+        #
+        # A series is either admitted history or a disposition explaining why
+        # it is not, never both, so EU's disposition stops being one. What that
+        # disposition carried about the provider-live route and the European
+        # books that were examined and refused is not a statement about the
+        # backtest, so it is kept on the admitted definition rather than
+        # dropped with it.
+        superseded = [
+            row for row in p123_dispositions if row.get("series_id") == "EU [P123]"
+        ]
+        p123_dispositions = [
+            row for row in p123_dispositions if row.get("series_id") != "EU [P123]"
+        ]
+        rows, definition = p123_eu_designer_part
+        for row in superseded:
+            definition["connected_model_currency"] = row.get("connected_model_currency")
+            definition["connected_model_inception"] = row.get(
+                "connected_model_inception"
+            )
+            definition["provider_live_route"] = row.get("provider_live")
+            definition["provider_live_status"] = row.get("history_status")
+            definition["retained_but_not_admitted"] = row.get(
+                "retained_but_not_admitted"
+            )
+            definition["superseded_prehistory_disposition"] = row.get(
+                "backtest_prehistory"
+            )
+        p123_eu_part = (rows, definition)
     parts = (
         _grizzly(
             grizzly_workbook,
@@ -1965,7 +2409,7 @@ def build_bundle(
                 accepted_as_of if grizzly_blended_trade_history is not None else None
             ),
         ),
-        _tt(tt_workbook),
+        _tt(tt_workbook, as_of_date=accepted_as_of),
         _qsi(
             qsi_subscription_archive,
             qsi_appendix_workbook,
@@ -1974,8 +2418,63 @@ def build_bundle(
             price_extension_json=price_extension_json,
             as_of_date=accepted_as_of,
         ),
+        *((p123_eu_part,) if p123_eu_part is not None else ()),
+        *((robuxio_part,) if robuxio_part is not None else ()),
     )
     rows = [row for accepted, _ in parts for row in accepted]
+    definitions = [definition for _accepted, definition in parts]
+
+    # Prehistory is admitted per strategy, strictly before that strategy's own
+    # account-live inception (`portfolio_target_series` rejects a series whose
+    # last row reaches its live start). Capping every series at one global
+    # as-of instead discards evidence that is admissible for the later-starting
+    # strategies, so each boundary is applied to its own series and recorded.
+    boundaries = {
+        series_id: _date_value(value, f"live inception {series_id}")
+        for series_id, value in (live_inceptions or {}).items()
+    }
+    # A caller supplies the whole product's inception map; this bundle carries
+    # only the series whose history comes from these retained vendor files, and
+    # the rest are sourced elsewhere. Names outside it are recorded, not fatal.
+    present = {item["series_id"] for item in definitions}
+    not_applicable = sorted(set(boundaries) - present)
+    boundaries = {k: v for k, v in boundaries.items() if k in present}
+    if boundaries:
+        kept: list[dict[str, str]] = []
+        excluded_by_series: dict[str, int] = {}
+        for history_row in rows:
+            row_series_id = history_row["series_id"]
+            boundary = boundaries.get(row_series_id)
+            if boundary is not None and date.fromisoformat(history_row["date"]) >= (
+                boundary
+            ):
+                excluded_by_series[row_series_id] = (
+                    excluded_by_series.get(row_series_id, 0) + 1
+                )
+                continue
+            kept.append(history_row)
+        rows = kept
+        for definition in definitions:
+            series_id = str(definition["series_id"])
+            boundary = boundaries.get(series_id)
+            if boundary is None:
+                continue
+            series_rows = [item for item in rows if item["series_id"] == series_id]
+            if not series_rows:
+                raise StrategyHistoryError(
+                    f"live inception excludes the whole history: {series_id}"
+                )
+            definition["live_inception"] = boundary.isoformat()
+            definition["observed_end"] = series_rows[-1]["date"]
+            definition["return_observations"] = len(series_rows)
+            definition["source_rows_excluded_at_or_after_live_inception"] = (
+                excluded_by_series.get(series_id, 0)
+            )
+            if excluded_by_series.get(series_id):
+                definition["coverage_disposition"] = (
+                    "COMPLETE_STRICTLY_BEFORE_ACCOUNT_LIVE_INCEPTION"
+                )
+
     rows.sort(key=lambda item: (item["series_id"], item["date"]))
     if any(date.fromisoformat(row["date"]) > accepted_as_of for row in rows):
         raise StrategyHistoryError("history contains observations after as_of_date")
@@ -1994,14 +2493,16 @@ def build_bundle(
             "size_bytes": len(returns_content),
         },
         "schema_version": SCHEMA_VERSION,
-        "series": [definition for _, definition in parts],
+        "live_inceptions_applied": {
+            series_id: boundary.isoformat()
+            for series_id, boundary in sorted(boundaries.items())
+        },
+        "live_inceptions_not_in_bundle": not_applicable,
+        "series": definitions,
         "verification": "VERIFIED",
     }
     history_dispositions = [volatis_disposition]
-    if portfolio123_generation_root is not None:
-        history_dispositions.extend(
-            _p123_history_dispositions(portfolio123_generation_root)
-        )
+    history_dispositions.extend(p123_dispositions)
     manifest["history_dispositions"] = history_dispositions
     manifest["bundle_id"] = hashlib.sha256(canonical_json_bytes(manifest)).hexdigest()
     return returns_content, canonical_json_bytes(manifest)
@@ -2058,7 +2559,22 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--price-extension-json", type=Path)
     parser.add_argument("--volatis-pricehistory-csv", type=Path, required=True)
     parser.add_argument("--portfolio123-generation-root", type=Path)
+    parser.add_argument("--robuxio-track-record-generation", type=Path)
+    parser.add_argument("--robuxio-strategy-version")
+    parser.add_argument("--p123-eu-designer-model-generation", type=Path)
+    parser.add_argument("--p123-eu-strategy-version")
     parser.add_argument("--as-of-date", required=True)
+    parser.add_argument(
+        "--live-inception",
+        action="append",
+        default=[],
+        metavar="SERIES=YYYY-MM-DD",
+        help=(
+            "Account-live inception for one series. Its prehistory is admitted "
+            "strictly before this date, which is what the layered-history "
+            "consumer requires; repeat per series."
+        ),
+    )
     parser.add_argument("--output-root", type=Path, required=True)
     return parser
 
@@ -2068,6 +2584,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         result = write_bundle(
             args.output_root,
+            live_inceptions={
+                series_id.strip(): value.strip()
+                for series_id, value in (
+                    item.split("=", 1) for item in args.live_inception
+                )
+            },
             grizzly_workbook=args.grizzly_workbook,
             grizzly_original_design_workbook=args.grizzly_original_design_workbook,
             grizzly_spx_workbook=args.grizzly_spx_workbook,
@@ -2082,6 +2604,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             price_extension_json=args.price_extension_json,
             volatis_pricehistory_csv=args.volatis_pricehistory_csv,
             portfolio123_generation_root=args.portfolio123_generation_root,
+            robuxio_track_record_generation=args.robuxio_track_record_generation,
+            robuxio_strategy_version=args.robuxio_strategy_version,
+            p123_eu_designer_model_generation=(args.p123_eu_designer_model_generation),
+            p123_eu_strategy_version=args.p123_eu_strategy_version,
             as_of_date=args.as_of_date,
         )
     except StrategyHistoryError as exc:
