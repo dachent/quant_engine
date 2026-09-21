@@ -5363,12 +5363,18 @@ def _attended_request_identity(
     output_root: Path,
     retained_cache_root: Path,
     requested_as_of: str,
+    evaluated_on: str | None,
     source_run: Path,
     financial_stage_inputs: Mapping[str, Path],
     source_phase: Mapping[str, Any],
     runtime: Mapping[str, Any],
 ) -> dict[str, Any]:
+    # `evaluated_on` is a separate clock from `requested_as_of`: plan bundles consume it as
+    # `evaluation_date`, the dependence spec as its `as_of_date`, and the governed HWM result
+    # records it and derives freshness from it.  Without it here, a resume under a different
+    # evaluation date reused every checkpoint and returned the earlier date's calculations.
     return {
+        "evaluated_on": evaluated_on,
         "output_root": str(output_root),
         "financial_stage_inputs": {
             flag: _file_definition(path)
@@ -5699,6 +5705,7 @@ def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
         output_root=output_root,
         retained_cache_root=retained_cache_root,
         requested_as_of=requested_as_of,
+        evaluated_on=args.evaluated_on,
         source_run=source_run,
         financial_stage_inputs=financial_stage_inputs,
         source_phase=source_phase,
@@ -6074,12 +6081,36 @@ def _attended_replace_checkpoint(output_root: Path, value: Mapping[str, Any]) ->
         raise MaterializationError("attended run checkpoint cannot be updated") from exc
 
 
+def _attended_shared_stage_roles(output_root: Path, role: str) -> tuple[str, ...]:
+    """Return the other attended roles whose bytes live in this role's stage root.
+
+    `panel-candidate` and `panel` share `stages/panel`, so moving that root aside for one of
+    them also removes the other's outputs while its own receipt survives.  Derived from the
+    mapping rather than naming the pair, so a future shared root cannot be missed.
+    """
+
+    stage_root = _attended_stage_root(output_root, role)
+    return tuple(
+        other
+        for other in ATTENDED_STAGES
+        if other != role and _attended_stage_root(output_root, other) == stage_root
+    )
+
+
 def _attended_preserve_failed_stage(output_root: Path, role: str) -> None:
     """Move failed-stage bytes aside before a create-only producer retries."""
 
     stage_root = _attended_stage_root(output_root, role)
     receipt = output_root / "stage-results" / f"{role}.json"
-    if not stage_root.exists() and not receipt.exists():
+    shared_receipts = [
+        output_root / "stage-results" / f"{other}.json"
+        for other in _attended_shared_stage_roles(output_root, role)
+    ]
+    if (
+        not stage_root.exists()
+        and not receipt.exists()
+        and not any(path.exists() for path in shared_receipts)
+    ):
         return
     if stage_root.is_symlink() or (stage_root.exists() and not stage_root.is_dir()):
         raise MaterializationError("attended failed stage root is not a directory")
@@ -6100,6 +6131,15 @@ def _attended_preserve_failed_stage(output_root: Path, role: str) -> None:
         stage_root.mkdir(parents=True)
     if receipt.exists():
         os.replace(receipt, destination / "stage-result.json")
+    # A receipt whose outputs just moved aside no longer describes anything on disk, so it
+    # must not be able to satisfy the completed-stage validation on the retry.
+    for path in shared_receipts:
+        if path.is_symlink():
+            raise MaterializationError(
+                "attended shared stage receipt is not a regular file"
+            )
+        if path.exists():
+            os.replace(path, destination / path.name)
 
 
 def _attended_stage_command(
@@ -6162,6 +6202,35 @@ def _attended_execute(
         completed = _attended_completed_stages(
             output_root, preflight["required_stages"], failed_stage=failed_stage
         )
+        # An interruption that killed a child before it returned leaves partial bytes with no
+        # receipt and no failed_stage, and the create-only producer refuses its own partial
+        # directory on the retry.  Three conditions keep this to exactly that case:
+        #   - a later attempt, not `resume`, because a plain `--execute` can re-enter a
+        #     prepared root the same way;
+        #   - nothing sharing the root has completed -- `panel` legitimately runs into the
+        #     root `panel-candidate` filled, which is the supported build -> QA -> resume path;
+        #   - the root still HOLDS something.  The preserve above recreates an empty root, so
+        #     without this an ordinary failed-stage resume would preserve twice and leave an
+        #     empty second attempt directory, breaking the one-failure-one-attempt mapping the
+        #     evidence directory exists to provide.
+        preserved_partial = False
+        if attempt > 1:
+            for role in preflight["required_stages"]:
+                if role in completed:
+                    continue
+                if any(
+                    other in completed
+                    for other in _attended_shared_stage_roles(output_root, role)
+                ):
+                    continue
+                stage_root = _attended_stage_root(output_root, role)
+                if stage_root.is_dir() and any(stage_root.iterdir()):
+                    _attended_preserve_failed_stage(output_root, role)
+                    preserved_partial = True
+        if preserved_partial:
+            completed = _attended_completed_stages(
+                output_root, preflight["required_stages"], failed_stage=failed_stage
+            )
         for role in preflight["required_stages"]:
             if role in completed:
                 continue

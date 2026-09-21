@@ -983,6 +983,7 @@ def _preparation_input_identity(
     config: Mapping[str, Any],
     plan: Mapping[str, Any],
     release_commit: str,
+    evaluated_on: str,
 ) -> dict[str, Any]:
     """Bind every selected input, policy, and local producer code surface."""
 
@@ -1000,6 +1001,7 @@ def _preparation_input_identity(
     return {
         "schema_version": 1,
         "code": code,
+        "evaluation_date": evaluated_on,
         "financial_data_cutoff": config["financial_data_cutoff"],
         "input_config": _definition(preparation_spec_path.resolve()),
         "policy": {
@@ -1188,8 +1190,13 @@ def _verify_epoch_calculation_cutoff(
 def _preparation_run_identity(identity: Mapping[str, Any]) -> dict[str, Any]:
     """Keep source-selection continuity separate from stage-local code changes."""
 
+    # `evaluation_date` sits beside the cutoff because the two are different clocks and a
+    # checkpoint computed under one evaluation date is not reusable under another: the plan
+    # bundles take it as `evaluation_date`, the dependence spec as its `as_of_date`, and the
+    # governed HWM result records it and derives freshness from it.
     keys = (
         "schema_version",
+        "evaluation_date",
         "financial_data_cutoff",
         "source_phase",
         "source_selection",
@@ -1432,6 +1439,7 @@ def _prepare_attended_inputs(
         config=config,
         plan=plan,
         release_commit=release_commit,
+        evaluated_on=evaluated_on,
     )
     run_identity = _preparation_run_identity(identity)
     if root.exists():

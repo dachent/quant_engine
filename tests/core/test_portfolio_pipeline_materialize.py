@@ -4733,6 +4733,185 @@ def test_attended_preserves_failed_partial_child_and_retries_it_on_resume(
     assert calls == ["ledger", "baseline", "baseline"]
 
 
+def test_attended_preserve_moves_the_receipt_sharing_the_stage_root(
+    tmp_path: Path,
+) -> None:
+    """A receipt whose bytes left with the shared root must leave with them."""
+
+    output_root = tmp_path / "output"
+    stage_root = output_root / "stages" / "panel"
+    stage_root.mkdir(parents=True)
+    (stage_root / "candidate.bin").write_bytes(b"candidate")
+    results = output_root / "stage-results"
+    results.mkdir()
+    (results / "panel.json").write_bytes(b'{"role": "panel"}')
+    (results / "panel-candidate.json").write_bytes(b'{"role": "panel-candidate"}')
+    # A role with its own root must not drag anything else along.
+    (results / "ledger.json").write_bytes(b'{"role": "ledger"}')
+
+    materializer._attended_preserve_failed_stage(output_root, "panel")
+
+    preserved = output_root / "failed-stage-evidence" / "panel" / "attempt-1"
+    assert (preserved / "stage-root" / "candidate.bin").read_bytes() == b"candidate"
+    assert (preserved / "stage-result.json").read_bytes() == b'{"role": "panel"}'
+    # panel-candidate's outputs went with the root, so its receipt cannot stay behind and
+    # claim they are still there.
+    assert (preserved / "panel-candidate.json").read_bytes() == (
+        b'{"role": "panel-candidate"}'
+    )
+    assert not (results / "panel-candidate.json").exists()
+    assert (results / "ledger.json").is_file()
+    assert sorted(item.name for item in stage_root.iterdir()) == []
+
+
+def test_attended_shared_stage_roles_are_derived_not_named(tmp_path: Path) -> None:
+    """The pair sharing a root is read from the mapping, so a new one cannot be missed."""
+
+    output_root = tmp_path / "output"
+    assert materializer._attended_shared_stage_roles(output_root, "panel") == (
+        "panel-candidate",
+    )
+    assert materializer._attended_shared_stage_roles(
+        output_root, "panel-candidate"
+    ) == ("panel",)
+    assert materializer._attended_shared_stage_roles(output_root, "ledger") == ()
+
+
+def test_attended_resume_records_one_attempt_for_one_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preserving a failed stage must not also preserve the empty root it recreates.
+
+    This one guards the partial-root recovery below rather than the defect it fixes: the
+    preserve recreates its stage root empty, so a recovery keyed on existence alone preserves
+    a second time and leaves an empty `attempt-2`. It passes on code that has no recovery at
+    all, which is why it is documented as a regression guard and not as proof of the fix.
+    """
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+
+    def fail_baseline(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        if role == "ledger":
+            _record_attended_stage(output_root, role)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        (output_root / "stages" / "baseline").mkdir(parents=True, exist_ok=True)
+        (output_root / "stages" / "baseline" / "partial.bin").write_bytes(b"partial")
+        return subprocess.CompletedProcess(argv, 83, "", "failed baseline")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", fail_baseline)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 83
+
+    def retry(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        _record_attended_stage(output_root, role)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer.subprocess, "run", retry)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 0
+    )
+    attempts = sorted((output_root / "failed-stage-evidence" / "baseline").iterdir())
+    assert [item.name for item in attempts] == ["attempt-1"]
+    assert (attempts[0] / "stage-root" / "partial.bin").read_bytes() == b"partial"
+
+
+def test_attended_resume_preserves_a_partial_root_left_without_a_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interruption before the parent records the failure still leaves partial bytes."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+
+    def fail_baseline(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        if role == "ledger":
+            _record_attended_stage(output_root, role)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        (output_root / "stages" / "baseline").mkdir(parents=True, exist_ok=True)
+        (output_root / "stages" / "baseline" / "partial.bin").write_bytes(b"partial")
+        return subprocess.CompletedProcess(argv, 83, "", "failed baseline")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", fail_baseline)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 83
+
+    # Emulate a kill that took the process before it could record which stage failed: the
+    # partial bytes are on disk and the receipt says nothing about them.
+    receipt = output_root / "attended-run.json"
+    value = json.loads(receipt.read_text("utf-8"))
+    receipt.write_bytes(
+        canonical_json_bytes(
+            {"request_identity": value["request_identity"], "schema_version": 1}
+        )
+    )
+
+    seen: list[list[str]] = []
+
+    def retry(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        if role == "baseline":
+            seen.append(
+                sorted(
+                    item.name
+                    for item in (output_root / "stages" / "baseline").iterdir()
+                )
+            )
+        _record_attended_stage(output_root, role)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer.subprocess, "run", retry)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 0
+    )
+    # The retried child sees an empty root, not its own half-written output.
+    assert seen == [[]]
+    preserved = output_root / "failed-stage-evidence" / "baseline" / "attempt-1"
+    assert (preserved / "stage-root" / "partial.bin").read_bytes() == b"partial"
+
+
+def test_attended_request_identity_binds_the_evaluation_clock(tmp_path: Path) -> None:
+    """A changed evaluation date must change the identity a resume is validated against."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    shared: dict[str, object] = {
+        "repo_root": preflight["repo_root"],
+        "python": preflight["python"],
+        "workspace_root": preflight["workspace_root"],
+        "output_root": tmp_path / "output",
+        "retained_cache_root": preflight["retained_cache_root"],
+        "requested_as_of": "2026-09-17",
+        "source_run": preflight["source_run"],
+        "financial_stage_inputs": {},
+        "source_phase": {},
+        "runtime": {},
+    }
+    first = materializer._attended_request_identity(evaluated_on="2026-09-21", **shared)
+    second = materializer._attended_request_identity(
+        evaluated_on="2026-09-22", **shared
+    )
+
+    assert first["evaluated_on"] == "2026-09-21"
+    assert canonical_json_bytes(first) != canonical_json_bytes(second)
+    # The financial cutoff is a separate clock and must not move with it.
+    assert first["requested_as_of"] == second["requested_as_of"] == "2026-09-17"
+
+
 def test_attended_preserves_original_exit_when_child_leaves_partial_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

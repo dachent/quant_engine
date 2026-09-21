@@ -999,6 +999,11 @@ def _preparation_function_fixture(
             )
         },
         "release_commit": "a" * 40,
+        # The real `_preparation_input_identity` records the evaluation clock beside the
+        # financial cutoff. A stub that omits it pushes `_preparation_run_identity` into its
+        # whole-dict fallback, which then compares `stage_inputs` too and refuses a legitimate
+        # resume -- a consumer suite lying about the producer it replaces.
+        "evaluation_date": "2026-09-19",
         "schema_version": 1,
         "source_phase": plan["source_phase"],
         "source_selection": preparation._definition(source_selection),
@@ -1017,7 +1022,12 @@ def _preparation_function_fixture(
 
     monkeypatch.setattr(preparation, "_validated_inputs", lambda *_args: (config, plan))
     monkeypatch.setattr(
-        preparation, "_preparation_input_identity", lambda **_kwargs: identity.copy()
+        preparation,
+        "_preparation_input_identity",
+        # The real function derives `evaluation_date` from its `evaluated_on` argument. A stub
+        # that returns a constant cannot distinguish two evaluation dates, which is exactly the
+        # reuse the identity exists to prevent.
+        lambda **kwargs: {**identity, "evaluation_date": kwargs["evaluated_on"]},
     )
     monkeypatch.setattr(preparation, "_selected_history_authorities", lambda _files: {})
 
@@ -1223,6 +1233,38 @@ def test_final_handoff_binds_allocation_to_selected_retained_authority(
     assert allocation["path"] != str(
         (output / "stages" / "baseline" / "generations" / ("b" * 64)).resolve()
     )
+
+
+def test_preparation_resume_refuses_a_changed_evaluation_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Checkpoints computed under one evaluation date are not reusable under another."""
+
+    spec, _calls, _identity = _preparation_function_fixture(tmp_path, monkeypatch)
+    output = tmp_path / "prepared"
+
+    preparation.prepare_attended_inputs(
+        preparation_spec_path=spec,
+        output_root=output,
+        requested_as_of="2026-09-17",
+        evaluated_on="2026-09-19",
+        release_commit="a" * 40,
+    )
+
+    # Same financial cutoff, different execution clock: the plan bundles take it as
+    # `evaluation_date`, the dependence spec as its `as_of_date`, and the governed HWM result
+    # records it and derives freshness from it, so no checkpoint may be reused.
+    with pytest.raises(
+        preparation.AttendedPreparationError, match="preparation input identity differs"
+    ):
+        preparation.prepare_attended_inputs(
+            preparation_spec_path=spec,
+            output_root=output,
+            requested_as_of="2026-09-17",
+            evaluated_on="2026-09-22",
+            release_commit="a" * 40,
+            resume=True,
+        )
 
 
 def test_hwm_stage_checkpoints_and_reuses_its_selected_calendar(
