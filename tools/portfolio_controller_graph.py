@@ -94,6 +94,13 @@ _PATH_STAGES = {
     _MATERIALIZER: list(_STAGE_ORDER),
     _RELEASE: list(_STAGE_ORDER),
     _CORRELATION: ["analytics", "report", "panel"],
+    # Consumed only by the panel, which reads its weekly series.
+    "tools/portfolio_weekly_returns.py": ["panel"],
+    # An audit tool: no producer imports it and it writes no delivery artifact,
+    # so a change to it affects no stage. Declared rather than omitted, because
+    # an omitted `tools/` path raises "unmapped relevant production change"
+    # instead of being treated as harmless.
+    "tools/check_retained_authority_pins.py": [],
     _PREPARATION: list(_STAGE_ORDER),
     _SOURCE_CONTRACT: list(_STAGE_ORDER),
     _SOURCE_SCHEMA: list(_STAGE_ORDER),
@@ -232,10 +239,12 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
             _PREPARATION,
             _TARGET_SERIES,
             "contracts/portfolio-performance-policy-v1.json",
+            "schemas/portfolio/base-decomposition-spec.schema.json",
         ),
         "contracts": (
             "contracts/portfolio-financial-mvp-source-v1.json",
             "contracts/portfolio-performance-policy-v1.json",
+            "schemas/portfolio/base-decomposition-spec.schema.json",
         ),
         "producer": (_DECOMPOSITION_PLAN, "build_bundle"),
         "artifacts": ("current decomposition plan bundle",),
