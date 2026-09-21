@@ -6326,7 +6326,10 @@ def _matrixport_flow_coverage(
 
 
 def _ibkr_flow_coverage(
-    catalog: Mapping[str, Any], known_accounts: set[str]
+    catalog: Mapping[str, Any],
+    known_accounts: set[str],
+    *,
+    required_accounts: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     matches = [
         item
@@ -6341,13 +6344,33 @@ def _ibkr_flow_coverage(
         {"accounts", "calendar", "fact_type", "known_gaps", "status"},
         "IBKR finalized history coverage",
     )
-    if (
-        history["calendar"] != "WEEKDAY_SOURCE_CALENDAR"
-        or history["status"] != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    scoped = required_accounts is not None
+    requested_accounts = required_accounts if required_accounts is not None else set()
+    if history["calendar"] != "WEEKDAY_SOURCE_CALENDAR":
+        if scoped:
+            raise ProviderLedgerError("IBKR finalized history unknown calendar")
+        raise ProviderLedgerError("IBKR finalized history coverage is incomplete")
+    if not isinstance(history["known_gaps"], list) or any(
+        not isinstance(item, str) or not item for item in history["known_gaps"]
+    ):
+        raise ProviderLedgerError("IBKR finalized history known gaps are invalid")
+    if scoped:
+        if not requested_accounts.issubset(known_accounts):
+            raise ProviderLedgerError(
+                "IBKR finalized history unknown requested account"
+            )
+    elif (
+        history["status"] != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
         or history["known_gaps"] != []
     ):
         raise ProviderLedgerError("IBKR finalized history coverage is incomplete")
+    if history["status"] not in {
+        "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        "PARTIAL",
+    }:
+        raise ProviderLedgerError("IBKR finalized history status is invalid")
     result: dict[str, dict[str, Any]] = {}
+    seen_accounts: set[str] = set()
     for raw_account in _objects(history["accounts"], "IBKR coverage accounts"):
         _strict(
             raw_account,
@@ -6355,8 +6378,13 @@ def _ibkr_flow_coverage(
             "IBKR coverage account",
         )
         account_id = _text(raw_account["account_id"], "IBKR coverage account_id")
-        if account_id not in known_accounts or account_id in result:
+        if account_id not in known_accounts:
             raise ProviderLedgerError("IBKR finalized history account scope differs")
+        if account_id in seen_accounts:
+            if scoped:
+                raise ProviderLedgerError("IBKR finalized history duplicate account")
+            raise ProviderLedgerError("IBKR finalized history account scope differs")
+        seen_accounts.add(account_id)
         statement_count = raw_account["statement_count"]
         if (
             not isinstance(statement_count, int)
@@ -6365,33 +6393,56 @@ def _ibkr_flow_coverage(
         ):
             raise ProviderLedgerError("IBKR finalized history count is invalid")
         intervals = _objects(raw_account["intervals"], "IBKR coverage intervals")
-        if len(intervals) != 1:
+        if not intervals:
+            raise ProviderLedgerError("IBKR finalized history malformed interval")
+        if (not scoped or account_id in requested_accounts) and len(intervals) != 1:
             raise ProviderLedgerError("IBKR finalized history is not contiguous")
-        interval = intervals[0]
-        _strict(
-            interval,
-            {"effective_end", "effective_start", "source_artifact_ids"},
-            "IBKR coverage interval",
-        )
-        start = _day(interval["effective_start"], "IBKR flow coverage start")
-        end = _day(interval["effective_end"], "IBKR flow coverage end")
-        artifact_ids = interval["source_artifact_ids"]
-        if (
-            start > end
-            or not isinstance(artifact_ids, list)
-            or not artifact_ids
-            or any(not isinstance(item, str) or not item for item in artifact_ids)
-            or len(set(artifact_ids)) != len(artifact_ids)
-        ):
-            raise ProviderLedgerError("IBKR finalized history interval is invalid")
+        parsed_intervals: list[tuple[date, date, list[str]]] = []
+        for interval in intervals:
+            try:
+                _strict(
+                    interval,
+                    {"effective_end", "effective_start", "source_artifact_ids"},
+                    "IBKR coverage interval",
+                )
+                start = _day(interval["effective_start"], "IBKR flow coverage start")
+                end = _day(interval["effective_end"], "IBKR flow coverage end")
+            except (ProviderLedgerError, TypeError, ValueError) as exc:
+                if scoped:
+                    raise ProviderLedgerError(
+                        "IBKR finalized history malformed interval"
+                    ) from exc
+                raise
+            artifact_ids = interval["source_artifact_ids"]
+            if (
+                start > end
+                or not isinstance(artifact_ids, list)
+                or not artifact_ids
+                or any(not isinstance(item, str) or not item for item in artifact_ids)
+                or len(set(artifact_ids)) != len(artifact_ids)
+            ):
+                if scoped:
+                    raise ProviderLedgerError(
+                        "IBKR finalized history malformed interval"
+                    )
+                raise ProviderLedgerError("IBKR finalized history interval is invalid")
+            parsed_intervals.append((start, end, list(artifact_ids)))
+        if scoped and account_id not in requested_accounts:
+            continue
+        start, end, artifact_ids = parsed_intervals[0]
         result[account_id] = {
             "calendar": "WEEKDAY_SOURCE_CALENDAR",
             "effective_end": end.isoformat(),
             "effective_start": start.isoformat(),
-            "source_artifact_ids": list(artifact_ids),
+            "source_artifact_ids": artifact_ids,
             "statement_count": statement_count,
         }
-    if set(result) != known_accounts:
+    if scoped:
+        if set(result) != requested_accounts:
+            raise ProviderLedgerError(
+                "IBKR finalized history missing requested account"
+            )
+    elif set(result) != known_accounts:
         raise ProviderLedgerError("IBKR finalized history account scope differs")
     return result
 
@@ -7789,6 +7840,20 @@ def build_catalog(
         {item.provider_id: item for item in identities},
         {provider_id: item.as_of_date for provider_id, item in manifests.items()},
     )
+    ibkr_known_accounts = {
+        _text(item.get("account_id"), "IBKR account_id")
+        for item in _objects(catalogs["ibkr"].get("accounts"), "IBKR accounts")
+    }
+    ibkr_required_accounts = {
+        account_id
+        for account_id, account_assignments in assignments.items()
+        if account_id in ibkr_known_accounts
+        and any(
+            assignment.get("mapping_status") == "MAPPED"
+            and assignment.get("strategy_id") in authoritative_strategy_ids
+            for assignment in account_assignments
+        )
+    }
     admissions = _admissions(
         combined,
         evidence_rows,
@@ -7797,10 +7862,8 @@ def build_catalog(
         schwab_flow_coverage=_schwab_flow_coverage(catalogs["schwab"], accounts),
         ibkr_flow_coverage=_ibkr_flow_coverage(
             catalogs["ibkr"],
-            {
-                _text(item.get("account_id"), "IBKR account_id")
-                for item in _objects(catalogs["ibkr"].get("accounts"), "IBKR accounts")
-            },
+            ibkr_known_accounts,
+            required_accounts=ibkr_required_accounts,
         ),
         matrixport_flow_coverage=_matrixport_flow_coverage(
             manifests["matrixport"],
