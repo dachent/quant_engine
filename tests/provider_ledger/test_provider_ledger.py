@@ -26,6 +26,7 @@ from quant_engine.core import (
     VerificationStatus,
     hash_file,
 )
+from quant_engine.core.contracts import canonical_json_bytes
 from quant_engine.portfolio_ledger import (
     DatasetItemKind,
     GenerationQualification,
@@ -2309,9 +2310,152 @@ def test_ibkr_finalized_history_rejects_gap_or_out_of_scope_account() -> None:
 
     coverage["known_gaps"] = []
     coverage["status"] = "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    with pytest.raises(ledger.ProviderLedgerError, match="not contiguous"):
+        ledger._ibkr_flow_coverage({"fact_coverage": [coverage]}, {"account-one"})
     coverage["accounts"][0]["intervals"] = coverage["accounts"][0]["intervals"][:1]
     with pytest.raises(ledger.ProviderLedgerError, match="account scope differs"):
         ledger._ibkr_flow_coverage({"fact_coverage": [coverage]}, {"account-other"})
+
+
+def test_ibkr_scoped_partial_history_returns_only_required_contiguous_accounts() -> (
+    None
+):
+    coverage = {
+        "accounts": [
+            {
+                "account_id": "account-required",
+                "intervals": [
+                    {
+                        "effective_end": "2026-09-02",
+                        "effective_start": "2025-09-15",
+                        "source_artifact_ids": ["selected/required.xml"],
+                    }
+                ],
+                "statement_count": 240,
+            },
+            {
+                "account_id": "account-reserve",
+                "intervals": [
+                    {
+                        "effective_end": "2025-12-31",
+                        "effective_start": "2025-09-15",
+                        "source_artifact_ids": ["selected/reserve-old.xml"],
+                    },
+                    {
+                        "effective_end": "2026-09-02",
+                        "effective_start": "2026-03-02",
+                        "source_artifact_ids": ["selected/reserve-new.xml"],
+                    },
+                ],
+                "statement_count": 198,
+            },
+        ],
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "fact_type": "FLEX_FINALIZED_HISTORY",
+        "known_gaps": ["account-reserve has a native Jan-Feb gap"],
+        "status": "PARTIAL",
+    }
+
+    result = ledger._ibkr_flow_coverage(
+        {"fact_coverage": [coverage]},
+        {"account-required", "account-reserve"},
+        required_accounts={"account-required"},
+    )
+
+    assert set(result) == {"account-required"}
+    assert result["account-required"]["effective_start"] == "2025-09-15"
+    assert result["account-required"]["effective_end"] == "2026-09-02"
+
+
+def test_ibkr_scoped_partial_history_rejects_unknown_or_missing_required_account() -> (
+    None
+):
+    coverage = {
+        "accounts": [
+            {
+                "account_id": "account-required",
+                "intervals": [
+                    {
+                        "effective_end": "2026-09-02",
+                        "effective_start": "2025-09-15",
+                        "source_artifact_ids": ["selected/required.xml"],
+                    }
+                ],
+                "statement_count": 240,
+            }
+        ],
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "fact_type": "FLEX_FINALIZED_HISTORY",
+        "known_gaps": ["unrequired native gap"],
+        "status": "PARTIAL",
+    }
+
+    with pytest.raises(ledger.ProviderLedgerError, match="unknown requested account"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [coverage]},
+            {"account-required"},
+            required_accounts={"account-unknown"},
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="missing requested account"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [coverage]},
+            {"account-required", "account-missing"},
+            required_accounts={"account-missing"},
+        )
+
+
+def test_ibkr_scoped_partial_history_rejects_duplicate_and_malformed_accounts() -> None:
+    base_account = {
+        "account_id": "account-required",
+        "intervals": [
+            {
+                "effective_end": "2026-09-02",
+                "effective_start": "2025-09-15",
+                "source_artifact_ids": ["selected/required.xml"],
+            }
+        ],
+        "statement_count": 240,
+    }
+    duplicate = {
+        "accounts": [base_account, dict(base_account)],
+        "calendar": "WEEKDAY_SOURCE_CALENDAR",
+        "fact_type": "FLEX_FINALIZED_HISTORY",
+        "known_gaps": [],
+        "status": "PARTIAL",
+    }
+    with pytest.raises(ledger.ProviderLedgerError, match="duplicate account"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [duplicate]},
+            {"account-required"},
+            required_accounts={"account-required"},
+        )
+    with pytest.raises(ledger.ProviderLedgerError, match="duplicate account"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [duplicate]},
+            {"account-required"},
+            required_accounts=set(),
+        )
+
+    malformed = {
+        **duplicate,
+        "accounts": [
+            {
+                **base_account,
+                "intervals": [
+                    {
+                        **base_account["intervals"][0],
+                        "effective_end": "not-a-date",
+                    }
+                ],
+            }
+        ],
+    }
+    with pytest.raises(ledger.ProviderLedgerError, match="malformed interval"):
+        ledger._ibkr_flow_coverage(
+            {"fact_coverage": [malformed]},
+            {"account-required"},
+            required_accounts={"account-required"},
+        )
 
 
 def test_declared_provider_fact_collection_cannot_fall_back_to_empty() -> None:
@@ -2884,6 +3028,404 @@ def _schwab_journal_row(
         "kind": "Journal",
         "record_id": record_id,
     }
+
+
+def _current_schwab_journal_catalog() -> tuple[
+    dict[str, object], GenerationManifest, dict[str, str]
+]:
+    """Build two disjoint synthetic current-source Journal pairs."""
+
+    accounts = {
+        "001": "account-0000000000000000",
+        "002": "account-0000000000000001",
+        "003": "account-0000000000000002",
+        "004": "account-0000000000000003",
+    }
+    source_hashes = {
+        account_id: f"{index:x}" * 64
+        for index, account_id in enumerate(accounts.values(), start=1)
+    }
+    rows = (
+        (
+            "001",
+            "current-to-ira",
+            "-100",
+            "JOURNAL TO ...002",
+            "TO",
+            "002",
+            "NATIVE_JOURNAL_TO",
+        ),
+        (
+            "002",
+            "current-ira",
+            "+100",
+            "IRA REGULAR CONTRIB",
+            None,
+            None,
+            "IRA_REGULAR_CONTRIB",
+        ),
+        (
+            "003",
+            "current-to-frm",
+            "-100",
+            "JOURNAL TO ...004",
+            "TO",
+            "004",
+            "NATIVE_JOURNAL_TO",
+        ),
+        (
+            "004",
+            "current-frm",
+            "+100",
+            "JOURNAL FRM ...003",
+            "FRM",
+            "003",
+            "NATIVE_JOURNAL_FRM",
+        ),
+    )
+    transactions: list[dict[str, object]] = []
+    for (
+        suffix,
+        record_id,
+        amount,
+        description,
+        direction,
+        counterparty,
+        recipient_basis,
+    ) in rows:
+        native_row = {
+            "action": "Journal",
+            "amount": amount,
+            "description": description,
+            "effectiveDate": "07/30/2026",
+            "transactionDate": "07/30/2026",
+        }
+        account_id = accounts[suffix]
+        transactions.append(
+            {
+                **_schwab_journal_row(account_id, record_id, "2026-07-30", amount),
+                "description": description,
+                "journal_source_evidence": {
+                    "counterparty_account_id": (
+                        accounts[counterparty] if counterparty is not None else None
+                    ),
+                    "currency_basis": "SELECTED_ACCOUNT_BASE_CURRENCY",
+                    "direction": direction,
+                    "native_row": native_row,
+                    "native_row_sha256": hashlib.sha256(
+                        canonical_json_bytes(native_row)
+                    ).hexdigest(),
+                    "recipient_basis": recipient_basis,
+                    "source_artifact_id": f"wch/transactions/{account_id}.json",
+                    "source_artifact_sha256": source_hashes[account_id],
+                },
+                "source_ordinal": 1,
+            }
+        )
+    entries = [
+        {"account_id": account_id, "native_suffix": suffix}
+        for suffix, account_id in sorted(accounts.items())
+    ]
+    catalog = {
+        "accounts": [
+            {"account_id": account_id, "base_currency": "USD", "provider": "SCHWAB"}
+            for account_id in accounts.values()
+        ],
+        "catalog_schema_version": 3,
+        "journal_counterparty_crosswalk": {
+            "basis": "SELECTED_SOURCE_SPEC_CROSSWALK",
+            "entries": entries,
+            "source_crosswalk_sha256": hashlib.sha256(
+                canonical_json_bytes(entries)
+            ).hexdigest(),
+        },
+        "nav_observations": [],
+        "positions": [],
+        "transactions": transactions,
+    }
+    manifest = GenerationManifest.build(
+        as_of_date=date(2026, 7, 31),
+        adapter=AdapterIdentity(name="test-provider-ledger", version="1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="synthetic current Schwab Journal evidence",
+            fact_types=("transactions",),
+            observed_start=date(2026, 7, 30),
+            observed_end=date(2026, 7, 31),
+        ),
+        artifacts=tuple(
+            SourceArtifact(
+                artifact_id=f"wch/transactions/{account_id}.json",
+                sha256=source_hashes[account_id],
+                size_bytes=1,
+                as_of_date=date(2026, 7, 31),
+                schema_name="synthetic-wch-transaction",
+                schema_version="1",
+            )
+            for account_id in accounts.values()
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    return catalog, manifest, accounts
+
+
+def test_current_schwab_journal_evidence_pairs_equal_same_day_transfers() -> None:
+    """Current native evidence disambiguates equal-value Journal transfers."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    assignments = {
+        account_id: [
+            {
+                "effective_start": "2026-07-30",
+                "effective_end": None,
+                "strategy_id": f"strategy-{suffix}",
+            }
+        ]
+        for suffix, account_id in accounts.items()
+    }
+
+    projected, _ = ledger._project_account_facts(
+        "schwab",
+        "current-schwab-generation",
+        catalog,
+        set(accounts.values()),
+        {row[0]["strategy_id"] for row in assignments.values()},
+        assignments,
+        manifest=manifest,
+    )
+
+    flows = projected["flows"]
+    assert len(flows) == 4
+    assert {flow["flow_type"] for flow in flows} == {"ACCOUNT_TRANSFER"}
+    assert {flow["mapping_basis"] for flow in flows} == {
+        "CURRENT_SOURCE_PAIRED_PROVIDER_JOURNAL"
+    }
+    assert sum(Decimal(flow["amount"]["value"]) for flow in flows) == 0
+    assert {flow["strategy_id"] for flow in flows} == {
+        "strategy-001",
+        "strategy-002",
+        "strategy-003",
+        "strategy-004",
+    }
+    pairs: dict[str, list[dict[str, object]]] = defaultdict(list)
+    for flow in flows:
+        pairs[str(flow["provider_activity_id_sha256"])].append(flow)
+    assert len(pairs) == 2
+    assert all(len(pair) == 2 for pair in pairs.values())
+
+
+def _project_current_schwab_journal_catalog(
+    catalog: Mapping[str, object],
+    manifest: GenerationManifest,
+    accounts: Mapping[str, str],
+) -> None:
+    assignments = {
+        account_id: [
+            {
+                "effective_start": "2026-07-30",
+                "effective_end": None,
+                "strategy_id": f"strategy-{suffix}",
+            }
+        ]
+        for suffix, account_id in accounts.items()
+    }
+    ledger._project_account_facts(
+        "schwab",
+        "current-schwab-generation",
+        catalog,
+        set(accounts.values()),
+        {row[0]["strategy_id"] for row in assignments.values()},
+        assignments,
+        manifest=manifest,
+    )
+
+
+def _refresh_current_schwab_native_row_hash(transaction: Mapping[str, Any]) -> None:
+    """Keep the synthetic native evidence internally hash-bound after a mutation."""
+
+    evidence = transaction["journal_source_evidence"]
+    evidence["native_row_sha256"] = hashlib.sha256(
+        canonical_json_bytes(evidence["native_row"])
+    ).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda catalog: catalog["transactions"][0][
+                "journal_source_evidence"
+            ].update({"counterparty_account_id": "account-not-selected"}),
+            "native semantics differ",
+        ),
+        (
+            lambda catalog: catalog["transactions"][0]["amount"].update(
+                {"value": "-101"}
+            ),
+            "native amount differs",
+        ),
+        (
+            lambda catalog: catalog["transactions"][0].update(
+                {"effective_date": "2026-07-31"}
+            ),
+            "native effective date differs",
+        ),
+        (
+            lambda catalog: catalog["transactions"][0]["amount"].update(
+                {"currency": "EUR"}
+            ),
+            "currency binding differs",
+        ),
+    ],
+)
+def test_current_schwab_journal_evidence_rejects_malformed_binding(
+    mutation: Callable[[dict[str, Any]], None], message: str
+) -> None:
+    """A changed native semantic binding cannot reach a weaker Journal route."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    mutation(catalog)
+
+    with pytest.raises(ledger.ProviderLedgerError, match=message):
+        _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_rejects_duplicate_recipient() -> None:
+    """A named IRA recipient must remain unique across the selected Journal rows."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    duplicate = json.loads(json.dumps(catalog["transactions"][1]))
+    duplicate["record_id"] = "current-ira-duplicate"
+    duplicate["source_ordinal"] = 2
+    catalog["transactions"].append(duplicate)
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="recipient pairing is ambiguous"
+    ):
+        _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_rejects_ambiguous_crosswalk() -> None:
+    """A duplicate selected suffix is not a valid Journal counterpart binding."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    catalog["journal_counterparty_crosswalk"]["entries"].append(
+        {"account_id": accounts["001"], "native_suffix": "002"}
+    )
+
+    with pytest.raises(ledger.ProviderLedgerError, match="crosswalk is ambiguous"):
+        _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_does_not_fall_back_when_missing() -> None:
+    """A v3 cash Journal without native evidence cannot use the generic route."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    del catalog["transactions"][0]["journal_source_evidence"]
+
+    with pytest.raises(ledger.ProviderLedgerError, match="source evidence is missing"):
+        _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_does_not_fall_back_when_all_missing() -> None:
+    """All v3 cash Journal rows require bound native evidence before projection."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    for transaction in catalog["transactions"]:
+        del transaction["journal_source_evidence"]
+
+    with pytest.raises(ledger.ProviderLedgerError, match="source evidence is missing"):
+        _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_preserves_outside_perimeter_receipt() -> None:
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    external = json.loads(json.dumps(catalog["transactions"][3]))
+    external["record_id"] = "current-external-receipt"
+    external["source_ordinal"] = 2
+    external["description"] = "JOURNAL FRM ...999"
+    evidence = external["journal_source_evidence"]
+    evidence["counterparty_account_id"] = None
+    evidence["native_row"]["description"] = external["description"]
+    _refresh_current_schwab_native_row_hash(external)
+    catalog["transactions"].append(external)
+    paired = ledger._schwab_current_journal_transfers(
+        catalog, catalog["transactions"], manifest
+    )
+    assert len(paired) == 4
+    assert external["record_id"] not in paired
+    _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_does_not_require_non_cash_native_rows() -> (
+    None
+):
+    """A v3 native Journal row without a cash amount remains outside this route."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    catalog["transactions"].append(
+        {
+            **_schwab_journal_row(
+                accounts["001"], "current-noncash-journal", "2026-07-30", "0"
+            ),
+            "amount": {"currency": "USD", "status": "UNAVAILABLE", "value": None},
+            "description": "JOURNAL TO ...002",
+            "source_ordinal": 2,
+        }
+    )
+
+    _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+@pytest.mark.parametrize(
+    ("transaction_index", "native_transaction_date", "native_amount"),
+    [
+        (3, "07/30/2026 as of 08/01/2026", "$100.00"),
+        (0, "2026-07-30", "(100.00)"),
+    ],
+)
+def test_current_schwab_journal_evidence_preserves_native_producer_parsers(
+    transaction_index: int, native_transaction_date: str, native_amount: str
+) -> None:
+    """Ledger reparse accepts the producer's native date suffix and money syntax."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    transaction = catalog["transactions"][transaction_index]
+    native_row = transaction["journal_source_evidence"]["native_row"]
+    native_row["amount"] = native_amount
+    native_row["transactionDate"] = native_transaction_date
+    _refresh_current_schwab_native_row_hash(transaction)
+
+    _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_rejects_invented_effective_date() -> None:
+    """An absent native effectiveDate requires the producer's normalized absence."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    for transaction in catalog["transactions"]:
+        transaction["journal_source_evidence"]["native_row"]["effectiveDate"] = ""
+        transaction["effective_date"] = "2026-07-31"
+        _refresh_current_schwab_native_row_hash(transaction)
+
+    with pytest.raises(
+        ledger.ProviderLedgerError, match="native effective date is absent"
+    ):
+        _project_current_schwab_journal_catalog(catalog, manifest, accounts)
+
+
+def test_current_schwab_journal_evidence_uses_event_date_when_native_effective_date_absent() -> (
+    None
+):
+    """Producer-normalized absent effective dates pair by the native event date."""
+
+    catalog, manifest, accounts = _current_schwab_journal_catalog()
+    for transaction in catalog["transactions"]:
+        transaction["journal_source_evidence"]["native_row"]["effectiveDate"] = ""
+        transaction["effective_date"] = None
+        _refresh_current_schwab_native_row_hash(transaction)
+
+    _project_current_schwab_journal_catalog(catalog, manifest, accounts)
 
 
 def test_schwab_pinned_journal_flows_require_exact_record_and_retained_source() -> None:

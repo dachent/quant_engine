@@ -71,7 +71,7 @@ _PROVIDER_CATALOGS: Final = {
     "matrixport": ("catalog.json", frozenset({1, 2})),
     "portfolio123": ("portfolio123-generation.json", frozenset({1})),
     "quantbase": ("quantbase-generation.json", frozenset({1})),
-    "schwab": ("schwab-generation.json", frozenset({1, 2})),
+    "schwab": ("schwab-generation.json", frozenset({1, 2, 3})),
 }
 _ACCOUNT_FACTS: Final = {
     "alpaca": ("nav_observations", "positions", "transactions"),
@@ -3751,9 +3751,13 @@ def _project_account_facts(
                 f"{provider_id}.{source_fact}"
             )
         rows = _objects(catalog[source_fact], f"{provider_id}.{source_fact}")
+        current_journal_transfers: dict[str, dict[str, str]] = {}
         if provider_id == "schwab" and source_fact == "transactions":
             rows = _schwab_transactions_within_cutoff(
                 rows, financial_cutoff, exceptions
+            )
+            current_journal_transfers = _schwab_current_journal_transfers(
+                catalog, rows, manifest
             )
         for row in rows:
             account_id = str(row.get("account_id") or "")
@@ -3853,11 +3857,11 @@ def _project_account_facts(
                     }
                 )
             elif provider_id == "schwab" and source_fact == "transactions":
-                pinned_journal = _schwab_pinned_journal_external_flow(
-                    row,
-                    manifest,
+                transfer: dict[str, Any] | None = current_journal_transfers.get(
+                    source_id
                 )
-                transfer: dict[str, Any] | None = pinned_journal
+                if transfer is None:
+                    transfer = _schwab_pinned_journal_external_flow(row, manifest)
                 if transfer is None and row.get("kind") == "Journaled Shares":
                     transfer = _schwab_share_transfer(row, rows)
                 elif (
@@ -4190,6 +4194,333 @@ def _schwab_pinned_journal_external_flow(
             "pinned Journal source artifact is absent or has a different hash"
         )
     return dict(pinned)
+
+
+def _schwab_native_journal_day(
+    value: object, name: str, *, allow_restatement_suffix: bool = False
+) -> date:
+    """Reparse a native WCH date with the producer's accepted syntax."""
+
+    text = _text(value, name)
+    if allow_restatement_suffix:
+        as_of_match = re.match(
+            r"(\d{1,2}/\d{1,2}/\d{4}) as of (\d{1,2}/\d{1,2}/\d{4})$", text
+        )
+        if as_of_match:
+            text = as_of_match.group(1)
+    for pattern in ("%m/%d/%Y", "%Y-%m-%d"):
+        prefix = text[:10]
+        try:
+            parsed = datetime.strptime(prefix, pattern).date()
+        except ValueError:
+            continue
+        if text != prefix:
+            raise ProviderLedgerError(
+                f"{name} has trailing content after the date: {text!r}"
+            )
+        return parsed
+    raise ProviderLedgerError(f"{name} is not a supported date")
+
+
+def _schwab_native_journal_decimal(value: object, name: str) -> Decimal:
+    """Reparse a native WCH amount with the producer's accepted syntax."""
+
+    if value is None or (isinstance(value, str) and value.strip() in {"", "--", "N/A"}):
+        raise ProviderLedgerError(f"{name} is missing")
+    raw = str(value).strip().replace("$", "").replace(",", "")
+    if raw.startswith("(") and raw.endswith(")"):
+        raw = f"-{raw[1:-1]}"
+    raw = raw.replace("%", "")
+    try:
+        parsed = Decimal(raw)
+    except InvalidOperation as exc:
+        raise ProviderLedgerError(f"{name} is not decimal") from exc
+    if not parsed.is_finite():
+        raise ProviderLedgerError(f"{name} must be finite")
+    return parsed
+
+
+def _schwab_current_journal_transfers(
+    catalog: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    manifest: GenerationManifest | None,
+) -> dict[str, dict[str, str]]:
+    """Derive unique internal Journal pairs from catalog v3 native evidence."""
+
+    if catalog.get("catalog_schema_version") != 3:
+        return {}
+    crosswalk = _object(
+        catalog.get("journal_counterparty_crosswalk"),
+        "Schwab current Journal crosswalk",
+    )
+    _strict(
+        crosswalk,
+        {"basis", "entries", "source_crosswalk_sha256"},
+        "Schwab current Journal crosswalk",
+    )
+    if crosswalk["basis"] != "SELECTED_SOURCE_SPEC_CROSSWALK":
+        raise ProviderLedgerError("Schwab current Journal crosswalk basis differs")
+    crosswalk_hash = _text(
+        crosswalk["source_crosswalk_sha256"],
+        "Schwab current Journal crosswalk hash",
+    )
+    if re.fullmatch(r"[0-9a-f]{64}", crosswalk_hash) is None:
+        raise ProviderLedgerError("Schwab current Journal crosswalk hash is invalid")
+    suffix_to_account: dict[str, str] = {}
+    for entry in _objects(
+        crosswalk["entries"], "Schwab current Journal crosswalk entries"
+    ):
+        _strict(
+            entry,
+            {"account_id", "native_suffix"},
+            "Schwab current Journal crosswalk entry",
+        )
+        suffix = _text(entry["native_suffix"], "Schwab current Journal suffix")
+        account_id = _text(entry["account_id"], "Schwab current Journal account")
+        if re.fullmatch(r"\d{3}", suffix) is None or suffix in suffix_to_account:
+            raise ProviderLedgerError("Schwab current Journal crosswalk is ambiguous")
+        suffix_to_account[suffix] = account_id
+    account_currency: dict[str, str] = {}
+    for account in _objects(catalog.get("accounts"), "Schwab current Journal accounts"):
+        account_id = _text(account.get("account_id"), "Schwab current Journal account")
+        currency = _text(
+            account.get("base_currency"), "Schwab current Journal currency"
+        )
+        if account_id in account_currency:
+            raise ProviderLedgerError("Schwab current Journal accounts are ambiguous")
+        account_currency[account_id] = currency
+    if set(account_currency) != set(suffix_to_account.values()):
+        raise ProviderLedgerError("Schwab current Journal crosswalk scope differs")
+    if manifest is None:
+        raise ProviderLedgerError("current Journal source requires a Schwab manifest")
+    artifacts = {artifact.artifact_id: artifact for artifact in manifest.artifacts}
+
+    candidates: list[dict[str, Any]] = []
+    record_ids: set[str] = set()
+    for row in rows:
+        if str(row.get("kind") or "").strip().upper() != "JOURNAL":
+            continue
+        evidence_value = row.get("journal_source_evidence")
+        if evidence_value is None:
+            if (
+                _observed_decimal(row.get("amount"), "Schwab current Journal amount")
+                is not None
+            ):
+                raise ProviderLedgerError("current Journal source evidence is missing")
+            continue
+        evidence = _object(evidence_value, "Schwab current Journal evidence")
+        _strict(
+            evidence,
+            {
+                "counterparty_account_id",
+                "currency_basis",
+                "direction",
+                "native_row",
+                "native_row_sha256",
+                "recipient_basis",
+                "source_artifact_id",
+                "source_artifact_sha256",
+            },
+            "Schwab current Journal evidence",
+        )
+        source_artifact_id = _text(
+            evidence["source_artifact_id"], "Schwab current Journal artifact id"
+        )
+        source_artifact_sha256 = _text(
+            evidence["source_artifact_sha256"], "Schwab current Journal artifact hash"
+        )
+        artifact = artifacts.get(source_artifact_id)
+        if artifact is None or artifact.sha256 != source_artifact_sha256:
+            raise ProviderLedgerError("current Journal source artifact differs")
+        native_row = _object(
+            evidence["native_row"], "Schwab current Journal native row"
+        )
+        native_hash = _text(
+            evidence["native_row_sha256"], "Schwab current Journal native row hash"
+        )
+        if native_hash != hashlib.sha256(canonical_json_bytes(native_row)).hexdigest():
+            raise ProviderLedgerError("current Journal native row hash differs")
+        if str(native_row.get("action") or "").strip().upper() != "JOURNAL":
+            raise ProviderLedgerError("current Journal native action differs")
+        description = str(native_row.get("description") or "").strip()
+        if description != str(row.get("description") or "").strip():
+            raise ProviderLedgerError("current Journal native description differs")
+        event_date = _day(row.get("event_date"), "Schwab current Journal event date")
+        if (
+            _schwab_native_journal_day(
+                native_row.get("transactionDate"),
+                "Schwab current Journal transactionDate",
+                allow_restatement_suffix=True,
+            )
+            != event_date
+        ):
+            raise ProviderLedgerError("current Journal native transaction date differs")
+        raw_effective_date = native_row.get("effectiveDate")
+        if raw_effective_date in {None, ""}:
+            if row.get("effective_date") is not None:
+                raise ProviderLedgerError(
+                    "current Journal native effective date is absent"
+                )
+        else:
+            effective_date = _day(
+                row.get("effective_date"), "Schwab current Journal effective date"
+            )
+            if (
+                _schwab_native_journal_day(
+                    raw_effective_date, "Schwab current Journal effectiveDate"
+                )
+                != effective_date
+            ):
+                raise ProviderLedgerError(
+                    "current Journal native effective date differs"
+                )
+        amount = _observed_decimal(row.get("amount"), "Schwab current Journal amount")
+        if (
+            amount is None
+            or _schwab_native_journal_decimal(
+                native_row.get("amount"), "Schwab native Journal amount"
+            )
+            != amount
+        ):
+            raise ProviderLedgerError("current Journal native amount differs")
+        account_id = _text(row.get("account_id"), "Schwab current Journal account")
+        amount_value = _object(row.get("amount"), "Schwab current Journal amount")
+        if (
+            account_currency.get(account_id) is None
+            or amount_value.get("currency") != account_currency[account_id]
+            or evidence["currency_basis"] != "SELECTED_ACCOUNT_BASE_CURRENCY"
+        ):
+            raise ProviderLedgerError("current Journal currency binding differs")
+        direction = evidence["direction"]
+        recipient_basis = evidence["recipient_basis"]
+        counterparty = evidence["counterparty_account_id"]
+        native_match = re.fullmatch(r"JOURNAL (TO|FRM) \.\.\.(\d{3})", description)
+        expected_direction = native_match.group(1) if native_match is not None else None
+        expected_counterparty = (
+            suffix_to_account.get(native_match.group(2))
+            if native_match is not None
+            else None
+        )
+        expected_recipient_basis = (
+            "NATIVE_JOURNAL_FRM"
+            if expected_direction == "FRM"
+            else "NATIVE_JOURNAL_TO"
+            if expected_direction == "TO"
+            else "IRA_REGULAR_CONTRIB"
+            if description.upper() == "IRA REGULAR CONTRIB"
+            else None
+        )
+        if (
+            direction != expected_direction
+            or counterparty != expected_counterparty
+            or recipient_basis != expected_recipient_basis
+        ):
+            raise ProviderLedgerError("current Journal native semantics differ")
+        record_id = _text(row.get("record_id"), "Schwab current Journal record id")
+        if record_id in record_ids:
+            raise ProviderLedgerError("current Journal record identity is ambiguous")
+        record_ids.add(record_id)
+        # A native receipt from outside the selected account perimeter is not
+        # a missing internal pair. Preserve its existing external-flow route.
+        if expected_recipient_basis is not None and not (
+            expected_direction == "FRM" and expected_counterparty is None and amount > 0
+        ):
+            if (
+                not isinstance(row.get("source_ordinal"), int)
+                or row["source_ordinal"] < 1
+            ):
+                raise ProviderLedgerError("current Journal source ordinal is invalid")
+            candidates.append(
+                {
+                    "account_id": account_id,
+                    "amount": amount,
+                    "currency": amount_value["currency"],
+                    "day": _day(
+                        row.get("effective_date") or row.get("event_date"),
+                        "Schwab current Journal pairing date",
+                    ),
+                    "evidence": evidence,
+                    "record_id": record_id,
+                    "source_ordinal": row["source_ordinal"],
+                }
+            )
+
+    transfers: dict[str, dict[str, str]] = {}
+    used: set[str] = set()
+    for outgoing in candidates:
+        evidence = outgoing["evidence"]
+        if evidence["direction"] != "TO":
+            continue
+        if outgoing["amount"] >= 0 or not isinstance(
+            evidence["counterparty_account_id"], str
+        ):
+            raise ProviderLedgerError("current Journal outgoing evidence is invalid")
+        matches = [
+            incoming
+            for incoming in candidates
+            if incoming["account_id"] == evidence["counterparty_account_id"]
+            and incoming["account_id"] != outgoing["account_id"]
+            and incoming["amount"] == -outgoing["amount"]
+            and incoming["currency"] == outgoing["currency"]
+            and incoming["day"] == outgoing["day"]
+            and (
+                (
+                    incoming["evidence"]["direction"] == "FRM"
+                    and incoming["evidence"]["counterparty_account_id"]
+                    == outgoing["account_id"]
+                )
+                or (
+                    incoming["evidence"]["direction"] is None
+                    and incoming["evidence"]["recipient_basis"] == "IRA_REGULAR_CONTRIB"
+                )
+            )
+        ]
+        if len(matches) != 1:
+            raise ProviderLedgerError("current Journal recipient pairing is ambiguous")
+        incoming = matches[0]
+        if (
+            incoming["amount"] <= 0
+            or outgoing["record_id"] in used
+            or incoming["record_id"] in used
+        ):
+            raise ProviderLedgerError("current Journal pair is not one-to-one")
+        identities = [
+            {
+                "native_row_sha256": item["evidence"]["native_row_sha256"],
+                "source_artifact_id": item["evidence"]["source_artifact_id"],
+                "source_artifact_sha256": item["evidence"]["source_artifact_sha256"],
+                "source_ordinal": item["source_ordinal"],
+            }
+            for item in (outgoing, incoming)
+        ]
+        activity_id = hashlib.sha256(
+            canonical_json_bytes(
+                {
+                    "journal_counterparty_crosswalk_sha256": crosswalk_hash,
+                    "native_rows": sorted(
+                        identities,
+                        key=lambda item: (
+                            item["source_artifact_id"],
+                            item["native_row_sha256"],
+                        ),
+                    ),
+                }
+            )
+        ).hexdigest()
+        for item in (outgoing, incoming):
+            item_evidence = item["evidence"]
+            transfers[item["record_id"]] = {
+                "flow_type": "ACCOUNT_TRANSFER",
+                "mapping_basis": "CURRENT_SOURCE_PAIRED_PROVIDER_JOURNAL",
+                "provider_activity_id_sha256": activity_id,
+                "source_artifact_id": item_evidence["source_artifact_id"],
+                "source_artifact_sha256": item_evidence["source_artifact_sha256"],
+                "source_classification": "PAIRED_INTERNAL_JOURNAL",
+            }
+            used.add(item["record_id"])
+    if used != {item["record_id"] for item in candidates}:
+        raise ProviderLedgerError("current Journal evidence is unpaired")
+    return transfers
 
 
 _CASH_TRANSACTION_KINDS: Final = frozenset(
@@ -6192,7 +6523,10 @@ def _matrixport_flow_coverage(
 
 
 def _ibkr_flow_coverage(
-    catalog: Mapping[str, Any], known_accounts: set[str]
+    catalog: Mapping[str, Any],
+    known_accounts: set[str],
+    *,
+    required_accounts: set[str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     matches = [
         item
@@ -6207,13 +6541,33 @@ def _ibkr_flow_coverage(
         {"accounts", "calendar", "fact_type", "known_gaps", "status"},
         "IBKR finalized history coverage",
     )
-    if (
-        history["calendar"] != "WEEKDAY_SOURCE_CALENDAR"
-        or history["status"] != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
+    scoped = required_accounts is not None
+    requested_accounts = required_accounts if required_accounts is not None else set()
+    if history["calendar"] != "WEEKDAY_SOURCE_CALENDAR":
+        if scoped:
+            raise ProviderLedgerError("IBKR finalized history unknown calendar")
+        raise ProviderLedgerError("IBKR finalized history coverage is incomplete")
+    if not isinstance(history["known_gaps"], list) or any(
+        not isinstance(item, str) or not item for item in history["known_gaps"]
+    ):
+        raise ProviderLedgerError("IBKR finalized history known gaps are invalid")
+    if scoped:
+        if not requested_accounts.issubset(known_accounts):
+            raise ProviderLedgerError(
+                "IBKR finalized history unknown requested account"
+            )
+    elif (
+        history["status"] != "COMPLETE_WITHIN_DECLARED_BOUNDARY"
         or history["known_gaps"] != []
     ):
         raise ProviderLedgerError("IBKR finalized history coverage is incomplete")
+    if history["status"] not in {
+        "COMPLETE_WITHIN_DECLARED_BOUNDARY",
+        "PARTIAL",
+    }:
+        raise ProviderLedgerError("IBKR finalized history status is invalid")
     result: dict[str, dict[str, Any]] = {}
+    seen_accounts: set[str] = set()
     for raw_account in _objects(history["accounts"], "IBKR coverage accounts"):
         _strict(
             raw_account,
@@ -6221,8 +6575,13 @@ def _ibkr_flow_coverage(
             "IBKR coverage account",
         )
         account_id = _text(raw_account["account_id"], "IBKR coverage account_id")
-        if account_id not in known_accounts or account_id in result:
+        if account_id not in known_accounts:
             raise ProviderLedgerError("IBKR finalized history account scope differs")
+        if account_id in seen_accounts:
+            if scoped:
+                raise ProviderLedgerError("IBKR finalized history duplicate account")
+            raise ProviderLedgerError("IBKR finalized history account scope differs")
+        seen_accounts.add(account_id)
         statement_count = raw_account["statement_count"]
         if (
             not isinstance(statement_count, int)
@@ -6231,33 +6590,56 @@ def _ibkr_flow_coverage(
         ):
             raise ProviderLedgerError("IBKR finalized history count is invalid")
         intervals = _objects(raw_account["intervals"], "IBKR coverage intervals")
-        if len(intervals) != 1:
+        if not intervals:
+            raise ProviderLedgerError("IBKR finalized history malformed interval")
+        if (not scoped or account_id in requested_accounts) and len(intervals) != 1:
             raise ProviderLedgerError("IBKR finalized history is not contiguous")
-        interval = intervals[0]
-        _strict(
-            interval,
-            {"effective_end", "effective_start", "source_artifact_ids"},
-            "IBKR coverage interval",
-        )
-        start = _day(interval["effective_start"], "IBKR flow coverage start")
-        end = _day(interval["effective_end"], "IBKR flow coverage end")
-        artifact_ids = interval["source_artifact_ids"]
-        if (
-            start > end
-            or not isinstance(artifact_ids, list)
-            or not artifact_ids
-            or any(not isinstance(item, str) or not item for item in artifact_ids)
-            or len(set(artifact_ids)) != len(artifact_ids)
-        ):
-            raise ProviderLedgerError("IBKR finalized history interval is invalid")
+        parsed_intervals: list[tuple[date, date, list[str]]] = []
+        for interval in intervals:
+            try:
+                _strict(
+                    interval,
+                    {"effective_end", "effective_start", "source_artifact_ids"},
+                    "IBKR coverage interval",
+                )
+                start = _day(interval["effective_start"], "IBKR flow coverage start")
+                end = _day(interval["effective_end"], "IBKR flow coverage end")
+            except (ProviderLedgerError, TypeError, ValueError) as exc:
+                if scoped:
+                    raise ProviderLedgerError(
+                        "IBKR finalized history malformed interval"
+                    ) from exc
+                raise
+            artifact_ids = interval["source_artifact_ids"]
+            if (
+                start > end
+                or not isinstance(artifact_ids, list)
+                or not artifact_ids
+                or any(not isinstance(item, str) or not item for item in artifact_ids)
+                or len(set(artifact_ids)) != len(artifact_ids)
+            ):
+                if scoped:
+                    raise ProviderLedgerError(
+                        "IBKR finalized history malformed interval"
+                    )
+                raise ProviderLedgerError("IBKR finalized history interval is invalid")
+            parsed_intervals.append((start, end, list(artifact_ids)))
+        if scoped and account_id not in requested_accounts:
+            continue
+        start, end, artifact_ids = parsed_intervals[0]
         result[account_id] = {
             "calendar": "WEEKDAY_SOURCE_CALENDAR",
             "effective_end": end.isoformat(),
             "effective_start": start.isoformat(),
-            "source_artifact_ids": list(artifact_ids),
+            "source_artifact_ids": artifact_ids,
             "statement_count": statement_count,
         }
-    if set(result) != known_accounts:
+    if scoped:
+        if set(result) != requested_accounts:
+            raise ProviderLedgerError(
+                "IBKR finalized history missing requested account"
+            )
+    elif set(result) != known_accounts:
         raise ProviderLedgerError("IBKR finalized history account scope differs")
     return result
 
@@ -7690,6 +8072,20 @@ def build_catalog(
         {item.provider_id: item for item in identities},
         {provider_id: item.as_of_date for provider_id, item in manifests.items()},
     )
+    ibkr_known_accounts = {
+        _text(item.get("account_id"), "IBKR account_id")
+        for item in _objects(catalogs["ibkr"].get("accounts"), "IBKR accounts")
+    }
+    ibkr_required_accounts = {
+        account_id
+        for account_id, account_assignments in assignments.items()
+        if account_id in ibkr_known_accounts
+        and any(
+            assignment.get("mapping_status") == "MAPPED"
+            and assignment.get("strategy_id") in authoritative_strategy_ids
+            for assignment in account_assignments
+        )
+    }
     admissions = _admissions(
         combined,
         evidence_rows,
@@ -7698,10 +8094,8 @@ def build_catalog(
         schwab_flow_coverage=_schwab_flow_coverage(catalogs["schwab"], accounts),
         ibkr_flow_coverage=_ibkr_flow_coverage(
             catalogs["ibkr"],
-            {
-                _text(item.get("account_id"), "IBKR account_id")
-                for item in _objects(catalogs["ibkr"].get("accounts"), "IBKR accounts")
-            },
+            ibkr_known_accounts,
+            required_accounts=ibkr_required_accounts,
         ),
         matrixport_flow_coverage=_matrixport_flow_coverage(
             manifests["matrixport"],
