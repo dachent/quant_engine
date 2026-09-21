@@ -42,7 +42,8 @@ def test_import_does_not_read_sources_or_resolve_machine_paths(monkeypatch):
     module = _load_module()
 
     assert not reads
-    assert list(inspect.signature(module.build_input_generation).parameters) == [
+    signature = inspect.signature(module.build_input_generation)
+    assert list(signature.parameters) == [
         "provider_ledger_generation_root",
         "epoch_manifest_generation_root",
         "provider_ledger_spec_path",
@@ -52,6 +53,10 @@ def test_import_does_not_read_sources_or_resolve_machine_paths(monkeypatch):
         "requested_as_of",
         "evaluated_on",
     ]
+    # Pin the RETURN as well. Every caller unpacks it, including the stub in
+    # tests/core/test_attended_preparation.py::_preparation_function_fixture, and a
+    # parameter-only pin let an arity change reach CI unnoticed once already.
+    assert signature.return_annotation == tuple[dict, dict[str, str]]
 
 
 def test_invalid_evaluation_is_rejected_before_source_import_or_reads(monkeypatch):

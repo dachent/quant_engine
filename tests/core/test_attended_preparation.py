@@ -1166,9 +1166,14 @@ def _preparation_function_fixture(
         hwm, "verify_governed_hwm_result", lambda *_args, **_kwargs: None
     )
 
-    def build_capital_input(**_kwargs: object) -> dict[str, object]:
+    def build_capital_input(
+        **_kwargs: object,
+    ) -> tuple[dict[str, object], dict[str, str]]:
+        # The real builder returns the generation AND this machine's locators for it.
+        # A stub that returns only the generation is a consumer suite lying about its
+        # producer, which AGENTS.md A1.3 says does not satisfy the seam.
         calls["capital"] += 1
-        return {}
+        return {}, {}
 
     monkeypatch.setattr(
         preparation, "_capital_input_builder", lambda: build_capital_input
