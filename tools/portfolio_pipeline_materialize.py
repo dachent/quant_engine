@@ -4784,9 +4784,12 @@ def _parser() -> argparse.ArgumentParser:
     spec_cmd.add_argument(
         "--portfolio-root",
         type=Path,
+        required=True,
         help=(
-            "The production portfolio root. Required for a financial vertical: "
-            "the workbook and panel roles prove their stage output is disjoint "
+            "The production portfolio root. Every schema-3 recipe is financial "
+            "and `build_spec` refuses without this root, so requiring it here "
+            "refuses at parse time rather than after the recipe is read. The "
+            "workbook and panel roles prove their stage output is disjoint "
             "from it before publishing governed HWM."
         ),
     )

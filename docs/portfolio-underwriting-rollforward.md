@@ -461,6 +461,7 @@ advancing pointers.
 & $enginePython tools\portfolio_pipeline_materialize.py spec `
   --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') `
   --output-root $runRoot `
+  --portfolio-root $portfolioRoot `
   --spec (Join-Path $runRoot 'pipeline-spec.json')
 
 & $enginePython tools\data_pipeline.py plan `
@@ -489,6 +490,11 @@ The production rebind contract must hash-bind the same product gate and must
 publish the exact provider-ledger generation admitted by that gate; a coherent
 release-graph rewrite to a different provider generation fails before effects.
 
+`--financial-artifacts` names a JSON array of the existing `ArtifactNode`
+definitions for the actual financial outcomes and their producer inputs. The
+rebind refuses without it; `ops/mvp2-release/scripts/run_production.sh:72`
+reads the same file from its own production root.
+
 ```powershell
 & $enginePython tools\portfolio_pipeline_materialize.py production-spec `
   --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') `
@@ -496,6 +502,7 @@ release-graph rewrite to a different provider generation fails before effects.
   --semantic-gate (Join-Path $runRoot 'evidence\post-build-semantic.json') `
   --portfolio-root $portfolioRoot `
   --state-root (Join-Path $cycleRoot 'production-state') `
+  --financial-artifacts (Join-Path $cycleRoot 'financial-artifacts.json') `
   --spec (Join-Path $cycleRoot 'production-spec.json')
 
 & $enginePython tools\data_pipeline.py plan `
