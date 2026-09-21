@@ -26,7 +26,11 @@ def test_hwm_policy_admission_precedes_history_and_output_creation(
     contract = tmp_path / "contract.json"
     calendar = tmp_path / "calendar.json"
     selection = tmp_path / "selection.json"
-    contract.write_text("{}", encoding="utf-8")
+    contract.write_bytes(
+        (
+            preparation.ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+        ).read_bytes()
+    )
     calendar.write_text(json.dumps({"hwm_policy_sha256": "0" * 64}), encoding="utf-8")
     selection.write_text('{"files":{}}', encoding="utf-8")
     spec = tmp_path / "spec.json"
@@ -103,6 +107,16 @@ def test_provider_replay_rejects_changed_transitive_authority_before_preparation
     )
     selection = tmp_path / "selection.json"
     selection.write_text('{"files":{}}', encoding="utf-8")
+    # This test is about provider replay, not contract currency, so the pinned
+    # contract must be a real copy of the product contract rather than a
+    # stand-in: `_validate_product_contract_currency` runs first and would
+    # otherwise refuse before provider replay is ever reached.
+    contract = tmp_path / "contract.json"
+    contract.write_bytes(
+        (
+            preparation.ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+        ).read_bytes()
+    )
     spec = tmp_path / "preparation.json"
     spec.write_text(
         json.dumps(
@@ -114,7 +128,7 @@ def test_provider_replay_rejects_changed_transitive_authority_before_preparation
                     tmp_path / "ledger" / "generations" / ("a" * 64)
                 ),
                 "source_selection": preparation._definition(selection),
-                "financial_input_contract": preparation._definition(selection),
+                "financial_input_contract": preparation._definition(contract),
             }
         ),
         encoding="utf-8",
@@ -349,6 +363,11 @@ def test_validation_passes_selected_history_authorities_to_every_reader(
         }
     for definition in modes.values():
         definition["base_source_template_root"] = str(tmp_path / "base")
+    (tmp_path / "contract.json").write_bytes(
+        (
+            preparation.ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+        ).read_bytes()
+    )
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -866,7 +885,11 @@ def _preparation_function_fixture(
     source_selection = tmp_path / "selection.json"
     source_selection.write_text('{"files":{}}', encoding="utf-8")
     contract = tmp_path / "contract.json"
-    contract.write_text("{}", encoding="utf-8")
+    contract.write_bytes(
+        (
+            preparation.ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
+        ).read_bytes()
+    )
     calendar = tmp_path / "calendar.json"
     calendar.write_text(
         '{"authority_evidence_sha256":"calendar","hwm_policy_sha256":"policy"}',

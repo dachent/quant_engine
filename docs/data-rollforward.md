@@ -261,12 +261,12 @@ python tools/portfolio_release_builder.py recipe --provider-ledger-generation <e
 python tools/portfolio_release_builder.py build --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot
 <run browser and interaction QA against the emitted panel candidate>
 python tools/portfolio_release_builder.py stage --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot --role panel --qa-dir $qaRoot --manifest-ledger <exact-ledger.json> --manifest-ledger-identity <exact-ledger-identity.json> --manifest-classified-flows <exact-classified-flows.json> --manifest-admission-policy <exact-admission-policy.json>
-python tools/portfolio_pipeline_materialize.py recipe --vertical-recipe (Join-Path $cycleRoot 'vertical-recipe.json') --proof-root $proofRoot --qa-dir $qaRoot --pipeline-id <new-pipeline-id> --output (Join-Path $cycleRoot 'pipeline-recipe.json')
+python tools/portfolio_pipeline_materialize.py recipe --vertical-recipe (Join-Path $cycleRoot 'vertical-recipe.json') --proof-root $proofRoot --qa-dir $qaRoot --pipeline-id <new-pipeline-id> --financial-mvp-contract contracts/portfolio-financial-mvp-source-v1.json --financial-mvp-source-matrix generated/financial-mvp/source-matrix.json --output (Join-Path $cycleRoot 'pipeline-recipe.json')
 python tools/portfolio_pipeline_materialize.py spec --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') --output-root $runRoot --portfolio-root $portfolioRoot --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py plan --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py execute --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py status --spec (Join-Path $runRoot 'pipeline-spec.json')
-python tools/portfolio_pipeline_materialize.py production-spec --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') --prepared-root $runRoot --semantic-gate (Join-Path $runRoot 'evidence\post-build-semantic.json') --portfolio-root $portfolioRoot --state-root (Join-Path $cycleRoot 'production-state') --spec (Join-Path $cycleRoot 'production-spec.json')
+python tools/portfolio_pipeline_materialize.py production-spec --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') --prepared-root $runRoot --semantic-gate (Join-Path $runRoot 'evidence\post-build-semantic.json') --portfolio-root $portfolioRoot --state-root (Join-Path $cycleRoot 'production-state') --financial-artifacts <financial-artifact-nodes.json> --spec (Join-Path $cycleRoot 'production-spec.json')
 python tools/data_pipeline.py plan --spec (Join-Path $cycleRoot 'production-spec.json')
 python tools/data_pipeline.py execute --spec (Join-Path $cycleRoot 'production-spec.json')
 python tools/data_pipeline.py execute --spec (Join-Path $cycleRoot 'production-spec.json') --commit

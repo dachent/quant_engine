@@ -718,7 +718,14 @@ def _validate_product_contract_currency(config: Mapping[str, Any]) -> None:
     """
     pinned = _pin(config["financial_input_contract"], "financial input contract")
     product = ROOT / "contracts" / "portfolio-financial-mvp-source-v1.json"
-    pinned_bytes = pinned.read_bytes()
+    try:
+        pinned_bytes = pinned.read_bytes()
+    except OSError as exc:
+        # Name the absence. Leaking the raw OSError here reports a path rather
+        # than the governance fact, and this runs before anything else reads it.
+        raise AttendedPreparationError(
+            f"selected financial input contract is unreadable at {pinned}"
+        ) from exc
     product_bytes = product.read_bytes()
     if pinned_bytes == product_bytes:
         return

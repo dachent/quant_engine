@@ -4914,7 +4914,6 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
         tmp_path / "correlation",
         epoch_manifest_generation_root=generation_root,
         epoch_manifest_generation_id=manifest.generation_id,
-        workbook_runtime_path=runtime,
     )
 
     manifest_path = candidate / "account-strategy-manifest.json"
