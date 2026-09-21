@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import copy
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
@@ -8,6 +9,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 from typing import Callable
@@ -4308,3 +4310,108 @@ def test_panel_lens_authority_admits_the_dynamic_style_path(tmp_path: Path) -> N
     panel["decomposition_lenses"]["modes"]["LIVE_ONLY"][-1]["generation_id"] = "0" * 64
     with pytest.raises(materializer.MaterializationError, match="panel lens"):
         materializer._verify_panel_lens_nodes(panel, nodes, DECOMPOSITION_AUTHORITY)
+
+
+# The tool must be the thing being run, not merely named. `docs/ci.md:108`
+# passes it to mypy inside a long file list, where the following token is the
+# next path rather than a subcommand.
+_MATERIALIZE = re.compile(
+    r"(?:\S*[Pp]ython\S*|\"?\$\{?PY\}?\"?)\s+"
+    r"\S*portfolio_pipeline_materialize\.py\s+([a-z][a-z-]*)"
+)
+
+
+def _subcommand_parsers() -> dict[str, argparse.ArgumentParser]:
+    parser = materializer._parser()
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return dict(action.choices)
+    raise AssertionError("the materializer parser declares no subcommands")
+
+
+def _required_options(parser: argparse.ArgumentParser) -> list[str]:
+    return [
+        action.option_strings[0]
+        for action in parser._actions
+        if action.required and action.option_strings
+    ]
+
+
+def _documented_invocations() -> list[tuple[Path, int, str, str]]:
+    """Every checked-in `portfolio_pipeline_materialize.py <subcommand>` call.
+
+    Continuations are joined by fence language -- PowerShell continues a
+    command with a trailing backtick, sh with a trailing backslash -- and
+    prose is skipped entirely. Markdown prose ends in a backtick whenever it
+    closes an inline code span, so a scan that ignored fences would splice an
+    unrelated sentence onto a command and check the wrong string.
+    """
+
+    found: list[tuple[Path, int, str, str]] = []
+    targets = sorted((ROOT / "docs").rglob("*.md")) + sorted(
+        (ROOT / "ops").rglob("*.sh")
+    )
+    for path in targets:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        if path.suffix == ".sh":
+            languages: list[str | None] = ["sh"] * len(lines)
+        else:
+            languages = []
+            language: str | None = None
+            for line in lines:
+                if line.startswith("```"):
+                    language = (
+                        None if language is not None else line[3:].strip().lower()
+                    )
+                    languages.append(None)
+                else:
+                    languages.append(language)
+        for index, line in enumerate(lines):
+            language = languages[index]
+            if language is None or not _MATERIALIZE.search(line):
+                continue
+            terminator = "`" if language in {"powershell", "pwsh"} else "\\"
+            block = [line]
+            cursor = index
+            while block[-1].rstrip().endswith(terminator) and cursor + 1 < len(lines):
+                cursor += 1
+                block.append(lines[cursor])
+            command = " ".join(part.rstrip().removesuffix(terminator) for part in block)
+            match = _MATERIALIZE.search(command)
+            assert match is not None
+            found.append((path, index + 1, match.group(1), command))
+    return found
+
+
+def test_documented_cli_invocations_supply_every_required_option() -> None:
+    """A checked-in procedure that omits a required option cannot start.
+
+    Both rollforward runbooks invoked `spec` without `--portfolio-root` from
+    2026-08 onward. `build_spec` refuses unconditionally without that root, but
+    the CLI declared the option optional, so the two contracts disagreed and
+    only a live run could tell. The requirement is read off the real parser
+    here rather than a hand-maintained list, so a newly required option cannot
+    land without its documented callers moving with it.
+    """
+
+    parsers = _subcommand_parsers()
+    invocations = _documented_invocations()
+    assert invocations, "no documented invocation was found, so this proves nothing"
+
+    missing: list[str] = []
+    for path, line, subcommand, command in invocations:
+        assert subcommand in parsers, (
+            f"{path.name}:{line} names unknown subcommand {subcommand!r}"
+        )
+        tokens = set(command.split())
+        for option in _required_options(parsers[subcommand]):
+            if option in tokens or any(
+                token.startswith(f"{option}=") for token in tokens
+            ):
+                continue
+            location = path.relative_to(ROOT).as_posix()
+            missing.append(f"{location}:{line} `{subcommand}` omits {option}")
+
+    assert not missing, "documented invocations omit required options: " + "; ".join(
+        missing
+    )
