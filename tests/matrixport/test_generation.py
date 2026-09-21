@@ -176,10 +176,38 @@ def _spec(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.mark.parametrize("coverage_pass", [False, True])
 def test_partial_generation_is_deterministic_and_never_published(
     tmp_path: Path,
+    coverage_pass: bool,
 ) -> None:
     spec = _spec(tmp_path)
+    if coverage_pass:
+        document = json.loads(spec.read_text(encoding="utf-8"))
+        run = Path(document["run_root"])
+        coverage_path = run / "reports/coverage.json"
+        coverage = json.loads(coverage_path.read_text(encoding="utf-8"))
+        coverage[1]["status"] = "complete_to_observed_boundary"
+        _write_json(coverage_path, coverage)
+        verification_path = run / "reports/verification.json"
+        verification = json.loads(verification_path.read_text(encoding="utf-8"))
+        verification["checks"]["coverage"].update(
+            status="PASS",
+            source_limited_reasons=[],
+            status_counts={"complete_to_observed_boundary": 2},
+        )
+        gaps = ["nav_missing_date:2026-01-27"]
+        verification["checks"]["valuation"]["reasons"] = gaps
+        _write_json(verification_path, verification)
+        document["baseline"]["coverage_status_counts"] = {
+            "complete_to_observed_boundary": 2
+        }
+        document["baseline"]["known_gaps"] = gaps
+        document["artifacts"] = [
+            _artifact(run / item["relative_path"], run)
+            for item in document["artifacts"]
+        ]
+        _write_json(spec, document)
     first, first_manifest, first_bytes = build_generation(spec)
     second, second_manifest, second_bytes = build_generation(spec)
     assert first == second

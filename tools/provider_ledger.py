@@ -79,7 +79,10 @@ _ACCOUNT_FACTS: Final = {
     "ibkr": (
         "capital_anchors",
         "corporate_actions",
+        "financing_cost_observations",
+        "financing_liability_observations",
         "flows",
+        "leverage_exposure_observations",
         "nav_observations",
         "positions",
         "transactions",
@@ -116,12 +119,18 @@ _DATA_CLASS_TARGET_FACT: Final = {
     "TRANSACTION": "transactions",
     "EXTERNAL_FLOW": "flows",
     "CORPORATE_ACTION": "corporate_actions",
+    "FINANCING_COST": "financing_cost_observations",
+    "FINANCING_LIABILITY": "financing_liability_observations",
+    "LEVERAGE_EXPOSURE": "leverage_exposure_observations",
     "PROVIDER_LIVE_RETURN": "provider_strategy_returns",
 }
 _TARGET_ADMISSION_FACT: Final = {
     "corporate_actions": "CORPORATE_ACTION",
     "capital_anchors": "CAPITAL_ANCHOR",
     "flows": "EXTERNAL_FLOW",
+    "financing_cost_observations": "FINANCING_COST",
+    "financing_liability_observations": "FINANCING_LIABILITY",
+    "leverage_exposure_observations": "LEVERAGE_EXPOSURE",
     "nav_observations": "NAV_OBSERVATION",
     "positions": "POSITION",
     "provider_strategy_returns": (
@@ -149,6 +158,9 @@ _SOURCE_FACT_TARGET: Final = {
     "cash_flows": "flows",
     "corporate_actions": "corporate_actions",
     "flows": "flows",
+    "financing_cost_observations": "financing_cost_observations",
+    "financing_liability_observations": "financing_liability_observations",
+    "leverage_exposure_observations": "leverage_exposure_observations",
     "nav_observations": "nav_observations",
     "positions": "positions",
     "transactions": "transactions",
@@ -170,6 +182,24 @@ _SCHWAB_FLOW_KINDS: Final = frozenset(
         "Security Transfer",
         "Wire Sent",
     }
+)
+_NATIVE_LEVERAGE_OBSERVATION_FACTS: Final = frozenset(
+    {
+        "financing_cost_observations",
+        "financing_liability_observations",
+        "leverage_exposure_observations",
+    }
+)
+_NATIVE_LEVERAGE_DATE_FIELDS: Final = (
+    "effective_date",
+    "event_date",
+    "value_date",
+    "as_of_date",
+    "period_start",
+    "period_end",
+    "accounting_date",
+    "settlement_date",
+    "report_date",
 )
 # Pins the retained, independently audited Schwab Journal records to the
 # accepted Schwab refresh generation 4e47b7b8 (dataSchwab CURRENT) as of
@@ -324,7 +354,7 @@ _DATE_FIELDS: Final = (
 _NAV_VALUE_BASIS_BY_PROVIDER: Final = {
     "ibkr": "ACCOUNT_TOTAL",
     "matrixport": "ACCOUNT_TOTAL",
-    "quantbase": "ACCOUNT_TOTAL",
+    "quantbase": "STRATEGY_NAV",
     "schwab": "ACCOUNT_VALUE",
 }
 _NAV_SOURCE_SCHEMA_NAMES_BY_PROVIDER: Final = {
@@ -1601,7 +1631,7 @@ def _quantbase_nav_observations(
     financial_cutoff: date | None = None,
     cutoff_findings: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Admit Quantbase Volatis daily dashboard values as account NAV observations."""
+    """Admit Quantbase Volatis daily dashboard values as strategy NAV observations."""
     account_id = _CSV_FACT_ACCOUNT["quantbase"]
     run_id = _run_id(
         _object(catalog.get("legacy_lineage"), "quantbase.legacy_lineage").get(
@@ -1660,10 +1690,10 @@ def _quantbase_nav_observations(
                 "source_artifact_id": artifact_id,
                 "source_record_id": source_id,
                 "strategy_id": strategy_id,
-                # The Volatis dashboard value is the strict account total for
-                # the mapped account: declare the basis so authoritative-NAV
-                # admission can verify it (#359/#361 contract class).
-                "value_basis": "ACCOUNT_TOTAL",
+                # This is fund NAV, not the linked brokerage account total.
+                # Brokerage transfers therefore remain ACCOUNT_ONLY evidence
+                # until an independently matching brokerage valuation exists.
+                "value_basis": "STRATEGY_NAV",
             }
         )
     return observations
@@ -1715,6 +1745,23 @@ def _quantbase_capital_anchors(
         {"activity_type", "amount", "fund", "is_rebalance", "time", "type"},
         "quantbase account activity",
     )
+
+    for row in activity_rows:
+        if (
+            row.get("activity_type") != "filled_txn"
+            or row.get("fund") != _QUANTBASE_FUND_ID
+            or str(row.get("is_rebalance") or "").lower() != "false"
+            or str(row.get("type") or "").upper() != "SELL"
+        ):
+            continue
+        # Fee-funded sales are retained strategy costs, already reflected in
+        # net fund NAV.  A different sale may be an investor withdrawal, but
+        # the current anchor contract has no source-typed withdrawal fact: it
+        # must stop rather than silently become a zero flow.
+        if str(row.get("created_to_cover_fees") or "").strip().lower() != "true":
+            raise ProviderLedgerError(
+                "quantbase non-fee fund sell requires admitted withdrawal"
+            )
 
     contributions: list[tuple[datetime, Decimal]] = []
     for row in activity_rows:
@@ -3146,12 +3193,71 @@ def _mapped_strategy(
     return (unique[0], "MAPPED") if len(unique) == 1 else (None, "UNMAPPED")
 
 
+def _mapped_strategy_for_period(
+    row: Mapping[str, Any],
+    accounts: set[str],
+    strategies: set[str],
+    assignments: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> tuple[str | None, str, str | None]:
+    """Map an interval only when one validated strategy covers every day."""
+
+    raw_start = row.get("period_start")
+    raw_end = row.get("period_end")
+    if raw_start in {None, ""} or raw_end in {None, ""}:
+        return None, "UNMAPPED", "PERIOD_MAPPING_BOUNDARY_MISSING"
+    start = _day(raw_start, "period_start")
+    end = _day(raw_end, "period_end")
+    if end < start:
+        return None, "UNMAPPED", "PERIOD_MAPPING_INVALID_INTERVAL"
+
+    selected: str | None = None
+    current = start
+    while current <= end:
+        strategy_id, mapping_status = _mapped_strategy(
+            {
+                "account_id": row.get("account_id"),
+                "effective_date": current.isoformat(),
+            },
+            accounts,
+            strategies,
+            assignments,
+        )
+        if mapping_status != "MAPPED":
+            active = {
+                str(item["strategy_id"])
+                for item in assignments.get(str(row.get("account_id") or ""), ())
+                if isinstance(item.get("strategy_id"), str)
+                and item["strategy_id"] in strategies
+                and item.get("effective_start") not in {None, ""}
+                and _day(item["effective_start"], "assignment.effective_start")
+                <= current
+                <= (
+                    date.max
+                    if item.get("effective_end") in {None, ""}
+                    else _day(item["effective_end"], "assignment.effective_end")
+                )
+            }
+            reason = (
+                "PERIOD_MAPPING_AMBIGUOUS_INTERVAL"
+                if len(active) > 1
+                else "PERIOD_MAPPING_MISSING_VALIDATED_INTERVAL"
+            )
+            return None, "UNMAPPED", reason
+        if selected is None:
+            selected = strategy_id
+        elif selected != strategy_id:
+            return None, "UNMAPPED", "PERIOD_CROSSES_STRATEGY_EPOCH"
+        current += timedelta(days=1)
+    return selected, "MAPPED", None
+
+
 _IBKR_CAPITAL_FLOW_TYPES: Final = (
     "DEPOSIT_OR_WITHDRAWAL",
     "TRANSFER:ACATS:IN",
     "TRANSFER:INTERNAL:IN",
     "TRANSFER:INTERNAL:OUT",
 )
+_IBKR_CHANGE_IN_NAV_MAX_SOURCE_PRECISION: Final = Decimal("0.01")
 
 
 def _assignable_strategies(
@@ -3216,6 +3322,105 @@ def _capital_anchor_epoch_strategy(
     return opening.pop(), "MAPPED"
 
 
+def _ibkr_pre_epoch_change_in_nav(
+    catalog: Mapping[str, Any], account_id: str, first_start: date
+) -> tuple[Decimal, Decimal, dict[str, Any] | None]:
+    """Validate source-bound pre-epoch ChangeInNAV intervals for one account.
+
+    ``ChangeInNAV`` is the provider's accounting identity.  The normalized
+    observation retains the source component keys and accounting date, so this
+    function never turns an otherwise unexplained NAV difference into cash.
+    """
+
+    raw_rows = _objects(
+        catalog.get("change_in_nav_observations") or [],
+        "ibkr.change_in_nav_observations",
+    )
+    intervals: list[tuple[date, dict[str, Any], dict[str, Decimal]]] = []
+    for row in raw_rows:
+        if _text(row.get("account_id"), "ibkr change account_id") != account_id:
+            continue
+        accounting_date = _day(
+            row.get("accounting_date"), "ibkr change accounting_date"
+        )
+        if accounting_date >= first_start:
+            continue
+        _text(row.get("source_artifact_id"), "ibkr change source_artifact_id")
+        _text(row.get("source_record_id"), "ibkr change source_record_id")
+        _text(row.get("currency"), "ibkr change currency")
+        opening = _decimal(row.get("opening_nav"), "ibkr change opening_nav")
+        ending = _decimal(row.get("ending_nav"), "ibkr change ending_nav")
+        tolerance = (
+            _decimal(row.get("identity_tolerance"), "ibkr change identity_tolerance")
+            if row.get("identity_tolerance") is not None
+            else Decimal(0)
+        )
+        if tolerance < 0:
+            raise ProviderLedgerError("IBKR_PRE_EPOCH_INVALID_IDENTITY_TOLERANCE")
+        if tolerance > _IBKR_CHANGE_IN_NAV_MAX_SOURCE_PRECISION:
+            raise ProviderLedgerError("IBKR_PRE_EPOCH_INVALID_IDENTITY_TOLERANCE")
+        components: dict[str, Decimal] = {}
+        for component in _objects(
+            row.get("components") or [], "ibkr change components"
+        ):
+            key = _text(
+                component.get("source_component_key"), "ibkr change component key"
+            )
+            if key in components:
+                raise ProviderLedgerError("IBKR_PRE_EPOCH_DUPLICATE_COMPONENT")
+            if key == "twr":
+                raise ProviderLedgerError("IBKR_PRE_EPOCH_NONADDITIVE_COMPONENT")
+            components[key] = _decimal(
+                component.get("value"), "ibkr change component value"
+            )
+        if abs(opening + sum(components.values(), Decimal(0)) - ending) > tolerance:
+            raise ProviderLedgerError("IBKR_PRE_EPOCH_UNRECONCILED_INTERVAL")
+        intervals.append((accounting_date, row, components))
+
+    intervals.sort(key=lambda item: item[0])
+    if len({item[0] for item in intervals}) != len(intervals):
+        raise ProviderLedgerError("IBKR_PRE_EPOCH_DUPLICATE_ACCOUNTING_DATE")
+    for previous, current in zip(intervals, intervals[1:]):
+        if current[0] not in {
+            previous[0] + timedelta(days=1),
+            _ibkr_next_weekday(previous[0]),
+        }:
+            raise ProviderLedgerError("IBKR_PRE_EPOCH_ACCOUNTING_GAP")
+        prior_ending = _decimal(previous[1].get("ending_nav"), "ibkr change ending_nav")
+        current_opening = _decimal(
+            current[1].get("opening_nav"), "ibkr change opening_nav"
+        )
+        if prior_ending != current_opening:
+            raise ProviderLedgerError("IBKR_PRE_EPOCH_ACCOUNTING_GAP")
+    if not intervals:
+        return Decimal(0), Decimal(0), None
+    source_cash = sum(
+        (
+            components.get("depositsWithdrawals", Decimal(0))
+            + components.get("internalCashTransfers", Decimal(0))
+            for _day_value, _row, components in intervals
+        ),
+        Decimal(0),
+    )
+    in_kind = sum(
+        (
+            components.get("assetTransfers", Decimal(0))
+            for _day_value, _row, components in intervals
+        ),
+        Decimal(0),
+    )
+    return source_cash, in_kind, intervals[-1][1]
+
+
+def _ibkr_next_weekday(day: date) -> date:
+    """Match the Flex history producer's declared weekday source calendar."""
+
+    candidate = day + timedelta(days=1)
+    while candidate.weekday() >= 5:
+        candidate += timedelta(days=1)
+    return candidate
+
+
 def _ibkr_capital_anchors(
     generation_id: str,
     catalog: Mapping[str, Any],
@@ -3223,7 +3428,7 @@ def _ibkr_capital_anchors(
     strategies: set[str],
     assignments: Mapping[str, Sequence[Mapping[str, Any]]],
 ) -> list[dict[str, Any]]:
-    """Net each statement account's capital events on their own event date.
+    """Reconcile pre-epoch IBKR capital, then retain later flow behavior.
 
     A single flow row is not a capital event, and the date a row is entered is
     not the date its capital exists.  IBKR credits a deposit advance against a
@@ -3240,9 +3445,12 @@ def _ibkr_capital_anchors(
     by its sibling is funded.  The external/internal distinction stays on the
     flow rows, which carry ``capital_disposition``.
 
-    An account whose capital history contains an amount-less event -- an
-    in-kind ACATS transfer -- has no arithmetic that could net its days, so it
-    yields no anchors at all rather than a series with a hole in it.
+    Before an epoch begins, net capital is reconciled over the entire source
+    interval.  Its governed final account NAV is distinct from capital: a
+    covered source P-and-L component may change NAV, but never contribution.
+    An in-kind contribution is admitted only at the normalized
+    ``assetTransfers`` market value.  The existing per-recognition-date flow
+    behavior begins at the epoch boundary and remains unchanged.
     """
 
     flow_rows = _objects(catalog.get("flows") or [], "ibkr.flows")
@@ -3295,9 +3503,97 @@ def _ibkr_capital_anchors(
             )
         by_day[account_id][recognition_day].append((row, currency, amount, event_day))
 
+    source_accounts = {
+        _text(row.get("account_id"), "ibkr change account_id")
+        for row in _objects(
+            catalog.get("change_in_nav_observations") or [],
+            "ibkr.change_in_nav_observations",
+        )
+    }
+
+    def first_epoch(account_id: str) -> tuple[date, str] | None:
+        starts = [
+            (_day(item["effective_start"], "assignment.effective_start"), strategy)
+            for item in assignments.get(account_id, ())
+            for strategy in (item.get("strategy_id"),)
+            if isinstance(strategy, str)
+            and strategy in strategies
+            and item.get("effective_start") not in {None, ""}
+        ]
+        if not starts:
+            return None
+        first_start = min(start for start, _strategy in starts)
+        opening = {strategy for start, strategy in starts if start == first_start}
+        return (first_start, opening.pop()) if len(opening) == 1 else None
+
+    def anchor(
+        account_id: str,
+        rows: Sequence[tuple[Mapping[str, Any], str, Decimal, date]],
+        currency: str,
+        amount: Decimal,
+        recognition_day: date,
+        event_day: date,
+        strategy_id: str | None,
+        mapping_status: str,
+        *,
+        opening_nav: Decimal | None = None,
+        opening_source: Mapping[str, Any] | None = None,
+        mapping_basis: str = "NET_STATEMENT_ACCOUNT_CAPITAL_ON_PROVIDER_EVENT_DATE",
+    ) -> dict[str, Any]:
+        source_record_id = (
+            _text(
+                opening_source.get("source_record_id"), "ibkr change source_record_id"
+            )
+            if opening_source is not None
+            else f"{account_id}:{recognition_day.isoformat()}"
+        )
+        source_artifact_id = (
+            _text(
+                opening_source.get("source_artifact_id"),
+                "ibkr change source_artifact_id",
+            )
+            if opening_source is not None
+            else _text(
+                rows[0][0].get("source_artifact_id"), "ibkr flow source_artifact_id"
+            )
+        )
+        result: dict[str, Any] = {
+            "account_id": account_id,
+            "amount": {
+                "currency": currency,
+                "status": "AVAILABLE",
+                "value": format(amount.normalize(), "f"),
+            },
+            "capital_type": "OPENING_CAPITAL_ANCHOR",
+            "event_date": event_day.isoformat(),
+            "evidence_layer": "ACCOUNT_LIVE",
+            "generation_id": generation_id,
+            "mapping_basis": mapping_basis,
+            "mapping_status": mapping_status,
+            "nav_recognition_date": recognition_day.isoformat(),
+            "provider_id": "ibkr",
+            "record_id": f"ibkr-capital-anchor:{source_record_id}",
+            "source_artifact_id": source_artifact_id,
+            "source_record_id": source_record_id,
+            "strategy_id": strategy_id,
+            "nav_source_artifact_id": "normalized/ibkr-catalog.json",
+        }
+        if opening_nav is not None:
+            result["opening_nav"] = {
+                "currency": currency,
+                "status": "AVAILABLE",
+                "value": format(opening_nav.normalize(), "f"),
+            }
+        if opening_source is not None:
+            result["opening_nav_accounting_date"] = _text(
+                opening_source.get("accounting_date"), "ibkr change accounting_date"
+            )
+            result["opening_nav_source_record_id"] = source_record_id
+        return result
+
     anchors: list[dict[str, Any]] = []
-    for account_id in sorted(by_day):
-        if account_id in unquantified:
+    for account_id in sorted(set(by_day) | source_accounts):
+        if account_id in unquantified and account_id not in source_accounts:
             continue
         # An anchor names the strategy it funds.  An account the product never
         # assigns to a strategy has no epoch to name, so it yields no anchors
@@ -3305,7 +3601,94 @@ def _ibkr_capital_anchors(
         if not _assignable_strategies(account_id, accounts, strategies, assignments):
             continue
         opened = False
+        epoch = first_epoch(account_id)
+        if epoch is not None:
+            first_start, opening_strategy = epoch
+            pre_rows = [
+                item
+                for day in sorted(by_day[account_id])
+                if day < first_start
+                for item in by_day[account_id][day]
+            ]
+            source_cash, in_kind, opening_source = _ibkr_pre_epoch_change_in_nav(
+                catalog, account_id, first_start
+            )
+            pre_currencies = {currency for _row, currency, _amount, _event in pre_rows}
+            if len(pre_currencies) > 1:
+                raise ProviderLedgerError("ibkr pre-epoch capital mixes currencies")
+            pre_currency = (
+                pre_currencies.pop()
+                if pre_currencies
+                else _text(opening_source.get("currency"), "ibkr change currency")
+                if opening_source is not None
+                else None
+            )
+            cash_capital = sum(
+                (
+                    amount
+                    for row, _currency, amount, _event in pre_rows
+                    if row.get("flow_type") != "TRANSFER:ACATS:IN"
+                ),
+                Decimal(0),
+            )
+            if opening_source is not None and cash_capital != source_cash:
+                raise ProviderLedgerError("IBKR_PRE_EPOCH_CAPITAL_SOURCE_MISMATCH")
+            reconciled_capital = cash_capital + in_kind
+            if reconciled_capital < 0:
+                raise ProviderLedgerError(
+                    "ibkr account returns capital before it is funded"
+                )
+            if reconciled_capital > 0:
+                final_navs = [
+                    (day, value)
+                    for (nav_account, day), value in nav_by_account_day.items()
+                    if nav_account == account_id and day < first_start
+                ]
+                if not final_navs:
+                    raise ProviderLedgerError("IBKR_OPENING_NAV_UNAVAILABLE")
+                opening_day, opening_nav = max(final_navs)
+                if opening_nav <= 0:
+                    raise ProviderLedgerError("IBKR_OPENING_NAV_UNAVAILABLE")
+                if opening_source is None:
+                    if opening_nav != reconciled_capital:
+                        raise ProviderLedgerError(
+                            "IBKR_PRE_EPOCH_UNEXPLAINED_OPENING_VALUE"
+                        )
+                else:
+                    source_day = _day(
+                        opening_source.get("accounting_date"),
+                        "ibkr change accounting_date",
+                    )
+                    source_nav = _decimal(
+                        opening_source.get("ending_nav"), "ibkr change ending_nav"
+                    )
+                    if source_day != opening_day or source_nav != opening_nav:
+                        raise ProviderLedgerError("IBKR_PRE_EPOCH_ACCOUNTING_GAP")
+                if pre_currency is None:
+                    raise ProviderLedgerError("IBKR_PRE_EPOCH_CURRENCY_UNAVAILABLE")
+                event_day = max(
+                    (event for _row, _currency, _amount, event in pre_rows),
+                    default=opening_day,
+                )
+                anchors.append(
+                    anchor(
+                        account_id,
+                        pre_rows,
+                        pre_currency,
+                        reconciled_capital,
+                        opening_day,
+                        event_day,
+                        opening_strategy,
+                        "MAPPED",
+                        opening_nav=opening_nav,
+                        opening_source=opening_source,
+                        mapping_basis="RECONCILED_PRE_EPOCH_STATEMENT_CAPITAL",
+                    )
+                )
+                opened = True
         for day in sorted(by_day[account_id]):
+            if epoch is not None and day < epoch[0]:
+                continue
             rows = by_day[account_id][day]
             currencies = {currency for _row, currency, _amount, _event in rows}
             if len(currencies) != 1:
@@ -3335,52 +3718,27 @@ def _ibkr_capital_anchors(
             strategy_id, mapping_status = _capital_anchor_epoch_strategy(
                 account_id, recognition_day, accounts, strategies, assignments
             )
-            source_record_id = f"{account_id}:{recognition_day.isoformat()}"
-            anchor: dict[str, Any] = {
-                "account_id": account_id,
-                "amount": {
-                    "currency": currency,
-                    "status": "AVAILABLE",
-                    "value": format(net.normalize(), "f"),
-                },
-                "capital_type": (
-                    "OPENING_CAPITAL_ANCHOR"
-                    if not opened
-                    else "STRATEGY_CAPITAL_ALLOCATION"
-                ),
-                "event_date": event_day.isoformat(),
-                "evidence_layer": "ACCOUNT_LIVE",
-                "generation_id": generation_id,
-                "mapping_basis": "NET_STATEMENT_ACCOUNT_CAPITAL_ON_PROVIDER_EVENT_DATE",
-                "mapping_status": mapping_status,
-                "nav_recognition_date": recognition_day.isoformat(),
-                "provider_id": "ibkr",
-                "record_id": f"ibkr-capital-anchor:{source_record_id}",
-                "source_artifact_id": _text(
-                    rows[0][0].get("source_artifact_id"),
-                    "ibkr flow source_artifact_id",
-                ),
-                "source_record_id": source_record_id,
-                "strategy_id": strategy_id,
-                # Every anchor names the artifact its NAV evidence comes from,
-                # opening or not: the manifest requires the provenance on the
-                # allocation rows too.
-                "nav_source_artifact_id": "normalized/ibkr-catalog.json",
-            }
             if not opened and net > 0:
-                opening_nav = nav_by_account_day.get((account_id, recognition_day))
-                if opening_nav is None or opening_nav <= 0:
+                recognized_nav = nav_by_account_day.get((account_id, recognition_day))
+                if recognized_nav is None or recognized_nav <= 0:
                     raise ProviderLedgerError(
                         "IBKR_OPENING_NAV_UNAVAILABLE: the account holds no "
                         "positive NAV on the day its capital is recognized"
                     )
-                anchor["opening_nav"] = {
-                    "currency": currency,
-                    "status": "AVAILABLE",
-                    "value": format(opening_nav.normalize(), "f"),
-                }
+                anchors.append(
+                    anchor(
+                        account_id,
+                        rows,
+                        currency,
+                        net,
+                        recognition_day,
+                        event_day,
+                        strategy_id,
+                        mapping_status,
+                        opening_nav=recognized_nav,
+                    )
+                )
                 opened = True
-            anchors.append(anchor)
     anchors.sort(
         key=lambda item: (str(item["nav_recognition_date"]), str(item["record_id"]))
     )
@@ -3746,11 +4104,22 @@ def _project_account_facts(
                     )
             continue
         if source_fact not in catalog:
+            if (
+                provider_id == "ibkr"
+                and source_fact in _NATIVE_LEVERAGE_OBSERVATION_FACTS
+            ):
+                # Older accepted IBKR generations predate these optional
+                # source collections. Their absence is not a zero balance or
+                # an admission failure; it is simply no native observation.
+                continue
             raise ProviderLedgerError(
                 f"declared provider fact collection is missing: "
                 f"{provider_id}.{source_fact}"
             )
         rows = _objects(catalog[source_fact], f"{provider_id}.{source_fact}")
+        native_leverage_observation = (
+            provider_id == "ibkr" and source_fact in _NATIVE_LEVERAGE_OBSERVATION_FACTS
+        )
         current_journal_transfers: dict[str, dict[str, str]] = {}
         if provider_id == "schwab" and source_fact == "transactions":
             rows = _schwab_transactions_within_cutoff(
@@ -3762,19 +4131,81 @@ def _project_account_facts(
         for row in rows:
             account_id = str(row.get("account_id") or "")
             mapping_row = row
+            mapping_reason: str | None = None
             if provider_id == "schwab" and source_fact == "transactions":
                 mapping_row = {
                     "account_id": account_id,
                     "effective_date": row.get("effective_date")
                     or row.get("event_date"),
                 }
+            if native_leverage_observation:
+                source_dates = {
+                    field: str(row[field])
+                    for field in _NATIVE_LEVERAGE_DATE_FIELDS
+                    if row.get(field) not in {None, ""}
+                }
+                parsed_dates = {
+                    field: _day(value, f"{source_fact}.{field}")
+                    for field, value in source_dates.items()
+                }
+                if financial_cutoff is not None and any(
+                    value > financial_cutoff for value in parsed_dates.values()
+                ):
+                    _excluded_source_row(
+                        exceptions,
+                        provider_id,
+                        source_fact,
+                        str(row.get("source_artifact_id", "")),
+                        row,
+                        max(parsed_dates.values()),
+                        financial_cutoff,
+                        original_source_dates=source_dates,
+                    )
+                    continue
+                mapping_day = next(
+                    (
+                        parsed_dates[field]
+                        for field in (
+                            "effective_date",
+                            "event_date",
+                            "value_date",
+                            "as_of_date",
+                            "period_end",
+                            "period_start",
+                        )
+                        if field in parsed_dates
+                    ),
+                    None,
+                )
+                mapping_row = {
+                    "account_id": account_id,
+                    **(
+                        {}
+                        if mapping_day is None
+                        else {"effective_date": mapping_day.isoformat()}
+                    ),
+                }
             day = _row_day(mapping_row)
             if (
                 provider_id == "ibkr"
                 and source_fact == "flows"
                 and row.get("provider_account_scope") != "STATEMENT_ACCOUNT"
+            ) or (
+                native_leverage_observation
+                and (
+                    row.get("source_account_scope") != "STATEMENT_ACCOUNT"
+                    or row.get("mapping_status") == "UNMAPPED"
+                )
             ):
                 strategy_id, mapping_status = None, "UNMAPPED"
+                if native_leverage_observation:
+                    mapping_reason = "SOURCE_ACCOUNT_SCOPE_UNMAPPED"
+            elif native_leverage_observation and (
+                "period_start" in row or "period_end" in row
+            ):
+                strategy_id, mapping_status, mapping_reason = (
+                    _mapped_strategy_for_period(row, accounts, strategies, assignments)
+                )
             else:
                 strategy_id, mapping_status = _mapped_strategy(
                     mapping_row, accounts, strategies, assignments
@@ -3792,28 +4223,40 @@ def _project_account_facts(
                 "source_record_id": source_id,
                 "strategy_id": strategy_id,
             }
-            for field in (
-                "amount",
-                "as_of_date",
-                "effective_date",
-                "event_date",
-                "execution_price",
-                "flow_type",
-                "kind",
-                "market_value",
-                "nav_recognition_date",
-                "nav",
-                "price",
-                "quantity",
-                "security_id",
-                "source_artifact_id",
-                "settle_date",
-                "provider_activity_id_sha256",
-                "provider_account_scope",
-                "value_basis",
-            ):
-                if field in row:
-                    record[field] = row[field]
+            if native_leverage_observation:
+                native_source_record_id = row.get("source_record_id")
+                record = {
+                    **row,
+                    **record,
+                    "source_record_id": source_id,
+                }
+                if native_source_record_id is not None:
+                    record["native_source_record_id"] = native_source_record_id
+                if mapping_reason is not None:
+                    record["mapping_reason"] = mapping_reason
+            else:
+                for field in (
+                    "amount",
+                    "as_of_date",
+                    "effective_date",
+                    "event_date",
+                    "execution_price",
+                    "flow_type",
+                    "kind",
+                    "market_value",
+                    "nav_recognition_date",
+                    "nav",
+                    "price",
+                    "quantity",
+                    "security_id",
+                    "source_artifact_id",
+                    "settle_date",
+                    "provider_activity_id_sha256",
+                    "provider_account_scope",
+                    "value_basis",
+                ):
+                    if field in row:
+                        record[field] = row[field]
             if source_fact == "positions" and position_observation is not None:
                 record.update(
                     observed_at=row["observed_at"],
@@ -3829,6 +4272,31 @@ def _project_account_facts(
                     "NON_CAPITAL" if amount == 0 else "EXTERNAL_CAPITAL"
                 )
             projections[target_fact].append(record)
+            if (
+                provider_id == "schwab"
+                and source_fact == "transactions"
+                and str(row.get("kind") or "").strip().upper() == "MARGIN INTEREST"
+            ):
+                # A retained Schwab MARGIN INTEREST transaction is an actual
+                # cash-posting financing observation.  It remains separate
+                # from owner flows and retains its native signed amount,
+                # economic dates and artifact/record lineage.
+                projections["financing_cost_observations"].append(
+                    {
+                        **record,
+                        "classification": "BROKER_DEBIT_INTEREST",
+                        "included_in_nav": None,
+                        "measurement_basis": "CASH_POSTING",
+                        "native_source_record_id": row.get("source_record_id")
+                        or source_id,
+                        "record_id": f"schwab-financing-cost:{source_id}",
+                        "source_amount": row.get("amount"),
+                        "source_field": "amount",
+                        "source_ordinal": row.get("source_ordinal"),
+                        "source_record_id": source_id,
+                        "source_section": "transactions",
+                    }
+                )
             if mapping_status == "UNMAPPED":
                 exceptions.append(
                     {
@@ -3838,6 +4306,11 @@ def _project_account_facts(
                         "provider_id": provider_id,
                         "record_id": record["record_id"],
                         "status": "UNMAPPED",
+                        **(
+                            {}
+                            if mapping_reason is None
+                            else {"mapping_reason": mapping_reason}
+                        ),
                     }
                 )
 
@@ -4963,6 +5436,8 @@ def _validate_selected_strategy_evidence(
 
 
 def _observed_bounds(rows: Sequence[Mapping[str, Any]]) -> tuple[date, date]:
+    if any(row.get("measurement_basis") is not None for row in rows):
+        return _row_bounds(rows)
     days = [day for row in rows if (day := _row_day(row)) is not None]
     if not days:
         raise ProviderLedgerError("admitted provider fact lacks an effective date")
@@ -7359,12 +7834,17 @@ def _materialized_rows(
     elif item.item_kind is DatasetItemKind.CATALOG_DATASET:
         if "/" not in item.item_id:
             target = _SOURCE_FACT_TARGET.get(item.item_id)
-            if target is not None:
+            if target is not None and (
+                target not in _NATIVE_LEVERAGE_OBSERVATION_FACTS
+                or target in provider_facts
+            ):
                 target_facts = (target,)
                 rows = provider_facts.get(target, ())
     elif item.item_kind is DatasetItemKind.COVERAGE_FACT_TYPE:
         target = _SOURCE_FACT_TARGET.get(item.item_id)
-        if target is not None:
+        if target is not None and (
+            target not in _NATIVE_LEVERAGE_OBSERVATION_FACTS or target in provider_facts
+        ):
             target_facts = (target,)
             rows = provider_facts.get(target, ())
     elif item.item_kind is DatasetItemKind.ARTIFACT:
@@ -7396,16 +7876,32 @@ def _materialized_rows(
 def _row_bounds(rows: Sequence[Mapping[str, Any]]) -> tuple[date, date]:
     observed = []
     for row in rows:
+        if row.get("measurement_basis") is not None:
+            source_days = [
+                _day(row[field], f"materialized row {field}")
+                for field in _NATIVE_LEVERAGE_DATE_FIELDS
+                if row.get(field) not in {None, ""}
+            ]
+            if not source_days:
+                raise ProviderLedgerError(
+                    "admitted dataset lacks an exact observed interval"
+                )
+            observed.extend(source_days)
+            continue
         raw = row.get("date")
-        observed.append(
+        observed_day = (
             _day(raw, "materialized row date")
             if raw not in {None, ""}
             else _row_day(row)
         )
-    days = [item for item in observed if item is not None]
-    if len(days) != len(rows) or not days:
+        if observed_day is None:
+            raise ProviderLedgerError(
+                "admitted dataset lacks an exact observed interval"
+            )
+        observed.append(observed_day)
+    if not observed:
         raise ProviderLedgerError("admitted dataset lacks an exact observed interval")
-    return min(days), max(days)
+    return min(observed), max(observed)
 
 
 def _dataset_disposition(
@@ -8146,7 +8642,14 @@ def build_catalog(
         "catalog_schema_version": CATALOG_SCHEMA_VERSION,
         "corporate_actions": combined.get("corporate_actions", []),
         "fact_counts": fact_counts,
+        "financing_cost_observations": combined.get("financing_cost_observations", []),
+        "financing_liability_observations": combined.get(
+            "financing_liability_observations", []
+        ),
         "flows": combined.get("flows", []),
+        "leverage_exposure_observations": combined.get(
+            "leverage_exposure_observations", []
+        ),
         "nav_observations": combined.get("nav_observations", []),
         "positions": combined.get("positions", []),
         "provider_coverage": provider_coverage,

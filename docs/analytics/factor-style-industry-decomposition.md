@@ -130,7 +130,9 @@ selected.
 Every strategy is evaluated separately within each eligible lens. The initial
 screening policy is versioned, not treated as a universal statistical law:
 
-- exact-date alignment only; no forward fill or calendar invention;
+- declared source-labelled factor-anchor association for admitted 24/7 or
+  session-calendared targets; legacy schema-1 targets remain exact-label-only;
+  no forward fill or calendar invention;
 - all transforms and diagnostics fitted on training observations only;
 - at least 20 training observations per effective parameter;
 - absolute training correlation of 0.98 or greater is a near-duplicate warning;

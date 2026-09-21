@@ -34,6 +34,20 @@ _REQUIRED_SECTIONS = {
     "Trades",
     "Transfers",
 }
+_CHANGE_IN_NAV_NONADDITIVE_ATTRIBUTES = frozenset(
+    {
+        "accountAlias",
+        "accountId",
+        "acctAlias",
+        "currency",
+        "endingValue",
+        "fromDate",
+        "model",
+        "startingValue",
+        "toDate",
+        "twr",
+    }
+)
 
 
 class FlexValidationError(ValueError):
@@ -65,6 +79,12 @@ def _day(value: str | None, name: str) -> date:
         return date(*(int(part) for part in match.groups()))
     except ValueError as exc:
         raise FlexValidationError(f"{name} contains an invalid date") from exc
+
+
+def _optional_day(value: str | None, name: str) -> date | None:
+    if _optional(value) is None:
+        return None
+    return _day(value, name)
 
 
 def _decimal(value: str | None, name: str) -> Decimal:
@@ -129,6 +149,15 @@ class FlexPosition:
     symbol: str | None
     description: str | None
     reported_account_matches_statement: bool
+    asset_category: str | None = None
+    sub_category: str | None = None
+    multiplier: Decimal | None = None
+    mark_price: Decimal | None = None
+    side: str | None = None
+    underlying_conid: str | None = None
+    expiry: str | None = None
+    strike: Decimal | None = None
+    put_call: str | None = None
 
 
 @dataclass(frozen=True)
@@ -161,6 +190,71 @@ class FlexCashTransaction:
     currency: str
     conid: str | None
     code: str | None
+    reported_account_matches_statement: bool
+    description: str | None = None
+    settlement_date: date | None = None
+    fx_rate_to_base: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class FlexCashReport:
+    raw_account_id: str
+    currency: str
+    level_of_detail: str
+    from_date: date
+    to_date: date
+    starting_cash: Decimal | None
+    ending_cash: Decimal | None
+    ending_settled_cash: Decimal | None
+    ending_cash_sec: Decimal | None
+    ending_cash_com: Decimal | None
+    ending_settled_cash_sec: Decimal | None
+    ending_settled_cash_com: Decimal | None
+    broker_interest: Decimal | None
+    broker_interest_sec: Decimal | None
+    broker_interest_com: Decimal | None
+    broker_interest_mtd: Decimal | None
+    broker_interest_ytd: Decimal | None
+    reported_account_matches_statement: bool
+
+
+@dataclass(frozen=True)
+class FlexInterestAccrual:
+    raw_account_id: str
+    currency: str
+    from_date: date
+    to_date: date
+    starting_accrual_balance: Decimal | None
+    interest_accrued: Decimal | None
+    accrual_reversal: Decimal | None
+    ending_accrual_balance: Decimal | None
+    fx_translation: Decimal | None
+    reported_account_matches_statement: bool
+
+
+@dataclass(frozen=True)
+class FlexTierInterest:
+    raw_account_id: str
+    currency: str
+    interest_type: str
+    value_date: date
+    report_date: date
+    tier_break: str | None
+    balance_threshold: Decimal | None
+    rate: Decimal | None
+    securities_principal: Decimal | None
+    securities_interest: Decimal | None
+    commodities_principal: Decimal | None
+    commodities_interest: Decimal | None
+    ibukl_principal: Decimal | None
+    ibukl_interest: Decimal | None
+    total_principal: Decimal | None
+    total_interest: Decimal | None
+    margin_balance: Decimal | None
+    fx_rate_to_base: Decimal | None
+    code: str | None
+    from_account: str | None
+    to_account: str | None
     reported_account_matches_statement: bool
 
 
@@ -209,12 +303,27 @@ class FlexDailyStatement:
     base_currency: str
     nav: Decimal
     change_in_nav_ending_value: Decimal
+    change_in_nav_accounting_date: date
+    change_in_nav_starting_value: Decimal | None
+    change_in_nav_deposits_withdrawals: Decimal | None
+    change_in_nav_asset_transfers: Decimal | None
+    change_in_nav_internal_cash_transfers: Decimal | None
+    change_in_nav_mtm: Decimal | None
+    change_in_nav_components: tuple[tuple[str, Decimal], ...]
     positions: tuple[FlexPosition, ...]
     trades: tuple[FlexTrade, ...]
     cash_transactions: tuple[FlexCashTransaction, ...]
     transfers: tuple[FlexTransfer, ...]
     corporate_actions: tuple[FlexCorporateAction, ...]
     rates: tuple[FlexRate, ...]
+    cash_reports: tuple[FlexCashReport, ...] = ()
+    interest_accruals: tuple[FlexInterestAccrual, ...] = ()
+    tier_interest: tuple[FlexTierInterest, ...] = ()
+    nav_cash: Decimal | None = None
+    nav_broker_cash_component: Decimal | None = None
+    nav_interest_accruals: Decimal | None = None
+    nav_broker_interest_accruals_component: Decimal | None = None
+    nav_margin_financing_charge_accruals: Decimal | None = None
 
 
 @dataclass(frozen=True)
@@ -240,6 +349,19 @@ def _position(element: ET.Element, raw_account_id: str) -> FlexPosition:
         symbol=_optional(element.attrib.get("symbol")),
         description=_optional(element.attrib.get("description")),
         reported_account_matches_statement=_account_matches(element, raw_account_id),
+        asset_category=_optional(element.attrib.get("assetCategory")),
+        sub_category=_optional(element.attrib.get("subCategory")),
+        multiplier=_optional_decimal(
+            element.attrib.get("multiplier"), "position.multiplier"
+        ),
+        mark_price=_optional_decimal(
+            element.attrib.get("markPrice"), "position.markPrice"
+        ),
+        side=_optional(element.attrib.get("side")),
+        underlying_conid=_optional(element.attrib.get("underlyingConid")),
+        expiry=_optional(element.attrib.get("expiry")),
+        strike=_optional_decimal(element.attrib.get("strike"), "position.strike"),
+        put_call=_optional(element.attrib.get("putCall")),
     )
 
 
@@ -294,6 +416,145 @@ def _cash_transaction(element: ET.Element, raw_account_id: str) -> FlexCashTrans
         currency=_text(element.attrib.get("currency"), "cash_transaction.currency"),
         conid=_optional(element.attrib.get("conid")),
         code=_optional(element.attrib.get("code")),
+        reported_account_matches_statement=_account_matches(element, raw_account_id),
+        description=_optional(element.attrib.get("description")),
+        settlement_date=_optional_day(
+            element.attrib.get("settleDate"), "cash_transaction.settleDate"
+        ),
+        fx_rate_to_base=_optional_decimal(
+            element.attrib.get("fxRateToBase"), "cash_transaction.fxRateToBase"
+        ),
+    )
+
+
+def _cash_report(element: ET.Element, raw_account_id: str) -> FlexCashReport:
+    return FlexCashReport(
+        raw_account_id=raw_account_id,
+        currency=_text(element.attrib.get("currency"), "cash_report.currency"),
+        level_of_detail=_text(
+            element.attrib.get("levelOfDetail"), "cash_report.levelOfDetail"
+        ),
+        from_date=_day(element.attrib.get("fromDate"), "cash_report.fromDate"),
+        to_date=_day(element.attrib.get("toDate"), "cash_report.toDate"),
+        starting_cash=_optional_decimal(
+            element.attrib.get("startingCash"), "cash_report.startingCash"
+        ),
+        ending_cash=_optional_decimal(
+            element.attrib.get("endingCash"), "cash_report.endingCash"
+        ),
+        ending_settled_cash=_optional_decimal(
+            element.attrib.get("endingSettledCash"), "cash_report.endingSettledCash"
+        ),
+        ending_cash_sec=_optional_decimal(
+            element.attrib.get("endingCashSec"), "cash_report.endingCashSec"
+        ),
+        ending_cash_com=_optional_decimal(
+            element.attrib.get("endingCashCom"), "cash_report.endingCashCom"
+        ),
+        ending_settled_cash_sec=_optional_decimal(
+            element.attrib.get("endingSettledCashSec"),
+            "cash_report.endingSettledCashSec",
+        ),
+        ending_settled_cash_com=_optional_decimal(
+            element.attrib.get("endingSettledCashCom"),
+            "cash_report.endingSettledCashCom",
+        ),
+        broker_interest=_optional_decimal(
+            element.attrib.get("brokerInterest"), "cash_report.brokerInterest"
+        ),
+        broker_interest_sec=_optional_decimal(
+            element.attrib.get("brokerInterestSec"), "cash_report.brokerInterestSec"
+        ),
+        broker_interest_com=_optional_decimal(
+            element.attrib.get("brokerInterestCom"), "cash_report.brokerInterestCom"
+        ),
+        broker_interest_mtd=_optional_decimal(
+            element.attrib.get("brokerInterestMTD"), "cash_report.brokerInterestMTD"
+        ),
+        broker_interest_ytd=_optional_decimal(
+            element.attrib.get("brokerInterestYTD"), "cash_report.brokerInterestYTD"
+        ),
+        reported_account_matches_statement=_account_matches(element, raw_account_id),
+    )
+
+
+def _interest_accrual(element: ET.Element, raw_account_id: str) -> FlexInterestAccrual:
+    return FlexInterestAccrual(
+        raw_account_id=raw_account_id,
+        currency=_text(element.attrib.get("currency"), "interest_accrual.currency"),
+        from_date=_day(element.attrib.get("fromDate"), "interest_accrual.fromDate"),
+        to_date=_day(element.attrib.get("toDate"), "interest_accrual.toDate"),
+        starting_accrual_balance=_optional_decimal(
+            element.attrib.get("startingAccrualBalance"),
+            "interest_accrual.startingAccrualBalance",
+        ),
+        interest_accrued=_optional_decimal(
+            element.attrib.get("interestAccrued"), "interest_accrual.interestAccrued"
+        ),
+        accrual_reversal=_optional_decimal(
+            element.attrib.get("accrualReversal"), "interest_accrual.accrualReversal"
+        ),
+        ending_accrual_balance=_optional_decimal(
+            element.attrib.get("endingAccrualBalance"),
+            "interest_accrual.endingAccrualBalance",
+        ),
+        fx_translation=_optional_decimal(
+            element.attrib.get("fxTranslation"), "interest_accrual.fxTranslation"
+        ),
+        reported_account_matches_statement=_account_matches(element, raw_account_id),
+    )
+
+
+def _tier_interest(element: ET.Element, raw_account_id: str) -> FlexTierInterest:
+    return FlexTierInterest(
+        raw_account_id=raw_account_id,
+        currency=_text(element.attrib.get("currency"), "tier_interest.currency"),
+        interest_type=_text(
+            element.attrib.get("interestType"), "tier_interest.interestType"
+        ),
+        value_date=_day(element.attrib.get("valueDate"), "tier_interest.valueDate"),
+        report_date=_day(element.attrib.get("reportDate"), "tier_interest.reportDate"),
+        tier_break=_optional(element.attrib.get("tierBreak")),
+        balance_threshold=_optional_decimal(
+            element.attrib.get("balanceThreshold"), "tier_interest.balanceThreshold"
+        ),
+        rate=_optional_decimal(element.attrib.get("rate"), "tier_interest.rate"),
+        securities_principal=_optional_decimal(
+            element.attrib.get("securitiesPrincipal"),
+            "tier_interest.securitiesPrincipal",
+        ),
+        securities_interest=_optional_decimal(
+            element.attrib.get("securitiesInterest"), "tier_interest.securitiesInterest"
+        ),
+        commodities_principal=_optional_decimal(
+            element.attrib.get("commoditiesPrincipal"),
+            "tier_interest.commoditiesPrincipal",
+        ),
+        commodities_interest=_optional_decimal(
+            element.attrib.get("commoditiesInterest"),
+            "tier_interest.commoditiesInterest",
+        ),
+        ibukl_principal=_optional_decimal(
+            element.attrib.get("ibuklPrincipal"), "tier_interest.ibuklPrincipal"
+        ),
+        ibukl_interest=_optional_decimal(
+            element.attrib.get("ibuklInterest"), "tier_interest.ibuklInterest"
+        ),
+        total_principal=_optional_decimal(
+            element.attrib.get("totalPrincipal"), "tier_interest.totalPrincipal"
+        ),
+        total_interest=_optional_decimal(
+            element.attrib.get("totalInterest"), "tier_interest.totalInterest"
+        ),
+        margin_balance=_optional_decimal(
+            element.attrib.get("marginBalance"), "tier_interest.marginBalance"
+        ),
+        fx_rate_to_base=_optional_decimal(
+            element.attrib.get("fxRateToBase"), "tier_interest.fxRateToBase"
+        ),
+        code=_optional(element.attrib.get("code")),
+        from_account=_optional(element.attrib.get("fromAcct")),
+        to_account=_optional(element.attrib.get("toAcct")),
         reported_account_matches_statement=_account_matches(element, raw_account_id),
     )
 
@@ -389,6 +650,18 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
     ending_value = _decimal(change.attrib.get("endingValue"), "change.endingValue")
     if nav_value != ending_value:
         raise FlexValidationError("NAV total differs from ChangeInNAV endingValue")
+    change_accounting_date = (
+        _day(change.attrib.get("toDate"), "change.toDate")
+        if _optional(change.attrib.get("toDate")) is not None
+        else report_date
+    )
+    if change_accounting_date != report_date:
+        raise FlexValidationError("ChangeInNAV toDate differs from statement date")
+    change_components: list[tuple[str, Decimal]] = []
+    for key, value in sorted(change.attrib.items()):
+        if key in _CHANGE_IN_NAV_NONADDITIVE_ATTRIBUTES:
+            continue
+        change_components.append((key, _decimal(value, f"change.{key}")))
 
     positions = tuple(
         _position(item, raw_account_id)
@@ -400,6 +673,18 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         for item in _elements(element, "Trade")
         if item.attrib.get("levelOfDetail") == "EXECUTION"
     )
+    cash_reports = tuple(
+        _cash_report(item, raw_account_id)
+        for item in _elements(element, "CashReportCurrency")
+    )
+    interest_accruals = tuple(
+        _interest_accrual(item, raw_account_id)
+        for item in _elements(element, "InterestAccrualsCurrency")
+    )
+    tier_interest = tuple(
+        _tier_interest(item, raw_account_id)
+        for item in _elements(element, "TierInterestDetail")
+    )
     return FlexDailyStatement(
         artifact_id=artifact_id,
         raw_account_id=raw_account_id,
@@ -407,6 +692,23 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
         base_currency=_text(account.attrib.get("currency"), "account.currency"),
         nav=nav_value,
         change_in_nav_ending_value=ending_value,
+        change_in_nav_accounting_date=change_accounting_date,
+        change_in_nav_starting_value=_optional_decimal(
+            change.attrib.get("startingValue"), "change.startingValue"
+        ),
+        change_in_nav_deposits_withdrawals=_optional_decimal(
+            change.attrib.get("depositsWithdrawals"),
+            "change.depositsWithdrawals",
+        ),
+        change_in_nav_asset_transfers=_optional_decimal(
+            change.attrib.get("assetTransfers"), "change.assetTransfers"
+        ),
+        change_in_nav_internal_cash_transfers=_optional_decimal(
+            change.attrib.get("internalCashTransfers"),
+            "change.internalCashTransfers",
+        ),
+        change_in_nav_mtm=_optional_decimal(change.attrib.get("mtm"), "change.mtm"),
+        change_in_nav_components=tuple(change_components),
         positions=positions,
         trades=trades,
         cash_transactions=tuple(
@@ -421,6 +723,24 @@ def _parse_statement(element: ET.Element, artifact_id: str) -> FlexDailyStatemen
             for item in _elements(element, "CorporateAction")
         ),
         rates=tuple(_rate(item) for item in _elements(element, "ConversionRate")),
+        cash_reports=cash_reports,
+        interest_accruals=interest_accruals,
+        tier_interest=tier_interest,
+        nav_cash=_optional_decimal(nav.attrib.get("cash"), "nav.cash"),
+        nav_broker_cash_component=_optional_decimal(
+            nav.attrib.get("brokerCashComponent"), "nav.brokerCashComponent"
+        ),
+        nav_interest_accruals=_optional_decimal(
+            nav.attrib.get("interestAccruals"), "nav.interestAccruals"
+        ),
+        nav_broker_interest_accruals_component=_optional_decimal(
+            nav.attrib.get("brokerInterestAccrualsComponent"),
+            "nav.brokerInterestAccrualsComponent",
+        ),
+        nav_margin_financing_charge_accruals=_optional_decimal(
+            nav.attrib.get("marginFinancingChargeAccruals"),
+            "nav.marginFinancingChargeAccruals",
+        ),
     )
 
 

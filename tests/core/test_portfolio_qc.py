@@ -25,6 +25,13 @@ def _proof() -> dict[str, Any]:
         "outcome_ids": list(qc.REQUIRED_OUTCOMES),
         "selected_cells": {"financial-outcome-decomposition": {"status": "AVAILABLE"}},
         "status": "PASS",
+        "work_counters": {
+            "correlation_build_calls": 0,
+            "full_rederivation_count": 0,
+            "grid_search_calls": 0,
+            "model_fit_calls": 0,
+            "receipt_reuse_count": 1,
+        },
     }
 
 
@@ -68,6 +75,29 @@ def _write_preflight(evidence: Path, spec: Any) -> Path:
             "status": "PASS",
         },
     )
+
+
+def test_financial_evidence_separates_semantic_identity_from_work_counters() -> None:
+    cold = _proof()
+    cold["work_counters"]["full_rederivation_count"] = 1
+    cold["work_counters"]["receipt_reuse_count"] = 0
+    warm = json.loads(json.dumps(cold))
+    warm["work_counters"] = {
+        "correlation_build_calls": 0,
+        "full_rederivation_count": 0,
+        "grid_search_calls": 0,
+        "model_fit_calls": 0,
+        "receipt_reuse_count": 1,
+    }
+
+    cold_evidence = qc._financial_evidence(cold)
+    warm_evidence = qc._financial_evidence(warm)
+
+    assert (
+        cold_evidence["financial_outcomes_sha256"]
+        == warm_evidence["financial_outcomes_sha256"]
+    )
+    assert cold_evidence["work_counters"] != warm_evidence["work_counters"]
 
 
 def test_ci_runs_complete_vertical_capital_attribution_and_operations(

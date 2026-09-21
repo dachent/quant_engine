@@ -3007,6 +3007,17 @@ def _suppress_unmatched_report_performance(
             "flow_count",
             "flow_timing",
             "mwr_xirr",
+            "mwr_opening_date",
+            "mwr_opening_value",
+            "mwr_terminal_date",
+            "mwr_terminal_value",
+            "mwr_currency",
+            "mwr_label",
+            "mwr_value_basis",
+            "mwr_valuation_timing",
+            "mwr_day_count",
+            "mwr_unit",
+            "mwr_source_binding",
             "nav_observations",
             "observed_start",
             "observed_end",
@@ -3023,10 +3034,71 @@ def _suppress_unmatched_report_performance(
             "twr",
         ):
             row[field] = None
+        row["mwr_reason"] = "SOURCE_LINEAGE_MISMATCH"
+        row["mwr_coverage_status"] = "BLOCKED"
+        row["mwr_cashflows"] = []
         for field in ("twr_status", "mwr_status", "return_path_status"):
             row[field] = "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"
         suppressed.append(row)
     return suppressed
+
+
+def _validate_mwr_perimeter(rows: Sequence[Mapping[str, Any]]) -> None:
+    """Keep the panel a strict projection of governed report MWR facts."""
+    for row in rows:
+        status = row.get("mwr_status")
+        if status == "AVAILABLE":
+            required = (
+                "mwr_xirr",
+                "mwr_opening_date",
+                "mwr_opening_value",
+                "mwr_terminal_date",
+                "mwr_terminal_value",
+                "mwr_currency",
+                "mwr_coverage_status",
+                "mwr_cashflows",
+                "mwr_label",
+                "mwr_value_basis",
+                "mwr_valuation_timing",
+                "mwr_day_count",
+                "mwr_unit",
+                "mwr_source_binding",
+            )
+            if any(row.get(field) is None for field in required):
+                raise ControlPanelValidationError("available MWR payload is incomplete")
+            if row.get("mwr_coverage_status") != "COMPLETE":
+                raise ControlPanelValidationError(
+                    "available MWR coverage is incomplete"
+                )
+            basis = row.get("mwr_value_basis")
+            label = row.get("mwr_label")
+            if (basis == "STRATEGY_NAV") != (label == "STRATEGY_EPOCH_MWR"):
+                raise ControlPanelValidationError(
+                    "MWR label differs from valuation perimeter"
+                )
+            cashflows = _objects(row.get("mwr_cashflows"), "MWR cashflows")
+            if not cashflows or any(
+                not isinstance(flow.get("source_record_ids"), list)
+                or not flow["source_record_ids"]
+                or not all(
+                    isinstance(source_id, str) and source_id
+                    for source_id in flow["source_record_ids"]
+                )
+                for flow in cashflows
+            ):
+                raise ControlPanelValidationError(
+                    "MWR cashflow source identities are absent"
+                )
+        elif status not in {
+            "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
+            "BLOCKED_ADMISSION",
+        }:
+            if row.get("mwr_xirr") is not None or not isinstance(
+                row.get("mwr_reason"), str
+            ):
+                raise ControlPanelValidationError(
+                    "unavailable MWR must retain reason and null rate"
+                )
 
 
 def _suppress_unmatched_strategy_performance(
@@ -3913,13 +3985,48 @@ def _factor_contribution_summary(model: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _schema_three_orthogonal_surface(
+    model: Mapping[str, Any], model_id: str, methodology_manifest_sha256: str
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Accept only the producer's named raw and orthogonal analytics receipts."""
+    orthogonal = _object(
+        model.get("orthogonal_attribution"), "model.orthogonal_attribution"
+    )
+    identities = _object(
+        model.get("analytics_identities"), "model.analytics_identities"
+    )
+    raw_identity = _object(identities.get("raw"), "model.analytics_identities.raw")
+    orthogonal_identity = _object(
+        identities.get("orthogonal"), "model.analytics_identities.orthogonal"
+    )
+    if (
+        raw_identity.get("model_id") != model_id
+        or raw_identity.get("methodology_manifest_sha256")
+        != methodology_manifest_sha256
+        or raw_identity.get("surface") not in {"RAW_MODEL", "RAW_CONSTRAINED_RBSA"}
+        or orthogonal_identity.get("model_id") != model_id
+        or orthogonal_identity.get("methodology_manifest_sha256")
+        != methodology_manifest_sha256
+        or orthogonal_identity.get("surface") != "ORTHOGONAL_RISK_ATTRIBUTION"
+    ):
+        raise ControlPanelValidationError("schema-three orthogonal identity differs")
+    interval = _object(model.get("interval_association"), "model.interval_association")
+    if (
+        interval.get("evaluation_information_set") != "RETROSPECTIVE_SELECTED_SNAPSHOT"
+        or interval.get("holdout_display_claim")
+        != "holdout association using selected historical snapshot"
+    ):
+        raise ControlPanelValidationError("schema-three orthogonal interval differs")
+    return orthogonal, identities, interval
+
+
 def _factor_analysis(
     decomposition: Mapping[str, Any],
     identity: Mapping[str, str],
     strategy_names: set[str],
 ) -> dict[str, Any]:
     analytics_schema_version = decomposition.get("analytics_schema_version")
-    if analytics_schema_version not in {1, 2}:
+    if analytics_schema_version not in {1, 2, 3}:
         raise ControlPanelValidationError("factor analytics schema is unsupported")
     method_label = _text(decomposition.get("method_label"), "factor.method_label")
     methodology_version = _text(
@@ -4044,6 +4151,31 @@ def _factor_analysis(
             model_quality.get("decision_status"), "model_quality.decision_status"
         )
         model_status = _text(model.get("status"), "model.status")
+        orthogonal_attribution: dict[str, Any] | None = None
+        analytics_identities: dict[str, Any] | None = None
+        interval_association: dict[str, Any] | None = None
+        if analytics_schema_version == 3:
+            (
+                orthogonal_attribution,
+                analytics_identities,
+                interval_association,
+            ) = _schema_three_orthogonal_surface(
+                model,
+                model_id,
+                _text(
+                    decomposition.get("methodology_manifest_sha256"),
+                    "factor.methodology_manifest_sha256",
+                ),
+            )
+        orthogonal_surface_fields = (
+            {
+                "analytics_identities": analytics_identities,
+                "interval_association": interval_association,
+                "orthogonal_attribution": orthogonal_attribution,
+            }
+            if analytics_schema_version == 3
+            else {}
+        )
         if computational_status != "AVAILABLE":
             raise ControlPanelValidationError(
                 f"selected factor model was not computed: {series_id}"
@@ -4101,6 +4233,7 @@ def _factor_analysis(
                     "exposures": diagnostic_exposures,
                     "model_id": model_id,
                     "model_quality": model_quality,
+                    **orthogonal_surface_fields,
                     "selection_status": _text(
                         selection.get("status"), "selection.status"
                     ),
@@ -4143,6 +4276,7 @@ def _factor_analysis(
                 "exposures": _objects(model.get("exposures"), "model.exposures"),
                 "model_id": model_id,
                 "model_quality": model_quality,
+                **orthogonal_surface_fields,
                 "selection_status": _text(selection.get("status"), "selection.status"),
                 "series_composition": series_composition.get(series_id, {}),
                 "series_id": series_id,
@@ -4168,7 +4302,7 @@ def _factor_analysis(
         )
         if accepted_proxy_governance.get("candidate_count") != len(proxies):
             raise ControlPanelValidationError("factor proxy candidate count differs")
-    if analytics_schema_version == 2 and not accepted_proxy_governance["proxies"]:
+    if analytics_schema_version in {2, 3} and not accepted_proxy_governance["proxies"]:
         raise ControlPanelValidationError("schema-v2 factor proxy governance is absent")
     return {
         "analytics_schema_version": analytics_schema_version,
@@ -4312,8 +4446,8 @@ def verify_decomposition_surface_against_plan(
     )
     if (
         manifest.get("builder") != "portfolio-current-decomposition-plan"
-        or manifest.get("builder_version") != "0.17.0"
-        or manifest.get("schema_version") != 2
+        or (manifest.get("builder_version"), manifest.get("schema_version"))
+        not in {("0.17.0", 2), ("0.18.0", 2)}
         or manifest.get("bundle_id") != plan_bundle.name
     ):
         raise ControlPanelValidationError("current decomposition plan identity differs")
@@ -4629,11 +4763,12 @@ def _decomposition_lenses_for_mode(
     dispositions, _dispositions_content, dispositions_sha256 = _json_snapshot(
         dispositions_path, "candidate dispositions"
     )
-    current_plan = (
-        manifest.get("builder") == "portfolio-current-decomposition-plan"
-        and manifest.get("builder_version") == "0.17.0"
-        and manifest.get("schema_version") == 2
-    )
+    current_plan = manifest.get(
+        "builder"
+    ) == "portfolio-current-decomposition-plan" and (
+        manifest.get("builder_version"),
+        manifest.get("schema_version"),
+    ) in {("0.17.0", 2), ("0.18.0", 2)}
     if current_plan:
         if manifest.get("bundle_id") != plan_bundle.name:
             raise ControlPanelValidationError(
@@ -4780,13 +4915,13 @@ def _decomposition_lenses_for_mode(
                 static_root,
                 filename="decomposition.json",
                 field_name=f"{source_label} STATIC decomposition",
-                expected_schema_version=(1, 2),
+                expected_schema_version=(1, 2, 3),
             )
             dynamic, dynamic_identity, dynamic_path = _current_analytics(
                 dynamic_surface_root,
                 filename="decomposition.json",
                 field_name=f"{source_label} DYNAMIC_FLS decomposition",
-                expected_schema_version=(1, 2),
+                expected_schema_version=(1, 2, 3),
             )
             surface_inputs = (
                 ("STATIC", decomposition, identity, path),
@@ -4797,7 +4932,7 @@ def _decomposition_lenses_for_mode(
                 root / source_key,
                 filename="decomposition.json",
                 field_name=f"{source_label} decomposition",
-                expected_schema_version=(1, 2),
+                expected_schema_version=(1, 2, 3),
             )
             surface_inputs = (("STATIC", decomposition, identity, path),)
         for surface, surface_value, surface_identity, surface_path in surface_inputs:
@@ -4965,7 +5100,7 @@ def _decomposition_lenses(
                 dynamic_root,
                 filename="decomposition.json",
                 field_name="hybrid dynamic-style decomposition",
-                expected_schema_version=(1, 2),
+                expected_schema_version=(1, 2, 3),
             )
             if dynamic.get("evidence_mode") != "LIVE_PLUS_BACKTEST":
                 raise ControlPanelValidationError(
@@ -7775,6 +7910,7 @@ def _panel_data(
         # rejected-lineage representation; otherwise a post-cutoff value could
         # be erased and silently admitted.
         performance = _suppress_unmatched_report_performance(performance)
+    _validate_mwr_perimeter(performance)
     referenced_account_ids = _referenced_current_account_ids((*performance, *positions))
     missing_account_ids = referenced_account_ids - set(account_ids)
     if missing_account_ids:
@@ -8686,7 +8822,7 @@ def _panel_data(
                 if position_count
                 else "Positions and FX remain unavailable; the panel does not infer either."
             ),
-            "MWR remains unavailable when complete external-flow coverage is absent.",
+            "MWR is annualized ACTUAL_365 and remains unavailable unless its declared valuation perimeter and complete dated source-bound flows are present.",
             *(
                 [
                     "Report-derived performance is unavailable because its provider-ledger lineage differs from the verified epoch manifest."
@@ -8912,6 +9048,7 @@ def _panel_data(
         "strategy_underwriting": strategy_underwriting,
         "hwm_summary": hwm_summary,
         "hybrid_mode_gate": hybrid_mode_gate,
+        "leverage_disclosures": list(report["leverage_disclosures"]),
         "weekly_returns": accepted_weekly_returns,
     }
     if portable_hwm_proof is not None:
@@ -9906,7 +10043,7 @@ def _rendered_files(
         resolved_decomposition,
         filename="decomposition.json",
         field_name="portfolio factor decomposition",
-        expected_schema_version=(1, 2),
+        expected_schema_version=(1, 2, 3),
     )
     correlation, correlation_identity, correlation_path = _current_analytics(
         resolved_correlation,

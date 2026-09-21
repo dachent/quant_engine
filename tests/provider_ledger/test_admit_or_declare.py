@@ -26,6 +26,7 @@ from quant_engine.portfolio_ledger import (
     GenerationQualification,
     ProviderAdmissionError,
     ProviderGenerationIdentity,
+    provider_admission,
 )
 
 
@@ -1453,6 +1454,76 @@ def test_observed_receipt_keeps_each_provider_original_qualification(
         for provider_id, qualification in qualifications.items()
     }
 
+    provider_generations = {
+        str(row["provider_id"]): row for row in receipt["provider_generations"]
+    }
+    inventory, dispositions = provider_admission.validate_admit_or_declare_receipt(
+        receipt,
+        product_authority=authority,
+        source_segments=authority["sources"],
+        provider_generations=provider_generations,
+    )
+    rewritten = copy.deepcopy(receipt)
+    rewritten["inventory"] = [
+        row
+        for row in rewritten["inventory"]
+        if not (
+            row["provider_id"] == "schwab"
+            and row["item_kind"] == "PRODUCT_DATA_CLASS"
+            and row["item_id"] == "ACCOUNT_NAV"
+        )
+    ]
+    rewritten["dispositions"] = [
+        row
+        for row in rewritten["dispositions"]
+        if not (
+            row["provider_id"] == "schwab"
+            and row["item_kind"] == "PRODUCT_DATA_CLASS"
+            and row["item_id"] == "ACCOUNT_NAV"
+        )
+    ]
+    schwab_inventory = tuple(
+        item
+        for item in inventory
+        if item.provider_id == "schwab"
+        and not (
+            item.item_kind.value == "PRODUCT_DATA_CLASS"
+            and item.item_id == "ACCOUNT_NAV"
+        )
+    )
+    schwab_dispositions = tuple(
+        item
+        for item in dispositions
+        if item.provider_id == "schwab"
+        and not (
+            item.item_kind.value == "PRODUCT_DATA_CLASS"
+            and item.item_id == "ACCOUNT_NAV"
+        )
+    )
+    observation = next(
+        row
+        for row in rewritten["run_observation"]["providers"]
+        if row["provider_id"] == "schwab"
+    )
+    observation["observed_inventory_count"] = len(schwab_inventory)
+    observation["observed_inventory_sha256"] = (
+        provider_admission.provider_upstream_inventory_digest(schwab_inventory)
+    )
+    admitted_count, admitted_digest = provider_admission.admitted_binding_set_digest(
+        schwab_dispositions
+    )
+    observation["observed_admitted_item_count"] = admitted_count
+    observation["observed_admitted_item_set_sha256"] = admitted_digest
+    _rehash_receipt(rewritten)
+
+    with pytest.raises(ProviderAdmissionError, match="product data-class set"):
+        provider_admission.validate_admit_or_declare_receipt(
+            rewritten,
+            product_authority=authority,
+            source_segments=authority["sources"],
+            provider_generations=provider_generations,
+        )
+
 
 @pytest.mark.skipif(
     not all(path.is_file() for path in P123_RETAINED_INPUTS),
@@ -2116,6 +2187,77 @@ def test_portfolio123_retained_transactions_require_the_admitted_fact() -> None:
             provider_facts,
             (),
         )
+
+
+def test_ibkr_native_leverage_data_classes_materialize_through_admission() -> None:
+    """The receipt admits native observations only when each class has rows."""
+
+    authority, identities, manifests, catalogs, provider_facts = _fixture()
+    source = authority["sources"]["ibkr-account-generation"]
+    native_classes = {
+        "FINANCING_COST": "financing_cost_observations",
+        "FINANCING_LIABILITY": "financing_liability_observations",
+        "LEVERAGE_EXPOSURE": "leverage_exposure_observations",
+    }
+    source["data_classes"].extend(native_classes)
+    source["admission"]["facts"].extend(native_classes)
+    source["data_classes"].sort()
+    source["admission"]["facts"].sort()
+    native_rows = {
+        target: [
+            {
+                "account_id": "private-ibkr-leverage",
+                "amount": {
+                    "currency": "USD",
+                    "status": "AVAILABLE",
+                    "value": "-1",
+                },
+                "as_of_date": DAY.isoformat(),
+                "evidence_layer": "ACCOUNT_LIVE",
+                "generation_id": manifests["ibkr"].generation_id,
+                "mapping_status": "MAPPED",
+                "native_source_record_id": f"native-{target}",
+                "provider_id": "ibkr",
+                "record_id": f"ibkr:catalog-{target}",
+                "source_artifact_id": "normalized/nav.json",
+                "source_record_id": f"catalog-{target}",
+                "strategy_id": "strategy-ibkr",
+            }
+        ]
+        for target in native_classes.values()
+    }
+    catalogs["ibkr"].update(native_rows)
+    provider_facts["ibkr"].update(native_rows)
+    _repin_dataset_pins(
+        authority,
+        "ibkr",
+        manifests,
+        catalogs,
+        provider_facts,
+        admitted_too=True,
+    )
+
+    receipt, _ = ledger._admit_or_declare_receipt(
+        authority,
+        identities,
+        manifests,
+        catalogs,
+        provider_facts,
+        (),
+    )
+
+    product_rows = {
+        row["item_id"]: row
+        for row in receipt["dispositions"]
+        if row["provider_id"] == "ibkr"
+        and row["item_kind"] == "PRODUCT_DATA_CLASS"
+        and row["item_id"] in native_classes
+    }
+    assert set(product_rows) == set(native_classes)
+    assert {
+        item_id: (row["action"], row["target_facts"], row["materialized_record_count"])
+        for item_id, row in product_rows.items()
+    } == {item_id: ("ADMIT", [target], 1) for item_id, target in native_classes.items()}
 
 
 QE_LEDGER_SPEC_PATH = os.environ.get("QE_LEDGER_SPEC_PATH", "")

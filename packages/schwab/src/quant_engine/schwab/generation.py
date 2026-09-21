@@ -1173,6 +1173,10 @@ def _transactions(
                     "symbol": symbol or None,
                 }
             )
+            if key[1].strip().upper() == "MARGIN INTEREST":
+                ledger["source_artifact_id"] = journal_source_artifacts[
+                    account_id
+                ].artifact_id
             evidence = _journal_source_evidence(
                 record,
                 source_artifact=journal_source_artifacts[account_id],
@@ -1324,6 +1328,10 @@ def _transactions_all(
                     "symbol": symbol or None,
                 }
             )
+            if key[1].strip().upper() == "MARGIN INTEREST":
+                ledger["source_artifact_id"] = journal_source_artifacts[
+                    account_id
+                ].artifact_id
             evidence = _journal_source_evidence(
                 record,
                 source_artifact=journal_source_artifacts[account_id],
