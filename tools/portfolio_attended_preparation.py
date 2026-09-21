@@ -271,8 +271,14 @@ def _directory_definition(path: Path) -> dict[str, object]:
                     "size_bytes": len(content),
                 }
             )
-    encoded = json.dumps(
-        files, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    # The trailing newline matches the other four implementations of this
+    # identity. `portfolio_pipeline_materialize._directory_identity` validates
+    # the `history_generation` definition written here, so a difference in
+    # framing alone makes the attended request unverifiable even when every row
+    # agrees. `test_directory_identity_agrees_across_producers` pins them.
+    encoded = (
+        json.dumps(files, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
     ).encode("utf-8")
     return {
         "path": str(path.resolve()),
