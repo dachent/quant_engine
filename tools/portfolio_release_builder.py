@@ -1879,6 +1879,7 @@ def _build_hybrid_decomposition(
     correlation_source: Path,
     bundle_root: Path,
     output_root: Path,
+    retained_cache_root: Path | None = None,
 ) -> dict[str, Any]:
     """Publish one version-bound hybrid decomposition from the shared history contract."""
 
@@ -1907,6 +1908,11 @@ def _build_hybrid_decomposition(
         str(source_root),
         "--output-root",
         str(output_root),
+        *(
+            ("--retained-cache-root", str(retained_cache_root))
+            if retained_cache_root is not None
+            else ()
+        ),
         timeout=7200,
     )
     published = _tool(
@@ -1918,6 +1924,11 @@ def _build_hybrid_decomposition(
         str(source_root),
         "--output-root",
         str(output_root),
+        *(
+            ("--retained-cache-root", str(retained_cache_root))
+            if retained_cache_root is not None
+            else ()
+        ),
         timeout=7200,
     )
     return {
@@ -2292,6 +2303,7 @@ def _expected_model_timing(
             "expected_sha256",
             "expected_size_bytes",
             "factors",
+            "interval_policy",
             "relative_path",
             "risk_free_column",
             "schema_name",
@@ -2302,6 +2314,7 @@ def _expected_model_timing(
             "artifact_id",
             "expected_sha256",
             "expected_size_bytes",
+            "interval_policy",
             "relative_path",
             "schema_name",
             "schema_version",
@@ -2316,6 +2329,8 @@ def _expected_model_timing(
         or target_source.get("relative_path") != target_relative
         or factor_source.get("risk_free_column")
         != source_contract.get("risk_free_column")
+        or not isinstance(factor_source.get("interval_policy"), dict)
+        or not isinstance(target_source.get("interval_policy"), dict)
     ):
         raise VerticalBuildError("attribution plan model sources differ")
     _, factor_path = _portable_bundle_file(
@@ -3832,11 +3847,10 @@ def _current_release_plan_specs(
         "specs",
     }:
         raise VerticalBuildError("current decomposition plan fields differ")
-    if (
-        plan.get("builder") != "portfolio-current-decomposition-plan"
-        or plan.get("builder_version") != "0.17.0"
-        or plan.get("schema_version") != 2
-    ):
+    if plan.get("builder") != "portfolio-current-decomposition-plan" or (
+        plan.get("builder_version"),
+        plan.get("schema_version"),
+    ) not in {("0.17.0", 2), ("0.18.0", 2)}:
         raise VerticalBuildError("current decomposition plan contract differs")
     bundle_id = _text(plan.get("bundle_id"), "attribution plan bundle_id")
     if len(bundle_id) != 64 or any(
@@ -4198,6 +4212,7 @@ def _build_base_analytics(
     decomposition_root: Path,
     *,
     current_plan: bool,
+    retained_cache_root: Path | None,
 ) -> tuple[Path, Path, str]:
     """Rebuild the existing base model from one mode's exact selected inputs."""
     base_spec = (
@@ -4274,6 +4289,11 @@ def _build_base_analytics(
         str(base_source),
         "--output-root",
         str(decomposition_root),
+        *(
+            ("--retained-cache-root", str(retained_cache_root))
+            if retained_cache_root is not None
+            else ()
+        ),
         timeout=7200,
     )
     decomposition = _tool(
@@ -4285,6 +4305,11 @@ def _build_base_analytics(
         str(base_source),
         "--output-root",
         str(decomposition_root),
+        *(
+            ("--retained-cache-root", str(retained_cache_root))
+            if retained_cache_root is not None
+            else ()
+        ),
         timeout=7200,
     )
     decomposition_generation_id = _generation_id(
@@ -4297,6 +4322,8 @@ def build_analytics(
     recipe_path: Path,
     attribution_bundle: Path,
     output_root: Path,
+    *,
+    retained_cache_root: Path | None = None,
 ) -> dict[str, Any]:
     recipe = _recipe(recipe_path)
     plan = _load(attribution_bundle / "plan-manifest.json", "attribution plan")
@@ -4326,11 +4353,10 @@ def build_analytics(
         correlation_as_of = _text(
             correlation_identity.get("as_of_date"), "correlation as_of_date"
         )
-    current_plan = (
-        plan.get("builder") == "portfolio-current-decomposition-plan"
-        and plan.get("builder_version") == "0.17.0"
-        and plan.get("schema_version") == 2
-    )
+    current_plan = plan.get("builder") == "portfolio-current-decomposition-plan" and (
+        plan.get("builder_version"),
+        plan.get("schema_version"),
+    ) in {("0.17.0", 2), ("0.18.0", 2)}
     if current_plan:
         if (
             plan.get("evaluation_date") != recipe_as_of
@@ -4383,6 +4409,7 @@ def build_analytics(
         output_root,
         decomposition_root,
         current_plan=current_plan,
+        retained_cache_root=retained_cache_root,
     )
     lenses_root = output_root / "decomposition-lenses"
     lenses: dict[str, str] = {}
@@ -4400,6 +4427,7 @@ def build_analytics(
             output_root / "hybrid-base",
             hybrid_base_root,
             current_plan=True,
+            retained_cache_root=retained_cache_root,
         )
         hybrid_dynamic = {"generation_id": hybrid_generation_id}
         hybrid_bundles["dynamic-style"] = str(hybrid_plan["bundle_id"])
@@ -4416,6 +4444,7 @@ def build_analytics(
             correlation_source=correlation_source,
             bundle_root=evidence_mode_root / "dynamic-style",
             output_root=hybrid_root / "dynamic-style",
+            retained_cache_root=retained_cache_root,
         )
         hybrid_bundles["dynamic-style"] = _text(
             hybrid_dynamic.get("bundle_id"), "hybrid dynamic bundle_id"
@@ -4440,6 +4469,11 @@ def build_analytics(
             str(lens_bundle),
             "--output-root",
             str(lens_root),
+            *(
+                ("--retained-cache-root", str(retained_cache_root))
+                if retained_cache_root is not None
+                else ()
+            ),
             timeout=7200,
         )
         result = _tool(
@@ -4451,6 +4485,11 @@ def build_analytics(
             str(lens_bundle),
             "--output-root",
             str(lens_root),
+            *(
+                ("--retained-cache-root", str(retained_cache_root))
+                if retained_cache_root is not None
+                else ()
+            ),
             timeout=7200,
         )
         generation_id = _generation_id(
@@ -4481,6 +4520,7 @@ def build_analytics(
                 correlation_source=correlation_source,
                 bundle_root=evidence_mode_root / source_key,
                 output_root=hybrid_root / source_key,
+                retained_cache_root=retained_cache_root,
             )
             hybrid_lenses[source_key] = _text(
                 hybrid.get("generation_id"), "hybrid lens generation_id"
@@ -6161,6 +6201,7 @@ def build_stage(
     invested_capital_result_path: Path | None = None,
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
+    retained_cache_root: Path | None = None,
     workbook_runtime_path: Path | None = None,
 ) -> dict[str, Any]:
     """Build exactly one source-to-panel stage from its predecessor outputs."""
@@ -6260,6 +6301,7 @@ def build_stage(
             recipe_path,
             _path(attribution.get("destination"), "attribution destination"),
             stages / "analytics",
+            retained_cache_root=retained_cache_root,
         )
     elif role == "report":
         ledger = _stage_result(output_root, "ledger")
@@ -6446,6 +6488,7 @@ def build_all(
     invested_capital_result_path: Path | None = None,
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
+    retained_cache_root: Path | None = None,
     workbook_runtime_path: Path | None = None,
 ) -> dict[str, Any]:
     _resolve_workbook_runtime(workbook_runtime_path)
@@ -6540,6 +6583,7 @@ def build_all(
         **financial_arguments,
         **hwm_paths,
         **portfolio_paths,
+        retained_cache_root=retained_cache_root,
     )
     report_candidate = build_stage(
         recipe_path,
@@ -6599,6 +6643,7 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--invested-capital-result", type=Path)
     build.add_argument("--invested-capital-input-generation", type=Path)
     build.add_argument("--portfolio-root", type=Path)
+    build.add_argument("--retained-cache-root", type=Path)
     build.add_argument("--workbook-runtime", type=Path)
     inventory = commands.add_parser("inventory")
     inventory.add_argument("--path", type=Path, required=True)
@@ -6656,6 +6701,7 @@ def _parser() -> argparse.ArgumentParser:
     stage.add_argument("--invested-capital-result", type=Path)
     stage.add_argument("--invested-capital-input-generation", type=Path)
     stage.add_argument("--portfolio-root", type=Path)
+    stage.add_argument("--retained-cache-root", type=Path)
     stage.add_argument("--workbook-runtime", type=Path)
     return parser
 
@@ -6680,6 +6726,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.invested_capital_input_generation
                 ),
                 portfolio_root=args.portfolio_root,
+                retained_cache_root=args.retained_cache_root,
                 workbook_runtime_path=args.workbook_runtime,
             )
         elif args.command == "inventory":
@@ -6737,6 +6784,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.invested_capital_input_generation
                 ),
                 portfolio_root=args.portfolio_root,
+                retained_cache_root=args.retained_cache_root,
                 workbook_runtime_path=args.workbook_runtime,
             )
     except (OSError, RuntimeError, ValueError) as exc:

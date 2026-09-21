@@ -3003,9 +3003,10 @@ def _verify_post_build_semantic_gate(spec: PipelineSpec, path: Path) -> None:
     if financial_check:
         expected_checks.add("financial_outcomes")
         proof = _verify_financial_outcomes(spec)
-        if (
-            payload["financial_outcomes_sha256"]
-            != hashlib.sha256(canonical_json_bytes(proof)).hexdigest()
+        from portfolio_financial_outcomes import financial_outcomes_semantic_identity
+
+        if payload["financial_outcomes_sha256"] != financial_outcomes_semantic_identity(
+            proof
         ):
             raise PipelineValidationError(
                 "financial outcomes semantic identity differs"

@@ -342,7 +342,7 @@
       "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "series", "series_composition", "source_sha256", "sources", "unavailable_count"],
       "properties": {
         "analytics_hash": { "$ref": "#/$defs/hash" },
-        "analytics_schema_version": { "enum": [1, 2] },
+        "analytics_schema_version": { "enum": [1, 2, 3] },
         "as_of_date": { "type": "string", "format": "date" },
         "available_count": { "type": "integer", "minimum": 0 },
         "available_source_keys": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
@@ -847,7 +847,7 @@
       "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "lens_id", "lens_label", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "return_basis", "series", "source_sha256", "sources", "unavailable_count"],
       "properties": {
         "analytics_hash": { "$ref": "#/$defs/hash" },
-        "analytics_schema_version": { "enum": [1, 2] },
+        "analytics_schema_version": { "enum": [1, 2, 3] },
         "as_of_date": { "type": "string", "format": "date" },
         "available_count": { "type": "integer", "minimum": 0 },
         "available_surfaces": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["STATIC", "DYNAMIC_FLS"] } },
@@ -885,7 +885,7 @@
       "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "available_source_keys", "default_source_key", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "lens_id", "lens_label", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "return_basis", "series", "source_sha256", "sources", "surface", "unavailable_count"],
       "properties": {
         "analytics_hash": { "$ref": "#/$defs/hash" },
-        "analytics_schema_version": { "enum": [1, 2] },
+        "analytics_schema_version": { "enum": [1, 2, 3] },
         "as_of_date": { "type": "string", "format": "date" },
         "available_count": { "type": "integer", "minimum": 0 },
         "available_source_keys": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
