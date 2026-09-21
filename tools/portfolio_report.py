@@ -10551,6 +10551,7 @@ def publish_report(
     hybrid_decomposition_plan_bundle: Path | None = None,
     attribution_generation_id: str | None = None,
     dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
 ) -> dict[str, Any]:
     governed_hwm_supplied = any(
         value is not None
@@ -10910,6 +10911,7 @@ def publish_report(
         hybrid_decomposition_plan_bundle=snapshot_hybrid_decomposition_plan_bundle,
         attribution_generation_id=snapshot_attribution_generation_id,
         dependence_selected_inputs_path=dependence_selected_inputs_path,
+        source_clock_path=source_clock_path,
     )
     if "workbook" in evidence_snapshots:
         _write_exact(snapshot_root / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
@@ -11374,6 +11376,12 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--attribution-generation-id")
     publish.add_argument("--history-contract", type=Path)
     publish.add_argument("--dependence-selected-inputs", type=Path)
+    # publish re-derives the report from its snapshots and re-validates it, so it needs
+    # every authority build and verify need. Without this the source-clock consumer
+    # binding is simply not checked at publication, and the release builder already
+    # passes the flag -- argparse rejected the whole invocation rather than the run
+    # silently publishing with one fewer check.
+    publish.add_argument("--source-clock", type=Path)
     publish.add_argument("--implementation-reconciliation", type=Path)
     publish.add_argument("--implementation-return-attribution", type=Path)
     publish.add_argument("--correlation-root", type=Path)
@@ -11536,6 +11544,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 attribution_generation_id=args.attribution_generation_id,
                 dependence_selected_inputs_path=args.dependence_selected_inputs,
+                source_clock_path=args.source_clock,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
                 **(
