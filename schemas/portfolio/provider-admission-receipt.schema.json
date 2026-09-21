@@ -52,6 +52,20 @@
       "maxItems": 7,
       "items": {"$ref": "#/$defs/providerGeneration"}
     },
+    "run_observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["captured_at_utc", "financial_cutoff", "path", "policy_contract_sha256", "providers", "sha256", "size_bytes"],
+      "properties": {
+        "captured_at_utc": {"$ref": "#/$defs/nonempty"},
+        "financial_cutoff": {"type": "string", "format": "date"},
+        "path": {"$ref": "#/$defs/nonempty"},
+        "policy_contract_sha256": {"$ref": "#/$defs/sha256"},
+        "providers": {"type": "array", "minItems": 7, "maxItems": 7},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"type": "integer", "minimum": 1}
+      }
+    },
     "receipt_type": {"const": "PROVIDER_ADMIT_OR_DECLARE_V1"},
     "schema_version": {"const": 1}
   },
@@ -249,7 +263,7 @@
         "observed_start": {"type": "string", "format": "date"},
         "provider_id": {"$ref": "#/$defs/nonempty"},
         "qualification": {
-          "enum": ["PUBLISHED_COMPLETE", "ACCEPTED_PARTIAL", "FINITE_STATIC"]
+          "enum": ["PUBLISHED_COMPLETE", "STAGED_COMPLETE", "ACCEPTED_PARTIAL", "FINITE_STATIC"]
         },
         "source_segment_id": {"$ref": "#/$defs/nonempty"},
         "source_segment_sha256": {"$ref": "#/$defs/sha256"}

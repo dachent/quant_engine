@@ -1546,14 +1546,17 @@ def _c3_ledger(
         nav = _c3_money(row.get("nav"), f"NAV {index}", allow_unavailable_reason=True)
         if nav["status"] == "AVAILABLE":
             available_currencies.add(str(nav["currency"]))
-        normalized_navs.append(
-            {
-                "record_id": record_id,
-                "account_id": account_id,
-                "as_of_date": as_of_date,
-                "nav": nav,
-            }
-        )
+        normalized_nav: dict[str, object] = {
+            "record_id": record_id,
+            "account_id": account_id,
+            "as_of_date": as_of_date,
+            "nav": nav,
+        }
+        if "value_basis" in row:
+            normalized_nav["value_basis"] = _nonempty_text(
+                row.get("value_basis"), f"NAV {record_id} value_basis"
+            )
+        normalized_navs.append(normalized_nav)
     if enforce_global_accounting_currency:
         if len(available_currencies) != 1:
             raise AccountAssignmentPerimeterError(
@@ -3531,10 +3534,28 @@ def _build_mixed_account_manifest_payloads(
             },
             "status": "BLOCKED_RETURN_LINKAGE",
             "blocking_reason": (
-                "OPENING_ANCHOR_RECOGNITION_AFTER_CUTOFF"
-                if key in cutoff_excluded_opening_anchor_keys
-                else "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL"
+                blocking_reason := (
+                    "OPENING_ANCHOR_RECOGNITION_AFTER_CUTOFF"
+                    if key in cutoff_excluded_opening_anchor_keys
+                    else "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL"
+                )
             ),
+            "mwr_status": "BLOCKED_ADMISSION",
+            "mwr_reason": blocking_reason,
+            "mwr_xirr": None,
+            "mwr_opening_date": None,
+            "mwr_opening_value": None,
+            "mwr_terminal_date": None,
+            "mwr_terminal_value": None,
+            "mwr_currency": None,
+            "mwr_coverage_status": "BLOCKED",
+            "mwr_cashflows": [],
+            "mwr_label": None,
+            "mwr_value_basis": None,
+            "mwr_valuation_timing": None,
+            "mwr_day_count": "ACTUAL_365",
+            "mwr_unit": "ANNUALIZED_RETURN",
+            "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
         }
         if isinstance(row, dict)
         and (

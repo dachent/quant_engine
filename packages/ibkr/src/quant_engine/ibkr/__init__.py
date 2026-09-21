@@ -1,9 +1,14 @@
 """Read-only Interactive Brokers provider contracts."""
 
 from quant_engine.ibkr.flex import (
+    FlexCashReport,
+    FlexCashTransaction,
     FlexDailyStatement,
     FlexDocument,
     FlexFetchResult,
+    FlexInterestAccrual,
+    FlexPosition,
+    FlexTierInterest,
     FlexValidationError,
     FlexWebServiceClient,
     parse_flex_file,
@@ -30,8 +35,13 @@ __version__ = "0.3.0"
 
 __all__ = [
     "FlexDailyStatement",
+    "FlexCashReport",
+    "FlexCashTransaction",
     "FlexDocument",
     "FlexFetchResult",
+    "FlexInterestAccrual",
+    "FlexPosition",
+    "FlexTierInterest",
     "FlexValidationError",
     "FlexWebServiceClient",
     "IbkrGenerationError",
