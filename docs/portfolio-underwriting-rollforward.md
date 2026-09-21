@@ -461,6 +461,7 @@ advancing pointers.
 & $enginePython tools\portfolio_pipeline_materialize.py spec `
   --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') `
   --output-root $runRoot `
+  --portfolio-root $portfolioRoot `
   --spec (Join-Path $runRoot 'pipeline-spec.json')
 
 & $enginePython tools\data_pipeline.py plan `

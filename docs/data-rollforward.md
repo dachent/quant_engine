@@ -262,7 +262,7 @@ python tools/portfolio_release_builder.py build --recipe (Join-Path $cycleRoot '
 <run browser and interaction QA against the emitted panel candidate>
 python tools/portfolio_release_builder.py stage --recipe (Join-Path $cycleRoot 'vertical-recipe.json') --output-root $proofRoot --role panel --qa-dir $qaRoot --manifest-ledger <exact-ledger.json> --manifest-ledger-identity <exact-ledger-identity.json> --manifest-classified-flows <exact-classified-flows.json> --manifest-admission-policy <exact-admission-policy.json>
 python tools/portfolio_pipeline_materialize.py recipe --vertical-recipe (Join-Path $cycleRoot 'vertical-recipe.json') --proof-root $proofRoot --qa-dir $qaRoot --pipeline-id <new-pipeline-id> --output (Join-Path $cycleRoot 'pipeline-recipe.json')
-python tools/portfolio_pipeline_materialize.py spec --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') --output-root $runRoot --spec (Join-Path $runRoot 'pipeline-spec.json')
+python tools/portfolio_pipeline_materialize.py spec --recipe (Join-Path $cycleRoot 'pipeline-recipe.json') --output-root $runRoot --portfolio-root $portfolioRoot --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py plan --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py execute --spec (Join-Path $runRoot 'pipeline-spec.json')
 python tools/data_pipeline.py status --spec (Join-Path $runRoot 'pipeline-spec.json')
