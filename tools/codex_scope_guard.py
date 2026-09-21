@@ -216,7 +216,9 @@ class _WindowsJob:
                 ("peak_job", ctypes.c_size_t),
             ]
 
-        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.kernel = ctypes.WinDLL(  # type: ignore[attr-defined, unused-ignore]
+            "kernel32", use_last_error=True
+        )
         self.kernel.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         self.kernel.CreateJobObjectW.restype = wintypes.HANDLE
         self.kernel.SetInformationJobObject.argtypes = [
@@ -238,14 +240,14 @@ class _WindowsJob:
         self.handle = self.kernel.CreateJobObjectW(None, None)
         if not self.handle:
             raise GuardError(
-                f"Cannot create child cleanup Job Object: {ctypes.get_last_error()}"
+                f"Cannot create child cleanup Job Object: {ctypes.get_last_error()}"  # type: ignore[attr-defined, unused-ignore]
             )
         limits = ExtendedLimits()
         limits.basic.flags = 0x2000  # JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         if not self.kernel.SetInformationJobObject(
             self.handle, 9, ctypes.byref(limits), ctypes.sizeof(limits)
         ):
-            error = ctypes.get_last_error()
+            error = ctypes.get_last_error()  # type: ignore[attr-defined, unused-ignore]
             self.close()
             raise GuardError(f"Cannot configure child cleanup Job Object: {error}")
 
@@ -256,9 +258,12 @@ class _WindowsJob:
         process_handle = wintypes.HANDLE(int(getattr(process, "_handle")))
         if not self.kernel.AssignProcessToJobObject(self.handle, process_handle):
             raise GuardError(
-                f"Cannot bind suspended child to cleanup Job Object: {ctypes.get_last_error()}"
+                "Cannot bind suspended child to cleanup Job Object: "
+                f"{ctypes.get_last_error()}"  # type: ignore[attr-defined, unused-ignore]
             )
-        resume = ctypes.WinDLL("ntdll").NtResumeProcess
+        resume = ctypes.WinDLL(  # type: ignore[attr-defined, unused-ignore]
+            "ntdll"
+        ).NtResumeProcess
         resume.argtypes = [wintypes.HANDLE]
         resume.restype = ctypes.c_long
         if resume(process_handle) != 0:

@@ -9,8 +9,6 @@ import shutil
 import sys
 from typing import Any
 
-from openpyxl import load_workbook
-from openpyxl.utils.cell import range_boundaries
 import pytest
 
 from quant_engine.core import (
@@ -701,8 +699,8 @@ def test_current_account_summary_excludes_deprecated_account() -> None:
     assert rows[0]["latest_value_usd"] == "99.81"
 
 
-def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_real_retained_baseline_projects_seven_strategy_hwm_and_report(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Removing HWM projection would restore Echo/Composer to a current artifact."""
 
@@ -750,7 +748,7 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
 
     # The portable epoch-generation fixture is independently blocked at
     # verification authority.  Bypass only that prerequisite so this test can
-    # exercise the retained-balance producer/workbook seam against real data.
+    # exercise the retained-balance producer/report seam against real data.
     monkeypatch.setattr(reporter, "_is_governed_financial_mvp2_path", lambda *_: False)
     report, _content, _baseline_path = reporter.build_report_data(
         REAL_BASELINE_ROOT,
@@ -826,115 +824,11 @@ def test_real_retained_baseline_projects_seven_strategy_hwm_and_workbook(
         row["strategy_id"] for row in report["hwm_inputs"]["periods"]
     }
 
-    workbook_path = tmp_path / "seven-strategy-report.xlsx"
-    reporter._workbook(report, workbook_path)
-    workbook = load_workbook(workbook_path, read_only=False, data_only=True)
-    assert workbook["Portfolio Summary"]["E4"].value == "PASS"
-    strategy_table = workbook["Strategy Summary"].tables["tblStrategies"]
-    min_col, min_row, max_col, max_row = range_boundaries(strategy_table.ref)
-    headers = [
-        workbook["Strategy Summary"].cell(min_row, column).value
-        for column in range(min_col, max_col + 1)
-    ]
-    strategy_column = min_col + headers.index("Strategy Id")
-    workbook_ids = {
-        workbook["Strategy Summary"].cell(row, strategy_column).value
-        for row in range(min_row + 1, max_row + 1)
-    }
-    assert workbook_ids == REQUIRED_STRATEGY_IDS
-    current_value_column = min_col + headers.index("Current Value Usd")
-    visible_current = sum(
-        (
-            Decimal(
-                str(workbook["Strategy Summary"].cell(row, current_value_column).value)
-            )
-            for row in range(min_row + 1, max_row + 1)
-        ),
-        Decimal("0"),
-    )
-    allocation_table = workbook["Allocation History"].tables["tblAllocations"]
-    allocation_min_col, allocation_min_row, allocation_max_col, allocation_max_row = (
-        range_boundaries(allocation_table.ref)
-    )
-    allocation_headers = [
-        workbook["Allocation History"].cell(allocation_min_row, column).value
-        for column in range(allocation_min_col, allocation_max_col + 1)
-    ]
-    reserve_allocation = sum(
-        (
-            Decimal(
-                str(
-                    workbook["Allocation History"]
-                    .cell(
-                        row,
-                        allocation_min_col
-                        + allocation_headers.index("Current Value Usd"),
-                    )
-                    .value
-                )
-            )
-            for row in range(allocation_min_row + 1, allocation_max_row + 1)
-            if workbook["Allocation History"]
-            .cell(row, allocation_min_col + allocation_headers.index("Scope"))
-            .value
-            == "RESERVE"
-        ),
-        Decimal("0"),
-    )
     summary = {row["metric"]: row["value"] for row in report["portfolio_summary"]}
     assert summary["Systematic capital"] == "445477.4493751776827506151026"
     assert summary["Retained excluded systematic balance"] == "1068.64"
     assert summary["Reserve"] == "100043.62"
     assert summary["Total liquid"] == "546589.7093751776827506151026"
-    assert abs(visible_current - Decimal("445477.4493751776827506151026")) < Decimal(
-        "0.02"
-    )
-    assert reserve_allocation == Decimal("100043.62")
-    assert abs(
-        visible_current
-        + reserve_allocation
-        + Decimal(summary["Retained excluded systematic balance"])
-        - Decimal(summary["Total liquid"])
-    ) < Decimal("0.02")
-    assert abs(
-        visible_current
-        + reserve_allocation
-        + Decimal(summary["Retained excluded systematic balance"])
-        + Decimal("0.03")
-        - Decimal(summary["Total liquid"])
-    ) >= Decimal("0.02")
-    formula_workbook = load_workbook(workbook_path, read_only=False, data_only=False)
-    try:
-        formula = formula_workbook["Portfolio Summary"]["E4"].value
-        assert formula == (
-            "=IF(ABS(SUM(tblStrategies[Current Value Usd])+"
-            'SUMIFS(tblAllocations[Current Value Usd],tblAllocations[Scope],"RESERVE")+'
-            "SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],"
-            '"Retained excluded systematic balance")-'
-            "SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric],"
-            '"Total liquid"))<0.02,"PASS","FAIL")'
-        )
-        summary_table = formula_workbook["Portfolio Summary"].tables[
-            "tblPortfolioSummary"
-        ]
-        summary_min_col, summary_min_row, summary_max_col, summary_max_row = (
-            range_boundaries(summary_table.ref)
-        )
-        summary_headers = [
-            formula_workbook["Portfolio Summary"].cell(summary_min_row, column).value
-            for column in range(summary_min_col, summary_max_col + 1)
-        ]
-        assert summary_headers == ["Metric", "Status", "Unit", "Value"]
-        summary_metric_column = summary_min_col + summary_headers.index("Metric")
-        assert {
-            formula_workbook["Portfolio Summary"].cell(row, summary_metric_column).value
-            for row in range(summary_min_row + 1, summary_max_row + 1)
-        } >= {"Retained excluded systematic balance", "Total liquid"}
-        assert (
-            "SUMIFS(tblPortfolioSummary[Value],tblPortfolioSummary[Metric]," in formula
-        )
-    finally:
-        formula_workbook.close()
 
 
 def test_real_financial_baseline_rejects_all_none_epoch_triplet() -> None:
@@ -1663,7 +1557,7 @@ def test_build_candidate_and_verify_use_successful_epoch_triplet(
     verified = reporter.verify_candidate(
         REAL_BASELINE_ROOT,
         candidate,
-        Path(built["workbook_path"]),
+        None,
         epoch_manifest_path=candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME,
         epoch_manifest_source_path=candidate
         / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
@@ -1677,7 +1571,7 @@ def test_build_candidate_and_verify_use_successful_epoch_triplet(
     )
 
 
-def test_build_bind_verify_publish_preserves_staged_epoch_authority(
+def test_build_verify_publish_preserves_staged_epoch_authority(
     tmp_path: Path,
 ) -> None:
     manifest_path, source_path, crosswalk_path, generation_root = (
@@ -1693,106 +1587,10 @@ def test_build_bind_verify_publish_preserves_staged_epoch_authority(
         baseline_generation_id=ACCEPTED_EPOCH_BASELINE_GENERATION_ID,
     )
     candidate = Path(built["candidate_dir"])
-    final_workbook = candidate / "excel" / reporter.WORKBOOK_NAME
-    final_workbook.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(candidate / reporter.WORKBOOK_NAME, final_workbook)
-    xlsx_result = candidate / "xlsx-result.json"
-    validation = candidate / "validation.json"
-    job = json.loads((candidate / "xlsx-job.json").read_text(encoding="utf-8"))
-    xlsx_result.write_bytes(
-        reporter.canonical_json_bytes(
-            {
-                "schema_version": "2.0",
-                "run_id": "a" * 32,
-                "idempotency_key": job["idempotency_key"],
-                "final_state": "SUCCEEDED",
-                "steps": [
-                    {
-                        "step_index": 0,
-                        "type": "open",
-                        "status": "succeeded",
-                        "message": "opened",
-                    },
-                    {
-                        "step_index": 1,
-                        "type": "recalc",
-                        "status": "succeeded",
-                        "message": "recalculated",
-                    },
-                    {
-                        "step_index": 2,
-                        "type": "save_as",
-                        "status": "succeeded",
-                        "message": "saved",
-                    },
-                ],
-                "invariants": [],
-                "ok": True,
-            }
-        )
-    )
-    validation.write_bytes(
-        reporter.canonical_json_bytes(
-            {"all_passed": True, "invariants": [{"name": "sentinel", "passed": True}]}
-        )
-    )
-    reporter.canonicalize_workbook(
-        final_workbook, candidate / "workbook-canonicalization.json"
-    )
-    reporter.canonicalize_xlsx_result(
-        xlsx_result, candidate / "xlsx-result-canonicalization.json"
-    )
-    binding_path = candidate / "workbook-evidence-binding.json"
-    binding = reporter.bind_workbook_evidence(
-        candidate,
-        final_workbook,
-        xlsx_result,
-        validation,
-        binding_path,
-        epoch_manifest_path=candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME,
-        epoch_manifest_source_path=candidate
-        / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
-        epoch_crosswalk_path=candidate / reporter.EPOCH_CROSSWALK_WORKBOOK_NAME,
-        baseline_root=REAL_BASELINE_ROOT,
-        epoch_manifest_generation_root=generation_root,
-        baseline_generation_id=ACCEPTED_EPOCH_BASELINE_GENERATION_ID,
-    )
-    assert (
-        binding["epoch_crosswalk_sha256"]
-        == hashlib.sha256(crosswalk_path.read_bytes()).hexdigest()
-    )
-    assert (
-        reporter.main(
-            [
-                "bind-workbook-evidence",
-                "--candidate-dir",
-                str(candidate),
-                "--excel-workbook",
-                str(final_workbook),
-                "--xlsx-result",
-                str(xlsx_result),
-                "--validation-result",
-                str(validation),
-                "--evidence",
-                str(binding_path),
-                "--baseline-root",
-                str(REAL_BASELINE_ROOT),
-                "--epoch-manifest",
-                str(candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME),
-                "--epoch-manifest-source",
-                str(candidate / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME),
-                "--epoch-crosswalk",
-                str(candidate / reporter.EPOCH_CROSSWALK_WORKBOOK_NAME),
-                "--epoch-manifest-generation-root",
-                str(generation_root),
-            ]
-        )
-        == 0
-    )
     verified = reporter.verify_candidate(
         REAL_BASELINE_ROOT,
         candidate,
-        final_workbook,
+        None,
         epoch_manifest_path=candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME,
         epoch_manifest_source_path=candidate
         / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
@@ -1804,23 +1602,25 @@ def test_build_bind_verify_publish_preserves_staged_epoch_authority(
     published = reporter.publish_report(
         REAL_BASELINE_ROOT,
         candidate,
-        final_workbook,
-        xlsx_result,
-        validation,
+        None,
+        None,
+        None,
         tmp_path / "published",
         provider_ledger_root=REAL_BASELINE_ROOT.parent / "provider-ledger",
-        workbook_evidence_binding=binding_path,
         epoch_manifest_path=candidate / reporter.EPOCH_MANIFEST_WORKBOOK_NAME,
         epoch_manifest_source_path=candidate
         / reporter.EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME,
         epoch_crosswalk_path=candidate / reporter.EPOCH_CROSSWALK_WORKBOOK_NAME,
         epoch_manifest_generation_root=generation_root,
     )
-    assert published["epoch_crosswalk_sha256"] == binding["epoch_crosswalk_sha256"]
+    assert (
+        published["epoch_crosswalk_sha256"]
+        == hashlib.sha256(crosswalk_path.read_bytes()).hexdigest()
+    )
     delivery = json.loads(
         (Path(published["delivery_receipt"])).read_text(encoding="utf-8")
     )
-    assert delivery["epoch_crosswalk"]["sha256"] == binding["epoch_crosswalk_sha256"]
+    assert delivery["epoch_crosswalk"]["sha256"] == published["epoch_crosswalk_sha256"]
     cli_published_root = tmp_path / "cli-published"
     assert (
         reporter.main(
@@ -1832,14 +1632,6 @@ def test_build_bind_verify_publish_preserves_staged_epoch_authority(
                 str(REAL_BASELINE_ROOT.parent / "provider-ledger"),
                 "--candidate-dir",
                 str(candidate),
-                "--excel-workbook",
-                str(final_workbook),
-                "--xlsx-result",
-                str(xlsx_result),
-                "--validation-result",
-                str(validation),
-                "--workbook-evidence-binding",
-                str(binding_path),
                 "--output-root",
                 str(cli_published_root),
                 "--epoch-manifest",
@@ -1876,10 +1668,10 @@ def test_build_bind_verify_publish_preserves_staged_epoch_authority(
         cli_delivery.parent.name,
         cli_delivery.parent,
     )
-    assert inspection["epoch_crosswalk_sha256"] == binding["epoch_crosswalk_sha256"]
+    assert inspection["epoch_crosswalk_sha256"] == published["epoch_crosswalk_sha256"]
 
 
-def test_current_crosswalk_labels_and_suffixes_reach_report_and_workbook(
+def test_current_crosswalk_labels_and_suffixes_reach_report(
     tmp_path: Path,
 ) -> None:
     manifest_path, source_path, crosswalk_path, generation_root = (
@@ -1914,54 +1706,6 @@ def test_current_crosswalk_labels_and_suffixes_reach_report_and_workbook(
         if row["strategy_id"] in REQUIRED_STRATEGY_IDS
     }
     assert observed == expected
-    workbook_path = tmp_path / "report.xlsx"
-    reporter._workbook(report, workbook_path)
-    workbook = load_workbook(workbook_path, data_only=True)
-    for sheet_name, table_name in (
-        ("TWR MWR", "tblTwrMwr"),
-        ("Account Summary", "tblAccounts"),
-    ):
-        table = workbook[sheet_name].tables[table_name]
-        min_col, min_row, max_col, max_row = range_boundaries(table.ref)
-        headers = [
-            workbook[sheet_name].cell(min_row, column).value
-            for column in range(min_col, max_col + 1)
-        ]
-        assert "Account Label" in headers
-        assert "Last Four" in headers
-        assert max_row > min_row
-        if sheet_name == "TWR MWR":
-            values = {
-                (
-                    workbook[sheet_name]
-                    .cell(row, headers.index("Account Id") + min_col)
-                    .value,
-                    workbook[sheet_name]
-                    .cell(row, headers.index("Strategy Id") + min_col)
-                    .value,
-                    workbook[sheet_name]
-                    .cell(row, headers.index("Effective Start") + min_col)
-                    .value,
-                    workbook[sheet_name]
-                    .cell(row, headers.index("Effective End") + min_col)
-                    .value
-                    or None,
-                ): (
-                    workbook[sheet_name]
-                    .cell(row, headers.index("Account Label") + min_col)
-                    .value,
-                    workbook[sheet_name]
-                    .cell(row, headers.index("Last Four") + min_col)
-                    .value
-                    or None,
-                )
-                for row in range(min_row + 1, max_row + 1)
-                if workbook[sheet_name]
-                .cell(row, headers.index("Strategy Id") + min_col)
-                .value
-                in REQUIRED_STRATEGY_IDS
-            }
-            assert values == expected
 
 
 def test_cli_build_does_not_drop_epoch_manifest_when_crosswalk_is_missing(

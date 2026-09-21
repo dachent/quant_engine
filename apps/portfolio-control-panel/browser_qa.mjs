@@ -29,6 +29,66 @@ function acceptedCutoff(value) {
   return value;
 }
 
+function optionalExpectedCommonEod(value) {
+  if (value == null) return null;
+  if (!isCalendarDate(value)) throw new Error("--expected-common-eod must be an ISO calendar date");
+  return value;
+}
+
+function sourceClockEvidence(clock, expectedCutoff, expectedCommonEod, renderedLines) {
+  if (clock == null) return { applicable: false, valid: true, reason: "legacy input without source_clock" };
+  const rows = Array.isArray(clock.source_data_as_of) ? clock.source_data_as_of : [];
+  const applicable = rows.filter((row) => row?.applies_to_latest_common_eod === true);
+  const dates = applicable.map((row) => row?.provider_data_date);
+  const latest = dates.length && dates.every(isCalendarDate) ? [...dates].sort()[0] : null;
+  const limiting = latest == null ? [] : applicable.filter((row) => row.provider_data_date === latest).map((row) => row.source_id).sort();
+  const sourceIds = rows.map((row) => row?.source_id);
+  const expectedHeadline = `Source clock — selected financial cutoff ${clock.selected_financial_cutoff}; latest common finalized EOD ${clock.latest_common_eod}; limiting inputs ${(clock.limiting_inputs || []).join(", ")}.`;
+  const sourceLines = rows.map((row) => renderedLines.find((line) => line.startsWith(`Source clock — ${row?.source_id}:`)) || "");
+  const nativeObservationValid = rows.every((row) => row?.native_observed_at == null
+    || (typeof row.native_observed_at === "string"
+      && /(?:Z|[+-]\d{2}:\d{2})$/.test(row.native_observed_at)
+      && typeof row.precision === "string"
+      && row.precision.length > 0
+      && row.precision !== "DATE"));
+  const nativeDeclarationDisplay = rows.every((row, index) => {
+    const line = sourceLines[index];
+    const timezone = typeof row?.timezone === "string" && row.timezone.length > 0
+      ? row.timezone
+      : "unavailable";
+    const precision = typeof row?.precision === "string" && row.precision.length > 0
+      ? row.precision
+      : "DATE";
+    return line.includes(`native timezone ${timezone}`)
+      && line.includes(`native precision ${precision}`)
+      && (row?.native_observed_at != null || !line.includes("T00:00:00"));
+  });
+  return {
+    applicable: true,
+    valid: isCalendarDate(clock.selected_financial_cutoff)
+      && isCalendarDate(clock.latest_common_eod)
+      && clock.selected_financial_cutoff === expectedCutoff
+      && (expectedCommonEod == null || clock.latest_common_eod === expectedCommonEod)
+      && clock.latest_common_eod >= clock.selected_financial_cutoff
+      && sourceIds.length > 0
+      && sourceIds.every((sourceId) => typeof sourceId === "string" && sourceId.length > 0)
+      && rows.every((row) => (row?.timezone == null || (typeof row.timezone === "string" && row.timezone.length > 0))
+        && (row?.precision == null || (typeof row.precision === "string" && row.precision.length > 0)))
+      && nativeObservationValid
+      && JSON.stringify(sourceIds) === JSON.stringify([...new Set(sourceIds)].sort())
+      && latest === clock.latest_common_eod
+      && JSON.stringify(clock.limiting_inputs) === JSON.stringify(limiting)
+      && renderedLines.includes(expectedHeadline)
+      && sourceLines.every(Boolean)
+      && nativeDeclarationDisplay
+      && renderedLines.some((line) => line.includes("Actual execution timestamp is not declared")),
+    selected_financial_cutoff: clock.selected_financial_cutoff,
+    latest_common_eod: clock.latest_common_eod,
+    limiting_inputs: clock.limiting_inputs,
+    rendered_lines: sourceLines,
+  };
+}
+
 function calculationDateFacts(manifest) {
   const facts = [];
   for (const row of manifest?.rows || []) {
@@ -57,6 +117,7 @@ if (!options.html || !options.output || !process.env.PLAYWRIGHT_MODULE) {
   throw new Error("--html, --output, and PLAYWRIGHT_MODULE are required");
 }
 const expectedCalculationCutoff = acceptedCutoff(options["expected-calculation-cutoff"]);
+const expectedCommonEod = optionalExpectedCommonEod(options["expected-common-eod"]);
 const moduleUrl = pathToFileURL(path.resolve(process.env.PLAYWRIGHT_MODULE)).href;
 const { chromium } = await import(moduleUrl);
 const html = path.resolve(options.html);
@@ -181,6 +242,13 @@ try {
     const target = `${baseUrl}${capture.view ? `#${capture.view}` : ""}`;
     await page.goto(target, { waitUntil: "load", timeout: 30000 });
     await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
+    const sourceClockDisplay = sourceClockEvidence(
+      dashboardData.meta?.source_clock,
+      expectedCalculationCutoff,
+      expectedCommonEod,
+      await page.locator("#limitations-list li").allTextContents(),
+    );
+    if (!sourceClockDisplay.valid) throw new Error("source clock rendered declaration is missing or divergent");
     let epochDisplay = null;
     if (capture.view === "risk" && dashboardData.account_manifest?.schema_version >= 9) {
       const manifest = dashboardData.account_manifest;
@@ -215,6 +283,29 @@ try {
       }
       epochDisplay = { rows, legend };
     }
+    // The payload has always carried leverage_disclosures and nothing rendered them. A
+    // payload assertion cannot catch that, which is why this one reads the DOM: the
+    // producer's own output must reach a reader, and an absent measure must be shown as
+    // not evaluated rather than as zero.
+    const leverageRows = Array.isArray(dashboardData.leverage_disclosures)
+      ? dashboardData.leverage_disclosures
+      : [];
+    const leverageStatus = (await page.locator("#leverage-status").textContent())?.trim() ?? "";
+    const leverageCoverageRows = await page.locator("#leverage-coverage-table tbody tr").count();
+    const leverageObservationKpi = (await page.locator("#leverage-kpis").textContent())?.trim() ?? "";
+    if (!leverageRows.length) {
+      if (leverageStatus !== "Not evaluated") {
+        throw new Error("absent leverage disclosures must render as not evaluated, never as zero");
+      }
+    } else {
+      const declaredClasses = new Set(leverageRows.map((row) => row.data_class));
+      const unavailable = leverageRows.filter((row) => row.coverage_status !== "OBSERVED_ONLY");
+      if (leverageCoverageRows < declaredClasses.size
+        || !leverageObservationKpi.includes(leverageRows.length.toLocaleString("en-US"))
+        || (unavailable.length > 0 && leverageStatus !== "Observed only")) {
+        throw new Error("rendered leverage disclosures diverge from the bound panel payload");
+      }
+    }
     await page.screenshot({ path: path.join(folder, "screenshot.png"), fullPage: true });
     if (capture.pdf) await page.pdf({ path: path.join(folder, "page.pdf"), printBackground: true, preferCSSPageSize: true });
     const manifest = {
@@ -231,6 +322,7 @@ try {
       target,
       final_url: page.url(),
       epoch_display: epochDisplay,
+      source_clock_display: sourceClockDisplay,
       title: await page.title(),
       tool: "portfolio_control_panel_browser_qa",
       scope: excludeCandidates ? "NON_CANDIDATE" : "FULL",

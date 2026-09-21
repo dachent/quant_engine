@@ -674,9 +674,11 @@ def _provider_ledger_generation(
     tmp_path: Path,
     *,
     catalog_schema_version: int,
+    catalog_as_of_date: date = date(2026, 7, 30),
     catalog_artifact_as_of_date: date = date(2026, 7, 30),
     manifest_catalog_schema_version: int | None = None,
     manifest_as_of_date: date = date(2026, 7, 30),
+    retained_source_as_of_date: date | None = None,
 ) -> tuple[Path, dict[str, str]]:
     provider_ids = (
         "alpaca",
@@ -696,7 +698,7 @@ def _provider_ledger_generation(
     )
     catalog = {
         "admissions": [],
-        "as_of_date": "2026-07-30",
+        "as_of_date": catalog_as_of_date.isoformat(),
         "catalog_schema_version": catalog_schema_version,
         "corporate_actions": [],
         "fact_counts": [
@@ -778,6 +780,18 @@ def _provider_ledger_generation(
         schema_name="provider-ledger-catalog",
         schema_version=str(manifest_catalog_schema_version or catalog_schema_version),
     )
+    retained_artifacts = ()
+    if retained_source_as_of_date is not None:
+        retained_artifacts = (
+            SourceArtifact(
+                artifact_id="source/retained-provider-observation.json",
+                sha256=hashlib.sha256(b"retained-provider-observation").hexdigest(),
+                size_bytes=len(b"retained-provider-observation"),
+                as_of_date=retained_source_as_of_date,
+                schema_name="retained-provider-observation",
+                schema_version="1",
+            ),
+        )
     manifest = GenerationManifest.build(
         as_of_date=manifest_as_of_date,
         adapter=AdapterIdentity("synthetic-provider-ledger", "2.0.0"),
@@ -786,7 +800,7 @@ def _provider_ledger_generation(
             boundary="synthetic accepted provider-ledger slice",
             fact_types=("nav",),
         ),
-        artifacts=(artifact,),
+        artifacts=(artifact, *retained_artifacts),
         verification=VerificationStatus.VERIFIED,
     )
     root = tmp_path / "provider-ledger"
@@ -1151,6 +1165,58 @@ def test_provider_ledger_consumer_preserves_supported_catalog_schema_version(
     assert catalog_link["schema_version"] == str(catalog_schema_version)
 
 
+def test_provider_ledger_consumer_preserves_financial_cutoff_with_later_provenance(
+    tmp_path: Path,
+) -> None:
+    """The catalog stays financial-dated while the retained source stays provenance-dated."""
+
+    root, ref = _provider_ledger_generation(
+        tmp_path,
+        catalog_schema_version=2,
+        manifest_as_of_date=date(2026, 7, 31),
+        retained_source_as_of_date=date(2026, 7, 31),
+    )
+
+    catalog, artifacts, links = baseline._provider_ledger(
+        ref,
+        {"provider-ledger": root},
+        date(2026, 7, 30),
+    )
+
+    assert catalog["as_of_date"] == "2026-07-30"
+    assert {item.artifact_id: item.as_of_date.isoformat() for item in artifacts} == {
+        "providers/provider-ledger/generation.json": "2026-07-31",
+        "providers/provider-ledger/provider-ledger.json": "2026-07-30",
+    }
+    assert {item["artifact_id"]: item["as_of_date"] for item in links} == {
+        "providers/provider-ledger/generation.json": "2026-07-31",
+        "providers/provider-ledger/provider-ledger.json": "2026-07-30",
+    }
+
+
+def test_provider_ledger_consumer_rejects_coherent_financial_cutoff_tampering(
+    tmp_path: Path,
+) -> None:
+    """A rehashed later catalog cannot evade the baseline's selected cutoff."""
+
+    root, ref = _provider_ledger_generation(
+        tmp_path,
+        catalog_schema_version=2,
+        catalog_as_of_date=date(2026, 7, 31),
+        catalog_artifact_as_of_date=date(2026, 7, 31),
+        manifest_as_of_date=date(2026, 7, 31),
+    )
+
+    with pytest.raises(
+        baseline.BaselineValidationError, match="provider-ledger is newer than baseline"
+    ):
+        baseline._provider_ledger(
+            ref,
+            {"provider-ledger": root},
+            date(2026, 7, 30),
+        )
+
+
 def test_portfolio_baseline_spec_v3_consumes_schema_valid_provider_ledger_v2(
     tmp_path: Path,
 ) -> None:
@@ -1249,6 +1315,84 @@ def test_provider_ledger_v2_consumes_only_effective_authoritative_account_facts(
     )
 
     assert [row["record_id"] for row in result[result_index]] == [f"{fact_type}-schwab"]
+
+
+@pytest.mark.parametrize(
+    ("observed_at", "expects_position"),
+    (
+        ("2026-09-18T03:59:40.004417+00:00", True),
+        ("2026-09-18T04:00:00+00:00", False),
+    ),
+)
+def test_provider_ledger_schwab_current_position_uses_new_york_financial_day(
+    observed_at: str, expects_position: bool
+) -> None:
+    """A native UTC position date remains authoritative, but EOD selection is New York."""
+
+    catalog = {
+        "admissions": [
+            {
+                "account_id": "account-schwab",
+                "account_reconciliation_sha256": "a" * 64,
+                "disposition": "AUTHORITATIVE",
+                "effective_end": "2026-09-18",
+                "effective_start": "2026-09-18",
+                "evidence_layer": "ACCOUNT_LIVE",
+                "fact_type": "positions",
+                "pool_id": None,
+                "provider_id": "schwab",
+                "strategy_id": None,
+            }
+        ],
+        "catalog_schema_version": 2,
+        "flows": [],
+        "nav_observations": [],
+        "positions": [
+            {
+                "account_id": "account-schwab",
+                "as_of_date": "2026-09-18",
+                "mapping_status": "MAPPED",
+                "observed_at": observed_at,
+                "provider_id": "schwab",
+                "record_id": "schwab:position-native-utc-18",
+                "security_id": "security-schwab-current",
+                "source_artifact_id": "source/schwab-current.json",
+                "source_record_id": "position-native-utc-18",
+            }
+        ],
+        "provider_coverage": [],
+        "quality_findings": [],
+        "securities": [],
+        "transactions": [],
+    }
+
+    if expects_position:
+        result = baseline._provider_ledger_facts(
+            catalog,
+            [{"account_id": "account-schwab"}],
+            [],
+            [],
+            [],
+            [],
+            date(2026, 9, 17),
+        )
+        assert [row["record_id"] for row in result[3]] == [
+            "schwab:position-native-utc-18"
+        ]
+    else:
+        with pytest.raises(
+            baseline.BaselineValidationError,
+            match="provider-ledger fact is newer than baseline",
+        ):
+            baseline._provider_ledger_facts(
+                catalog,
+                [{"account_id": "account-schwab"}],
+                [],
+                [],
+                [],
+                [],
+                date(2026, 9, 17),
+            )
 
 
 @pytest.mark.parametrize(
@@ -1590,16 +1734,25 @@ def test_provider_ledger_consumer_rejects_manifest_schema_version_drift(
 
 
 @pytest.mark.parametrize(
-    ("date_field", "drifted_date"),
+    ("date_field", "drifted_date", "message"),
     (
-        ("catalog_artifact_as_of_date", date(2026, 7, 29)),
-        ("manifest_as_of_date", date(2026, 7, 31)),
+        (
+            "catalog_artifact_as_of_date",
+            date(2026, 7, 29),
+            "provider-ledger catalog as-of binding differs",
+        ),
+        (
+            "manifest_as_of_date",
+            date(2026, 7, 31),
+            "provider-ledger generation date is not artifact-derived",
+        ),
     ),
 )
 def test_provider_ledger_consumer_rejects_catalog_as_of_binding_drift(
     tmp_path: Path,
     date_field: str,
     drifted_date: date,
+    message: str,
 ) -> None:
     root, ref = _provider_ledger_generation(
         tmp_path,
@@ -1607,10 +1760,7 @@ def test_provider_ledger_consumer_rejects_catalog_as_of_binding_drift(
         **{date_field: drifted_date},
     )
 
-    with pytest.raises(
-        baseline.BaselineValidationError,
-        match="provider-ledger catalog as-of binding differs",
-    ):
+    with pytest.raises(baseline.BaselineValidationError, match=message):
         baseline._provider_ledger(
             ref,
             {"provider-ledger": root},

@@ -164,6 +164,7 @@ def test_rebinds_only_baseline_derived_fields_from_exact_staged_generation(
         "schema_version": "1",
     }
     assert rebound["as_of_date"] == "2026-08-13"
+    assert rebound["calculation_cutoff_date"] == "2026-08-13"
     assert rebound["rows"][0] == {
         "assignment_id": "assignment-rebound-00",
         "account_id": "account-00",
@@ -181,6 +182,66 @@ def test_rebinds_only_baseline_derived_fields_from_exact_staged_generation(
         == "EXCLUDED_DEPRECATED_HISTORY_ONLY"
     )
     assert rebound["rows"][14]["owner_reason"] == "OWNER_CHOICE_14"
+
+
+def test_rebind_honors_selected_cutoff_without_mutating_old_template(
+    tmp_path: Path,
+) -> None:
+    """Would fail if a retained Sep. 2 template overrides the selected Sep. 17 cutoff."""
+
+    runner = _load_runner()
+    rows = _rows()
+    template = _template(rows)
+    template["as_of_date"] = "2026-09-17"
+    template["calculation_cutoff_date"] = "2026-09-02"
+    template_path = tmp_path / "explicit-crosswalk.json"
+    template_path.write_text(json.dumps(template), encoding="utf-8")
+    baseline = _baseline(rows)
+    baseline["as_of_date"] = "2026-09-17"
+    generation = _write_generation(tmp_path, baseline)
+    output = tmp_path / "candidate-crosswalk.json"
+
+    runner.rebind_current_epoch_crosswalk(
+        template_path=template_path,
+        baseline_generation_dir=generation,
+        output_path=output,
+        calculation_cutoff_date="2026-09-17",
+    )
+
+    assert json.loads(output.read_text(encoding="utf-8"))[
+        "calculation_cutoff_date"
+    ] == ("2026-09-17")
+    assert json.loads(template_path.read_text(encoding="utf-8"))[
+        "calculation_cutoff_date"
+    ] == ("2026-09-02")
+
+
+@pytest.mark.parametrize("selected", ["2026-09-18", "2026-9-17"])
+def test_rebind_rejects_malformed_or_out_of_bound_selected_cutoff_before_write(
+    tmp_path: Path, selected: str
+) -> None:
+    """Would fail if an invalid requested cutoff can create a candidate crosswalk."""
+
+    runner = _load_runner()
+    rows = _rows()
+    template_path = tmp_path / "explicit-crosswalk.json"
+    template_path.write_text(json.dumps(_template(rows)), encoding="utf-8")
+    baseline = _baseline(rows)
+    baseline["as_of_date"] = "2026-09-17"
+    generation = _write_generation(tmp_path, baseline)
+    output = tmp_path / "candidate-crosswalk.json"
+
+    with pytest.raises(
+        runner.CurrentEpochCrosswalkRebindError, match="calculation.*cutoff.*invalid"
+    ):
+        runner.rebind_current_epoch_crosswalk(
+            template_path=template_path,
+            baseline_generation_dir=generation,
+            output_path=output,
+            calculation_cutoff_date=selected,
+        )
+
+    assert not output.exists()
 
 
 def test_rebind_writes_the_core_canonical_json_encoding(tmp_path: Path) -> None:

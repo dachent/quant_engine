@@ -481,20 +481,37 @@ def verify_selected_capital_ledger(
 ) -> Path:
     """Bind capital's provider ledger to the generation this candidate selected.
 
-    The capital input generation names its own provider-ledger file, and every
-    ledger generation built under one contract satisfies the same admission
-    receipt. Without this check an older ledger could validate while the
-    candidate selected a newer one. Containment is checked rather than the
-    parent name, because the ledger sits directly in the generation directory
-    on the governed route and under a normalized subdirectory elsewhere.
+    Every ledger generation built under one contract satisfies the same
+    admission receipt, so without this check an older ledger could validate
+    while the candidate selected a newer one.
+
+    The binding carries the generation id, which is portable identity rather
+    than a locator. This previously compared an absolute path for containment,
+    which forced the published financial artifact to carry the directory it was
+    built in and made its identity depend on where the run happened. Identity
+    holds for both on-disk shapes -- the ledger sits directly in the generation
+    directory on the governed route and under a normalized subdirectory
+    elsewhere, which is why containment was used before -- and it distinguishes
+    a byte-identical ledger from a different generation, which neither
+    containment nor a content hash alone can do.
     """
     inputs = json.loads(input_generation_path.read_bytes())
     bindings = inputs.get("source_bindings")
     ledger = bindings.get("provider_ledger") if isinstance(bindings, Mapping) else None
-    if not isinstance(ledger, Mapping) or not isinstance(ledger.get("path"), str):
+    if (
+        not isinstance(ledger, Mapping)
+        or not isinstance(ledger.get("sha256"), str)
+        or not isinstance(ledger.get("generation_id"), str)
+    ):
         raise FinancialOutcomeError("capital provider ledger binding is absent")
     selected_root = provider_ledger_generation_path.resolve().parent
-    if not Path(ledger["path"]).resolve().is_relative_to(selected_root):
+    # Bind by portable identity rather than by containment. The old check asked
+    # whether an absolute path sat under the selected directory, which forced
+    # the published result to carry its own build location. Generation id and
+    # content hash together are strictly stronger: containment alone could not
+    # tell a byte-identical ledger from a different generation apart, and a
+    # hash alone cannot either.
+    if ledger["generation_id"] != selected_root.name:
         raise FinancialOutcomeError(
             "capital provider ledger differs from the selected generation"
         )
@@ -1239,16 +1256,10 @@ def _verify_consumers(
     )
     if downloadable_report != report_bytes:
         raise FinancialOutcomeError("downloaded report differs from selected report")
-    # The panel carries the workbook inline rather than as a file beside the
-    # page: an .xlsx inside a published generation is rewritten in place by the
-    # SharePoint sync client, and a sealed directory cannot tolerate a file that
-    # changes under it. Parity is therefore checked against the bytes the panel
-    # actually delivers, which is what the browser downloads too.
-    _index_path, index_html = _generation_file(epochs["panel_generation"], "index.html")
-    workbook = panel_producer.embedded_download_bytes(
-        index_html.decode("utf-8"), panel_producer.WORKBOOK_DOWNLOAD
-    )
-    parity = report_producer._workbook_parity_receipt(report_bytes, workbook)
+    report_panel_parity = {
+        "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
+        "panel_report_sha256": hashlib.sha256(downloadable_report).hexdigest(),
+    }
     correlation_node = nodes["financial-outcome-dependence-live-only"]
     correlation_generation = _generation(spec, correlation_node)
     correlation = replays[("DEPENDENCE", correlation_node.path.resolve())]
@@ -1282,7 +1293,7 @@ def _verify_consumers(
             raise FinancialOutcomeError(f"panel dependence values differ: {mode}")
     return {
         "report_sha256": hashlib.sha256(report_bytes).hexdigest(),
-        "workbook_parity": parity,
+        "report_panel_parity": report_panel_parity,
         "decomposition_cells": _verify_decomposition_consumers(
             spec, contract, nodes, replays, series, dashboard, plan_bindings, plan
         ),
@@ -1385,13 +1396,19 @@ def validate_financial_outcomes(
     capital_node = nodes["financial-outcome-capital"]
     capital = json.loads(capital_node.path.read_bytes())
     capital_input = capital["input_generation"]
-    _artifact_for_digest(spec, capital_input["sha256"], capital_input["size_bytes"])
+    # The binding identifies the generation by digest, not by where it sits.
+    # The spec already resolves that digest to a node, so take the path from
+    # there rather than from the payload: a published financial artifact that
+    # carried its own build location could only ever re-verify from it.
+    capital_input_node = _artifact_for_digest(
+        spec, capital_input["sha256"], capital_input["size_bytes"]
+    )
     verify_selected_capital_ledger(
-        Path(capital_input["path"]),
+        capital_input_node.path,
         selected_sources["provider_ledger_generation_path"],
     )
     capital = verify_governed_capital_result(
-        capital, Path(capital_input["path"]), contract_path
+        capital, capital_input_node.path, contract_path
     )
     if capital.get("status") != "AVAILABLE" or (
         not allow_synthetic and capital.get("authority_profile") != "ACCEPTED_GOVERNED"

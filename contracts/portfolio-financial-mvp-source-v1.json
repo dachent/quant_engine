@@ -3,7 +3,7 @@
  "contract_schema_version": 6,
  "product": {
   "product_id": "FINANCIAL_MVP",
-  "product_version": "1.8.0",
+  "product_version": "1.9.0",
   "runtime_profile": "PORTFOLIO_SOURCE_TO_PANEL_V1",
   "operator_outcome": "One governed as-held portfolio product with numerical HWM and drawdowns, daily and current invested capital excluding gains, applicable decomposition, and complete dependence analysis.",
   "as_of_policy": {
@@ -49,12 +49,8 @@
     "acceptance": "All four required outcomes have calculation-specific accepted states and exact source identities."
    },
    {
-    "role": "WORKBOOK",
-    "acceptance": "The native workbook recalculates and agrees with the report under release QC."
-   },
-   {
     "role": "PANEL",
-    "acceptance": "The staged panel and downloads agree with report and workbook values, statuses, intervals, and identities."
+   "acceptance": "The staged panel agrees with canonical report values, statuses, intervals, and identities."
    },
    {
     "role": "RELEASE_RECEIPT",
@@ -2582,7 +2578,6 @@
    ],
    "consumers": [
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -2614,7 +2609,6 @@
    ],
    "consumers": [
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -2851,7 +2845,6 @@
       "DECOMPOSITION",
       "DEPENDENCE",
       "REPORT",
-      "WORKBOOK",
       "PANEL",
       "RELEASE_RECEIPT"
      ],
@@ -2954,7 +2947,6 @@
    ],
    "consumers": [
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -2990,7 +2982,6 @@
    ],
    "consumers": [
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -3107,7 +3098,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -3130,7 +3120,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -3228,7 +3217,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -3326,7 +3314,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -3420,7 +3407,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -3512,7 +3498,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -3589,28 +3574,25 @@
      "effective_end": null,
      "upstream_inventory_sha256": "9ea70645cc8f40dd38148fc115fa65ca02ef6d43eb932ece404c989fde555da1",
      "product_data_class_count": 1,
-     "product_data_class_set_sha256": "8855be07f869e61d3eeef1a2dd1b97e8645c48f99c01205f113d5b7cd8382cd7",
+     "product_data_class_set_sha256": "bd9dc67925fb1bbed75941595a17013240853904918f97e7cee8d2ce84d01d40",
      "admitted_item_count": 2,
      "admitted_item_set_sha256": "c9a66669fe0cd411dee0b2d99c79f063a3c7c026bc671ce5ec97d58de6f6aa0f",
      "allowed_exclusion_reasons": [
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED",
-      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER"
+      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER",
+      "NO_CURRENT_PRODUCT_CONSUMER"
      ],
-     "exclusion_readiness_impact": "REQUIRED_NOT_READY",
+     "exclusion_readiness_impact": "NO_CURRENT_PRODUCT_EFFECT",
      "exclusion_readiness_impact_by_reason": {
       "REQUIRED_DATA_CLASS_NOT_MATERIALIZED": "REQUIRED_NOT_READY",
-      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER": "NO_CURRENT_PRODUCT_EFFECT"
+      "SOURCE_ITEM_NOT_ADMITTED_TO_CURRENT_LEDGER": "NO_CURRENT_PRODUCT_EFFECT",
+      "NO_CURRENT_PRODUCT_CONSUMER": "NO_CURRENT_PRODUCT_EFFECT"
      },
      "exclusion_invalidated_outputs_rule": "SOURCE_SEGMENT_INVALIDATED_OUTPUTS_OR_NO_CURRENT_PRODUCT_OUTPUT"
     }
    },
-   "product_requirement": "REQUIRED",
-   "consumers": [
-    "DECOMPOSITION",
-    "DEPENDENCE",
-    "REPORT",
-    "RELEASE_RECEIPT"
-   ],
+   "product_requirement": "EXCLUDED",
+   "consumers": [],
    "current_generation": {
     "generation_id": "80ad1dcab09a909032a4f174666ac130359c1585b67dec9a5ebe2182aac5eef8",
     "sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
@@ -3629,7 +3611,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -3717,7 +3698,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -3742,7 +3722,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4018,7 +3997,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8",
      "product_data_class_count": 9,
-     "product_data_class_set_sha256": "c8fa73170b7176c8d31ffe9b0d2ffb25aceed4193361930270e9e92a8968bfc5",
+     "product_data_class_set_sha256": "9b94724ff0b983b83b8f920ceedd0cd8ff691f34cbeb15d0603c7fc3e88c6ac9",
      "admitted_item_count": 25,
      "admitted_item_set_sha256": "0b8c38b8dcfcc551ac38dae244b47fd431488cc57d220656c5223967cd6892c2",
      "allowed_exclusion_reasons": [
@@ -4064,7 +4043,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4140,7 +4118,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "24f77dcf8c81b5c4906f66013568c2ec205e46752117c9bad56aba2e65d3b98e",
      "product_data_class_count": 2,
-     "product_data_class_set_sha256": "792f5bd0bbca0836b4e25a3559adf6f69aab248a4289959925bc0d1caa05c978",
+     "product_data_class_set_sha256": "58a28c6e71f75ed76a4548806906cf01dd9192a2d10f25679e5df4b1b62a8183",
      "admitted_item_count": 6,
      "admitted_item_set_sha256": "1c00617f3db60ee5b1571ef822261c39c02cf0c620604a66a35c45616f82141c",
      "allowed_exclusion_reasons": [
@@ -4242,7 +4220,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4319,7 +4296,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "2abcd635064683b61f71e11b07893a52029c7bb32d2a7d5ceb38e27a1aa9020f",
      "product_data_class_count": 3,
-     "product_data_class_set_sha256": "70fcf851a90a424642d944bf3e0a5c7fe984bde6506c9e284e4463c5d8a69ce1",
+     "product_data_class_set_sha256": "ae460ceb04d7a53821ab8b40eda9579e766f1e33c28df76719acdccb30f918c0",
      "admitted_item_count": 6,
      "admitted_item_set_sha256": "c08d7a42db964d459235cf0071a843a6b3b703c03932b5c3b72b0ccab7b1843b",
      "allowed_exclusion_reasons": [
@@ -4365,7 +4342,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4446,7 +4422,7 @@
      "effective_end": null,
      "upstream_inventory_sha256": "548db85021b3a735b9145934795c37d7d99f51360fba94f0548120f1828eaf33",
      "product_data_class_count": 5,
-     "product_data_class_set_sha256": "5e40f0cb78ec90654003fc71947b77a34effd3c4d3ba7f0c6656008d93413304",
+     "product_data_class_set_sha256": "84091cab83bf027885fa37553ad7951330839c4004bf5221bd51d56b626e4075",
      "admitted_item_count": 22,
      "admitted_item_set_sha256": "c736740e96e30517af5597c8819332d8e1020b45e0a8e35c646897f6b2bf4a26",
      "allowed_exclusion_reasons": [
@@ -4491,7 +4467,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4568,7 +4543,6 @@
    "consumers": [
     "DECOMPOSITION",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4585,7 +4559,6 @@
    "invalidated_outputs": [
     "DECOMPOSITION",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4665,7 +4638,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4683,7 +4655,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4752,7 +4723,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4770,7 +4740,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4840,7 +4809,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4860,7 +4828,6 @@
     "DECOMPOSITION",
     "DEPENDENCE",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4934,7 +4901,6 @@
     "AS_HELD_COMPOSITE_HWM",
     "INVESTED_CAPITAL",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -4953,7 +4919,6 @@
     "HWM",
     "INVESTED_CAPITAL",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -5027,7 +4992,6 @@
    "consumers": [
     "AS_HELD_COMPOSITE_HWM",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -5044,7 +5008,6 @@
    "invalidated_outputs": [
     "HWM",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -5122,7 +5085,6 @@
     "INVESTED_CAPITAL",
     "DECOMPOSITION",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],
@@ -5147,7 +5109,6 @@
     "INVESTED_CAPITAL",
     "DECOMPOSITION",
     "REPORT",
-    "WORKBOOK",
     "PANEL",
     "RELEASE_RECEIPT"
    ],

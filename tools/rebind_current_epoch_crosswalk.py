@@ -306,8 +306,8 @@ def _baseline_mapped_rows(
         account_id = _text(
             raw_assignment.get("account_id"), "baseline assignment account_id"
         )
-        provider = account_providers.get(account_id)
-        if provider is None:
+        assignment_provider = account_providers.get(account_id)
+        if assignment_provider is None:
             raise CurrentEpochCrosswalkRebindError(
                 "baseline assignment account is missing"
             )
@@ -316,7 +316,7 @@ def _baseline_mapped_rows(
                 raw_assignment.get("assignment_id"), "baseline assignment_id"
             ),
             "account_id": account_id,
-            "provider": provider,
+            "provider": assignment_provider,
             "strategy_id": _text(
                 raw_assignment.get("strategy_id"), "baseline strategy_id"
             ),
@@ -341,7 +341,10 @@ def _baseline_mapped_rows(
 
 
 def _candidate_payload(
-    template: dict[str, Any], baseline: dict[str, Any], binding: dict[str, Any]
+    template: dict[str, Any],
+    baseline: dict[str, Any],
+    binding: dict[str, Any],
+    calculation_cutoff_date: str | None,
 ) -> dict[str, Any]:
     template_rows = _validate_template(template)
     mapped, account_displays = _baseline_mapped_rows(baseline)
@@ -364,13 +367,17 @@ def _candidate_payload(
     candidate["selected_baseline"] = binding
     candidate["rows"] = rebound_rows
     cutoff = _canonical_date(
-        candidate.get("calculation_cutoff_date"), "crosswalk calculation_cutoff_date"
+        calculation_cutoff_date
+        if calculation_cutoff_date is not None
+        else candidate.get("calculation_cutoff_date"),
+        "crosswalk calculation_cutoff_date",
     )
     assert cutoff is not None
     if date.fromisoformat(cutoff) > date.fromisoformat(str(binding["as_of_date"])):
         raise CurrentEpochCrosswalkRebindError(
             "crosswalk calculation cutoff is invalid"
         )
+    candidate["calculation_cutoff_date"] = cutoff
     return candidate
 
 
@@ -387,13 +394,17 @@ def _write_new(path: Path, payload: Mapping[str, Any]) -> None:
 
 
 def rebind_current_epoch_crosswalk(
-    *, template_path: Path, baseline_generation_dir: Path, output_path: Path
+    *,
+    template_path: Path,
+    baseline_generation_dir: Path,
+    output_path: Path,
+    calculation_cutoff_date: str | None = None,
 ) -> dict[str, object]:
-    """Produce a new bound candidate without changing the explicit policy choice."""
+    """Produce a new bound candidate without changing policy or topology choices."""
 
     template = _object_from_path(template_path, "explicit crosswalk")
     baseline, binding = _baseline_binding(baseline_generation_dir)
-    candidate = _candidate_payload(template, baseline, binding)
+    candidate = _candidate_payload(template, baseline, binding, calculation_cutoff_date)
     _write_new(output_path, candidate)
     return {
         "baseline_generation_id": binding["generation_id"],
@@ -407,6 +418,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--template", type=Path, required=True)
     parser.add_argument("--baseline-generation-dir", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--calculation-cutoff-date")
     return parser
 
 
@@ -417,6 +429,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             template_path=args.template,
             baseline_generation_dir=args.baseline_generation_dir,
             output_path=args.output,
+            calculation_cutoff_date=args.calculation_cutoff_date,
         )
     except (CurrentEpochCrosswalkRebindError, OSError, ValueError) as exc:
         print(f"current-epoch-crosswalk-rebind: FAIL: {exc}", file=sys.stderr)

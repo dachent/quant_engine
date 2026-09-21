@@ -436,10 +436,10 @@ def _manifest_hashes(plan_bundle: Path) -> dict[str, str]:
     if manifest.get("bundle_id") != plan_bundle.name:
         raise WeeklyReturnError("planning bundle identity differs")
     if schema_version == 2:
-        if (
-            manifest.get("builder") != "portfolio-current-decomposition-plan"
-            or manifest.get("builder_version") != "0.17.0"
-        ):
+        if manifest.get("builder") != "portfolio-current-decomposition-plan" or (
+            manifest.get("builder_version"),
+            manifest.get("schema_version"),
+        ) not in {("0.17.0", 2), ("0.18.0", 2)}:
             raise WeeklyReturnError("current planning builder identity differs")
         identity = dict(manifest)
         identity.pop("bundle_id", None)

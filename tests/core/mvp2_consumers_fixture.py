@@ -319,7 +319,7 @@ def build_consumers_vertical(
     *,
     primary_decomposition_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Build real report/workbook and panel private candidates from one source."""
+    """Build real report and panel private candidates from one source."""
 
     import portfolio_control_panel as panel
     import portfolio_current_dependence as current
@@ -450,7 +450,6 @@ def build_consumers_vertical(
         "panel_generation": panel_generation,
         "report_root": report_root,
         "panel_root": panel_root,
-        "workbook_candidate": Path(report_built["workbook_path"]),
         "freshness_health": freshness,
         "epoch_manifest": epoch_manifest,
         "epoch_manifest_source": epoch_source,

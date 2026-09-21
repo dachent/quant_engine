@@ -79,6 +79,54 @@ def _write_json(path: Path, value: object) -> Path:
     return path
 
 
+def test_layered_history_authority_paths_forward_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, object] = {}
+    authority_paths = {
+        "provider_admission_receipt_path": tmp_path / "receipt.json",
+        "financial_input_contract_path": tmp_path / "financial-contract.json",
+        "provider_ledger_manifest_path": tmp_path / "ledger-manifest.json",
+        "provider_ledger_catalog_path": tmp_path / "ledger-catalog.json",
+        "portfolio123_version_evidence_path": tmp_path / "p123-version.json",
+    }
+
+    class _RoutingVerifier:
+        @staticmethod
+        def verify_layered_history_generation(
+            generation_root: Path,
+            contract_path: Path,
+            **kwargs: object,
+        ) -> dict[str, object]:
+            captured.update(
+                generation_root=generation_root, contract_path=contract_path, **kwargs
+            )
+            raise OSError("routing sentinel")
+
+    monkeypatch.setattr(planner, "_layered_history_module", lambda: _RoutingVerifier)
+    with pytest.raises(planner.CurrentPlanError, match="routing sentinel"):
+        planner._layered_history_targets(
+            generation_root=tmp_path / "generation",
+            contract_path=tmp_path / "contract.json",
+            strategies=[
+                {
+                    "strategy_id": "strategy",
+                    "series_id": "SERIES",
+                    "assignments": [{"source_key": "source"}],
+                }
+            ],
+            evidence_mode="LIVE_ONLY",
+            evaluated_on=date(2026, 1, 1),
+            **authority_paths,
+        )
+
+    assert captured == {
+        "generation_root": tmp_path / "generation",
+        "contract_path": tmp_path / "contract.json",
+        **authority_paths,
+    }
+
+
 def _release_builder_module(name: str) -> Any:
     release_path = REPOSITORY_ROOT / "tools" / "portfolio_release_builder.py"
     release_spec = importlib.util.spec_from_file_location(name, release_path)
@@ -593,6 +641,110 @@ def _canonical_public_manifest_with_renamed_inputs(
     _reidentify_public_manifest(manifest)
     manifest_path = _write_json(tmp_path / "public-factor-manifest.json", manifest)
     return market_paths, manifest_path, catalog_sha256, evaluation_date
+
+
+def test_legacy_development_accepts_complete_source_with_empty_gap_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _fixture(tmp_path)
+    contract = json.loads(
+        inputs["financial_mvp_contract_path"].read_text(encoding="utf-8")
+    )
+    coverage = json.loads(
+        (inputs["layered_history_generation_path"] / "coverage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    selected_source_ids = {
+        segment["source_id"]
+        for strategy in coverage["strategies"]
+        for segment in strategy["segments"]
+        if segment["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    }
+    for source in contract["source_segments"]:
+        if source["source_id"] in selected_source_ids:
+            source["declared_gap_policy"] = {
+                "declared_missing_source_dates": [],
+                "omitted_return_dates": [],
+                "span_return_receipts": [],
+                "unavailable_return_dates": [],
+            }
+    contract_path = _write_json(tmp_path / "empty-gap-contract.json", contract)
+
+    class _ValidVerifier:
+        @staticmethod
+        def verify_layered_history_generation(
+            _generation_root: Path, _contract_path: Path
+        ) -> dict[str, str]:
+            return {
+                "generation_id": inputs["layered_history_generation_path"].name,
+                "verification": "VALID",
+            }
+
+    monkeypatch.setattr(planner, "_layered_history_module", lambda: _ValidVerifier)
+    result = planner._layered_history_targets(
+        generation_root=inputs["layered_history_generation_path"],
+        contract_path=contract_path,
+        strategies=planner._resolved_strategies(inputs["plan_document"]),
+        evidence_mode="LIVE_ONLY",
+        evaluated_on=date.fromisoformat(inputs["evaluation_date"]),
+    )
+
+    assert result["rows"]
+
+
+def test_legacy_development_rejects_real_gap_without_manifest_authority(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    inputs = _fixture(tmp_path)
+    contract = json.loads(
+        inputs["financial_mvp_contract_path"].read_text(encoding="utf-8")
+    )
+    coverage = json.loads(
+        (inputs["layered_history_generation_path"] / "coverage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    selected_source_ids = {
+        segment["source_id"]
+        for strategy in coverage["strategies"]
+        for segment in strategy["segments"]
+        if segment["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+    }
+    source = next(
+        item
+        for item in contract["source_segments"]
+        if item["source_id"] in selected_source_ids
+    )
+    source["declared_gap_policy"] = {
+        "declared_missing_source_dates": ["2026-01-02"],
+        "omitted_return_dates": ["2026-01-04"],
+        "span_return_receipts": [],
+        "unavailable_return_dates": ["2026-01-02", "2026-01-03"],
+    }
+    contract_path = _write_json(tmp_path / "real-gap-contract.json", contract)
+
+    class _ValidVerifier:
+        @staticmethod
+        def verify_layered_history_generation(
+            _generation_root: Path, _contract_path: Path
+        ) -> dict[str, str]:
+            return {
+                "generation_id": inputs["layered_history_generation_path"].name,
+                "verification": "VALID",
+            }
+
+    monkeypatch.setattr(planner, "_layered_history_module", lambda: _ValidVerifier)
+    with pytest.raises(
+        planner.CurrentPlanError, match="declared source gap authority is incomplete"
+    ):
+        planner._layered_history_targets(
+            generation_root=inputs["layered_history_generation_path"],
+            contract_path=contract_path,
+            strategies=planner._resolved_strategies(inputs["plan_document"]),
+            evidence_mode="LIVE_ONLY",
+            evaluated_on=date.fromisoformat(inputs["evaluation_date"]),
+        )
 
 
 def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -> None:
@@ -2598,6 +2750,103 @@ def test_public_manifest_reuse_warns_in_development_and_fails_release_qc(
         )
 
 
+def _retained_public_factor_capture(
+    inputs: dict[str, Any], financial_data_cutoff: str
+) -> dict[str, object]:
+    """Bind one already verified public-factor acquisition to a frozen cutoff."""
+
+    manifest_path = inputs["public_factor_manifest_path"]
+    assert isinstance(manifest_path, Path)
+    content = manifest_path.read_bytes()
+    manifest = json.loads(content)
+    acquisition_run = manifest["acquisition_run"]
+    return {
+        "schema_version": 1,
+        "financial_data_cutoff": financial_data_cutoff,
+        "manifest_sha256": hashlib.sha256(content).hexdigest(),
+        "manifest_size_bytes": len(content),
+        "acquisition_run_id": acquisition_run["run_id"],
+    }
+
+
+def test_release_qc_replays_verified_frozen_public_capture_through_plan_and_reader(
+    tmp_path: Path,
+) -> None:
+    """A rollover may age a bound capture, but cannot relabel its source identity."""
+
+    inputs = _fixture(tmp_path)
+    generation = json.loads(
+        (inputs["layered_history_generation_path"] / "generation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    capture_date = date.fromisoformat(inputs["evaluation_date"])
+    inputs["evaluation_date"] = (capture_date + timedelta(days=1)).isoformat()
+    receipt = _retained_public_factor_capture(inputs, generation["as_of_date"])
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+
+    written = planner.write_bundle(
+        output_root=tmp_path / "output",
+        assurance_profile="RELEASE_QC",
+        retained_public_factor_capture=receipt,
+        **kwargs,
+    )
+    destination = Path(written["destination"])
+    manifest = json.loads(
+        (destination / "plan-manifest.json").read_text(encoding="utf-8")
+    )
+    receipt_path = destination / "inputs/governance/retained-public-factor-capture.json"
+    assert json.loads(receipt_path.read_text(encoding="utf-8")) == receipt
+    assert any(
+        item["path"] == "inputs/governance/retained-public-factor-capture.json"
+        for item in manifest["inputs"]
+    )
+
+    release_builder = _release_builder_module(
+        "portfolio_release_builder_for_frozen_public_capture"
+    )
+    assert len(release_builder._current_release_plan_specs(destination, manifest)) == 6
+    assert manifest["data_age"]["public_factor_capture"] == {
+        "age_days": 1,
+        "complete_through": capture_date.isoformat(),
+        "evaluated_on": inputs["evaluation_date"],
+        "limiting_inputs": ["public-factor-acquisition-run"],
+        "status": "WARN_COMPLETE_DATA_AGE",
+        "warning_after_days": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("financial_data_cutoff", "2026-01-01"),
+        ("manifest_sha256", "0" * 64),
+        ("manifest_size_bytes", 0),
+        ("acquisition_run_id", "0" * 64),
+    ),
+)
+def test_release_qc_rejects_unbound_frozen_public_capture_identity(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    inputs = _fixture(tmp_path)
+    generation = json.loads(
+        (inputs["layered_history_generation_path"] / "generation.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    capture_date = date.fromisoformat(inputs["evaluation_date"])
+    inputs["evaluation_date"] = (capture_date + timedelta(days=1)).isoformat()
+    receipt = _retained_public_factor_capture(inputs, generation["as_of_date"])
+    receipt[field] = value
+
+    with pytest.raises(planner.CurrentPlanError, match="retained public factor"):
+        planner.build_bundle(
+            assurance_profile="RELEASE_QC",
+            retained_public_factor_capture=receipt,
+            **{key: value for key, value in inputs.items() if key != "plan_document"},
+        )
+
+
 def test_market_source_age_warns_in_development_and_release_qc(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2856,3 +3105,86 @@ def test_build_rejects_missing_candidate_disposition_and_unknown_lens(
         planner.build_bundle(
             **{key: value for key, value in inputs.items() if key != "plan_document"}
         )
+
+
+def test_emitted_base_spec_carries_the_computed_source_period_policy(
+    tmp_path: Path,
+) -> None:
+    """The planner must emit what it computed, not the template it was handed.
+
+    The base specification used to travel as the retained template's bytes verbatim while
+    the composition and source-period interval policy were computed and discarded. A
+    template produced before source-period policy existed therefore reached the
+    decomposition producer with empty `source_segments`, the producer could not reach its
+    SOURCE_SEGMENT_GAP tolerance path, and a delivery run stopped on the first declared
+    provider NAV gap.
+    """
+    inputs = _fixture(tmp_path)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+
+    # A template with no source-period authority at all: exactly the stale shape.
+    template = json.loads(inputs["base_spec_path"].read_text(encoding="utf-8"))
+    template["target_source"]["interval_policy"] = {
+        "currency": "XXX",
+        "evaluation_information_set": "STALE_TEMPLATE",
+        "series_policies": {},
+    }
+    template["series_composition"] = {}
+    _write_json(inputs["base_spec_path"], template)
+
+    outputs, _manifest = planner.build_bundle(**kwargs)
+
+    emitted = json.loads(
+        outputs["inputs/governance/base-decomposition-spec.json"].decode("utf-8")
+    )
+    policy = emitted["target_source"]["interval_policy"]
+    assert policy["evaluation_information_set"] == "RETROSPECTIVE_SELECTED_SNAPSHOT"
+    assert policy["currency"] != "XXX"
+    assert emitted["series_composition"], (
+        "the emitted composition is still the template"
+    )
+    assert policy != template["target_source"]["interval_policy"]
+    # Whatever the layered history computed is what travels, and every series it names
+    # carries its source-period authority explicitly.
+    for series_id, series_policy in policy["series_policies"].items():
+        assert "source_segments" in series_policy, series_id
+        assert "declared_unavailable_labels" in series_policy, series_id
+
+
+def test_a_stale_template_interval_policy_cannot_reach_the_bundle(
+    tmp_path: Path,
+) -> None:
+    """A template's source-period policy is no longer an input, so it cannot poison a bundle.
+
+    This is the property that makes the out-of-band template regeneration unnecessary: the
+    emitted specification is computed from the layered history, so replacing the template's
+    interval policy with nonsense changes nothing at all -- not the bytes, not the identity.
+    """
+    inputs = _fixture(tmp_path)
+    kwargs = {key: value for key, value in inputs.items() if key != "plan_document"}
+    baseline_outputs, baseline = planner.build_bundle(**kwargs)
+
+    template = json.loads(inputs["base_spec_path"].read_text(encoding="utf-8"))
+    template["target_source"]["interval_policy"] = {
+        "currency": "XXX",
+        "evaluation_information_set": "STALE_TEMPLATE",
+        "series_policies": {},
+    }
+    _write_json(inputs["base_spec_path"], template)
+
+    changed_outputs, changed = planner.build_bundle(**kwargs)
+
+    assert (
+        changed_outputs["inputs/governance/base-decomposition-spec.json"]
+        == baseline_outputs["inputs/governance/base-decomposition-spec.json"]
+    )
+    assert changed["bundle_id"] == baseline["bundle_id"]
+    emitted = json.loads(
+        changed_outputs["inputs/governance/base-decomposition-spec.json"].decode(
+            "utf-8"
+        )
+    )
+    assert (
+        emitted["target_source"]["interval_policy"]["evaluation_information_set"]
+        == "RETROSPECTIVE_SELECTED_SNAPSHOT"
+    )

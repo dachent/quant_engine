@@ -19,70 +19,13 @@ The result is then built and verified by the repository producer, so a row this
 script got wrong fails closed rather than shipping.
 """
 
+import argparse
 import hashlib
 import json
-import os
 import sys
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-
-REPO = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
-    r"/.codex-bootstrap/mvp2-execution/repo"
-)
-sys.path[:0] = [str(REPO / "tools")] + [str(p) for p in REPO.glob("packages/*/src")]
-
-Q = Path(r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine")
-
-
-def _cycle_id(env_name, result_name, key="generation_id"):
-    """Read an identity from THIS cycle's stage result rather than a literal.
-
-    These used to default to ids from an earlier cycle. Nothing forced the
-    environment variable to be set, so a run that forgot it silently bound
-    generations that no longer exist on disk -- which is how a stale ledger id
-    survived into several drivers and cost a day of one-gate-per-run discovery.
-    A missing stage result is now an error, not a fallback.
-    """
-
-    override = os.environ.get(env_name)
-    if override:
-        return override
-    path = Path(r"C:/Dev/scratch/quant-engine/pl12/cycle2") / result_name
-    if not path.is_file():
-        raise SystemExit(
-            "cycle result is absent, cannot derive %s: %s" % (env_name, path)
-        )
-    return json.loads(path.read_text(encoding="utf-8"))[key]
-
-
-EPOCH_ID = _cycle_id("CYCLE_EPOCH_ID", "epoch-manifest.json")
-EPOCH = Q / "dataEpochManifest/generations" / EPOCH_ID
-LEDGER_ID = _cycle_id("CYCLE_LEDGER_ID", "stage-ledger.json")
-# The production specification binds capital's provider ledger to the copy the
-# PIPELINE staged, and requires the path this file records to sit inside it, so
-# the root has to be selectable. The ledger generation id is identical in both
-# roots, which is what makes the two bindings interchangeable at all.
-RUN = Path(
-    os.environ.get("CAPITAL_RUN_ROOT", r"C:/Dev/scratch/quant-engine/pl12/proof2")
-)
-LEDGER = RUN / "stages/ledger/generations" / LEDGER_ID
-OUT = Path(r"C:/Dev/scratch/quant-engine/pl12/capital")
-
-CONTRACT = REPO / "contracts/portfolio-financial-mvp-source-v1.json"
-REGISTRY = REPO / "docs/analytics/current-strategy-decomposition-plan.json"
-LEDGER_SPEC = (
-    Q
-    / "dataPortfolio/rollforward/2026-09-10-mvp2-live-only/config"
-    / "provider-ledger-spec-release.json"
-)
-CROSSWALK = (
-    Q
-    / "dataPortfolio/rollforward/2026-09-05-mvp2-execution/source-repair/evidence"
-    / "schwab-sleeve-account-crosswalk-v2.json"
-)
-EVALUATION_DATE = "2026-09-11"
 
 _MAGNITUDE = {
     "EXTERNAL_WITHDRAWAL",
@@ -92,14 +35,61 @@ _MAGNITUDE = {
 }
 
 
-def main():
-    import portfolio_invested_capital as capital
+def _canonical_date(value: str, label: str) -> date:
+    try:
+        parsed = date.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a canonical ISO date") from exc
+    if parsed.isoformat() != value:
+        raise ValueError(f"{label} must be a canonical ISO date")
+    return parsed
 
-    ledger_path = LEDGER / "provider-ledger.json"
+
+def build_input_generation(
+    *,
+    provider_ledger_generation_root: Path,
+    epoch_manifest_generation_root: Path,
+    provider_ledger_spec_path: Path,
+    financial_contract_path: Path,
+    strategy_registry_path: Path,
+    account_crosswalk_path: Path,
+    requested_as_of: str,
+    evaluated_on: str,
+) -> tuple[dict, dict[str, str]]:
+    """Build the capital input generation and this machine's locators for it."""
+
+    requested_date = _canonical_date(requested_as_of, "requested_as_of")
+    evaluation_date = _canonical_date(evaluated_on, "evaluated_on")
+    if evaluation_date < requested_date:
+        raise ValueError("evaluated_on cannot be before requested_as_of")
+
+    import portfolio_invested_capital as capital
+    from portfolio_hwm_selected_inputs import _source_generation_from_path
+    from quant_engine.core.publication import read_generation_bundle
+
+    provider_ledger_generation_root = Path(provider_ledger_generation_root)
+    epoch_manifest_generation_root = Path(epoch_manifest_generation_root)
+    provider_ledger_spec_path = Path(provider_ledger_spec_path)
+    financial_contract_path = Path(financial_contract_path)
+    strategy_registry_path = Path(strategy_registry_path)
+    account_crosswalk_path = Path(account_crosswalk_path)
+
+    _source_generation_from_path(
+        provider_ledger_generation_root / "generation.json", "provider-ledger"
+    )
+    epoch_bundle = read_generation_bundle(
+        epoch_manifest_generation_root.parents[1], epoch_manifest_generation_root.name
+    )
+    if epoch_bundle.manifest.verification.value != "VERIFIED":
+        raise ValueError("epoch-manifest generation is not VERIFIED")
+
+    ledger_path = provider_ledger_generation_root / "provider-ledger.json"
     ledger = json.loads(ledger_path.read_bytes())
-    contract_bytes = CONTRACT.read_bytes()
+    contract_bytes = financial_contract_path.read_bytes()
     contract_raw = json.loads(contract_bytes)
-    contract = capital.load_contract(CONTRACT, registry_path=REGISTRY)
+    contract = capital.load_contract(
+        financial_contract_path, registry_path=strategy_registry_path
+    )
     rules = capital._load_flow_classification_rules()
 
     source_rows = {
@@ -118,9 +108,11 @@ def main():
     from provider_ledger import _provenance
 
     manifest = json.loads(
-        (EPOCH / "outputs/account-strategy-manifest.json").read_bytes()
+        (
+            epoch_manifest_generation_root / "outputs/account-strategy-manifest.json"
+        ).read_bytes()
     )
-    spec = json.loads(LEDGER_SPEC.read_bytes())
+    spec = json.loads(provider_ledger_spec_path.read_bytes())
     provenance, _identity = _provenance(spec)
     account_ids = {row["account_id"] for row in provenance["accounts"]}
     groups = {}
@@ -159,7 +151,7 @@ def main():
             raise SystemExit("sleeve/account cardinality differs for %s" % (aliases,))
         for alias, account_id in zip(sorted(aliases), sorted(candidates)):
             alias_by_account[account_id] = alias
-    crosswalk = json.loads(CROSSWALK.read_bytes())
+    crosswalk = json.loads(account_crosswalk_path.read_bytes())
     for row in crosswalk["bindings"]:
         bound = alias_by_account.get(row["account_id"])
         if bound is not None and bound != row["sleeve_alias"]:
@@ -259,6 +251,10 @@ def main():
     # the ledger's own as-of date: the ledger observes two days past the last
     # date common to all sources.
     complete_through = manifest["calculation_cutoff_date"]
+    if complete_through != requested_as_of:
+        raise ValueError(
+            "epoch-manifest calculation_cutoff_date differs from requested_as_of"
+        )
 
     # --- events -------------------------------------------------------------
     # Disposition comes from the capital tool's own classifier over the whole
@@ -359,7 +355,7 @@ def main():
         "authority_profile": "ACCEPTED_GOVERNED",
         "complete_through": complete_through,
         "correction_bindings": [],
-        "evaluation_date": EVALUATION_DATE,
+        "evaluation_date": evaluated_on,
         "events": events,
         "flow_coverage": coverage,
         "opening_basis": opening_basis,
@@ -368,24 +364,78 @@ def main():
         "required_epochs": epochs,
         "schema_version": 1,
         "source_bindings": {
-            "provider_ledger": capital._file_binding(ledger_path)[0],
-            "provider_ledger_spec": capital._file_binding(LEDGER_SPEC)[0],
-            "account_crosswalk": capital._file_binding(CROSSWALK)[0],
-            "strategy_registry": capital._file_binding(REGISTRY)[0],
+            # The generation id is portable identity, not a locator, and it
+            # is what proves this ledger came from the SELECTED generation
+            # rather than merely having the same bytes as some other one.
+            "provider_ledger": {
+                **capital._file_binding(ledger_path)[0],
+                "generation_id": provider_ledger_generation_root.name,
+            },
+            "provider_ledger_spec": capital._file_binding(provider_ledger_spec_path)[0],
+            "account_crosswalk": capital._file_binding(account_crosswalk_path)[0],
+            "strategy_registry": capital._file_binding(strategy_registry_path)[0],
         },
     }
-    OUT.mkdir(parents=True, exist_ok=True)
-    input_path = OUT / "capital-input-generation.json"
-    input_path.write_bytes(capital._canonical(generation))
-    print("written", input_path)
+    # The generation binds bytes by identity only, so it is the same document
+    # wherever the run happened. Where those bytes live on this machine is
+    # returned separately and written to a sidecar that is never hashed,
+    # published, or copied into the report candidate.
+    locators = {
+        "provider_ledger": capital._local_binding(ledger_path),
+        "provider_ledger_spec": capital._local_binding(provider_ledger_spec_path),
+        "account_crosswalk": capital._local_binding(account_crosswalk_path),
+        "strategy_registry": capital._local_binding(strategy_registry_path),
+    }
+    return generation, locators
 
-    result = capital.build_governed_capital_result(input_path, CONTRACT)
-    result_path = OUT / "invested-capital.json"
+
+def main(argv=None):
+    repository_root = Path(__file__).resolve().parents[3]
+    cli_import_roots = [
+        repository_root / "tools",
+        *sorted(repository_root.glob("packages/*/src")),
+    ]
+    for import_root in reversed(cli_import_roots):
+        import_root_text = str(import_root)
+        if import_root_text not in sys.path:
+            sys.path.insert(0, import_root_text)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--provider-ledger-generation-root", type=Path, required=True)
+    parser.add_argument("--epoch-manifest-generation-root", type=Path, required=True)
+    parser.add_argument("--provider-ledger-spec", type=Path, required=True)
+    parser.add_argument("--financial-contract", type=Path, required=True)
+    parser.add_argument("--strategy-registry", type=Path, required=True)
+    parser.add_argument("--account-crosswalk", type=Path, required=True)
+    parser.add_argument("--requested-as-of", required=True)
+    parser.add_argument("--evaluated-on", required=True)
+    parser.add_argument("--output-root", type=Path, required=True)
+    args = parser.parse_args(argv)
+
+    import portfolio_invested_capital as capital
+
+    generation, locators = build_input_generation(
+        provider_ledger_generation_root=args.provider_ledger_generation_root,
+        epoch_manifest_generation_root=args.epoch_manifest_generation_root,
+        provider_ledger_spec_path=args.provider_ledger_spec,
+        financial_contract_path=args.financial_contract,
+        strategy_registry_path=args.strategy_registry,
+        account_crosswalk_path=args.account_crosswalk,
+        requested_as_of=args.requested_as_of,
+        evaluated_on=args.evaluated_on,
+    )
+    args.output_root.mkdir(parents=True, exist_ok=True)
+    input_path = args.output_root / "capital-input-generation.json"
+    capital.assert_no_absolute_locators(
+        generation, field_name="capital input generation"
+    )
+    input_path.write_bytes(capital._canonical(generation))
+    capital.write_local_sidecar(input_path, locators)
+    result = capital.build_governed_capital_result(input_path, args.financial_contract)
+    capital.verify_governed_capital_result(result, input_path, args.financial_contract)
+    result_path = args.output_root / "invested-capital.json"
     result_path.write_bytes(capital._canonical(result))
-    print("status           ", result.get("status"))
-    print("authority_profile", result.get("authority_profile"))
-    print("result_id        ", result.get("result_id"))
-    print("current aggregate", result.get("current_aggregate_usd"))
+    print("written", input_path)
     print("written", result_path)
     return 0
 

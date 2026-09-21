@@ -21,6 +21,7 @@ from pathlib import Path, PurePosixPath
 import re
 import sys
 from typing import Any, Final, Mapping, Sequence
+from zoneinfo import ZoneInfo
 
 from quant_engine.core import (
     AdapterIdentity,
@@ -653,11 +654,12 @@ def _provider_ledger(
             "provider-ledger catalog manifest binding differs"
         )
     provider_as_of = _date(catalog.get("as_of_date"), "provider-ledger as_of_date")
-    if (
-        manifest.as_of_date != provider_as_of
-        or catalog_artifacts[0].as_of_date != provider_as_of
-    ):
+    if catalog_artifacts[0].as_of_date != provider_as_of:
         raise BaselineValidationError("provider-ledger catalog as-of binding differs")
+    if manifest.as_of_date != max(item.as_of_date for item in manifest.artifacts):
+        raise BaselineValidationError(
+            "provider-ledger generation date is not artifact-derived"
+        )
     if provider_as_of > baseline_as_of:
         raise BaselineValidationError("provider-ledger is newer than baseline")
     provider_ids = {
@@ -681,7 +683,7 @@ def _provider_ledger(
             artifact_id="providers/provider-ledger/generation.json",
             sha256=actual_manifest_hash,
             size_bytes=manifest_size,
-            as_of_date=provider_as_of,
+            as_of_date=manifest.as_of_date,
             schema_name="generation-manifest",
             schema_version="1",
         ),
@@ -697,7 +699,7 @@ def _provider_ledger(
     links = [
         {
             "artifact_id": item.artifact_id,
-            "as_of_date": provider_as_of.isoformat(),
+            "as_of_date": item.as_of_date.isoformat(),
             "schema_name": item.schema_name,
             "schema_version": item.schema_version,
             "sha256": item.sha256,
@@ -1648,7 +1650,35 @@ def _provider_ledger_facts(
                 )
             ):
                 continue
-            if fact_date > baseline_as_of:
+            financial_fact_date = fact_date
+            if (
+                name == "positions"
+                and provider_id == "schwab"
+                and item.get("observed_at") is not None
+            ):
+                try:
+                    observed_at = datetime.fromisoformat(
+                        _text(item.get("observed_at"), "positions.observed_at")
+                    )
+                except ValueError as exc:
+                    raise BaselineValidationError(
+                        "Schwab current position clock is invalid"
+                    ) from exc
+                if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+                    raise BaselineValidationError(
+                        "Schwab current position clock must be timezone-aware"
+                    )
+                if observed_at.date() != fact_date:
+                    raise BaselineValidationError(
+                        "Schwab current position native date differs"
+                    )
+                # Authority remains bound to the native UTC row date above.  The
+                # retained current-point evidence has already bound this clock;
+                # only its financial-cutoff comparison uses Schwab's New York day.
+                financial_fact_date = observed_at.astimezone(
+                    ZoneInfo("America/New_York")
+                ).date()
+            if financial_fact_date > baseline_as_of:
                 raise BaselineValidationError(
                     "provider-ledger fact is newer than baseline"
                 )
@@ -3711,8 +3741,22 @@ def build_catalog(
         # perform the anchor-content cross-check without access to the
         # governed source files.
         catalog["hwm_acceptance_record"] = hwm_acceptance_record
-    if provenance.get("strategy_version_catalog") is not None:
-        catalog["strategy_version_catalog"] = provenance["strategy_version_catalog"]
+    version_catalog = provenance.get("strategy_version_catalog")
+    if version_catalog is not None:
+        # The catalog's as_of_date is a certification date: the provenance producer requires
+        # every strategy version to be in force at it, and downstream it decides hybrid
+        # eligibility rather than labelling anything. Copying a catalog certified for an
+        # earlier date into a later baseline therefore carries an assumption, not evidence.
+        # The report refuses that, but three stages downstream -- so it is refused here,
+        # where the baseline that would carry it is being built.
+        certified_at = version_catalog.get("as_of_date")
+        if certified_at != catalog.get("as_of_date"):
+            raise BaselineValidationError(
+                "strategy version catalog certifies "
+                f"{certified_at} but the baseline is dated {catalog.get('as_of_date')}; "
+                "re-certify the provenance generation at this cutoff"
+            )
+        catalog["strategy_version_catalog"] = version_catalog
     catalog_bytes = canonical_json_bytes(catalog)
     catalog_artifact = SourceArtifact(
         artifact_id="normalized/portfolio-baseline.json",
@@ -3745,7 +3789,17 @@ def build_catalog(
     )
     observed_dates = [_date(item["as_of_date"], "nav.as_of_date") for item in nav]
     manifest = GenerationManifest.build(
-        as_of_date=as_of,
+        as_of_date=max(
+            item.as_of_date
+            for item in (
+                *source_artifacts,
+                *([hwm_inputs_artifact] if hwm_inputs_artifact is not None else []),
+                *provider_artifacts,
+                provenance_artifact,
+                spec_artifact,
+                catalog_artifact,
+            )
+        ),
         adapter=AdapterIdentity("portfolio-baseline-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,

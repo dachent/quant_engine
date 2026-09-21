@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import copy
 import hashlib
 import importlib.util
 import io
@@ -234,11 +235,14 @@ def _stub_current_plan_upstream_verification(
             if path.is_file()
         )
         first_spec = json.loads(specification_path.read_text(encoding="utf-8"))
+        target_policy = first_spec["target_source"]["interval_policy"]
         return {
             "layered_composition": {
                 "Strategy 0": {"authority": "SYNTHETIC_LAYERED_HISTORY"}
             },
+            "series_interval_policies": target_policy["series_policies"],
             "provenance_sources": first_spec["provenance_sources"],
+            "reporting_currency": target_policy["currency"],
         }
 
     monkeypatch.setattr(
@@ -255,25 +259,37 @@ def _file_definition(path: Path) -> dict[str, object]:
     }
 
 
-def _provider_ledger_generation(tmp_path: Path) -> Path:
+def _provider_ledger_generation(
+    tmp_path: Path,
+    *,
+    catalog_as_of: str = "2026-08-03",
+    manifest_as_of: str | None = None,
+    artifact_as_of: str | None = None,
+    receipt_cutoff: str | None = None,
+) -> Path:
+    """Build a hash-bound ledger with independently declared financial/provenance dates."""
+
+    manifest_as_of = manifest_as_of or catalog_as_of
+    artifact_as_of = artifact_as_of or catalog_as_of
     catalog = (
         json.dumps(
-            {"as_of_date": "2026-08-03", "catalog_schema_version": 2},
+            {"as_of_date": catalog_as_of, "catalog_schema_version": 2},
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
         + b"\n"
     )
-    receipt = canonical_json_bytes(
-        {
-            "admission_gate_status": "PASS",
-            "product_readiness": "REQUIRED_NOT_READY",
-            "receipt_type": "PROVIDER_ADMIT_OR_DECLARE_V1",
-            "schema_version": 1,
-        }
-    )
+    receipt_value: dict[str, object] = {
+        "admission_gate_status": "PASS",
+        "product_readiness": "REQUIRED_NOT_READY",
+        "receipt_type": "PROVIDER_ADMIT_OR_DECLARE_V1",
+        "schema_version": 1,
+    }
+    if receipt_cutoff is not None:
+        receipt_value["run_observation"] = {"financial_cutoff": receipt_cutoff}
+    receipt = canonical_json_bytes(receipt_value)
     manifest = GenerationManifest.build(
-        as_of_date=builder.date.fromisoformat("2026-08-03"),
+        as_of_date=builder.date.fromisoformat(manifest_as_of),
         adapter=AdapterIdentity("quant-engine-provider-ledger", "5"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
@@ -287,7 +303,7 @@ def _provider_ledger_generation(tmp_path: Path) -> Path:
                 artifact_id="normalized/admit-or-declare-receipt.json",
                 sha256=hashlib.sha256(receipt).hexdigest(),
                 size_bytes=len(receipt),
-                as_of_date=builder.date.fromisoformat("2026-08-03"),
+                as_of_date=builder.date.fromisoformat(artifact_as_of),
                 schema_name="provider-admission-receipt",
                 schema_version="1",
             ),
@@ -295,7 +311,7 @@ def _provider_ledger_generation(tmp_path: Path) -> Path:
                 artifact_id="normalized/provider-ledger.json",
                 sha256=hashlib.sha256(catalog).hexdigest(),
                 size_bytes=len(catalog),
-                as_of_date=builder.date.fromisoformat("2026-08-03"),
+                as_of_date=builder.date.fromisoformat(artifact_as_of),
                 schema_name="provider-ledger-catalog",
                 schema_version="2",
             ),
@@ -307,6 +323,144 @@ def _provider_ledger_generation(tmp_path: Path) -> Path:
     builder._write_exact(generation / "admit-or-declare-receipt.json", receipt)
     builder._write_exact(generation / "provider-ledger.json", catalog)
     return generation
+
+
+def test_reusable_provider_ledger_accepts_later_generation_provenance(
+    tmp_path: Path,
+) -> None:
+    """A later provenance generation must not relabel the governed cutoff."""
+
+    generation = _provider_ledger_generation(
+        tmp_path,
+        catalog_as_of="2026-09-17",
+        manifest_as_of="2026-09-18",
+        artifact_as_of="2026-09-17",
+        receipt_cutoff="2026-09-17",
+    )
+
+    generation_id, accepted = builder._validated_reusable_provider_ledger(generation)
+
+    assert generation_id == generation.name
+    assert accepted == generation / "provider-ledger.json"
+
+
+def test_reusable_provider_ledger_rejects_receipt_cutoff_that_differs_from_catalog(
+    tmp_path: Path,
+) -> None:
+    """Provenance may be later, but the receipt must retain the catalog cutoff."""
+
+    generation = _provider_ledger_generation(
+        tmp_path,
+        catalog_as_of="2026-09-17",
+        manifest_as_of="2026-09-18",
+        artifact_as_of="2026-09-17",
+        receipt_cutoff="2026-09-18",
+    )
+
+    with pytest.raises(builder.VerticalBuildError, match="catalog contract differs"):
+        builder._validated_reusable_provider_ledger(generation)
+
+
+def _reused_ledger_recipe(tmp_path: Path, *, evaluated_on: str) -> tuple[Path, Path]:
+    recipe_path = _recipe(tmp_path)
+    payload = json.loads(recipe_path.read_text(encoding="utf-8"))
+    generation = _provider_ledger_generation(
+        tmp_path,
+        catalog_as_of="2026-09-17",
+        manifest_as_of="2026-09-18",
+        artifact_as_of="2026-09-17",
+        receipt_cutoff="2026-09-17",
+    )
+    payload.pop("provider_ledger_spec")
+    payload.update(
+        {
+            "as_of_date": "2026-09-17",
+            "evaluated_on": evaluated_on,
+            "provider_ledger_generation": {
+                "path": str(generation),
+                **builder._directory_inventory(generation),
+            },
+            "schema_version": 7,
+        }
+    )
+    recipe_path.write_bytes(canonical_json_bytes(payload))
+    return recipe_path, generation
+
+
+def test_build_ledger_forwards_later_evaluation_without_relabeling_financial_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Dropping the explicit evaluation date would fail the freshness handoff."""
+
+    recipe_path, generation = _reused_ledger_recipe(tmp_path, evaluated_on="2026-09-19")
+    monkeypatch.setattr(
+        builder,
+        "_history_contract_path",
+        lambda recipe: (
+            Path(recipe["correlation_source_root"]["path"]) / "dependence-source.json"
+        ),
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def freshness_tool(name: str, *args: str, **_kwargs: object) -> dict[str, object]:
+        assert name == "portfolio_freshness.py"
+        calls.append(args)
+        return {}
+
+    monkeypatch.setattr(builder, "_tool", freshness_tool)
+
+    result = builder.build_ledger(recipe_path, tmp_path / "ledger-output")
+
+    assert calls == [
+        (
+            "--provider-ledger-root",
+            str(tmp_path / "ledger-output"),
+            "--provider-ledger-generation-id",
+            generation.name,
+            "--evaluation-date",
+            "2026-09-19",
+            "--output",
+            str(tmp_path / "ledger-output" / "freshness-health.json"),
+        )
+    ]
+    copied_catalog = (
+        tmp_path
+        / "ledger-output"
+        / "generations"
+        / generation.name
+        / "provider-ledger.json"
+    )
+    assert (
+        copied_catalog.read_bytes()
+        == (generation / "provider-ledger.json").read_bytes()
+    )
+    assert (
+        json.loads(copied_catalog.read_text(encoding="utf-8"))["as_of_date"]
+        == "2026-09-17"
+    )
+    assert result["source_mode"] == "REUSED_VERIFIED_IMMUTABLE_GENERATION"
+
+
+def test_recipe_rejects_evaluation_before_financial_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Freshness cannot be assessed before the selected financial cutoff."""
+
+    recipe_path, _generation = _reused_ledger_recipe(
+        tmp_path, evaluated_on="2026-09-16"
+    )
+    monkeypatch.setattr(
+        builder,
+        "_history_contract_path",
+        lambda recipe: (
+            Path(recipe["correlation_source_root"]["path"]) / "dependence-source.json"
+        ),
+    )
+
+    with pytest.raises(
+        builder.VerticalBuildError, match="evaluation date precedes financial cutoff"
+    ):
+        builder._recipe(recipe_path)
 
 
 def _recipe(tmp_path: Path) -> Path:
@@ -751,6 +905,8 @@ def _panel_checkpoint_stage_fixture(
     candidate.mkdir()
     candidate_file = candidate / "panel.html"
     candidate_file.write_text("candidate-v1", encoding="utf-8")
+    report_root = tmp_path / "report"
+    report_root.mkdir()
     implementation = tmp_path / "implementation.json"
     return_attribution = tmp_path / "return-attribution.json"
     strategy_root = tmp_path / "strategy-root"
@@ -765,7 +921,10 @@ def _panel_checkpoint_stage_fixture(
         "baseline": {},
         "attribution": {"destination": str(tmp_path / "attribution")},
         "analytics": {"correlation_root": str(tmp_path / "correlation")},
-        "report": {},
+        # The panel producer consumes the report producer's declared root.
+        # Keep this fixture on that real producer/consumer seam rather than
+        # weakening the non-empty report-root guard.
+        "report": {"root": str(report_root)},
         "workbook": {},
     }
     for role, value in values.items():
@@ -833,7 +992,7 @@ def test_panel_candidate_checkpoint_rejects_foreign_or_stale_provenance(
         return
 
     recipe_bytes = recipe_path.read_bytes()
-    predecessor_path = output_root / "stage-results" / "workbook.json"
+    predecessor_path = output_root / "stage-results" / "report.json"
     predecessor_bytes = predecessor_path.read_bytes()
     candidate_bytes = candidate_file.read_bytes()
 
@@ -1143,8 +1302,7 @@ def test_release_stages_route_recipe_hybrid_plan_to_all_consumers(
             "decomposition_lenses_root": str(tmp_path / "lenses-output"),
             "weekly_root": str(tmp_path / "weekly-output"),
         },
-        "report": {"candidate_dir": str(tmp_path / "report-candidate")},
-        "workbook": {},
+        "report": {"root": str(tmp_path / "report")},
     }
     for role, value in stage_values.items():
         (stage_results / f"{role}.json").write_bytes(canonical_json_bytes(value))
@@ -1157,8 +1315,8 @@ def test_release_stages_route_recipe_hybrid_plan_to_all_consumers(
     ) -> Callable[..., dict[str, object]]:
         def called(*_args: object, **kwargs: object) -> dict[str, object]:
             routed.append((name, kwargs.get("hybrid_decomposition_plan_bundle")))
-            if name in {"report", "workbook"}:
-                index = 9 if name == "report" else 10
+            if name == "report":
+                index = 9
                 routed_lenses.append((name, _args[index]))
             return result
 
@@ -1167,16 +1325,8 @@ def test_release_stages_route_recipe_hybrid_plan_to_all_consumers(
     panel_result = {"candidate_dir": str(candidate)}
     monkeypatch.setattr(
         builder,
-        "build_report_candidate",
-        capture("report", {"candidate_dir": str(tmp_path / "report-candidate")}),
-    )
-    monkeypatch.setattr(builder, "build_workbook", capture("workbook", {}))
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(
-        builder,
-        "_resolve_workbook_runtime",
-        lambda _path: SimpleNamespace(identity={"synthetic": True}),
+        "build_report",
+        capture("report", {"root": str(tmp_path / "report")}),
     )
     monkeypatch.setattr(
         builder, "build_panel_candidate", capture("panel-candidate", panel_result)
@@ -1191,25 +1341,17 @@ def test_release_stages_route_recipe_hybrid_plan_to_all_consumers(
     )
 
     builder.build_stage(recipe_path, output_root, "report")
-    builder.build_stage(
-        recipe_path,
-        output_root,
-        "workbook",
-        workbook_runtime_path=runtime,
-    )
     builder.build_stage(recipe_path, output_root, "panel-candidate")
     builder.build_stage(recipe_path, output_root, "panel", qa_dir=tmp_path / "qa")
 
     assert routed == [
         ("report", hybrid_plan),
-        ("workbook", hybrid_plan),
         ("panel-candidate", hybrid_plan),
         ("panel-candidate", hybrid_plan),
         ("panel", hybrid_plan),
     ]
     assert routed_lenses == [
         ("report", tmp_path / "lenses-output"),
-        ("workbook", tmp_path / "lenses-output"),
     ]
 
 
@@ -1360,6 +1502,7 @@ def test_reusable_provider_ledger_requires_hash_bound_admission_receipt(
         builder._validated_reusable_provider_ledger(generation)
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_xlsx_startup_deadline_is_the_only_extended_failure() -> None:
     startup = {
         "final_state": "TIMED_OUT",
@@ -1380,6 +1523,7 @@ def test_xlsx_startup_deadline_is_the_only_extended_failure() -> None:
     assert builder._is_xlsx_startup_deadline(startup) is False
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_xlsx_startup_extension_is_bounded_and_preserves_job() -> None:
     job = {
         "idempotency_key": "synthetic",
@@ -1399,6 +1543,7 @@ def test_xlsx_startup_extension_is_bounded_and_preserves_job() -> None:
     }
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_xlsx_startup_extension_rejects_unvalidated_job_shape() -> None:
     with pytest.raises(builder.VerticalBuildError, match="keys differ"):
         builder._xlsx_job_with_startup_extension(
@@ -1411,6 +1556,7 @@ def test_xlsx_startup_extension_rejects_unvalidated_job_shape() -> None:
         )
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_derived_runner_job_resolves_paths_and_keeps_type_first(
     tmp_path: Path,
 ) -> None:
@@ -1458,51 +1604,41 @@ def test_derived_runner_job_resolves_paths_and_keeps_type_first(
     assert json.loads((candidate / "xlsx-job.json").read_text(encoding="utf-8")) == job
 
 
-def test_workbook_runtime_is_an_explicit_cli_argument_and_missing_config_is_redacted(
+def test_held_workbook_runtime_is_rejected_before_runtime_resolution(
     tmp_path: Path,
 ) -> None:
-    for command, tail in (("build", ()), ("stage", ("--role", "workbook"))):
-        args = builder._parser().parse_args(
-            [
-                command,
-                "--recipe",
-                "recipe.json",
-                "--output-root",
-                "output",
-                *tail,
-                "--workbook-runtime",
-                "runtime.json",
-            ]
-        )
-        assert args.workbook_runtime == Path("runtime.json")
-
     missing = tmp_path / "PRIVATE-MISSING-RUNTIME.json"
-    with pytest.raises(builder.VerticalBuildError) as error:
-        builder._resolve_workbook_runtime(missing)
-    message = str(error.value)
-    assert "runtime" in message.lower()
-    assert str(missing) not in message
+    with pytest.raises(builder.VerticalBuildError, match="permanently held"):
+        builder.build_report(
+            tmp_path / "baseline",
+            tmp_path / "ledger",
+            tmp_path / "freshness.json",
+            tmp_path / "history.json",
+            tmp_path / "implementation.json",
+            tmp_path / "return-attribution.json",
+            None,
+            tmp_path / "report",
+            workbook_runtime_path=missing,
+        )
+    with pytest.raises(builder.VerticalBuildError, match="permanently held"):
+        builder.build_stage(
+            tmp_path / "recipe.json",
+            tmp_path / "output",
+            "ledger",
+            workbook_runtime_path=missing,
+        )
+    with pytest.raises(builder.VerticalBuildError, match="permanently held"):
+        builder.build_all(
+            tmp_path / "recipe.json",
+            tmp_path / "output",
+            workbook_runtime_path=missing,
+        )
 
 
-def test_public_build_and_stage_forward_workbook_runtime(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[dict[str, object]] = []
-
-    def fake_build_all(*_args: object, **kwargs: object) -> dict[str, object]:
-        calls.append(kwargs)
-        return {"state": "synthetic"}
-
-    def fake_build_stage(*_args: object, **kwargs: object) -> dict[str, object]:
-        calls.append(kwargs)
-        return {"state": "synthetic"}
-
-    monkeypatch.setattr(builder, "build_all", fake_build_all)
-    monkeypatch.setattr(builder, "build_stage", fake_build_stage)
-    runtime = tmp_path / "runtime.json"
-
-    assert (
-        builder.main(
+def test_active_cli_does_not_admit_a_workbook_runtime() -> None:
+    parser = builder._parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(
             [
                 "build",
                 "--recipe",
@@ -1510,13 +1646,11 @@ def test_public_build_and_stage_forward_workbook_runtime(
                 "--output-root",
                 "output",
                 "--workbook-runtime",
-                str(runtime),
+                "runtime.json",
             ]
         )
-        == 0
-    )
-    assert (
-        builder.main(
+    with pytest.raises(SystemExit):
+        parser.parse_args(
             [
                 "stage",
                 "--recipe",
@@ -1525,15 +1659,11 @@ def test_public_build_and_stage_forward_workbook_runtime(
                 "output",
                 "--role",
                 "workbook",
-                "--workbook-runtime",
-                str(runtime),
             ]
         )
-        == 0
-    )
-    assert [call["workbook_runtime_path"] for call in calls] == [runtime, runtime]
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_runtime_contract_validation_uses_configured_python_and_cli(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1556,6 +1686,7 @@ def test_runtime_contract_validation_uses_configured_python_and_cli(
     assert all(call[1] == str(runtime.cli) for call in calls)
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_runtime_execution_receipt_binds_resume_to_runtime_identity(
     tmp_path: Path,
 ) -> None:
@@ -1600,6 +1731,7 @@ def test_runtime_execution_receipt_binds_resume_to_runtime_identity(
         builder._current_workbook_runtime = original
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_successful_xlsx_evidence_is_resumable_and_identity_bound(
     tmp_path: Path,
 ) -> None:
@@ -1628,6 +1760,7 @@ def test_successful_xlsx_evidence_is_resumable_and_identity_bound(
     assert builder._accepted_xlsx_evidence(candidate) is False
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_workbook_validation_resume_requires_all_invariants(tmp_path: Path) -> None:
     candidate = tmp_path / "candidate"
     (candidate / "excel").mkdir(parents=True)
@@ -2071,9 +2204,11 @@ def _current_plan_bundle(
                         "currency": "USD",
                         "finality": "COMPLETE_SELECTED_SNAPSHOT",
                         "native_calendar": "SOURCE_LABELLED_DAILY",
-                        "native_label_convention": "PUBLISHED_DAILY_LABEL",
-                        "return_basis": "NET",
-                        "source_vintage": "SELECTED_SNAPSHOT",
+                        "native_label_convention": "SOURCE_PUBLISHED_DAILY_LABEL",
+                        "return_basis": "SOURCE_PUBLISHED",
+                        "source_vintage": hashlib.sha256(
+                            model_sources[source_key]["factor_content"]
+                        ).hexdigest(),
                     },
                     "date_column": "date",
                     "expected_sha256": hashlib.sha256(
@@ -2124,13 +2259,17 @@ def _current_plan_bundle(
                     "interval_policy": {
                         "currency": "USD",
                         "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
-                        "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
-                        "finalized_through": "2026-08-03",
-                        "gap_disposition": "REJECT_BUCKET",
-                        "native_calendar": "CALENDAR_DAY_24_7",
-                        "native_label_convention": "SYNTHETIC_CALENDAR_DAY",
-                        "return_basis": "NET",
-                        "source_vintage": "SELECTED_SNAPSHOT",
+                        "series_policies": {
+                            series_id: {
+                                "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
+                                "finalized_through": "2026-08-03",
+                                "gap_disposition": "REJECT_BUCKET",
+                                "native_calendar": "CALENDAR_DAY_24_7",
+                                "native_label_convention": "SYNTHETIC_CALENDAR_DAY",
+                                "return_basis": "NET",
+                                "source_vintage": "SELECTED_SNAPSHOT",
+                            }
+                        },
                     },
                     "expected_sha256": hashlib.sha256(
                         model_sources[source_key]["target_content"]
@@ -2336,6 +2475,49 @@ def _current_manifest(bundle: Path) -> dict[str, object]:
     return json.loads((bundle / "plan-manifest.json").read_text(encoding="utf-8"))
 
 
+def test_selected_dependence_authority_paths_preserve_all_native_readers(
+    tmp_path: Path,
+) -> None:
+    """Current-plan reconstruction receives the exact selected authority family."""
+
+    ledger_root = tmp_path / "ledger" / ("a" * 64)
+    ledger_root.mkdir(parents=True)
+    for path in (
+        ledger_root / "generation.json",
+        ledger_root / "provider-ledger.json",
+        tmp_path / "admission.json",
+        tmp_path / "financial-input-contract.json",
+        tmp_path / "portfolio123-version.json",
+    ):
+        path.write_text("{}", encoding="utf-8")
+    selected = tmp_path / "selected-inputs.json"
+    selected.write_bytes(
+        builder.canonical_json_bytes(
+            {
+                "schema_version": 1,
+                "history_generation_root": str(tmp_path / "history"),
+                "allocation_generation_root": str(tmp_path / "allocation"),
+                "provider_ledger_generation_root": str(ledger_root),
+                "financial_input_contract_path": str(
+                    tmp_path / "financial-input-contract.json"
+                ),
+                "provider_admission_receipt_path": str(tmp_path / "admission.json"),
+                "portfolio123_version_evidence_path": str(
+                    tmp_path / "portfolio123-version.json"
+                ),
+            }
+        )
+    )
+
+    assert builder._selected_dependence_authority_paths(selected) == {
+        "provider_admission_receipt_path": tmp_path / "admission.json",
+        "financial_input_contract_path": tmp_path / "financial-input-contract.json",
+        "provider_ledger_manifest_path": ledger_root / "generation.json",
+        "provider_ledger_catalog_path": ledger_root / "provider-ledger.json",
+        "portfolio123_version_evidence_path": tmp_path / "portfolio123-version.json",
+    }
+
+
 def _rebind_current_bundle(
     bundle: Path, manifest: dict[str, object]
 ) -> tuple[Path, dict[str, object]]:
@@ -2380,19 +2562,197 @@ def test_current_analytics_rejects_recipe_plan_as_of_drift(tmp_path: Path) -> No
         builder.build_analytics(recipe, bundle, tmp_path / "analytics")
 
 
+def test_current_analytics_rejects_legacy_correlation_date_drift_before_producer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A current plan must retain, rather than replace, a legacy observed date."""
+
+    recipe_root = tmp_path / "recipe-fixture"
+    recipe_root.mkdir()
+    recipe = _recipe(recipe_root)
+    recipe_value = json.loads(recipe.read_text(encoding="utf-8"))
+    correlation = Path(recipe_value["correlation_source_root"]["path"])
+    proof_path = correlation / "evidence-proof.json"
+    proof = json.loads(proof_path.read_text(encoding="utf-8"))
+    proof["as_of_date"] = "2026-08-02"
+    proof_path.write_bytes(builder.canonical_json_bytes(proof))
+    recipe_value["correlation_source_root"].update(
+        builder._directory_inventory(correlation)
+    )
+    recipe.write_bytes(builder.canonical_json_bytes(recipe_value))
+    bundle = _current_plan_bundle(tmp_path)
+    _bind_recipe_plan_bundle(recipe, bundle)
+
+    class ReachedNumericalBuild(Exception):
+        pass
+
+    monkeypatch.setattr(
+        builder,
+        "_build_base_analytics",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ReachedNumericalBuild()),
+    )
+    with pytest.raises(
+        builder.VerticalBuildError, match="current analytics as-of date"
+    ):
+        builder.build_analytics(recipe, bundle, tmp_path / "analytics")
+
+
+def test_current_analytics_uses_execution_clock_separate_from_financial_cutoff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Current primary and hybrid plans bind execution time, not financial as-of."""
+
+    recipe_root = tmp_path / "recipe-fixture"
+    recipe_root.mkdir()
+    recipe = _recipe(recipe_root)
+    recipe_value = json.loads(recipe.read_text(encoding="utf-8"))
+    execution_date = "2026-08-04"
+    correlation = Path(recipe_value["correlation_source_root"]["path"])
+    (correlation / "dependence-source.json").write_bytes(
+        builder.canonical_json_bytes({"evaluated_on": execution_date})
+    )
+    recipe_value["evaluated_on"] = execution_date
+    recipe_value["correlation_source_root"].update(
+        builder._directory_inventory(correlation)
+    )
+
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["evaluation_date"] = execution_date
+    bundle, _manifest = _rebind_current_bundle(bundle, manifest)
+    recipe_value["decomposition_plan_bundle"] = {
+        "path": str(bundle),
+        **builder._directory_inventory(bundle),
+    }
+
+    hybrid = tmp_path / "hybrid-execution-clock"
+    shutil.copytree(bundle, hybrid)
+    hybrid_manifest = _current_manifest(hybrid)
+    hybrid_manifest["policies"]["strategy_evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    hybrid_manifest["layered_history"]["mode"] = "LIVE_PLUS_BACKTEST"
+    hybrid, _hybrid_manifest = _rebind_current_bundle(hybrid, hybrid_manifest)
+    recipe_value["hybrid_decomposition_plan_bundle"] = {
+        "path": str(hybrid),
+        **builder._directory_inventory(hybrid),
+    }
+    recipe.write_bytes(builder.canonical_json_bytes(recipe_value))
+
+    class ReachedNumericalBuild(Exception):
+        pass
+
+    monkeypatch.setattr(
+        builder, "_history_contract_path", lambda _recipe: Path("synthetic-history")
+    )
+    monkeypatch.setattr(
+        builder, "_current_release_plan_specs", lambda *_args, **_kw: []
+    )
+    monkeypatch.setattr(
+        builder,
+        "_build_base_analytics",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ReachedNumericalBuild()),
+    )
+    with pytest.raises(ReachedNumericalBuild):
+        builder.build_analytics(recipe, bundle, tmp_path / "analytics")
+
+
+@pytest.mark.parametrize("identity", ("plan", "dependence", "hybrid"))
+def test_current_analytics_rejects_changed_execution_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, identity: str
+) -> None:
+    recipe_root = tmp_path / "recipe-fixture"
+    recipe_root.mkdir()
+    recipe = _recipe(recipe_root)
+    recipe_value = json.loads(recipe.read_text(encoding="utf-8"))
+    execution_date = "2026-08-04"
+    correlation = Path(recipe_value["correlation_source_root"]["path"])
+    (correlation / "dependence-source.json").write_bytes(
+        builder.canonical_json_bytes(
+            {
+                "evaluated_on": "2026-08-05"
+                if identity == "dependence"
+                else execution_date
+            }
+        )
+    )
+    recipe_value["evaluated_on"] = execution_date
+    recipe_value["correlation_source_root"].update(
+        builder._directory_inventory(correlation)
+    )
+
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    manifest["evaluation_date"] = "2026-08-05" if identity == "plan" else execution_date
+    bundle, _manifest = _rebind_current_bundle(bundle, manifest)
+    recipe_value["decomposition_plan_bundle"] = {
+        "path": str(bundle),
+        **builder._directory_inventory(bundle),
+    }
+    hybrid = tmp_path / "hybrid-execution-clock"
+    shutil.copytree(bundle, hybrid)
+    hybrid_manifest = _current_manifest(hybrid)
+    hybrid_manifest["policies"]["strategy_evidence_mode"] = "LIVE_PLUS_BACKTEST"
+    hybrid_manifest["layered_history"]["mode"] = "LIVE_PLUS_BACKTEST"
+    if identity == "hybrid":
+        hybrid_manifest["evaluation_date"] = "2026-08-05"
+    hybrid, _hybrid_manifest = _rebind_current_bundle(hybrid, hybrid_manifest)
+    recipe_value["hybrid_decomposition_plan_bundle"] = {
+        "path": str(hybrid),
+        **builder._directory_inventory(hybrid),
+    }
+    recipe.write_bytes(builder.canonical_json_bytes(recipe_value))
+
+    monkeypatch.setattr(
+        builder, "_history_contract_path", lambda _recipe: Path("synthetic-history")
+    )
+    monkeypatch.setattr(
+        builder, "_current_release_plan_specs", lambda *_args, **_kw: []
+    )
+    with pytest.raises(
+        builder.VerticalBuildError,
+        match="current analytics as-of date differs|hybrid decomposition mode, date",
+    ):
+        builder.build_analytics(recipe, bundle, tmp_path / "analytics")
+
+
 @pytest.mark.parametrize("value", (None, "not-a-generation", "g" * 64))
 def test_generation_id_requires_canonical_hash(value: object) -> None:
     with pytest.raises(builder.VerticalBuildError, match="generation"):
         builder._generation_id(value, "synthetic generation_id")
 
 
-@pytest.mark.parametrize("include_hybrid", (False, True))
+@pytest.mark.parametrize(
+    ("include_hybrid", "reused", "expected_warm_status"),
+    (
+        (False, True, "ALL_REUSED"),
+        (True, True, "ALL_REUSED"),
+        (False, False, "RECOMPUTED"),
+        (False, None, "UNKNOWN"),
+    ),
+)
 def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, include_hybrid: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    include_hybrid: bool,
+    reused: bool | None,
+    expected_warm_status: str,
 ) -> None:
     recipe_root = tmp_path / "recipe-fixture"
     recipe_root.mkdir()
     recipe = _recipe(recipe_root)
+    correlation_spec = (
+        Path(
+            json.loads(recipe.read_text(encoding="utf-8"))["correlation_source_root"][
+                "path"
+            ]
+        )
+        / "spec.json"
+    )
+    correlation_spec.write_text("{}", encoding="utf-8")
+    recipe_value = json.loads(recipe.read_text(encoding="utf-8"))
+    recipe_value["correlation_source_root"].update(
+        builder._directory_inventory(correlation_spec.parent)
+    )
+    recipe.write_bytes(builder.canonical_json_bytes(recipe_value))
     bundle = _current_plan_bundle(tmp_path)
     _bind_recipe_plan_bundle(recipe, bundle)
     if include_hybrid:
@@ -2412,19 +2772,30 @@ def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter
         recipe.write_bytes(builder.canonical_json_bytes(recipe_value))
         real_specs = builder._current_release_plan_specs
 
-        def routing_specs(selected_bundle, selected_plan):
+        def routing_specs(selected_bundle, selected_plan, **kwargs):
             if selected_bundle == hybrid_bundle:
                 return [
                     {**row, "evidence_mode": "LIVE_PLUS_BACKTEST"}
-                    for row in real_specs(bundle, _current_manifest(bundle))
+                    for row in real_specs(bundle, _current_manifest(bundle), **kwargs)
                 ]
-            return real_specs(selected_bundle, selected_plan)
+            return real_specs(selected_bundle, selected_plan, **kwargs)
 
         monkeypatch.setattr(builder, "_current_release_plan_specs", routing_specs)
     calls: list[tuple[object, ...]] = []
 
     def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
         calls.append(args)
+        if args[0] in {
+            "portfolio_decomposition.py",
+            "portfolio_correlation.py",
+        } and args[1] in {"stage", "publish"}:
+            output_root = str(args[args.index("--output-root") + 1])
+            result: dict[str, object] = {
+                "generation_id": hashlib.sha256(output_root.encode()).hexdigest()
+            }
+            if reused is not None:
+                result["reused"] = reused
+            return result
         if args[0:2] == ("portfolio_weekly_returns.py", "build"):
             return {"candidate_dir": str(tmp_path / "weekly-candidate")}
         if args[1] == "publish":
@@ -2439,7 +2810,10 @@ def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter
     monkeypatch.setattr(builder, "_build_hybrid_decomposition", reject_hybrid)
 
     output_root = tmp_path / "analytics"
-    result = builder.build_analytics(recipe, bundle, output_root)
+    retained_cache_root = tmp_path / "retained"
+    result = builder.build_analytics(
+        recipe, bundle, output_root, retained_cache_root=retained_cache_root
+    )
 
     expected_specs = {"us-economic:DYNAMIC_FLS", "us-economic:STATIC"}
     assert set(result["lens_generations"]) == (
@@ -2520,6 +2894,68 @@ def test_current_surface_plan_builds_distinct_generations_without_hybrid_adapter
     assert (base_source_root / "targets.csv").read_bytes() == selected_targets
     assert not any(
         call[0] == "portfolio_decomposition_evidence_modes.py" for call in calls
+    )
+    correlation_calls = [
+        call
+        for call in calls
+        if call[0] == "portfolio_correlation.py" and call[1] in {"stage", "publish"}
+    ]
+    assert len(correlation_calls) == 2
+    for call in correlation_calls:
+        assert call[call.index("--retained-cache-root") + 1] == str(retained_cache_root)
+    numerical_calls = [
+        call
+        for call in calls
+        if call[0] in {"portfolio_decomposition.py", "portfolio_correlation.py"}
+        and call[1] in {"stage", "publish"}
+    ]
+    operations = result["numerical_producer_evidence"]["operations"]
+    assert [(row["tool"], row["operation"]) for row in operations] == [
+        (call[0], call[1]) for call in numerical_calls
+    ]
+    assert all(row["producer_result"].get("reused") is reused for row in operations)
+    assert all(len(row["source_identity"]["spec_sha256"]) == 64 for row in operations)
+    assert result["numerical_producer_evidence"]["warm_status"] == expected_warm_status
+
+
+def test_hybrid_analytics_records_actual_stage_and_publish_dispositions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The legacy hybrid helper contributes its producer returns to analytics evidence."""
+
+    source_root = tmp_path / "hybrid-source"
+    source_root.mkdir()
+    hybrid_spec = source_root / "base-spec.json"
+    hybrid_spec.write_text("{}", encoding="utf-8")
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        if args[0] == "portfolio_decomposition_evidence_modes.py":
+            return {"bundle_id": "hybrid-bundle", "destination": str(source_root)}
+        if args[0:2] == ("portfolio_decomposition.py", "stage"):
+            return {"generation_id": "stage-generation", "reused": True}
+        if args[0:2] == ("portfolio_decomposition.py", "publish"):
+            return {"generation_id": "publish-generation", "reused": True}
+        raise AssertionError(f"unexpected tool call: {args}")
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+    operations: list[dict[str, object]] = []
+    result = builder._build_hybrid_decomposition(
+        base_spec=tmp_path / "base.json",
+        base_source=tmp_path / "base-source",
+        correlation_source=tmp_path / "correlation-source",
+        bundle_root=tmp_path / "bundle-output",
+        output_root=tmp_path / "analytics-output",
+        producer_operations=operations,
+    )
+
+    assert result["generation_id"] == "publish-generation"
+    assert [(row["tool"], row["operation"]) for row in operations] == [
+        ("portfolio_decomposition.py", "stage"),
+        ("portfolio_decomposition.py", "publish"),
+    ]
+    assert all(row["producer_result"]["reused"] is True for row in operations)
+    assert (
+        builder._numerical_producer_evidence(operations)["warm_status"] == "ALL_REUSED"
     )
 
 
@@ -3010,6 +3446,9 @@ def test_current_surface_plan_admits_leading_incomplete_ordinary_factor_row(
             expected_sha256=projected_binding["sha256"],
             expected_size_bytes=projected_binding["size_bytes"],
         )
+        specification["factor_source"]["interval_policy"]["source_vintage"] = (
+            projected_binding["sha256"]
+        )
         specification["factor_source"]["factors"][0]["effective_start"] = "2026-07-26"
         content = builder.canonical_json_bytes(specification)
         (bundle / relative).write_bytes(content)
@@ -3024,6 +3463,87 @@ def test_current_surface_plan_admits_leading_incomplete_ordinary_factor_row(
     bundle, manifest = _rebind_current_bundle(bundle, manifest)
 
     assert len(builder._current_release_plan_specs(bundle, manifest)) == 2
+
+
+def test_current_surface_plan_admits_native_policy_superset_for_selected_series(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    original_verifier = builder._verify_current_plan_upstream_evidence
+
+    def native_evidence_with_unselected_policy(
+        *args: object, **kwargs: object
+    ) -> dict[str, object]:
+        evidence = original_verifier(*args, **kwargs)
+        policies = evidence["series_interval_policies"]
+        assert isinstance(policies, dict)
+        selected_policy = policies["Strategy 0"]
+        policies["QSI"] = copy.deepcopy(selected_policy)
+        return evidence
+
+    monkeypatch.setattr(
+        builder,
+        "_verify_current_plan_upstream_evidence",
+        native_evidence_with_unselected_policy,
+    )
+
+    assert len(builder._current_release_plan_specs(bundle, manifest)) == 2
+
+
+def test_current_surface_plan_rejects_rehashed_source_interval_policy_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Self-consistent copied specs cannot erase a governed source gap."""
+
+    bundle = _current_plan_bundle(tmp_path)
+    manifest = _current_manifest(bundle)
+    first_path = bundle / str(manifest["specs"][0]["path"])
+    original = json.loads(first_path.read_text(encoding="utf-8"))
+    original_policies = copy.deepcopy(
+        original["target_source"]["interval_policy"]["series_policies"]
+    )
+    for row in manifest["specs"]:
+        relative = str(row["path"])
+        path = bundle / relative
+        specification = json.loads(path.read_text(encoding="utf-8"))
+        specification["target_source"]["interval_policy"]["series_policies"][
+            "Strategy 0"
+        ].pop("gap_disposition")
+        content = builder.canonical_json_bytes(specification)
+        path.write_bytes(content)
+        binding = {
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size_bytes": len(content),
+        }
+        row.update(binding)
+        next(item for item in manifest["outputs"] if item["path"] == relative).update(
+            binding
+        )
+    bundle, manifest = _rebind_current_bundle(bundle, manifest)
+
+    def authoritative_evidence(
+        attribution_bundle: Path, _inputs: object, _plan: object, **_kwargs: object
+    ) -> dict[str, object]:
+        specification = json.loads(
+            next((attribution_bundle / "specs").glob("*.json")).read_text(
+                encoding="utf-8"
+            )
+        )
+        return {
+            "layered_composition": {
+                "Strategy 0": {"authority": "SYNTHETIC_LAYERED_HISTORY"}
+            },
+            "series_interval_policies": original_policies,
+            "provenance_sources": specification["provenance_sources"],
+            "reporting_currency": "USD",
+        }
+
+    monkeypatch.setattr(
+        builder, "_verify_current_plan_upstream_evidence", authoritative_evidence
+    )
+    with pytest.raises(builder.VerticalBuildError, match="interval policy differs"):
+        builder._current_release_plan_specs(bundle, manifest)
 
 
 def test_current_surface_plan_rejects_governed_model_identity_substitution(
@@ -3630,21 +4150,39 @@ def test_panel_publication_validates_browser_qa_before_authorizing_receipt(
 
     receipt_bytes: bytes | None = None
     qa_bytes_at_receipt: dict[str, bytes] | None = None
+    original_qa_bytes = {
+        item.relative_to(qa).as_posix(): item.read_bytes()
+        for item in qa.rglob("*")
+        if item.is_file()
+    }
     panel_result: dict[str, object] = {}
 
     def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
         nonlocal receipt_bytes, qa_bytes_at_receipt, panel_result
         calls.append(args)
         if args[1] == "qa":
-            assert (qa / "semantic-validation.json").is_file()
+            producer_qa = Path(str(args[args.index("--qa-dir") + 1]))
+            assert producer_qa != qa
+            assert (producer_qa / "semantic-validation.json").is_file()
+            assert {
+                item.relative_to(producer_qa).as_posix(): item.read_bytes()
+                for item in producer_qa.rglob("*")
+                if item.is_file()
+            } == {
+                "browser.json": b"{}",
+                "semantic-validation.json": canonical_json_bytes(
+                    {"publication_state": "PUBLISHED"}
+                ),
+            }
         if args[1] == "publish":
             receipt_path = Path(
                 str(args[args.index("--coordinated-release-receipt") + 1])
             )
             receipt_bytes = receipt_path.read_bytes()
+            producer_qa = Path(str(args[args.index("--qa-dir") + 1]))
             qa_bytes_at_receipt = {
-                item.relative_to(qa).as_posix(): item.read_bytes()
-                for item in qa.rglob("*")
+                item.relative_to(producer_qa).as_posix(): item.read_bytes()
+                for item in producer_qa.rglob("*")
                 if item.is_file()
             }
             receipt = json.loads(receipt_bytes)
@@ -3681,10 +4219,16 @@ def test_panel_publication_validates_browser_qa_before_authorizing_receipt(
     assert receipt_bytes is not None
     assert qa_bytes_at_receipt is not None
     assert qa_bytes_at_receipt == {
+        "browser.json": b"{}",
+        "semantic-validation.json": canonical_json_bytes(
+            {"publication_state": "PUBLISHED"}
+        ),
+    }
+    assert {
         item.relative_to(qa).as_posix(): item.read_bytes()
         for item in qa.rglob("*")
         if item.is_file()
-    }
+    } == original_qa_bytes
     assert receipt_bytes == canonical_json_bytes(json.loads(receipt_bytes))
     assert (
         result["coordinated_release_receipt_sha256"]
@@ -4186,6 +4730,8 @@ def test_schema10_panel_build_publish_routes_one_verified_epoch_bundle(
     panel_root = tmp_path / "stages" / "panel"
     candidate_dir = tmp_path / "candidate"
     qa_dir = tmp_path / "qa"
+    qa_dir.mkdir()
+    (qa_dir / "browser.json").write_text("{}", encoding="utf-8")
     calls: list[tuple[object, ...]] = []
     real_stage = builder._stage_verified_epoch_manifest_bundle
     stage_calls: list[tuple[object, ...]] = []
@@ -4287,6 +4833,7 @@ def test_schema10_panel_build_publish_routes_one_verified_epoch_bundle(
         assert not any(str(argument).startswith("--manifest-") for argument in call)
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
 def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4367,7 +4914,6 @@ def test_schema10_workbook_candidate_binds_exact_epoch_bundle_bytes(
         tmp_path / "correlation",
         epoch_manifest_generation_root=generation_root,
         epoch_manifest_generation_id=manifest.generation_id,
-        workbook_runtime_path=runtime,
     )
 
     manifest_path = candidate / "account-strategy-manifest.json"
@@ -4467,31 +5013,6 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
 ) -> None:
     candidate = tmp_path / "report-candidate"
     candidate.mkdir()
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text("{}", encoding="utf-8")
-    fake_runtime = SimpleNamespace(identity={"synthetic": True})
-    monkeypatch.setattr(
-        builder, "_resolve_workbook_runtime", lambda _path: fake_runtime
-    )
-    monkeypatch.setattr(
-        builder, "_current_workbook_runtime", lambda _runtime: fake_runtime
-    )
-    monkeypatch.setattr(
-        builder, "_record_workbook_runtime_execution", lambda *_args: None
-    )
-    monkeypatch.setattr(
-        builder, "_accepted_xlsx_evidence", lambda _path, **_kwargs: True
-    )
-    monkeypatch.setattr(
-        builder,
-        "_successful_xlsx_result_path",
-        lambda selected: selected / "xlsx-result.json",
-    )
-    monkeypatch.setattr(
-        builder,
-        "_accepted_workbook_validation",
-        lambda _path, _candidate, **_kwargs: {"all_passed": True},
-    )
     calls: list[tuple[object, ...]] = []
 
     def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
@@ -4503,16 +5024,6 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
         return {"status": "PASS"}
 
     monkeypatch.setattr(builder, "_tool", fake_tool)
-    monkeypatch.setattr(
-        builder,
-        "_require_exact_report_delivery",
-        lambda _root, generation_id, _delivery: {
-            "delivery_classification": "NON_AUTHORITY_HUMAN_DELIVERY",
-            "generation_id": generation_id,
-            "workbook_status": "EXACT_NON_AUTHORITY",
-        },
-    )
-
     built = builder.build_report(
         tmp_path / "baseline",
         tmp_path / "ledger",
@@ -4522,15 +5033,11 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
         tmp_path / "return-attribution.json",
         None,
         tmp_path / "report-output",
-        workbook_runtime_path=runtime,
     )
 
     report_calls = [call for call in calls if call[0] == "portfolio_report.py"]
     assert [call[1] for call in report_calls] == [
         "build",
-        "canonicalize-xlsx-result",
-        "canonicalize",
-        "bind-workbook-evidence",
         "verify",
         "publish",
     ]
@@ -4538,25 +5045,19 @@ def test_report_wrapper_omits_unavailable_optional_attribution_input(
     assert built["generation_id"] == "f" * 64
 
 
-def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook runtime lifecycle")
+def test_build_workbook_forwards_selected_attribution_to_verify_and_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    candidate = tmp_path / "report-candidate"
-    candidate.mkdir()
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text("{}", encoding="utf-8")
-    fake_runtime = SimpleNamespace(identity={"synthetic": True})
+    """The workbook consumer keeps an immutable attribution choice to both readers."""
+
+    candidate = tmp_path / "candidate"
+    selected_generation_id = "a" * 64
+    runtime = SimpleNamespace(identity={"synthetic": True})
+    monkeypatch.setattr(builder, "_resolve_workbook_runtime", lambda _path: runtime)
     monkeypatch.setattr(
-        builder, "_resolve_workbook_runtime", lambda _path: fake_runtime
-    )
-    monkeypatch.setattr(
-        builder, "_current_workbook_runtime", lambda _runtime: fake_runtime
-    )
-    monkeypatch.setattr(
-        builder, "_record_workbook_runtime_execution", lambda *_args: None
-    )
-    monkeypatch.setattr(
-        builder, "_accepted_xlsx_evidence", lambda _path, **_kwargs: True
+        builder, "_accepted_xlsx_evidence", lambda *_args, **_kwargs: True
     )
     monkeypatch.setattr(
         builder,
@@ -4566,8 +5067,57 @@ def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
     monkeypatch.setattr(
         builder,
         "_accepted_workbook_validation",
-        lambda _path, _candidate, **_kwargs: {"all_passed": True},
+        lambda *_args, **_kwargs: {"all_passed": True},
     )
+    monkeypatch.setattr(
+        builder, "_record_workbook_runtime_execution", lambda *_args: None
+    )
+    monkeypatch.setattr(
+        builder,
+        "_require_exact_report_delivery",
+        lambda *_args: {"delivery_classification": "NON_AUTHORITY_HUMAN_DELIVERY"},
+    )
+    calls: list[tuple[object, ...]] = []
+
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(args)
+        if args[1] == "publish":
+            return {"generation_id": "b" * 64}
+        return {"status": "PASS"}
+
+    monkeypatch.setattr(builder, "_tool", fake_tool)
+
+    builder.build_workbook(
+        tmp_path / "baseline",
+        tmp_path / "ledger",
+        tmp_path / "freshness.json",
+        tmp_path / "history.json",
+        tmp_path / "implementation.json",
+        tmp_path / "return-attribution.json",
+        tmp_path / "attribution",
+        candidate,
+        tmp_path / "report-output",
+        attribution_generation_id=selected_generation_id,
+    )
+
+    report_calls = [
+        call
+        for call in calls
+        if call[0] == "portfolio_report.py" and call[1] in {"verify", "publish"}
+    ]
+    assert [call[1] for call in report_calls] == ["verify", "publish"]
+    for call in report_calls:
+        assert (
+            call[call.index("--attribution-generation-id") + 1]
+            == selected_generation_id
+        )
+
+
+def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = tmp_path / "report-candidate"
+    candidate.mkdir()
     calls: list[tuple[object, ...]] = []
 
     def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
@@ -4611,7 +5161,6 @@ def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
         hwm_governed_calendar_authority_path=tmp_path / "hwm-calendar.json",
         hwm_governed_admission_receipt_path=tmp_path / "hwm-receipt.json",
         portfolio_root=portfolio_root,
-        workbook_runtime_path=runtime,
     )
 
     report_calls = [
@@ -4628,10 +5177,15 @@ def test_report_commands_forward_distinct_live_and_hybrid_plan_bundles(
         )
 
 
-def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("select_attribution", [False, True])
+@pytest.mark.parametrize("select_dependence", [False, True])
+def test_build_report_routes_schema10_epoch_binding_to_data_only_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    select_attribution: bool,
+    select_dependence: bool,
 ) -> None:
-    """The wrapper keeps the same epoch authority through both report stages."""
+    """The wrapper keeps epoch authority through data-only report publication."""
 
     candidate = tmp_path / "candidate"
     calls: dict[str, object] = {}
@@ -4641,20 +5195,14 @@ def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
         calls["candidate_kwargs"] = kwargs
         return {"candidate_dir": str(candidate)}
 
-    def fake_workbook(*args: object, **kwargs: object) -> dict[str, object]:
-        calls["workbook_args"] = args
-        calls["workbook_kwargs"] = kwargs
-        return {"generation_id": "a" * 64}
+    def fake_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.setdefault("tool_calls", []).append(args)
+        if args[1] == "publish":
+            return {"generation_id": "a" * 64}
+        return {"status": "PASS"}
 
     monkeypatch.setattr(builder, "build_report_candidate", fake_candidate)
-    monkeypatch.setattr(builder, "build_workbook", fake_workbook)
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(
-        builder,
-        "_resolve_workbook_runtime",
-        lambda _path: SimpleNamespace(identity={"synthetic": True}),
-    )
+    monkeypatch.setattr(builder, "_tool", fake_tool)
     generation_root = tmp_path / "epoch-generation"
     result = builder.build_report(
         tmp_path / "baseline",
@@ -4668,26 +5216,47 @@ def test_build_report_routes_schema10_epoch_binding_to_candidate_and_workbook(
         tmp_path / "correlation",
         epoch_manifest_generation_root=generation_root,
         epoch_manifest_generation_id="b" * 64,
-        workbook_runtime_path=runtime,
+        attribution_generation_id="c" * 64 if select_attribution else None,
+        dependence_selected_inputs_path=(
+            tmp_path / "selected-inputs.json" if select_dependence else None
+        ),
     )
 
-    assert result == {"generation_id": "a" * 64}
+    assert result == {
+        "candidate_dir": str(candidate),
+        "generation_id": "a" * 64,
+        "root": str(tmp_path / "report"),
+        "verification": {"status": "PASS"},
+    }
     expected_epoch = {
         "epoch_manifest_generation_root": generation_root,
         "epoch_manifest_generation_id": "b" * 64,
     }
+    expected_selection: dict[str, object] = {}
+    if select_attribution:
+        expected_selection["attribution_generation_id"] = "c" * 64
+    if select_dependence:
+        expected_selection["dependence_selected_inputs_path"] = (
+            tmp_path / "selected-inputs.json"
+        )
     assert calls["candidate_kwargs"] == {
         **expected_epoch,
+        **expected_selection,
         "hybrid_decomposition_plan_bundle": None,
+        "source_clock_path": None,
     }
-    assert calls["workbook_kwargs"] == {
-        **expected_epoch,
-        "hybrid_decomposition_plan_bundle": None,
-        "workbook_runtime_path": runtime,
-    }
+    report_calls = calls["tool_calls"]
+    assert [call[1] for call in report_calls] == ["verify", "publish"]
+    for call in report_calls:
+        assert "--excel-workbook" not in call
+        assert "--xlsx-result" not in call
+        assert "--validation-result" not in call
+        assert call[call.index("--epoch-manifest") + 1] == str(
+            candidate / "account-strategy-manifest.json"
+        )
 
 
-def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
+def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_data_only_publish(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The wrapper consumes a real producer CLI candidate before workbook binding."""
@@ -4721,25 +5290,20 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
     def real_candidate_boundary(*_args: object, **kwargs: object) -> dict[str, object]:
         assert kwargs == {
             "hybrid_decomposition_plan_bundle": None,
+            "source_clock_path": None,
             "epoch_manifest_generation_root": epoch_root,
             "epoch_manifest_generation_id": "d" * 64,
         }
         return real_candidate
 
-    def workbook_boundary(*args: object, **kwargs: object) -> dict[str, object]:
-        calls["candidate"] = args[7]
-        calls["epoch"] = kwargs
-        return {"generation_id": "c" * 64}
+    def report_tool(*args: object, **_kwargs: object) -> dict[str, object]:
+        calls.setdefault("report_calls", []).append(args)
+        if args[1] == "publish":
+            return {"generation_id": "c" * 64}
+        return {"status": "PASS"}
 
     monkeypatch.setattr(builder, "build_report_candidate", real_candidate_boundary)
-    monkeypatch.setattr(builder, "build_workbook", workbook_boundary)
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(
-        builder,
-        "_resolve_workbook_runtime",
-        lambda _path: SimpleNamespace(identity={"synthetic": True}),
-    )
+    monkeypatch.setattr(builder, "_tool", report_tool)
     result = builder.build_report(
         baseline_root,
         tmp_path / "ledger",
@@ -4751,20 +5315,24 @@ def test_build_report_routes_real_cli_candidate_and_epoch_binding_to_workbook(
         tmp_path / "report",
         epoch_manifest_generation_root=epoch_root,
         epoch_manifest_generation_id="d" * 64,
-        workbook_runtime_path=runtime,
     )
 
-    assert result == {"generation_id": "c" * 64}
-    assert Path(str(calls["candidate"])).resolve() == candidate_path.resolve()
-    assert (candidate_path / "portfolio-report-data.json").is_file()
-    assert calls["epoch"] == {
-        "hybrid_decomposition_plan_bundle": None,
-        "epoch_manifest_generation_root": epoch_root,
-        "epoch_manifest_generation_id": "d" * 64,
-        "workbook_runtime_path": runtime,
+    assert result == {
+        "candidate_dir": str(candidate_path),
+        "generation_id": "c" * 64,
+        "root": str(tmp_path / "report"),
+        "verification": {"status": "PASS"},
     }
+    assert (candidate_path / "portfolio-report-data.json").is_file()
+    report_calls = calls["report_calls"]
+    assert [call[1] for call in report_calls] == ["verify", "publish"]
+    for call in report_calls:
+        assert "--excel-workbook" not in call
+        assert "--xlsx-result" not in call
+        assert "--validation-result" not in call
 
 
+@pytest.mark.skip(reason="Owner permanent hold: retired workbook delivery workflow")
 @pytest.mark.parametrize(
     "smuggled_path",
     (
@@ -5070,7 +5638,7 @@ def test_schema10_publish_rejects_mutated_epoch_candidate_identity(
         )
 
 
-def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
+def test_builder_forwards_governed_hwm_bundle_to_report_and_panel(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5132,19 +5700,7 @@ def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
         forwarded.append(kwargs)
         return {"candidate_dir": str(tmp_path / "candidate")}
 
-    def workbook(*_args: object, **kwargs: object) -> dict[str, object]:
-        forwarded.append(kwargs)
-        return {"generation_id": "f" * 64}
-
     monkeypatch.setattr(builder, "build_report_candidate", report_candidate)
-    monkeypatch.setattr(builder, "build_workbook", workbook)
-    runtime = tmp_path / "runtime.json"
-    runtime.write_text("{}", encoding="utf-8")
-    monkeypatch.setattr(
-        builder,
-        "_resolve_workbook_runtime",
-        lambda _path: SimpleNamespace(identity={"synthetic": True}),
-    )
     builder.build_report(
         tmp_path / "baseline",
         tmp_path / "ledger",
@@ -5161,7 +5717,6 @@ def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
         portfolio_root=tmp_path / "portfolio",
         invested_capital_result_path=capital_result_path,
         invested_capital_input_generation_path=capital_input_path,
-        workbook_runtime_path=runtime,
     )
     expected = {
         "hwm_governed_result_path": paths["result"],
@@ -5172,7 +5727,7 @@ def test_builder_forwards_governed_hwm_bundle_to_report_workbook_and_panel(
         "invested_capital_result_path": capital_result_path,
         "invested_capital_input_generation_path": capital_input_path,
     }
-    assert len(forwarded) == 2
+    assert len(forwarded) == 1
     assert all(
         all(call[key] == value for key, value in expected.items()) for call in forwarded
     )
@@ -5248,3 +5803,158 @@ def test_private_stage_rejects_production_root_overlap_before_any_write(
         validate_private_stage_target(target, target, portfolio_root)
 
     assert not target.exists()
+
+
+@pytest.mark.parametrize("mode", ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"])
+@pytest.mark.parametrize(
+    "damage", [None, "sha256", "size_bytes", "generation_id", "missing", "duplicate"]
+)
+def test_current_attribution_binds_selected_history_not_legacy_template(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, damage: str | None
+) -> None:
+    """The real hash reader must bind current targets to their selected ledger."""
+    bundle = tmp_path / "plan-id"
+    history = bundle / "inputs/history/generation.json"
+    history.parent.mkdir(parents=True)
+    ledger = tmp_path / "selected-ledger"
+    ledger.mkdir()
+    (ledger / "generation.json").write_bytes(b'{"fixture":"selected manifest"}')
+    (ledger / "provider-ledger.json").write_bytes(b'{"fixture":"selected catalog"}')
+    bindings = []
+    for input_id, name in (
+        ("provider-ledger-manifest", "generation.json"),
+        ("provider-ledger-catalog", "provider-ledger.json"),
+    ):
+        content = (ledger / name).read_bytes()
+        bindings.append(
+            {
+                "input_id": input_id,
+                "generation_id": "selected-ledger",
+                "sha256": hashlib.sha256(content).hexdigest(),
+                "size_bytes": len(content),
+            }
+        )
+    if damage in {"sha256", "size_bytes", "generation_id"}:
+        bindings[0][damage] = 0 if damage == "size_bytes" else "wrong"
+    elif damage == "missing":
+        bindings.pop()
+    elif damage == "duplicate":
+        bindings.append(dict(bindings[0]))
+    history.write_bytes(canonical_json_bytes({"inputs": bindings}))
+    legacy = bundle / "inputs/base/provenance"
+    legacy.mkdir(parents=True)
+    (legacy / "00-provider-ledger-generation.json").write_bytes(
+        b'{"fixture":"old manifest"}'
+    )
+    (legacy / "01-provider-ledger.json").write_bytes(b'{"fixture":"old catalog"}')
+    marker = bundle / "spec.json"
+    marker.write_bytes(b"{}")
+
+    def row(path: Path) -> dict[str, object]:
+        return {
+            "path": path.relative_to(bundle).as_posix(),
+            "sha256": builder._sha(path)[0],
+            "size_bytes": path.stat().st_size,
+        }
+
+    manifest = {
+        "builder": "portfolio-current-decomposition-plan",
+        "bundle_id": bundle.name,
+        "policies": {"strategy_evidence_mode": mode},
+        "inputs": [row(history), *[row(path) for path in sorted(legacy.iterdir())]],
+        "outputs": [row(marker)],
+    }
+    (bundle / "plan-manifest.json").write_bytes(canonical_json_bytes(manifest))
+    monkeypatch.setattr(
+        builder,
+        "_recipe",
+        lambda _: {"decomposition_plan_bundle": {"path": str(bundle)}},
+    )
+    monkeypatch.setattr(
+        builder, "_published_generation", lambda _: (ledger.name, ledger)
+    )
+    output = tmp_path / "attribution"
+    if damage is None:
+        result = builder.build_attribution(tmp_path / "recipe.json", output)
+        proof = json.loads(Path(result["verification"]).read_bytes())
+        assert proof["ledger_generation_id"] == ledger.name
+        assert (
+            proof["ledger_catalog_sha256"]
+            == builder._sha(ledger / "provider-ledger.json")[0]
+        )
+        assert (
+            b"old manifest"
+            in (legacy / "00-provider-ledger-generation.json").read_bytes()
+        )
+    else:
+        with pytest.raises(
+            builder.VerticalBuildError, match="selected history.*ledger"
+        ):
+            builder.build_attribution(tmp_path / "recipe.json", output)
+        assert not output.exists()
+
+
+def test_publish_panel_forwards_dependence_inputs_to_every_consumer() -> None:
+    """Every control-panel subcommand that accepts the selected inputs gets them.
+
+    `publish_panel` prepares `dependence_selected_arguments` once and forwarded
+    them only to `verify`. `publish` re-reads the same dependence source, and a
+    schema-2 receipt refuses without them, so a real run verified the panel and
+    then failed at the last step of the last stage with "selected dependence
+    source requires selected inputs".
+
+    This derives the expectation from the panel's own parser rather than a list
+    of subcommand names, so a new consumer is covered the moment it accepts the
+    flag.
+    """
+
+    import argparse
+    import importlib.util
+    import re
+    import sys
+
+    module_name = "_panel_for_release_forwarding"
+    spec = importlib.util.spec_from_file_location(
+        module_name, ROOT / "tools" / "portfolio_control_panel.py"
+    )
+    assert spec is not None and spec.loader is not None
+    panel = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = panel
+    spec.loader.exec_module(panel)
+
+    subparsers = next(
+        action
+        for action in panel._parser()._actions  # noqa: SLF001
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    accepts = {
+        name
+        for name, sub in subparsers.choices.items()
+        if any(
+            "--dependence-selected-inputs" in action.option_strings
+            for action in sub._actions
+        )
+    }
+    assert "publish" in accepts and "verify" in accepts
+
+    source = (ROOT / "tools" / "portfolio_release_builder.py").read_text(
+        encoding="utf-8"
+    )
+    body = source[source.index("def publish_panel(") :]
+    body = body[: body.index("\ndef ", 10)]
+
+    missing = []
+    for match in re.finditer(r'"portfolio_control_panel\.py",\s*\n\s*"(\w+)"', body):
+        subcommand = match.group(1)
+        if subcommand not in accepts:
+            continue
+        tail = body[match.end() :]
+        end = tail.find("\n    )")
+        block = tail[: end if end > 0 else len(tail)]
+        if "*dependence_selected_arguments" not in block:
+            missing.append(subcommand)
+
+    assert not missing, (
+        "publish_panel invokes control-panel subcommands that accept "
+        f"--dependence-selected-inputs without forwarding them: {missing}"
+    )

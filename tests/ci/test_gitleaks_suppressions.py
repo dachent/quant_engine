@@ -68,7 +68,7 @@ def _copy_trust_paths(root: Path) -> None:
 
 def _configure_source_alternate(root: Path) -> None:
     source_git_dir = _git(
-        REPOSITORY_ROOT, "rev-parse", "--absolute-git-dir"
+        REPOSITORY_ROOT, "rev-parse", "--path-format=absolute", "--git-common-dir"
     ).stdout.strip()
     alternates = root / ".git" / "objects" / "info" / "alternates"
     alternates.parent.mkdir(parents=True, exist_ok=True)
@@ -309,11 +309,30 @@ def test_autocrlf_checkout_keeps_trust_paths_lf_and_manual_crlf_is_rejected(
     checker = _checker()
     source = _trusted_repo(tmp_path / "source")
     checkout = tmp_path / "autocrlf"
-    subprocess.run(
-        ["git", "clone", "--config", "core.autocrlf=true", str(source), str(checkout)],
-        check=True,
+    # Every other Git call in this file goes through `_git`, which sets
+    # `safe.directory=*` and `--no-replace-objects`. This clone did not, and it is
+    # the one call that reads a repository Git did not create in this process. It
+    # failed on one CI job with a bare exit 128 and no stderr, because
+    # `capture_output=True` swallowed it -- so the configuration is now the same as
+    # every neighbouring call, and a failure reports what Git actually said.
+    completed = subprocess.run(
+        [
+            "git",
+            "--no-replace-objects",
+            "-c",
+            "safe.directory=*",
+            "clone",
+            "--config",
+            "core.autocrlf=true",
+            str(source),
+            str(checkout),
+        ],
+        check=False,
         text=True,
         capture_output=True,
+    )
+    assert completed.returncode == 0, (
+        f"git clone exited {completed.returncode}: {completed.stderr.strip()}"
     )
     for relative in (".gitleaksignore", ".github/gitleaks-suppressions.json"):
         assert b"\r" not in (checkout / relative).read_bytes()

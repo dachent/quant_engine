@@ -146,6 +146,9 @@ LAYERED_HISTORY_REPOSITORY_DEPENDENCIES: Final = (
     "packages/core/src/quant_engine/core/contracts.py",
     "schemas/portfolio/financial-mvp-source-contract.schema.json",
     "tools/portfolio_financial_mvp_contract.py",
+    "tools/portfolio_pipeline_materialize.py",
+    "tools/portfolio_strategy_history.py",
+    "tools/portfolio_strategy_backtests.py",
     "tools/provider_ledger.py",
 )
 CORE_GENERATION_ADAPTER_BY_SOURCE_SCHEMA: Final = {
@@ -360,6 +363,28 @@ def _manifest_artifacts(value: object) -> dict[str, VerifiedArtifact]:
         ):
             raise TargetSeriesError("manifest artifact identity is invalid")
         result[artifact_id] = VerifiedArtifact(artifact_id, sha256, size)
+    return result
+
+
+def _manifest_artifact_dates(value: object) -> dict[str, date]:
+    """Return the immutable artifact dates used to derive a manifest date."""
+
+    if not isinstance(value, list):
+        raise TargetSeriesError("manifest artifacts must be an array")
+    result: dict[str, date] = {}
+    for item in value:
+        if not isinstance(item, dict):
+            raise TargetSeriesError("manifest artifact must be an object")
+        artifact_id = str(item.get("artifact_id", ""))
+        try:
+            as_of_date = date.fromisoformat(str(item.get("as_of_date", "")))
+        except ValueError as exc:
+            raise TargetSeriesError("manifest artifact as-of date is invalid") from exc
+        if not artifact_id or artifact_id in result:
+            raise TargetSeriesError("manifest artifact identity is invalid")
+        result[artifact_id] = as_of_date
+    if not result:
+        raise TargetSeriesError("manifest artifacts must not be empty")
     return result
 
 
@@ -1831,6 +1856,7 @@ def build_provider_ledger_targets(
     if len(generation_id) != 64:
         raise TargetSeriesError("provider-ledger generation identity is invalid")
     artifacts = _manifest_artifacts(manifest.get("artifacts"))
+    artifact_dates = _manifest_artifact_dates(manifest.get("artifacts"))
     catalog_artifact = _verify_artifact(
         catalog_path, artifacts, "normalized/provider-ledger.json"
     )
@@ -1850,8 +1876,13 @@ def build_provider_ledger_targets(
         manifest_as_of = date.fromisoformat(str(manifest.get("as_of_date", "")))
     except ValueError as exc:
         raise TargetSeriesError("provider-ledger as-of date is invalid") from exc
-    if accepted_as_of != manifest_as_of:
-        raise TargetSeriesError("provider-ledger manifest and catalog dates differ")
+    catalog_artifact_as_of = artifact_dates.get("normalized/provider-ledger.json")
+    if catalog_artifact_as_of != accepted_as_of:
+        raise TargetSeriesError("provider-ledger catalog financial date differs")
+    if manifest_as_of != max(artifact_dates.values()):
+        raise TargetSeriesError(
+            "provider-ledger generation date is not artifact-derived"
+        )
 
     raw_rows = catalog.get("strategy_returns")
     if not isinstance(raw_rows, list) or not raw_rows:
@@ -2286,6 +2317,191 @@ def _verified_immutable_generation(
     if observed_as_of.isoformat() != as_of:
         raise TargetSeriesError(f"{name} generation as-of date is invalid")
     return manifest, generation_id, as_of
+
+
+def _current_source_admission_authority(
+    *,
+    contract_path: Path,
+    financial_input_contract_path: Path | None,
+    provider_admission_receipt_path: Path | None,
+    provider_ledger_manifest_path: Path,
+    provider_ledger_catalog_path: Path,
+    accepted_as_of: date,
+) -> dict[str, object] | None:
+    """Reopen the selected provider admission without changing contract pins.
+
+    The receipt is an explicit runtime selection, rather than a replacement for
+    the retained policy's historical generations.  The materializer replays the
+    provider inventory and its run observation; this layer only projects the
+    compact facts needed by the layered-history seam.
+    """
+
+    if provider_admission_receipt_path is None:
+        if financial_input_contract_path is not None:
+            raise TargetSeriesError(
+                "financial input contract requires provider admission receipt"
+            )
+        return None
+    if (
+        provider_admission_receipt_path.is_symlink()
+        or not provider_admission_receipt_path.is_file()
+    ):
+        raise TargetSeriesError("provider admission receipt must be a regular file")
+    generation = provider_ledger_manifest_path.parent
+    if (
+        provider_admission_receipt_path.name != "admit-or-declare-receipt.json"
+        or provider_admission_receipt_path.parent != generation
+        or provider_ledger_manifest_path.name != "generation.json"
+        or provider_ledger_catalog_path.name != "provider-ledger.json"
+        or provider_ledger_catalog_path.parent != generation
+    ):
+        raise TargetSeriesError("provider admission receipt generation differs")
+    materializer_path = Path(__file__).with_name("portfolio_pipeline_materialize.py")
+    spec = importlib.util.spec_from_file_location(
+        "_portfolio_pipeline_materialize_for_layered_history", materializer_path
+    )
+    if spec is None or spec.loader is None:
+        raise TargetSeriesError("provider admission reader is unavailable")
+    materializer = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = materializer
+    try:
+        spec.loader.exec_module(materializer)
+        financial = materializer._financial_mvp_module()
+        admission_path = (
+            contract_path
+            if financial_input_contract_path is None
+            else financial_input_contract_path
+        )
+        admission_contract = financial.load_contract(
+            admission_path,
+            materializer.CURRENT_STRATEGY_REGISTRY,
+            materializer.FINANCIAL_MVP_SCHEMA,
+        )
+        raw_sha256, _size = _sha256(admission_path)
+        semantic_sha256 = financial.contract_digest(admission_contract)
+        census_sha256 = financial.census_digest(admission_contract["current_census"])
+        authority = materializer._provider_admission_authority(
+            generation,
+            admission_contract,
+            contract_raw_sha256=raw_sha256,
+            contract_semantic_sha256=semantic_sha256,
+            census_sha256=census_sha256,
+        )
+    except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
+        raise TargetSeriesError("current provider admission authority differs") from exc
+    receipt_sha256, receipt_size = _sha256(provider_admission_receipt_path)
+    if (
+        authority.get("receipt_sha256") != receipt_sha256
+        or authority.get("generation_id") != generation.name
+        or authority.get("manifest_sha256") != _sha256(provider_ledger_manifest_path)[0]
+        or authority.get("catalog_sha256") != _sha256(provider_ledger_catalog_path)[0]
+        or authority.get("admission_gate_status") != "PASS"
+        or authority.get("product_readiness") != "READY_FOR_COMPOSITION"
+    ):
+        raise TargetSeriesError("current provider admission authority differs")
+    receipt = authority.get("receipt")
+    if not isinstance(receipt, dict):
+        raise TargetSeriesError("current provider admission receipt differs")
+    observation = receipt.get("run_observation")
+    if not isinstance(observation, dict):
+        raise TargetSeriesError("current provider admission observation differs")
+    cutoff = str(observation.get("financial_cutoff", ""))
+    try:
+        cutoff_date = date.fromisoformat(cutoff)
+    except ValueError as exc:
+        raise TargetSeriesError("current provider admission cutoff is invalid") from exc
+    if cutoff_date < accepted_as_of:
+        raise TargetSeriesError("current provider admission cutoff differs")
+    rows = receipt.get("provider_generations")
+    if not isinstance(rows, list):
+        raise TargetSeriesError("current provider admission generations differ")
+    provider_rows = {
+        str(row.get("provider_id")): row
+        for row in rows
+        if isinstance(row, dict) and isinstance(row.get("provider_id"), str)
+    }
+    if len(provider_rows) != len(rows):
+        raise TargetSeriesError("current provider admission generations differ")
+    source_providers = {
+        "matrixport-account-generation": "matrixport",
+        "quantbase-account-generation": "quantbase",
+        "portfolio123-model-generation": "portfolio123",
+    }
+    source_generations: dict[str, dict[str, str]] = {
+        "owner-account-live-history": {
+            "as_of": str(
+                GenerationManifest.from_json_bytes(
+                    provider_ledger_manifest_path.read_bytes()
+                ).as_of_date
+            ),
+            "generation_id": str(authority["generation_id"]),
+            "sha256": str(authority["manifest_sha256"]),
+        }
+    }
+    for source_id, provider_id in source_providers.items():
+        row = provider_rows.get(provider_id)
+        if not isinstance(row, dict):
+            raise TargetSeriesError("current provider admission source is absent")
+        source_generations[source_id] = {
+            "as_of": str(row.get("generation_as_of_date", "")),
+            "generation_id": str(row.get("generation_id", "")),
+            "sha256": str(row.get("manifest_sha256", "")),
+        }
+    if any(
+        len(item["generation_id"]) != 64 or len(item["sha256"]) != 64
+        for item in source_generations.values()
+    ):
+        raise TargetSeriesError("current provider admission source identity differs")
+    proof = {
+        "admission_receipt_sha256": receipt_sha256,
+        "admission_receipt_size_bytes": receipt_size,
+        "admission_observation_cutoff": cutoff,
+        "financial_cutoff": accepted_as_of.isoformat(),
+        "financial_input_contract_census_sha256": census_sha256,
+        "financial_input_contract_raw_sha256": raw_sha256,
+        "financial_input_contract_semantic_sha256": semantic_sha256,
+        "ledger_catalog_sha256": str(authority["catalog_sha256"]),
+        "ledger_generation_id": str(authority["generation_id"]),
+        "ledger_manifest_sha256": str(authority["manifest_sha256"]),
+        "run_observation_sha256": str(observation.get("sha256", "")),
+        "schema_version": 1,
+        "source_generations": [
+            {"source_id": source_id, **source_generations[source_id]}
+            for source_id in sorted(source_generations)
+        ],
+    }
+    if len(str(proof["run_observation_sha256"])) != 64:
+        raise TargetSeriesError("current provider admission observation differs")
+    return {"proof": proof, "source_generations": source_generations}
+
+
+def _verified_admitted_generation(
+    *,
+    manifest_path: Path,
+    source: Mapping[str, Any],
+    admitted: Mapping[str, str],
+    name: str,
+) -> tuple[dict[str, Any], str, str]:
+    """Verify a selected source generation against the independently replayed receipt."""
+
+    content = manifest_path.read_bytes()
+    manifest = _load_json(manifest_path, f"{name} generation manifest")
+    core = _verified_core_generation_envelope(
+        content, source, f"{name} admitted generation differs"
+    )
+    observed = (
+        core.generation_id,
+        hashlib.sha256(content).hexdigest(),
+        core.as_of_date.isoformat(),
+    )
+    expected = (
+        admitted.get("generation_id"),
+        admitted.get("sha256"),
+        admitted.get("as_of"),
+    )
+    if observed != expected:
+        raise TargetSeriesError(f"{name} admitted generation differs")
+    return manifest, core.generation_id, core.as_of_date.isoformat()
 
 
 def _matrixport_provider_returns(
@@ -3331,25 +3547,30 @@ def _gap_disposition(
     return "REQUIRED_NOT_READY_UNEXPLAINED_INTERIOR_GAP"
 
 
-def _p123_ai_backtest(
-    *,
-    evidence: Mapping[str, Any],
-    returns_path: Path,
-    relationships_path: Path,
-    generation_id: str,
-    relationships_sha256: str,
-    strategy_evidence_sha256: str,
-    series_id: str,
-) -> tuple[list[dict[str, str]], str, dict[str, object]]:
+_PORTFOLIO123_VERSION_EVIDENCE_ARTIFACT_IDS = frozenset(
+    {
+        "tables/entities.parquet",
+        "tables/general_info.parquet",
+        "tables/book_assets.parquet",
+        "tables/strategy_registry.parquet",
+        "tables/strategy_relationships.parquet",
+        "tables/manual_trading_system_config.parquet",
+        "tables/har_trading_system_settings.parquet",
+        "tables/har_buy_rules.parquet",
+        "tables/har_sell_rules.parquet",
+        "tables/returns_daily.parquet",
+        "source/har-workspace/csv/strategy_1853536_trading_system_settings.csv",
+        "source/har-workspace/csv/strategy_1853549_trading_system_settings.csv",
+    }
+)
+
+
+def _portfolio123_ai_relationship_ids(
+    evidence: Mapping[str, Any], relationships_path: Path
+) -> tuple[str, str]:
     provider = evidence.get("provider")
     if not isinstance(provider, dict) or provider.get("provider_id") != "portfolio123":
         raise TargetSeriesError("Portfolio123 AI provider evidence is absent")
-    # Portfolio123 keeps two identifier spaces.  har_managed_performance is
-    # keyed by the managed portfolio id, which the provider-live return route
-    # needs; strategy_relationships and returns_daily are keyed by the model id
-    # behind it, which the live/simulation twin route needs.  A managed
-    # portfolio therefore names its model explicitly rather than being looked
-    # up in a table it does not appear in.
     provider_entity_id = str(
         provider.get("model_entity_id") or provider.get("entity_id", "")
     ).strip()
@@ -3371,7 +3592,305 @@ def _p123_ai_backtest(
             twins.add(left)
     if len(twins) != 1:
         raise TargetSeriesError("Portfolio123 AI live/simulation twin is not unique")
-    simulation_entity_id = next(iter(twins))
+    return provider_entity_id, next(iter(twins))
+
+
+def _portfolio123_version_equivalence(
+    *,
+    evidence_path: Path,
+    policy_source: Mapping[str, Any],
+    strategy: Mapping[str, Any],
+    current_manifest_content: bytes,
+    current_manifest: Mapping[str, Any],
+    current_artifacts: Mapping[str, VerifiedArtifact],
+    ai_evidence: Mapping[str, Any],
+    strategy_evidence_sha256: str,
+) -> dict[str, object]:
+    """Reverify the bounded, captured-source AI version equivalence.
+
+    This deliberately binds only the recorded definition/twin perimeter.  The
+    historical account-evidence preimage is not part of that perimeter.
+    """
+    if evidence_path.is_symlink() or not evidence_path.is_file():
+        raise TargetSeriesError("Portfolio123 version evidence is unreadable")
+    evidence_content = evidence_path.read_bytes()
+    try:
+        evidence = json.loads(evidence_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TargetSeriesError("Portfolio123 version evidence is invalid") from exc
+    if (
+        not isinstance(evidence, dict)
+        or canonical_json_bytes(evidence) != evidence_content
+    ):
+        raise TargetSeriesError("Portfolio123 version evidence is not canonical")
+    _require_exact_keys(
+        evidence,
+        frozenset(
+            {
+                "accepted_source_manifest_path",
+                "accepted_strategy_version",
+                "current_artifacts",
+                "historical_coverage_path",
+                "historical_generation_manifest_path",
+                "provider_entity_id",
+                "schema_version",
+                "simulation_entity_id",
+                "strategy_id",
+            }
+        ),
+        "Portfolio123 version evidence",
+    )
+    product_version = _contract_version(strategy)[1]
+    if (
+        evidence.get("schema_version") != 1
+        or evidence.get("strategy_id") != "p123-ai-factor"
+        or evidence.get("accepted_strategy_version") != product_version
+    ):
+        raise TargetSeriesError("Portfolio123 accepted strategy version differs")
+    current_generation = policy_source.get("current_generation")
+    if not isinstance(current_generation, dict):
+        raise TargetSeriesError("Portfolio123 version policy generation is absent")
+    if (
+        canonical_json_bytes(current_manifest) != current_manifest_content
+        or not isinstance(current_manifest.get("generation_id"), str)
+        or len(str(current_manifest["generation_id"])) != 64
+    ):
+        raise TargetSeriesError("Portfolio123 current source manifest differs")
+
+    old_path = Path(str(evidence.get("accepted_source_manifest_path") or ""))
+    if old_path.is_symlink() or not old_path.is_file():
+        raise TargetSeriesError("Portfolio123 accepted source manifest is unreadable")
+    old_content = old_path.read_bytes()
+    try:
+        old_manifest = json.loads(old_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TargetSeriesError(
+            "Portfolio123 accepted source manifest is invalid"
+        ) from exc
+    if (
+        not isinstance(old_manifest, dict)
+        or canonical_json_bytes(old_manifest) != old_content
+        or hashlib.sha256(old_content).hexdigest() != current_generation.get("sha256")
+        or old_manifest.get("generation_id") != current_generation.get("generation_id")
+    ):
+        raise TargetSeriesError("Portfolio123 accepted source manifest differs")
+    old_artifacts = _manifest_artifacts(old_manifest.get("artifacts"))
+    evidence_artifacts = evidence.get("current_artifacts")
+    if not isinstance(evidence_artifacts, list):
+        raise TargetSeriesError("Portfolio123 version evidence artifacts are absent")
+    selected: list[dict[str, object]] = []
+    selected_ids: set[str] = set()
+    selected_paths: dict[str, Path] = {}
+    for item in evidence_artifacts:
+        if not isinstance(item, dict):
+            raise TargetSeriesError("Portfolio123 version evidence artifact is invalid")
+        _require_exact_keys(
+            item,
+            frozenset({"artifact_id", "path"}),
+            "Portfolio123 version evidence artifact",
+        )
+        artifact_id = str(item.get("artifact_id") or "")
+        path = Path(str(item.get("path") or ""))
+        if (
+            artifact_id in selected_ids
+            or path.is_symlink()
+            or not path.is_file()
+            or artifact_id not in _PORTFOLIO123_VERSION_EVIDENCE_ARTIFACT_IDS
+        ):
+            raise TargetSeriesError("Portfolio123 version evidence artifact differs")
+        selected_ids.add(artifact_id)
+        selected_paths[artifact_id] = path
+        old_artifact = old_artifacts.get(artifact_id)
+        current_artifact = current_artifacts.get(artifact_id)
+        actual_sha256, actual_size = _sha256(path)
+        if (
+            old_artifact is None
+            or current_artifact is None
+            or (old_artifact.sha256, old_artifact.size_bytes)
+            != (current_artifact.sha256, current_artifact.size_bytes)
+            or (actual_sha256, actual_size)
+            != (old_artifact.sha256, old_artifact.size_bytes)
+        ):
+            raise TargetSeriesError("Portfolio123 version evidence artifact differs")
+        selected.append(
+            {
+                "artifact_id": artifact_id,
+                "sha256": actual_sha256,
+                "size_bytes": actual_size,
+            }
+        )
+    if selected_ids != _PORTFOLIO123_VERSION_EVIDENCE_ARTIFACT_IDS:
+        raise TargetSeriesError("Portfolio123 version evidence artifact set differs")
+    provider_entity_id, simulation_entity_id = _portfolio123_ai_relationship_ids(
+        ai_evidence, selected_paths["tables/strategy_relationships.parquet"]
+    )
+    if (
+        evidence.get("provider_entity_id"),
+        evidence.get("simulation_entity_id"),
+    ) != (provider_entity_id, simulation_entity_id):
+        raise TargetSeriesError("Portfolio123 version evidence twin differs")
+    observation_strategy_version = _strategy_version(
+        "p123-live-sim-twin",
+        {
+            "generation_id": current_manifest["generation_id"],
+            "provider_entity_id": provider_entity_id,
+            "relationship_sha256": current_artifacts[
+                "tables/strategy_relationships.parquet"
+            ].sha256,
+            "relationship_type": "live_sim_twin",
+            "simulation_entity_id": simulation_entity_id,
+            "strategy_evidence_sha256": strategy_evidence_sha256,
+        },
+    )
+
+    historical_path = Path(
+        str(evidence.get("historical_generation_manifest_path") or "")
+    )
+    coverage_path = Path(str(evidence.get("historical_coverage_path") or ""))
+    if any(
+        path.is_symlink() or not path.is_file()
+        for path in (historical_path, coverage_path)
+    ):
+        raise TargetSeriesError(
+            "Portfolio123 historical version evidence is unreadable"
+        )
+    historical_content = historical_path.read_bytes()
+    coverage_content = coverage_path.read_bytes()
+    try:
+        historical = json.loads(historical_content)
+        coverage = json.loads(coverage_content)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TargetSeriesError(
+            "Portfolio123 historical version evidence is invalid"
+        ) from exc
+    if (
+        not isinstance(historical, dict)
+        or not isinstance(coverage, dict)
+        or canonical_json_bytes(historical) != historical_content
+        or canonical_json_bytes(coverage) != coverage_content
+    ):
+        raise TargetSeriesError(
+            "Portfolio123 historical version evidence is not canonical"
+        )
+    historical_without_id = dict(historical)
+    historical_id = historical_without_id.pop("generation_id", None)
+    if (
+        not isinstance(historical_id, str)
+        or historical_id
+        != hashlib.sha256(canonical_json_bytes(historical_without_id)).hexdigest()
+        or historical.get("builder") != LAYERED_HISTORY_BUILDER
+        or historical.get("schema_version") != LAYERED_HISTORY_SCHEMA_VERSION
+        or historical.get("verification") != "VERIFIED"
+    ):
+        raise TargetSeriesError("Portfolio123 historical generation identity differs")
+    historical_sources = historical.get("source_manifests")
+    historical_inputs = historical.get("inputs")
+    historical_outputs = historical.get("outputs")
+    if (
+        not isinstance(historical_sources, dict)
+        or historical_sources.get("portfolio123") != old_content.decode("utf-8")
+        or not isinstance(historical_inputs, list)
+        or not isinstance(historical_outputs, dict)
+    ):
+        raise TargetSeriesError("Portfolio123 historical source binding differs")
+    historical_p123_inputs = [
+        item
+        for item in historical_inputs
+        if isinstance(item, dict) and item.get("input_id") == "portfolio123-manifest"
+    ]
+    coverage_output = historical_outputs.get("coverage.json")
+    if (
+        len(historical_p123_inputs) != 1
+        or not isinstance(coverage_output, dict)
+        or (
+            historical_p123_inputs[0].get("generation_id"),
+            historical_p123_inputs[0].get("sha256"),
+            historical_p123_inputs[0].get("size_bytes"),
+        )
+        != (
+            old_manifest.get("generation_id"),
+            hashlib.sha256(old_content).hexdigest(),
+            len(old_content),
+        )
+        or (coverage_output.get("sha256"), coverage_output.get("size_bytes"))
+        != (hashlib.sha256(coverage_content).hexdigest(), len(coverage_content))
+    ):
+        raise TargetSeriesError("Portfolio123 historical coverage binding differs")
+    coverage_strategies = coverage.get("strategies")
+    if not isinstance(coverage_strategies, list):
+        raise TargetSeriesError("Portfolio123 historical coverage is invalid")
+    coverage_rows = [
+        row
+        for row in coverage_strategies
+        if isinstance(row, dict) and row.get("strategy_id") == "p123-ai-factor"
+    ]
+    if len(coverage_rows) != 1:
+        raise TargetSeriesError("Portfolio123 historical coverage strategy differs")
+    coverage_row = coverage_rows[0]
+    version = coverage_row.get("strategy_version")
+    segments = coverage_row.get("segments")
+    backtests = (
+        [
+            row
+            for row in segments
+            if isinstance(row, dict)
+            and row.get("segment_id") == "p123-ai-factor:backtest"
+        ]
+        if isinstance(segments, list)
+        else []
+    )
+    if (
+        not isinstance(version, dict)
+        or len(backtests) != 1
+        or (
+            version.get("history_generation_ref"),
+            version.get("product_version_ref"),
+            backtests[0].get("strategy_version"),
+            backtests[0].get("source_generation_id"),
+            backtests[0].get("mode_admission"),
+        )
+        != (
+            product_version,
+            product_version,
+            product_version,
+            old_manifest.get("generation_id"),
+            "INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+        )
+    ):
+        raise TargetSeriesError("Portfolio123 historical coverage association differs")
+    return {
+        "accepted_source_generation_id": old_manifest["generation_id"],
+        "accepted_source_manifest_sha256": hashlib.sha256(old_content).hexdigest(),
+        "accepted_strategy_version": product_version,
+        "current_artifacts": sorted(
+            selected, key=lambda item: str(item["artifact_id"])
+        ),
+        "current_source_generation_id": current_manifest["generation_id"],
+        "historical_coverage_sha256": hashlib.sha256(coverage_content).hexdigest(),
+        "historical_generation_manifest_sha256": hashlib.sha256(
+            historical_content
+        ).hexdigest(),
+        "observation_strategy_version": observation_strategy_version,
+        "provider_entity_id": provider_entity_id,
+        "simulation_entity_id": simulation_entity_id,
+        "strategy_id": "p123-ai-factor",
+        "version_evidence_sha256": hashlib.sha256(evidence_content).hexdigest(),
+    }
+
+
+def _p123_ai_backtest(
+    *,
+    evidence: Mapping[str, Any],
+    returns_path: Path,
+    relationships_path: Path,
+    generation_id: str,
+    relationships_sha256: str,
+    strategy_evidence_sha256: str,
+    series_id: str,
+) -> tuple[list[dict[str, str]], str, dict[str, object]]:
+    provider_entity_id, simulation_entity_id = _portfolio123_ai_relationship_ids(
+        evidence, relationships_path
+    )
     rows, coverage = _portfolio123_simulation_returns(
         returns_path,
         relationships_path,
@@ -3512,6 +4031,201 @@ def _strategies_without_a_backtest_layer(
     return without
 
 
+def _assert_admitted_rows_digest(
+    *, segments: Sequence[Mapping[str, Any]], receipt: Mapping[str, Any]
+) -> None:
+    """Check the materialized QSI backtest rows against the producer's row digest.
+
+    The bundle serializes its admitted rows on RETURN_FIELDS, which is the same tuple as
+    CORRELATION_FIELDS_V2, so a reader holding only the layered generation can reproduce the
+    exact bytes the producer hashed. Segment rows carry the accepted strategy version, so
+    the observation version from the receipt is restored before hashing.
+    """
+
+    declared = receipt.get("admitted_rows_sha256")
+    if not isinstance(declared, str):
+        raise TargetSeriesError("QSI source revision admitted row digest is absent")
+    admitted = [
+        {
+            "series_id": "QSI",
+            "date": row["date"],
+            "return": row["return"],
+            "evidence_layer": row["evidence_layer"],
+            "strategy_version": receipt["observation_strategy_version"],
+        }
+        for row in segments
+        if row.get("segment_id") == "qsi:backtest"
+    ]
+    output = io.StringIO(newline="")
+    writer = csv.DictWriter(
+        output, fieldnames=CORRELATION_FIELDS_V2, lineterminator="\n"
+    )
+    writer.writeheader()
+    writer.writerows(sorted(admitted, key=lambda row: (row["series_id"], row["date"])))
+    actual = hashlib.sha256(output.getvalue().encode("utf-8")).hexdigest()
+    if actual != declared:
+        raise TargetSeriesError(
+            "QSI source revision admitted rows differ from the attested digest"
+        )
+
+
+def _qsi_source_revision_admission(
+    *,
+    bundle_content: bytes,
+    staged_content: bytes | None,
+    contract: Mapping[str, Any],
+    accepted_as_of: date,
+    sources_path: Path | None = None,
+) -> tuple[dict[str, Any], list[dict[str, str]] | None] | None:
+    """Admit the QSI revision against the unchanged accepted contract seed.
+
+    Two modes, because the two callers have different evidence available and pretending
+    otherwise is what put absolute locators into a portable artifact.
+
+    The PRODUCER holds the archives, so `sources_path` names the sidecar written beside the
+    bundle and the revision is re-derived from the raw sources and compared byte for byte.
+    That is the revision's external anchor and it happens before the generation exists.
+
+    The PORTABLE VERIFIER holds only retained bytes. It proves the receipt's hash chain, the
+    admitted-row digest and the contract's accepted-seed pins. It does NOT prove the revised
+    rows derive from the archives; only the producer proves that, and the docstring says so
+    rather than implying a strength the verifier does not have.
+    """
+    bundle = json.loads(bundle_content)
+    if "qsi_source_revision" not in bundle:
+        return None
+    if staged_content is None:
+        raise TargetSeriesError("QSI source revision requires its staged generation")
+    receipt = bundle["qsi_source_revision"]
+    if receipt.get("schema_version") != 2:
+        raise TargetSeriesError("QSI source revision receipt schema is unsupported")
+    predecessor = receipt["accepted_predecessor"]
+    modules = {}
+    for name in ("portfolio_strategy_history", "portfolio_strategy_backtests"):
+        spec = importlib.util.spec_from_file_location(
+            f"_{name}_for_qsi_revision", Path(__file__).with_name(f"{name}.py")
+        )
+        if spec is None or spec.loader is None:
+            raise TargetSeriesError("QSI source revision verifier is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        modules[name] = module
+    history = modules["portfolio_strategy_history"]
+    backtests = modules["portfolio_strategy_backtests"]
+    rows: list[dict[str, str]] | None = None
+    try:
+        if sources_path is not None:
+            sidecar = json.loads(Path(sources_path).read_bytes())
+            if sidecar.get("bundle_id") != bundle["bundle_id"]:
+                raise TargetSeriesError(
+                    "QSI refresh source sidecar names another bundle"
+                )
+            verified = history.verify_qsi_refresh_bundle(
+                bundle_content,
+                sources={key: Path(value) for key, value in sidecar["sources"].items()},
+                seed_manifest_path=Path(
+                    sidecar["accepted_predecessor"]["manifest_path"]
+                ),
+                seed_returns_path=Path(sidecar["accepted_predecessor"]["returns_path"]),
+            )
+            receipt = verified["qsi_source_revision"]
+            predecessor = receipt["accepted_predecessor"]
+            rows = cast(list[dict[str, str]], verified["rows"])
+            current_returns = _correlation_view_bytes(rows)
+        else:
+            current_returns = None
+        if current_returns is not None:
+            _, _, current_generation, _ = backtests._build_from_contents(
+                bundle_content, current_returns
+            )
+            if current_generation.to_json_bytes() != staged_content:
+                raise TargetSeriesError("QSI source revision staged generation differs")
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise TargetSeriesError(
+            f"QSI source revision verification failed: {exc}"
+        ) from exc
+    seed_sha = predecessor["accepted_generation_manifest_sha256"]
+    seed_source = next(
+        source
+        for source in contract["source_segments"]
+        if source["source_id"] == "strategy-backtests"
+    )
+    strategy = next(
+        item for item in contract["strategies"] if item["strategy_id"] == "qsi"
+    )
+    current = seed_source.get("current_generation", {})
+    if (
+        (
+            predecessor["accepted_generation_id"],
+            seed_sha,
+            predecessor["accepted_generation_as_of"],
+        )
+        != (current.get("generation_id"), current.get("sha256"), current.get("as_of"))
+        or _contract_version(strategy)
+        != ("EVIDENCED", predecessor["accepted_strategy_version"])
+        or seed_source.get("strategy_version", {}).get("version_refs", {}).get("qsi")
+        != predecessor["accepted_strategy_version"]
+    ):
+        raise TargetSeriesError("QSI source revision accepted contract seed differs")
+    if receipt["financial_cutoff"] != accepted_as_of.isoformat():
+        raise TargetSeriesError("QSI source revision financial cutoff differs")
+    staged_generation = GenerationManifest.from_json_bytes(staged_content)
+    staged_artifacts = {item.artifact_id: item for item in staged_generation.artifacts}
+    bundle_artifact = staged_artifacts.get("raw/strategy-history-manifest.json")
+    if (
+        bundle_artifact is None
+        or bundle_artifact.sha256 != hashlib.sha256(bundle_content).hexdigest()
+        or bundle_artifact.size_bytes != len(bundle_content)
+    ):
+        raise TargetSeriesError("QSI source revision staged generation differs")
+    returns_artifact = staged_artifacts.get("returns.csv")
+    declared_returns = bundle["returns_artifact"]
+    if (
+        returns_artifact is None
+        or returns_artifact.sha256 != declared_returns["sha256"]
+        or returns_artifact.size_bytes != declared_returns["size_bytes"]
+    ):
+        raise TargetSeriesError("QSI source revision staged returns differ")
+    proof = {
+        "schema_version": 1,
+        "revision_kind": receipt["revision_kind"],
+        "revision_sha256": hashlib.sha256(canonical_json_bytes(receipt)).hexdigest(),
+        "accepted_strategy_version": predecessor["accepted_strategy_version"],
+        "observation_strategy_version": receipt["observation_strategy_version"],
+        "accepted_bundle_id": predecessor["bundle_id"],
+        "accepted_generation_id": predecessor["accepted_generation_id"],
+        "accepted_generation_manifest_sha256": seed_sha,
+        "accepted_generation_manifest_size_bytes": predecessor[
+            "accepted_generation_manifest_size_bytes"
+        ],
+        "bundle_id": bundle["bundle_id"],
+        "generation_id": staged_generation.generation_id,
+        "generation_manifest_sha256": hashlib.sha256(staged_content).hexdigest(),
+        "generation_manifest_size_bytes": len(staged_content),
+        "live_inception": receipt["live_inception"],
+        "financial_cutoff": receipt["financial_cutoff"],
+    }
+    return proof, rows
+
+
+def _qsi_revision_sources(
+    sources: Mapping[str, dict[str, Any]],
+    proof: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Select the proven staged receipt locally; never modify the contract."""
+    return {
+        **sources,
+        "strategy-backtests": {
+            **sources["strategy-backtests"],
+            "current_generation": {
+                "generation_id": proof["generation_id"],
+                "sha256": proof["generation_manifest_sha256"],
+                "as_of": proof["financial_cutoff"],
+            },
+        },
+    }
+
+
 def build_layered_history_generation(
     *,
     contract_path: Path,
@@ -3534,11 +4248,14 @@ def build_layered_history_generation(
     quantbase_fund_id: str,
     portfolio123_pointer_path: Path | None,
     portfolio123_manifest_path: Path,
-    portfolio123_metadata_path: Path,
-    portfolio123_performance_path: Path,
-    portfolio123_equity_path: Path,
+    portfolio123_metadata_path: Path | None,
+    portfolio123_performance_path: Path | None,
+    portfolio123_equity_path: Path | None,
     portfolio123_returns_path: Path,
     portfolio123_relationships_path: Path,
+    portfolio123_version_evidence_path: Path | None = None,
+    provider_admission_receipt_path: Path | None = None,
+    financial_input_contract_path: Path | None = None,
     strategy_history_manifest_path: Path | None = None,
     strategy_history_returns_path: Path | None = None,
     strategy_backtests_generation_path: Path | None = None,
@@ -3589,6 +4306,19 @@ def build_layered_history_generation(
     contract, strategies, sources, corrections = _history_contract(contract_path)
     product = contract["product"]
     history_policy = contract["history_corrections"]
+    current_admission = _current_source_admission_authority(
+        contract_path=contract_path,
+        financial_input_contract_path=financial_input_contract_path,
+        provider_admission_receipt_path=provider_admission_receipt_path,
+        provider_ledger_manifest_path=provider_ledger_manifest_path,
+        provider_ledger_catalog_path=provider_ledger_catalog_path,
+        accepted_as_of=accepted_as_of,
+    )
+    admitted_generations: Mapping[str, Mapping[str, str]] | None = (
+        cast(Mapping[str, Mapping[str, str]], current_admission["source_generations"])
+        if current_admission is not None
+        else None
+    )
 
     if source_selection_mode == "CURRENT_POINTERS":
         ledger_manifest, ledger_generation, ledger_as_of = _verified_current_generation(
@@ -3623,6 +4353,37 @@ def build_layered_history_generation(
             name="Portfolio123",
             inventory_profile="portfolio123",
         )
+    elif admitted_generations is not None:
+        ledger_manifest, ledger_generation, ledger_as_of = (
+            _verified_admitted_generation(
+                manifest_path=provider_ledger_manifest_path,
+                source=sources["owner-account-live-history"],
+                admitted=admitted_generations["owner-account-live-history"],
+                name="provider ledger",
+            )
+        )
+        matrixport_manifest, matrixport_generation, matrixport_as_of = (
+            _verified_admitted_generation(
+                manifest_path=matrixport_manifest_path,
+                source=sources["matrixport-account-generation"],
+                admitted=admitted_generations["matrixport-account-generation"],
+                name="Matrixport",
+            )
+        )
+        quantbase_manifest, quantbase_generation, quantbase_as_of = (
+            _verified_admitted_generation(
+                manifest_path=quantbase_manifest_path,
+                source=sources["quantbase-account-generation"],
+                admitted=admitted_generations["quantbase-account-generation"],
+                name="Quantbase",
+            )
+        )
+        p123_manifest, p123_generation, p123_as_of = _verified_admitted_generation(
+            manifest_path=portfolio123_manifest_path,
+            source=sources["portfolio123-model-generation"],
+            admitted=admitted_generations["portfolio123-model-generation"],
+            name="Portfolio123",
+        )
     else:
         ledger_manifest, ledger_generation, ledger_as_of = (
             _verified_immutable_generation(
@@ -3650,7 +4411,7 @@ def build_layered_history_generation(
             source=sources["portfolio123-model-generation"],
             name="Portfolio123",
         )
-    if (
+    if current_admission is None and (
         max(
             map(
                 date.fromisoformat,
@@ -3863,8 +4624,10 @@ def build_layered_history_generation(
     if not isinstance(robuxio_interval, dict):
         raise TargetSeriesError("Robuxio account-live interval is absent from contract")
     try:
-        matrixport_admission_cutoff = date.fromisoformat(
-            str(robuxio_interval.get("observed_end", ""))
+        matrixport_admission_cutoff = (
+            accepted_as_of
+            if current_admission is not None
+            else date.fromisoformat(str(robuxio_interval.get("observed_end", "")))
         )
     except ValueError as exc:
         raise TargetSeriesError("Robuxio account-live cutoff is invalid") from exc
@@ -3911,12 +4674,17 @@ def build_layered_history_generation(
         date.fromisoformat(str(item))
         for item in raw_gap_policy.get("unavailable_return_dates", [])
     )
-    if not robuxio_account_absent and (
-        robuxio_live[0]["date"],
-        robuxio_live[-1]["date"],
-    ) != (
-        robuxio_interval.get("observed_start"),
-        robuxio_interval.get("observed_end"),
+    if (
+        current_admission is None
+        and not robuxio_account_absent
+        and (
+            robuxio_live[0]["date"],
+            robuxio_live[-1]["date"],
+        )
+        != (
+            robuxio_interval.get("observed_start"),
+            robuxio_interval.get("observed_end"),
+        )
     ):
         raise TargetSeriesError("Robuxio account-live interval differs from contract")
     robuxio_provider = _matrixport_provider_returns(
@@ -4010,16 +4778,28 @@ def build_layered_history_generation(
         quantbase_fund_id,
         volatis_series,
     )
+    if current_admission is not None:
+        volatis_live = [
+            row
+            for row in volatis_live
+            if date.fromisoformat(row["date"]) <= accepted_as_of
+        ]
+        if not volatis_live:
+            raise TargetSeriesError("Volatis admitted live history is unavailable")
     volatis_coverage = volatis_proof.get("coverage")
     if not isinstance(volatis_coverage, dict):
         raise TargetSeriesError("Volatis coverage proof is invalid")
     volatis_interval = corrections["volatis-account-live"].get("interval")
     if not isinstance(volatis_interval, dict) or (
-        volatis_live[0]["date"],
-        volatis_live[-1]["date"],
-    ) != (
-        volatis_interval.get("observed_start"),
-        volatis_interval.get("observed_end"),
+        current_admission is None
+        and (
+            volatis_live[0]["date"],
+            volatis_live[-1]["date"],
+        )
+        != (
+            volatis_interval.get("observed_start"),
+            volatis_interval.get("observed_end"),
+        )
     ):
         raise TargetSeriesError("Volatis account-live interval differs from contract")
     raw_flow_matches = volatis_proof.get("flow_matches")
@@ -4041,13 +4821,36 @@ def build_layered_history_generation(
         # only proof dates in the calculated-return perimeter are exceptional.
         if booked_date in volatis_return_dates:
             volatis_flow_dates.add(booked_date)
-    live_by_strategy["volatis-strategy"] = _quantbase_account_live_from_ledger(
-        live_by_strategy["volatis-strategy"], volatis_live, volatis_flow_dates
-    )
+    if current_admission is not None:
+        admitted_volatis_dates = [
+            row["date"] for row in live_by_strategy["volatis-strategy"]
+        ]
+        if admitted_volatis_dates != [row["date"] for row in volatis_live]:
+            raise TargetSeriesError("Volatis admitted live dates differ from provider")
+    else:
+        live_by_strategy["volatis-strategy"] = _quantbase_account_live_from_ledger(
+            live_by_strategy["volatis-strategy"], volatis_live, volatis_flow_dates
+        )
 
     p123_artifacts = _manifest_artifacts(p123_manifest.get("artifacts"))
-    p123_history_receipts = _portfolio123_provider_history_receipts(
-        corrections["p123-eu-provider-live"], p123_generation
+    p123_comparison_paths = (
+        portfolio123_metadata_path,
+        portfolio123_performance_path,
+        portfolio123_equity_path,
+    )
+    if any(path is None for path in p123_comparison_paths) and any(
+        path is not None for path in p123_comparison_paths
+    ):
+        raise TargetSeriesError(
+            "Portfolio123 comparison inputs must be supplied together"
+        )
+    p123_comparison_selected = all(path is not None for path in p123_comparison_paths)
+    p123_history_receipts = (
+        _portfolio123_provider_history_receipts(
+            corrections["p123-eu-provider-live"], p123_generation
+        )
+        if p123_comparison_selected
+        else None
     )
     p123_history_manifest_path = portfolio123_manifest_path
     p123_history_generation = p123_generation
@@ -4095,35 +4898,49 @@ def build_layered_history_generation(
                 "artifacts"
             ]
         )
-    try:
-        metadata_artifact = _verify_artifact(
-            portfolio123_metadata_path,
-            p123_history_artifacts,
-            "tables/har_managed_metadata.parquet",
-        )
-        performance_artifact = _verify_artifact(
-            portfolio123_performance_path,
-            p123_history_artifacts,
-            "tables/har_managed_performance.parquet",
-        )
-        equity_artifact = _verify_artifact(
-            portfolio123_equity_path,
-            p123_history_artifacts,
-            "tables/har_equity_curve.parquet",
-        )
-    except TargetSeriesError as exc:
-        if p123_history_receipts is None:
-            raise
-        raise TargetSeriesError(
-            f"Portfolio123 provider history artifact differs: {exc}"
-        ) from exc
+    metadata_artifact: VerifiedArtifact | None = None
+    performance_artifact: VerifiedArtifact | None = None
+    equity_artifact: VerifiedArtifact | None = None
+    if p123_comparison_selected:
+        assert portfolio123_metadata_path is not None
+        assert portfolio123_performance_path is not None
+        assert portfolio123_equity_path is not None
+        try:
+            metadata_artifact = _verify_artifact(
+                portfolio123_metadata_path,
+                p123_history_artifacts,
+                "tables/har_managed_metadata.parquet",
+            )
+            performance_artifact = _verify_artifact(
+                portfolio123_performance_path,
+                p123_history_artifacts,
+                "tables/har_managed_performance.parquet",
+            )
+            equity_artifact = _verify_artifact(
+                portfolio123_equity_path,
+                p123_history_artifacts,
+                "tables/har_equity_curve.parquet",
+            )
+        except TargetSeriesError as exc:
+            if p123_history_receipts is None:
+                raise
+            raise TargetSeriesError(
+                f"Portfolio123 provider history artifact differs: {exc}"
+            ) from exc
+    if p123_history_receipts is not None:
+        assert metadata_artifact is not None
+        assert performance_artifact is not None
+        assert equity_artifact is not None
+        comparison_artifacts = {
+            "metadata": metadata_artifact,
+            "performance": performance_artifact,
+            "equity": equity_artifact,
+        }
+    else:
+        comparison_artifacts = {}
     if p123_history_receipts is not None and any(
-        artifact.sha256 != p123_history_receipts[key]["sha256"]
-        for key, artifact in (
-            ("metadata", metadata_artifact),
-            ("performance", performance_artifact),
-            ("equity", equity_artifact),
-        )
+        comparison_artifacts[key].sha256 != p123_history_receipts[key]["sha256"]
+        for key in comparison_artifacts
     ):
         raise TargetSeriesError(
             "Portfolio123 provider history artifact receipt differs"
@@ -4140,21 +4957,37 @@ def build_layered_history_generation(
     if p123_eu_series is None:
         raise TargetSeriesError("provider ledger lacks Portfolio123 EU mapping")
     _eu_version_status, p123_eu_version = _contract_version(strategies["p123-eu"])
-    p123_eu_candidate, p123_eu_proof = _portfolio123_provider_performance_returns(
-        metadata_path=portfolio123_metadata_path,
-        performance_path=portfolio123_performance_path,
-        equity_path=portfolio123_equity_path,
-        generation_id=p123_history_generation,
-        series_id=p123_eu_series,
-        accepted_version=p123_eu_version,
-    )
+    if p123_comparison_selected:
+        assert portfolio123_metadata_path is not None
+        assert portfolio123_performance_path is not None
+        assert portfolio123_equity_path is not None
+        p123_eu_candidate, p123_eu_proof = _portfolio123_provider_performance_returns(
+            metadata_path=portfolio123_metadata_path,
+            performance_path=portfolio123_performance_path,
+            equity_path=portfolio123_equity_path,
+            generation_id=p123_history_generation,
+            series_id=p123_eu_series,
+            accepted_version=p123_eu_version,
+        )
+    else:
+        p123_eu_candidate = []
+        p123_eu_proof = cast(
+            dict[str, object],
+            corrections["p123-eu-provider-live"].get("derived_evidence_identity"),
+        )
+        if not isinstance(p123_eu_proof, dict):
+            raise TargetSeriesError("Portfolio123 EU provider evidence is absent")
     p123_eu_interval = corrections["p123-eu-provider-live"].get("interval")
     if not isinstance(p123_eu_interval, dict) or (
-        p123_eu_candidate[0]["date"],
-        p123_eu_candidate[-1]["date"],
-    ) != (
-        p123_eu_interval.get("observed_start"),
-        p123_eu_interval.get("observed_end"),
+        p123_comparison_selected
+        and (
+            p123_eu_candidate[0]["date"],
+            p123_eu_candidate[-1]["date"],
+        )
+        != (
+            p123_eu_interval.get("observed_start"),
+            p123_eu_interval.get("observed_end"),
+        )
     ):
         raise TargetSeriesError("Portfolio123 EU provider interval differs")
     p123_eu_live_interval = corrections["p123-eu-account-live"].get("interval")
@@ -4162,10 +4995,13 @@ def build_layered_history_generation(
     if (
         not isinstance(p123_eu_live_interval, dict)
         or not p123_eu_live
-        or (p123_eu_live[0]["date"], p123_eu_live[-1]["date"])
-        != (
-            p123_eu_live_interval.get("observed_start"),
-            p123_eu_live_interval.get("observed_end"),
+        or (
+            current_admission is None
+            and (p123_eu_live[0]["date"], p123_eu_live[-1]["date"])
+            != (
+                p123_eu_live_interval.get("observed_start"),
+                p123_eu_live_interval.get("observed_end"),
+            )
         )
     ):
         raise TargetSeriesError("Portfolio123 EU account-live interval differs")
@@ -4182,6 +5018,26 @@ def build_layered_history_generation(
         relationships_sha256=relationships_artifact.sha256,
         strategy_evidence_sha256=hashlib.sha256(strategy_evidence_content).hexdigest(),
         series_id=p123_ai_series,
+    )
+    portfolio123_version_equivalence = (
+        _portfolio123_version_equivalence(
+            evidence_path=portfolio123_version_evidence_path,
+            policy_source=next(
+                source
+                for source in contract["source_segments"]
+                if source.get("source_id") == "portfolio123-model-generation"
+            ),
+            strategy=strategies["p123-ai-factor"],
+            current_manifest_content=portfolio123_manifest_path.read_bytes(),
+            current_manifest=p123_manifest,
+            current_artifacts=p123_artifacts,
+            ai_evidence=p123_ai_evidence,
+            strategy_evidence_sha256=hashlib.sha256(
+                strategy_evidence_content
+            ).hexdigest(),
+        )
+        if portfolio123_version_evidence_path is not None
+        else None
     )
 
     history_rows: dict[str, list[dict[str, str]]] = {}
@@ -4215,6 +5071,33 @@ def build_layered_history_generation(
         manifest_path=strategy_history_manifest_path,
         returns_path=strategy_history_returns_path,
     )
+    # The producer holds the archives, so it re-derives the revision rather than trusting
+    # the receipt. The locators come from the sidecar beside the bundle, never from the
+    # receipt, which is embedded in a portable artifact.
+    qsi_refresh_sidecar = (
+        strategy_history_manifest_path.with_name("sources.local.json")
+        if strategy_history_manifest_path is not None
+        else None
+    )
+    qsi_revision = (
+        _qsi_source_revision_admission(
+            bundle_content=strategy_history_manifest_path.read_bytes(),
+            staged_content=(
+                strategy_backtests_generation_path.read_bytes()
+                if strategy_backtests_generation_path is not None
+                else None
+            ),
+            contract=contract,
+            accepted_as_of=accepted_as_of,
+            sources_path=(
+                qsi_refresh_sidecar
+                if qsi_refresh_sidecar is not None and qsi_refresh_sidecar.is_file()
+                else None
+            ),
+        )
+        if strategy_history_manifest_path is not None
+        else None
+    )
 
     first_live: dict[str, date] = {}
     for strategy_id, rows in live_by_strategy.items():
@@ -4226,6 +5109,10 @@ def build_layered_history_generation(
             seen_dates.add(row["date"])
         if rows:
             first_live[strategy_id] = date.fromisoformat(rows[0]["date"])
+    if qsi_revision is not None and qsi_revision[0]["live_inception"] != str(
+        first_live.get("qsi")
+    ):
+        raise TargetSeriesError("QSI source revision retained live inception differs")
     version_by_strategy: dict[str, str] = {}
     no_backtest_layer = _strategies_without_a_backtest_layer(corrections)
     version_status_by_strategy: dict[str, str] = {}
@@ -4242,9 +5129,17 @@ def build_layered_history_generation(
     # The product assertion can be EVIDENCED and still not be the version the
     # evidence carries, so its status alone cannot distinguish them.
     version_mismatched_backtests: set[str] = set()
-    p123_ai_exact_version = (
-        version_status_by_strategy["p123-ai-factor"] == "EVIDENCED"
-        and version_by_strategy["p123-ai-factor"] == p123_ai_version
+    p123_ai_exact_version = version_status_by_strategy[
+        "p123-ai-factor"
+    ] == "EVIDENCED" and (
+        version_by_strategy["p123-ai-factor"] == p123_ai_version
+        or (
+            portfolio123_version_equivalence is not None
+            and portfolio123_version_equivalence["accepted_strategy_version"]
+            == version_by_strategy["p123-ai-factor"]
+            and portfolio123_version_equivalence["observation_strategy_version"]
+            == p123_ai_version
+        )
     )
     # Split the twin at this strategy's own account-live inception rather than
     # judging the series as a whole. The rows at or after it are a simulation
@@ -4279,9 +5174,16 @@ def build_layered_history_generation(
             raise TargetSeriesError("strategy history series lacks product mapping")
         definition = history_definitions[series_id]
         definition_version = str(definition["strategy_version"])
-        if (
-            version_status_by_strategy[mapped_strategy_id] != "EVIDENCED"
-            or version_by_strategy[mapped_strategy_id] != definition_version
+        # Segment rows retain the design reference. The distinct QSI source
+        # version and its revised history remain bound in the raw bundle/proof.
+        if version_status_by_strategy[mapped_strategy_id] != "EVIDENCED" or (
+            version_by_strategy[mapped_strategy_id] != definition_version
+            and not (
+                mapped_strategy_id == "qsi"
+                and qsi_revision is not None
+                and qsi_revision[0]["observation_strategy_version"]
+                == definition_version
+            )
         ):
             continue
         if (
@@ -4629,6 +5531,8 @@ def build_layered_history_generation(
                 },
             }
         )
+        if strategy_id == "qsi" and qsi_revision is not None:
+            coverage_rows[-1]["source_history_revision"] = qsi_revision[0]
     correction_resolutions: dict[str, dict[str, Any]] = {
         "echotrade-event-only-account-live-rejected": {
             "canonicalization": echo_expected_identity["canonicalization"],
@@ -4793,30 +5697,6 @@ def build_layered_history_generation(
             as_of_date=p123_as_of,
         ),
         _artifact_identity(
-            input_id="portfolio123-metadata",
-            artifact_role="GENERATION_ARTIFACT",
-            path=portfolio123_metadata_path,
-            artifact_id=metadata_artifact.artifact_id,
-            generation_id=p123_history_generation,
-            as_of_date=p123_history_as_of,
-        ),
-        _artifact_identity(
-            input_id="portfolio123-performance",
-            artifact_role="GENERATION_ARTIFACT",
-            path=portfolio123_performance_path,
-            artifact_id=performance_artifact.artifact_id,
-            generation_id=p123_history_generation,
-            as_of_date=p123_history_as_of,
-        ),
-        _artifact_identity(
-            input_id="portfolio123-equity",
-            artifact_role="GENERATION_ARTIFACT",
-            path=portfolio123_equity_path,
-            artifact_id=equity_artifact.artifact_id,
-            generation_id=p123_history_generation,
-            as_of_date=p123_history_as_of,
-        ),
-        _artifact_identity(
             input_id="portfolio123-returns",
             artifact_role="GENERATION_ARTIFACT",
             path=portfolio123_returns_path,
@@ -4833,6 +5713,73 @@ def build_layered_history_generation(
             as_of_date=p123_as_of,
         ),
     ]
+    if p123_comparison_selected:
+        assert portfolio123_metadata_path is not None
+        assert portfolio123_performance_path is not None
+        assert portfolio123_equity_path is not None
+        assert metadata_artifact is not None
+        assert performance_artifact is not None
+        assert equity_artifact is not None
+        inputs.extend(
+            [
+                _artifact_identity(
+                    input_id="portfolio123-metadata",
+                    artifact_role="GENERATION_ARTIFACT",
+                    path=portfolio123_metadata_path,
+                    artifact_id=metadata_artifact.artifact_id,
+                    generation_id=p123_history_generation,
+                    as_of_date=p123_history_as_of,
+                ),
+                _artifact_identity(
+                    input_id="portfolio123-performance",
+                    artifact_role="GENERATION_ARTIFACT",
+                    path=portfolio123_performance_path,
+                    artifact_id=performance_artifact.artifact_id,
+                    generation_id=p123_history_generation,
+                    as_of_date=p123_history_as_of,
+                ),
+                _artifact_identity(
+                    input_id="portfolio123-equity",
+                    artifact_role="GENERATION_ARTIFACT",
+                    path=portfolio123_equity_path,
+                    artifact_id=equity_artifact.artifact_id,
+                    generation_id=p123_history_generation,
+                    as_of_date=p123_history_as_of,
+                ),
+            ]
+        )
+    if portfolio123_version_evidence_path is not None:
+        inputs.append(
+            _artifact_identity(
+                input_id="portfolio123-version-evidence",
+                artifact_role="SOURCE_EQUIVALENCE_EVIDENCE",
+                path=portfolio123_version_evidence_path,
+            )
+        )
+    if current_admission is not None:
+        admission_path = cast(Path, provider_admission_receipt_path)
+        admission_contract_path = (
+            contract_path
+            if financial_input_contract_path is None
+            else financial_input_contract_path
+        )
+        inputs.extend(
+            [
+                _artifact_identity(
+                    input_id="provider-admission-receipt",
+                    artifact_role="ADMISSION_RECEIPT",
+                    path=admission_path,
+                    artifact_id="normalized/admit-or-declare-receipt.json",
+                    generation_id=ledger_generation,
+                    as_of_date=ledger_as_of,
+                ),
+                _artifact_identity(
+                    input_id="financial-input-contract",
+                    artifact_role="ADMITTED_INPUT_CONTRACT",
+                    path=admission_contract_path,
+                ),
+            ]
+        )
     if source_selection_mode == "CURRENT_POINTERS":
         inputs.extend(
             [
@@ -5021,6 +5968,14 @@ def build_layered_history_generation(
             ),
             "quantbase": cast(Path, quantbase_pointer_path).read_text(encoding="utf-8"),
         }
+    if current_admission is not None:
+        manifest_without_id["current_source_admission"] = current_admission["proof"]
+    if portfolio123_version_equivalence is not None:
+        manifest_without_id["portfolio123_version_equivalence"] = (
+            portfolio123_version_equivalence
+        )
+    if qsi_revision is not None:
+        manifest_without_id["qsi_source_revision"] = qsi_revision[0]
 
     generation_id = hashlib.sha256(
         canonical_json_bytes(manifest_without_id)
@@ -5108,6 +6063,11 @@ def validate_layered_history_generation(
     artifacts: Mapping[str, bytes],
     manifest_content: bytes,
     contract_path: Path,
+    provider_admission_receipt_path: Path | None = None,
+    financial_input_contract_path: Path | None = None,
+    provider_ledger_manifest_path: Path | None = None,
+    provider_ledger_catalog_path: Path | None = None,
+    portfolio123_version_evidence_path: Path | None = None,
     require_mode: str | None = None,
     assurance_profile: str | None = None,
     evaluated_on: date | None = None,
@@ -5125,6 +6085,8 @@ def validate_layered_history_generation(
     source_selection_mode = manifest.get("source_selection_mode", "CURRENT_POINTERS")
     if source_selection_mode not in {"CURRENT_POINTERS", "IMMUTABLE_GENERATIONS"}:
         raise TargetSeriesError("layered history source selection mode differs")
+    current_admission_requested = provider_admission_receipt_path is not None
+    version_evidence_requested = portfolio123_version_evidence_path is not None
     expected_manifest_keys = {
         "$schema",
         "as_of_date",
@@ -5141,6 +6103,12 @@ def validate_layered_history_generation(
         "tool_sha256",
         "verification",
     }
+    if current_admission_requested:
+        expected_manifest_keys.add("current_source_admission")
+    if version_evidence_requested:
+        expected_manifest_keys.add("portfolio123_version_equivalence")
+    if "qsi_source_revision" in manifest:
+        expected_manifest_keys.add("qsi_source_revision")
     if "source_selection_mode" in manifest:
         expected_manifest_keys.add("source_selection_mode")
     if source_selection_mode == "CURRENT_POINTERS":
@@ -5171,6 +6139,35 @@ def validate_layered_history_generation(
         raise TargetSeriesError("layered history generation as-of is invalid") from exc
     if accepted_as_of.isoformat() != raw_as_of:
         raise TargetSeriesError("layered history generation as-of is invalid")
+    admission_paths = (
+        provider_admission_receipt_path,
+        provider_ledger_manifest_path,
+        provider_ledger_catalog_path,
+    )
+    if provider_admission_receipt_path is None:
+        if financial_input_contract_path is not None:
+            raise TargetSeriesError(
+                "current admission inputs require provider admission receipt"
+            )
+        current_admission = None
+    else:
+        if any(path is None for path in admission_paths[1:]):
+            raise TargetSeriesError(
+                "current admission receipt requires provider ledger inputs"
+            )
+        current_admission = _current_source_admission_authority(
+            contract_path=contract_path,
+            financial_input_contract_path=financial_input_contract_path,
+            provider_admission_receipt_path=provider_admission_receipt_path,
+            provider_ledger_manifest_path=cast(Path, provider_ledger_manifest_path),
+            provider_ledger_catalog_path=cast(Path, provider_ledger_catalog_path),
+            accepted_as_of=accepted_as_of,
+        )
+    if (
+        current_admission is not None
+        and manifest.get("current_source_admission") != (current_admission["proof"])
+    ):
+        raise TargetSeriesError("current source admission proof differs")
     repository_sha = str(manifest.get("repository_sha", ""))
     tool_sha256 = str(manifest.get("tool_sha256", ""))
     if (
@@ -5189,6 +6186,19 @@ def validate_layered_history_generation(
     contract, strategies, sources, corrections = _history_contract(
         contract_path, repository_sha
     )
+    if current_admission is not None:
+        admitted_generations = cast(
+            Mapping[str, Mapping[str, str]], current_admission["source_generations"]
+        )
+        sources = {
+            source_id: {
+                **source,
+                "current_generation": dict(admitted_generations[source_id]),
+            }
+            if source_id in admitted_generations
+            else source
+            for source_id, source in sources.items()
+        }
     product = manifest.get("product")
     if (
         not isinstance(product, dict)
@@ -5260,13 +6270,25 @@ def validate_layered_history_generation(
     if input_rows != sorted(input_rows, key=lambda item: str(item["input_id"])):
         raise TargetSeriesError("layered history input ordering differs")
 
-    p123_history_receipts = _portfolio123_provider_history_receipts(
-        corrections["p123-eu-provider-live"],
-        str(
-            sources["portfolio123-model-generation"]["current_generation"][
-                "generation_id"
-            ]
-        ),
+    comparison_input_ids = {
+        "portfolio123-metadata",
+        "portfolio123-performance",
+        "portfolio123-equity",
+    }
+    comparison_inputs_selected = comparison_input_ids <= set(inputs)
+    if comparison_input_ids & set(inputs) and not comparison_inputs_selected:
+        raise TargetSeriesError("Portfolio123 comparison input set differs")
+    p123_history_receipts = (
+        _portfolio123_provider_history_receipts(
+            corrections["p123-eu-provider-live"],
+            str(
+                sources["portfolio123-model-generation"]["current_generation"][
+                    "generation_id"
+                ]
+            ),
+        )
+        if comparison_inputs_selected
+        else None
     )
     expected_input_contracts: dict[str, tuple[str, str | None]] = {
         "financial-mvp-contract": ("PRODUCT_CONTRACT", None),
@@ -5313,6 +6335,24 @@ def validate_layered_history_generation(
             "tables/strategy_relationships.parquet",
         ),
     }
+    if not comparison_inputs_selected:
+        for input_id in comparison_input_ids:
+            expected_input_contracts.pop(input_id)
+    if version_evidence_requested:
+        expected_input_contracts["portfolio123-version-evidence"] = (
+            "SOURCE_EQUIVALENCE_EVIDENCE",
+            None,
+        )
+    if current_admission is not None:
+        expected_input_contracts.update(
+            {
+                "provider-admission-receipt": (
+                    "ADMISSION_RECEIPT",
+                    "normalized/admit-or-declare-receipt.json",
+                ),
+                "financial-input-contract": ("ADMITTED_INPUT_CONTRACT", None),
+            }
+        )
     if source_selection_mode == "CURRENT_POINTERS":
         expected_input_contracts.update(
             {
@@ -5402,6 +6442,36 @@ def validate_layered_history_generation(
         contract_input.get("size_bytes"),
     ) != ("PRODUCT_CONTRACT", *_sha256(contract_path)):
         raise TargetSeriesError("layered history product input differs")
+    if current_admission is not None:
+        admission_input = inputs["provider-admission-receipt"]
+        financial_input = inputs["financial-input-contract"]
+        admission_path = cast(Path, provider_admission_receipt_path)
+        admission_contract_path = (
+            contract_path
+            if financial_input_contract_path is None
+            else financial_input_contract_path
+        )
+        proof = cast(Mapping[str, object], current_admission["proof"])
+        if (
+            admission_input.get("generation_id"),
+            admission_input.get("as_of_date"),
+            admission_input.get("sha256"),
+            admission_input.get("size_bytes"),
+            financial_input.get("generation_id"),
+            financial_input.get("as_of_date"),
+            financial_input.get("sha256"),
+            financial_input.get("size_bytes"),
+        ) != (
+            inputs["provider-ledger-manifest"].get("generation_id"),
+            inputs["provider-ledger-manifest"].get("as_of_date"),
+            *_sha256(admission_path),
+            None,
+            None,
+            *_sha256(admission_contract_path),
+        ) or financial_input.get("sha256") != proof.get(
+            "financial_input_contract_raw_sha256"
+        ):
+            raise TargetSeriesError("current admission input identity differs")
     raw_source_manifests = manifest.get("source_manifests")
     source_manifest_input_ids = {
         "provider-ledger": "provider-ledger-manifest",
@@ -5490,6 +6560,27 @@ def validate_layered_history_generation(
                     "Portfolio123 provider history manifest receipt differs"
                 )
         source_manifests[source_name] = parsed
+    qsi_revision = (
+        _qsi_source_revision_admission(
+            bundle_content=raw_source_manifests["strategy-history"].encode("utf-8"),
+            staged_content=(
+                raw_source_manifests["strategy-backtests"].encode("utf-8")
+                if "strategy-backtests" in raw_source_manifests
+                else None
+            ),
+            contract=contract,
+            accepted_as_of=accepted_as_of,
+        )
+        if "strategy-history" in raw_source_manifests
+        else None
+    )
+    if (qsi_revision is not None) != ("qsi_source_revision" in manifest) or (
+        manifest.get("qsi_source_revision")
+        != (qsi_revision[0] if qsi_revision else None)
+    ):
+        raise TargetSeriesError("QSI source revision proof differs")
+    if qsi_revision is not None:
+        sources = _qsi_revision_sources(sources, qsi_revision[0])
     provider_has_fx = "portfolio/fx-rates/generation.json" in _manifest_artifacts(
         source_manifests["provider-ledger"].get("artifacts")
     )
@@ -5506,12 +6597,19 @@ def validate_layered_history_generation(
         "quantbase-history": "quantbase",
         "quantbase-activity": "quantbase",
         "portfolio123-manifest": "portfolio123",
-        "portfolio123-metadata": "portfolio123",
-        "portfolio123-performance": "portfolio123",
-        "portfolio123-equity": "portfolio123",
         "portfolio123-returns": "portfolio123",
         "portfolio123-relationships": "portfolio123",
     }
+    if comparison_inputs_selected:
+        input_source_names.update(
+            {
+                "portfolio123-metadata": "portfolio123",
+                "portfolio123-performance": "portfolio123",
+                "portfolio123-equity": "portfolio123",
+            }
+        )
+    if current_admission is not None:
+        input_source_names["provider-admission-receipt"] = "provider-ledger"
     if p123_history_receipts is not None:
         input_source_names["portfolio123-provider-history-manifest"] = (
             "portfolio123-provider-history"
@@ -5553,7 +6651,12 @@ def validate_layered_history_generation(
                 "portfolio-fx-rates": "portfolio-fx-rates",
             }
         )
-    if set(input_source_names) != set(inputs) - {"financial-mvp-contract"}:
+    non_source_input_ids = {"financial-mvp-contract"}
+    if current_admission is not None:
+        non_source_input_ids.add("financial-input-contract")
+    if version_evidence_requested:
+        non_source_input_ids.add("portfolio123-version-evidence")
+    if set(input_source_names) != set(inputs) - non_source_input_ids:
         raise TargetSeriesError("layered history input source mapping differs")
     for input_id, source_name in input_source_names.items():
         authority_manifest = source_manifests[source_name]
@@ -5715,6 +6818,70 @@ def validate_layered_history_generation(
             raise TargetSeriesError(
                 f"layered history source artifact differs: {input_id}"
             )
+    if version_evidence_requested:
+        if (
+            portfolio123_version_evidence_path is None
+            or provider_ledger_manifest_path is None
+            or provider_ledger_catalog_path is None
+        ):
+            raise TargetSeriesError(
+                "Portfolio123 version evidence requires provider ledger inputs"
+            )
+        version_input = inputs["portfolio123-version-evidence"]
+        if (
+            version_input.get("generation_id"),
+            version_input.get("as_of_date"),
+            version_input.get("sha256"),
+            version_input.get("size_bytes"),
+        ) != (None, None, *_sha256(portfolio123_version_evidence_path)):
+            raise TargetSeriesError("Portfolio123 version evidence input differs")
+        _targets, strategy_evidence, _proof, _ledger_manifest = (
+            build_provider_ledger_targets(
+                provider_ledger_manifest_path, provider_ledger_catalog_path
+            )
+        )
+        try:
+            strategy_evidence_value = json.loads(strategy_evidence)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise TargetSeriesError(
+                "Portfolio123 AI provider evidence is invalid"
+            ) from exc
+        strategy_evidence_rows = (
+            strategy_evidence_value.get("strategies")
+            if isinstance(strategy_evidence_value, dict)
+            else None
+        )
+        ai_rows = (
+            [
+                row
+                for row in strategy_evidence_rows
+                if isinstance(row, dict) and row.get("strategy_id") == "p123-ai-factor"
+            ]
+            if isinstance(strategy_evidence_rows, list)
+            else []
+        )
+        if len(ai_rows) != 1:
+            raise TargetSeriesError("Portfolio123 AI provider evidence is absent")
+        expected_equivalence = _portfolio123_version_equivalence(
+            evidence_path=portfolio123_version_evidence_path,
+            policy_source=next(
+                source
+                for source in contract["source_segments"]
+                if source.get("source_id") == "portfolio123-model-generation"
+            ),
+            strategy=strategies["p123-ai-factor"],
+            current_manifest_content=raw_source_manifests["portfolio123"].encode(
+                "utf-8"
+            ),
+            current_manifest=source_manifests["portfolio123"],
+            current_artifacts=_manifest_artifacts(
+                source_manifests["portfolio123"].get("artifacts")
+            ),
+            ai_evidence=ai_rows[0],
+            strategy_evidence_sha256=hashlib.sha256(strategy_evidence).hexdigest(),
+        )
+        if manifest.get("portfolio123_version_equivalence") != expected_equivalence:
+            raise TargetSeriesError("Portfolio123 version equivalence differs")
     output_rows = manifest.get("outputs")
     if not isinstance(output_rows, dict) or set(output_rows) != set(
         LAYERED_HISTORY_OUTPUT_NAMES
@@ -5768,6 +6935,191 @@ def validate_layered_history_generation(
     expected_segment_identities = contract["history_corrections"].get(
         "materialized_segment_identities"
     )
+    if qsi_revision is not None:
+        proof, raw_rows = qsi_revision
+        if raw_rows is None:
+            # Portable verification: the archives are absent, so the revised rows cannot be
+            # re-derived. Without a row-level anchor a mutated backtest return would leave
+            # count, start and end unchanged and nothing hash-bound would disagree, so
+            # re-hashing a tampered bundle would buy admission. The producer's
+            # admitted_rows_sha256 is that anchor, and it is checked against the rows that
+            # actually materialized here.
+            _assert_admitted_rows_digest(
+                segments=segments,
+                receipt=json.loads(raw_source_manifests["strategy-history"])[
+                    "qsi_source_revision"
+                ],
+            )
+        expected_backtests: list[dict[str, str]] = []
+        calendar, frequency = _source_temporal(sources["strategy-backtests"])
+        for strategy_id, strategy in strategies.items():
+            if raw_rows is None:
+                continue
+            selected = [
+                row
+                for row in raw_rows
+                if row["series_id"] == strategy.get("history_series_id")
+            ]
+            version_status, version = _contract_version(strategy)
+            if (
+                not selected
+                or version_status != "EVIDENCED"
+                or (strategy_id != "qsi" and selected[0]["strategy_version"] != version)
+            ):
+                continue
+            expected_backtests.extend(
+                _segment_rows(
+                    [
+                        {**row, "return_basis": "MODEL", "return_type": "TOTAL"}
+                        for row in selected
+                    ],
+                    strategy_id=strategy_id,
+                    strategy_version=version,
+                    segment_id=f"{strategy_id}:backtest",
+                    source_id="strategy-backtests",
+                    source_generation_id=proof["generation_id"],
+                    mode_admission="INCLUDE_VERSION_COMPATIBLE_PREHISTORY",
+                    calendar=calendar,
+                    frequency=frequency,
+                )
+            )
+        actual_backtests = [
+            row for row in segments if row["source_id"] == "strategy-backtests"
+        ]
+        # Only the producer can compare against a reconstruction, because only the producer
+        # re-derived one. The portable verifier has already checked the attested row digest
+        # above; comparing against an empty reconstruction would fail every generation.
+        if raw_rows is not None and sorted(
+            actual_backtests, key=lambda row: (row["strategy_id"], row["date"])
+        ) != sorted(
+            expected_backtests, key=lambda row: (row["strategy_id"], row["date"])
+        ):
+            raise TargetSeriesError(
+                "QSI source revision layered rows differ from reconstructed bundle"
+            )
+        qsi_live = [
+            row["date"]
+            for row in segments
+            if row["strategy_id"] == "qsi"
+            and row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+        ]
+        if not qsi_live or min(qsi_live) != proof["live_inception"]:
+            raise TargetSeriesError(
+                "QSI source revision retained live inception differs"
+            )
+        # Only the QSI segment may move under a QSI revision. A tampered non-QSI backtest
+        # row is caught downstream by the product-authority comparison, but under a
+        # revision it must be refused here, naming the revision -- otherwise the failure
+        # reads as a contract mismatch and the reader looks in the wrong place.
+        pinned_backtests = {
+            item["segment_id"]: item
+            for item in expected_segment_identities
+            if item["source_id"] == "strategy-backtests"
+            and item["segment_id"] != "qsi:backtest"
+        }
+        for segment_id, pinned in pinned_backtests.items():
+            actual = next(
+                (
+                    item
+                    for item in actual_segment_identities
+                    if item["segment_id"] == segment_id
+                ),
+                None,
+            )
+            if actual is None or any(
+                actual[key] != pinned[key]
+                for key in (
+                    "sha256",
+                    "observed_start",
+                    "observed_end",
+                    "return_observations",
+                )
+            ):
+                raise TargetSeriesError(
+                    "QSI source revision altered a non-QSI backtest segment"
+                )
+        # The contract pins the pre-revision qsi:backtest identity, so the revision
+        # substitutes its own. The producer takes it from the reconstruction it just
+        # verified byte for byte; the portable verifier takes it from the materialized
+        # rows, which the attested digest above has already proved.
+        revised_identity = _row_identity(
+            [row for row in expected_backtests if row["strategy_id"] == "qsi"]
+            if raw_rows is not None
+            else [row for row in segments if row.get("segment_id") == "qsi:backtest"]
+        )
+        expected_segment_identities = [
+            {
+                **item,
+                **(
+                    {
+                        "source_generation_id": proof["generation_id"],
+                        "source_generation_sha256": proof["generation_manifest_sha256"],
+                    }
+                    if item["source_id"] == "strategy-backtests"
+                    else {}
+                ),
+                **(
+                    {
+                        key: revised_identity[key]
+                        for key in (
+                            "sha256",
+                            "observed_start",
+                            "observed_end",
+                            "return_observations",
+                        )
+                    }
+                    if item["segment_id"] == "qsi:backtest"
+                    else {}
+                ),
+            }
+            for item in expected_segment_identities
+        ]
+    if current_admission is not None:
+        selected_targets, _evidence, _proof, _manifest = build_provider_ledger_targets(
+            cast(Path, provider_ledger_manifest_path),
+            cast(Path, provider_ledger_catalog_path),
+        )
+        required_series = {
+            str(strategy["history_series_id"])
+            for strategy in strategies.values()
+            if strategy.get("product_requirement") == "REQUIRED"
+            and isinstance(strategy.get("history_series_id"), str)
+        }
+        expected_live_rows = sorted(
+            [
+                (
+                    row["series_id"],
+                    row["date"],
+                    row["return"],
+                    row["evidence_layer"],
+                    row["return_basis"],
+                    row["return_type"],
+                )
+                for row in _target_rows(selected_targets)
+                if row["series_id"] in required_series
+                and row["evidence_layer"] == "ACCOUNT_LIVE"
+                and date.fromisoformat(row["date"]) <= accepted_as_of
+            ]
+        )
+        actual_live_rows = sorted(
+            [
+                (
+                    row["series_id"],
+                    row["date"],
+                    row["return"],
+                    row["evidence_layer"],
+                    row["return_basis"],
+                    row["return_type"],
+                )
+                for row in segments
+                if row["mode_admission"] == "INCLUDE_SELECTED_LIVE"
+            ]
+        )
+        if actual_live_rows != expected_live_rows:
+            raise TargetSeriesError(
+                "layered history selected live rows differ from current admission"
+            )
+        expected_segment_identities = actual_segment_identities
     robuxio_account_absent = _matrixport_account_is_unadmitted(sources)
     if robuxio_account_absent:
         if any(
@@ -6040,9 +7392,20 @@ def validate_layered_history_generation(
                     "strategy_id",
                     "strategy_version",
                 }
+                | (
+                    {"source_history_revision"}
+                    if strategy_id == "qsi" and qsi_revision is not None
+                    else set()
+                )
             ),
             "layered history strategy coverage",
         )
+        if (
+            strategy_id == "qsi"
+            and qsi_revision is not None
+            and raw.get("source_history_revision") != qsi_revision[0]
+        ):
+            raise TargetSeriesError("QSI source revision coverage differs")
         strategy = strategies[strategy_id]
         if raw.get("series_id") != strategy.get("history_series_id"):
             raise TargetSeriesError(
@@ -6672,17 +8035,14 @@ def validate_layered_history_generation(
         if isinstance(volatis_correction, dict)
         else None
     )
-    if (
-        not isinstance(volatis_interval, dict)
-        or not isinstance(volatis_funding, dict)
-        or volatis_resolution
-        != {
-            "observed_end": volatis_interval.get("observed_end"),
-            "observed_start": volatis_interval.get("observed_start"),
-            "source_first_positive_value_date": volatis_funding.get("event_date"),
-            "status": "RESOLVED_BY_PIPE_HISTORY_001",
-        }
-    ):
+    if not isinstance(volatis_interval, dict) or not isinstance(volatis_funding, dict):
+        raise TargetSeriesError("Volatis account-live resolution differs")
+    if current_admission is None and volatis_resolution != {
+        "observed_end": volatis_interval.get("observed_end"),
+        "observed_start": volatis_interval.get("observed_start"),
+        "source_first_positive_value_date": volatis_funding.get("event_date"),
+        "status": "RESOLVED_BY_PIPE_HISTORY_001",
+    }:
         raise TargetSeriesError("Volatis account-live resolution differs")
 
     def _correction_interval(correction_id: str) -> Mapping[str, Any]:
@@ -6710,6 +8070,11 @@ def validate_layered_history_generation(
         key=lambda row: row["date"],
     )
     robuxio_interval = _correction_interval("robuxio-account-live-after-funding")
+    matrixport_admission_cutoff = (
+        accepted_as_of
+        if current_admission is not None
+        else date.fromisoformat(str(robuxio_interval["observed_end"]))
+    )
     robuxio_provider_interval = _correction_interval(
         "robuxio-provider-live-before-funding"
     )
@@ -6721,9 +8086,14 @@ def validate_layered_history_generation(
         raise TargetSeriesError("Robuxio provider history exceeds funding boundary")
     if not robuxio_account_absent and (
         not robuxio_live
-        or robuxio_live[0]["date"] != robuxio_interval["observed_start"]
-        or robuxio_live[-1]["date"] != robuxio_interval["observed_end"]
         or any(date.fromisoformat(row["date"]) <= funding_start for row in robuxio_live)
+        or (
+            current_admission is None
+            and (
+                robuxio_live[0]["date"] != robuxio_interval["observed_start"]
+                or robuxio_live[-1]["date"] != robuxio_interval["observed_end"]
+            )
+        )
     ):
         raise TargetSeriesError("Robuxio funding correction differs")
     expected_robuxio_resolution = {
@@ -6753,7 +8123,7 @@ def validate_layered_history_generation(
             matrixport_manifest=source_manifests["matrixport"],
             source_gap_policy=expected_matrixport_gap_policy,
             account_live_start=funding_start,
-            admission_cutoff=date.fromisoformat(str(robuxio_interval["observed_end"])),
+            admission_cutoff=matrixport_admission_cutoff,
         )
         _matrixport_account_live_from_ledger(
             robuxio_live, expected_usd_rows, matrixport_unavailable_return_dates
@@ -6802,7 +8172,7 @@ def validate_layered_history_generation(
                 else raw_span_receipts
             ),
             source_gap_policy=expected_matrixport_gap_policy,
-            admission_cutoff=date.fromisoformat(str(robuxio_interval["observed_end"])),
+            admission_cutoff=matrixport_admission_cutoff,
         )
         if epoch_hpr_row != {
             "evidence_layer": "ACCOUNT_LIVE",
@@ -6816,6 +8186,8 @@ def validate_layered_history_generation(
         ("p123-eu", "p123-eu-account-live"),
         ("volatis-strategy", "volatis-account-live"),
     ):
+        if current_admission is not None:
+            continue
         live = sorted(
             [
                 row
@@ -6922,6 +8294,11 @@ def verify_layered_history_generation(
     generation_root: Path,
     contract_path: Path,
     *,
+    provider_admission_receipt_path: Path | None = None,
+    financial_input_contract_path: Path | None = None,
+    provider_ledger_manifest_path: Path | None = None,
+    provider_ledger_catalog_path: Path | None = None,
+    portfolio123_version_evidence_path: Path | None = None,
     require_mode: str | None = None,
     assurance_profile: str | None = None,
     evaluated_on: date | None = None,
@@ -6959,6 +8336,11 @@ def verify_layered_history_generation(
         artifacts=artifacts,
         manifest_content=manifest_content,
         contract_path=contract_path,
+        provider_admission_receipt_path=provider_admission_receipt_path,
+        financial_input_contract_path=financial_input_contract_path,
+        provider_ledger_manifest_path=provider_ledger_manifest_path,
+        provider_ledger_catalog_path=provider_ledger_catalog_path,
+        portfolio123_version_evidence_path=portfolio123_version_evidence_path,
         require_mode=require_mode,
         assurance_profile=assurance_profile,
         evaluated_on=evaluated_on,
@@ -8001,6 +9383,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio123-performance", type=Path)
     parser.add_argument("--portfolio123-returns", type=Path)
     parser.add_argument("--portfolio123-relationships", type=Path)
+    parser.add_argument("--portfolio123-version-evidence", type=Path)
     parser.add_argument("--portfolio123-provider-entity-id")
     parser.add_argument("--portfolio123-simulation-entity-id")
     parser.add_argument("--portfolio123-strategy-evidence", type=Path)
@@ -8012,6 +9395,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--portfolio-fx-rates-manifest", type=Path)
     parser.add_argument("--provider-ledger-manifest", type=Path)
     parser.add_argument("--provider-ledger-catalog", type=Path)
+    parser.add_argument("--provider-admission-receipt", type=Path)
+    parser.add_argument("--financial-input-contract", type=Path)
     parser.add_argument("--financial-mvp-contract", type=Path)
     parser.add_argument("--repository-sha")
     parser.add_argument("--as-of-date")
@@ -8067,6 +9452,11 @@ def main() -> int:
             result = verify_layered_history_generation(
                 args.verify_layered_history,
                 args.financial_mvp_contract,
+                provider_admission_receipt_path=args.provider_admission_receipt,
+                financial_input_contract_path=args.financial_input_contract,
+                provider_ledger_manifest_path=args.provider_ledger_manifest,
+                provider_ledger_catalog_path=args.provider_ledger_catalog,
+                portfolio123_version_evidence_path=args.portfolio123_version_evidence,
                 require_mode=args.require_mode,
                 assurance_profile=args.assurance_profile,
                 evaluated_on=assurance_evaluated_on,
@@ -8103,13 +9493,16 @@ def main() -> int:
                 "quantbase_activity",
                 "quantbase_fund_id",
                 "portfolio123_manifest",
-                "portfolio123_metadata",
-                "portfolio123_performance",
-                "portfolio123_equity",
                 "portfolio123_returns",
                 "portfolio123_relationships",
                 "output_root",
             ) + (() if args.immutable_generations else pointer_names)
+            if args.provider_admission_receipt is None:
+                required_names += (
+                    "portfolio123_metadata",
+                    "portfolio123_performance",
+                    "portfolio123_equity",
+                )
             _required(args, required_names, "layered history generation")
             artifacts, manifest_content = build_layered_history_generation(
                 contract_path=args.financial_mvp_contract,
@@ -8137,6 +9530,9 @@ def main() -> int:
                 portfolio123_equity_path=args.portfolio123_equity,
                 portfolio123_returns_path=args.portfolio123_returns,
                 portfolio123_relationships_path=args.portfolio123_relationships,
+                portfolio123_version_evidence_path=args.portfolio123_version_evidence,
+                provider_admission_receipt_path=args.provider_admission_receipt,
+                financial_input_contract_path=args.financial_input_contract,
                 portfolio_fx_rates_manifest_path=args.portfolio_fx_rates_manifest,
                 strategy_history_manifest_path=args.strategy_history_manifest,
                 strategy_history_returns_path=args.strategy_history_returns,
@@ -8151,6 +9547,11 @@ def main() -> int:
                 artifacts=artifacts,
                 manifest_content=manifest_content,
                 contract_path=args.financial_mvp_contract,
+                provider_admission_receipt_path=args.provider_admission_receipt,
+                financial_input_contract_path=args.financial_input_contract,
+                provider_ledger_manifest_path=args.provider_ledger_manifest,
+                provider_ledger_catalog_path=args.provider_ledger_catalog,
+                portfolio123_version_evidence_path=args.portfolio123_version_evidence,
                 require_mode=args.require_mode,
             )
             write_layered_history_generation(

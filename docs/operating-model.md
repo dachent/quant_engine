@@ -53,6 +53,12 @@ handoff requirements. It deliberately changes:
   immediately before promotion.
 - Make declared checks and evidence proportional to impact. A check is evidence,
   not truth; a deterministic pass cannot expand authority.
+- A resumable numerical run records each actual execution attempt separately from
+  its financial identity. A completed or failed attempt records observed start
+  and terminal times; a later resume marks an interrupted attempt incomplete
+  without inventing its terminal time. Reuse validates the selected financial
+  cutoff, source/policy/code identities and verified outputs before skipping a
+  producer, while operational timestamps never change financial cache identity.
 - Preserve Dead Ends in the issue whenever a path is rejected. Rejected paths
   may be retried only when their recorded failure mechanism materially changes.
 - Keep secrets, real account identifiers, captured sessions, and real financial
@@ -218,8 +224,15 @@ governing issue may strengthen them but may not silently omit or weaken them.
    deduplication, reconciliation equations where coverage permits, and
    independent hand-calculated micro-ledgers. Missing NAV, FX, flows, or signs
    makes an affected metric unavailable or explicitly qualified—never silently
-   interpolated. Excel is controlled intake or a generated report, not the
-   calculation authority.
+   interpolated. A governed HWM run preserves its immutable accepted calendar
+   seed, owner decisions, policy binding, interval topology, source perimeter,
+   and calendar kinds, then derives its local calendar authority from the exact
+   selected source rows before numerical production. It writes that local
+   authority into the HWM checkpoint and reuses its exact bytes only after the
+   checkpoint's selected-source bindings and output integrity revalidate; a new
+   hole, closure, perimeter, kind, or interval binding is rejected rather than
+   filled or tolerated. Excel is controlled intake or a generated report, not
+   the calculation authority.
 5. **Broker execution** — initial authority is offline, dry-run, or separately
    approved PAPER only. Every submission requires an immutable order manifest,
    exact ledger/allocation references, environment and account allowlists,

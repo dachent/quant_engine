@@ -38,12 +38,28 @@ DEFAULT_FILE_COUNT: Final = 55
 DEFAULT_RECORD_COUNT: Final = 14901
 PLANNING_RECORD_COUNT: Final = 14981
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_NATIVE_ARTIFACT_SCHEMAS: Final[dict[str, str]] = {
-    "har/quantbase_20260902_171237.har": "quantbase-native-har",
-    (
-        "har_output/responses/0274_qbapi3.com_200_application_json.json"
-    ): "quantbase-account-activity-response",
-}
+_NATIVE_ARTIFACT_CONTRACTS: Final[tuple[dict[str, tuple[str, str]], ...]] = (
+    {
+        "har/quantbase_20260902_171237.har": (
+            "quantbase-native-har",
+            "legacy-unknown",
+        ),
+        "har_output/responses/0274_qbapi3.com_200_application_json.json": (
+            "quantbase-account-activity-response",
+            "legacy-unknown",
+        ),
+    },
+    {
+        "capture/account-activity-response.json": (
+            "quantbase-account-activity-response",
+            "1",
+        ),
+        "capture/account-activity-request-proof.json": (
+            "quantbase-account-activity-request-proof",
+            "1",
+        ),
+    },
+)
 
 _HEADERS: Final[dict[str, tuple[str, ...]]] = {
     "account_activity": (
@@ -406,10 +422,7 @@ def create_plan(
             )
         if len(source_paths) != len(set(source_paths)):
             raise QuantbaseGenerationError("native artifact sources must be unique")
-        if set(relative_paths) != set(_NATIVE_ARTIFACT_SCHEMAS):
-            raise QuantbaseGenerationError(
-                "native artifacts must contain the exact retained HAR and response pair"
-            )
+        contract = _native_artifact_contract(relative_paths)
         for relative, source_path in sorted(
             zip(relative_paths, source_paths, strict=True), key=lambda item: item[0]
         ):
@@ -418,8 +431,8 @@ def create_plan(
                 {
                     "bytes": size,
                     "relative_path": relative,
-                    "schema_name": _NATIVE_ARTIFACT_SCHEMAS[relative],
-                    "schema_version": "legacy-unknown",
+                    "schema_name": contract[relative][0],
+                    "schema_version": contract[relative][1],
                     "sha256": digest,
                     "source_path": str(source_path),
                 }
@@ -537,22 +550,31 @@ def _native_entries(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
         if not source_path.is_absolute():
             raise QuantbaseGenerationError("native artifact source must be absolute")
         source_paths.append(os.path.normcase(os.path.abspath(source_path)))
-        if (
-            item.get("schema_name") != _NATIVE_ARTIFACT_SCHEMAS.get(relative)
-            or item.get("schema_version") != "legacy-unknown"
-        ):
-            raise QuantbaseGenerationError("native artifact contract differs")
         _text(item.get("sha256"), "native sha256")
         _integer(item.get("bytes"), "native bytes")
-    if set(relative_paths) != set(_NATIVE_ARTIFACT_SCHEMAS):
-        raise QuantbaseGenerationError(
-            "native artifacts must contain the exact retained HAR and response pair"
-        )
     if len(relative_paths) != len(set(relative_paths)):
         raise QuantbaseGenerationError("native artifact relative paths must be unique")
     if len(source_paths) != len(set(source_paths)):
         raise QuantbaseGenerationError("native artifact sources must be unique")
+    contract = _native_artifact_contract(relative_paths)
+    for item, relative in zip(native, relative_paths, strict=True):
+        if (
+            item.get("schema_name") != contract[relative][0]
+            or item.get("schema_version") != contract[relative][1]
+        ):
+            raise QuantbaseGenerationError("native artifact contract differs")
     return native
+
+
+def _native_artifact_contract(
+    relative_paths: Sequence[str],
+) -> dict[str, tuple[str, str]]:
+    for contract in _NATIVE_ARTIFACT_CONTRACTS:
+        if set(relative_paths) == set(contract):
+            return contract
+    raise QuantbaseGenerationError(
+        "native artifacts must contain the exact retained HAR and response pair"
+    )
 
 
 def _expected_entries(plan: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -691,6 +713,7 @@ def build_generation(
             item["row_count"], "row_count"
         )
     baseline = _object(plan["baseline"], "baseline")
+    native_entries = _native_entries(plan)
     catalog: dict[str, object] = {
         "api_fallback": False,
         "as_of_date": as_of.isoformat(),
@@ -722,7 +745,15 @@ def build_generation(
         "family_dataset_counts": dict(sorted(family_counts.items())),
         "family_record_counts": dict(sorted(family_rows.items())),
         "legacy_lineage": {
-            "capture_transport": "HAR_ONLY",
+            "capture_transport": (
+                "EXECUTED_READ_ONLY_REQUEST"
+                if any(
+                    item["relative_path"]
+                    == "capture/account-activity-request-proof.json"
+                    for item in native_entries
+                )
+                else "HAR_ONLY"
+            ),
             "producing_revision": plan["source_revision"],
             "quarantine_plan_id": plan["quarantine_plan_id"],
             "run_id": plan["run_id"],
@@ -764,11 +795,7 @@ def build_generation(
             schema_name=_text(item["schema_name"], "native schema_name"),
             schema_version=_text(item["schema_version"], "native schema_version"),
         )
-        for item in (
-            _objects(plan["native_artifacts"], "native_artifacts")
-            if "native_artifacts" in plan
-            else []
-        )
+        for item in native_entries
     )
     runbook = _object(plan["runbook"], "runbook")
     plan_hash, plan_size = hash_file(plan_path)

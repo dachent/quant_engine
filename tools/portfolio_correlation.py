@@ -12,6 +12,7 @@ import json
 import math
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import tempfile
 from typing import Any, Final, Mapping, Sequence, cast
@@ -1759,6 +1760,46 @@ def build_correlation(
     return result, manifest, result_bytes
 
 
+def _consumed_producer_identity() -> dict[str, str]:
+    """Hash the local code and lock bytes the correlation result consumes."""
+
+    producer_path = Path(__file__).resolve()
+    paths = {
+        "core_contracts": Path(canonical_json_bytes.__code__.co_filename).resolve(),
+        "decimal_text": Path(decimal_text.__code__.co_filename).resolve(),
+        "producer": producer_path,
+    }
+    lock = producer_path.parents[1] / "uv.lock"
+    if lock.is_symlink() or not lock.is_file():
+        raise CorrelationError("correlation dependency lock is unavailable")
+    paths["dependency_lock"] = lock
+    return {
+        name: hashlib.sha256(path.read_bytes()).hexdigest()
+        for name, path in sorted(paths.items())
+    }
+
+
+def _input_key(spec_path: Path, source_root: Path) -> str:
+    """Verify requested source bytes before deriving retained-cache identity."""
+
+    spec_bytes = spec_path.read_bytes()
+    spec = _load_spec(spec_path)
+    # A spec's source digest is only a declaration until its pinned bytes are
+    # reopened. This check intentionally precedes an index lookup.
+    _verify_source(source_root, spec.source)
+    digest = hashlib.sha256()
+    digest.update(spec_bytes)
+    digest.update(canonical_json_bytes(_consumed_producer_identity()))
+    return digest.hexdigest()
+
+
+def _cache_root(output_root: Path, retained_cache_root: Path | None) -> Path:
+    root = retained_cache_root or output_root
+    if root.is_symlink():
+        raise CorrelationError("retained cache root must not be a symlink")
+    return root.resolve()
+
+
 def _write_new(path: Path, content: bytes) -> None:
     with path.open("xb") as handle:
         handle.write(content)
@@ -1783,33 +1824,167 @@ def _verify_candidate(
             raise CorrelationError(f"candidate {name} differs from the exact build")
 
 
-def stage_candidate(
-    spec_path: Path, source_root: Path, output_root: Path
-) -> dict[str, object]:
-    result, manifest, result_bytes = build_correlation(spec_path, source_root)
-    if output_root.exists() and output_root.is_symlink():
-        raise CorrelationError("output root must not be a symlink")
-    candidates = output_root.resolve() / "candidates"
+def _indexed_generation(
+    cache_root: Path, key: str, requested_spec_bytes: bytes
+) -> Path | None:
+    """Return only a manifest- and result-verified retained candidate."""
+
+    pointer = cache_root / ".correlation-index" / f"{key}.json"
+    if pointer.is_symlink() or not pointer.is_file():
+        return None
+    try:
+        index = json.loads(pointer.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if set(index) != {"generation_id", "key", "result_sha256", "result_size_bytes"}:
+        return None
+    if index.get("key") != key:
+        return None
+    generation_id = index.get("generation_id")
+    if not isinstance(generation_id, str) or not re.fullmatch(
+        r"[0-9a-f]{64}", generation_id
+    ):
+        return None
+    root = (cache_root / "candidates").resolve()
+    candidate = (root / generation_id).resolve()
+    if not candidate.is_relative_to(root):
+        return None
+    result = candidate / "correlation.json"
+    manifest_path = candidate / "generation.json"
+    if (
+        candidate.is_symlink()
+        or not candidate.is_dir()
+        or result.is_symlink()
+        or not result.is_file()
+        or manifest_path.is_symlink()
+        or not manifest_path.is_file()
+    ):
+        return None
+    try:
+        manifest = GenerationManifest.from_json_bytes(manifest_path.read_bytes())
+    except ValueError:
+        return None
+    if manifest.generation_id != generation_id:
+        return None
+    requested_spec = [
+        item
+        for item in manifest.artifacts
+        if item.artifact_id == "spec/correlation-spec.json"
+    ]
+    if (
+        len(requested_spec) != 1
+        or requested_spec[0].sha256 != hashlib.sha256(requested_spec_bytes).hexdigest()
+        or requested_spec[0].size_bytes != len(requested_spec_bytes)
+    ):
+        raise CorrelationError(
+            "indexed generation is bound to a different requested identity"
+        )
+    if {item.name for item in candidate.iterdir()} != {
+        "correlation.json",
+        "generation.json",
+    }:
+        raise CorrelationError("candidate file set differs from manifest-bound result")
+    result_bytes = result.read_bytes()
+    declared = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "normalized/correlation.json"
+        ),
+        None,
+    )
+    if (
+        declared is None
+        or declared.sha256 != hashlib.sha256(result_bytes).hexdigest()
+        or declared.size_bytes != len(result_bytes)
+        or index["result_sha256"] != declared.sha256
+        or index["result_size_bytes"] != declared.size_bytes
+    ):
+        return None
+    return candidate
+
+
+def _record_input_key(
+    cache_root: Path, key: str, generation_id: str, result_bytes: bytes
+) -> None:
+    index = cache_root / ".correlation-index"
+    index.mkdir(parents=True, exist_ok=True)
+    pointer = index / f"{key}.json"
+    if pointer.is_symlink():
+        raise CorrelationError("correlation index entry is linked")
+    record = canonical_json_bytes(
+        {
+            "generation_id": generation_id,
+            "key": key,
+            "result_sha256": hashlib.sha256(result_bytes).hexdigest(),
+            "result_size_bytes": len(result_bytes),
+        }
+    )
+    if pointer.exists():
+        if pointer.read_bytes() != record:
+            raise CorrelationError("correlation index identity differs")
+        return
+    _write_new(pointer, record)
+
+
+def _stage_candidate(
+    candidates: Path, manifest: GenerationManifest, result_bytes: bytes
+) -> Path:
     candidates.mkdir(parents=True, exist_ok=True)
     candidate = candidates / manifest.generation_id
     if candidate.exists():
         _verify_candidate(candidate, manifest, result_bytes)
+        return candidate
+    temporary = Path(tempfile.mkdtemp(prefix=".stage-", dir=candidates))
+    try:
+        _write_new(temporary / "correlation.json", result_bytes)
+        _write_new(temporary / "generation.json", manifest.to_json_bytes())
+        rename_directory_with_retry(temporary, candidate)
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+    return candidate
+
+
+def stage_candidate(
+    spec_path: Path,
+    source_root: Path,
+    output_root: Path,
+    *,
+    retained_cache_root: Path | None = None,
+) -> dict[str, object]:
+    if retained_cache_root is not None:
+        key = _input_key(spec_path, source_root)
+        cache_root = _cache_root(output_root, retained_cache_root)
+        cached = _indexed_generation(cache_root, key, spec_path.read_bytes())
+        if cached is not None:
+            payload = json.loads((cached / "correlation.json").read_text("utf-8"))
+            dependence = cast(dict[str, Any], payload["dependence"])
+            return {
+                "analytics_hash": payload["analytics_hash"],
+                "candidate": str(cached),
+                "generation_id": cached.name,
+                "pair_count": len(cast(list[object], dependence["observed_cells"])),
+                "reused": True,
+            }
     else:
-        temporary = Path(tempfile.mkdtemp(prefix=".stage-", dir=candidates))
-        try:
-            _write_new(temporary / "correlation.json", result_bytes)
-            _write_new(temporary / "generation.json", manifest.to_json_bytes())
-            rename_directory_with_retry(temporary, candidate)
-        finally:
-            if temporary.exists():
-                shutil.rmtree(temporary)
+        cache_root = output_root
+    result, manifest, result_bytes = build_correlation(spec_path, source_root)
+    if output_root.exists() and output_root.is_symlink():
+        raise CorrelationError("output root must not be a symlink")
+    candidate = _stage_candidate(cache_root / "candidates", manifest, result_bytes)
+    if retained_cache_root is not None:
+        _record_input_key(cache_root, key, manifest.generation_id, result_bytes)
     dependence = cast(dict[str, Any], result["dependence"])
-    return {
+    staged: dict[str, object] = {
         "analytics_hash": result["analytics_hash"],
         "candidate": str(candidate),
         "generation_id": manifest.generation_id,
         "pair_count": len(cast(list[object], dependence["observed_cells"])),
     }
+    if retained_cache_root is not None:
+        staged["reused"] = False
+    return staged
 
 
 def _publish_candidate(
@@ -1836,17 +2011,55 @@ def _publish_candidate(
     return publish_generation(output_root, manifest.generation_id)
 
 
-def publish(spec_path: Path, source_root: Path, output_root: Path) -> dict[str, object]:
+def publish(
+    spec_path: Path,
+    source_root: Path,
+    output_root: Path,
+    *,
+    retained_cache_root: Path | None = None,
+) -> dict[str, object]:
+    if retained_cache_root is not None:
+        key = _input_key(spec_path, source_root)
+        cache_root = _cache_root(output_root, retained_cache_root)
+        cached = _indexed_generation(cache_root, key, spec_path.read_bytes())
+        if cached is not None:
+            manifest = GenerationManifest.from_json_bytes(
+                (cached / "generation.json").read_bytes()
+            )
+            result_bytes = (cached / "correlation.json").read_bytes()
+            payload = json.loads(result_bytes.decode("utf-8"))
+            pointer = _publish_candidate(cached, output_root, manifest, result_bytes)
+            dependence = cast(dict[str, Any], payload["dependence"])
+            return {
+                "analytics_hash": payload["analytics_hash"],
+                "generation_id": manifest.generation_id,
+                "pair_count": len(cast(list[object], dependence["observed_cells"])),
+                "publication_state": pointer.state.value,
+                "reused": True,
+            }
+    else:
+        cache_root = output_root
     result, manifest, result_bytes = build_correlation(spec_path, source_root)
-    candidate = output_root.resolve() / "candidates" / manifest.generation_id
+    if output_root.exists() and output_root.is_symlink():
+        raise CorrelationError("output root must not be a symlink")
+    candidate = (
+        cache_root.resolve() / "candidates" / manifest.generation_id
+        if retained_cache_root is None
+        else _stage_candidate(cache_root / "candidates", manifest, result_bytes)
+    )
     pointer = _publish_candidate(candidate, output_root, manifest, result_bytes)
+    if retained_cache_root is not None:
+        _record_input_key(cache_root, key, manifest.generation_id, result_bytes)
     dependence = cast(dict[str, Any], result["dependence"])
-    return {
+    published: dict[str, object] = {
         "analytics_hash": result["analytics_hash"],
         "generation_id": manifest.generation_id,
         "pair_count": len(cast(list[object], dependence["observed_cells"])),
         "publication_state": pointer.state.value,
     }
+    if retained_cache_root is not None:
+        published["reused"] = False
+    return published
 
 
 def _summary(spec_path: Path, source_root: Path) -> dict[str, object]:
@@ -1870,6 +2083,7 @@ def _parser() -> argparse.ArgumentParser:
         item.add_argument("--source-root", required=True, type=Path)
         if command != "build":
             item.add_argument("--output-root", required=True, type=Path)
+            item.add_argument("--retained-cache-root", type=Path)
     return parser
 
 
@@ -1878,9 +2092,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "build":
         result = _summary(args.spec, args.source_root)
     elif args.command == "stage":
-        result = stage_candidate(args.spec, args.source_root, args.output_root)
+        result = stage_candidate(
+            args.spec,
+            args.source_root,
+            args.output_root,
+            retained_cache_root=args.retained_cache_root,
+        )
     else:
-        result = publish(args.spec, args.source_root, args.output_root)
+        result = publish(
+            args.spec,
+            args.source_root,
+            args.output_root,
+            retained_cache_root=args.retained_cache_root,
+        )
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
     return 0
 

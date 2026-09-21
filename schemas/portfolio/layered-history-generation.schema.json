@@ -40,6 +40,82 @@
     "repository_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
     "tool_sha256": {"$ref": "#/$defs/sha256"},
     "source_selection_mode": {"enum": ["CURRENT_POINTERS", "IMMUTABLE_GENERATIONS"]},
+    "qsi_source_revision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "revision_kind", "revision_sha256", "accepted_strategy_version",
+        "observation_strategy_version", "accepted_bundle_id", "accepted_generation_id",
+        "accepted_generation_manifest_sha256", "accepted_generation_manifest_size_bytes",
+        "bundle_id", "generation_id", "generation_manifest_sha256", "generation_manifest_size_bytes",
+        "live_inception", "financial_cutoff"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "revision_kind": {"const": "OWNER_SELECTED_CURRENT_QSI_ARCHIVE_REVISION"},
+        "revision_sha256": {"$ref": "#/$defs/sha256"},
+        "accepted_strategy_version": {"type": "string", "minLength": 1},
+        "observation_strategy_version": {"type": "string", "minLength": 1},
+        "accepted_bundle_id": {"$ref": "#/$defs/sha256"},
+        "accepted_generation_id": {"$ref": "#/$defs/sha256"},
+        "accepted_generation_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "accepted_generation_manifest_size_bytes": {"type": "integer", "minimum": 1},
+        "bundle_id": {"$ref": "#/$defs/sha256"},
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "generation_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "generation_manifest_size_bytes": {"type": "integer", "minimum": 1},
+        "live_inception": {"type": "string", "format": "date"},
+        "financial_cutoff": {"type": "string", "format": "date"}
+      }
+    },
+    "current_source_admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "ledger_generation_id",
+        "ledger_manifest_sha256",
+        "ledger_catalog_sha256",
+        "admission_receipt_sha256",
+        "admission_receipt_size_bytes",
+        "financial_input_contract_raw_sha256",
+        "financial_input_contract_semantic_sha256",
+        "financial_input_contract_census_sha256",
+        "run_observation_sha256",
+        "admission_observation_cutoff",
+        "financial_cutoff",
+        "source_generations"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "ledger_generation_id": {"$ref": "#/$defs/sha256"},
+        "ledger_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "ledger_catalog_sha256": {"$ref": "#/$defs/sha256"},
+        "admission_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "admission_receipt_size_bytes": {"type": "integer", "minimum": 0},
+        "financial_input_contract_raw_sha256": {"$ref": "#/$defs/sha256"},
+        "financial_input_contract_semantic_sha256": {"$ref": "#/$defs/sha256"},
+        "financial_input_contract_census_sha256": {"$ref": "#/$defs/sha256"},
+        "run_observation_sha256": {"$ref": "#/$defs/sha256"},
+        "admission_observation_cutoff": {"type": "string", "format": "date"},
+        "financial_cutoff": {"type": "string", "format": "date"},
+        "source_generations": {
+          "type": "array",
+          "minItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["source_id", "generation_id", "sha256", "as_of"],
+            "properties": {
+              "source_id": {"type": "string", "minLength": 1},
+              "generation_id": {"$ref": "#/$defs/sha256"},
+              "sha256": {"$ref": "#/$defs/sha256"},
+              "as_of": {"type": "string", "format": "date"}
+            }
+          }
+        }
+      }
+    },
     "product": {
       "type": "object",
       "additionalProperties": false,
@@ -74,7 +150,8 @@
         "portfolio123": {"type": "string", "minLength": 2},
         "portfolio123-provider-history": {"type": "string", "minLength": 2},
         "portfolio-fx-rates": {"type": "string", "minLength": 2},
-        "strategy-history": {"type": "string", "minLength": 2}
+        "strategy-history": {"type": "string", "minLength": 2},
+        "strategy-backtests": {"type": "string", "minLength": 2}
       }
     },
     "source_pointers": {

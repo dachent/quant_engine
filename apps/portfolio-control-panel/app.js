@@ -79,7 +79,18 @@
     "portfolio-report.xlsx": Object.freeze({ mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", payloadPrefix: "download-payload-report-xlsx" }),
   });
   const EMBEDDED_DOWNLOAD_CHUNK_SIZE = 65536;
-  const EMBEDDED_DOWNLOAD_MAX_CHUNKS = 4096;
+  // The report data is embedded rather than linked to the sibling file because
+  // Chromium ignores the `download` attribute when a file:// page links to a
+  // file:// target: it navigates instead and no download event ever fires.
+  // Every browser and interaction QA capture loads the panel over file://, so
+  // the sibling route cannot satisfy the gate.
+  //
+  // 8191 is the mechanism's ceiling, not a policy choice. `chunks.join("")`
+  // below builds one string and V8's MAX_STRING_LENGTH is 536870888, so 8192
+  // chunks of 65536 raise RangeError whatever this constant says.
+  // `_DOWNLOAD_MAX_BASE64_CHUNKS` in tools/portfolio_control_panel.py must
+  // equal this, and a test pins the two together.
+  const EMBEDDED_DOWNLOAD_MAX_CHUNKS = 8191;
   const humanStatus = (status) => STATUS_LABELS[String(status)] || String(status || "Unknown").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
   const statusText = (status) => `<span class="status-text ${toneForStatus(status)}">${safe(humanStatus(status))}</span>`;
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;
@@ -363,6 +374,7 @@
     $("#strategy-table").innerHTML = tableMarkup([["Strategy / identity"], ["Economic family"], ["Value", "numeric"], ["Weight", "numeric"], ["NAV and evidence coverage"], ["Cost"], ["Implementation gap"]], rows);
     renderLifecycleTable();
     renderPositionTable();
+    renderLeverageDisclosures();
   }
 
   function renderInvestedCapital() {
@@ -394,6 +406,67 @@
       ...selectedRows.map((row) => `<tr><td>${safe(formatDate(row.date))}</td><td>${safe(row.strategy_id)}</td><td class="numeric">${currency(row.invested_capital_usd)}</td></tr>`),
     ];
     $("#invested-capital-daily-table").innerHTML = tableMarkup([["Date"], ["Strategy"], ["Invested capital", "numeric"]], dailyRows);
+  }
+
+  // The report has always carried leverage_disclosures and the panel payload has always
+  // forwarded them; nothing read them. An unproved leverage FACT fails hard, but an
+  // unrendered leverage DISCLOSURE failed silently, which is precisely the silently omitted
+  // sink the operating model forbids. Rendered state-faithfully: an empty list means the
+  // measure was not evaluated rather than that it is zero, an unavailable amount keeps the
+  // source's own reason token, and nothing is aggregated across data classes.
+  const LEVERAGE_MAX_ROWS = 250;
+
+  function renderLeverageDisclosures() {
+    const rows = Array.isArray(data.leverage_disclosures) ? data.leverage_disclosures : [];
+    const status = $("#leverage-status");
+    const truncation = $("#leverage-truncation");
+    if (!rows.length) {
+      status.textContent = "Not evaluated";
+      status.className = "badge badge-warning";
+      renderKpis("#leverage-kpis", [[
+        "Leverage observations",
+        "—",
+        "No leverage disclosure was produced; this is not a zero exposure",
+        "warning",
+      ]]);
+      $("#leverage-coverage-table").innerHTML = tableMarkup([["Data class"], ["Coverage"], ["Observations", "numeric"]], [emptyRow(3)]);
+      $("#leverage-table").innerHTML = tableMarkup([["Data class"], ["Provider / account"], ["Strategy"], ["Amount", "numeric"], ["Coverage and reason"]], [emptyRow(5)]);
+      truncation.textContent = "";
+      return;
+    }
+    const observed = rows.filter((row) => row.coverage_status === "OBSERVED_ONLY");
+    const unavailable = rows.filter((row) => row.coverage_status !== "OBSERVED_ONLY");
+    status.textContent = unavailable.length ? "Observed only" : "Observed";
+    status.className = unavailable.length ? "badge badge-warning" : "badge badge-positive";
+    const classes = [...new Set(rows.map((row) => row.data_class))].sort();
+    renderKpis("#leverage-kpis", [
+      ["Observations", integer.format(rows.length), `${classes.length} data class${classes.length === 1 ? "" : "es"} declared`],
+      ["Observed measures", integer.format(observed.length), "Source-observed, never completed by inference", observed.length ? "positive" : "warning"],
+      ["Unavailable measures", integer.format(unavailable.length), "Carried with the source reason rather than zero", unavailable.length ? "warning" : "positive"],
+    ]);
+    const coverage = new Map();
+    for (const row of rows) {
+      const key = JSON.stringify([row.data_class, row.coverage_status, row.coverage_reason || ""]);
+      coverage.set(key, (coverage.get(key) || 0) + 1);
+    }
+    const coverageRows = [...coverage.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([key, count]) => {
+      const [dataClass, coverageStatus, reason] = JSON.parse(key);
+      return `<tr><td>${safe(dataClass)}</td><td><span class="cell-primary">${statusText(coverageStatus)}</span>${reason ? `<span class="cell-secondary">${safe(reason)}</span>` : ""}</td><td class="numeric">${integer.format(count)}</td></tr>`;
+    });
+    $("#leverage-coverage-table").innerHTML = tableMarkup([["Data class"], ["Coverage"], ["Observations", "numeric"]], coverageRows);
+    const shown = rows.slice(0, LEVERAGE_MAX_ROWS);
+    const detailRows = shown.map((row) => {
+      const amount = row.amount && typeof row.amount === "object" ? row.amount : null;
+      const measure = amount && amount.status === "AVAILABLE" && amount.value !== null
+        ? currencyExact(amount.value)
+        : statusText(amount ? amount.status : "UNAVAILABLE");
+      const account = [row.provider_id, row.account_id].filter(Boolean).join(" · ");
+      return `<tr><td><span class="cell-primary">${safe(row.data_class)}</span>${row.measurement_basis ? `<span class="cell-secondary">${safe(row.measurement_basis)}</span>` : ""}</td><td>${safe(account || "—")}</td><td>${safe(row.strategy_id || "—")}</td><td class="numeric">${measure}</td><td><span class="cell-primary">${statusText(row.coverage_status)}</span>${row.reason ? `<span class="cell-secondary">${safe(row.reason)}</span>` : ""}${row.included_in_nav === false ? `<span class="cell-secondary">Not included in NAV</span>` : ""}</td></tr>`;
+    });
+    $("#leverage-table").innerHTML = tableMarkup([["Data class"], ["Provider / account"], ["Strategy"], ["Amount", "numeric"], ["Coverage and reason"]], detailRows);
+    truncation.textContent = rows.length > shown.length
+      ? `Showing ${integer.format(shown.length)} of ${integer.format(rows.length)} observations; the coverage table above counts every one.`
+      : "";
   }
 
   function renderPerformanceComparison() {

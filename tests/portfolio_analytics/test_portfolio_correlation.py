@@ -358,6 +358,134 @@ def test_build_stage_publish_are_deterministic_and_fail_on_drift(
         correlation.stage_candidate(spec, root, output)
 
 
+def test_legacy_publish_without_staged_candidate_rejects_without_output(
+    tmp_path: Path,
+) -> None:
+    """Legacy publication preserves its separate, verified staging boundary."""
+
+    source_root = tmp_path / "source"
+    source, days = _write_returns(source_root)
+    spec = _spec(source_root, source, days)
+    output_root = tmp_path / "output"
+
+    with pytest.raises(correlation.CorrelationError, match="candidate"):
+        correlation.publish(spec, source_root, output_root)
+
+    assert not (output_root / "CURRENT.json").exists()
+    assert not (output_root / "generations").exists()
+
+
+def test_retained_cache_reuses_one_correlation_generation_across_output_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing retained candidate reuse would rebuild unchanged second-root work."""
+
+    source_root = tmp_path / "source"
+    source, days = _write_returns(source_root)
+    spec = _spec(source_root, source, days)
+    retained_root = tmp_path / "retained"
+    cold_root = tmp_path / "cold"
+    warm_root = tmp_path / "warm"
+    calls = 0
+    real_build = correlation.build_correlation
+
+    def counted_build(
+        spec_path: Path, input_root: Path
+    ) -> tuple[dict[str, object], object, bytes]:
+        nonlocal calls
+        calls += 1
+        return real_build(spec_path, input_root)
+
+    monkeypatch.setattr(correlation, "build_correlation", counted_build)
+
+    cold_stage = correlation.stage_candidate(
+        spec, source_root, cold_root, retained_cache_root=retained_root
+    )
+    cold_publish = correlation.publish(
+        spec, source_root, cold_root, retained_cache_root=retained_root
+    )
+    warm_stage = correlation.stage_candidate(
+        spec, source_root, warm_root, retained_cache_root=retained_root
+    )
+    warm_publish = correlation.publish(
+        spec, source_root, warm_root, retained_cache_root=retained_root
+    )
+
+    assert calls == 1
+    assert cold_stage["reused"] is False
+    assert cold_publish["reused"] is True
+    assert warm_stage["reused"] is True
+    assert warm_publish["reused"] is True
+    assert (
+        read_current(cold_root).generation_id == read_current(warm_root).generation_id
+    )
+    cold_generation = cold_root / "generations" / str(cold_publish["generation_id"])
+    warm_generation = warm_root / "generations" / str(warm_publish["generation_id"])
+    assert (cold_generation / "correlation.json").read_bytes() == (
+        warm_generation / "correlation.json"
+    ).read_bytes()
+    assert (cold_generation / "generation.json").read_bytes() == (
+        warm_generation / "generation.json"
+    ).read_bytes()
+
+
+def test_retained_cache_validates_sources_before_hit_and_rejects_corruption(
+    tmp_path: Path,
+) -> None:
+    """A stale source or altered retained generation must never be served."""
+
+    source_root = tmp_path / "source"
+    source, days = _write_returns(source_root)
+    spec = _spec(source_root, source, days)
+    retained_root = tmp_path / "retained"
+    staged = correlation.stage_candidate(
+        spec, source_root, tmp_path / "cold", retained_cache_root=retained_root
+    )
+
+    source_bytes = source.read_bytes()
+    source.write_bytes(source_bytes + b"\n")
+    with pytest.raises(correlation.CorrelationError, match="hash or size differs"):
+        correlation.stage_candidate(
+            spec,
+            source_root,
+            tmp_path / "stale-source",
+            retained_cache_root=retained_root,
+        )
+
+    source.write_bytes(source_bytes)
+    candidate = Path(str(staged["candidate"])) / "correlation.json"
+    candidate.write_bytes(b"{}\n")
+    with pytest.raises(correlation.CorrelationError, match="exact build"):
+        correlation.stage_candidate(
+            spec, source_root, tmp_path / "corrupt", retained_cache_root=retained_root
+        )
+
+
+def test_correlation_reuse_identity_binds_spec_and_consumed_helper_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A changed requested spec or consumed helper must select a new cache identity."""
+
+    source_root = tmp_path / "source"
+    source, days = _write_returns(source_root)
+    spec = _spec(source_root, source, days)
+    original_key = correlation._input_key(spec, source_root)
+
+    payload = json.loads(spec.read_text(encoding="utf-8"))
+    payload["stress_uplift"] = "0.16"
+    spec.write_text(json.dumps(payload, sort_keys=True), encoding="utf-8")
+    spec_key = correlation._input_key(spec, source_root)
+    assert spec_key != original_key
+
+    original_helper = correlation.canonical_json_bytes
+
+    def replacement_helper(value: object) -> bytes:
+        return original_helper(value)
+
+    monkeypatch.setattr(correlation, "canonical_json_bytes", replacement_helper)
+    assert correlation._input_key(spec, source_root) != spec_key
+
+
 def test_invalid_priors_stress_and_mixed_layers_fail_closed(tmp_path: Path) -> None:
     root = tmp_path / "source"
     source, days = _write_returns(root)

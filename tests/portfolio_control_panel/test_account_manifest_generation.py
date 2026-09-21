@@ -549,10 +549,14 @@ def _generation_manifest_snapshot(
     catalog_schema_name: str,
     catalog_schema_version: str,
     as_of_date: str,
+    manifest_as_of_date: str | None = None,
 ) -> InputSnapshot:
     source_date = date.fromisoformat(as_of_date)
+    generation_date = date.fromisoformat(
+        as_of_date if manifest_as_of_date is None else manifest_as_of_date
+    )
     manifest = GenerationManifest.build(
-        as_of_date=source_date,
+        as_of_date=generation_date,
         adapter=AdapterIdentity("synthetic-selected-input", "1"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
@@ -576,6 +580,120 @@ def _generation_manifest_snapshot(
     return InputSnapshot.from_bytes(
         "synthetic generation manifest", manifest.to_json_bytes()
     )
+
+
+def test_catalog_identity_preserves_later_manifest_generation_date(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    catalog = InputSnapshot.from_bytes(
+        "synthetic provider ledger",
+        canonical_json_bytes({"as_of_date": "2026-09-17", "catalog_schema_version": 1}),
+    )
+    manifest = _generation_manifest_snapshot(
+        catalog=catalog,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-09-17",
+        manifest_as_of_date="2026-09-18",
+    )
+
+    _, built = perimeter_module._bound_catalog_identity(
+        catalog=catalog,
+        manifest_snapshot=manifest,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version_field="catalog_schema_version",
+        manifest_identity_artifact_id="identity/provider-ledger-generation.json",
+    )
+    _, verified = verifier_module._bound_catalog(
+        catalog,
+        manifest,
+        role="provider_ledger",
+    )
+
+    assert built == verified
+    assert built["artifact"]["as_of_date"] == "2026-09-17"
+    assert built["generation_manifest"]["as_of_date"] == "2026-09-18"
+
+
+def test_catalog_identity_rejects_catalog_byte_substitution_with_later_manifest(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    catalog = InputSnapshot.from_bytes(
+        "synthetic provider ledger",
+        canonical_json_bytes({"as_of_date": "2026-09-17", "catalog_schema_version": 1}),
+    )
+    manifest = _generation_manifest_snapshot(
+        catalog=catalog,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-09-17",
+        manifest_as_of_date="2026-09-18",
+    )
+    substituted = InputSnapshot.from_bytes(
+        "substituted provider ledger",
+        canonical_json_bytes(
+            {"as_of_date": "2026-09-17", "catalog_schema_version": 1, "x": 1}
+        ),
+    )
+
+    with pytest.raises(
+        perimeter_module.AccountAssignmentPerimeterError,
+        match="selected manifest catalog artifact differs from frozen catalog",
+    ):
+        perimeter_module._bound_catalog_identity(
+            catalog=substituted,
+            manifest_snapshot=manifest,
+            catalog_artifact_id="normalized/provider-ledger.json",
+            catalog_schema_name="provider-ledger-catalog",
+            catalog_schema_version_field="catalog_schema_version",
+            manifest_identity_artifact_id="identity/provider-ledger-generation.json",
+        )
+    with pytest.raises(verifier_module.IndependentVerificationError):
+        verifier_module._bound_catalog(
+            substituted,
+            manifest,
+            role="provider_ledger",
+        )
+
+
+def test_catalog_identity_preserves_equal_date_compatibility(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    catalog = InputSnapshot.from_bytes(
+        "synthetic provider ledger",
+        canonical_json_bytes({"as_of_date": "2026-09-17", "catalog_schema_version": 1}),
+    )
+    manifest = _generation_manifest_snapshot(
+        catalog=catalog,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version="1",
+        as_of_date="2026-09-17",
+    )
+
+    _, built = perimeter_module._bound_catalog_identity(
+        catalog=catalog,
+        manifest_snapshot=manifest,
+        catalog_artifact_id="normalized/provider-ledger.json",
+        catalog_schema_name="provider-ledger-catalog",
+        catalog_schema_version_field="catalog_schema_version",
+        manifest_identity_artifact_id="identity/provider-ledger-generation.json",
+    )
+    _, verified = verifier_module._bound_catalog(
+        catalog,
+        manifest,
+        role="provider_ledger",
+    )
+
+    assert built == verified
+    assert built["artifact"]["as_of_date"] == "2026-09-17"
+    assert built["generation_manifest"]["as_of_date"] == "2026-09-17"
 
 
 def _selected_inputs(module: Any, baseline: InputSnapshot | None = None) -> object:
@@ -14516,7 +14634,7 @@ def test_c4d1a_core_contract_objects_are_identical_and_pinned(
         ),
         "quant_engine.core.contracts": (
             "packages/core/src/quant_engine/core/contracts.py",
-            "38bcfa8593a1c168674cd94e6f2b22f21b98748ecc178343e0f8726940ae0ac5",
+            "619c4f0c7ad51fa868a2e0213371310efb337bf6be2797e31150518d6f179fc9",
         ),
         "quant_engine.core.strict_json": (
             "packages/core/src/quant_engine/core/strict_json.py",
@@ -14901,7 +15019,7 @@ def _c4d1b_parent_core_table() -> tuple[dict[str, object], set[bytes]]:
 
     expected_pins = {
         "quant_engine.core.snapshots": "ba9e0ee78c84a0c3ec38cab2e778284bcf02335c5958266f0823a04072e4e653",
-        "quant_engine.core.contracts": "38bcfa8593a1c168674cd94e6f2b22f21b98748ecc178343e0f8726940ae0ac5",
+        "quant_engine.core.contracts": "619c4f0c7ad51fa868a2e0213371310efb337bf6be2797e31150518d6f179fc9",
         "quant_engine.core.strict_json": "9f86b89862fd6510f607a25d2ec88e1ab5577614d36fe42ca1234c41f547f1e1",
     }
     modules = {
@@ -16231,7 +16349,7 @@ def _c4d3a_catalog_identity_oracle(
         "generation_id": manifest.generation_id,
         "artifact": {
             "artifact_id": catalog_artifact_id,
-            "as_of_date": manifest.as_of_date.isoformat(),
+            "as_of_date": catalog.json_object()["as_of_date"],
             "schema": {
                 "name": catalog_schema_name,
                 "version": artifact.schema_version,
@@ -25951,7 +26069,7 @@ def test_provider_fact_after_selected_ledger_date_is_rejected_by_legacy_perimete
         )
 
 
-@pytest.mark.parametrize("fact_kind", ["nav", "flow", "provider_generation"])
+@pytest.mark.parametrize("fact_kind", ["nav", "flow"])
 def test_provider_fact_after_selected_ledger_date_is_rejected_before_c3_calculation_inputs(
     perimeter_module: Any, fact_kind: str
 ) -> None:
@@ -25962,15 +26080,6 @@ def test_provider_fact_after_selected_ledger_date_is_rejected_before_c3_calculat
         ledger["nav_observations"][0]["as_of_date"] = "2026-02-02"
     elif fact_kind == "flow":
         ledger["flows"][0]["event_date"] = "2026-02-02"
-    else:
-        ledger["provider_generations"] = [
-            {
-                "provider_id": "synthetic",
-                "generation_id": "c" * 64,
-                "manifest_sha256": "a" * 64,
-                "generation_as_of_date": "2026-02-02",
-            }
-        ]
     mutated = _c3_with_mutated_ledger_or_policy(
         perimeter_module, ledger, selected.flow_classification_policy.json_object()
     )
@@ -25978,10 +26087,10 @@ def test_provider_fact_after_selected_ledger_date_is_rejected_before_c3_calculat
         perimeter_module.build_blocked_account_manifest_payloads(mutated)
 
 
-def test_legacy_perimeter_rejects_future_provider_generation_metadata(
+def test_legacy_perimeter_accepts_later_provider_generation_metadata(
     perimeter_module: Any,
 ) -> None:
-    """Legacy perimeter selection rejects provider generations after ledger as_of_date."""
+    """Legacy perimeter keeps later generation provenance separate from facts."""
     selected = _c3_selected_inputs(perimeter_module)
     ledger = selected.provider_ledger.json_object()
     ledger["provider_generations"] = [
@@ -26010,13 +26119,12 @@ def test_legacy_perimeter_rejects_future_provider_generation_metadata(
     )
     selected = perimeter_module.AccountManifestSelectedInputs(**values)
     facts = _fixture_inputs()
-    with pytest.raises(perimeter_module.AccountAssignmentPerimeterError):
-        perimeter_module.build_account_assignment_perimeter(
-            selected_inputs=selected,
-            nav_facts=facts["nav_facts"],
-            raw_flow_facts=facts["raw_flow_facts"],
-            classified_flow_facts=facts["classified_flow_facts"],
-        )
+    perimeter_module.build_account_assignment_perimeter(
+        selected_inputs=selected,
+        nav_facts=facts["nav_facts"],
+        raw_flow_facts=facts["raw_flow_facts"],
+        classified_flow_facts=facts["classified_flow_facts"],
+    )
 
 
 def test_blocked_c3_uses_provider_ledger_date_for_open_ended_boundaries(
@@ -26093,16 +26201,76 @@ def test_independent_verifier_accepts_later_baseline_receipt_capped_at_ledger_da
     } == {"2026-02-01"}
 
 
+def test_mixed_route_preserves_later_admission_authority_date_and_provenance(
+    perimeter_module: Any,
+    verifier_module: Any,
+) -> None:
+    """Admission authority may be later than equal financial catalog dates."""
+    selected = _mixed_composer_selected_inputs(perimeter_module)
+    ledger = selected.provider_ledger.json_object()
+    ledger["provider_generations"][0]["generation_as_of_date"] = "2026-02-03"
+    selected = _mixed_selected_with_ledger(perimeter_module, selected, ledger)
+    receipt_id = "receipt/mixed-account-01.json"
+    receipt = selected.retrieval_receipts[receipt_id].json_object()
+    receipt["provider_generation_manifest"]["as_of_date"] = "2026-02-03"
+    receipt["raw_evidence_artifacts"][0]["as_of_date"] = "2026-02-03"
+    receipt_snapshot = InputSnapshot.from_bytes(
+        "later source provenance with equal financial catalogs",
+        canonical_json_bytes(receipt),
+    )
+    authority = selected.receipt_authority.json_object()
+    authority_entry = authority["receipts"][0]
+    authority_entry["sha256"] = receipt_snapshot.sha256
+    authority_entry["size_bytes"] = receipt_snapshot.size_bytes
+    authority_entry["contract"]["provider_generation_manifest"]["as_of_date"] = (
+        "2026-02-03"
+    )
+    authority_entry["contract"]["raw_evidence_artifacts"][0]["as_of_date"] = (
+        "2026-02-03"
+    )
+    authority_snapshot = InputSnapshot.from_bytes(
+        "later source provenance authority with equal financial catalogs",
+        canonical_json_bytes(authority),
+    )
+    admission = selected.admission_policy.json_object()
+    admission["as_of_date"] = "2026-02-03"
+    admission_snapshot = InputSnapshot.from_bytes(
+        "later admission authority with equal financial catalogs",
+        canonical_json_bytes(admission),
+    )
+    values = _selected_input_kwargs(selected)
+    values.update(
+        {
+            "retrieval_receipts": {receipt_id: receipt_snapshot},
+            "receipt_authority": authority_snapshot,
+            "admission_policy": admission_snapshot,
+            "manifest_schema": selected.manifest_schema,
+        }
+    )
+    selected = perimeter_module.AccountManifestSelectedInputs(**values)
+    assert selected.generation_as_of_date.isoformat() == "2026-02-01"
+
+    payloads = perimeter_module.build_account_manifest_payloads(selected)
+    output = json.loads(payloads["outputs/account-strategy-manifest.json"])
+    assert (
+        output["source_identities"]["admission_policy"]["artifact"]["as_of_date"]
+        == "2026-02-03"
+    )
+    assert json.loads(payloads["authority/account-flow-coverage.json"])[
+        "as_of_date"
+    ] == ("2026-02-01")
+    verifier_module.IndependentAccountManifestVerifier().verify(
+        _mixed_verifier_inputs(verifier_module, selected), payloads
+    )
+
+
 @pytest.mark.parametrize(
     "receipt_field",
     [
-        "provider_generation",
         "requested_start",
         "requested_end",
         "covered_start",
         "covered_end",
-        "provider_generation_manifest",
-        "raw_evidence_artifacts",
     ],
 )
 def test_mixed_receipt_date_after_selected_ledger_date_is_rejected(
@@ -26130,8 +26298,6 @@ def test_mixed_receipt_date_after_selected_ledger_date_is_rejected(
         "requested_end",
         "covered_start",
         "covered_end",
-        "provider_generation_manifest",
-        "raw_evidence_artifacts",
     ],
 )
 def test_independent_verifier_rejects_receipt_interval_after_selected_ledger_date(
@@ -26155,7 +26321,7 @@ def test_independent_verifier_rejects_receipt_interval_after_selected_ledger_dat
         )
 
 
-@pytest.mark.parametrize("fact_kind", ["nav", "flow", "provider_generation"])
+@pytest.mark.parametrize("fact_kind", ["nav", "flow"])
 def test_independent_verifier_rejects_provider_fact_after_selected_ledger_date(
     perimeter_module: Any, verifier_module: Any, fact_kind: str
 ) -> None:
@@ -26166,8 +26332,6 @@ def test_independent_verifier_rejects_provider_fact_after_selected_ledger_date(
         ledger["nav_observations"][0]["as_of_date"] = "2026-02-02"
     elif fact_kind == "flow":
         ledger["flows"][0]["event_date"] = "2026-02-02"
-    else:
-        ledger["provider_generations"][0]["generation_as_of_date"] = "2026-02-02"
     values = _selected_input_kwargs(selected)
     ledger_snapshot = InputSnapshot.from_bytes(
         "future provider ledger", canonical_json_bytes(ledger)
@@ -26193,10 +26357,6 @@ def test_independent_verifier_rejects_provider_fact_after_selected_ledger_date(
             verifier_module._normalize_provider_navs(verifier_selected)
         elif fact_kind == "flow":
             verifier_module._mixed_normalized_facts(verifier_selected)
-        else:
-            verifier_module._validate_provider_ledger_date_authority(
-                verifier_selected, ledger
-            )
 
 
 @pytest.mark.parametrize("admission_edge", ["funded_to_blocked", "invalid_nav_id"])
@@ -26798,17 +26958,16 @@ def test_generation_composer_preserves_declared_nav_basis_for_mwr(
         )
 
 
-def test_generation_available_mwr_reaches_bound_report_workbook(
+def test_generation_available_mwr_reaches_bound_report_and_panel(
     perimeter_module: Any,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One staged MWR reaches report, panel intake, and TWR/MWR workbook."""
+    """One staged MWR reaches the active report and panel consumers."""
 
     import portfolio_control_panel as panel
     import portfolio_release_builder as release_builder
     import portfolio_report as reporter
-    from openpyxl import load_workbook  # type: ignore[import-untyped]
 
     monkeypatch.setattr(
         reporter,
@@ -27214,45 +27373,7 @@ def test_generation_available_mwr_reaches_bound_report_workbook(
         )
     }
 
-    workbook_path = tmp_path / "portfolio-report.xlsx"
-    reporter._build_workbook_exact(report, workbook_path)
-    workbook = load_workbook(workbook_path, read_only=False, data_only=True)
-    try:
-        table = workbook["TWR MWR"].tables["tblTwrMwr"]
-        cells = list(workbook["TWR MWR"][table.ref])
-        headers = [cell.value for cell in cells[0]]
-        header_indexes = {
-            str(header).lower().replace(" ", "_"): index
-            for index, header in enumerate(headers)
-        }
-        row = next(
-            row
-            for row in cells[1:]
-            if row[header_indexes["account_id"]].value == available["account_id"]
-            and row[header_indexes["strategy_id"]].value == available["strategy_id"]
-        )
-        values_by_header = {
-            header: row[index].value for header, index in header_indexes.items()
-        }
-        assert values_by_header["mwr_status"] == available["mwr_status"]
-        assert abs(
-            Decimal(str(values_by_header["mwr_xirr"])) - Decimal(available["mwr_xirr"])
-        ) < Decimal("1e-15")
-        assert values_by_header["mwr_value_basis"] == available["mwr_value_basis"]
-        assert values_by_header["mwr_unit"] == available["mwr_unit"]
-        blocked_workbook_row = next(
-            row
-            for row in cells[1:]
-            if row[header_indexes["account_id"]].value == blocked["account_id"]
-            and row[header_indexes["strategy_id"]].value == blocked["strategy_id"]
-        )
-        assert (
-            blocked_workbook_row[header_indexes["mwr_reason"]].value
-            == staged_blocked["mwr_reason"]
-            == blocked["mwr_reason"]
-        )
-    finally:
-        workbook.close()
+    assert blocked["mwr_reason"] == staged_blocked["mwr_reason"]
 
     strategy_names = [str(row["name"]) for row in baseline_payload["strategies"]]
     all_series_names = dict(

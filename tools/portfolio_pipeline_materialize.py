@@ -13,12 +13,14 @@ from pathlib import Path
 import subprocess
 import sys
 from typing import Any, Final, Mapping, Sequence, cast
+from zoneinfo import ZoneInfo
 
 from quant_engine.core import (
     CoverageStatus,
     GenerationManifest,
     VerificationStatus,
     inventory_generation,
+    read_current,
     read_generation_bundle,
     runtime_environment_sha256,
 )
@@ -46,7 +48,15 @@ STAGES = (
     "attribution",
     "analytics",
     "report",
-    "workbook",
+    "panel",
+)
+ATTENDED_STAGES: Final = (
+    "ledger",
+    "baseline",
+    "attribution",
+    "analytics",
+    "report",
+    "panel-candidate",
     "panel",
 )
 STAGE_DEPENDENCIES = {
@@ -55,8 +65,7 @@ STAGE_DEPENDENCIES = {
     "attribution": ("baseline", "ledger"),
     "analytics": ("attribution",),
     "report": ("baseline", "ledger", "analytics"),
-    "workbook": ("baseline", "ledger", "report"),
-    "panel": ("ledger", "attribution", "analytics", "workbook"),
+    "panel": ("ledger", "attribution", "analytics", "report"),
 }
 SEMANTIC_FIRST_STAGE = {
     "AS_HELD_COMPOSITE_HWM": "analytics",
@@ -69,7 +78,6 @@ SEMANTIC_FIRST_STAGE = {
     "INVESTED_CAPITAL": "analytics",
     "DEPENDENCE": "analytics",
     "REPORT": "report",
-    "WORKBOOK": "workbook",
     "PANEL": "panel",
     "RELEASE_RECEIPT": "panel",
 }
@@ -86,6 +94,16 @@ EPOCH_MANIFEST_INPUTS = {
     "account_strategy_classified_flows": "--manifest-classified-flows",
     "account_strategy_flow_coverage": "--manifest-flow-coverage",
     "account_strategy_admission_policy": "--manifest-admission-policy",
+}
+ATTENDED_HWM_INPUTS = {
+    "--hwm-governed-result": "hwm_governed_result",
+    "--hwm-governed-input-generation": "hwm_governed_input_generation",
+    "--hwm-governed-calendar-authority": "hwm_governed_calendar_authority",
+    "--hwm-governed-admission-receipt": "hwm_governed_admission_receipt",
+}
+ATTENDED_CAPITAL_INPUTS = {
+    "--invested-capital-result": "invested_capital_result",
+    "--invested-capital-input-generation": "invested_capital_input_generation",
 }
 SCHEMA_9_VERTICAL_RECIPE_KEYS = frozenset(
     {
@@ -108,11 +126,11 @@ SCHEMA_9_VERTICAL_RECIPE_KEYS = frozenset(
 RELEASE_ROLES = ("ledger", "baseline", "report", "panel")
 # Roles whose release-builder path validates the private stage target against
 # production and therefore requires --portfolio-root on a financial run.
-_PORTFOLIO_ROOT_STAGES: Final = ("workbook", "panel")
+_PORTFOLIO_ROOT_STAGES: Final = ("report", "panel")
 # The roles whose staged output depends on the governed numerical results. A
 # run that binds them into one of these and not the others produces two
 # different semantic validations of the same release.
-_GOVERNED_OUTCOME_STAGES: Final = ("report", "workbook", "panel")
+_GOVERNED_OUTCOME_STAGES: Final = ("report", "panel")
 ROOT_IDS = {
     "ledger": "provider-ledger",
     "baseline": "baseline",
@@ -395,7 +413,7 @@ HYBRID_PANEL_ROOT_IDS = {
 GENERATION_STAGE = {
     "ledger": "ledger",
     "baseline": "baseline",
-    "report": "workbook",
+    "report": "report",
     "panel": "panel",
 }
 GENERATION_ROOT = {
@@ -618,9 +636,16 @@ def _directory_rows(path: Path) -> list[dict[str, object]]:
 
 
 def _directory_identity(path: Path) -> dict[str, object]:
+    # The trailing newline is load-bearing. `portfolio_release_builder
+    # ._directory_inventory` and `portfolio_control_panel._directory_identity`
+    # both hash the canonical rows plus a newline, and this function has to
+    # validate what they write. Omitting it made every panel-candidate receipt
+    # unverifiable: the rows agree byte for byte and only the framing differed.
+    # `test_directory_identity_agrees_across_producers` pins all three together.
     rows = _directory_rows(path)
-    encoded = json.dumps(
-        rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    encoded = (
+        json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
     ).encode("utf-8")
     return {
         "file_count": len(rows),
@@ -995,6 +1020,9 @@ def _schwab_selected_point_positions(
             or transport not in {"WEB_CONTRACT", "DEVELOPER_API"}
         ):
             raise ValueError("point clock/date/transport differs")
+        financial_observation_date = captured.astimezone(
+            ZoneInfo("America/New_York")
+        ).date()
         artifact = artifacts[0]
         if (
             artifact["as_of_date"] != day.isoformat()
@@ -1083,7 +1111,7 @@ def _schwab_selected_point_positions(
             raise ValueError("point position account count differs")
     except (KeyError, ValueError, TypeError, AttributeError) as exc:
         raise MaterializationError("Schwab selected point authority differs") from exc
-    return expected if day <= requested_as_of else None
+    return expected if financial_observation_date <= requested_as_of else None
 
 
 def _provider_admission_authority(
@@ -1147,9 +1175,37 @@ def _provider_admission_authority(
         raise MaterializationError("provider ledger authority is unreadable") from exc
     if not isinstance(receipt, dict) or not isinstance(catalog, dict):
         raise MaterializationError("provider ledger authority root differs")
+    try:
+        financial_cutoff = date.fromisoformat(str(catalog["as_of_date"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MaterializationError("provider ledger catalog authority differs") from exc
+    normalized_artifacts = {
+        item.artifact_id: item
+        for item in manifest.artifacts
+        if item.artifact_id
+        in {
+            "normalized/provider-ledger.json",
+            "normalized/admit-or-declare-receipt.json",
+        }
+    }
+    observation = receipt.get("run_observation")
+    receipt_cutoff = (
+        observation.get("financial_cutoff")
+        if isinstance(observation, dict)
+        else catalog.get("as_of_date")
+    )
     if (
         catalog.get("catalog_schema_version") != 2
-        or catalog.get("as_of_date") != manifest.as_of_date.isoformat()
+        or receipt_cutoff != catalog.get("as_of_date")
+        or set(normalized_artifacts)
+        != {
+            "normalized/provider-ledger.json",
+            "normalized/admit-or-declare-receipt.json",
+        }
+        or any(
+            artifact.as_of_date != financial_cutoff
+            for artifact in normalized_artifacts.values()
+        )
     ):
         raise MaterializationError("provider ledger catalog authority differs")
     product = contract.get("product")
@@ -1328,6 +1384,14 @@ def _provider_admission_authority(
                             )
                             if row.get(field) not in {None, ""}
                         ]
+                        if point_bound:
+                            # Native equality above binds the original UTC date
+                            # and clock; EOD selection uses the provider day.
+                            days = [
+                                datetime.fromisoformat(row["observed_at"])
+                                .astimezone(ZoneInfo("America/New_York"))
+                                .date()
+                            ]
                         if row.get("generation_id") != identity.generation_id or (
                             any(
                                 day > (cutoff if point_bound else effective)
@@ -1395,6 +1459,11 @@ def _provider_admission_authority(
                 raise MaterializationError(
                     "provider ledger selected generations differ"
                 )
+            expected_generation_as_of = reader._generation_as_of_date(
+                cutoff, tuple(manifest.artifacts)
+            )
+            if manifest.as_of_date != expected_generation_as_of:
+                raise MaterializationError("provider ledger generation date differs")
         except MaterializationError:
             raise
         except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
@@ -1430,6 +1499,79 @@ def _provider_admission_authority(
         "provider_count": len(receipt.get("provider_generations", [])),
         "receipt": _canonical_clone(receipt),
         "receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+    }
+
+
+def validate_source_phase(
+    *,
+    requested_as_of: str,
+    provider_ledger_generation_root: Path,
+    financial_input_contract_path: Path,
+) -> dict[str, Any]:
+    """Replay one retained provider admission at the frozen financial boundary.
+
+    This is deliberately narrower than product conformance.  It proves the
+    selected provider generation and the exact input contract it was admitted
+    under; the release recipe continues to validate the public, history and
+    numerical producer inputs through their existing readers.
+    """
+
+    try:
+        requested_cutoff = date.fromisoformat(requested_as_of).isoformat()
+    except (TypeError, ValueError) as exc:
+        raise MaterializationError("requested financial cutoff is invalid") from exc
+    generation = provider_ledger_generation_root.resolve()
+    contract_path = financial_input_contract_path.resolve()
+    module = _financial_mvp_module()
+    try:
+        contract = module.load_contract(
+            contract_path, CURRENT_STRATEGY_REGISTRY, FINANCIAL_MVP_SCHEMA
+        )
+        contract_semantic_sha256 = module.contract_digest(contract)
+        census_sha256 = module.census_digest(contract["current_census"])
+    except (OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        raise MaterializationError("financial input contract is invalid") from exc
+    contract_raw_sha256, _ = _sha(contract_path)
+    admission = _provider_admission_authority(
+        generation,
+        contract,
+        contract_raw_sha256=contract_raw_sha256,
+        contract_semantic_sha256=contract_semantic_sha256,
+        census_sha256=census_sha256,
+    )
+    try:
+        catalog = _load(generation / "provider-ledger.json", "provider ledger catalog")
+        receipt = admission["receipt"]
+        if not isinstance(receipt, dict):
+            raise ValueError("receipt differs")
+        observation = receipt.get("run_observation")
+        if not isinstance(observation, dict):
+            raise ValueError("run observation differs")
+        receipt_cutoff = observation.get("financial_cutoff")
+        if (
+            catalog.get("as_of_date") != requested_cutoff
+            or receipt_cutoff != requested_cutoff
+            or admission.get("admission_gate_status") != "PASS"
+            or admission.get("product_readiness") != "READY_FOR_COMPOSITION"
+        ):
+            raise ValueError("financial cutoff or admission readiness differs")
+    except (OSError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "provider source phase is not READY_FOR_COMPOSITION at requested financial cutoff"
+        ) from exc
+    return {
+        "financial_data_cutoff": requested_cutoff,
+        "financial_input_contract": _file_definition(contract_path),
+        "provider_ledger_catalog": _file_definition(
+            generation / "provider-ledger.json"
+        ),
+        "provider_ledger_generation_id": admission["generation_id"],
+        "provider_ledger_manifest": _file_definition(generation / "generation.json"),
+        "provider_ledger_receipt": _file_definition(
+            generation / "admit-or-declare-receipt.json"
+        ),
+        "source_provenance": _canonical_clone(receipt.get("run_observation")),
+        "status": "PASS",
     }
 
 
@@ -3851,18 +3993,6 @@ def build_spec(
         }
     )
 
-    report_data_file = next(
-        row
-        for row in recipe["expected_generations"]["report"]["files"]
-        if row["relative_path"] == "portfolio-report-data.json"
-    )
-    report_candidate = (
-        output_root
-        / "stages"
-        / "report-candidate"
-        / "candidates"
-        / report_data_file["sha256"]
-    )
     stage_writes = {
         "ledger": [
             output_root / "stages" / "ledger",
@@ -3882,16 +4012,8 @@ def build_spec(
             retained_cache_root,
         ],
         "report": [
-            report_candidate / "portfolio-report-data.json",
-            report_candidate / "portfolio-report.xlsx",
-            report_candidate / "workbook-contract.json",
-            report_candidate / "xlsx-job.json",
-            output_root / "stage-results" / "report.json",
-        ],
-        "workbook": [
-            output_root / "stages" / "report-candidate",
             output_root / "stages" / "report",
-            output_root / "stage-results" / "workbook.json",
+            output_root / "stage-results" / "report.json",
         ],
         "panel": [
             output_root / "stages" / "panel",
@@ -3932,9 +4054,7 @@ def build_spec(
             args.extend(("--qa-dir", str(qa_dir)))
         if role == "analytics":
             args.extend(("--retained-cache-root", str(retained_cache_root)))
-        if role == "workbook" and workbook_runtime_path is not None:
-            args.extend(("--workbook-runtime", str(workbook_runtime_path)))
-        # `build_workbook` and `build_panel` treat any run carrying governed
+        # `build_report` and `build_panel` treat any run carrying governed
         # HWM, invested capital or decomposition lenses as a financial
         # publication and refuse it without a portfolio root, which is what
         # proves the stage output root is disjoint from production. Every
@@ -3945,7 +4065,7 @@ def build_spec(
         if needs_portfolio_root and portfolio_root is not None:
             args.extend(("--portfolio-root", str(portfolio_root)))
         # The governed numerical results are stage inputs, not merely gate
-        # evidence: `build_report`, `build_workbook` and `build_panel` each read
+        # evidence: `build_report` and `build_panel` each read
         # them and each refuses to verify a candidate that was built with them
         # when it is re-run without. Omitting them here made the pipeline's own
         # panel node recompute a semantic validation that differed from the one
@@ -3959,8 +4079,6 @@ def build_spec(
             reads.extend(stage_writes[dependency])
         if role == "panel":
             reads.append(qa_dir)
-        if role == "workbook" and workbook_runtime_path is not None:
-            reads.append(workbook_runtime_path)
         reads = list(dict.fromkeys(reads))
         command = _command(
             node_id=command_id,
@@ -3972,7 +4090,7 @@ def build_spec(
             args=args,
             reads=reads,
             writes=stage_writes[role],
-            retry_limit=1 if role == "workbook" else 0,
+            retry_limit=0,
             timeout_seconds=(
                 ANALYTICS_SILENCE_SECONDS if role == "analytics" else 3600
             ),
@@ -4739,6 +4857,1426 @@ def build_production_spec(
     }
 
 
+def _attended_stage_root(output_root: Path, role: str) -> Path:
+    roots = {
+        "ledger": "ledger",
+        "baseline": "baseline",
+        "attribution": "attribution",
+        "analytics": "analytics",
+        "report": "report",
+        "panel-candidate": "panel",
+        "panel": "panel",
+    }
+    return output_root / "stages" / roots[role]
+
+
+def _attended_completed_ledger(receipt: Mapping[str, Any], stage_root: Path) -> None:
+    """Verify the stage-owned ledger generation before resume may skip it."""
+
+    try:
+        root = _absolute(receipt.get("root"), "attended completed ledger root")
+        generation_id = _text(
+            receipt.get("generation_id"), "attended completed ledger generation_id"
+        )
+        catalog_sha256 = _text(
+            receipt.get("catalog_sha256"), "attended completed ledger catalog_sha256"
+        )
+        if len(generation_id) != 64 or len(catalog_sha256) != 64:
+            raise ValueError("ledger identity length differs")
+        if root != stage_root.resolve():
+            raise ValueError("ledger root differs")
+        import portfolio_release_builder as release
+
+        verified_id, catalog = release._validated_reusable_provider_ledger(  # noqa: SLF001
+            stage_root / "generations" / generation_id
+        )
+        if verified_id != generation_id or _sha(catalog)[0] != catalog_sha256:
+            raise ValueError("ledger catalog identity differs")
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "attended completed ledger artifact identity differs"
+        ) from exc
+
+
+def _attended_completed_baseline(receipt: Mapping[str, Any], stage_root: Path) -> None:
+    """Verify the staged baseline through its existing generation reader."""
+
+    try:
+        root = _absolute(receipt.get("root"), "attended completed baseline root")
+        generation_id = _text(
+            receipt.get("generation_id"), "attended completed baseline generation_id"
+        )
+        catalog_sha256 = _text(
+            receipt.get("catalog_sha256"), "attended completed baseline catalog_sha256"
+        )
+        if len(generation_id) != 64 or len(catalog_sha256) != 64:
+            raise ValueError("baseline identity length differs")
+        if root != stage_root.resolve():
+            raise ValueError("baseline root differs")
+        import portfolio_report
+
+        _catalog, identity, _catalog_path = portfolio_report._baseline(  # noqa: SLF001
+            stage_root, generation_id=generation_id
+        )
+        if identity.get("generation_id") != generation_id or (
+            identity.get("catalog_sha256") != catalog_sha256
+        ):
+            raise ValueError("baseline catalog identity differs")
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "attended completed baseline artifact identity differs"
+        ) from exc
+
+
+def _attended_completed_attribution(
+    receipt: Mapping[str, Any], stage_root: Path
+) -> None:
+    """Re-read the immutable attribution bundle and its stage verification."""
+
+    try:
+        bundle_id = _text(receipt.get("bundle_id"), "attended attribution bundle_id")
+        destination = _absolute(
+            receipt.get("destination"), "attended attribution destination"
+        )
+        verification_path = _absolute(
+            receipt.get("verification"), "attended attribution verification"
+        )
+        if destination.name != bundle_id or verification_path != (
+            stage_root.resolve() / "attribution-verification.json"
+        ):
+            raise ValueError("attribution receipt identity differs")
+        manifest_path = destination / "plan-manifest.json"
+        manifest = _load(manifest_path, "attended attribution plan manifest")
+        if manifest.get("bundle_id") != bundle_id:
+            raise ValueError("attribution bundle identity differs")
+        for section in ("inputs", "outputs"):
+            rows = manifest.get(section)
+            if not isinstance(rows, list) or not rows:
+                raise ValueError("attribution artifact inventory differs")
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise ValueError("attribution artifact definition differs")
+                path = destination / _text(row.get("path"), "attribution artifact")
+                sha256, size_bytes = _sha(path)
+                if sha256 != row.get("sha256") or size_bytes != row.get("size_bytes"):
+                    raise ValueError("attribution artifact identity differs")
+        verification = _load(verification_path, "attended attribution verification")
+        if (
+            verification.get("schema_version") != 1
+            or verification.get("status") != "PASS"
+            or verification.get("bundle_id") != bundle_id
+            or verification.get("plan_manifest_sha256") != _sha(manifest_path)[0]
+        ):
+            raise ValueError("attribution verification identity differs")
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "attended completed attribution artifact identity differs"
+        ) from exc
+
+
+def _attended_published_generation(
+    root: Path,
+    expected_generation_id: object,
+    label: str,
+    *,
+    filename: str,
+    expected_schema_version: int | Sequence[int],
+) -> None:
+    """Read one published analytics generation through its native reader."""
+
+    import portfolio_control_panel as panel
+
+    generation_id = _text(expected_generation_id, f"attended {label} generation_id")
+    _value, identity, _path = panel._current_analytics(  # noqa: SLF001
+        root,
+        filename=filename,
+        field_name=label,
+        expected_schema_version=expected_schema_version,
+    )
+    if identity.get("generation_id") != generation_id:
+        raise ValueError(f"{label} generation identity differs")
+
+
+def _attended_completed_analytics(receipt: Mapping[str, Any], stage_root: Path) -> None:
+    """Re-read every result bound by the current analytics producer."""
+
+    if receipt.get("schema_version") != 2:
+        raise ValueError("analytics result schema differs")
+    roots = {
+        "correlation": _absolute(
+            receipt.get("correlation_root"), "attended analytics correlation_root"
+        ),
+        "decomposition": _absolute(
+            receipt.get("decomposition_root"), "attended analytics decomposition_root"
+        ),
+        "lenses": _absolute(
+            receipt.get("decomposition_lenses_root"),
+            "attended analytics decomposition_lenses_root",
+        ),
+        "weekly": _absolute(
+            receipt.get("weekly_root"), "attended analytics weekly_root"
+        ),
+    }
+    if any(
+        path.is_symlink() or not path.is_dir() or not path.is_relative_to(stage_root)
+        for path in roots.values()
+    ):
+        raise ValueError("analytics output differs")
+    _attended_published_generation(
+        roots["correlation"],
+        receipt.get("correlation_generation_id"),
+        "analytics correlation",
+        filename="correlation.json",
+        expected_schema_version=(1, 2),
+    )
+    _attended_published_generation(
+        roots["decomposition"],
+        receipt.get("decomposition_generation_id"),
+        "analytics decomposition",
+        filename="decomposition.json",
+        expected_schema_version=(1, 2, 3),
+    )
+    _attended_published_generation(
+        roots["weekly"],
+        receipt.get("weekly_generation_id"),
+        "analytics weekly",
+        filename="weekly-returns.json",
+        expected_schema_version=1,
+    )
+    bindings = receipt.get("lens_generation_bindings")
+    plan_bundles = receipt.get("plan_bundle_ids")
+    if (
+        not isinstance(bindings, list)
+        or not bindings
+        or not isinstance(plan_bundles, dict)
+    ):
+        raise ValueError("analytics lens bindings differ")
+    seen: set[tuple[str, str]] = set()
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            raise ValueError("analytics lens binding differs")
+        evidence_mode = _text(binding.get("evidence_mode"), "analytics lens mode")
+        spec_id = _text(binding.get("spec_id"), "analytics lens spec_id")
+        source_key = _text(binding.get("source_key"), "analytics lens source_key")
+        surface = _text(binding.get("surface"), "analytics lens surface")
+        if (
+            evidence_mode not in {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}
+            or surface not in {"STATIC", "DYNAMIC_FLS"}
+            or (evidence_mode, spec_id) in seen
+            or binding.get("plan_bundle_id") != plan_bundles.get(evidence_mode)
+            or spec_id != f"{source_key}:{surface}"
+        ):
+            raise ValueError("analytics lens binding differs")
+        seen.add((evidence_mode, spec_id))
+        lens_root = roots["lenses"] / evidence_mode / surface / source_key
+        _attended_published_generation(
+            lens_root,
+            binding.get("generation_id"),
+            "analytics lens",
+            filename="decomposition.json",
+            expected_schema_version=(1, 2, 3),
+        )
+    hybrid_generation = receipt.get("hybrid_dynamic_generation_id")
+    if hybrid_generation is not None:
+        _attended_published_generation(
+            roots["lenses"] / "LIVE_PLUS_BACKTEST" / "dynamic-style",
+            hybrid_generation,
+            "analytics hybrid decomposition",
+            filename="decomposition.json",
+            expected_schema_version=(1, 2, 3),
+        )
+
+
+def _attended_completed_report(receipt: Mapping[str, Any], stage_root: Path) -> None:
+    """Validate the report producer's canonical-data candidate for resume."""
+
+    root = _absolute(receipt.get("root"), "attended completed report root")
+    candidate = _absolute(receipt.get("candidate_dir"), "attended report candidate")
+    if (
+        root != stage_root.resolve()
+        or candidate.is_symlink()
+        or not candidate.is_dir()
+        or not candidate.is_relative_to(stage_root)
+    ):
+        raise ValueError("report candidate differs")
+    report_data = candidate / "portfolio-report-data.json"
+    if report_data.is_symlink() or not report_data.is_file():
+        raise ValueError("report candidate inventory differs")
+    report_bytes = report_data.read_bytes()
+    if (
+        candidate.name != hashlib.sha256(report_bytes).hexdigest()
+        or canonical_json_bytes(json.loads(report_bytes)) != report_bytes
+    ):
+        raise ValueError("report candidate content differs")
+    generation_id = _text(receipt.get("generation_id"), "attended report generation_id")
+    current = read_current(root)
+    if current.generation_id != generation_id:
+        raise ValueError("report current generation differs")
+    # Read through the producer's own reader, as the ledger, baseline and
+    # analytics gates already do. `read_generation_bundle` demands the detached
+    # inventory and receipt that only `stage_generation_bundle` writes, and the
+    # report producer uses the bare `stage_generation`, so it could never pass.
+    # `_current_report` binds the report bytes to the manifest artifact's sha
+    # AND size, and `read_current` pins the whole directory inventory.
+    import portfolio_control_panel as panel
+
+    _report, identity, _path = panel._current_report(root)  # noqa: SLF001
+    if identity.get("generation_id") != generation_id:
+        raise ValueError("report generation identity differs")
+    generation_report = (
+        root / "generations" / generation_id / "portfolio-report-data.json"
+    )
+    generation_bytes = generation_report.read_bytes()
+    if (
+        generation_bytes != report_bytes
+        or canonical_json_bytes(json.loads(generation_bytes)) != generation_bytes
+    ):
+        raise ValueError("report generation content differs")
+
+
+def _attended_completed_panel(receipt: Mapping[str, Any], stage_root: Path) -> None:
+    """Verify the published panel generation and its retained producer QA."""
+
+    root = _absolute(receipt.get("root"), "attended completed panel root")
+    if root != stage_root.resolve():
+        raise ValueError("panel root differs")
+    generation_id = _text(receipt.get("generation_id"), "attended panel generation_id")
+    current = read_current(root)
+    if current.generation_id != generation_id:
+        raise ValueError("panel current generation differs")
+    # Same correction as the report gate. The panel producer also stages with
+    # the bare `stage_generation`, and it writes QA under `qa/<name>` while
+    # declaring the artifact id `evidence/<name>`, so a bundle read fails twice
+    # over. `_current_panel_qa` binds each declared artifact to the bytes on
+    # disk by sha and size, which a membership test on manifest ids would not.
+    import portfolio_control_panel as panel
+
+    identity = panel._current_panel_qa(  # noqa: SLF001
+        root,
+        required=("qa-validation.json", "semantic-validation.json"),
+    )
+    if identity.get("generation_id") != generation_id:
+        raise ValueError("panel generation identity differs")
+
+
+def _attended_completed_stage_root(
+    receipt: Mapping[str, Any], stage_root: Path, role: str
+) -> None:
+    """Require a role result to bind its materialized root before resume."""
+
+    try:
+        if role == "analytics":
+            _attended_completed_analytics(receipt, stage_root)
+            return
+        root = _absolute(receipt.get("root"), f"attended completed {role} root")
+        if root != stage_root.resolve():
+            raise ValueError("stage root differs")
+        if role == "report":
+            _attended_completed_report(receipt, stage_root)
+        elif role == "panel":
+            _attended_completed_panel(receipt, stage_root)
+        else:
+            import portfolio_release_builder as release
+
+            generation_id, _generation = release._published_generation(stage_root)  # noqa: SLF001
+            if receipt.get("generation_id") != generation_id:
+                raise ValueError("published generation identity differs")
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            f"attended completed {role} artifact identity differs"
+        ) from exc
+
+
+def _attended_completed_panel_candidate(
+    receipt: Mapping[str, Any], stage_root: Path
+) -> None:
+    """Validate the release builder's immutable panel-candidate checkpoint."""
+
+    try:
+        if (
+            receipt.get("schema_version") != 1
+            or receipt.get("role") != "panel-candidate"
+        ):
+            raise ValueError("panel candidate checkpoint differs")
+        candidate = receipt.get("candidate")
+        if not isinstance(candidate, dict):
+            raise ValueError("panel candidate identity differs")
+        candidate_root = _absolute(candidate.get("path"), "panel candidate path")
+        if not candidate_root.is_relative_to(stage_root.resolve()):
+            raise ValueError("panel candidate root differs")
+        _validate_directory_definition(candidate, "attended panel candidate")
+        result = receipt.get("result")
+        if (
+            not isinstance(result, dict)
+            or _absolute(result.get("candidate_dir"), "panel candidate result")
+            != candidate_root
+        ):
+            raise ValueError("panel candidate result differs")
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "attended completed panel-candidate artifact identity differs"
+        ) from exc
+
+
+def _attended_completed_stages(
+    output_root: Path,
+    required_stages: Sequence[str],
+    *,
+    failed_stage: str | None = None,
+) -> list[str]:
+    """Return only a contiguous, independently readable prefix of stage receipts."""
+
+    completed: list[str] = []
+    missing_seen = False
+    for role in required_stages:
+        receipt = output_root / "stage-results" / f"{role}.json"
+        stage_root = _attended_stage_root(output_root, role)
+        receipt_exists = receipt.exists()
+        root_exists = stage_root.exists()
+        # The panel candidate intentionally creates the panel staging root;
+        # before browser QA the final panel receipt is absent while that shared
+        # root is already a valid predecessor artifact.
+        if role == "panel" and not receipt_exists and "panel-candidate" in completed:
+            root_exists = False
+        if not receipt_exists:
+            if root_exists and (stage_root.is_symlink() or not stage_root.is_dir()):
+                raise MaterializationError(
+                    f"attended completed {role} stage root is invalid"
+                )
+            missing_seen = True
+            continue
+        if missing_seen or not root_exists:
+            raise MaterializationError(
+                f"attended completed {role} artifact set is incomplete"
+            )
+        if role == failed_stage:
+            if any(
+                (output_root / "stage-results" / f"{later}.json").exists()
+                for later in required_stages[required_stages.index(role) + 1 :]
+            ):
+                raise MaterializationError(
+                    "attended failed stage has a later completed receipt"
+                )
+            return completed
+        result = _load(receipt, f"attended {role} stage result")
+        if stage_root.is_symlink() or not stage_root.is_dir():
+            raise MaterializationError(
+                f"attended completed {role} stage root is invalid"
+            )
+        if role == "ledger":
+            _attended_completed_ledger(result, stage_root)
+        elif role == "baseline":
+            _attended_completed_baseline(result, stage_root)
+        elif role == "attribution":
+            _attended_completed_attribution(result, stage_root)
+        elif role == "panel-candidate":
+            _attended_completed_panel_candidate(result, stage_root)
+        else:
+            _attended_completed_stage_root(result, stage_root, role)
+        completed.append(role)
+    return completed
+
+
+def _attended_view(
+    output_root: Path,
+    required_stages: Sequence[str],
+    request_identity: Mapping[str, Any],
+    verified_completed_stages: Sequence[str] | None = None,
+) -> dict[str, Any]:
+    """Render selection facts without claiming later proof-bound material exists."""
+
+    return {
+        "planned_stages": list(required_stages),
+        "post_proof_pipeline_spec": None,
+        "request_identity": _canonical_clone(request_identity),
+        "verified_completed_stages": list(verified_completed_stages)
+        if verified_completed_stages is not None
+        else _attended_completed_stages(output_root, required_stages),
+    }
+
+
+def _attended_artifacts(value: object) -> dict[str, dict[str, object]]:
+    if not isinstance(value, list):
+        raise MaterializationError("attended source artifacts differ")
+    artifacts: dict[str, dict[str, object]] = {}
+    for row in value:
+        if not isinstance(row, dict) or "type" not in row:
+            raise MaterializationError("attended source artifact differs")
+        kind = row.get("type")
+        definition = {key: item for key, item in row.items() if key != "type"}
+        if kind == "FILE":
+            path = _validate_file_definition(definition, "attended source artifact")
+        elif kind == "DIRECTORY":
+            path = _validate_directory_definition(
+                definition, "attended source artifact"
+            )
+        else:
+            raise MaterializationError("attended source artifact type differs")
+        key = str(path)
+        if key in artifacts:
+            raise MaterializationError("attended source artifact is duplicated")
+        artifacts[key] = definition
+    return artifacts
+
+
+def _attended_disjoint(left: Path, right: Path, label: str) -> None:
+    try:
+        left.relative_to(right)
+    except ValueError:
+        try:
+            right.relative_to(left)
+        except ValueError:
+            return
+    raise MaterializationError(f"attended {label} roots overlap")
+
+
+def _attended_predecessor(definition: object, portfolio_root: Path) -> Path | None:
+    """Validate the selected predecessor, rather than allowing a shadow pointer."""
+
+    current = portfolio_root / "releases-refresh-2026" / "CURRENT_RELEASE.json"
+    if definition is None:
+        if current.exists():
+            raise MaterializationError(
+                "attended predecessor selection cannot hide a committed release"
+            )
+        return None
+    path = _validate_file_definition(definition, "attended predecessor spec")
+    try:
+        from quant_engine.core.pipeline import PipelineSpec
+        import portfolio_qc
+
+        spec = PipelineSpec.from_json_bytes(path.read_bytes())
+        manifest = portfolio_qc._read_committed_release(spec)  # noqa: SLF001
+        portfolio_qc._verify_committed_manifest(spec, manifest)  # noqa: SLF001
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "attended predecessor is not a committed release"
+        ) from exc
+    return path
+
+
+def _attended_request_identity(
+    *,
+    repo_root: Path,
+    python: Path,
+    workspace_root: Path,
+    output_root: Path,
+    retained_cache_root: Path,
+    requested_as_of: str,
+    evaluated_on: str | None,
+    source_run: Path,
+    financial_stage_inputs: Mapping[str, Path],
+    source_phase: Mapping[str, Any],
+    runtime: Mapping[str, Any],
+) -> dict[str, Any]:
+    # `evaluated_on` is a separate clock from `requested_as_of`: plan bundles consume it as
+    # `evaluation_date`, the dependence spec as its `as_of_date`, and the governed HWM result
+    # records it and derives freshness from it.  Without it here, a resume under a different
+    # evaluation date reused every checkpoint and returned the earlier date's calculations.
+    return {
+        "evaluated_on": evaluated_on,
+        "output_root": str(output_root),
+        "financial_stage_inputs": {
+            flag: _file_definition(path)
+            for flag, path in sorted(financial_stage_inputs.items())
+        },
+        "python": _file_definition(python),
+        "repo_root": str(repo_root),
+        "requested_as_of": requested_as_of,
+        "retained_cache_root": str(retained_cache_root),
+        "runtime": _canonical_clone(runtime),
+        "source_phase": _canonical_clone(source_phase),
+        "source_run": _file_definition(source_run),
+        "workspace_root": str(workspace_root),
+    }
+
+
+def _runtime_identity(python: Path, repo_root: Path) -> dict[str, object]:
+    """Probe the exact configured interpreter before source preparation writes."""
+
+    if python.is_symlink() or not python.is_file():
+        raise MaterializationError("attended configured Python is unavailable")
+    try:
+        probe = subprocess.run(
+            [
+                str(python),
+                "-I",
+                "-c",
+                "import json,sys; print(json.dumps({'executable':sys.executable,'version':list(sys.version_info[:3])},sort_keys=True))",
+            ],
+            cwd=repo_root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        value = json.loads(probe.stdout)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        raise MaterializationError("attended configured Python probe failed") from exc
+    if probe.returncode != 0 or not isinstance(value, dict):
+        raise MaterializationError("attended configured Python probe failed")
+    executable = value.get("executable")
+    version = value.get("version")
+    if (
+        not isinstance(executable, str)
+        or Path(executable).resolve() != python.resolve()
+        or not isinstance(version, list)
+        or len(version) != 3
+        or not all(isinstance(item, int) for item in version)
+    ):
+        raise MaterializationError("attended configured Python identity differs")
+    return {
+        "environment_sha256": runtime_environment_sha256(python),
+        "executable_path": str(python.resolve()),
+        "executable_sha256": _sha(python)[0],
+        "version": version,
+    }
+
+
+def _attended_stage_financial_inputs(
+    args: argparse.Namespace, release: Any
+) -> dict[str, Path]:
+    """Validate the release builder's governed input families before a child."""
+
+    supplied = {
+        flag: getattr(args, attribute)
+        for flag, attribute in {
+            **ATTENDED_HWM_INPUTS,
+            **ATTENDED_CAPITAL_INPUTS,
+        }.items()
+    }
+    try:
+        release._governed_hwm_arguments(  # noqa: SLF001
+            result=supplied["--hwm-governed-result"],
+            input_generation=supplied["--hwm-governed-input-generation"],
+            calendar_authority=supplied["--hwm-governed-calendar-authority"],
+            admission_receipt=supplied["--hwm-governed-admission-receipt"],
+        )
+        release._invested_capital_arguments(  # noqa: SLF001
+            result=supplied["--invested-capital-result"],
+            input_generation=supplied["--invested-capital-input-generation"],
+        )
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError("attended financial input family differs") from exc
+    return {
+        flag: _validate_file_definition(
+            _file_definition(Path(path).resolve()), f"attended {attribute}"
+        )
+        for flag, attribute in {
+            **ATTENDED_HWM_INPUTS,
+            **ATTENDED_CAPITAL_INPUTS,
+        }.items()
+        if (path := supplied[flag]) is not None
+    }
+
+
+def _attended_basic_preflight(args: argparse.Namespace) -> dict[str, Any]:
+    """Validate the runner environment before source admission can have effects."""
+
+    repo_root = Path(args.repo_root).resolve()
+    python = Path(args.python).resolve()
+    workspace_root = Path(args.workspace_root).resolve()
+    output_root = Path(args.output_root).resolve()
+    retained_cache_root = Path(args.retained_cache_root).resolve()
+    if repo_root != REPOSITORY_ROOT or not (repo_root / "tools").is_dir():
+        raise MaterializationError(
+            "attended repository root differs from this entrypoint"
+        )
+    runtime = _runtime_identity(python, repo_root)
+    if workspace_root.is_symlink() or not workspace_root.is_dir():
+        raise MaterializationError("attended workspace root is unavailable")
+    if retained_cache_root.is_symlink() or not retained_cache_root.is_dir():
+        raise MaterializationError("attended retained cache root is unavailable")
+    portfolio_root = workspace_root / "dataPortfolio"
+    if portfolio_root.is_symlink() or not portfolio_root.is_dir():
+        raise MaterializationError("attended workspace dataPortfolio is unavailable")
+    _attended_disjoint(output_root, portfolio_root, "output and portfolio")
+    _attended_disjoint(output_root, retained_cache_root, "output and retained cache")
+    try:
+        requested_as_of = date.fromisoformat(args.requested_as_of).isoformat()
+    except ValueError as exc:
+        raise MaterializationError("attended requested as-of date is invalid") from exc
+    return {
+        "output_root": output_root,
+        "portfolio_root": portfolio_root,
+        "python": python,
+        "repo_root": repo_root,
+        "requested_as_of": requested_as_of,
+        "retained_cache_root": retained_cache_root,
+        "runtime": runtime,
+        "workspace_root": workspace_root,
+    }
+
+
+def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
+    """Bind schema-1 initial selection before a release-builder child may run."""
+
+    basic = _attended_basic_preflight(args)
+    repo_root = cast(Path, basic["repo_root"])
+    python = cast(Path, basic["python"])
+    workspace_root = cast(Path, basic["workspace_root"])
+    output_root = cast(Path, basic["output_root"])
+    retained_cache_root = cast(Path, basic["retained_cache_root"])
+    runtime = cast(Mapping[str, Any], basic["runtime"])
+    portfolio_root = cast(Path, basic["portfolio_root"])
+    requested_as_of = cast(str, basic["requested_as_of"])
+    source_run = Path(args.source_run).resolve()
+    source = _load(source_run, "attended source run")
+    if (
+        set(source)
+        != {
+            "schema_version",
+            "as_of_date",
+            "release_commit",
+            "artifacts",
+            "attended",
+        }
+        or source.get("schema_version") != 1
+    ):
+        raise MaterializationError("attended source-run schema differs")
+    source_as_of = _text(source.get("as_of_date"), "attended source as_of_date")
+    try:
+        date.fromisoformat(source_as_of)
+    except ValueError as exc:
+        raise MaterializationError("attended source as-of date is invalid") from exc
+    if source_as_of != requested_as_of:
+        raise MaterializationError(
+            "attended requested as-of differs from source selection"
+        )
+    release_commit = _text(source.get("release_commit"), "attended release_commit")
+    if len(release_commit) != 40 or release_commit != _git(
+        repo_root, "rev-parse", "HEAD"
+    ):
+        raise MaterializationError("attended release commit differs")
+    _attended_artifacts(source.get("artifacts"))
+    attended = source.get("attended")
+    expected_attended = {
+        "schema_version",
+        "release_recipe",
+        "history_generation",
+        "allocation_generation",
+        "financial_input_contract",
+        "required_stages",
+        "predecessor_spec",
+    }
+    allowed_attended = (
+        expected_attended,
+        expected_attended | {"data_clock"},
+        expected_attended | {"data_clock", "source_clock"},
+    )
+    if not isinstance(attended, dict) or set(attended) not in allowed_attended:
+        raise MaterializationError("attended extension schema differs")
+    if attended.get("schema_version") != 1:
+        raise MaterializationError("attended extension version differs")
+    data_clock = attended.get("data_clock")
+    if data_clock is not None and (
+        not isinstance(data_clock, dict)
+        or set(data_clock)
+        != {
+            "latest_common_eod",
+            "selected_financial_cutoff",
+            "limiting_inputs",
+            "source_data_as_of",
+        }
+        or data_clock.get("selected_financial_cutoff") != requested_as_of
+        or not isinstance(data_clock.get("limiting_inputs"), list)
+        or not data_clock["limiting_inputs"]
+        or not isinstance(data_clock.get("source_data_as_of"), list)
+    ):
+        raise MaterializationError("attended data clock differs")
+    if data_clock is not None:
+        try:
+            date.fromisoformat(
+                _text(data_clock["latest_common_eod"], "attended latest common EOD")
+            )
+        except ValueError as exc:
+            raise MaterializationError("attended data clock differs") from exc
+    source_clock = attended.get("source_clock")
+    if source_clock is not None:
+        clock_path = _validate_file_definition(source_clock, "attended source clock")
+        try:
+            import portfolio_report as report
+
+            if report._validated_source_clock(clock_path) != data_clock:  # noqa: SLF001
+                raise ValueError("clock differs")
+        except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise MaterializationError("attended source clock differs") from exc
+    if getattr(args, "preparation_spec", None) is not None and data_clock is None:
+        raise MaterializationError("attended preparation data clock is absent")
+    required_stages = attended.get("required_stages")
+    if required_stages != list(ATTENDED_STAGES):
+        raise MaterializationError("attended required stage graph differs")
+    recipe_path = _validate_file_definition(
+        attended["release_recipe"], "attended release recipe"
+    )
+    history_root = _validate_directory_definition(
+        attended["history_generation"], "attended history generation"
+    )
+    allocation_root = _validate_directory_definition(
+        attended["allocation_generation"], "attended allocation generation"
+    )
+    financial_input_contract = _validate_file_definition(
+        attended["financial_input_contract"], "attended financial input contract"
+    )
+    import portfolio_release_builder as release
+
+    recipe = release._recipe(recipe_path)  # noqa: SLF001
+    if (
+        recipe["as_of_date"] != requested_as_of
+        or recipe["release_commit"] != release_commit
+    ):
+        raise MaterializationError("attended release recipe identity differs")
+    selected_definition = recipe.get("dependence_selected_inputs")
+    if not isinstance(selected_definition, dict):
+        raise MaterializationError("attended selected dependence inputs are missing")
+    selected_path = _validate_file_definition(
+        selected_definition, "attended selected dependence inputs"
+    )
+    selected = _load(selected_path, "attended selected dependence inputs")
+    try:
+        selected_history = _absolute(
+            selected["history_generation_root"], "attended selected history root"
+        )
+        selected_allocation = _absolute(
+            selected["allocation_generation_root"], "attended selected allocation root"
+        )
+        selected_contract = _absolute(
+            selected["financial_input_contract_path"],
+            "attended selected financial input contract",
+        )
+    except KeyError as exc:
+        raise MaterializationError(
+            "attended selected dependence inputs differ"
+        ) from exc
+    if (
+        selected_history != history_root
+        or selected_allocation != allocation_root
+        or selected_contract != financial_input_contract
+    ):
+        raise MaterializationError("attended selected dependence authority differs")
+    _epoch_manifest_generation_definition(recipe)
+    provider_definition = recipe.get("provider_ledger_generation")
+    if not isinstance(provider_definition, dict):
+        raise MaterializationError("attended provider generation is absent")
+    source_phase = validate_source_phase(
+        requested_as_of=requested_as_of,
+        provider_ledger_generation_root=_absolute(
+            provider_definition.get("path"), "attended provider generation"
+        ),
+        financial_input_contract_path=financial_input_contract,
+    )
+    try:
+        # The provider admission replay is intentionally only one source gate.
+        # Run the normal selected-history reader before a child can reach any
+        # calculation, rather than deferring it to attribution or analytics.
+        release._history_contract_path(recipe)  # noqa: SLF001
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "attended selected history input QC differs"
+        ) from exc
+    predecessor = _attended_predecessor(attended["predecessor_spec"], portfolio_root)
+    financial_inputs = release._financial_epoch_inputs(recipe)  # noqa: SLF001
+    if financial_inputs is not None:
+        try:
+            release._validate_stage_financial_arguments(  # noqa: SLF001
+                recipe,
+                manifest_ledger=financial_inputs["ledger"],
+                manifest_ledger_identity=financial_inputs["ledger_identity"],
+                manifest_classified_flows=financial_inputs["classified_flows"],
+                manifest_flow_coverage=financial_inputs["flow_coverage"],
+                manifest_admission_policy=financial_inputs["admission_policy"],
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise MaterializationError(
+                "attended selected public input QC differs"
+            ) from exc
+    financial_stage_inputs = _attended_stage_financial_inputs(args, release)
+    qa_dir = (
+        _validate_directory_definition(
+            _directory_definition(Path(args.qa_dir).resolve()), "attended panel QA"
+        )
+        if args.qa_dir is not None
+        else None
+    )
+    request_identity = _attended_request_identity(
+        repo_root=repo_root,
+        python=python,
+        workspace_root=workspace_root,
+        output_root=output_root,
+        retained_cache_root=retained_cache_root,
+        requested_as_of=requested_as_of,
+        evaluated_on=args.evaluated_on,
+        source_run=source_run,
+        financial_stage_inputs=financial_stage_inputs,
+        source_phase=source_phase,
+        runtime=runtime,
+    )
+    return {
+        "financial_inputs": financial_inputs or {},
+        "financial_stage_inputs": financial_stage_inputs,
+        "portfolio_root": portfolio_root,
+        "predecessor_spec": predecessor,
+        "python": python,
+        "qa_dir": qa_dir,
+        "recipe": recipe_path,
+        "repo_root": repo_root,
+        "request_identity": request_identity,
+        "required_stages": ATTENDED_STAGES,
+        "retained_cache_root": retained_cache_root,
+        "source_phase": source_phase,
+        "source_run": source_run,
+        "workspace_root": workspace_root,
+    }
+
+
+def _attended_run_receipt(output_root: Path) -> Path:
+    return output_root / "attended-run.json"
+
+
+def _attended_qa_receipt(output_root: Path) -> Path:
+    return output_root / "attended-qa.json"
+
+
+def _attended_source_phase_receipt(output_root: Path) -> Path:
+    return output_root / "source-phase-qc.json"
+
+
+def _attended_execution_observations_receipt(output_root: Path) -> Path:
+    return output_root / "attended-execution-observations.json"
+
+
+def _execution_timestamp() -> str:
+    """Record the actual UTC instant without contributing to financial identity."""
+
+    return datetime.now(UTC).isoformat()
+
+
+def _attended_execution_observations(
+    output_root: Path,
+) -> dict[str, list[dict[str, Any]]]:
+    """Read prior operational attempts, rejecting malformed timing evidence."""
+
+    receipt = _attended_execution_observations_receipt(output_root)
+    if not receipt.exists():
+        return {"execution_attempts": [], "preparation_attempts": []}
+    value = _load(receipt, "attended execution observations")
+    schema = value.get("schema_version")
+    values: dict[str, object]
+    if schema == 1 and set(value) == {"attempts", "schema_version"}:
+        values = {
+            "execution_attempts": value.get("attempts"),
+            "preparation_attempts": [],
+        }
+    elif schema == 2 and set(value) == {
+        "execution_attempts",
+        "preparation_attempts",
+        "schema_version",
+    }:
+        values = {
+            "execution_attempts": value.get("execution_attempts"),
+            "preparation_attempts": value.get("preparation_attempts"),
+        }
+    else:
+        raise MaterializationError("attended execution observations differ")
+    validated: dict[str, list[dict[str, Any]]] = {}
+    for phase, attempts in values.items():
+        if not isinstance(attempts, list):
+            raise MaterializationError("attended execution observations differ")
+        phase_attempts: list[dict[str, Any]] = []
+        for expected_attempt, attempt in enumerate(attempts, start=1):
+            if (
+                not isinstance(attempt, dict)
+                or attempt.get("attempt") != expected_attempt
+            ):
+                raise MaterializationError("attended execution observations differ")
+            status = attempt.get("status")
+            required = (
+                {"attempt", "started_at", "status"}
+                if status in {"RUNNING", "INCOMPLETE"}
+                else {"attempt", "ended_at", "started_at", "status"}
+            )
+            if (
+                set(attempt) != required
+                or status not in {"RUNNING", "INCOMPLETE", "COMPLETED", "FAILED"}
+                or not isinstance(attempt.get("started_at"), str)
+            ):
+                raise MaterializationError("attended execution observations differ")
+            try:
+                started = datetime.fromisoformat(cast(str, attempt["started_at"]))
+                ended = (
+                    datetime.fromisoformat(cast(str, attempt["ended_at"]))
+                    if "ended_at" in attempt
+                    else None
+                )
+            except ValueError as exc:
+                raise MaterializationError(
+                    "attended execution observations differ"
+                ) from exc
+            if started.tzinfo is None or (ended is not None and ended.tzinfo is None):
+                raise MaterializationError("attended execution observations differ")
+            phase_attempts.append(dict(attempt))
+        validated[phase] = phase_attempts
+    return validated
+
+
+def _attended_replace_execution_observations(
+    output_root: Path, attempts: Mapping[str, Sequence[Mapping[str, Any]]]
+) -> None:
+    """Atomically preserve every operational attempt outside financial cache state."""
+
+    receipt = _attended_execution_observations_receipt(output_root)
+    if set(attempts) != {"execution_attempts", "preparation_attempts"}:
+        raise MaterializationError("attended execution observations differ")
+    value = {
+        "execution_attempts": [
+            dict(attempt) for attempt in attempts["execution_attempts"]
+        ],
+        "preparation_attempts": [
+            dict(attempt) for attempt in attempts["preparation_attempts"]
+        ],
+        "schema_version": 2,
+    }
+    if not receipt.exists():
+        _write_exact(receipt, canonical_json_bytes(value))
+        return
+    if receipt.is_symlink() or not receipt.is_file():
+        raise MaterializationError(
+            "attended execution observations are not a regular file"
+        )
+    temporary = receipt.with_name(f".{receipt.name}.update")
+    _write_exact(temporary, canonical_json_bytes(value))
+    try:
+        os.replace(temporary, receipt)
+    except OSError as exc:
+        raise MaterializationError(
+            "attended execution observations cannot be updated"
+        ) from exc
+
+
+def _attended_start_attempt(output_root: Path, phase: str) -> int:
+    """Begin one operational phase attempt without altering financial identity."""
+
+    if phase not in {"execution", "preparation"}:
+        raise MaterializationError("attended execution phase differs")
+    attempts = _attended_execution_observations(output_root)
+    key = f"{phase}_attempts"
+    phase_attempts = attempts[key]
+    if phase_attempts and phase_attempts[-1]["status"] == "RUNNING":
+        phase_attempts[-1]["status"] = "INCOMPLETE"
+    attempt = len(phase_attempts) + 1
+    phase_attempts.append(
+        {"attempt": attempt, "started_at": _execution_timestamp(), "status": "RUNNING"}
+    )
+    _attended_replace_execution_observations(output_root, attempts)
+    return attempt
+
+
+def _attended_finish_attempt(
+    output_root: Path, phase: str, attempt: int, status: str
+) -> None:
+    """Terminal outcomes receive a real ending instant; interruption remains open."""
+
+    if status not in {"COMPLETED", "FAILED"}:
+        raise MaterializationError("attended execution status differs")
+    if phase not in {"execution", "preparation"}:
+        raise MaterializationError("attended execution phase differs")
+    attempts = _attended_execution_observations(output_root)
+    phase_attempts = attempts[f"{phase}_attempts"]
+    if (
+        not phase_attempts
+        or phase_attempts[-1].get("attempt") != attempt
+        or phase_attempts[-1].get("status") != "RUNNING"
+    ):
+        raise MaterializationError("attended execution attempt differs")
+    phase_attempts[-1]["ended_at"] = _execution_timestamp()
+    phase_attempts[-1]["status"] = status
+    _attended_replace_execution_observations(output_root, attempts)
+
+
+def _attended_start_execution_attempt(output_root: Path) -> int:
+    return _attended_start_attempt(output_root, "execution")
+
+
+def _attended_finish_execution_attempt(
+    output_root: Path, attempt: int, status: str
+) -> None:
+    _attended_finish_attempt(output_root, "execution", attempt, status)
+
+
+def _attended_start_preparation_attempt(output_root: Path) -> int:
+    return _attended_start_attempt(output_root, "preparation")
+
+
+def _attended_finish_preparation_attempt(
+    output_root: Path, attempt: int, status: str
+) -> None:
+    _attended_finish_attempt(output_root, "preparation", attempt, status)
+
+
+def _attended_bind_qa(
+    preflight: Mapping[str, Any], output_root: Path, completed: Sequence[str]
+) -> None:
+    """Bind QA when it is available, without rewriting an incomplete run's inputs."""
+
+    qa_dir = cast(Path | None, preflight["qa_dir"])
+    receipt = _attended_qa_receipt(output_root)
+    expected = _directory_definition(qa_dir) if qa_dir is not None else None
+    if receipt.exists():
+        observed = _load(receipt, "attended QA receipt")
+        if expected is None or canonical_json_bytes(observed) != canonical_json_bytes(
+            expected
+        ):
+            raise MaterializationError("attended QA identity differs")
+        _validate_directory_definition(observed, "attended QA receipt")
+        return
+    if expected is None:
+        return
+    if "panel" in completed:
+        raise MaterializationError("attended QA identity cannot follow completed panel")
+    _write_exact(receipt, canonical_json_bytes(expected))
+
+
+def _attended_start_or_resume(
+    preflight: Mapping[str, Any], output_root: Path, *, resume: bool
+) -> str | None:
+    request_identity = preflight["request_identity"]
+    if not isinstance(request_identity, dict):
+        raise MaterializationError("attended request identity differs")
+    receipt = _attended_run_receipt(output_root)
+    if resume:
+        # Preparation owns the output root and may complete before any
+        # downstream receipt exists.  Reuse the established create-only
+        # handoff validation for that one first-execution transition, but only
+        # before the execution observation ledger shows a downstream attempt.
+        # A missing receipt after execution began remains fail-closed.
+        if output_root.exists() and not receipt.exists() and not receipt.is_symlink():
+            observations = _attended_execution_observations(output_root)
+            if observations["execution_attempts"]:
+                raise MaterializationError(
+                    "attended run receipt is missing after execution started"
+                )
+            return _attended_start_or_resume(preflight, output_root, resume=False)
+        value = _load(receipt, "attended run receipt")
+        failed = value.get("failed_stage")
+        if (
+            set(value)
+            not in (
+                {"request_identity", "schema_version"},
+                {"failed_stage", "request_identity", "schema_version"},
+            )
+            or value.get("schema_version") not in {1, 2}
+            or canonical_json_bytes(value["request_identity"])
+            != canonical_json_bytes(request_identity)
+        ):
+            raise MaterializationError("attended resume identity differs")
+        failed_role: str | None = None
+        if failed is not None:
+            if (
+                value.get("schema_version") != 2
+                or not isinstance(failed, dict)
+                or set(failed) != {"returncode", "role"}
+                or failed.get("role") not in preflight["required_stages"]
+                or isinstance(failed.get("returncode"), bool)
+                or not isinstance(failed.get("returncode"), int)
+                or failed["returncode"] == 0
+            ):
+                raise MaterializationError("attended failed-stage checkpoint differs")
+            failed_role = cast(str, failed["role"])
+        completed = _attended_completed_stages(
+            output_root, preflight["required_stages"], failed_stage=failed_role
+        )
+        source_phase = preflight.get("source_phase")
+        if not isinstance(source_phase, dict) or (
+            _load(_attended_source_phase_receipt(output_root), "attended source phase")
+            != source_phase
+        ):
+            raise MaterializationError("attended source phase identity differs")
+        _attended_bind_qa(preflight, output_root, completed)
+        return failed_role
+    if output_root.exists():
+        handoff = output_root / "preparation-handoff.json"
+        if handoff.is_symlink() or not handoff.is_file():
+            raise MaterializationError(
+                "attended output root already exists; use --resume"
+            )
+        expected_stage = {
+            flag: _file_definition(path)
+            for flag, path in sorted(
+                cast(
+                    Mapping[str, Path], preflight.get("financial_stage_inputs", {})
+                ).items()
+            )
+        }
+        value = _load(handoff, "attended preparation handoff")
+        source_run = cast(Path, preflight["source_run"])
+        expected = {
+            "schema_version": 1,
+            "source_run": _file_definition(source_run),
+            "financial_stage_inputs": expected_stage,
+            "source_phase": preflight["source_phase"],
+            "data_clock": _load(source_run, "attended prepared source run")["attended"][
+                "data_clock"
+            ],
+        }
+        if value != expected:
+            raise MaterializationError("attended preparation handoff differs")
+    else:
+        output_root.mkdir(parents=True, exist_ok=False)
+    _write_exact(
+        receipt,
+        canonical_json_bytes(
+            {"schema_version": 1, "request_identity": request_identity}
+        ),
+    )
+    source_phase = preflight.get("source_phase")
+    if not isinstance(source_phase, dict) or source_phase.get("status") != "PASS":
+        raise MaterializationError("attended source phase is not PASS")
+    _write_exact(
+        _attended_source_phase_receipt(output_root), canonical_json_bytes(source_phase)
+    )
+    _attended_bind_qa(preflight, output_root, ())
+    return None
+
+
+def _attended_record_failed_stage(
+    output_root: Path,
+    request_identity: Mapping[str, Any],
+    role: str,
+    returncode: int,
+) -> None:
+    """Preserve a failed child's partial bytes as pending retry evidence."""
+
+    _attended_replace_checkpoint(
+        output_root,
+        {
+            "failed_stage": {"returncode": returncode, "role": role},
+            "request_identity": request_identity,
+            "schema_version": 2,
+        },
+    )
+
+
+def _attended_clear_failed_stage(
+    output_root: Path, request_identity: Mapping[str, Any]
+) -> None:
+    """Return a checkpoint to its completed-only shape after native verification."""
+
+    _attended_replace_checkpoint(
+        output_root,
+        {"request_identity": request_identity, "schema_version": 1},
+    )
+
+
+def _attended_replace_checkpoint(output_root: Path, value: Mapping[str, Any]) -> None:
+    """Atomically update the one mutable attended-run checkpoint."""
+
+    receipt = _attended_run_receipt(output_root)
+    if receipt.is_symlink() or not receipt.is_file():
+        raise MaterializationError("attended run receipt is not a regular file")
+    temporary = receipt.with_name(f".{receipt.name}.update")
+    _write_exact(temporary, canonical_json_bytes(dict(value)))
+    try:
+        os.replace(temporary, receipt)
+    except OSError as exc:
+        raise MaterializationError("attended run checkpoint cannot be updated") from exc
+
+
+def _attended_shared_stage_roles(output_root: Path, role: str) -> tuple[str, ...]:
+    """Return the other attended roles whose bytes live in this role's stage root.
+
+    `panel-candidate` and `panel` share `stages/panel`, so moving that root aside for one of
+    them also removes the other's outputs while its own receipt survives.  Derived from the
+    mapping rather than naming the pair, so a future shared root cannot be missed.
+    """
+
+    stage_root = _attended_stage_root(output_root, role)
+    return tuple(
+        other
+        for other in ATTENDED_STAGES
+        if other != role and _attended_stage_root(output_root, other) == stage_root
+    )
+
+
+def _attended_preserve_failed_stage(output_root: Path, role: str) -> None:
+    """Move failed-stage bytes aside before a create-only producer retries."""
+
+    stage_root = _attended_stage_root(output_root, role)
+    receipt = output_root / "stage-results" / f"{role}.json"
+    shared_receipts = [
+        output_root / "stage-results" / f"{other}.json"
+        for other in _attended_shared_stage_roles(output_root, role)
+    ]
+    if (
+        not stage_root.exists()
+        and not receipt.exists()
+        and not any(path.exists() for path in shared_receipts)
+    ):
+        return
+    if stage_root.is_symlink() or (stage_root.exists() and not stage_root.is_dir()):
+        raise MaterializationError("attended failed stage root is not a directory")
+    if receipt.is_symlink() or (receipt.exists() and not receipt.is_file()):
+        raise MaterializationError(
+            "attended failed stage receipt is not a regular file"
+        )
+
+    evidence_root = output_root / "failed-stage-evidence" / role
+    evidence_root.mkdir(parents=True, exist_ok=True)
+    attempt = 1
+    while (evidence_root / f"attempt-{attempt}").exists():
+        attempt += 1
+    destination = evidence_root / f"attempt-{attempt}"
+    destination.mkdir()
+    if stage_root.exists():
+        os.replace(stage_root, destination / "stage-root")
+        stage_root.mkdir(parents=True)
+    if receipt.exists():
+        os.replace(receipt, destination / "stage-result.json")
+    # A receipt whose outputs just moved aside no longer describes anything on disk, so it
+    # must not be able to satisfy the completed-stage validation on the retry.
+    for path in shared_receipts:
+        if path.is_symlink():
+            raise MaterializationError(
+                "attended shared stage receipt is not a regular file"
+            )
+        if path.exists():
+            os.replace(path, destination / path.name)
+
+
+def _attended_stage_command(
+    preflight: Mapping[str, Any], output_root: Path, role: str
+) -> list[str]:
+    repo_root = cast(Path, preflight["repo_root"])
+    command = [
+        str(cast(Path, preflight["python"])),
+        str(repo_root / "tools" / "portfolio_release_builder.py"),
+        "stage",
+        "--recipe",
+        str(cast(Path, preflight["recipe"])),
+        "--output-root",
+        str(output_root),
+        "--role",
+        role,
+        "--portfolio-root",
+        str(cast(Path, preflight["portfolio_root"])),
+        "--retained-cache-root",
+        str(cast(Path, preflight["retained_cache_root"])),
+    ]
+    financial_inputs = cast(Mapping[str, Path], preflight["financial_inputs"])
+    if set(financial_inputs) not in (set(), set(EPOCH_MANIFEST_INPUTS)):
+        raise MaterializationError("attended financial input family differs")
+    for key, flag in EPOCH_MANIFEST_INPUTS.items():
+        if key in financial_inputs:
+            command.extend((flag, str(financial_inputs[key])))
+    financial_stage_inputs = cast(
+        Mapping[str, Path], preflight.get("financial_stage_inputs", {})
+    )
+    hwm = [financial_stage_inputs.get(flag) for flag in ATTENDED_HWM_INPUTS]
+    capital = [financial_stage_inputs.get(flag) for flag in ATTENDED_CAPITAL_INPUTS]
+    if any(path is not None for path in hwm) and any(path is None for path in hwm):
+        raise MaterializationError("attended financial input family differs")
+    if any(path is not None for path in capital) and any(
+        path is None for path in capital
+    ):
+        raise MaterializationError("attended financial input family differs")
+    for flag in (*ATTENDED_HWM_INPUTS, *ATTENDED_CAPITAL_INPUTS):
+        if (path := financial_stage_inputs.get(flag)) is not None:
+            command.extend((flag, str(path)))
+    if role == "panel":
+        qa_dir = cast(Path | None, preflight["qa_dir"])
+        if qa_dir is None:
+            raise MaterializationError(
+                "attended panel requires produced browser QA evidence"
+            )
+        command.extend(("--qa-dir", str(qa_dir)))
+    return command
+
+
+def _attended_execute(
+    preflight: Mapping[str, Any], output_root: Path, *, resume: bool
+) -> tuple[int, dict[str, Any]]:
+    failed_stage = _attended_start_or_resume(preflight, output_root, resume=resume)
+    attempt = _attended_start_execution_attempt(output_root)
+    try:
+        if failed_stage is not None:
+            _attended_preserve_failed_stage(output_root, failed_stage)
+        completed = _attended_completed_stages(
+            output_root, preflight["required_stages"], failed_stage=failed_stage
+        )
+        # An interruption that killed a child before it returned leaves partial bytes with no
+        # receipt and no failed_stage, and the create-only producer refuses its own partial
+        # directory on the retry.  Three conditions keep this to exactly that case:
+        #   - a later attempt, not `resume`, because a plain `--execute` can re-enter a
+        #     prepared root the same way;
+        #   - nothing sharing the root has completed -- `panel` legitimately runs into the
+        #     root `panel-candidate` filled, which is the supported build -> QA -> resume path;
+        #   - the root still HOLDS something.  The preserve above recreates an empty root, so
+        #     without this an ordinary failed-stage resume would preserve twice and leave an
+        #     empty second attempt directory, breaking the one-failure-one-attempt mapping the
+        #     evidence directory exists to provide.
+        preserved_partial = False
+        if attempt > 1:
+            for role in preflight["required_stages"]:
+                if role in completed:
+                    continue
+                if any(
+                    other in completed
+                    for other in _attended_shared_stage_roles(output_root, role)
+                ):
+                    continue
+                stage_root = _attended_stage_root(output_root, role)
+                if stage_root.is_dir() and any(stage_root.iterdir()):
+                    _attended_preserve_failed_stage(output_root, role)
+                    preserved_partial = True
+        if preserved_partial:
+            completed = _attended_completed_stages(
+                output_root, preflight["required_stages"], failed_stage=failed_stage
+            )
+        for role in preflight["required_stages"]:
+            if role in completed:
+                continue
+            command = _attended_stage_command(preflight, output_root, role)
+            result = subprocess.run(
+                command,
+                cwd=cast(Path, preflight["repo_root"]),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if result.stdout:
+                print(result.stdout, end="")
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
+            if result.returncode != 0:
+                _attended_record_failed_stage(
+                    output_root, preflight["request_identity"], role, result.returncode
+                )
+                _attended_finish_execution_attempt(output_root, attempt, "FAILED")
+                return result.returncode, _attended_view(
+                    output_root,
+                    preflight["required_stages"],
+                    preflight["request_identity"],
+                    completed,
+                )
+            completed = _attended_completed_stages(
+                output_root,
+                preflight["required_stages"],
+            )
+            if role not in completed:
+                raise MaterializationError(
+                    f"attended {role} child returned success without completed artifacts"
+                )
+            if failed_stage == role:
+                _attended_clear_failed_stage(output_root, preflight["request_identity"])
+                failed_stage = None
+        _attended_finish_execution_attempt(output_root, attempt, "COMPLETED")
+        return 0, _attended_view(
+            output_root, preflight["required_stages"], preflight["request_identity"]
+        )
+    except Exception:
+        _attended_finish_execution_attempt(output_root, attempt, "FAILED")
+        raise
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -4749,6 +6287,29 @@ def _parser() -> argparse.ArgumentParser:
     authority_cmd.add_argument("--recipe", type=Path, required=True)
     authority_cmd.add_argument("--source-run", type=Path, required=True)
     authority_cmd.add_argument("--output-dir", type=Path, required=True)
+    attended_cmd = commands.add_parser(
+        "attended",
+        help="plan or run one source-bound attended release without publication",
+    )
+    attended_cmd.add_argument("--repo-root", type=Path, required=True)
+    attended_cmd.add_argument("--python", type=Path, required=True)
+    attended_cmd.add_argument("--workspace-root", type=Path, required=True)
+    attended_cmd.add_argument("--output-root", type=Path, required=True)
+    attended_cmd.add_argument("--retained-cache-root", type=Path, required=True)
+    attended_cmd.add_argument("--requested-as-of", required=True)
+    attended_cmd.add_argument("--evaluated-on")
+    attended_inputs = attended_cmd.add_mutually_exclusive_group(required=True)
+    attended_inputs.add_argument("--source-run", type=Path)
+    attended_inputs.add_argument("--preparation-spec", type=Path)
+    attended_cmd.add_argument("--hwm-governed-result", type=Path)
+    attended_cmd.add_argument("--hwm-governed-input-generation", type=Path)
+    attended_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
+    attended_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
+    attended_cmd.add_argument("--invested-capital-result", type=Path)
+    attended_cmd.add_argument("--invested-capital-input-generation", type=Path)
+    attended_cmd.add_argument("--qa-dir", type=Path)
+    attended_cmd.add_argument("--resume", action="store_true")
+    attended_cmd.add_argument("--execute", action="store_true")
     semantic_cmd = commands.add_parser("semantic")
     semantic_cmd.add_argument("--recipe", type=Path, required=True)
     semantic_cmd.add_argument("--output", type=Path, required=True)
@@ -4794,7 +6355,6 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     spec_cmd.add_argument("--retained-cache-root", type=Path)
-    spec_cmd.add_argument("--workbook-runtime", type=Path)
     production_cmd = commands.add_parser("production-spec")
     production_cmd.add_argument("--recipe", type=Path, required=True)
     production_cmd.add_argument("--prepared-root", type=Path, required=True)
@@ -4835,7 +6395,65 @@ def _parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
-        if args.command == "acquire":
+        exit_code = 0
+        if args.command == "attended":
+            if args.resume and not args.execute:
+                raise MaterializationError("attended --resume requires --execute")
+            if args.preparation_spec is not None:
+                if args.evaluated_on is None:
+                    raise MaterializationError(
+                        "attended --preparation-spec requires --evaluated-on"
+                    )
+                # Source planning/preparation can create private handoff bytes,
+                # so retain the attended command's normal environment admission
+                # ahead of either branch.
+                _attended_basic_preflight(args)
+                import portfolio_attended_preparation as preparation
+
+                if not args.execute:
+                    result = preparation.plan_attended_inputs(
+                        preparation_spec_path=args.preparation_spec,
+                        requested_as_of=args.requested_as_of,
+                        evaluated_on=args.evaluated_on,
+                    )
+                    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+                    return 0
+                prepared = preparation.prepare_attended_inputs(
+                    preparation_spec_path=args.preparation_spec,
+                    output_root=Path(args.output_root).resolve(),
+                    requested_as_of=args.requested_as_of,
+                    evaluated_on=args.evaluated_on,
+                    release_commit=_git(REPOSITORY_ROOT, "rev-parse", "HEAD"),
+                    resume=args.resume,
+                )
+                source_run = prepared.get("source_run")
+                financial = prepared.get("financial_stage_inputs")
+                if not isinstance(source_run, Path) or not isinstance(
+                    financial, Mapping
+                ):
+                    raise MaterializationError("attended preparation handoff differs")
+                args.source_run = source_run
+                for flag, path in financial.items():
+                    if flag not in {
+                        *ATTENDED_HWM_INPUTS,
+                        *ATTENDED_CAPITAL_INPUTS,
+                    } or not isinstance(path, Path):
+                        raise MaterializationError(
+                            "attended preparation financial bindings differ"
+                        )
+                    setattr(args, flag[2:].replace("-", "_"), path)
+            preflight = _attended_preflight(args)
+            if args.execute:
+                exit_code, result = _attended_execute(
+                    preflight, Path(args.output_root).resolve(), resume=args.resume
+                )
+            else:
+                result = _attended_view(
+                    Path(args.output_root).resolve(),
+                    preflight["required_stages"],
+                    preflight["request_identity"],
+                )
+        elif args.command == "acquire":
             result = acquire(args.recipe, args.output_dir)
         elif args.command == "authority":
             result = authority(args.recipe, args.source_run, args.output_dir)
@@ -4868,7 +6486,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.invested_capital_result,
                 args.invested_capital_input_generation,
                 args.retained_cache_root,
-                workbook_runtime_path=args.workbook_runtime,
             )
         else:
             result = build_production_spec(
@@ -4890,7 +6507,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"portfolio-pipeline: FAIL: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(result, sort_keys=True, separators=(",", ":")))
-    return 0
+    return exit_code
 
 
 if __name__ == "__main__":

@@ -223,6 +223,12 @@ def _governed_case(tmp_path):
     )[0]
     input_path = tmp_path / "capital-input-generation.json"
     input_path.write_bytes(capital._canonical(inputs))
+    # The generation is portable; the locators live beside it, as the real
+    # producer writes them.
+    capital.write_local_sidecar(
+        input_path,
+        {"provider_ledger": ledger_path, "provider_ledger_spec": spec_path},
+    )
     return input_path, contract_path
 
 
@@ -310,7 +316,7 @@ def test_governed_capital_cannot_omit_an_in_scope_selected_deposit(tmp_path):
     epoch = next(
         row for row in inputs["required_epochs"] if row["effective_end"] is None
     )
-    ledger_path = Path(inputs["source_bindings"]["provider_ledger"]["path"])
+    ledger_path = Path(capital.read_local_sidecar(input_path)["provider_ledger"])
     ledger = json.loads(ledger_path.read_bytes())
     fact = {
         "record_id": "additional-owner-deposit",

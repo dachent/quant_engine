@@ -829,8 +829,10 @@ def _validate_provider_ledger_date_authority(
     for generation in generations:
         if not isinstance(generation, dict):
             _fail()
-        generation_date = _date_value(generation.get("generation_as_of_date"))
-        _reject_provider_fact_after_ledger_date(generation_date, ledger_as_of_date)
+        # Generation provenance is retained source metadata, not a financial
+        # observation. Keep its canonical date validation and exact identity
+        # binding, but do not compare it with the financial ledger cutoff.
+        _date_value(generation.get("generation_as_of_date"))
     return ledger_as_of_date
 
 
@@ -2271,7 +2273,7 @@ def _bound_catalog(
     ):
         _fail()
     manifest = _manifest(manifest_snapshot)
-    if manifest.as_of_date != catalog_date or manifest.verification.value != "VERIFIED":
+    if manifest.verification.value != "VERIFIED":
         _fail()
     expected_artifact_id = (
         "normalized/provider-ledger.json"
@@ -2306,7 +2308,7 @@ def _bound_catalog(
         artifact_id=manifest_artifact_id,
         sha256=manifest_snapshot.sha256,
         size_bytes=manifest_snapshot.size_bytes,
-        as_of_date=catalog_date,
+        as_of_date=manifest.as_of_date,
         schema_name="generation-manifest",
         schema_version="1",
     )
@@ -4094,13 +4096,9 @@ def _validate_provider_receipt_date_authority(
     raw_artifacts: list[Mapping[str, object]],
 ) -> None:
     ledger_as_of_date = _selected_date(selected.provider_ledger)
-    _reject_provider_fact_after_ledger_date(
-        _date_value(manifest.get("as_of_date")), ledger_as_of_date
-    )
+    _date_value(manifest.get("as_of_date"))
     for artifact in raw_artifacts:
-        _reject_provider_fact_after_ledger_date(
-            _date_value(artifact.get("as_of_date")), ledger_as_of_date
-        )
+        _date_value(artifact.get("as_of_date"))
     for field_name in (
         "requested_start",
         "requested_end",
@@ -4256,6 +4254,13 @@ def _verify_mixed_authority_and_coverage_many(
                 staged != expected_staged
                 or cutoff is None
                 or receipt.get("calculation_cutoff_date") != cutoff.isoformat()
+            ):
+                _fail()
+            if (
+                requested_start > requested_end
+                or requested_end > coverage_date
+                or cutoff > coverage_date
+                or _date_value(receipt.get("coverage_as_of_date")) != coverage_date
             ):
                 _fail()
 
@@ -5261,8 +5266,6 @@ def _verify_mixed_admission(
     if (
         policy.get("policy_id") != "MAPPED_EPOCH_ADMISSION_V2"
         or policy.get("policy_version") != "2"
-        or _date_value(policy.get("as_of_date"))
-        != _selected_date(selected.provider_ledger)
     ):
         _fail()
     admissions = policy.get("admissions")

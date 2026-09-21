@@ -290,11 +290,20 @@ def build_capital_vertical(
             }
         )
     bindings = {
-        "provider_ledger": capital._file_binding(ledger_path)[0],
+        "provider_ledger": {
+            **capital._file_binding(ledger_path)[0],
+            # The generation directory, not the normalized/ subdirectory
+            # the ledger happens to sit in on this route.
+            "generation_id": paths["provider_generation"].parent.name,
+        },
         "provider_ledger_spec": capital._file_binding(spec_path)[0],
     }
+    # The generation binds bytes by identity; where they live goes in the
+    # sidecar, exactly as the real producer writes it.
+    locators = {"provider_ledger": ledger_path, "provider_ledger_spec": spec_path}
     if registry_path is not None:
         bindings["strategy_registry"] = capital._file_binding(registry_path)[0]
+        locators["strategy_registry"] = registry_path
     input_path = _write_json(
         root / "capital-input-generation.json",
         {
@@ -314,6 +323,7 @@ def build_capital_vertical(
             "correction_bindings": [],
         },
     )
+    capital.write_local_sidecar(input_path, locators)
     result_path = _write_json(
         root / "invested-capital.json",
         capital.build_governed_capital_result(input_path, contract_path),

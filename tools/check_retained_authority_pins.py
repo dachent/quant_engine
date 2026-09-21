@@ -1,0 +1,293 @@
+"""Report retained pins that name a superseded, or absent, repository authority.
+
+Retained inputs hold **copies** of repository authorities -- the product contract, the
+schemas, the policies -- and pin them by sha256 so a generation stays replayable after the
+repository moves. Nothing re-derives those copies when the authority itself changes, and the
+copy keeps hashing to its recorded value, so an ordinary pin check cannot see the drift.
+
+That is not hypothetical. Commit 47120f1 bumped the product contract 1.8.0 -> 1.9.0 and the
+matching schema, and touched no retained input. The delivery chain kept running on 1.8.0 while
+``portfolio_report.py`` resolves the product contract from the repository tree, and the
+disagreement surfaced four stages into a cold run, at
+``portfolio_current_dependence.py``:
+
+    current dependence source is invalid:
+    selected financial input contract differs from the product contract
+
+This tool asks the two questions that would have caught it before anything executed:
+
+``superseded``
+    Does this pin name a version of a repository authority that git knows but the working
+    tree no longer has? Both LF and CRLF renderings are indexed, because the working tree is
+    CRLF on Windows while git blobs are LF, and pins record whichever was copied.
+
+``missing``
+    Does this pin name bytes that do not exist at all? A different failure, and one that has
+    also bitten this project: a declared generation whose byte store never produced it.
+
+Published generations are excluded. They pin what they consumed, immutably and on purpose;
+reporting them would be reporting history as breakage. What matters is the mutable layer a
+run reads: configurations, specifications, selections and readiness files.
+
+Exit status is 1 when anything is found, so this can gate a pipeline.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import subprocess
+import sys
+from collections import defaultdict
+from pathlib import Path
+from typing import Any, Iterator
+
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+
+# Files whose bytes are copied into retained inputs and whose version therefore matters.
+AUTHORITY_PATTERNS: tuple[str, ...] = (
+    "contracts/*.json",
+    "schemas/portfolio/*.json",
+    "docs/analytics/current-strategy-decomposition-plan.json",
+)
+
+# Immutable published content, virtual environments and caches.
+SKIP_DIRECTORY_NAMES = frozenset(
+    {"generations", "candidates", ".scratch", "node_modules", ".venv", "tmp", ".git"}
+)
+
+DEFAULT_MAXIMUM_DEPTH = 4
+
+
+class AuthorityPinError(RuntimeError):
+    """The sweep could not be carried out."""
+
+
+def _run_git(root: Path, *arguments: str) -> bytes:
+    try:
+        return subprocess.check_output(
+            ["git", "-C", str(root), *arguments],
+            stderr=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:  # pragma: no cover - env
+        raise AuthorityPinError(f"git {' '.join(arguments)} failed") from exc
+
+
+def renderings(raw: bytes) -> set[str]:
+    """Every plausible on-disk digest of these bytes, LF and CRLF."""
+    unix = raw.replace(b"\r\n", b"\n")
+    windows = unix.replace(b"\n", b"\r\n")
+    return {hashlib.sha256(item).hexdigest() for item in (raw, unix, windows)}
+
+
+def authority_paths(root: Path) -> list[Path]:
+    found: list[Path] = []
+    for pattern in AUTHORITY_PATTERNS:
+        found.extend(sorted(root.glob(pattern)))
+    return found
+
+
+def index_authorities(root: Path) -> tuple[dict[str, str], dict[str, dict[str, str]]]:
+    """Map digest -> authority for the current tree, and for every superseded version."""
+    current: dict[str, str] = {}
+    superseded: dict[str, dict[str, str]] = {}
+    for path in authority_paths(root):
+        relative = path.relative_to(root).as_posix()
+        for digest in renderings(path.read_bytes()):
+            current[digest] = relative
+    for path in authority_paths(root):
+        relative = path.relative_to(root).as_posix()
+        history = _run_git(
+            root, "log", "--format=%H %ad", "--date=short", "--", relative
+        )
+        for line in history.decode("utf-8", "replace").splitlines():
+            commit, _, day = line.partition(" ")
+            if not commit:
+                continue
+            try:
+                blob = _run_git(root, "show", f"{commit}:{relative}")
+            except AuthorityPinError:
+                continue
+            for digest in renderings(blob):
+                if digest in current or digest in superseded:
+                    continue
+                superseded[digest] = {
+                    "authority": relative,
+                    "superseded_after": commit[:7],
+                    "dated": day,
+                }
+    return current, superseded
+
+
+def iter_pins(value: Any) -> Iterator[tuple[str, str]]:
+    """Yield every ``(path, sha256)`` pair at any depth."""
+    if isinstance(value, dict):
+        declared_path = value.get("path")
+        declared_sha = value.get("sha256")
+        if isinstance(declared_sha, str) and len(declared_sha) == 64:
+            yield (
+                declared_path if isinstance(declared_path, str) else "",
+                declared_sha,
+            )
+        for child in value.values():
+            yield from iter_pins(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_pins(child)
+
+
+def iter_documents(roots: list[Path], maximum_depth: int) -> Iterator[Path]:
+    """Walk with pruning.
+
+    ``rglob`` cannot be used: it descends into paths that exceed the Windows path limit and
+    raises, which is itself one of the defects this family of checks exists for.
+    """
+    for base in roots:
+        if not base.is_dir():
+            continue
+        for parent, directories, names in os.walk(base, onerror=lambda _exc: None):
+            here = Path(parent)
+            depth = len(here.relative_to(base).parts)
+            directories[:] = (
+                []
+                if depth >= maximum_depth
+                else [name for name in directories if name not in SKIP_DIRECTORY_NAMES]
+            )
+            for name in names:
+                if name.endswith(".json"):
+                    yield here / name
+
+
+def sweep(
+    roots: list[Path],
+    *,
+    repository_root: Path = REPOSITORY_ROOT,
+    maximum_depth: int = DEFAULT_MAXIMUM_DEPTH,
+) -> dict[str, Any]:
+    current, superseded = index_authorities(repository_root)
+    digests: dict[Path, str | None] = {}
+
+    def digest_of(path: Path) -> str | None:
+        if path not in digests:
+            try:
+                digests[path] = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError:
+                digests[path] = None
+        return digests[path]
+
+    superseded_findings: dict[str, list[dict[str, str]]] = defaultdict(list)
+    missing_findings: dict[str, list[str]] = defaultdict(list)
+    documents = 0
+    checked = 0
+
+    for document in iter_documents(roots, maximum_depth):
+        try:
+            payload = json.loads(document.read_bytes())
+        except (OSError, ValueError):
+            continue
+        pins = list(iter_pins(payload))
+        if not pins:
+            continue
+        documents += 1
+        name = str(document)
+        for declared_path, declared_sha in pins:
+            checked += 1
+            if declared_sha in superseded:
+                superseded_findings[name].append(
+                    {**superseded[declared_sha], "pinned_sha256": declared_sha}
+                )
+            if not declared_path:
+                continue
+            target = Path(declared_path)
+            if target.is_absolute() and digest_of(target) is None:
+                missing_findings[name].append(declared_path)
+
+    return {
+        "status": "RETAINED_AUTHORITY_PIN_SWEEP",
+        "repository_root": str(repository_root),
+        "roots": [str(root) for root in roots],
+        "authorities_tracked": [
+            path.relative_to(repository_root).as_posix()
+            for path in authority_paths(repository_root)
+        ],
+        "superseded_versions_indexed": len(superseded),
+        "documents_with_pins": documents,
+        "pins_checked": checked,
+        "documents_pinning_superseded_authorities": len(superseded_findings),
+        "documents_with_missing_targets": len(missing_findings),
+        "superseded": {
+            key: value for key, value in sorted(superseded_findings.items())
+        },
+        "missing": {
+            key: sorted(set(value)) for key, value in sorted(missing_findings.items())
+        },
+    }
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "roots",
+        nargs="+",
+        type=Path,
+        help="directories holding retained configurations, specs and proofs",
+    )
+    parser.add_argument("--json-out", type=Path)
+    parser.add_argument("--max-depth", type=int, default=DEFAULT_MAXIMUM_DEPTH)
+    parser.add_argument(
+        "--allow-superseded",
+        action="store_true",
+        help="report superseded pins without failing (missing targets still fail)",
+    )
+    arguments = parser.parse_args(argv)
+
+    report = sweep(
+        [root.resolve() for root in arguments.roots], maximum_depth=arguments.max_depth
+    )
+    if arguments.json_out is not None:
+        arguments.json_out.write_text(
+            json.dumps(report, indent=2) + "\n", encoding="utf-8"
+        )
+
+    by_authority: dict[str, set[str]] = defaultdict(set)
+    for document, entries in report["superseded"].items():
+        for entry in entries:
+            label = (
+                f"{entry['authority']} (superseded after "
+                f"{entry['superseded_after']} {entry['dated']})"
+            )
+            by_authority[label].add(document)
+
+    print(
+        json.dumps(
+            {
+                key: report[key]
+                for key in (
+                    "superseded_versions_indexed",
+                    "pins_checked",
+                    "documents_pinning_superseded_authorities",
+                    "documents_with_missing_targets",
+                )
+            },
+            indent=2,
+        )
+    )
+    for label, documents in sorted(
+        by_authority.items(), key=lambda item: -len(item[1])
+    ):
+        print(f"{len(documents):5d} documents pin superseded  {label}")
+    for document, targets in report["missing"].items():
+        print(f"MISSING  {document}")
+        for target in targets:
+            print(f"      {target}")
+
+    failed = bool(report["missing"]) or (
+        bool(report["superseded"]) and not arguments.allow_superseded
+    )
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

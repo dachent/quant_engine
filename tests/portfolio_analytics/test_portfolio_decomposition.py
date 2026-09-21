@@ -53,14 +53,25 @@ def _write_sources(
     target_only_dates: tuple[date, ...] = (),
     mixed_layer: bool = False,
     complete_costs: bool = False,
+    blank_factor: str | None = None,
+    blank_factor_rows: tuple[int, ...] = (),
+    target_skip_leading: int = 0,
 ) -> tuple[Path, list[date]]:
+    """Write a synthetic target/factor pair.
+
+    ``blank_factor`` with ``blank_factor_rows`` leaves that factor column empty on the
+    given ``days`` indices, which is how a real factor source represents a component
+    that had not yet come into existence.  ``target_skip_leading`` drops the first N
+    days from the *target* file only, so the target's own lifetime can start after a
+    later-inception component's first observation.
+    """
     root.mkdir(parents=True)
     days = _days(count, start)
     target_path = root / "targets.csv"
     with target_path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow(decomposition.TARGET_HEADERS)
-        for index, day in enumerate([*days, *target_only_dates]):
+        for index, day in enumerate([*days[target_skip_leading:], *target_only_dates]):
             f1 = 0.008 * math.sin(index / 5.0) + 0.002 * math.cos(index / 11.0)
             f2 = f1 if identical_factors else 0.006 * math.cos(index / 7.0)
             if formula == "simplex":
@@ -88,9 +99,10 @@ def _write_sources(
         for index, day in enumerate(days):
             f1 = 0.008 * math.sin(index / 5.0) + 0.002 * math.cos(index / 11.0)
             f2 = f1 if identical_factors else 0.006 * math.cos(index / 7.0)
-            writer.writerow(
-                [day.isoformat(), "0.00005", format(f1, ".17g"), format(f2, ".17g")]
-            )
+            cells = {"F1": format(f1, ".17g"), "F2": format(f2, ".17g")}
+            if blank_factor is not None and index in blank_factor_rows:
+                cells[blank_factor] = ""
+            writer.writerow([day.isoformat(), "0.00005", cells["F1"], cells["F2"]])
     return target_path, days
 
 
@@ -452,6 +464,66 @@ def test_later_target_lifetime_rejects_gap_inside_declared_source_bucket(
     with pytest.raises(
         decomposition.DecompositionError,
         match=f"missing expected target label\\(s\\).*{missing_day}",
+    ):
+        decomposition.build_decomposition(spec_path, source)
+
+
+def test_declared_unavailable_label_does_not_hide_other_missing_source_label(
+    tmp_path: Path,
+) -> None:
+    """A named source omission does not authorize an unrelated dropped period."""
+    source = tmp_path / "source"
+    target_path, days = _write_sources(source)
+    declared_missing = days[20]
+    unexpected_missing = days[40]
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle)
+        writer.writerows(
+            row
+            for row in rows
+            if len(row) < 2
+            or row[1]
+            not in {declared_missing.isoformat(), unexpected_missing.isoformat()}
+        )
+    spec_path = _spec(source, target_path, days)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    target_source = spec["target_source"]
+    target_hash, target_size = _hash(target_path)
+    target_source["expected_sha256"] = target_hash
+    target_source["expected_size_bytes"] = target_size
+    policy = target_source["interval_policy"]
+    policy["source_segments"] = [
+        {
+            "segment_id": "selected-source-segment",
+            "observed_start": days[0].isoformat(),
+            "observed_end": days[-1].isoformat(),
+            "source_vintage": "SELECTED_SNAPSHOT",
+        }
+    ]
+    policy["declared_unavailable_labels"] = [
+        {
+            "date": declared_missing.isoformat(),
+            "reason": "DECLARED_NATIVE_NAV_GAP",
+            "source_reference": {
+                "source_id": "matrixport",
+                "generation_id": "SELECTED_SNAPSHOT",
+                "manifest_sha256": "selected-manifest",
+                "declared_exclusion_item": f"nav_missing_date:{declared_missing.isoformat()}",
+            },
+        }
+    ]
+    spec_path.write_text(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        decomposition.DecompositionError,
+        match=(
+            "missing expected target label\\(s\\) from source-period authority.*"
+            f"{unexpected_missing.isoformat()}"
+        ),
     ):
         decomposition.build_decomposition(spec_path, source)
 
@@ -2063,3 +2135,181 @@ def test_staging_re_solves_when_the_indexed_result_does_not_verify(
     with pytest.raises(decomposition.DecompositionError):
         decomposition.stage_candidate(spec_path, source_root, output_root)
     assert calls["count"] == 1
+
+
+def test_pre_inception_factor_blanks_bound_anchor_range_and_are_disclosed(
+    tmp_path: Path,
+) -> None:
+    """A component absent before its own inception bounds the fit, it does not stop it.
+
+    The blank-bearing run must reproduce, byte for byte, a control run whose factor
+    file simply begins at the first complete anchor, and must say so in the receipt.
+    """
+    blank = 10
+    source = tmp_path / "source"
+    target_path, days = _write_sources(
+        source,
+        blank_factor="F2",
+        blank_factor_rows=tuple(range(blank)),
+        target_skip_leading=blank,
+    )
+    target_days = days[blank:]
+    spec_path = _spec(source, target_path, target_days, models=[_model(target_days)])
+
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+
+    model_result = _available(result)
+    assert (
+        model_result["coverage"]["factor_observed_start"] == target_days[0].isoformat()
+    )
+    interval = model_result["interval_association"]
+    assert interval["factor_incomplete_anchors_excluded"] == [
+        observed.isoformat() for observed in days[:blank]
+    ]
+    assert all(
+        bucket["prior_factor_anchor"] >= target_days[0].isoformat()
+        for bucket in cast(list[dict[str, Any]], interval["buckets"])
+    )
+
+    # Control: the same target bytes against a factor file whose leading rows are
+    # absent rather than blank.  Excluding an incomplete anchor must be identical to
+    # never having been given it.
+    control = tmp_path / "control"
+    control.mkdir()
+    (control / "targets.csv").write_bytes(target_path.read_bytes())
+    factor_rows = list(
+        csv.reader((source / "factors.csv").read_text(encoding="utf-8").splitlines())
+    )
+    with (control / "factors.csv").open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows([factor_rows[0], *factor_rows[1 + blank :]])
+    control_spec = _spec(
+        control,
+        control / "targets.csv",
+        target_days,
+        models=[_model(target_days)],
+    )
+
+    control_result, _cmanifest, _ccontent = decomposition.build_decomposition(
+        control_spec, control
+    )
+
+    control_model = _available(control_result)
+    assert (
+        control_model["interval_association"]["factor_incomplete_anchors_excluded"]
+        == []
+    )
+    control_interval = dict(control_model["interval_association"])
+    observed_interval = dict(interval)
+    for payload in (control_interval, observed_interval):
+        payload.pop("factor_incomplete_anchors_excluded")
+    assert observed_interval == control_interval
+    observed_payload = dict(model_result)
+    control_payload = dict(control_model)
+    for payload in (observed_payload, control_payload):
+        payload.pop("interval_association")
+    assert observed_payload == control_payload
+
+
+def test_internal_factor_blank_inside_target_scope_stops_the_model(
+    tmp_path: Path,
+) -> None:
+    """A component that disappears mid-life is a gap, not an inception boundary.
+
+    Compounding a bucket across it would associate a multi-session target return with
+    a shorter factor return, so it must stop rather than publish a fitted observation.
+    """
+    source = tmp_path / "source"
+    target_path, days = _write_sources(
+        source,
+        blank_factor="F2",
+        blank_factor_rows=(60,),
+    )
+    spec_path = _spec(source, target_path, days)
+
+    with pytest.raises(
+        decomposition.DecompositionError,
+        match=f"factor anchor {days[60].isoformat()} has incomplete selected components",
+    ):
+        decomposition.build_decomposition(spec_path, source)
+
+
+def test_factor_blank_after_target_scope_still_stops_a_bucket_that_bridges_it(
+    tmp_path: Path,
+) -> None:
+    """Target scope is the wrong discriminator; what matters is the bucket's labels.
+
+    When factor anchors are sparser than the target schedule, an anchor excluded for
+    incompleteness can sit past the target's last label and still be bridged: the
+    bucket carries earlier in-scope labels whose compounded return would be
+    associated with a factor period twice as long as the one they belong to.
+    """
+    source = tmp_path / "source"
+    target_path, days = _write_sources(
+        source,
+        count=111,
+        blank_factor="F2",
+        blank_factor_rows=(105,),
+    )
+    target_days = days[:103]
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    keep = {day.isoformat() for day in target_days}
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(
+            [rows[0], *(row for row in rows[1:] if row[1] in keep)]
+        )
+    # Anchors every fifth session, so one bucket spans several target labels.
+    factor_path = source / "factors.csv"
+    factor_rows = list(csv.reader(factor_path.read_text(encoding="utf-8").splitlines()))
+    anchor_days = {day.isoformat() for day in days[::5]}
+    with factor_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(
+            [factor_rows[0], *(row for row in factor_rows[1:] if row[0] in anchor_days)]
+        )
+
+    spec_path = _spec(source, target_path, target_days, models=[_model(target_days)])
+    # The factor source stays available past the target's last label, which is what
+    # puts the excluded anchor inside a live bucket rather than among future anchors.
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    spec["as_of_date"] = days[110].isoformat()
+    spec["factor_source"]["interval_policy"]["available_through_anchor"] = days[
+        110
+    ].isoformat()
+    spec_path.write_text(json.dumps(spec, indent=2), encoding="utf-8")
+
+    with pytest.raises(
+        decomposition.DecompositionError,
+        match=f"factor anchor {days[105].isoformat()} has incomplete selected components",
+    ):
+        decomposition.build_decomposition(spec_path, source)
+
+
+def test_factor_blank_on_a_target_non_session_day_inside_scope_stops_the_model(
+    tmp_path: Path,
+) -> None:
+    """Excluding an anchor must not hide a gap the complete-anchor path would refuse.
+
+    Here no carried label falls at or before the hole, so the bucket-bridging test
+    alone accepts it -- but with the anchor present its bucket would have no admitted
+    target labels and be refused. Dropping the anchor must not buy admission.
+    """
+    hole = 60
+    source = tmp_path / "source"
+    target_path, days = _write_sources(
+        source,
+        blank_factor="F2",
+        blank_factor_rows=(hole,),
+    )
+    sessions = [day for index, day in enumerate(days) if index != hole]
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(
+            [rows[0], *(row for row in rows[1:] if row[1] != days[hole].isoformat())]
+        )
+
+    spec_path = _spec(source, target_path, sessions, models=[_model(sessions)])
+
+    with pytest.raises(
+        decomposition.DecompositionError,
+        match=f"factor anchor {days[hole].isoformat()} has incomplete selected components",
+    ):
+        decomposition.build_decomposition(spec_path, source)

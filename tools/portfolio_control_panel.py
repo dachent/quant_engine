@@ -205,6 +205,11 @@ _DOWNLOAD_METADATA: Final = {
     ),
 }
 _DOWNLOAD_BASE64_CHUNK_SIZE: Final = 65_536
+# Must equal `EMBEDDED_DOWNLOAD_MAX_CHUNKS` in apps/portfolio-control-panel/app.js.
+# The renderer joins every chunk into one string and V8's MAX_STRING_LENGTH is
+# 536870888, so 8192 chunks of 65536 raise RangeError there no matter what
+# either constant says. A test pins the two together.
+_DOWNLOAD_MAX_BASE64_CHUNKS: Final = 8191
 _DOWNLOAD_PLACEHOLDER: Final = b"<!-- REPORT_DOWNLOADS -->"
 _ALLOWED_FRONTEND_REFERENCES: Final = (
     ("link", "href", "styles.css"),
@@ -1048,6 +1053,55 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
     )
 
 
+def _current_panel_qa(root: Path, *, required: tuple[str, ...]) -> dict[str, str]:
+    """Bind the published panel's retained QA evidence to its own manifest.
+
+    The panel producer stages with the bare `stage_generation` and then writes
+    QA under `qa/<name>` while declaring the artifact id `evidence/<name>`, so
+    the detached-bundle verifier cannot read it: the sidecars are absent and the
+    declared ids are logical rather than on-disk paths.
+
+    Each required name is resolved through that mapping and its bytes are
+    compared to the manifest's recorded sha256 **and** size. Asserting only that
+    an artifact id appears in the manifest would accept a claim with no bytes
+    behind it, which is the property the retained-QA gate exists to deny.
+    """
+
+    (
+        pointer,
+        manifest,
+        pointer_path,
+        pointer_sha256,
+        manifest_path,
+        manifest_sha256,
+        generation_snapshots,
+    ) = _current_generation_snapshot(root, "portfolio panel")
+    artifacts = {item.artifact_id: item for item in manifest.artifacts}
+    for name in required:
+        artifact = artifacts.get(f"evidence/{name}")
+        if artifact is None:
+            raise ControlPanelValidationError(
+                f"panel retained QA evidence is missing from the manifest: {name}"
+            )
+        try:
+            content, sha256 = generation_snapshots[f"qa/{name}"]
+        except KeyError as exc:
+            raise ControlPanelValidationError(
+                f"panel retained QA evidence is missing: {name}"
+            ) from exc
+        if (sha256, len(content)) != (artifact.sha256, artifact.size_bytes):
+            raise ControlPanelValidationError(
+                f"panel retained QA evidence is not hash-bound by its manifest: {name}"
+            )
+    return {
+        "generation_id": pointer.generation_id,
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": manifest_sha256,
+        "pointer_path": str(pointer_path),
+        "pointer_sha256": pointer_sha256,
+    }
+
+
 def _report_candidate(
     candidate_dir: Path,
 ) -> tuple[dict[str, Any], dict[str, str | None], Path]:
@@ -1092,6 +1146,8 @@ def _report_downloads(
         raise ControlPanelValidationError("report download changed after selection")
     files = {REPORT_DOWNLOAD: report_bytes}
     bindings: dict[str, tuple[Path, str]] = {}
+    if not require_workbook:
+        return files, bindings
     workbook_dir = (
         report_root / "deliveries" / str(report_identity["generation_id"])
         if report_root is not None
@@ -1173,6 +1229,16 @@ def _report_download_link(relative_path: str, label: str, content: bytes) -> str
         payload[index : index + _DOWNLOAD_BASE64_CHUNK_SIZE]
         for index in range(0, len(payload), _DOWNLOAD_BASE64_CHUNK_SIZE)
     ]
+    if len(chunks) > _DOWNLOAD_MAX_BASE64_CHUNKS:
+        # Refuse here rather than emit a panel whose own download handler will
+        # reject its metadata. Nothing bounded this before, so the producer
+        # could publish an inert link and the cost surfaced six stages later as
+        # a bare interaction-QA timeout naming nothing.
+        raise ControlPanelValidationError(
+            "report download payload exceeds the embedded download chunk cap: "
+            f"{relative_path} needs {len(chunks)} chunks, the renderer accepts "
+            f"{_DOWNLOAD_MAX_BASE64_CHUNKS}"
+        )
     link = (
         f'<a class="ghost-button" href="{relative_path}" download="{filename}" '
         f'data-download-filename="{filename}" data-download-mime="{mime_type}" '
@@ -1189,7 +1255,9 @@ def _report_download_link(relative_path: str, label: str, content: bytes) -> str
 
 
 def _verified_strategy_history_contract(
-    source_path: Path, report_contract: Mapping[str, Any]
+    source_path: Path,
+    report_contract: Mapping[str, Any],
+    dependence_selected_inputs_path: Path | None = None,
 ) -> tuple[dict[str, Any], tuple[Path, str]]:
     """Verify the report-bound dependence source needed for HPR HWM parity."""
 
@@ -1221,6 +1289,7 @@ def _verified_strategy_history_contract(
             source_path.parent,
             contract_path=FINANCIAL_MVP_CONTRACT,
             policy_path=DEPENDENCE_POLICY,
+            selected_inputs_path=dependence_selected_inputs_path,
         )
     except current_dependence.CurrentDependenceError as exc:
         raise ControlPanelValidationError(
@@ -3486,6 +3555,154 @@ def _panel_date(value: object, field_name: str) -> date:
         return date.fromisoformat(accepted)
     except ValueError as exc:
         raise ControlPanelValidationError(f"{field_name} must be an ISO date") from exc
+
+
+def _source_clock_display_lines(value: object) -> list[str]:
+    """Validate and render the report's replayed source clock without a wall clock."""
+
+    if not isinstance(value, Mapping) or set(value) != {
+        "latest_common_eod",
+        "limiting_inputs",
+        "selected_financial_cutoff",
+        "source_data_as_of",
+    }:
+        raise ControlPanelValidationError("source clock declaration differs")
+    selected = _panel_date(
+        value.get("selected_financial_cutoff"), "source clock selected financial cutoff"
+    ).isoformat()
+    latest = _panel_date(
+        value.get("latest_common_eod"), "source clock latest common EOD"
+    ).isoformat()
+    if latest < selected:
+        raise ControlPanelValidationError(
+            "source clock latest common EOD precedes cutoff"
+        )
+    limiting = value.get("limiting_inputs")
+    rows = value.get("source_data_as_of")
+    if (
+        not isinstance(limiting, list)
+        or not all(isinstance(item, str) and item for item in limiting)
+        or limiting != sorted(set(limiting))
+        or not isinstance(rows, list)
+        or not rows
+    ):
+        raise ControlPanelValidationError("source clock provider declarations differ")
+    permitted = {
+        "applies_to_latest_common_eod",
+        "captured_at",
+        "finality",
+        "native_calendar",
+        "native_capture_end_utc",
+        "native_capture_start_utc",
+        "native_observed_at",
+        "precision",
+        "provider_data_date",
+        "published_at",
+        "source_id",
+        "timezone",
+    }
+    source_ids: list[str] = []
+    applicable_dates: dict[str, str] = {}
+    rendered: list[str] = []
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) - permitted:
+            raise ControlPanelValidationError(
+                "source clock provider declaration differs"
+            )
+        source_id = _text(row.get("source_id"), "source clock provider source_id")
+        source_ids.append(source_id)
+        applies = row.get("applies_to_latest_common_eod")
+        if not isinstance(applies, bool):
+            raise ControlPanelValidationError(
+                "source clock provider applicability differs"
+            )
+        provider_date = _panel_date(
+            row.get("provider_data_date"), f"source clock {source_id} data date"
+        ).isoformat()
+        finality = row.get("finality")
+        if (
+            not isinstance(finality, Mapping)
+            or set(finality) != {"basis", "provider_finality_guarantee"}
+            or not isinstance(finality.get("basis"), str)
+            or not isinstance(finality.get("provider_finality_guarantee"), bool)
+        ):
+            raise ControlPanelValidationError("source clock provider finality differs")
+        timezone = row.get("timezone")
+        if timezone is not None and (not isinstance(timezone, str) or not timezone):
+            raise ControlPanelValidationError("source clock native timezone differs")
+        precision = row.get("precision")
+        if precision is not None and (not isinstance(precision, str) or not precision):
+            raise ControlPanelValidationError("source clock native precision differs")
+        native_observed_at = row.get("native_observed_at")
+        if native_observed_at is not None:
+            observed_text = _text(
+                native_observed_at, f"source clock {source_id} native observation"
+            )
+            try:
+                parsed_observation = datetime.fromisoformat(observed_text)
+            except ValueError as exc:
+                raise ControlPanelValidationError(
+                    "source clock native observation differs"
+                ) from exc
+            if (
+                parsed_observation.tzinfo is None
+                or parsed_observation.utcoffset() is None
+            ):
+                raise ControlPanelValidationError(
+                    "source clock native observation differs"
+                )
+            if precision is None or precision == "DATE":
+                raise ControlPanelValidationError(
+                    "source clock native precision differs"
+                )
+        rendered_timezone = timezone if timezone is not None else "unavailable"
+        rendered_precision = precision if precision is not None else "DATE"
+        if applies:
+            applicable_dates[source_id] = provider_date
+        details = [
+            f"Source clock — {source_id}: data as-of {provider_date}",
+            f"finality basis {finality['basis']}",
+        ]
+        if native_observed_at is not None:
+            details.append(
+                "native observation "
+                + _text(
+                    native_observed_at, f"source clock {source_id} native observation"
+                )
+            )
+        for field_name, label in (
+            ("native_capture_start_utc", "native capture start"),
+            ("native_capture_end_utc", "native capture end"),
+            ("captured_at", "native provenance captured"),
+            ("published_at", "native provenance published"),
+        ):
+            field_value = row.get(field_name)
+            if field_value is not None:
+                details.append(
+                    f"{label} {_text(field_value, f'source clock {source_id} {field_name}')}"
+                )
+        details.append(f"native timezone {rendered_timezone}")
+        details.append(f"native precision {rendered_precision}")
+        rendered.append("; ".join(details) + ".")
+    if source_ids != sorted(set(source_ids)) or not applicable_dates:
+        raise ControlPanelValidationError("source clock provider identities differ")
+    expected_latest = min(applicable_dates.values())
+    expected_limiting = sorted(
+        source_id
+        for source_id, provider_date in applicable_dates.items()
+        if provider_date == expected_latest
+    )
+    if latest != expected_latest or limiting != expected_limiting:
+        raise ControlPanelValidationError(
+            "source clock latest common EOD or limiting inputs differ"
+        )
+    return [
+        "Source clock — selected financial cutoff "
+        f"{selected}; latest common finalized EOD {latest}; limiting inputs "
+        f"{', '.join(limiting)}.",
+        *rendered,
+        "Actual execution timestamp is not declared in this report consumer; runner receipts retain execution attempts separately.",
+    ]
 
 
 def _compute_panel_numerical_hwm(
@@ -8801,6 +9018,16 @@ def _panel_data(
             raise ControlPanelValidationError(
                 "correlation-one stress differs from the accepted portfolio report"
             )
+    source_clock = report.get("source_clock")
+    source_clock_lines = (
+        _source_clock_display_lines(source_clock) if source_clock is not None else []
+    )
+    if source_clock is not None and source_clock.get(
+        "selected_financial_cutoff"
+    ) != report.get("calculation_cutoff_date"):
+        raise ControlPanelValidationError(
+            "source clock selected financial cutoff differs from report cutoff"
+        )
     limitations = sorted(
         {
             "Read-only local artifact; no provider, broker, order, or deployment connection exists.",
@@ -8833,6 +9060,7 @@ def _panel_data(
             ),
             "Provider, account-live, predecessor, shadow, and backtest evidence are not concatenated.",
             *(str(row.get("known_gap")) for row in coverage if row.get("known_gap")),
+            *source_clock_lines,
         }
     )
     account_manifest_verification = (
@@ -8978,6 +9206,7 @@ def _panel_data(
             ),
             "panel_mode": "LOCAL_DIRECT_FILE_READ_ONLY",
             "portfolio_as_of": _text(report.get("as_of_date"), "report.as_of_date"),
+            "source_clock": report.get("source_clock"),
             "freshness_evaluated_on": freshness_evaluated_on,
             "performance_lineage": performance_lineage,
             "correlation_generation_id": correlation_identity["generation_id"],
@@ -9953,6 +10182,7 @@ def _rendered_files(
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> tuple[
     dict[str, bytes],
     dict[str, Any],
@@ -10001,6 +10231,7 @@ def _rendered_files(
                         report.get("strategy_history_contract"),
                         "report.strategy_history_contract",
                     ),
+                    dependence_selected_inputs_path,
                 )
             )
     else:
@@ -10016,6 +10247,7 @@ def _rendered_files(
                     report.get("strategy_history_contract"),
                     "report.strategy_history_contract",
                 ),
+                dependence_selected_inputs_path,
             )
         )
     report_identity_values = {
@@ -10387,7 +10619,7 @@ def _rendered_files(
         report_path,
         report_identity,
         report_root,
-        require_workbook=invested_capital is not None,
+        require_workbook=False,
     )
     if files["index.html"].count(_DOWNLOAD_PLACEHOLDER) != 1:
         raise ControlPanelValidationError("report download template location differs")
@@ -10731,6 +10963,7 @@ def build_candidate(
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     files, data, _ = _rendered_files(
         report_root,
@@ -10769,6 +11002,7 @@ def build_candidate(
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
     )
     panel_id = _panel_id(files)
     candidate = output_root / "candidates" / panel_id
@@ -10859,6 +11093,7 @@ def verify_candidate(
     account_manifest_generation_root: Path | None = None,
     account_manifest_generation_id: str | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     expected, data, _ = _rendered_files(
         report_root,
@@ -10897,6 +11132,7 @@ def verify_candidate(
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
     )
     panel_id = _panel_id(expected)
     checks: list[dict[str, Any]] = []
@@ -12212,6 +12448,7 @@ def publish_panel(
     portfolio_root: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
     strategy_history_contract_path: Path | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     governed_hwm_supplied = any(
         value is not None
@@ -12279,6 +12516,7 @@ def publish_panel(
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         strategy_history_contract_path=strategy_history_contract_path,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
     )
     if verification.get("all_passed") is not True:
         raise ControlPanelValidationError(
@@ -12309,6 +12547,7 @@ def publish_panel(
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
         account_manifest_path=account_manifest_path,
         financial_mode=financial_mode,
         manifest_ledger_path=manifest_ledger_path,
@@ -12743,6 +12982,7 @@ def _parser() -> argparse.ArgumentParser:
                 "and verify, and needs that source's epoch HPR receipts."
             ),
         )
+        command.add_argument("--dependence-selected-inputs", type=Path)
         command.add_argument("--legacy-panel", type=Path, required=True)
         command.add_argument(
             "--template-root", type=Path, default=DEFAULT_TEMPLATE_ROOT
@@ -12967,6 +13207,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
             )
         elif args.command == "verify":
             if (args.report_root is None) == (args.report_candidate is None):
@@ -13015,6 +13256,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
             )
         elif args.command == "qa":
             result = validate_qa(args.candidate_dir, args.qa_dir)
@@ -13074,6 +13316,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
                 strategy_history_contract_path=args.strategy_history_contract,
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
             )
     except (OSError, ValueError, RuntimeError) as exc:
         print(f"portfolio-control-panel: FAIL: {exc}", file=sys.stderr)

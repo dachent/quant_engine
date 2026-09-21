@@ -17,7 +17,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, Sequence, TypedDict
 
 from quant_engine.core import (
     GenerationManifest,
@@ -49,6 +49,18 @@ ACCOUNT_STRATEGY_PANEL_TEMPLATE_ROOT = (
     REPOSITORY_ROOT / "apps" / "portfolio-control-panel"
 )
 WORKBOOK_RUNTIME_RECEIPT = "workbook-runtime-execution.json"
+
+
+class _ReportForwardedArguments(TypedDict, total=False):
+    hwm_governed_result_path: Path | None
+    hwm_governed_input_generation_path: Path | None
+    hwm_governed_calendar_authority_path: Path | None
+    hwm_governed_admission_receipt_path: Path | None
+    invested_capital_result_path: Path | None
+    invested_capital_input_generation_path: Path | None
+    portfolio_root: Path
+    dependence_selected_inputs_path: Path
+    attribution_generation_id: str
 
 
 class _WorkbookRuntime:
@@ -215,7 +227,8 @@ def _write_disposable(path: Path, content: bytes) -> None:
 
 def _sha(path: Path) -> tuple[str, int]:
     try:
-        return hash_file(path)
+        digest: tuple[str, int] = hash_file(path)
+        return digest
     except (OSError, ValueError) as exc:
         raise VerticalBuildError(f"source artifact is unavailable: {path}") from exc
 
@@ -607,6 +620,35 @@ def _directory_inventory(path: Path) -> dict[str, Any]:
     }
 
 
+def _stage_panel_qa(qa_dir: Path, output_root: Path) -> Path:
+    """Copy immutable attended QA into the panel producer's stage root."""
+
+    source = qa_dir.resolve()
+    destination = output_root.resolve() / "qa"
+    source_inventory = _directory_inventory(source)
+    try:
+        destination.relative_to(source)
+    except ValueError:
+        pass
+    else:
+        raise VerticalBuildError("panel QA stage copy overlaps its source")
+    if destination.exists():
+        if _directory_inventory(destination) != source_inventory:
+            raise VerticalBuildError("panel QA stage copy differs")
+        return destination
+    destination.mkdir(parents=True)
+    for item in sorted(source.rglob("*")):
+        relative = item.relative_to(source)
+        target = destination / relative
+        if item.is_dir():
+            target.mkdir()
+        else:
+            _write_exact(target, item.read_bytes())
+    if _directory_inventory(destination) != source_inventory:
+        raise VerticalBuildError("panel QA stage copy differs after creation")
+    return destination
+
+
 def _panel_publication_receipt(
     recipe_path: Path,
     recipe: Mapping[str, Any],
@@ -732,9 +774,17 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
         ) from exc
     if not isinstance(catalog, dict):
         raise VerticalBuildError("reusable provider-ledger root must be an object")
-    if (
-        catalog.get("as_of_date") != manifest.as_of_date.isoformat()
-        or catalog.get("catalog_schema_version") != 2
+    try:
+        financial_cutoff = date.fromisoformat(
+            _text(catalog.get("as_of_date"), "provider ledger cutoff")
+        )
+    except (TypeError, ValueError) as exc:
+        raise VerticalBuildError(
+            "reusable provider-ledger catalog contract differs"
+        ) from exc
+    if catalog.get("catalog_schema_version") != 2 or any(
+        artifact_by_id[artifact_id].as_of_date != financial_cutoff
+        for artifact_id in required_artifacts
     ):
         raise VerticalBuildError("reusable provider-ledger catalog contract differs")
     try:
@@ -747,6 +797,12 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
         raise VerticalBuildError(
             "reusable provider-ledger admission receipt root must be an object"
         )
+    observation = receipt.get("run_observation")
+    if observation is not None and (
+        not isinstance(observation, dict)
+        or observation.get("financial_cutoff") != catalog["as_of_date"]
+    ):
+        raise VerticalBuildError("reusable provider-ledger catalog contract differs")
     if (
         receipt.get("receipt_type") != "PROVIDER_ADMIT_OR_DECLARE_V1"
         or receipt.get("schema_version") != 1
@@ -760,12 +816,82 @@ def _validated_reusable_provider_ledger(path: Path) -> tuple[str, Path]:
     return manifest.generation_id, path / "provider-ledger.json"
 
 
+def _validated_strategy_attribution_generation(
+    root: Path, generation_id: object
+) -> str:
+    """Bind the optional recipe selector to one verified attribution catalog."""
+
+    selected_generation_id = _generation_id(
+        generation_id, "strategy_attribution_root.generation_id"
+    )
+    try:
+        manifest = read_generation(root, selected_generation_id)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise VerticalBuildError(
+            "selected strategy-attribution generation is not accepted"
+        ) from exc
+    generation = root / "generations" / selected_generation_id
+    manifest_path = generation / "generation.json"
+    if (
+        manifest.generation_id != selected_generation_id
+        or manifest.verification is not VerificationStatus.VERIFIED
+        or manifest_path.is_symlink()
+        or not manifest_path.is_file()
+        or manifest_path.read_bytes() != manifest.to_json_bytes()
+    ):
+        raise VerticalBuildError("selected strategy-attribution generation differs")
+    catalog_path = generation / "strategy-attribution.json"
+    catalog = _load(catalog_path, "selected strategy-attribution catalog")
+    schema_version = catalog.get("catalog_schema_version")
+    if schema_version not in {1, 2}:
+        raise VerticalBuildError("selected strategy-attribution schema is unsupported")
+    sha256, size_bytes = hash_file(catalog_path)
+    artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "normalized/strategy-attribution.json"
+        ),
+        None,
+    )
+    if artifact is None or (
+        artifact.sha256,
+        artifact.size_bytes,
+        artifact.schema_name,
+        artifact.schema_version,
+    ) != (sha256, size_bytes, "strategy-attribution", str(schema_version)):
+        raise VerticalBuildError("selected strategy-attribution artifact differs")
+    return selected_generation_id
+
+
 def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
     correlation_root = _path(
         recipe["correlation_source_root"]["path"], "correlation source root"
     )
     current_receipt = correlation_root / "dependence-source.json"
     if current_receipt.exists():
+        selected_definition = recipe.get("dependence_selected_inputs")
+        selected_inputs_path: Path | None = None
+        if selected_definition is not None:
+            if not isinstance(selected_definition, dict) or set(
+                selected_definition
+            ) != {
+                "path",
+                "sha256",
+                "size_bytes",
+            }:
+                raise VerticalBuildError(
+                    "dependence_selected_inputs definition differs"
+                )
+            selected_inputs_path = _path(
+                selected_definition["path"], "dependence_selected_inputs.path"
+            )
+            sha256, size = _sha(selected_inputs_path)
+            if (sha256, size) != (
+                selected_definition["sha256"],
+                selected_definition["size_bytes"],
+            ):
+                raise VerticalBuildError("dependence_selected_inputs identity differs")
         module_path = TOOLS_ROOT / "portfolio_current_dependence.py"
         module_name = "portfolio_current_dependence_for_release_builder"
         spec = importlib.util.spec_from_file_location(module_name, module_path)
@@ -775,14 +901,22 @@ def _history_contract_path(recipe: Mapping[str, Any]) -> Path:
         sys.modules[module_name] = module
         try:
             spec.loader.exec_module(module)
+            contract_path = (
+                module._selected_inputs(selected_inputs_path)[  # noqa: SLF001
+                    "financial_input_contract_path"
+                ]
+                if selected_inputs_path is not None
+                else REPOSITORY_ROOT
+                / "contracts"
+                / "portfolio-financial-mvp-source-v1.json"
+            )
             result = module.verify_packaged_source(
                 correlation_root,
-                contract_path=REPOSITORY_ROOT
-                / "contracts"
-                / "portfolio-financial-mvp-source-v1.json",
+                contract_path=contract_path,
                 policy_path=REPOSITORY_ROOT
                 / "contracts"
                 / "portfolio-dependence-policy-v1.json",
+                selected_inputs_path=selected_inputs_path,
             )
         except Exception as exc:
             raise VerticalBuildError(
@@ -869,9 +1003,22 @@ def _recipe(path: Path) -> dict[str, Any]:
         )
     if schema_version == 10:
         required.add("epoch_manifest_generation")
-    if set(recipe) != required:
+    if (
+        set(recipe) - {"dependence_selected_inputs", "evaluated_on", "source_clock"}
+        != required
+    ):
         raise VerticalBuildError("vertical-build recipe keys differ")
-    date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
+    financial_cutoff = date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
+    if "evaluated_on" in recipe:
+        evaluation_text = _text(recipe["evaluated_on"], "evaluated_on")
+        try:
+            evaluation_date = date.fromisoformat(evaluation_text)
+        except ValueError as exc:
+            raise VerticalBuildError("evaluated_on is invalid") from exc
+        if evaluation_date.isoformat() != evaluation_text:
+            raise VerticalBuildError("evaluated_on is invalid")
+        if evaluation_date < financial_cutoff:
+            raise VerticalBuildError("evaluation date precedes financial cutoff")
     for key in (
         "baseline_spec",
         "base_factor_file",
@@ -889,6 +1036,30 @@ def _recipe(path: Path) -> dict[str, Any]:
         sha256, size = _sha(artifact)
         if sha256 != definition["sha256"] or size != definition["size_bytes"]:
             raise VerticalBuildError(f"{key} identity differs")
+    if "dependence_selected_inputs" in recipe:
+        definition = recipe["dependence_selected_inputs"]
+        if not isinstance(definition, dict) or set(definition) != {
+            "path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise VerticalBuildError("dependence_selected_inputs definition differs")
+        artifact = _path(definition["path"], "dependence_selected_inputs.path")
+        sha256, size = _sha(artifact)
+        if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+            raise VerticalBuildError("dependence_selected_inputs identity differs")
+    if "source_clock" in recipe:
+        definition = recipe["source_clock"]
+        if not isinstance(definition, dict) or set(definition) != {
+            "path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise VerticalBuildError("source_clock definition differs")
+        artifact = _path(definition["path"], "source_clock.path")
+        sha256, size = _sha(artifact)
+        if sha256 != definition["sha256"] or size != definition["size_bytes"]:
+            raise VerticalBuildError("source_clock identity differs")
     if schema_version == 6:
         definition = recipe["provider_ledger_spec"]
         if not isinstance(definition, dict) or set(definition) != {
@@ -905,7 +1076,6 @@ def _recipe(path: Path) -> dict[str, Any]:
         "decomposition_plan_bundle",
         "correlation_source_root",
         "legacy_panel",
-        "strategy_attribution_root",
     ]
     if "hybrid_decomposition_plan_bundle" in recipe:
         directory_keys.append("hybrid_decomposition_plan_bundle")
@@ -923,6 +1093,28 @@ def _recipe(path: Path) -> dict[str, Any]:
             "inventory_sha256": definition["inventory_sha256"],
         }:
             raise VerticalBuildError(f"{key} inventory differs")
+    attribution_definition = recipe["strategy_attribution_root"]
+    attribution_keys = {"file_count", "inventory_sha256", "path"}
+    if (
+        not isinstance(attribution_definition, dict)
+        or not attribution_keys.issubset(attribution_definition)
+        or not set(attribution_definition).issubset(
+            attribution_keys | {"generation_id"}
+        )
+    ):
+        raise VerticalBuildError("strategy_attribution_root definition differs")
+    attribution_root = _path(
+        attribution_definition["path"], "strategy_attribution_root.path"
+    )
+    if _directory_inventory(attribution_root) != {
+        "file_count": attribution_definition["file_count"],
+        "inventory_sha256": attribution_definition["inventory_sha256"],
+    }:
+        raise VerticalBuildError("strategy_attribution_root inventory differs")
+    if "generation_id" in attribution_definition:
+        _validated_strategy_attribution_generation(
+            attribution_root, attribution_definition["generation_id"]
+        )
     if schema_version in {7, 9, 10}:
         definition = recipe["provider_ledger_generation"]
         if not isinstance(definition, dict) or set(definition) != {
@@ -1037,8 +1229,23 @@ def create_recipe(
     account_strategy_admission_policy: Path | None = None,
     epoch_manifest_generation_root: Path | None = None,
     epoch_manifest_generation_id: str | None = None,
+    strategy_attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
+    evaluated_on: str | None = None,
 ) -> dict[str, Any]:
-    date.fromisoformat(as_of_date)
+    financial_cutoff = date.fromisoformat(as_of_date)
+    normalized_evaluated_on: str | None = None
+    if evaluated_on is not None:
+        normalized_evaluated_on = _text(evaluated_on, "evaluated_on")
+        try:
+            evaluation_date = date.fromisoformat(normalized_evaluated_on)
+        except ValueError as exc:
+            raise VerticalBuildError("evaluated_on is invalid") from exc
+        if evaluation_date.isoformat() != normalized_evaluated_on:
+            raise VerticalBuildError("evaluated_on is invalid")
+        if evaluation_date < financial_cutoff:
+            raise VerticalBuildError("evaluation date precedes financial cutoff")
     if len(release_commit) != 40:
         raise VerticalBuildError("release commit differs")
     if (provider_ledger_spec is None) == (provider_ledger_generation is None):
@@ -1080,6 +1287,14 @@ def create_recipe(
         raise VerticalBuildError(
             "verified epoch-manifest recipes require a reusable provider-ledger generation"
         )
+    resolved_strategy_attribution_root = strategy_attribution_root.resolve()
+    selected_attribution_generation_id = (
+        _validated_strategy_attribution_generation(
+            resolved_strategy_attribution_root, strategy_attribution_generation_id
+        )
+        if strategy_attribution_generation_id is not None
+        else None
+    )
     payload: dict[str, Any] = {
         "as_of_date": as_of_date,
         "base_factor_file": _file_definition(base_factor_file.resolve()),
@@ -1105,8 +1320,13 @@ def create_recipe(
         "pipeline_id": pipeline_id,
         "release_commit": release_commit,
         "strategy_attribution_root": {
-            "path": str(strategy_attribution_root.resolve()),
-            **_directory_inventory(strategy_attribution_root.resolve()),
+            "path": str(resolved_strategy_attribution_root),
+            **_directory_inventory(resolved_strategy_attribution_root),
+            **(
+                {"generation_id": selected_attribution_generation_id}
+                if selected_attribution_generation_id is not None
+                else {}
+            ),
         },
     }
     if hybrid_decomposition_plan_bundle is not None:
@@ -1115,6 +1335,14 @@ def create_recipe(
             "path": str(hybrid_plan),
             **_directory_inventory(hybrid_plan),
         }
+    if dependence_selected_inputs_path is not None:
+        payload["dependence_selected_inputs"] = _file_definition(
+            dependence_selected_inputs_path.resolve()
+        )
+    if source_clock_path is not None:
+        payload["source_clock"] = _file_definition(source_clock_path.resolve())
+    if normalized_evaluated_on is not None:
+        payload["evaluated_on"] = normalized_evaluated_on
     if provider_ledger_spec is not None:
         payload["provider_ledger_spec"] = _file_definition(
             provider_ledger_spec.resolve()
@@ -1532,6 +1760,61 @@ def _tool(name: str, *args: str, timeout: int = 3600) -> dict[str, Any]:
     )
 
 
+def _record_numerical_producer_operation(
+    operations: list[dict[str, Any]],
+    *,
+    tool: str,
+    operation: str,
+    spec_path: Path,
+    source_root: Path,
+    output_root: Path,
+    producer_result: Mapping[str, Any],
+) -> None:
+    """Keep each numerical producer's returned reuse disposition in the stage result."""
+
+    returned_reused = producer_result.get("reused")
+    reuse_status = (
+        "REUSED"
+        if returned_reused is True
+        else "RECOMPUTED"
+        if returned_reused is False
+        else "UNKNOWN"
+    )
+    spec_sha256, spec_size_bytes = _sha(spec_path)
+    operations.append(
+        {
+            "generation_id": producer_result.get("generation_id"),
+            "operation": operation,
+            "output_root": str(output_root),
+            "producer_result": dict(producer_result),
+            "reuse_status": reuse_status,
+            "source_identity": {
+                "source_root": str(source_root),
+                "spec_path": str(spec_path),
+                "spec_sha256": spec_sha256,
+                "spec_size_bytes": spec_size_bytes,
+            },
+            "tool": tool,
+        }
+    )
+
+
+def _numerical_producer_evidence(
+    operations: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Summarize only returned producer dispositions; unknown is never zero work."""
+
+    statuses = {str(row["reuse_status"]) for row in operations}
+    warm_status = (
+        "ALL_REUSED"
+        if operations and statuses == {"REUSED"}
+        else "RECOMPUTED"
+        if "RECOMPUTED" in statuses
+        else "UNKNOWN"
+    )
+    return {"operations": operations, "warm_status": warm_status}
+
+
 def _published_generation(root: Path) -> tuple[str, Path]:
     pointer = read_current(root)
     generation = root / "generations" / pointer.generation_id
@@ -1734,6 +2017,9 @@ def build_ledger(recipe_path: Path, output_root: Path) -> dict[str, Any]:
         _validated_reusable_provider_ledger(destination)
         source_mode = "REUSED_VERIFIED_IMMUTABLE_GENERATION"
     pointer = publish_generation(output_root, generation_id)
+    _, catalog = _validated_reusable_provider_ledger(
+        output_root / "generations" / generation_id
+    )
     freshness = output_root / "freshness-health.json"
     _tool(
         "portfolio_freshness.py",
@@ -1742,11 +2028,12 @@ def build_ledger(recipe_path: Path, output_root: Path) -> dict[str, Any]:
         "--provider-ledger-generation-id",
         generation_id,
         "--evaluation-date",
-        _text(recipe["as_of_date"], "as_of_date"),
+        _text(recipe.get("evaluated_on", recipe["as_of_date"]), "evaluation date"),
         "--output",
         str(freshness),
     )
     return {
+        "catalog_sha256": _sha(catalog)[0],
         "freshness_health": str(freshness),
         "generation_id": generation_id,
         "publication_state": pointer.state.value,
@@ -1841,19 +2128,52 @@ def build_attribution(recipe_path: Path, output_root: Path) -> dict[str, Any]:
     ledger_id, ledger_generation = _published_generation(output_root.parent / "ledger")
     ledger_manifest = ledger_generation / "generation.json"
     ledger_catalog = ledger_generation / "provider-ledger.json"
-    bound_manifest = (
-        source / "inputs" / "base" / "provenance" / "00-provider-ledger-generation.json"
-    )
-    bound_catalog = (
-        source / "inputs" / "base" / "provenance" / "01-provider-ledger.json"
-    )
-    if (
-        bound_manifest.read_bytes() != ledger_manifest.read_bytes()
-        or bound_catalog.read_bytes() != ledger_catalog.read_bytes()
-    ):
-        raise VerticalBuildError(
-            "attribution plan is not bound to the rebuilt provider ledger"
+    if manifest.get("builder") == "portfolio-current-decomposition-plan":
+        # Current targets come from selected layered history. Base provenance
+        # remains the immutable template's provenance and may name an older
+        # ledger; it must neither replace nor be relabelled as current evidence.
+        history_relative = "inputs/history/generation.json"
+        if sum(row.get("path") == history_relative for row in manifest["inputs"]) != 1:
+            raise VerticalBuildError("selected history is not bound to the ledger plan")
+        history = _load(source / history_relative, "selected history generation")
+        history_inputs = history.get("inputs")
+        if not isinstance(history_inputs, list):
+            raise VerticalBuildError("selected history ledger inputs are invalid")
+        for input_id, artifact in (
+            ("provider-ledger-manifest", ledger_manifest),
+            ("provider-ledger-catalog", ledger_catalog),
+        ):
+            bindings = [
+                row
+                for row in history_inputs
+                if isinstance(row, dict) and row.get("input_id") == input_id
+            ]
+            if len(bindings) != 1 or (
+                bindings[0].get("generation_id") != ledger_id
+                or (bindings[0].get("sha256"), bindings[0].get("size_bytes"))
+                != _sha(artifact)
+            ):
+                raise VerticalBuildError(
+                    "selected history is not bound to the rebuilt ledger"
+                )
+    else:
+        bound_manifest = (
+            source
+            / "inputs"
+            / "base"
+            / "provenance"
+            / "00-provider-ledger-generation.json"
         )
+        bound_catalog = (
+            source / "inputs" / "base" / "provenance" / "01-provider-ledger.json"
+        )
+        if (
+            bound_manifest.read_bytes() != ledger_manifest.read_bytes()
+            or bound_catalog.read_bytes() != ledger_catalog.read_bytes()
+        ):
+            raise VerticalBuildError(
+                "attribution plan is not bound to the rebuilt provider ledger"
+            )
     verification = {
         "artifact_count": len(rows),
         "bundle_id": source.name,
@@ -1880,6 +2200,7 @@ def _build_hybrid_decomposition(
     bundle_root: Path,
     output_root: Path,
     retained_cache_root: Path | None = None,
+    producer_operations: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Publish one version-bound hybrid decomposition from the shared history contract."""
 
@@ -1899,7 +2220,7 @@ def _build_hybrid_decomposition(
     )
     source_root = _path(bundle.get("destination"), "hybrid decomposition bundle")
     hybrid_spec = source_root / "base-spec.json"
-    _tool(
+    staged = _tool(
         "portfolio_decomposition.py",
         "stage",
         "--spec",
@@ -1915,6 +2236,16 @@ def _build_hybrid_decomposition(
         ),
         timeout=7200,
     )
+    if producer_operations is not None:
+        _record_numerical_producer_operation(
+            producer_operations,
+            tool="portfolio_decomposition.py",
+            operation="stage",
+            spec_path=hybrid_spec,
+            source_root=source_root,
+            output_root=output_root,
+            producer_result=staged,
+        )
     published = _tool(
         "portfolio_decomposition.py",
         "publish",
@@ -1931,6 +2262,16 @@ def _build_hybrid_decomposition(
         ),
         timeout=7200,
     )
+    if producer_operations is not None:
+        _record_numerical_producer_operation(
+            producer_operations,
+            tool="portfolio_decomposition.py",
+            operation="publish",
+            spec_path=hybrid_spec,
+            source_root=source_root,
+            output_root=output_root,
+            producer_result=published,
+        )
     return {
         "bundle_id": _text(bundle.get("bundle_id"), "hybrid bundle_id"),
         "bundle_root": str(source_root),
@@ -2822,6 +3163,75 @@ def _age_boundary_value(
     }
 
 
+def _retained_public_factor_capture(
+    attribution_bundle: Path,
+    inputs: Mapping[str, tuple[str, int]],
+    public_manifest: Mapping[str, Any],
+    *,
+    evaluation_date: str,
+) -> dict[str, object] | None:
+    """Read a frozen capture only when it is inventory-bound to this plan."""
+
+    relative = "inputs/governance/retained-public-factor-capture.json"
+    if relative not in inputs:
+        return None
+    _, receipt_path = _portable_bundle_file(
+        attribution_bundle, relative, "retained public factor capture path"
+    )
+    if inputs.get(relative) != _sha(receipt_path):
+        raise VerticalBuildError("retained public factor capture binding differs")
+    receipt = _load(receipt_path, "retained public factor capture")
+    if set(receipt) != {
+        "schema_version",
+        "financial_data_cutoff",
+        "manifest_sha256",
+        "manifest_size_bytes",
+        "acquisition_run_id",
+    }:
+        raise VerticalBuildError("retained public factor capture fields differ")
+    manifest_relative = "inputs/governance/public-factor-source-manifest.json"
+    _, manifest_path = _portable_bundle_file(
+        attribution_bundle, manifest_relative, "public factor manifest path"
+    )
+    manifest_sha256, manifest_size = _sha(manifest_path)
+    acquisition_run = public_manifest.get("acquisition_run")
+    history_relative = "inputs/history/generation.json"
+    _, history_path = _portable_bundle_file(
+        attribution_bundle, history_relative, "layered generation path"
+    )
+    if inputs.get(history_relative) != _sha(history_path):
+        raise VerticalBuildError("layered generation binding differs")
+    generation = _load(history_path, "layered generation")
+    cutoff = _text(
+        receipt.get("financial_data_cutoff"), "retained public factor financial cutoff"
+    )
+    try:
+        cutoff_date = date.fromisoformat(cutoff)
+        evaluated_on = date.fromisoformat(evaluation_date)
+    except ValueError as exc:
+        raise VerticalBuildError(
+            "retained public factor capture cutoff differs"
+        ) from exc
+    if (
+        receipt.get("schema_version") != 1
+        or cutoff_date.isoformat() != cutoff
+        or cutoff_date > evaluated_on
+        or receipt.get("manifest_sha256") != manifest_sha256
+        or receipt.get("manifest_size_bytes") != manifest_size
+        or not isinstance(acquisition_run, dict)
+        or receipt.get("acquisition_run_id") != acquisition_run.get("run_id")
+        or cutoff != generation.get("as_of_date")
+    ):
+        raise VerticalBuildError("retained public factor capture identity differs")
+    return {
+        "schema_version": 1,
+        "financial_data_cutoff": cutoff,
+        "manifest_sha256": manifest_sha256,
+        "manifest_size_bytes": manifest_size,
+        "acquisition_run_id": receipt["acquisition_run_id"],
+    }
+
+
 def _expected_non_spec_data_age(
     attribution_bundle: Path,
     inputs: Mapping[str, tuple[str, int]],
@@ -2840,6 +3250,12 @@ def _expected_non_spec_data_age(
     if inputs.get(public_manifest_relative) != _sha(public_manifest_path):
         raise VerticalBuildError("public factor manifest binding differs")
     public_manifest = _load(public_manifest_path, "public factor manifest")
+    retained_capture = _retained_public_factor_capture(
+        attribution_bundle,
+        inputs,
+        public_manifest,
+        evaluation_date=evaluation_date,
+    )
     acquisition_run = public_manifest.get("acquisition_run")
     if (
         public_manifest.get("schema_version") != 2
@@ -2861,6 +3277,7 @@ def _expected_non_spec_data_age(
         or (
             assurance_profile == "RELEASE_QC"
             and capture_evaluation_date != evaluated_on
+            and retained_capture is None
         )
     ):
         raise VerticalBuildError("public factor evaluation date differs")
@@ -2984,6 +3401,7 @@ def _verify_current_plan_upstream_evidence(
     evaluation_date: str,
     evidence_mode: str,
     assurance_profile: str,
+    dependence_authority_paths: Mapping[str, Path | None] | None = None,
 ) -> dict[str, Any]:
     module_name = "portfolio_current_decomposition_plan_for_release_builder"
     module_path = TOOLS_ROOT / "portfolio_current_decomposition_plan.py"
@@ -3015,6 +3433,12 @@ def _verify_current_plan_upstream_evidence(
         )
         catalog_sha256 = hashlib.sha256(catalog_content).hexdigest()
         public_manifest = _load(public_manifest_path, "public factor manifest")
+        retained_capture = _retained_public_factor_capture(
+            attribution_bundle,
+            inputs,
+            public_manifest,
+            evaluation_date=evaluation_date,
+        )
         public_outputs = public_manifest.get("outputs")
         style_manifest = _load(style_manifest_path, "style source manifest")
         sector_manifest = _load(sector_manifest_path, "sector source manifest")
@@ -3084,6 +3508,7 @@ def _verify_current_plan_upstream_evidence(
                 catalog_sha256,
                 evaluated_on,
                 assurance_profile,
+                retained_capture,
             )
             for key, manifest in (
                 ("style_returns", style_manifest),
@@ -3183,6 +3608,7 @@ def _verify_current_plan_upstream_evidence(
                 evidence_mode=evidence_mode,
                 evaluated_on=evaluated_on,
                 assurance_profile=assurance_profile,
+                **(dependence_authority_paths or {}),
             )
     except Exception as exc:
         raise VerticalBuildError(
@@ -3194,12 +3620,14 @@ def _verify_current_plan_upstream_evidence(
     history_contents = layered.get("contents")
     history_identity = layered.get("identity")
     history_composition = layered.get("composition")
+    series_interval_policies = layered.get("series_interval_policies")
     history_schema_definitions = layered.get("schema_definitions")
     plan_data_age = plan.get("data_age")
     if (
         not isinstance(history_contents, dict)
         or not isinstance(history_identity, dict)
         or not isinstance(history_composition, dict)
+        or not isinstance(series_interval_policies, dict)
         or not isinstance(history_schema_definitions, dict)
         or plan.get("layered_history") != history_identity
         or not isinstance(plan_data_age, dict)
@@ -3309,9 +3737,14 @@ def _verify_current_plan_upstream_evidence(
                 _text(schema.get("schema_version"), "history schema_version"),
             )
         )
+    reporting_currency = planner._reporting_currency(  # noqa: SLF001
+        _load(contract_path, "financial MVP source contract")
+    )
     return {
         "layered_composition": history_composition,
+        "series_interval_policies": series_interval_policies,
         "provenance_sources": expected_provenance,
+        "reporting_currency": reporting_currency,
     }
 
 
@@ -3828,8 +4261,48 @@ def _governed_plan_sources(
     )
 
 
+def _selected_dependence_authority_paths(
+    selected_inputs_path: Path | None,
+) -> dict[str, Path | None]:
+    """Reconstruct the five selected source authorities for current history."""
+
+    if selected_inputs_path is None:
+        return {}
+    module_path = TOOLS_ROOT / "portfolio_current_dependence.py"
+    module_name = "portfolio_current_dependence_for_release_builder"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
+    if spec is None or spec.loader is None:
+        raise VerticalBuildError("current dependence verifier is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+        selected = module._selected_inputs(selected_inputs_path)  # noqa: SLF001
+        ledger_root = selected["provider_ledger_generation_root"]
+        return {
+            "provider_admission_receipt_path": selected[
+                "provider_admission_receipt_path"
+            ],
+            "financial_input_contract_path": selected["financial_input_contract_path"],
+            "provider_ledger_manifest_path": ledger_root / "generation.json",
+            "provider_ledger_catalog_path": ledger_root / "provider-ledger.json",
+            "portfolio123_version_evidence_path": selected.get(
+                "portfolio123_version_evidence_path"
+            ),
+        }
+    except Exception as exc:
+        raise VerticalBuildError(
+            f"selected dependence authority is invalid: {exc}"
+        ) from exc
+    finally:
+        sys.modules.pop(module_name, None)
+
+
 def _current_release_plan_specs(
-    attribution_bundle: Path, plan: Mapping[str, Any]
+    attribution_bundle: Path,
+    plan: Mapping[str, Any],
+    *,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> list[dict[str, Any]]:
     if set(plan) != {
         "assurance_profile",
@@ -3968,6 +4441,9 @@ def _current_release_plan_specs(
         evaluation_date=evaluation_date,
         evidence_mode=evidence_mode,
         assurance_profile=assurance_profile,
+        dependence_authority_paths=_selected_dependence_authority_paths(
+            dependence_selected_inputs_path
+        ),
     )
     (
         governed_sources,
@@ -4114,8 +4590,12 @@ def _current_release_plan_specs(
             for model in governed_models[source_key].values()
         }
         layered_composition = upstream_evidence.get("layered_composition")
+        series_interval_policies = upstream_evidence.get("series_interval_policies")
+        reporting_currency = upstream_evidence.get("reporting_currency")
         if (
             not isinstance(layered_composition, dict)
+            or not isinstance(series_interval_policies, dict)
+            or not isinstance(reporting_currency, str)
             or specification.get("series_composition")
             != {
                 series_id: layered_composition[series_id]
@@ -4126,6 +4606,31 @@ def _current_release_plan_specs(
         ):
             raise VerticalBuildError(
                 f"attribution plan series composition differs: {spec_id}"
+            )
+        target_source = specification.get("target_source")
+        selected_series_interval_policies = {
+            series_id: series_interval_policies[series_id]
+            for series_id in sorted(expected_series)
+            if series_id in series_interval_policies
+        }
+        missing_interval_policies = expected_series.difference(series_interval_policies)
+        expected_target_interval_policy = {
+            "currency": reporting_currency,
+            "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+            "series_policies": selected_series_interval_policies,
+        }
+        if (
+            any(
+                not isinstance(layered_composition.get(series_id), dict)
+                or layered_composition[series_id].get("interval_association_status")
+                != "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY"
+                for series_id in missing_interval_policies
+            )
+            or not isinstance(target_source, dict)
+            or target_source.get("interval_policy") != expected_target_interval_policy
+        ):
+            raise VerticalBuildError(
+                f"attribution plan interval policy differs: {spec_id}"
             )
         source_contracts = governed_model_policy.get("source_contracts")
         source_contract = (
@@ -4145,6 +4650,29 @@ def _current_release_plan_specs(
             evaluation_date=evaluation_date,
             holdout_fraction=governed_model_policy["holdout_fraction"],
         )
+        factor_source = specification.get("factor_source")
+        if not isinstance(factor_source, dict):
+            raise VerticalBuildError("attribution plan model sources differ")
+        _, factor_path = _portable_bundle_file(
+            attribution_bundle,
+            factor_source.get("relative_path"),
+            "factor source path",
+        )
+        expected_factor_interval_policy = {
+            "available_through_anchor": max(
+                timing["as_of_date"] for timing in expected_timing.values()
+            ),
+            "currency": reporting_currency,
+            "finality": "COMPLETE_SELECTED_SNAPSHOT",
+            "native_calendar": "SOURCE_LABELLED_DAILY",
+            "native_label_convention": "SOURCE_PUBLISHED_DAILY_LABEL",
+            "return_basis": "SOURCE_PUBLISHED",
+            "source_vintage": _sha(factor_path)[0],
+        }
+        if factor_source.get("interval_policy") != expected_factor_interval_policy:
+            raise VerticalBuildError(
+                f"attribution plan factor interval policy differs: {spec_id}"
+            )
         population = _surface_population(
             raw,
             specification,
@@ -4213,6 +4741,7 @@ def _build_base_analytics(
     *,
     current_plan: bool,
     retained_cache_root: Path | None,
+    producer_operations: list[dict[str, Any]],
 ) -> tuple[Path, Path, str]:
     """Rebuild the existing base model from one mode's exact selected inputs."""
     base_spec = (
@@ -4280,7 +4809,7 @@ def _build_base_analytics(
             )
         _write_exact(base_source / relative, matches[0].read_bytes())
     _note_progress("decomposition base")
-    _tool(
+    staged = _tool(
         "portfolio_decomposition.py",
         "stage",
         "--spec",
@@ -4295,6 +4824,15 @@ def _build_base_analytics(
             else ()
         ),
         timeout=7200,
+    )
+    _record_numerical_producer_operation(
+        producer_operations,
+        tool="portfolio_decomposition.py",
+        operation="stage",
+        spec_path=base_spec,
+        source_root=base_source,
+        output_root=decomposition_root,
+        producer_result=staged,
     )
     decomposition = _tool(
         "portfolio_decomposition.py",
@@ -4311,6 +4849,15 @@ def _build_base_analytics(
             else ()
         ),
         timeout=7200,
+    )
+    _record_numerical_producer_operation(
+        producer_operations,
+        tool="portfolio_decomposition.py",
+        operation="publish",
+        spec_path=base_spec,
+        source_root=base_source,
+        output_root=decomposition_root,
+        producer_result=decomposition,
     )
     decomposition_generation_id = _generation_id(
         decomposition.get("generation_id"), "decomposition generation_id"
@@ -4334,6 +4881,15 @@ def build_analytics(
     if attribution_bundle.resolve() != recipe_bundle:
         raise VerticalBuildError("attribution plan bundle differs from recipe")
     recipe_as_of = _text(recipe.get("as_of_date"), "recipe as_of_date")
+    recipe_evaluated_on = _text(
+        recipe.get("evaluated_on", recipe["as_of_date"]), "recipe evaluated_on"
+    )
+    selected_definition = recipe.get("dependence_selected_inputs")
+    selected_inputs_path = (
+        _path(selected_definition.get("path"), "dependence_selected_inputs.path")
+        if isinstance(selected_definition, dict)
+        else None
+    )
     correlation_source = _path(
         recipe["correlation_source_root"]["path"], "correlation source root"
     )
@@ -4358,12 +4914,21 @@ def build_analytics(
         plan.get("schema_version"),
     ) in {("0.17.0", 2), ("0.18.0", 2)}
     if current_plan:
+        correlation_expected_date = (
+            recipe_evaluated_on
+            if current_dependence_receipt.is_file()
+            else recipe_as_of
+        )
         if (
-            plan.get("evaluation_date") != recipe_as_of
-            or correlation_as_of != recipe_as_of
+            plan.get("evaluation_date") != recipe_evaluated_on
+            or correlation_as_of != correlation_expected_date
         ):
             raise VerticalBuildError("current analytics as-of date differs")
-        specs = _current_release_plan_specs(attribution_bundle, plan)
+        specs = _current_release_plan_specs(
+            attribution_bundle,
+            plan,
+            dependence_selected_inputs_path=selected_inputs_path,
+        )
     else:
         specs = _legacy_release_plan_specs(plan)
     mode_plans = (
@@ -4384,10 +4949,14 @@ def build_analytics(
         hybrid_plan = _load(
             hybrid_bundle / "plan-manifest.json", "hybrid decomposition plan"
         )
-        hybrid_specs = _current_release_plan_specs(hybrid_bundle, hybrid_plan)
+        hybrid_specs = _current_release_plan_specs(
+            hybrid_bundle,
+            hybrid_plan,
+            dependence_selected_inputs_path=selected_inputs_path,
+        )
         if (
             hybrid_plan["policies"]["strategy_evidence_mode"] != "LIVE_PLUS_BACKTEST"
-            or hybrid_plan["evaluation_date"] != recipe_as_of
+            or hybrid_plan["evaluation_date"] != recipe_evaluated_on
             or (
                 hybrid_bundle / "inputs/history/financial-mvp-contract.json"
             ).read_bytes()
@@ -4401,6 +4970,7 @@ def build_analytics(
         mode_plans["LIVE_PLUS_BACKTEST"] = (hybrid_bundle, hybrid_plan)
         spec_sources.extend((hybrid_bundle, row) for row in hybrid_specs)
     base_factor = _path(recipe["base_factor_file"]["path"], "base factor file")
+    producer_operations: list[dict[str, Any]] = []
     decomposition_root = output_root / "decomposition"
     base_spec, base_source, decomposition_generation_id = _build_base_analytics(
         attribution_bundle,
@@ -4410,6 +4980,7 @@ def build_analytics(
         decomposition_root,
         current_plan=current_plan,
         retained_cache_root=retained_cache_root,
+        producer_operations=producer_operations,
     )
     lenses_root = output_root / "decomposition-lenses"
     lenses: dict[str, str] = {}
@@ -4428,6 +4999,7 @@ def build_analytics(
             hybrid_base_root,
             current_plan=True,
             retained_cache_root=retained_cache_root,
+            producer_operations=producer_operations,
         )
         hybrid_dynamic = {"generation_id": hybrid_generation_id}
         hybrid_bundles["dynamic-style"] = str(hybrid_plan["bundle_id"])
@@ -4445,6 +5017,7 @@ def build_analytics(
             bundle_root=evidence_mode_root / "dynamic-style",
             output_root=hybrid_root / "dynamic-style",
             retained_cache_root=retained_cache_root,
+            producer_operations=producer_operations,
         )
         hybrid_bundles["dynamic-style"] = _text(
             hybrid_dynamic.get("bundle_id"), "hybrid dynamic bundle_id"
@@ -4460,7 +5033,7 @@ def build_analytics(
             lens_root = lenses_root / source_key
         lens_spec = lens_bundle / _text(row.get("path"), "lens spec path")
         _note_progress(f"decomposition lens {lens_root.name}/{lens_spec.stem}")
-        _tool(
+        staged = _tool(
             "portfolio_decomposition.py",
             "stage",
             "--spec",
@@ -4475,6 +5048,15 @@ def build_analytics(
                 else ()
             ),
             timeout=7200,
+        )
+        _record_numerical_producer_operation(
+            producer_operations,
+            tool="portfolio_decomposition.py",
+            operation="stage",
+            spec_path=lens_spec,
+            source_root=lens_bundle,
+            output_root=lens_root,
+            producer_result=staged,
         )
         result = _tool(
             "portfolio_decomposition.py",
@@ -4491,6 +5073,15 @@ def build_analytics(
                 else ()
             ),
             timeout=7200,
+        )
+        _record_numerical_producer_operation(
+            producer_operations,
+            tool="portfolio_decomposition.py",
+            operation="publish",
+            spec_path=lens_spec,
+            source_root=lens_bundle,
+            output_root=lens_root,
+            producer_result=result,
         )
         generation_id = _generation_id(
             result.get("generation_id"), "lens generation_id"
@@ -4521,6 +5112,7 @@ def build_analytics(
                 bundle_root=evidence_mode_root / source_key,
                 output_root=hybrid_root / source_key,
                 retained_cache_root=retained_cache_root,
+                producer_operations=producer_operations,
             )
             hybrid_lenses[source_key] = _text(
                 hybrid.get("generation_id"), "hybrid lens generation_id"
@@ -4529,27 +5121,56 @@ def build_analytics(
                 hybrid.get("bundle_id"), "hybrid lens bundle_id"
             )
     correlation_root = output_root / "correlation"
-    _tool(
+    correlation_spec = correlation_source / "spec.json"
+    correlation_staged = _tool(
         "portfolio_correlation.py",
         "stage",
         "--spec",
-        str(correlation_source / "spec.json"),
+        str(correlation_spec),
         "--source-root",
         str(correlation_source),
         "--output-root",
         str(correlation_root),
+        *(
+            ("--retained-cache-root", str(retained_cache_root))
+            if retained_cache_root is not None
+            else ()
+        ),
         timeout=7200,
+    )
+    _record_numerical_producer_operation(
+        producer_operations,
+        tool="portfolio_correlation.py",
+        operation="stage",
+        spec_path=correlation_spec,
+        source_root=correlation_source,
+        output_root=correlation_root,
+        producer_result=correlation_staged,
     )
     correlation = _tool(
         "portfolio_correlation.py",
         "publish",
         "--spec",
-        str(correlation_source / "spec.json"),
+        str(correlation_spec),
         "--source-root",
         str(correlation_source),
         "--output-root",
         str(correlation_root),
+        *(
+            ("--retained-cache-root", str(retained_cache_root))
+            if retained_cache_root is not None
+            else ()
+        ),
         timeout=7200,
+    )
+    _record_numerical_producer_operation(
+        producer_operations,
+        tool="portfolio_correlation.py",
+        operation="publish",
+        spec_path=correlation_spec,
+        source_root=correlation_source,
+        output_root=correlation_root,
+        producer_result=correlation,
     )
     correlation_generation_id = _generation_id(
         correlation.get("generation_id"), "correlation generation_id"
@@ -4610,6 +5231,9 @@ def build_analytics(
         "decomposition_lenses_root": str(lenses_root),
         "decomposition_root": str(decomposition_root),
         "lens_generations": lenses,
+        "numerical_producer_evidence": _numerical_producer_evidence(
+            producer_operations
+        ),
         "weekly_generation_id": weekly_generation_id,
         "weekly_root": str(weekly_root),
     }
@@ -4659,6 +5283,9 @@ def build_report_candidate(
     invested_capital_result_path: Path | None = None,
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
+    attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
 ) -> dict[str, Any]:
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
@@ -4679,6 +5306,10 @@ def build_report_candidate(
     ):
         raise VerticalBuildError(
             "epoch-manifest generation root and id must be supplied together"
+        )
+    if attribution_generation_id is not None and attribution_root is None:
+        raise VerticalBuildError(
+            "attribution root and generation identity are required together"
         )
     epoch_arguments: tuple[str, ...] = ()
     if epoch_manifest_generation_root is not None:
@@ -4715,6 +5346,16 @@ def build_report_candidate(
         str(freshness_health),
         "--history-contract",
         str(history_contract),
+        *(
+            ("--dependence-selected-inputs", str(dependence_selected_inputs_path))
+            if dependence_selected_inputs_path is not None
+            else ()
+        ),
+        *(
+            ("--source-clock", str(source_clock_path))
+            if source_clock_path is not None
+            else ()
+        ),
         "--implementation-reconciliation",
         str(implementation_reconciliation),
         "--implementation-return-attribution",
@@ -4722,6 +5363,11 @@ def build_report_candidate(
         *(
             ("--attribution-root", str(attribution_root))
             if attribution_root is not None
+            else ()
+        ),
+        *(
+            ("--attribution-generation-id", attribution_generation_id)
+            if attribution_generation_id is not None
             else ()
         ),
         *(
@@ -4789,6 +5435,8 @@ def build_workbook(
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
     workbook_runtime_path: Path | None = None,
+    attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
 ) -> dict[str, Any]:
     workbook_runtime = _resolve_workbook_runtime(workbook_runtime_path)
     hwm_arguments = _governed_hwm_arguments(
@@ -4813,6 +5461,10 @@ def build_workbook(
     ):
         raise VerticalBuildError(
             "epoch-manifest generation root and id must be supplied together"
+        )
+    if attribution_generation_id is not None and attribution_root is None:
+        raise VerticalBuildError(
+            "attribution root and generation identity are required together"
         )
     epoch_arguments: tuple[str, ...] = ()
     epoch_source: dict[str, object] | None = None
@@ -4970,6 +5622,11 @@ def build_workbook(
         str(freshness_health),
         "--history-contract",
         str(history_contract),
+        *(
+            ("--dependence-selected-inputs", str(dependence_selected_inputs_path))
+            if dependence_selected_inputs_path is not None
+            else ()
+        ),
         "--implementation-reconciliation",
         str(implementation_reconciliation),
         "--implementation-return-attribution",
@@ -4977,6 +5634,11 @@ def build_workbook(
         *(
             ("--attribution-root", str(attribution_root))
             if attribution_root is not None
+            else ()
+        ),
+        *(
+            ("--attribution-generation-id", attribution_generation_id)
+            if attribution_generation_id is not None
             else ()
         ),
         *(
@@ -5035,6 +5697,11 @@ def build_workbook(
         str(freshness_health),
         "--history-contract",
         str(history_contract),
+        *(
+            ("--dependence-selected-inputs", str(dependence_selected_inputs_path))
+            if dependence_selected_inputs_path is not None
+            else ()
+        ),
         "--implementation-reconciliation",
         str(implementation_reconciliation),
         "--implementation-return-attribution",
@@ -5042,6 +5709,11 @@ def build_workbook(
         *(
             ("--attribution-root", str(attribution_root))
             if attribution_root is not None
+            else ()
+        ),
+        *(
+            ("--attribution-generation-id", attribution_generation_id)
+            if attribution_generation_id is not None
             else ()
         ),
         *(
@@ -5141,9 +5813,15 @@ def build_report(
     invested_capital_input_generation_path: Path | None = None,
     portfolio_root: Path | None = None,
     workbook_runtime_path: Path | None = None,
+    attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
 ) -> dict[str, Any]:
-    _resolve_workbook_runtime(workbook_runtime_path)
-    hwm_paths = (
+    if workbook_runtime_path is not None:
+        raise VerticalBuildError(
+            "workbook runtime is permanently held and excluded from the financial MVP"
+        )
+    hwm_paths: _ReportForwardedArguments = (
         {
             "hwm_governed_result_path": hwm_governed_result_path,
             "hwm_governed_input_generation_path": (hwm_governed_input_generation_path),
@@ -5162,7 +5840,7 @@ def build_report(
         )
         else {}
     )
-    capital_paths = (
+    capital_paths: _ReportForwardedArguments = (
         {
             "invested_capital_result_path": invested_capital_result_path,
             "invested_capital_input_generation_path": (
@@ -5181,9 +5859,26 @@ def build_report(
     # publication and require the portfolio root for it.  Forward whatever
     # the caller supplied instead of only forwarding it alongside those two
     # argument families.
-    portfolio_paths = (
+    portfolio_paths: _ReportForwardedArguments = (
         {"portfolio_root": portfolio_root} if portfolio_root is not None else {}
     )
+    dependence_selected_inputs_paths: _ReportForwardedArguments = (
+        {"dependence_selected_inputs_path": dependence_selected_inputs_path}
+        if dependence_selected_inputs_path is not None
+        else {}
+    )
+    attribution_generation_paths: _ReportForwardedArguments = (
+        {"attribution_generation_id": attribution_generation_id}
+        if attribution_generation_id is not None
+        else {}
+    )
+    forwarded_arguments: _ReportForwardedArguments = {
+        **hwm_paths,
+        **capital_paths,
+        **portfolio_paths,
+        **dependence_selected_inputs_paths,
+        **attribution_generation_paths,
+    }
     candidate = build_report_candidate(
         baseline_root,
         provider_ledger_root,
@@ -5199,31 +5894,112 @@ def build_report(
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
         epoch_manifest_generation_root=epoch_manifest_generation_root,
         epoch_manifest_generation_id=epoch_manifest_generation_id,
-        **hwm_paths,
-        **portfolio_paths,
-        **capital_paths,
+        **forwarded_arguments,
+        source_clock_path=source_clock_path,
     )
-    return build_workbook(
-        baseline_root,
-        provider_ledger_root,
-        freshness_health,
-        history_contract,
-        implementation_reconciliation,
-        implementation_return_attribution,
-        attribution_root,
-        Path(_text(candidate.get("candidate_dir"), "report candidate")),
-        output_root,
-        correlation_root,
-        decomposition_lenses_root,
-        decomposition_plan_bundle,
-        hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
-        epoch_manifest_generation_root=epoch_manifest_generation_root,
-        epoch_manifest_generation_id=epoch_manifest_generation_id,
-        **hwm_paths,
-        **portfolio_paths,
-        **capital_paths,
-        workbook_runtime_path=workbook_runtime_path,
+    candidate_dir = Path(_text(candidate.get("candidate_dir"), "report candidate"))
+    report_arguments = (
+        "--baseline-root",
+        str(baseline_root),
+        "--candidate-dir",
+        str(candidate_dir),
+        "--provider-ledger-root",
+        str(provider_ledger_root),
+        "--freshness-health",
+        str(freshness_health),
+        "--history-contract",
+        str(history_contract),
+        "--implementation-reconciliation",
+        str(implementation_reconciliation),
+        "--implementation-return-attribution",
+        str(implementation_return_attribution),
+        *(
+            ("--attribution-root", str(attribution_root))
+            if attribution_root is not None
+            else ()
+        ),
+        *(
+            ("--attribution-generation-id", attribution_generation_id)
+            if attribution_generation_id is not None
+            else ()
+        ),
+        *(
+            ("--correlation-root", str(correlation_root))
+            if correlation_root is not None
+            else ()
+        ),
+        *(
+            ("--dependence-selected-inputs", str(dependence_selected_inputs_path))
+            if dependence_selected_inputs_path is not None
+            else ()
+        ),
+        *(
+            ("--source-clock", str(source_clock_path))
+            if source_clock_path is not None
+            else ()
+        ),
+        *(
+            (
+                "--decomposition-lenses-root",
+                str(decomposition_lenses_root),
+                "--decomposition-plan-bundle",
+                str(decomposition_plan_bundle),
+            )
+            if decomposition_lenses_root is not None
+            and decomposition_plan_bundle is not None
+            else ()
+        ),
+        *(
+            (
+                "--hybrid-decomposition-plan-bundle",
+                str(hybrid_decomposition_plan_bundle),
+            )
+            if hybrid_decomposition_plan_bundle is not None
+            else ()
+        ),
+        *(
+            (
+                "--epoch-manifest",
+                str(candidate_dir / "account-strategy-manifest.json"),
+                "--epoch-manifest-source",
+                str(candidate_dir / "epoch-manifest-source.json"),
+                "--epoch-crosswalk",
+                str(candidate_dir / "account-strategy-current-epoch-crosswalk.json"),
+                "--epoch-manifest-generation-root",
+                str(epoch_manifest_generation_root),
+            )
+            if epoch_manifest_generation_root is not None
+            else ()
+        ),
+        *_governed_hwm_arguments(
+            result=hwm_governed_result_path,
+            input_generation=hwm_governed_input_generation_path,
+            calendar_authority=hwm_governed_calendar_authority_path,
+            admission_receipt=hwm_governed_admission_receipt_path,
+        ),
+        *_invested_capital_arguments(
+            result=invested_capital_result_path,
+            input_generation=invested_capital_input_generation_path,
+        ),
     )
+    verification = _tool("portfolio_report.py", "verify", *report_arguments)
+    published = _tool(
+        "portfolio_report.py",
+        "publish",
+        *report_arguments,
+        "--output-root",
+        str(output_root),
+        "--private-stage-root",
+        str(output_root),
+        "--portfolio-root",
+        str(portfolio_root) if portfolio_root is not None else str(output_root),
+    )
+    return {
+        **published,
+        "candidate_dir": str(candidate_dir),
+        "root": str(output_root),
+        "verification": verification,
+    }
 
 
 def _financial_epoch_inputs(recipe: Mapping[str, Any]) -> dict[str, Path] | None:
@@ -5555,6 +6331,20 @@ def build_panel_candidate(
     # mere existence, or a missing source silently reverts the panel to
     # NO_HWM_INPUTS and HPR HWM parity fails with a misleading diff.
     strategy_history_contract = _history_contract_path(recipe)
+    dependence_selected_inputs = recipe.get("dependence_selected_inputs")
+    dependence_selected_arguments = (
+        (
+            "--dependence-selected-inputs",
+            str(
+                _path(
+                    dependence_selected_inputs["path"],
+                    "dependence_selected_inputs.path",
+                )
+            ),
+        )
+        if isinstance(dependence_selected_inputs, dict)
+        else ()
+    )
     strategy_history_arguments = (
         ("--strategy-history-contract", str(strategy_history_contract))
         if strategy_history_contract.name == "dependence-source.json"
@@ -5609,6 +6399,7 @@ def build_panel_candidate(
         "--report-root",
         str(report_root),
         *strategy_history_arguments,
+        *dependence_selected_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5644,6 +6435,7 @@ def build_panel_candidate(
         "--report-root",
         str(report_root),
         *strategy_history_arguments,
+        *dependence_selected_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5743,6 +6535,20 @@ def publish_panel(
     # mere existence, or a missing source silently reverts the panel to
     # NO_HWM_INPUTS and HPR HWM parity fails with a misleading diff.
     strategy_history_contract = _history_contract_path(recipe)
+    dependence_selected_inputs = recipe.get("dependence_selected_inputs")
+    dependence_selected_arguments = (
+        (
+            "--dependence-selected-inputs",
+            str(
+                _path(
+                    dependence_selected_inputs["path"],
+                    "dependence_selected_inputs.path",
+                )
+            ),
+        )
+        if isinstance(dependence_selected_inputs, dict)
+        else ()
+    )
     strategy_history_arguments = (
         ("--strategy-history-contract", str(strategy_history_contract))
         if strategy_history_contract.name == "dependence-source.json"
@@ -5821,12 +6627,14 @@ def publish_panel(
             raise VerticalBuildError(
                 "staged account-strategy manifest identity differs"
             )
+    producer_qa_dir = _stage_panel_qa(qa_dir, output_root)
     semantic_validation = _tool(
         "portfolio_control_panel.py",
         "verify",
         "--report-root",
         str(report_root),
         *strategy_history_arguments,
+        *dependence_selected_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5853,7 +6661,8 @@ def publish_panel(
         timeout=7200,
     )
     _write_exact(
-        qa_dir / "semantic-validation.json", canonical_json_bytes(semantic_validation)
+        producer_qa_dir / "semantic-validation.json",
+        canonical_json_bytes(semantic_validation),
     )
     _tool(
         "portfolio_control_panel.py",
@@ -5861,11 +6670,11 @@ def publish_panel(
         "--candidate-dir",
         str(candidate),
         "--qa-dir",
-        str(qa_dir),
+        str(producer_qa_dir),
         timeout=7200,
     )
     receipt_path, receipt = _panel_publication_receipt(
-        recipe_path, recipe, output_root, candidate, qa_dir
+        recipe_path, recipe, output_root, candidate, producer_qa_dir
     )
     result = _tool(
         "portfolio_control_panel.py",
@@ -5873,6 +6682,12 @@ def publish_panel(
         "--report-root",
         str(report_root),
         *strategy_history_arguments,
+        # `verify` above already receives these. `publish` re-reads the same
+        # dependence source, and a schema-2 receipt refuses without them
+        # ("selected dependence source requires selected inputs"), so omitting
+        # them here let the panel verify and then fail at the last step of the
+        # last stage.
+        *dependence_selected_arguments,
         "--baseline-root",
         str(baseline_root),
         "--legacy-panel",
@@ -5900,7 +6715,7 @@ def publish_panel(
         "--candidate-dir",
         str(candidate),
         "--qa-dir",
-        str(qa_dir),
+        str(producer_qa_dir),
         "--coordinated-release-receipt",
         str(receipt_path),
         "--output-root",
@@ -5969,7 +6784,6 @@ _PANEL_CANDIDATE_PREDECESSORS = (
     "attribution",
     "analytics",
     "report",
-    "workbook",
 )
 
 
@@ -6206,8 +7020,14 @@ def build_stage(
 ) -> dict[str, Any]:
     """Build exactly one source-to-panel stage from its predecessor outputs."""
 
+    if workbook_runtime_path is not None:
+        raise VerticalBuildError(
+            "workbook runtime is permanently held and excluded from the financial MVP"
+        )
     if role == "workbook":
-        _resolve_workbook_runtime(workbook_runtime_path)
+        raise VerticalBuildError(
+            "workbook stage is permanently held and excluded from the financial MVP"
+        )
 
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
@@ -6267,6 +7087,28 @@ def build_stage(
         manifest_admission_policy=manifest_admission_policy,
     )
     history_contract = _history_contract_path(recipe)
+    dependence_selected_inputs_path = (
+        _path(
+            recipe["dependence_selected_inputs"]["path"],
+            "dependence_selected_inputs.path",
+        )
+        if "dependence_selected_inputs" in recipe
+        else None
+    )
+    dependence_selected_inputs_paths = (
+        {"dependence_selected_inputs_path": dependence_selected_inputs_path}
+        if dependence_selected_inputs_path is not None
+        else {}
+    )
+    source_clock_paths = (
+        {
+            "source_clock_path": _path(
+                recipe["source_clock"]["path"], "source_clock.path"
+            )
+        }
+        if isinstance(recipe.get("source_clock"), dict)
+        else {}
+    )
     implementation_reconciliation = _path(
         recipe["implementation_reconciliation"]["path"],
         "implementation reconciliation",
@@ -6279,6 +7121,7 @@ def build_stage(
         recipe["strategy_attribution_root"]["path"],
         "strategy attribution root",
     )
+    attribution_generation_id = recipe["strategy_attribution_root"].get("generation_id")
     hybrid_decomposition_plan_bundle = (
         _path(
             recipe["hybrid_decomposition_plan_bundle"]["path"],
@@ -6307,7 +7150,7 @@ def build_stage(
         ledger = _stage_result(output_root, "ledger")
         analytics = _stage_result(output_root, "analytics")
         epoch_identity = _epoch_manifest_panel_identity(recipe)
-        result = build_report_candidate(
+        result = build_report(
             stages / "baseline",
             stages / "ledger",
             _path(ledger.get("freshness_health"), "freshness health"),
@@ -6315,40 +7158,6 @@ def build_stage(
             implementation_reconciliation,
             implementation_return_attribution,
             strategy_attribution_root,
-            stages / "report-candidate",
-            _path(analytics.get("correlation_root"), "correlation root"),
-            _path(
-                analytics.get("decomposition_lenses_root"), "decomposition lenses root"
-            ),
-            _path(
-                recipe["decomposition_plan_bundle"]["path"],
-                "decomposition plan bundle",
-            ),
-            epoch_manifest_generation_root=(
-                epoch_identity[0] if epoch_identity is not None else None
-            ),
-            epoch_manifest_generation_id=(
-                epoch_identity[1] if epoch_identity is not None else None
-            ),
-            hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
-            **hwm_paths,
-            **portfolio_paths,
-            **capital_paths,
-        )
-    elif role == "workbook":
-        ledger = _stage_result(output_root, "ledger")
-        report = _stage_result(output_root, "report")
-        analytics = _stage_result(output_root, "analytics")
-        epoch_identity = _epoch_manifest_panel_identity(recipe)
-        result = build_workbook(
-            stages / "baseline",
-            stages / "ledger",
-            _path(ledger.get("freshness_health"), "freshness health"),
-            history_contract,
-            implementation_reconciliation,
-            implementation_return_attribution,
-            strategy_attribution_root,
-            _path(report.get("candidate_dir"), "report candidate"),
             stages / "report",
             _path(analytics.get("correlation_root"), "correlation root"),
             _path(
@@ -6364,24 +7173,25 @@ def build_stage(
             epoch_manifest_generation_id=(
                 epoch_identity[1] if epoch_identity is not None else None
             ),
+            attribution_generation_id=attribution_generation_id,
             hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+            **dependence_selected_inputs_paths,
+            **source_clock_paths,
             **hwm_paths,
             **portfolio_paths,
             **capital_paths,
-            workbook_runtime_path=workbook_runtime_path,
         )
     elif role in {"panel-candidate", "panel"}:
         ledger = _stage_result(output_root, "ledger")
         attribution = _stage_result(output_root, "attribution")
         analytics = _stage_result(output_root, "analytics")
-        _stage_result(output_root, "workbook")
         candidate_result_path = _stage_path(output_root, "panel-candidate")
         panel = (
             _load_panel_candidate_checkpoint(recipe_path, recipe, output_root)
             if candidate_result_path.is_file()
             else build_panel_candidate(
                 recipe_path,
-                stages / "report",
+                _path(_stage_result(output_root, "report").get("root"), "report root"),
                 stages / "baseline",
                 _path(attribution.get("destination"), "attribution destination"),
                 analytics,
@@ -6413,7 +7223,7 @@ def build_stage(
             staged_manifest = panel.get("account_strategy_manifest")
             result = publish_panel(
                 recipe_path,
-                stages / "report",
+                _path(_stage_result(output_root, "report").get("root"), "report root"),
                 stages / "baseline",
                 _path(attribution.get("destination"), "attribution destination"),
                 analytics,
@@ -6491,7 +7301,10 @@ def build_all(
     retained_cache_root: Path | None = None,
     workbook_runtime_path: Path | None = None,
 ) -> dict[str, Any]:
-    _resolve_workbook_runtime(workbook_runtime_path)
+    if workbook_runtime_path is not None:
+        raise VerticalBuildError(
+            "workbook runtime is permanently held and excluded from the financial MVP"
+        )
     hwm_arguments = _governed_hwm_arguments(
         result=hwm_governed_result_path,
         input_generation=hwm_governed_input_generation_path,
@@ -6585,7 +7398,7 @@ def build_all(
         **portfolio_paths,
         retained_cache_root=retained_cache_root,
     )
-    report_candidate = build_stage(
+    report = build_stage(
         recipe_path,
         output_root,
         "report",
@@ -6593,16 +7406,6 @@ def build_all(
         **hwm_paths,
         **portfolio_paths,
         **capital_paths,
-    )
-    report = build_stage(
-        recipe_path,
-        output_root,
-        "workbook",
-        **financial_arguments,
-        **hwm_paths,
-        **portfolio_paths,
-        **capital_paths,
-        workbook_runtime_path=workbook_runtime_path,
     )
     panel = build_stage(
         recipe_path,
@@ -6621,7 +7424,6 @@ def build_all(
         "panel": panel,
         "release_commit": recipe["release_commit"],
         "report": report,
-        "report_candidate": report_candidate,
         "schema_version": 1,
         "state": "PANEL_CANDIDATE_REQUIRES_BROWSER_QA",
     }
@@ -6644,7 +7446,6 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--invested-capital-input-generation", type=Path)
     build.add_argument("--portfolio-root", type=Path)
     build.add_argument("--retained-cache-root", type=Path)
-    build.add_argument("--workbook-runtime", type=Path)
     inventory = commands.add_parser("inventory")
     inventory.add_argument("--path", type=Path, required=True)
     recipe = commands.add_parser("recipe")
@@ -6656,9 +7457,11 @@ def _parser() -> argparse.ArgumentParser:
     recipe.add_argument("--implementation-reconciliation", type=Path, required=True)
     recipe.add_argument("--implementation-return-attribution", type=Path, required=True)
     recipe.add_argument("--strategy-attribution-root", type=Path, required=True)
+    recipe.add_argument("--strategy-attribution-generation-id")
     recipe.add_argument("--decomposition-plan-bundle", type=Path, required=True)
     recipe.add_argument("--hybrid-decomposition-plan-bundle", type=Path)
     recipe.add_argument("--correlation-source-root", type=Path, required=True)
+    recipe.add_argument("--dependence-selected-inputs", type=Path)
     recipe.add_argument("--legacy-panel", type=Path, required=True)
     recipe.add_argument("--as-of-date", required=True)
     recipe.add_argument("--pipeline-id", required=True)
@@ -6682,7 +7485,6 @@ def _parser() -> argparse.ArgumentParser:
             "attribution",
             "analytics",
             "report",
-            "workbook",
             "panel-candidate",
             "panel",
         ),
@@ -6702,7 +7504,6 @@ def _parser() -> argparse.ArgumentParser:
     stage.add_argument("--invested-capital-input-generation", type=Path)
     stage.add_argument("--portfolio-root", type=Path)
     stage.add_argument("--retained-cache-root", type=Path)
-    stage.add_argument("--workbook-runtime", type=Path)
     return parser
 
 
@@ -6727,7 +7528,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 portfolio_root=args.portfolio_root,
                 retained_cache_root=args.retained_cache_root,
-                workbook_runtime_path=args.workbook_runtime,
             )
         elif args.command == "inventory":
             result = _directory_inventory(args.path.resolve())
@@ -6759,6 +7559,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 account_strategy_admission_policy=args.account_strategy_admission_policy,
                 epoch_manifest_generation_root=args.epoch_manifest_generation_root,
                 epoch_manifest_generation_id=args.epoch_manifest_generation_id,
+                strategy_attribution_generation_id=(
+                    args.strategy_attribution_generation_id
+                ),
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
             )
         else:
             result = build_stage(
@@ -6785,7 +7589,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
                 portfolio_root=args.portfolio_root,
                 retained_cache_root=args.retained_cache_root,
-                workbook_runtime_path=args.workbook_runtime,
             )
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"portfolio-release-builder: FAIL: {exc}", file=sys.stderr)

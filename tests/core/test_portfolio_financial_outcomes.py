@@ -448,7 +448,12 @@ def test_semantic_gate_ignores_only_financial_invocation_counters():
 
 
 def _staged_ledger(root: Path, generation_id: str) -> Path:
-    """Stage one provider-ledger file inside its own generation directory."""
+    """Stage one provider-ledger file under its generation's normalized route.
+
+    Both shapes are real: the governed route writes the ledger at the
+    generation root, and this one nests it. Binding by generation id rather
+    than by path holds for either.
+    """
     ledger = root / "generations" / generation_id / "normalized/provider-ledger.json"
     ledger.parent.mkdir(parents=True)
     ledger.write_bytes(b'{"as_of_date": "2026-09-02"}')
@@ -456,9 +461,18 @@ def _staged_ledger(root: Path, generation_id: str) -> Path:
 
 
 def _capital_input(path: Path, ledger: Path) -> Path:
+    """A portable binding: content hash plus the generation it came from."""
     path.write_bytes(
         json.dumps(
-            {"source_bindings": {"provider_ledger": {"path": str(ledger)}}}
+            {
+                "source_bindings": {
+                    "provider_ledger": {
+                        "sha256": hashlib.sha256(ledger.read_bytes()).hexdigest(),
+                        "size_bytes": ledger.stat().st_size,
+                        "generation_id": ledger.parent.parent.name,
+                    }
+                }
+            }
         ).encode("utf-8")
     )
     return path

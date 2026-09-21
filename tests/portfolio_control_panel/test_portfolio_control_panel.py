@@ -7,6 +7,7 @@ from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 import hashlib
 import importlib.util
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -10277,7 +10278,7 @@ def _copy_epoch_browser_fixture(tmp_path: Path) -> Path:
 
 
 def _run_interaction_qa(
-    candidate: Path, output: Path
+    candidate: Path, output: Path, *, expected_common_eod: str | None = None
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
     """Run the shipped Chromium acceptance harness against one candidate."""
 
@@ -10304,21 +10305,24 @@ def _run_interaction_qa(
     env = dict(os.environ)
     env["PLAYWRIGHT_MODULE"] = str(playwright_module)
     env["PLAYWRIGHT_EXECUTABLE_PATH"] = executable
+    command = [
+        node,
+        str(panel.DEFAULT_TEMPLATE_ROOT / "interaction_qa.mjs"),
+        "--html",
+        str(candidate / "index.html"),
+        "--output",
+        str(output),
+        "--exclude-candidates",
+        "true",
+        "--epoch-only",
+        "true",
+        "--expected-calculation-cutoff",
+        "2026-08-13",
+    ]
+    if expected_common_eod is not None:
+        command.extend(["--expected-common-eod", expected_common_eod])
     result = subprocess.run(
-        [
-            node,
-            str(panel.DEFAULT_TEMPLATE_ROOT / "interaction_qa.mjs"),
-            "--html",
-            str(candidate / "index.html"),
-            "--output",
-            str(output),
-            "--exclude-candidates",
-            "true",
-            "--epoch-only",
-            "true",
-            "--expected-calculation-cutoff",
-            "2026-08-13",
-        ],
+        command,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -10368,6 +10372,75 @@ def test_schema9_epoch_manifest_browser_uses_authority_labels_and_cutoff(
     assert rendered_rows[0]["label"] != "wrong-summary-provider account 1"
     assert evidence["legend"].find("Calculations through 2026-08-13") >= 0
     assert evidence["legend"].find("Artifact/provider capture date: 2026-08-16") >= 0
+
+
+def test_interaction_qa_checks_the_rendered_source_clock_handoff(
+    tmp_path: Path,
+) -> None:
+    """The shipped browser consumer sees the panel's accepted clock disclosures."""
+
+    candidate = _copy_epoch_browser_fixture(tmp_path)
+    data = json.loads(
+        (candidate / "data" / "dashboard_data.json").read_text(encoding="utf-8")
+    )
+    clock = {
+        "selected_financial_cutoff": "2026-08-13",
+        "latest_common_eod": "2026-08-14",
+        "limiting_inputs": ["matrixport", "quantbase"],
+        "source_data_as_of": [
+            {
+                "source_id": "ibkr",
+                "applies_to_latest_common_eod": True,
+                "provider_data_date": "2026-08-15",
+                "finality": {
+                    "basis": "NATIVE_LEDGER",
+                    "provider_finality_guarantee": True,
+                },
+                "timezone": "UTC",
+                "precision": "DATE",
+            },
+            {
+                "source_id": "matrixport",
+                "applies_to_latest_common_eod": True,
+                "provider_data_date": "2026-08-14",
+                "finality": {
+                    "basis": "NATIVE_LEDGER",
+                    "provider_finality_guarantee": True,
+                },
+                "timezone": "UTC",
+                "precision": "DATE",
+            },
+            {
+                "source_id": "quantbase",
+                "applies_to_latest_common_eod": True,
+                "provider_data_date": "2026-08-14",
+                "finality": {
+                    "basis": "NATIVE_LEDGER",
+                    "provider_finality_guarantee": True,
+                },
+                "timezone": "UTC",
+                "precision": "DATE",
+            },
+        ],
+    }
+    data["meta"]["source_clock"] = clock
+    data["limitations"] = [
+        *data["limitations"],
+        *panel._source_clock_display_lines(clock),
+    ]
+    _write_dashboard_data_script(candidate, data)
+
+    result, evidence = _run_interaction_qa(
+        candidate, tmp_path / "source-clock-qa.json", expected_common_eod="2026-08-14"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert any(
+        item["check"]
+        == "Source clock preserves selected/common EOD, limiting inputs, and native source disclosures"
+        and item["status"] == "PASS"
+        for item in evidence["checks"]
+    )
 
 
 def test_schema9_epoch_manifest_browser_tracks_label_mutations_and_discloses_missing_cutoff(
@@ -11325,8 +11398,12 @@ def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_recei
                 baseline_root=inputs["baseline"],
                 **financial,
             )
+        # The builder stages attended QA into its own directory and names it on the
+        # command line; the coordinated-release receipt records that same directory.
+        # Reading it back from the argument is what production does.
+        producer_qa = Path(str(args[args.index("--qa-dir") + 1]))
         if command == "qa":
-            return panel.validate_qa(candidate, qa)
+            return panel.validate_qa(candidate, producer_qa)
         assert command == "publish"
         assert args[args.index("--strategy-history-contract") + 1] == str(
             dependence_source
@@ -11334,11 +11411,13 @@ def test_release_builder_wrapper_reaches_real_panel_publication_with_bound_recei
         receipt_path = Path(str(args[args.index("--coordinated-release-receipt") + 1]))
         receipt_bytes = receipt_path.read_bytes()
         assert receipt_bytes == canonical_json_bytes(json.loads(receipt_bytes))
+        assert producer_qa == inputs["output"].resolve() / "qa"
+        assert producer_qa != qa
         panel_result = panel.publish_panel(
             inputs["report"],
             inputs["legacy"],
             candidate,
-            qa,
+            producer_qa,
             inputs["output"],
             private_stage_root=inputs["output"],
             portfolio_root=tmp_path / "production",
@@ -11952,3 +12031,49 @@ def test_panel_mwr_projection_rejects_label_perimeter_mismatch() -> None:
     row["mwr_label"] = "ACCOUNT_EPOCH_MWR"
     with pytest.raises(panel.ControlPanelValidationError, match="valuation perimeter"):
         panel._validate_mwr_perimeter([row])
+
+
+def test_embedded_download_chunk_cap_is_one_shared_constant() -> None:
+    """The producer's cap and the renderer's cap must be the same number.
+
+    Nothing bounded the producer, so it emitted a 6612-chunk payload against a
+    renderer that refused anything over 4096. The panel published an inert
+    download link and the cost surfaced six stages later, in the attended panel
+    stage, as an interaction-QA timeout that named nothing.
+
+    8191 is the mechanism's ceiling rather than a policy choice: the renderer
+    joins every chunk into one string and V8's MAX_STRING_LENGTH is 536870888,
+    so 8192 chunks of 65536 raise RangeError there whatever these say.
+    """
+
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"EMBEDDED_DOWNLOAD_MAX_CHUNKS = (\d+);", renderer)
+    assert match is not None, "the renderer no longer declares a chunk cap"
+    assert int(match.group(1)) == panel._DOWNLOAD_MAX_BASE64_CHUNKS, (
+        "the renderer and the producer disagree about the embedded download "
+        "chunk cap, so the producer can emit a panel that refuses its own "
+        "download metadata"
+    )
+
+    size = re.search(r"EMBEDDED_DOWNLOAD_CHUNK_SIZE = (\d+);", renderer)
+    assert size is not None
+    assert int(size.group(1)) == panel._DOWNLOAD_BASE64_CHUNK_SIZE
+    assert (
+        panel._DOWNLOAD_MAX_BASE64_CHUNKS * panel._DOWNLOAD_BASE64_CHUNK_SIZE
+        <= 536_870_888
+    ), "the cap admits a payload the renderer's string join cannot hold"
+
+
+def test_report_download_link_refuses_a_payload_over_the_chunk_cap() -> None:
+    """A payload the renderer would reject must not reach a published panel."""
+
+    oversized = b"x" * (
+        (panel._DOWNLOAD_MAX_BASE64_CHUNKS + 1) * panel._DOWNLOAD_BASE64_CHUNK_SIZE
+    )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="exceeds the embedded download chunk cap",
+    ):
+        panel._report_download_link(
+            "downloads/portfolio-report-data.json", "Report data", oversized
+        )

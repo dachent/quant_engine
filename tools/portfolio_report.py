@@ -388,6 +388,152 @@ def _public_report_value(value: object) -> object:
     return value
 
 
+def _source_clock_file_path(value: object, field_name: str) -> Path:
+    if not isinstance(value, Mapping) or set(value) != {
+        "path",
+        "sha256",
+        "size_bytes",
+    }:
+        raise ReportValidationError(f"source clock {field_name} differs")
+    path = Path(_text(value.get("path"), f"source clock {field_name}.path")).resolve()
+    if path.is_symlink() or not path.is_file():
+        raise ReportValidationError(f"source clock {field_name} is unavailable")
+    sha256, size_bytes = hash_file(path)
+    if sha256 != value.get("sha256") or size_bytes != value.get("size_bytes"):
+        raise ReportValidationError(f"source clock {field_name} differs")
+    return path
+
+
+def _source_clock_authority(
+    path: Path | None,
+) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    """Replay the receipt's native source phase before accepting its clock."""
+
+    if path is None:
+        return None
+    receipt = _load_json(path, "source clock receipt")
+    if (
+        set(receipt) != {"schema_version", "source_phase", "data_clock"}
+        or receipt.get("schema_version") != 1
+    ):
+        raise ReportValidationError("source clock receipt differs")
+    phase = receipt.get("source_phase")
+    clock = receipt.get("data_clock")
+    if (
+        not isinstance(phase, Mapping)
+        or phase.get("status") != "PASS"
+        or not isinstance(clock, dict)
+    ):
+        raise ReportValidationError("source clock receipt differs")
+    try:
+        from portfolio_attended_preparation import _source_clock
+        from portfolio_pipeline_materialize import validate_source_phase
+
+        cutoff = _text(
+            clock.get("selected_financial_cutoff"),
+            "source clock selected_financial_cutoff",
+        )
+        contract_path = _source_clock_file_path(
+            phase.get("financial_input_contract"), "financial input contract"
+        )
+        catalog_path = _source_clock_file_path(
+            phase.get("provider_ledger_catalog"), "provider ledger catalog"
+        )
+        manifest_path = _source_clock_file_path(
+            phase.get("provider_ledger_manifest"), "provider ledger manifest"
+        )
+        if catalog_path.parent != manifest_path.parent:
+            raise ValueError("provider ledger generation differs")
+        replayed_phase = validate_source_phase(
+            requested_as_of=cutoff,
+            provider_ledger_generation_root=manifest_path.parent,
+            financial_input_contract_path=contract_path,
+        )
+        expected = _source_clock(replayed_phase, cutoff)
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise ReportValidationError("source clock source authority differs") from exc
+    if dict(phase) != replayed_phase or clock != expected:
+        raise ReportValidationError("source clock source authority differs")
+    source_rows = expected.get("source_data_as_of")
+    if not isinstance(source_rows, list) or not source_rows:
+        raise ReportValidationError("source clock native declarations differ")
+    for row in source_rows:
+        if not isinstance(row, Mapping):
+            raise ReportValidationError("source clock native declarations differ")
+        timezone = row.get("timezone")
+        if timezone is not None and (not isinstance(timezone, str) or not timezone):
+            raise ReportValidationError("source clock native timezone differs")
+        precision = row.get("precision")
+        if precision is not None and (not isinstance(precision, str) or not precision):
+            raise ReportValidationError("source clock native precision differs")
+        observed_at = row.get("native_observed_at")
+        if observed_at is not None:
+            if not isinstance(observed_at, str) or not observed_at:
+                raise ReportValidationError("source clock native observation differs")
+            try:
+                parsed = datetime.fromisoformat(observed_at)
+            except ValueError as exc:
+                raise ReportValidationError(
+                    "source clock native observation differs"
+                ) from exc
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                raise ReportValidationError("source clock native observation differs")
+            if precision is None or precision == "DATE":
+                raise ReportValidationError("source clock native precision differs")
+    return replayed_phase, dict(clock)
+
+
+def _validated_source_clock(path: Path | None) -> dict[str, Any] | None:
+    """Admit only a clock replayed from its retained native source authority."""
+
+    authority = _source_clock_authority(path)
+    return None if authority is None else authority[1]
+
+
+def _validate_source_clock_consumer_binding(
+    phase: Mapping[str, Any],
+    clock: Mapping[str, Any],
+    *,
+    catalog: Mapping[str, Any],
+    baseline_root: Path,
+    provider_ledger_root: Path | None,
+    calculation_cutoff_date: str | None,
+    financial_input_contract_path: Path,
+) -> None:
+    """Bind a replayed attended clock to the report's actual input selections."""
+
+    if (
+        calculation_cutoff_date is None
+        or clock.get("selected_financial_cutoff") != calculation_cutoff_date
+    ):
+        raise ReportValidationError("source clock selected financial cutoff differs")
+    _reference, _provider_catalog, generation_id, catalog_sha256 = (
+        _selected_provider_ledger_catalog(catalog, baseline_root, provider_ledger_root)
+    )
+    root = provider_ledger_root or baseline_root.parent / "provider-ledger"
+    selected_generation = root / "generations" / generation_id
+    phase_catalog = _source_clock_file_path(
+        phase.get("provider_ledger_catalog"), "provider ledger catalog"
+    )
+    phase_manifest = _source_clock_file_path(
+        phase.get("provider_ledger_manifest"), "provider ledger manifest"
+    )
+    selected_catalog = selected_generation / "provider-ledger.json"
+    selected_manifest = selected_generation / "generation.json"
+    if (
+        phase.get("provider_ledger_generation_id") != generation_id
+        or hash_file(phase_catalog) != hash_file(selected_catalog)
+        or hash_file(phase_manifest) != hash_file(selected_manifest)
+        or hash_file(selected_catalog)[0] != catalog_sha256
+    ):
+        raise ReportValidationError("source clock selected ledger differs")
+    phase_contract = _source_clock_file_path(
+        phase.get("financial_input_contract"), "financial input contract"
+    )
+    if hash_file(phase_contract) != hash_file(financial_input_contract_path):
+        raise ReportValidationError("source clock financial input contract differs")
+
+
 def _load_json(path: Path, field_name: str) -> dict[str, Any]:
     try:
         decoded = json.loads(path.read_text(encoding="utf-8"))
@@ -474,12 +620,65 @@ def _baseline(
 
 
 def _attribution(
-    root: Path, baseline_ref: Mapping[str, Any]
+    root: Path | None,
+    baseline_ref: Mapping[str, Any],
+    *,
+    attribution_generation_id: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, str], Path]:
-    pointer = read_current(root)
-    catalog_path = (
-        root / "generations" / pointer.generation_id / "strategy-attribution.json"
-    )
+    if root is None:
+        if attribution_generation_id is not None:
+            raise ReportValidationError(
+                "attribution root and generation identity are required together"
+            )
+        raise ReportValidationError("strategy attribution root is required")
+    if attribution_generation_id is None:
+        try:
+            pointer = read_current(root)
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise ReportValidationError(
+                "strategy attribution pointer is not accepted"
+            ) from exc
+        catalog_path = (
+            root / "generations" / pointer.generation_id / "strategy-attribution.json"
+        )
+        if catalog_path.is_symlink() or not catalog_path.is_file():
+            raise ReportValidationError(
+                "strategy attribution catalog is missing or linked"
+            )
+        catalog = _load_json(catalog_path, "strategy attribution catalog")
+        if catalog.get("catalog_schema_version") not in {1, 2}:
+            raise ReportValidationError("strategy attribution schema is unsupported")
+        attribution_baseline = _object(catalog.get("baseline"), "attribution.baseline")
+        if attribution_baseline != dict(baseline_ref):
+            raise ReportValidationError(
+                "strategy attribution baseline identity differs"
+            )
+        sha256, _ = hash_file(catalog_path)
+        return (
+            catalog,
+            {"catalog_sha256": sha256, "generation_id": pointer.generation_id},
+            catalog_path,
+        )
+    if re.fullmatch(r"[0-9a-f]{64}", attribution_generation_id) is None:
+        raise ReportValidationError("strategy attribution generation identity differs")
+    try:
+        manifest = read_generation(root, attribution_generation_id)
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise ReportValidationError(
+            "strategy attribution generation is not accepted"
+        ) from exc
+    generation_root = root / "generations" / attribution_generation_id
+    manifest_path = generation_root / "generation.json"
+    if (
+        manifest.generation_id != attribution_generation_id
+        or manifest.verification is not VerificationStatus.VERIFIED
+        or _regular_file_bytes(
+            manifest_path, "strategy attribution generation manifest"
+        )
+        != manifest.to_json_bytes()
+    ):
+        raise ReportValidationError("strategy attribution generation contract differs")
+    catalog_path = generation_root / "strategy-attribution.json"
     if catalog_path.is_symlink() or not catalog_path.is_file():
         raise ReportValidationError("strategy attribution catalog is missing or linked")
     catalog = _load_json(catalog_path, "strategy attribution catalog")
@@ -488,10 +687,30 @@ def _attribution(
     attribution_baseline = _object(catalog.get("baseline"), "attribution.baseline")
     if attribution_baseline != dict(baseline_ref):
         raise ReportValidationError("strategy attribution baseline identity differs")
-    sha256, _ = hash_file(catalog_path)
+    sha256, size_bytes = hash_file(catalog_path)
+    artifact = next(
+        (
+            item
+            for item in manifest.artifacts
+            if item.artifact_id == "normalized/strategy-attribution.json"
+        ),
+        None,
+    )
+    if artifact is None or (
+        artifact.sha256,
+        artifact.size_bytes,
+        artifact.schema_name,
+        artifact.schema_version,
+    ) != (
+        sha256,
+        size_bytes,
+        "strategy-attribution",
+        str(catalog["catalog_schema_version"]),
+    ):
+        raise ReportValidationError("strategy attribution artifact identity differs")
     return (
         catalog,
-        {"catalog_sha256": sha256, "generation_id": pointer.generation_id},
+        {"catalog_sha256": sha256, "generation_id": attribution_generation_id},
         catalog_path,
     )
 
@@ -2617,6 +2836,7 @@ def _history_contract(
     *,
     portfolio_as_of: str,
     strategy_names: set[str],
+    dependence_selected_inputs_path: Path | None = None,
 ) -> tuple[dict[str, dict[str, Any]], dict[str, Any]]:
     payload = _load_json(path, "strategy history compatibility contract")
     if payload.get("builder") == "portfolio-current-dependence-source":
@@ -2635,6 +2855,7 @@ def _history_contract(
                 path.parent,
                 contract_path=_PORTABLE_HWM_PRODUCT_CONTRACT,
                 policy_path=DEPENDENCE_POLICY,
+                selected_inputs_path=dependence_selected_inputs_path,
             )
         except Exception as exc:
             raise ReportValidationError(
@@ -5132,9 +5353,14 @@ def build_report_data(
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
 ) -> tuple[dict[str, Any], bytes, Path]:
     """Build canonical report data from the currently accepted baseline."""
 
+    source_clock_authority = _source_clock_authority(source_clock_path)
+    source_clock = None if source_clock_authority is None else source_clock_authority[1]
     catalog, baseline_ref, baseline_catalog_path = _baseline(
         baseline_root, baseline_generation_id
     )
@@ -5299,6 +5525,7 @@ def build_report_data(
             history_contract_path,
             portfolio_as_of=_text(catalog.get("as_of_date"), "portfolio as_of_date"),
             strategy_names=strategy_names,
+            dependence_selected_inputs_path=dependence_selected_inputs_path,
         )
         if (
             calculation_cutoff_date is not None
@@ -5395,9 +5622,15 @@ def build_report_data(
         )
     attribution_catalog: dict[str, Any] | None = None
     attribution_ref: dict[str, str] | None = None
+    if attribution_generation_id is not None and attribution_root is None:
+        raise ReportValidationError(
+            "attribution root and generation identity are required together"
+        )
     if attribution_root is not None:
         attribution_catalog, attribution_ref, _ = _attribution(
-            attribution_root, baseline_ref
+            attribution_root,
+            baseline_ref,
+            attribution_generation_id=attribution_generation_id,
         )
         strategy_summary = _merge_attribution(strategy_summary, attribution_catalog)
     allocation_history = _allocations(catalog, strategy_product_controls)
@@ -5509,6 +5742,17 @@ def build_report_data(
                 _PORTABLE_HWM_PRODUCT_CONTRACT,
                 catalog,
             )
+        )
+    if source_clock_authority is not None:
+        assert source_clock is not None
+        _validate_source_clock_consumer_binding(
+            source_clock_authority[0],
+            source_clock,
+            catalog=catalog,
+            baseline_root=baseline_root,
+            provider_ledger_root=provider_ledger_root,
+            calculation_cutoff_date=calculation_cutoff_date,
+            financial_input_contract_path=financial_input_contract_path,
         )
     governed_hwm_proof = (
         _report_governed_hwm_proof(
@@ -5849,6 +6093,7 @@ def build_report_data(
             catalog, baseline_root, baseline_ref, provider_ledger_root
         ),
         "report_schema_version": REPORT_SCHEMA_VERSION,
+        **({"source_clock": source_clock} if source_clock is not None else {}),
         "strategy_summary": strategy_summary,
         "attribution_dispositions": catalog.get("attribution_dispositions", []),
         "leverage_disclosures": _leverage_disclosures(
@@ -6722,6 +6967,10 @@ def build_candidate(
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
+    include_workbook: bool = False,
 ) -> dict[str, Any]:
     report, report_bytes, _ = build_report_data(
         baseline_root,
@@ -6739,6 +6988,8 @@ def build_candidate(
         hwm_governed_generation_bytes,
         hwm_governed_calendar_bytes,
         hwm_governed_receipt_bytes,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
+        source_clock_path=source_clock_path,
         invested_capital_result=invested_capital_result,
         invested_capital_input_generation_path=(invested_capital_input_generation_path),
         epoch_manifest_path=epoch_manifest_path,
@@ -6750,6 +7001,7 @@ def build_candidate(
         decomposition_lenses_root=decomposition_lenses_root,
         decomposition_plan_bundle=decomposition_plan_bundle,
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+        attribution_generation_id=attribution_generation_id,
     )
     report_id = hashlib.sha256(report_bytes).hexdigest()
     candidate = output_root / "candidates" / report_id
@@ -6781,6 +7033,37 @@ def build_candidate(
                 "invested-capital input generation",
             ),
         )
+    if not include_workbook:
+        # The current product publishes canonical report authority only.  The
+        # dormant workbook branch below remains available for immutable legacy
+        # input replay, but no active runner or default report build reaches it.
+        if epoch_manifest_path is not None or epoch_manifest_source_path is not None:
+            _manifest, _source, manifest_bytes, source_bytes = _epoch_manifest_payloads(
+                epoch_manifest_path, epoch_manifest_source_path
+            )
+            if epoch_crosswalk_path is None:
+                raise ReportValidationError(
+                    "epoch manifest requires an explicit current epoch crosswalk"
+                )
+            _write_exact(candidate / EPOCH_MANIFEST_WORKBOOK_NAME, manifest_bytes)
+            _write_exact(candidate / EPOCH_MANIFEST_SOURCE_WORKBOOK_NAME, source_bytes)
+            _write_exact(
+                candidate / EPOCH_CROSSWALK_WORKBOOK_NAME,
+                _regular_file_bytes(epoch_crosswalk_path, "current epoch crosswalk"),
+            )
+        return {
+            "account_count": len(report["account_summary"]),
+            "candidate_dir": str(candidate),
+            "report_data_sha256": report_id,
+            "report_id": report_id,
+            "strategy_count": len(report["strategy_summary"]),
+            "twr_available_count": sum(
+                1
+                for item in report["twr_mwr"]
+                if str(item["twr_status"]).startswith("AVAILABLE")
+            ),
+            "twr_row_count": len(report["twr_mwr"]),
+        }
     workbook_evidence = _build_workbook_exact(report, workbook_path)
     # Excel is allowed to rewrite the file it opens. Keep the canonical initial
     # workbook immutable and reset only this explicit non-authority copy.
@@ -9459,8 +9742,8 @@ def _verification_from_snapshots(
     report_bytes: bytes,
     candidate_dir: Path,
     candidate_report_bytes: bytes,
-    workbook_path: Path,
-    workbook_bytes: bytes,
+    workbook_path: Path | None = None,
+    workbook_bytes: bytes | None = None,
 ) -> dict[str, Any]:
     report_id = hashlib.sha256(report_bytes).hexdigest()
     if candidate_dir.name != report_id:
@@ -9469,10 +9752,7 @@ def _verification_from_snapshots(
         raise ReportValidationError(
             "candidate report data differs from current baseline"
         )
-    if _regular_file_bytes(workbook_path, "Excel workbook") != workbook_bytes:
-        raise ReportValidationError("Excel workbook snapshot differs")
-    workbook_evidence = verify_workbook(workbook_path)
-    return {
+    verification = {
         "account_count": len(report["account_summary"]),
         "baseline_generation_id": report["baseline"]["generation_id"],
         "report_data_sha256": report_id,
@@ -9484,14 +9764,20 @@ def _verification_from_snapshots(
             if str(item["twr_status"]).startswith("AVAILABLE")
         ),
         "twr_row_count": len(report["twr_mwr"]),
-        **workbook_evidence,
     }
+    if workbook_path is not None or workbook_bytes is not None:
+        if workbook_path is None or workbook_bytes is None:
+            raise ReportValidationError("workbook snapshot arguments differ")
+        if _regular_file_bytes(workbook_path, "Excel workbook") != workbook_bytes:
+            raise ReportValidationError("Excel workbook snapshot differs")
+        verification.update(verify_workbook(workbook_path))
+    return verification
 
 
 def verify_candidate(
     baseline_root: Path,
     candidate_dir: Path,
-    excel_workbook: Path,
+    excel_workbook: Path | None = None,
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
     attribution_root: Path | None = None,
@@ -9518,6 +9804,9 @@ def verify_candidate(
     decomposition_lenses_root: Path | None = None,
     decomposition_plan_bundle: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
 ) -> dict[str, Any]:
     epoch_snapshots = _epoch_manifest_workbook_snapshots(
         candidate_dir,
@@ -9573,6 +9862,9 @@ def verify_candidate(
         decomposition_lenses_root=decomposition_lenses_root,
         decomposition_plan_bundle=decomposition_plan_bundle,
         hybrid_decomposition_plan_bundle=hybrid_decomposition_plan_bundle,
+        attribution_generation_id=attribution_generation_id,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
+        source_clock_path=source_clock_path,
     )
     data_path = candidate_dir / REPORT_DATA_NAME
     candidate_report_bytes = _regular_file_bytes(data_path, "candidate report data")
@@ -9601,7 +9893,11 @@ def verify_candidate(
             raise ReportValidationError(
                 "candidate invested-capital input generation differs"
             )
-    workbook_bytes = _regular_file_bytes(excel_workbook, "Excel workbook")
+    workbook_bytes = (
+        _regular_file_bytes(excel_workbook, "Excel workbook")
+        if excel_workbook is not None
+        else None
+    )
     verification = _verification_from_snapshots(
         report,
         report_bytes,
@@ -10223,9 +10519,9 @@ def _recheck_snapshot_identities(
 def publish_report(
     baseline_root: Path,
     candidate_dir: Path,
-    excel_workbook: Path,
-    xlsx_result: Path,
-    validation_result: Path,
+    excel_workbook: Path | None,
+    xlsx_result: Path | None,
+    validation_result: Path | None,
     output_root: Path,
     freshness_health_path: Path | None = None,
     provider_ledger_root: Path | None = None,
@@ -10253,6 +10549,9 @@ def publish_report(
     private_stage_root: Path | None = None,
     portfolio_root: Path | None = None,
     hybrid_decomposition_plan_bundle: Path | None = None,
+    attribution_generation_id: str | None = None,
+    dependence_selected_inputs_path: Path | None = None,
+    source_clock_path: Path | None = None,
 ) -> dict[str, Any]:
     governed_hwm_supplied = any(
         value is not None
@@ -10338,16 +10637,50 @@ def publish_report(
             baseline_catalog_path=baseline_catalog_path,
             epoch_manifest_generation_root=epoch_manifest_generation_root,
         )
-    evidence_snapshots = _validated_workbook_evidence_snapshots(
-        candidate_dir,
+    workbook_inputs = (
         excel_workbook,
         xlsx_result,
         validation_result,
         workbook_evidence_binding,
-        epoch_manifest_path,
-        epoch_manifest_source_path,
-        epoch_crosswalk_path,
     )
+    if all(value is None for value in workbook_inputs):
+        # Current authority is canonical report data.  Do not create or infer
+        # an XLSX/evidence substitute when the held workbook route is absent.
+        evidence_snapshots = {
+            "report_data": (
+                candidate_dir / REPORT_DATA_NAME,
+                _regular_file_bytes(
+                    candidate_dir / REPORT_DATA_NAME, "candidate report data"
+                ),
+            )
+        }
+        evidence_snapshots.update(
+            _epoch_manifest_workbook_snapshots(
+                candidate_dir,
+                epoch_manifest_path,
+                epoch_manifest_source_path,
+                epoch_crosswalk_path,
+            )
+        )
+    elif any(value is None for value in workbook_inputs):
+        raise ReportValidationError(
+            "workbook evidence arguments must be all absent or all supplied"
+        )
+    else:
+        assert excel_workbook is not None
+        assert xlsx_result is not None
+        assert validation_result is not None
+        assert workbook_evidence_binding is not None
+        evidence_snapshots = _validated_workbook_evidence_snapshots(
+            candidate_dir,
+            excel_workbook,
+            xlsx_result,
+            validation_result,
+            workbook_evidence_binding,
+            epoch_manifest_path,
+            epoch_manifest_source_path,
+            epoch_crosswalk_path,
+        )
     effective_epoch_manifest_path = (
         candidate_dir / EPOCH_MANIFEST_WORKBOOK_NAME
         if "epoch_manifest" in evidence_snapshots
@@ -10401,16 +10734,31 @@ def publish_report(
         if provider_ledger_root is not None
         else None
     )
-    snapshot_attribution_root = (
-        _snapshot_current_root(
+    if attribution_generation_id is not None and attribution_root is None:
+        raise ReportValidationError(
+            "attribution root and generation identity are required together"
+        )
+    snapshot_attribution_generation_id: str | None = None
+    if attribution_root is None:
+        snapshot_attribution_root = None
+    elif attribution_generation_id is None:
+        snapshot_attribution_root = _snapshot_current_root(
             attribution_root,
             snapshot_root / "attribution",
             originals,
             inventories,
         )
-        if attribution_root is not None
-        else None
-    )
+    else:
+        (
+            snapshot_attribution_root,
+            _snapshot_attribution_generation_dir,
+        ) = _snapshot_selected_generation_root(
+            attribution_root / "generations" / attribution_generation_id,
+            snapshot_root / "attribution",
+            originals,
+            inventories,
+        )
+        snapshot_attribution_generation_id = attribution_generation_id
     snapshot_correlation_generation_dir: Path | None = None
     if correlation_generation_dir is not None:
         (
@@ -10561,16 +10909,19 @@ def publish_report(
         decomposition_lenses_root=snapshot_decomposition_lenses_root,
         decomposition_plan_bundle=snapshot_decomposition_plan_bundle,
         hybrid_decomposition_plan_bundle=snapshot_hybrid_decomposition_plan_bundle,
+        attribution_generation_id=snapshot_attribution_generation_id,
+        dependence_selected_inputs_path=dependence_selected_inputs_path,
+        source_clock_path=source_clock_path,
     )
-    snapshot_workbook = snapshot_root / WORKBOOK_NAME
-    _write_exact(snapshot_workbook, evidence_snapshots["workbook"][1])
+    if "workbook" in evidence_snapshots:
+        _write_exact(snapshot_root / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
     verification = _verification_from_snapshots(
         report,
         report_bytes,
         candidate_dir,
         evidence_snapshots["report_data"][1],
-        snapshot_workbook,
-        evidence_snapshots["workbook"][1],
+        snapshot_root / WORKBOOK_NAME if "workbook" in evidence_snapshots else None,
+        evidence_snapshots.get("workbook", (None, None))[1],
     )
     if "epoch_manifest" in evidence_snapshots:
         for name in ("epoch_manifest", "epoch_manifest_source", "epoch_crosswalk"):
@@ -10594,55 +10945,60 @@ def publish_report(
             "portfolio-report-data",
             "1",
         ),
-        (
-            evidence_snapshots["xlsx_result"][0],
-            "evidence/xlsx-win-result.json",
-            "xlsx-win-result",
-            "2.0",
-        ),
-        (
-            evidence_snapshots["validation_result"][0],
-            "evidence/workbook-validation.json",
-            "xlsx-win-validation",
-            "1",
-        ),
-        (
-            evidence_snapshots["workbook_canonicalization"][0],
-            "evidence/workbook-canonicalization.json",
-            "portfolio-report-workbook-canonicalization",
-            WORKBOOK_CANONICALIZATION_VERSION,
-        ),
-        (
-            evidence_snapshots["xlsx_result_canonicalization"][0],
-            "evidence/xlsx-result-canonicalization.json",
-            "xlsx-win-result-canonicalization",
-            XLSX_RESULT_CANONICALIZATION_VERSION,
-        ),
-        (
-            evidence_snapshots["workbook_contract"][0],
-            "evidence/workbook-contract.json",
-            "xlsx-win-validation-contract",
-            "1",
-        ),
-        (
-            evidence_snapshots["xlsx_job"][0],
-            "evidence/xlsx-job.json",
-            "xlsx-win-job",
-            "2.0",
-        ),
-        (
-            evidence_snapshots["workbook_evidence_binding"][0],
-            "evidence/workbook-evidence-binding.json",
-            "portfolio-report-workbook-evidence-binding",
-            str(WORKBOOK_EVIDENCE_BINDING_VERSION),
-        ),
-        (
-            evidence_snapshots["workbook_parity"][0],
-            "evidence/workbook-parity.json",
-            "portfolio-report-workbook-parity",
-            str(WORKBOOK_PARITY_VERSION),
-        ),
     ]
+    if "workbook" in evidence_snapshots:
+        artifact_specs.extend(
+            [
+                (
+                    evidence_snapshots["xlsx_result"][0],
+                    "evidence/xlsx-win-result.json",
+                    "xlsx-win-result",
+                    "2.0",
+                ),
+                (
+                    evidence_snapshots["validation_result"][0],
+                    "evidence/workbook-validation.json",
+                    "xlsx-win-validation",
+                    "1",
+                ),
+                (
+                    evidence_snapshots["workbook_canonicalization"][0],
+                    "evidence/workbook-canonicalization.json",
+                    "portfolio-report-workbook-canonicalization",
+                    WORKBOOK_CANONICALIZATION_VERSION,
+                ),
+                (
+                    evidence_snapshots["xlsx_result_canonicalization"][0],
+                    "evidence/xlsx-result-canonicalization.json",
+                    "xlsx-win-result-canonicalization",
+                    XLSX_RESULT_CANONICALIZATION_VERSION,
+                ),
+                (
+                    evidence_snapshots["workbook_contract"][0],
+                    "evidence/workbook-contract.json",
+                    "xlsx-win-validation-contract",
+                    "1",
+                ),
+                (
+                    evidence_snapshots["xlsx_job"][0],
+                    "evidence/xlsx-job.json",
+                    "xlsx-win-job",
+                    "2.0",
+                ),
+                (
+                    evidence_snapshots["workbook_evidence_binding"][0],
+                    "evidence/workbook-evidence-binding.json",
+                    "portfolio-report-workbook-evidence-binding",
+                    str(WORKBOOK_EVIDENCE_BINDING_VERSION),
+                ),
+                (
+                    evidence_snapshots["workbook_parity"][0],
+                    "evidence/workbook-parity.json",
+                    "portfolio-report-workbook-parity",
+                    str(WORKBOOK_PARITY_VERSION),
+                ),
+            ]
+        )
     if "invested_capital_result" in evidence_snapshots:
         artifact_specs.extend(
             [
@@ -10695,7 +11051,9 @@ def publish_report(
         )
     if snapshot_attribution_root is not None:
         _attribution_catalog, _attribution_ref, attribution_catalog_path = _attribution(
-            snapshot_attribution_root, report["baseline"]
+            snapshot_attribution_root,
+            report["baseline"],
+            attribution_generation_id=snapshot_attribution_generation_id,
         )
         artifact_specs.append(
             (
@@ -10810,12 +11168,11 @@ def publish_report(
         adapter=AdapterIdentity("portfolio-report-builder", BUILDER_VERSION),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
-            boundary="accepted baseline report data plus explicit workbook coverage and validation dispositions",
+            boundary="accepted baseline report data with exact source and canonical-report verification",
             fact_types=(
                 "performance",
                 "portfolio report",
                 "reconciliation",
-                "workbook validation",
             ),
             observed_start=as_of,
             observed_end=as_of,
@@ -10829,38 +11186,18 @@ def publish_report(
         generation_dir / REPORT_DATA_NAME,
         evidence_snapshots["report_data"][1],
     )
-    _write_exact(
-        generation_dir / "xlsx-win-result.json",
-        evidence_snapshots["xlsx_result"][1],
-    )
-    _write_exact(
-        generation_dir / "workbook-validation.json",
-        evidence_snapshots["validation_result"][1],
-    )
-    _write_exact(
-        generation_dir / "workbook-canonicalization.json",
-        evidence_snapshots["workbook_canonicalization"][1],
-    )
-    _write_exact(
-        generation_dir / "xlsx-result-canonicalization.json",
-        evidence_snapshots["xlsx_result_canonicalization"][1],
-    )
-    _write_exact(
-        generation_dir / "workbook-contract.json",
-        evidence_snapshots["workbook_contract"][1],
-    )
-    _write_exact(
-        generation_dir / "xlsx-job.json",
-        evidence_snapshots["xlsx_job"][1],
-    )
-    _write_exact(
-        generation_dir / "workbook-evidence-binding.json",
-        evidence_snapshots["workbook_evidence_binding"][1],
-    )
-    _write_exact(
-        generation_dir / "workbook-parity.json",
-        evidence_snapshots["workbook_parity"][1],
-    )
+    if "workbook" in evidence_snapshots:
+        for name, relative in (
+            ("xlsx_result", "xlsx-win-result.json"),
+            ("validation_result", "workbook-validation.json"),
+            ("workbook_canonicalization", "workbook-canonicalization.json"),
+            ("xlsx_result_canonicalization", "xlsx-result-canonicalization.json"),
+            ("workbook_contract", "workbook-contract.json"),
+            ("xlsx_job", "xlsx-job.json"),
+            ("workbook_evidence_binding", "workbook-evidence-binding.json"),
+            ("workbook_parity", "workbook-parity.json"),
+        ):
+            _write_exact(generation_dir / relative, evidence_snapshots[name][1])
     if "invested_capital_result" in evidence_snapshots:
         _write_exact(
             generation_dir / INVESTED_CAPITAL_RESULT_NAME,
@@ -10890,28 +11227,30 @@ def publish_report(
         )
     _write_exact(generation_dir / "report-verification.json", verification_bytes)
     _recheck_snapshot_identities(originals, inventories)
-    generation_manifest_bytes = manifest.to_json_bytes()
-    delivery_dir = output_root / "deliveries" / manifest.generation_id
-    delivery_receipt = _report_delivery_receipt(
-        generation_id=manifest.generation_id,
-        generation_manifest_bytes=generation_manifest_bytes,
-        generation_inventory_sha256_value=generation_inventory_sha256(
-            output_root, manifest.generation_id
-        ),
-        report_data_bytes=evidence_snapshots["report_data"][1],
-        workbook_bytes=evidence_snapshots["workbook"][1],
-        epoch_crosswalk_bytes=(
-            evidence_snapshots["epoch_crosswalk"][1]
-            if "epoch_crosswalk" in evidence_snapshots
-            else None
-        ),
-    )
-    delivery_receipt_bytes = canonical_json_bytes(delivery_receipt)
-    _preflight_report_delivery(
-        delivery_dir, evidence_snapshots["workbook"][1], delivery_receipt_bytes
-    )
-    _write_exact(delivery_dir / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
-    _write_exact(delivery_dir / REPORT_DELIVERY_NAME, delivery_receipt_bytes)
+    delivery_dir: Path | None = None
+    if "workbook" in evidence_snapshots:
+        generation_manifest_bytes = manifest.to_json_bytes()
+        delivery_dir = output_root / "deliveries" / manifest.generation_id
+        delivery_receipt = _report_delivery_receipt(
+            generation_id=manifest.generation_id,
+            generation_manifest_bytes=generation_manifest_bytes,
+            generation_inventory_sha256_value=generation_inventory_sha256(
+                output_root, manifest.generation_id
+            ),
+            report_data_bytes=evidence_snapshots["report_data"][1],
+            workbook_bytes=evidence_snapshots["workbook"][1],
+            epoch_crosswalk_bytes=(
+                evidence_snapshots["epoch_crosswalk"][1]
+                if "epoch_crosswalk" in evidence_snapshots
+                else None
+            ),
+        )
+        delivery_receipt_bytes = canonical_json_bytes(delivery_receipt)
+        _preflight_report_delivery(
+            delivery_dir, evidence_snapshots["workbook"][1], delivery_receipt_bytes
+        )
+        _write_exact(delivery_dir / WORKBOOK_NAME, evidence_snapshots["workbook"][1])
+        _write_exact(delivery_dir / REPORT_DELIVERY_NAME, delivery_receipt_bytes)
     pointer = publish_generation(output_root, manifest.generation_id)
     snapshot_context.cleanup()
     return {
@@ -10921,9 +11260,16 @@ def publish_report(
         "strategy_count": verification["strategy_count"],
         "twr_available_count": verification["twr_available_count"],
         "twr_row_count": verification["twr_row_count"],
-        "delivery_dir": str(delivery_dir),
-        "delivery_receipt": str(delivery_dir / REPORT_DELIVERY_NAME),
-        "workbook_sha256": verification["workbook_sha256"],
+        "root": str(output_root),
+        **(
+            {
+                "delivery_dir": str(delivery_dir),
+                "delivery_receipt": str(delivery_dir / REPORT_DELIVERY_NAME),
+                "workbook_sha256": verification["workbook_sha256"],
+            }
+            if delivery_dir is not None
+            else {}
+        ),
         **(
             {
                 "epoch_manifest_sha256": verification["epoch_manifest_sha256"],
@@ -10954,7 +11300,10 @@ def _parser() -> argparse.ArgumentParser:
     build.add_argument("--freshness-health", type=Path)
     build.add_argument("--provider-ledger-root", type=Path)
     build.add_argument("--attribution-root", type=Path)
+    build.add_argument("--attribution-generation-id")
     build.add_argument("--history-contract", type=Path)
+    build.add_argument("--dependence-selected-inputs", type=Path)
+    build.add_argument("--source-clock", type=Path)
     build.add_argument("--implementation-reconciliation", type=Path)
     build.add_argument("--implementation-return-attribution", type=Path)
     build.add_argument("--correlation-root", type=Path)
@@ -10968,11 +11317,14 @@ def _parser() -> argparse.ArgumentParser:
     verify.add_argument("--baseline-root", type=Path, required=True)
     verify.add_argument("--baseline-generation-id")
     verify.add_argument("--candidate-dir", type=Path, required=True)
-    verify.add_argument("--excel-workbook", type=Path, required=True)
+    verify.add_argument("--excel-workbook", type=Path)
     verify.add_argument("--freshness-health", type=Path)
     verify.add_argument("--provider-ledger-root", type=Path)
     verify.add_argument("--attribution-root", type=Path)
+    verify.add_argument("--attribution-generation-id")
     verify.add_argument("--history-contract", type=Path)
+    verify.add_argument("--dependence-selected-inputs", type=Path)
+    verify.add_argument("--source-clock", type=Path)
     verify.add_argument("--implementation-reconciliation", type=Path)
     verify.add_argument("--implementation-return-attribution", type=Path)
     verify.add_argument("--correlation-root", type=Path)
@@ -11013,15 +11365,23 @@ def _parser() -> argparse.ArgumentParser:
     publish.add_argument("--baseline-root", type=Path, required=True)
     publish.add_argument("--baseline-generation-id")
     publish.add_argument("--candidate-dir", type=Path, required=True)
-    publish.add_argument("--excel-workbook", type=Path, required=True)
-    publish.add_argument("--xlsx-result", type=Path, required=True)
-    publish.add_argument("--validation-result", type=Path, required=True)
-    publish.add_argument("--workbook-evidence-binding", type=Path, required=True)
+    publish.add_argument("--excel-workbook", type=Path)
+    publish.add_argument("--xlsx-result", type=Path)
+    publish.add_argument("--validation-result", type=Path)
+    publish.add_argument("--workbook-evidence-binding", type=Path)
     publish.add_argument("--output-root", type=Path, required=True)
     publish.add_argument("--freshness-health", type=Path)
     publish.add_argument("--provider-ledger-root", type=Path)
     publish.add_argument("--attribution-root", type=Path)
+    publish.add_argument("--attribution-generation-id")
     publish.add_argument("--history-contract", type=Path)
+    publish.add_argument("--dependence-selected-inputs", type=Path)
+    # publish re-derives the report from its snapshots and re-validates it, so it needs
+    # every authority build and verify need. Without this the source-clock consumer
+    # binding is simply not checked at publication, and the release builder already
+    # passes the flag -- argparse rejected the whole invocation rather than the run
+    # silently publishing with one fewer check.
+    publish.add_argument("--source-clock", type=Path)
     publish.add_argument("--implementation-reconciliation", type=Path)
     publish.add_argument("--implementation-return-attribution", type=Path)
     publish.add_argument("--correlation-root", type=Path)
@@ -11105,6 +11465,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 decomposition_lenses_root=args.decomposition_lenses_root,
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                attribution_generation_id=args.attribution_generation_id,
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
+                source_clock_path=args.source_clock,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )
@@ -11130,6 +11493,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 decomposition_lenses_root=args.decomposition_lenses_root,
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                attribution_generation_id=args.attribution_generation_id,
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
+                source_clock_path=args.source_clock,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
             )
@@ -11176,6 +11542,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 decomposition_lenses_root=args.decomposition_lenses_root,
                 decomposition_plan_bundle=args.decomposition_plan_bundle,
                 hybrid_decomposition_plan_bundle=args.hybrid_decomposition_plan_bundle,
+                attribution_generation_id=args.attribution_generation_id,
+                dependence_selected_inputs_path=args.dependence_selected_inputs,
+                source_clock_path=args.source_clock,
                 **_governed_hwm_cli_values(args),
                 **_invested_capital_cli_values(args),
                 **(

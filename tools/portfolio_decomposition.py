@@ -163,6 +163,8 @@ class IntervalAssociationPolicy:
     evaluation_information_set: str
     point_in_time_vintage: str | None
     target_session_labels: Mapping[str, tuple[date, ...]]
+    source_segments: tuple[Mapping[str, object], ...]
+    declared_unavailable_labels: tuple[Mapping[str, object], ...]
 
 
 @dataclass(frozen=True)
@@ -542,6 +544,7 @@ def _interval_association_policy(
     }
     if target.get("native_calendar") == "SESSION_LABELLED":
         target_keys.add("session_schedule_labels")
+    optional_keys = {"source_segments", "declared_unavailable_labels"}
     if target.get("native_calendar") == "LEGACY_EXACT_LABEL":
         target_keys.add("legacy_alignment_policy")
     if "point_in_time_vintage" in target:
@@ -552,7 +555,11 @@ def _interval_association_policy(
                 "retained_historical_availability_proved",
             }
         )
-    _strict_keys(target, target_keys, "target_source.interval_policy")
+    _strict_keys(
+        target,
+        target_keys | (set(target) & optional_keys),
+        "target_source.interval_policy",
+    )
     _strict_keys(
         factor,
         {
@@ -655,6 +662,102 @@ def _interval_association_policy(
             target_session_labels[
                 _text(series_id, "target session schedule series")
             ] = labels
+    source_segments: list[Mapping[str, object]] = []
+    raw_segments = target.get("source_segments", [])
+    if not isinstance(raw_segments, list):
+        raise DecompositionError("target source segments must be an array")
+    prior_end: date | None = None
+    for index, raw_segment in enumerate(raw_segments):
+        segment = _object(raw_segment, "target source segment")
+        _strict_keys(
+            segment,
+            {"segment_id", "observed_start", "observed_end", "source_vintage"},
+            "target source segment",
+        )
+        observed_start = _day(segment["observed_start"], "target source segment start")
+        observed_end = _day(segment["observed_end"], "target source segment end")
+        if observed_start > observed_end:
+            raise DecompositionError("target source segment has inverted dates")
+        if prior_end is not None and observed_start <= prior_end:
+            raise DecompositionError("target source segments overlap or are unordered")
+        prior_end = observed_end
+        source_segments.append(
+            {
+                "segment_id": _text(segment["segment_id"], "target source segment ID"),
+                "observed_start": observed_start.isoformat(),
+                "observed_end": observed_end.isoformat(),
+                "source_vintage": _text(
+                    segment["source_vintage"], "target source segment vintage"
+                ),
+            }
+        )
+    raw_unavailable = target.get("declared_unavailable_labels", [])
+    if not isinstance(raw_unavailable, list):
+        raise DecompositionError("declared unavailable labels must be an array")
+    unavailable: list[Mapping[str, object]] = []
+    prior_label: date | None = None
+    segment_vintages = {str(segment["source_vintage"]) for segment in source_segments}
+    for raw_declaration in raw_unavailable:
+        declaration = _object(raw_declaration, "declared unavailable label")
+        _strict_keys(
+            declaration,
+            {"date", "reason", "source_reference"},
+            "declared unavailable label",
+        )
+        label = _day(declaration["date"], "declared unavailable label date")
+        if prior_label is not None and label <= prior_label:
+            raise DecompositionError(
+                "declared unavailable labels must be unique and sorted"
+            )
+        prior_label = label
+        reference = _object(
+            declaration["source_reference"], "declared unavailable source reference"
+        )
+        _strict_keys(
+            reference,
+            {
+                "source_id",
+                "generation_id",
+                "manifest_sha256",
+                "declared_exclusion_item",
+            },
+            "declared unavailable source reference",
+        )
+        generation_id = _text(
+            reference["generation_id"], "declared unavailable generation"
+        )
+        exclusion = _text(
+            reference["declared_exclusion_item"], "declared unavailable exclusion"
+        )
+        if generation_id not in segment_vintages or not exclusion.startswith(
+            "nav_missing_date:"
+        ):
+            raise DecompositionError(
+                "declared unavailable source reference is not selected"
+            )
+        excluded_day = _day(
+            exclusion.split(":", 1)[1], "declared unavailable exclusion date"
+        )
+        if label not in {excluded_day, excluded_day + timedelta(days=1)}:
+            raise DecompositionError(
+                "declared unavailable label is unrelated to source exclusion"
+            )
+        unavailable.append(
+            {
+                "date": label.isoformat(),
+                "reason": _text(declaration["reason"], "declared unavailable reason"),
+                "source_reference": {
+                    "source_id": _text(
+                        reference["source_id"], "declared unavailable source"
+                    ),
+                    "generation_id": generation_id,
+                    "manifest_sha256": _text(
+                        reference["manifest_sha256"], "declared unavailable manifest"
+                    ),
+                    "declared_exclusion_item": exclusion,
+                },
+            }
+        )
     return IntervalAssociationPolicy(
         target_calendar=target_calendar,
         target_label_convention=_text(
@@ -694,6 +797,8 @@ def _interval_association_policy(
         evaluation_information_set=information_set,
         point_in_time_vintage=point_in_time_vintage,
         target_session_labels=target_session_labels,
+        source_segments=tuple(source_segments),
+        declared_unavailable_labels=tuple(unavailable),
     )
 
 
@@ -2971,26 +3076,47 @@ def _factor_anchor_observations(
     future_anchors = [
         observed for observed in all_anchors if observed > effective_factor_availability
     ]
-    anchors = [
+    available_anchors = [
         observed
         for observed in all_anchors
         if observed <= effective_factor_availability
     ]
+    incomplete_anchors = [
+        observed
+        for observed in available_anchors
+        if any(
+            factor_rows[observed].values.get(factor_id) is None
+            for factor_id in model.factor_ids
+        )
+    ]
+    excluded_anchors = set(incomplete_anchors)
+    anchors = [
+        observed for observed in available_anchors if observed not in excluded_anchors
+    ]
     if len(anchors) < 2:
         raise DecompositionError("fewer than two available factor anchors")
-    for observed in anchors:
-        factor_row = factor_rows[observed]
-        if any(
-            factor_row.values.get(factor_id) is None for factor_id in model.factor_ids
-        ):
-            raise DecompositionError(
-                f"factor anchor {observed.isoformat()} has incomplete selected components"
-            )
     target_by_day = {row.day: row for row in usable_rows}
     if len(target_by_day) != len(usable_rows):
         raise DecompositionError("target source contains a duplicate date")
     target_scope_start = min(target_by_day) if target_by_day else None
     target_scope_end = max(target_by_day) if target_by_day else None
+    # Excluding an anchor is only equivalent to the factor source starting later.  An
+    # excluded anchor inside target scope is not: with the anchor present the bucket it
+    # bounds would be judged on its own admitted labels, and dropping it can hide a
+    # target-side gap the complete-anchor path refuses.  Stop instead.
+    internal_incomplete = [
+        observed
+        for observed in incomplete_anchors
+        if observed > anchors[0]
+        and target_scope_start is not None
+        and target_scope_end is not None
+        and target_scope_start <= observed <= target_scope_end
+    ]
+    if internal_incomplete:
+        raise DecompositionError(
+            "factor anchor "
+            f"{internal_incomplete[0].isoformat()} has incomplete selected components"
+        )
     if policy.target_calendar == "CALENDAR_DAY_24_7" and any(
         row.return_type != "TOTAL" for row in usable_rows
     ):
@@ -3000,6 +3126,19 @@ def _factor_anchor_observations(
     rejected_bucket_receipts: list[dict[str, object]] = []
     assigned: set[date] = set()
     for left, right in zip(anchors, anchors[1:]):
+        source_gap: tuple[Mapping[str, object], Mapping[str, object]] | None = None
+        for prior_segment, next_segment in zip(
+            policy.source_segments, policy.source_segments[1:]
+        ):
+            prior_end = _day(prior_segment["observed_end"], "source segment end")
+            next_start = _day(next_segment["observed_start"], "source segment start")
+            if (
+                (next_start - prior_end).days > 1
+                and left < next_start
+                and right > prior_end
+            ):
+                source_gap = (prior_segment, next_segment)
+                break
         if policy.target_calendar == "CALENDAR_DAY_24_7":
             labels: list[date] = []
             cursor = left + timedelta(days=1)
@@ -3029,6 +3168,40 @@ def _factor_anchor_observations(
                 for label in labels
                 if target_scope_start <= label <= target_scope_end
             ]
+        if source_gap is not None:
+            prior_segment, next_segment = source_gap
+            rejected_bucket_receipts.append(
+                {
+                    "calendar_day_duration": (right - left).days,
+                    "factor_anchor": right.isoformat(),
+                    "factor_return_basis": policy.factor_return_basis,
+                    "factor_source_snapshot_identity": policy.factor_source_vintage,
+                    "prior_factor_anchor": left.isoformat(),
+                    "reason": "SOURCE_SEGMENT_GAP",
+                    "source_segments": [dict(prior_segment), dict(next_segment)],
+                    "target_calendar": policy.target_calendar,
+                    "target_currency": policy.target_currency,
+                    "target_label_convention": policy.target_label_convention,
+                    "target_labels": [label.isoformat() for label in labels],
+                    "target_source_snapshot_identity": policy.target_source_vintage,
+                }
+            )
+            continue
+        # An anchor excluded for incompleteness that falls inside this bucket means the
+        # bucket's factor return spans a longer period than the target returns it
+        # carries.  That is harmless only when every carried label falls after the hole,
+        # which is the pre-inception case; a label at or before it would have its return
+        # compounded across the hole and associated with the wrong factor period.
+        bridged = [
+            observed
+            for observed in incomplete_anchors
+            if left < observed < right and any(label <= observed for label in labels)
+        ]
+        if bridged:
+            raise DecompositionError(
+                "factor anchor "
+                f"{bridged[0].isoformat()} has incomplete selected components"
+            )
         missing = [label for label in labels if label not in target_by_day]
         if missing and policy.target_calendar != "LEGACY_EXACT_LABEL":
             raise DecompositionError(
@@ -3037,6 +3210,16 @@ def _factor_anchor_observations(
             )
         if not labels:
             if policy.target_calendar == "LEGACY_EXACT_LABEL":
+                continue
+            if policy.source_segments and not any(
+                left < _day(segment["observed_end"], "source segment end")
+                and right >= _day(segment["observed_start"], "source segment start")
+                for segment in policy.source_segments
+            ):
+                # This factor interval lies entirely inside a source-proved
+                # no-observation period.  It has no target claim to fit; only
+                # an interval crossing either adjacent source segment is a
+                # rejected source-gap receipt below.
                 continue
             if not bucket_intersects_target_scope:
                 continue
@@ -3171,6 +3354,9 @@ def _factor_anchor_observations(
             if policy.evaluation_information_set == "RETROSPECTIVE_SELECTED_SNAPSHOT"
             else "point-in-time factor-conditional holdout association using retained historical vintage"
         ),
+        "factor_incomplete_anchors_excluded": [
+            observed.isoformat() for observed in incomplete_anchors
+        ],
         "pending_factor_anchor_labels": unassignable_tail_labels,
         "periods_per_year": model.periods_per_year,
         "policy_id": (
@@ -3288,6 +3474,86 @@ def _model_result(
             "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
             empty_coverage,
         )
+    declared_unavailable = interval_policy.declared_unavailable_labels
+    if declared_unavailable:
+        declared_days = [
+            _day(item["date"], "declared unavailable label date")
+            for item in declared_unavailable
+        ]
+        expected_labels: tuple[date, ...]
+        if interval_policy.target_calendar == "SESSION_LABELLED":
+            schedule = interval_policy.target_session_labels.get(model.series_id)
+            if schedule is None or any(day not in schedule for day in declared_days):
+                raise DecompositionError(
+                    "declared unavailable label is outside the source schedule"
+                )
+            expected_labels = schedule
+        elif interval_policy.target_calendar == "CALENDAR_DAY_24_7":
+            if any(
+                not any(
+                    _day(segment["observed_start"], "source segment start")
+                    <= day
+                    <= _day(segment["observed_end"], "source segment end")
+                    for segment in interval_policy.source_segments
+                )
+                for day in declared_days
+            ):
+                raise DecompositionError(
+                    "declared unavailable label is outside source segments"
+                )
+            expected_labels = tuple(
+                day
+                for segment in interval_policy.source_segments
+                for day in (
+                    _day(segment["observed_start"], "source segment start")
+                    + timedelta(days=offset)
+                    for offset in range(
+                        (
+                            _day(segment["observed_end"], "source segment end")
+                            - _day(segment["observed_start"], "source segment start")
+                        ).days
+                        + 1
+                    )
+                )
+            )
+        else:
+            raise DecompositionError(
+                "declared unavailable labels require source schedule"
+            )
+        observed_days = {row.day for row in target_rows}
+        if any(day in observed_days for day in declared_days):
+            raise DecompositionError(
+                "declared unavailable label is present in target rows"
+            )
+        effective_target_finality = min(
+            interval_policy.target_finalized_through,
+            model.as_of_date or interval_policy.target_finalized_through,
+        )
+        unexpected_missing = [
+            day
+            for day in expected_labels
+            if day <= effective_target_finality
+            and day not in declared_days
+            and day not in observed_days
+        ]
+        if unexpected_missing:
+            raise DecompositionError(
+                "missing expected target label(s) from source-period authority: "
+                f"{[day.isoformat() for day in unexpected_missing]}"
+            )
+        source_proof = {
+            "declared_unavailable_labels": [
+                dict(item) for item in declared_unavailable
+            ],
+            "source_segments": [dict(item) for item in interval_policy.source_segments],
+        }
+        unavailable_coverage = {**empty_coverage, "interval_association": source_proof}
+        return _unavailable_result(
+            model,
+            target_rows,
+            "UNAVAILABLE_DECLARED_SOURCE_INTERVAL",
+            unavailable_coverage,
+        )
 
     aligned, interval_association = _factor_anchor_observations(
         model=model,
@@ -3295,6 +3561,9 @@ def _model_result(
         factor_rows=factor_rows,
         policy=interval_policy,
     )
+    # Exact-date factor gaps are impossible under FACTOR_ANCHOR_POLICY: every in-scope
+    # label is assigned to its bucket.  Labels outside the anchor range are disclosed
+    # separately as `pre_anchor_labels` / `pending_factor_anchor_labels`.
     missing_dates: list[date] = []
 
     train = [item for item in aligned if item[0].day <= model.train_end]
@@ -3756,6 +4025,16 @@ def _select_models(
         ]
         selections.append(
             {
+                # Candidates of one series need not share a fitted sample: a component
+                # absent before its own inception bounds only the models that select it.
+                # The parsimony comparison below therefore spans unequal samples, so the
+                # sizes it ranked are recorded rather than left for a reader to infer.
+                "candidate_train_observations": {
+                    cast(str, item[0]["model_id"]): cast(
+                        dict[str, Any], item[0]["coverage"]
+                    )["train_observations"]
+                    for item in computable
+                },
                 "factor_count": len(cast(list[object], selected["factor_ids"])),
                 "holdout_predicted_r_squared": holdout["predicted_r_squared"],
                 "model_id": selected["model_id"],

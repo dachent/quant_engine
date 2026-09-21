@@ -11,6 +11,7 @@ import json
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import sys
 from typing import Callable
 
@@ -30,6 +31,7 @@ from quant_engine.core import (
     inventory_generation,
     pipeline_status,
     plan_pipeline,
+    publish_generation,
     read_generation_bundle,
     stage_generation,
     stage_generation_bundle,
@@ -1113,11 +1115,11 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
     # The panel command writes the manifest from the same verified bundle, so
     # the spec build leaves that node's declared output untouched.
     assert not (output_root / "stages" / "panel").exists()
-    # `build_workbook` and `build_panel` refuse a financial publication
-    # without a portfolio root, so the nodes that run them must carry it.
+    # The report and panel stages are private financial stages and must carry
+    # the production root disjointness proof; workbook is permanently held.
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
     argv_by_node = {row["node_id"]: row.get("argv", []) for row in spec["nodes"]}
-    for node_id in ("build-workbook", "build-panel"):
+    for node_id in ("build-report", "build-panel"):
         argv = argv_by_node[node_id]
         assert "--portfolio-root" in argv
         assert argv[argv.index("--portfolio-root") + 1] == str(tmp_path / "portfolio")
@@ -1131,7 +1133,7 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
     reads_by_node = {
         row["node_id"]: row.get("declared_reads", []) for row in spec["nodes"]
     }
-    for node_id in ("build-report", "build-workbook", "build-panel"):
+    for node_id in ("build-report", "build-panel"):
         argv = argv_by_node[node_id]
         for flag, path in (
             ("--hwm-governed-result", governed["as-held-hwm"]),
@@ -1171,7 +1173,7 @@ def test_schema10_build_spec_materializes_bound_manifest_and_contract_source(
 def test_governed_results_reach_every_role_that_reads_them(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The report, workbook and panel roles each read the governed results.
+    """The report and panel roles each read the governed results.
 
     Binding them into the proof but not into the pipeline's own nodes made the
     panel node recompute a semantic validation that differed from the one the
@@ -1212,7 +1214,7 @@ def test_governed_results_reach_every_role_that_reads_them(
     ):
         materializer._governed_stage_paths(*missing)
 
-    assert materializer._GOVERNED_OUTCOME_STAGES == ("report", "workbook", "panel")
+    assert materializer._GOVERNED_OUTCOME_STAGES == ("report", "panel")
 
 
 def test_financial_spec_without_a_portfolio_root_fails_before_the_dag(
@@ -2760,6 +2762,84 @@ def test_current_admission_reopens_sources_and_rejects_coherent_omissions(
     assert not (tmp_path / "staged/CURRENT.json").exists()
 
 
+def test_current_admission_separates_financial_cutoff_from_generation_date(
+    tmp_path: Path,
+) -> None:
+    fixture_spec = importlib.util.spec_from_file_location(
+        "current_source_stage_date_fixture",
+        ROOT / "tests/provider_ledger/test_admit_or_declare.py",
+    )
+    assert fixture_spec is not None and fixture_spec.loader is not None
+    fixture = importlib.util.module_from_spec(fixture_spec)
+    fixture_spec.loader.exec_module(fixture)
+    generation, authority, _ = fixture._source_bound_stage(tmp_path)
+    arguments = {
+        key: authority[key]
+        for key in ("contract_raw_sha256", "contract_semantic_sha256", "census_sha256")
+    }
+    original = GenerationManifest.from_json_bytes(
+        (generation / "generation.json").read_bytes()
+    )
+    later = original.as_of_date + timedelta(days=1)
+    rebound = GenerationManifest.build(
+        as_of_date=later,
+        adapter=original.adapter,
+        coverage=original.coverage,
+        artifacts=original.artifacts,
+        verification=original.verification,
+    )
+    forged = tmp_path / "later-generation" / rebound.generation_id
+    forged.mkdir(parents=True)
+    (forged / "generation.json").write_bytes(rebound.to_json_bytes())
+    for name in (
+        "admit-or-declare-receipt.json",
+        "provider-ledger.json",
+    ):
+        (forged / name).write_bytes((generation / name).read_bytes())
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="provider ledger generation date differs",
+    ):
+        materializer._provider_admission_authority(
+            forged, authority["contract"], **arguments
+        )
+
+    catalog = json.loads((forged / "provider-ledger.json").read_bytes())
+    catalog["as_of_date"] = later.isoformat()
+    tampered_catalog = canonical_json_bytes(catalog)
+    tampered_manifest = GenerationManifest.build(
+        as_of_date=later,
+        adapter=rebound.adapter,
+        coverage=rebound.coverage,
+        artifacts=tuple(
+            replace(
+                artifact,
+                sha256=hashlib.sha256(tampered_catalog).hexdigest(),
+                size_bytes=len(tampered_catalog),
+            )
+            if artifact.artifact_id == "normalized/provider-ledger.json"
+            else artifact
+            for artifact in rebound.artifacts
+        ),
+        verification=rebound.verification,
+    )
+    tampered = tmp_path / "tampered-generation" / tampered_manifest.generation_id
+    tampered.mkdir(parents=True)
+    (tampered / "generation.json").write_bytes(tampered_manifest.to_json_bytes())
+    (tampered / "provider-ledger.json").write_bytes(tampered_catalog)
+    (tampered / "admit-or-declare-receipt.json").write_bytes(
+        (generation / "admit-or-declare-receipt.json").read_bytes()
+    )
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="provider ledger catalog authority differs",
+    ):
+        materializer._provider_admission_authority(
+            tampered, authority["contract"], **arguments
+        )
+
+
 def _runtime_registry(
     tmp_path: Path,
     *,
@@ -2882,7 +2962,7 @@ def test_correction_identity_invalidates_only_its_dag_closure(tmp_path: Path) ->
         stage
         for stage in materializer.STAGES
         if baseline_ids[stage] != changed_ids[stage]
-    ] == ["report", "workbook", "panel"]
+    ] == ["report", "panel"]
     assert all(
         baseline_ids[stage] == changed_ids[stage]
         for stage in ("ledger", "baseline", "attribution", "analytics")
@@ -4150,16 +4230,12 @@ def test_generated_semantic_command_declares_exact_gate_file(
     output_root = tmp_path / "dag"
     spec_path = output_root / "pipeline-spec.json"
     retained_cache_root = tmp_path / "retained-decomposition"
-    workbook_runtime = tmp_path / "workbook-runtime.json"
-    workbook_runtime.write_text("{}\n", encoding="utf-8")
-
     materializer.build_spec(
         recipe_path,
         output_root,
         spec_path,
         portfolio_root=tmp_path / "portfolio",
         retained_cache_root=retained_cache_root,
-        workbook_runtime_path=workbook_runtime,
     )
 
     spec = json.loads(spec_path.read_text(encoding="utf-8"))
@@ -4183,15 +4259,10 @@ def test_generated_semantic_command_declares_exact_gate_file(
     assert analytics_command["argv"][retained_index + 1] == str(retained_cache_root)
     assert str(retained_cache_root) in analytics_command["declared_writes"]
     assert spec["state_root"] == str(retained_cache_root)
-    workbook_command = nodes["build-workbook"]
-    runtime_index = workbook_command["argv"].index("--workbook-runtime")
-    assert workbook_command["argv"][runtime_index + 1] == str(workbook_runtime)
-    assert str(workbook_runtime) in workbook_command["declared_reads"]
-    assert nodes["build-workbook"]["retry_limit"] == 1
     assert all(
         node["retry_limit"] == 0
         for node_id, node in nodes.items()
-        if node.get("kind") == "COMMAND" and node_id != "build-workbook"
+        if node.get("kind") == "COMMAND"
     )
     vertical = json.loads(
         Path(json.loads(recipe_path.read_text())["vertical_recipe"]["path"]).read_text()
@@ -4220,28 +4291,18 @@ def test_generated_semantic_command_declares_exact_gate_file(
         str(output_root / "stages" / "ledger")
         in nodes["build-attribution"]["declared_reads"]
     )
-    for role in ("report", "workbook"):
+    for role in ("report",):
         assert (
             str(output_root / "stages" / "baseline")
             in nodes[f"build-{role}"]["declared_reads"]
         )
-    report_id = next(
-        row["sha256"]
-        for row in nodes["report-generation"]["files"]
-        if row["relative_path"] == "portfolio-report-data.json"
-    )
-    report_candidate = (
-        output_root / "stages" / "report-candidate" / "candidates" / report_id
-    )
     assert (
-        str(output_root / "stages" / "report-candidate")
-        not in nodes["build-report"]["declared_writes"]
+        str(output_root / "stages" / "report")
+        in nodes["build-report"]["declared_writes"]
     )
-    assert {
-        str(report_candidate / "portfolio-report-data.json"),
-        str(report_candidate / "workbook-contract.json"),
-        str(report_candidate / "xlsx-job.json"),
-    } <= set(nodes["build-report"]["declared_writes"])
+    assert str(output_root / "stages" / "report") in set(
+        nodes["build-report"]["declared_writes"]
+    )
     report_generation_paths = {
         row["relative_path"] for row in nodes["report-generation"]["files"]
     }
@@ -4251,13 +4312,10 @@ def test_generated_semantic_command_declares_exact_gate_file(
         str(output_root / "stages" / "report") in nodes["build-panel"]["declared_reads"]
     )
     assert (
-        str(output_root / "stage-results" / "workbook.json")
+        str(output_root / "stage-results" / "report.json")
         in nodes["build-panel"]["declared_reads"]
     )
-    assert (
-        str(output_root / "stages" / "report-candidate")
-        in nodes["build-workbook"]["declared_writes"]
-    )
+    assert "build-workbook" not in nodes
 
 
 def test_governed_hwm_assessment_binds_the_admitted_input_contract() -> None:
@@ -4310,6 +4368,1063 @@ def test_panel_lens_authority_admits_the_dynamic_style_path(tmp_path: Path) -> N
     panel["decomposition_lenses"]["modes"]["LIVE_ONLY"][-1]["generation_id"] = "0" * 64
     with pytest.raises(materializer.MaterializationError, match="panel lens"):
         materializer._verify_panel_lens_nodes(panel, nodes, DECOMPOSITION_AUTHORITY)
+
+
+def _attended_preflight_fixture(tmp_path: Path) -> dict[str, object]:
+    """A child-bound run fixture with no financial inputs or publication seam."""
+
+    repo = tmp_path / "repo"
+    builder = repo / "tools" / "portfolio_release_builder.py"
+    builder.parent.mkdir(parents=True)
+    builder.write_text("# child boundary\n", encoding="utf-8")
+    runtime = tmp_path / "python.exe"
+    runtime.write_bytes(b"python")
+    descriptor = tmp_path / "workbook-runtime.json"
+    descriptor.write_text("{}", encoding="utf-8")
+    recipe = tmp_path / "recipe.json"
+    recipe.write_text("{}", encoding="utf-8")
+    source_run = tmp_path / "source-run.json"
+    source_run.write_text("{}", encoding="utf-8")
+    workspace = tmp_path / "workspace"
+    (workspace / "dataPortfolio").mkdir(parents=True)
+    cache = tmp_path / "cache"
+    cache.mkdir()
+    qa_dir = tmp_path / "qa"
+    qa_dir.mkdir()
+    return {
+        "repo_root": repo,
+        "python": runtime,
+        "workspace_root": workspace,
+        "portfolio_root": workspace / "dataPortfolio",
+        "retained_cache_root": cache,
+        "requested_as_of": "2026-09-19",
+        "source_run": source_run,
+        "runtime": {"descriptor": descriptor, "identity": {"runtime": "test"}},
+        "recipe": recipe,
+        "financial_inputs": {},
+        "financial_stage_inputs": {},
+        "qa_dir": qa_dir,
+        "request_identity": {"fixture": "attended-child-boundary"},
+        "required_stages": materializer.ATTENDED_STAGES,
+        "source_phase": {"status": "PASS"},
+    }
+
+
+def _record_attended_stage(output_root: Path, role: str) -> None:
+    stage_root = (
+        output_root
+        / "stages"
+        / (
+            "report"
+            if role == "report"
+            else "report"
+            if role == "workbook"
+            else "panel"
+            if role in {"panel-candidate", "panel"}
+            else role
+        )
+    )
+    stage_root.mkdir(parents=True, exist_ok=True)
+    result: dict[str, object] = {"role": role}
+    if role == "ledger":
+        product = financial_fixture.build_financial_mvp_fixture(
+            output_root / "attended-ledger-source"
+        )
+        generation = stage_root / "generations" / product.generation.name
+        shutil.copytree(product.generation, generation)
+        result.update(
+            {
+                "catalog_sha256": hashlib.sha256(
+                    (generation / "provider-ledger.json").read_bytes()
+                ).hexdigest(),
+                "generation_id": product.generation.name,
+                "root": str(stage_root),
+            }
+        )
+    elif role == "baseline":
+        catalog = canonical_json_bytes(
+            {"baseline_schema_version": 1, "policy_version": "PORT-PERF-1"}
+        )
+        artifact = SourceArtifact(
+            artifact_id="normalized/portfolio-baseline.json",
+            sha256=hashlib.sha256(catalog).hexdigest(),
+            size_bytes=len(catalog),
+            as_of_date=AS_OF,
+            schema_name="portfolio-baseline-catalog",
+            schema_version="1",
+        )
+        manifest = GenerationManifest.build(
+            as_of_date=AS_OF,
+            adapter=AdapterIdentity("attended-baseline", "1"),
+            coverage=CoverageClaim(
+                status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+                boundary="attended baseline test artifact",
+                fact_types=("baseline",),
+                observed_start=AS_OF,
+                observed_end=AS_OF,
+            ),
+            artifacts=(artifact,),
+            verification=VerificationStatus.VERIFIED,
+        )
+        generation = stage_root / "generations" / manifest.generation_id
+        generation.mkdir(parents=True)
+        (generation / "generation.json").write_bytes(manifest.to_json_bytes())
+        (generation / "portfolio-baseline.json").write_bytes(catalog)
+        result.update(
+            {
+                "catalog_sha256": artifact.sha256,
+                "generation_id": manifest.generation_id,
+                "root": str(stage_root),
+            }
+        )
+    _write_json(output_root / "stage-results" / f"{role}.json", result)
+
+
+def _attended_argv(
+    preflight: dict[str, object],
+    output_root: Path,
+    *,
+    execute: bool,
+    resume: bool = False,
+) -> list[str]:
+    argv = [
+        "attended",
+        "--repo-root",
+        str(preflight["repo_root"]),
+        "--python",
+        str(preflight["python"]),
+        "--workspace-root",
+        str(preflight["workspace_root"]),
+        "--output-root",
+        str(output_root),
+        "--retained-cache-root",
+        str(preflight["retained_cache_root"]),
+        "--requested-as-of",
+        str(preflight["requested_as_of"]),
+        "--source-run",
+        str(preflight["source_run"]),
+    ]
+    if execute:
+        argv.append("--execute")
+    if resume:
+        argv.append("--resume")
+    return argv
+
+
+def test_attended_view_separates_plan_from_verified_completed_artifacts(
+    tmp_path: Path,
+) -> None:
+    """Dropping a result receipt must make a completed stage disappear from the view."""
+
+    output_root = tmp_path / "output"
+    _record_attended_stage(output_root, "ledger")
+
+    view = materializer._attended_view(
+        output_root, materializer.ATTENDED_STAGES, {"source": "test"}
+    )
+
+    assert view["planned_stages"] == list(materializer.ATTENDED_STAGES)
+    assert view["verified_completed_stages"] == ["ledger"]
+    assert view["post_proof_pipeline_spec"] is None
+
+
+def test_attended_completed_ledger_requires_a_bound_verified_generation(
+    tmp_path: Path,
+) -> None:
+    """A receipt alone is not a completed ledger artifact for resume purposes."""
+
+    output_root = tmp_path / "output"
+    ledger_root = output_root / "stages" / "ledger"
+    ledger_root.mkdir(parents=True)
+    _write_json(
+        output_root / "stage-results" / "ledger.json",
+        {
+            "catalog_sha256": "0" * 64,
+            "generation_id": "0" * 64,
+            "root": str(ledger_root),
+        },
+    )
+
+    with pytest.raises(
+        materializer.MaterializationError,
+        match="attended completed ledger",
+    ):
+        materializer._attended_completed_stages(
+            output_root, materializer.ATTENDED_STAGES
+        )
+
+
+def test_attended_execute_never_starts_a_coordinated_publication_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replacing a stage child with publication must fail this boundary assertion."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+    calls: list[list[str]] = []
+
+    def stage_only(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        role = argv[argv.index("--role") + 1]
+        _record_attended_stage(output_root, role)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", stage_only)
+
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+    assert len(calls) == len(preflight["required_stages"])
+    assert all(command[2] == "stage" for command in calls)
+    assert all("publish" not in command for command in calls)
+
+
+def test_attended_resume_skips_only_verified_completed_stages(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Removing a stage directory must turn a would-be resume skip into rejection."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a verified completed stage must be skipped")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 0
+    )
+
+    shutil.rmtree(output_root / "stages" / "ledger")
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 1
+    )
+
+
+def test_attended_resume_rejects_a_corrupt_completed_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Replacing a JSON receipt with arbitrary bytes must stop before another child."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+    (output_root / "stage-results" / "ledger.json").write_bytes(b"not-json")
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("corrupt completion must fail before a child starts")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 1
+    )
+
+
+def test_attended_resume_rejects_a_corrupt_completed_baseline_before_a_child(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-ledger receipt may not make a changed generation skippable."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 0
+    baseline = (
+        next((output_root / "stages" / "baseline" / "generations").iterdir())
+        / "portfolio-baseline.json"
+    )
+    baseline.write_bytes(baseline.read_bytes() + b"\n")
+
+    def no_child(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("corrupt baseline must fail before a child starts")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 1
+    )
+
+
+def test_attended_preserves_failed_partial_child_and_retries_it_on_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed child retains pending output and keeps its original exit code."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+    calls: list[str] = []
+
+    def fail_baseline(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        calls.append(role)
+        if role == "ledger":
+            _record_attended_stage(output_root, role)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        (output_root / "stages" / "baseline").mkdir(parents=True)
+        return subprocess.CompletedProcess(argv, 83, "", "failed baseline")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", fail_baseline)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 83
+
+    def retry_baseline(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        calls.append(role)
+        assert role == "baseline"
+        shutil.rmtree(output_root / "stages" / "baseline")
+        _record_attended_stage(output_root, role)
+        return subprocess.CompletedProcess(argv, 97, "", "next boundary")
+
+    monkeypatch.setattr(materializer.subprocess, "run", retry_baseline)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 97
+    )
+    assert calls == ["ledger", "baseline", "baseline"]
+
+
+def test_attended_preserve_moves_the_receipt_sharing_the_stage_root(
+    tmp_path: Path,
+) -> None:
+    """A receipt whose bytes left with the shared root must leave with them."""
+
+    output_root = tmp_path / "output"
+    stage_root = output_root / "stages" / "panel"
+    stage_root.mkdir(parents=True)
+    (stage_root / "candidate.bin").write_bytes(b"candidate")
+    results = output_root / "stage-results"
+    results.mkdir()
+    (results / "panel.json").write_bytes(b'{"role": "panel"}')
+    (results / "panel-candidate.json").write_bytes(b'{"role": "panel-candidate"}')
+    # A role with its own root must not drag anything else along.
+    (results / "ledger.json").write_bytes(b'{"role": "ledger"}')
+
+    materializer._attended_preserve_failed_stage(output_root, "panel")
+
+    preserved = output_root / "failed-stage-evidence" / "panel" / "attempt-1"
+    assert (preserved / "stage-root" / "candidate.bin").read_bytes() == b"candidate"
+    assert (preserved / "stage-result.json").read_bytes() == b'{"role": "panel"}'
+    # panel-candidate's outputs went with the root, so its receipt cannot stay behind and
+    # claim they are still there.
+    assert (preserved / "panel-candidate.json").read_bytes() == (
+        b'{"role": "panel-candidate"}'
+    )
+    assert not (results / "panel-candidate.json").exists()
+    assert (results / "ledger.json").is_file()
+    assert sorted(item.name for item in stage_root.iterdir()) == []
+
+
+def test_attended_shared_stage_roles_are_derived_not_named(tmp_path: Path) -> None:
+    """The pair sharing a root is read from the mapping, so a new one cannot be missed."""
+
+    output_root = tmp_path / "output"
+    assert materializer._attended_shared_stage_roles(output_root, "panel") == (
+        "panel-candidate",
+    )
+    assert materializer._attended_shared_stage_roles(
+        output_root, "panel-candidate"
+    ) == ("panel",)
+    assert materializer._attended_shared_stage_roles(output_root, "ledger") == ()
+
+
+def test_attended_resume_records_one_attempt_for_one_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Preserving a failed stage must not also preserve the empty root it recreates.
+
+    This one guards the partial-root recovery below rather than the defect it fixes: the
+    preserve recreates its stage root empty, so a recovery keyed on existence alone preserves
+    a second time and leaves an empty `attempt-2`. It passes on code that has no recovery at
+    all, which is why it is documented as a regression guard and not as proof of the fix.
+    """
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+
+    def fail_baseline(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        if role == "ledger":
+            _record_attended_stage(output_root, role)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        (output_root / "stages" / "baseline").mkdir(parents=True, exist_ok=True)
+        (output_root / "stages" / "baseline" / "partial.bin").write_bytes(b"partial")
+        return subprocess.CompletedProcess(argv, 83, "", "failed baseline")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", fail_baseline)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 83
+
+    def retry(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        _record_attended_stage(output_root, role)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer.subprocess, "run", retry)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 0
+    )
+    attempts = sorted((output_root / "failed-stage-evidence" / "baseline").iterdir())
+    assert [item.name for item in attempts] == ["attempt-1"]
+    assert (attempts[0] / "stage-root" / "partial.bin").read_bytes() == b"partial"
+
+
+def test_attended_resume_preserves_a_partial_root_left_without_a_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An interruption before the parent records the failure still leaves partial bytes."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+
+    def fail_baseline(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        if role == "ledger":
+            _record_attended_stage(output_root, role)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        (output_root / "stages" / "baseline").mkdir(parents=True, exist_ok=True)
+        (output_root / "stages" / "baseline" / "partial.bin").write_bytes(b"partial")
+        return subprocess.CompletedProcess(argv, 83, "", "failed baseline")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", fail_baseline)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 83
+
+    # Emulate a kill that took the process before it could record which stage failed: the
+    # partial bytes are on disk and the receipt says nothing about them.
+    receipt = output_root / "attended-run.json"
+    value = json.loads(receipt.read_text("utf-8"))
+    receipt.write_bytes(
+        canonical_json_bytes(
+            {"request_identity": value["request_identity"], "schema_version": 1}
+        )
+    )
+
+    seen: list[list[str]] = []
+
+    def retry(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        if role == "baseline":
+            seen.append(
+                sorted(
+                    item.name
+                    for item in (output_root / "stages" / "baseline").iterdir()
+                )
+            )
+        _record_attended_stage(output_root, role)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer.subprocess, "run", retry)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 0
+    )
+    # The retried child sees an empty root, not its own half-written output.
+    assert seen == [[]]
+    preserved = output_root / "failed-stage-evidence" / "baseline" / "attempt-1"
+    assert (preserved / "stage-root" / "partial.bin").read_bytes() == b"partial"
+
+
+def test_attended_request_identity_binds_the_evaluation_clock(tmp_path: Path) -> None:
+    """A changed evaluation date must change the identity a resume is validated against."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    shared: dict[str, object] = {
+        "repo_root": preflight["repo_root"],
+        "python": preflight["python"],
+        "workspace_root": preflight["workspace_root"],
+        "output_root": tmp_path / "output",
+        "retained_cache_root": preflight["retained_cache_root"],
+        "requested_as_of": "2026-09-17",
+        "source_run": preflight["source_run"],
+        "financial_stage_inputs": {},
+        "source_phase": {},
+        "runtime": {},
+    }
+    first = materializer._attended_request_identity(evaluated_on="2026-09-21", **shared)
+    second = materializer._attended_request_identity(
+        evaluated_on="2026-09-22", **shared
+    )
+
+    assert first["evaluated_on"] == "2026-09-21"
+    assert canonical_json_bytes(first) != canonical_json_bytes(second)
+    # The financial cutoff is a separate clock and must not move with it.
+    assert first["requested_as_of"] == second["requested_as_of"] == "2026-09-17"
+
+
+def test_attended_preserves_original_exit_when_child_leaves_partial_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A malformed receipt from a failed child remains pending, not completed."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+
+    def fail_ledger(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        (output_root / "stages" / "ledger").mkdir(parents=True)
+        (output_root / "stage-results").mkdir(parents=True)
+        (output_root / "stage-results" / "ledger.json").write_bytes(b"{")
+        return subprocess.CompletedProcess(argv, 97, "", "partial ledger")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", fail_ledger)
+
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 97
+    assert (output_root / "stage-results" / "ledger.json").read_bytes() == b"{"
+
+    calls: list[str] = []
+
+    def retry_pending_ledger(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        role = argv[argv.index("--role") + 1]
+        calls.append(role)
+        if role == "ledger":
+            import portfolio_release_builder as release
+
+            expected_root = tmp_path / "expected-ledger"
+            _record_attended_stage(expected_root, role)
+            expected = json.loads(
+                (expected_root / "stage-results" / "ledger.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            expected["root"] = str(output_root / "stages" / "ledger")
+            shutil.copytree(
+                expected_root / "stages" / "ledger",
+                output_root / "stages" / "ledger",
+                dirs_exist_ok=True,
+            )
+            release._record_stage(output_root, role, expected)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return subprocess.CompletedProcess(argv, 97, "", "next boundary")
+
+    monkeypatch.setattr(materializer.subprocess, "run", retry_pending_ledger)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 97
+    )
+    assert calls == ["ledger", "baseline"]
+    assert json.loads((output_root / "stage-results" / "ledger.json").read_text())
+    assert any(
+        path.read_bytes() == b"{"
+        for path in (output_root / "failed-stage-evidence").rglob("stage-result.json")
+    )
+    checkpoint = json.loads((output_root / "attended-run.json").read_text())
+    assert checkpoint["schema_version"] == 2
+    assert checkpoint["failed_stage"] == {"returncode": 97, "role": "baseline"}
+
+
+def test_attended_execution_observations_preserve_cold_and_resumed_attempt_times(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Execution timing is an operational receipt, not a financial identity input."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger",)
+    output_root = tmp_path / "output"
+    times = iter(
+        (
+            "2026-09-19T12:00:00+00:00",
+            "2026-09-19T12:00:01+00:00",
+            "2026-09-19T12:01:00+00:00",
+            "2026-09-19T12:01:01+00:00",
+        )
+    )
+    monkeypatch.setattr(materializer, "_execution_timestamp", lambda: next(times))
+
+    def fail_once(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 97, "", "ledger failed")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", fail_once)
+    assert materializer.main(_attended_argv(preflight, output_root, execute=True)) == 97
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, "ledger")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 0
+    )
+
+    receipt = json.loads(
+        (output_root / "attended-execution-observations.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert receipt == {
+        "execution_attempts": [
+            {
+                "attempt": 1,
+                "ended_at": "2026-09-19T12:00:01+00:00",
+                "started_at": "2026-09-19T12:00:00+00:00",
+                "status": "FAILED",
+            },
+            {
+                "attempt": 2,
+                "ended_at": "2026-09-19T12:01:01+00:00",
+                "started_at": "2026-09-19T12:01:00+00:00",
+                "status": "COMPLETED",
+            },
+        ],
+        "preparation_attempts": [],
+        "schema_version": 2,
+    }
+    assert (
+        json.loads((output_root / "attended-run.json").read_text())["request_identity"]
+        == (preflight["request_identity"])
+    )
+
+
+def test_attended_execution_observations_mark_interrupted_attempt_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A resumed run records interruption without inventing a terminal instant."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger",)
+    output_root = tmp_path / "output"
+    times = iter(
+        (
+            "2026-09-19T12:00:00+00:00",
+            "2026-09-19T12:01:00+00:00",
+            "2026-09-19T12:01:01+00:00",
+        )
+    )
+    monkeypatch.setattr(materializer, "_execution_timestamp", lambda: next(times))
+
+    def interrupted(
+        _argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(materializer.subprocess, "run", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        materializer._attended_execute(preflight, output_root, resume=False)
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        _record_attended_stage(output_root, "ledger")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    assert materializer._attended_execute(preflight, output_root, resume=True)[0] == 0
+    attempts = json.loads(
+        (output_root / "attended-execution-observations.json").read_text(
+            encoding="utf-8"
+        )
+    )["execution_attempts"]
+    assert attempts[0] == {
+        "attempt": 1,
+        "started_at": "2026-09-19T12:00:00+00:00",
+        "status": "INCOMPLETE",
+    }
+    assert attempts[1]["status"] == "COMPLETED"
+
+
+@pytest.mark.parametrize(
+    "role",
+    ("attribution", "analytics", "report", "panel-candidate", "panel"),
+)
+def test_attended_completed_nonledger_stage_requires_bound_native_artifacts(
+    tmp_path: Path, role: str
+) -> None:
+    """A non-ledger result receipt alone is never a verified resume artifact."""
+
+    output_root = tmp_path / "output"
+    materializer._attended_stage_root(output_root, role).mkdir(parents=True)
+    _write_json(output_root / "stage-results" / f"{role}.json", {"role": role})
+
+    with pytest.raises(materializer.MaterializationError, match=f"completed {role}"):
+        materializer._attended_completed_stages(output_root, (role,))
+
+
+@pytest.mark.parametrize("mutation", ("tamper", "missing"))
+def test_attended_completed_panel_verifies_retained_qa_generation(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Panel resume must verify the generation's retained QA payloads."""
+
+    root = tmp_path / "output" / "stages" / "panel"
+    as_of = date(2026, 9, 17)
+    payloads = {
+        "panel/index.html": b"panel",
+        "verification/independent-verification.json": canonical_json_bytes({}),
+        "evidence/qa-validation.json": canonical_json_bytes({"all_passed": True}),
+        "evidence/semantic-validation.json": canonical_json_bytes({"all_passed": True}),
+    }
+    artifacts = tuple(
+        SourceArtifact(
+            artifact_id=relative,
+            sha256=hashlib.sha256(content).hexdigest(),
+            size_bytes=len(content),
+            as_of_date=as_of,
+            schema_name="attended-panel-test",
+            schema_version="1",
+        )
+        for relative, content in payloads.items()
+    )
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("attended-panel-test", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="attended panel QA resume test",
+            fact_types=("panel", "browser QA"),
+            observed_start=as_of,
+            observed_end=as_of,
+        ),
+        artifacts=artifacts,
+        verification=VerificationStatus.VERIFIED,
+    )
+    # The real panel producer stages with the bare `stage_generation` and then
+    # writes each payload itself, QA under `qa/<name>` while declaring the
+    # artifact id `evidence/<name>` (portfolio_control_panel.py:12812,12856).
+    # Building this fixture with `stage_generation_bundle` produced a shape
+    # production never emits, so the gate passed here and failed on every real
+    # run.
+    manifest_path = stage_generation(root, manifest)
+    generation_dir = manifest_path.parent
+    for artifact_id, content in payloads.items():
+        relative = artifact_id.split("/", 1)[1]
+        written = (
+            generation_dir / "qa" / relative
+            if artifact_id.startswith("evidence/")
+            else generation_dir / relative
+        )
+        written.parent.mkdir(parents=True, exist_ok=True)
+        written.write_bytes(content)
+    publish_generation(root, manifest.generation_id)
+    receipt = {
+        "generation_id": manifest.generation_id,
+        "root": str(root),
+    }
+    _write_json(tmp_path / "output" / "stage-results" / "panel.json", receipt)
+
+    materializer._attended_completed_stages(  # noqa: SLF001
+        tmp_path / "output", ("panel",)
+    )
+    target = root / "generations" / manifest.generation_id / "qa" / "qa-validation.json"
+    if mutation == "tamper":
+        target.write_bytes(b'{"all_passed":false}')
+    else:
+        target.unlink()
+    with pytest.raises(
+        materializer.MaterializationError, match="attended completed panel"
+    ):
+        materializer._attended_completed_stage_root(  # noqa: SLF001
+            receipt, root, "panel"
+        )
+
+
+@pytest.mark.parametrize("mutation", ("tamper", "missing"))
+def test_attended_completed_report_verifies_the_published_generation(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Report resume must bind the published report bytes to their manifest.
+
+    Built with the real producer's shape: `portfolio_report.publish_report`
+    stages with the bare `stage_generation` and writes the report data at
+    `portfolio-report-data.json` while declaring the artifact id
+    `normalized/portfolio-report-data.json`. The detached-bundle verifier
+    cannot read that -- no sidecars, and the declared ids are logical rather
+    than on-disk paths -- so this gate failed on every real run and had no
+    test at all.
+    """
+
+    root = tmp_path / "output" / "stages" / "report"
+    as_of = date(2026, 9, 17)
+    report = {"report_schema_version": 1, "as_of_date": as_of.isoformat()}
+    report_bytes = canonical_json_bytes(report)
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("attended-report-test", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="attended report resume test",
+            fact_types=("portfolio report",),
+            observed_start=as_of,
+            observed_end=as_of,
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/portfolio-report-data.json",
+                sha256=hashlib.sha256(report_bytes).hexdigest(),
+                size_bytes=len(report_bytes),
+                as_of_date=as_of,
+                schema_name="portfolio-report-data",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(root, manifest)
+    generation_dir = manifest_path.parent
+    (generation_dir / "portfolio-report-data.json").write_bytes(report_bytes)
+    publish_generation(root, manifest.generation_id)
+
+    candidate = root / "candidates" / hashlib.sha256(report_bytes).hexdigest()
+    candidate.mkdir(parents=True)
+    (candidate / "portfolio-report-data.json").write_bytes(report_bytes)
+
+    receipt = {
+        "generation_id": manifest.generation_id,
+        "root": str(root),
+        "candidate_dir": str(candidate),
+    }
+    _write_json(tmp_path / "output" / "stage-results" / "report.json", receipt)
+
+    materializer._attended_completed_stages(  # noqa: SLF001
+        tmp_path / "output", ("report",)
+    )
+
+    target = generation_dir / "portfolio-report-data.json"
+    if mutation == "tamper":
+        target.write_bytes(canonical_json_bytes({"report_schema_version": 1, "x": 1}))
+    else:
+        target.unlink()
+    with pytest.raises(
+        materializer.MaterializationError, match="attended completed report"
+    ):
+        materializer._attended_completed_stages(  # noqa: SLF001
+            tmp_path / "output", ("report",)
+        )
+
+
+def test_attended_forwards_complete_governed_financial_families_and_qa(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The attended boundary keeps all governed stage inputs intact."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+    qa_dir = tmp_path / "qa"
+    supplied = {
+        "--hwm-governed-result": tmp_path / "hwm-result.json",
+        "--hwm-governed-input-generation": tmp_path / "hwm-generation.json",
+        "--hwm-governed-calendar-authority": tmp_path / "hwm-calendar.json",
+        "--hwm-governed-admission-receipt": tmp_path / "hwm-receipt.json",
+        "--invested-capital-result": tmp_path / "capital-result.json",
+        "--invested-capital-input-generation": tmp_path / "capital-generation.json",
+    }
+    for path in supplied.values():
+        path.write_text("{}", encoding="utf-8")
+    preflight["financial_stage_inputs"] = supplied
+    preflight["qa_dir"] = qa_dir
+    calls: list[list[str]] = []
+
+    def complete(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        _record_attended_stage(output_root, argv[argv.index("--role") + 1])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", complete)
+    argv = _attended_argv(preflight, output_root, execute=True)
+    argv.extend(item for flag, path in supplied.items() for item in (flag, str(path)))
+    argv.extend(("--qa-dir", str(qa_dir)))
+    assert materializer.main(argv) == 0
+    assert len(calls) == len(preflight["required_stages"])
+    for command in calls:
+        for flag, path in supplied.items():
+            assert command[command.index(flag) + 1] == str(path)
+    panel = materializer._attended_stage_command(preflight, output_root, "panel")
+    assert panel[panel.index("--qa-dir") + 1] == str(qa_dir)
+
+
+def test_attended_rejects_partial_governed_financial_family_before_child(
+    tmp_path: Path,
+) -> None:
+    """A lone governed HWM path cannot enter an attended stage command."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["financial_stage_inputs"] = {
+        "--hwm-governed-result": tmp_path / "hwm-result.json"
+    }
+
+    with pytest.raises(
+        materializer.MaterializationError, match="financial input family"
+    ):
+        materializer._attended_stage_command(preflight, tmp_path / "output", "ledger")
+
+
+def test_attended_binds_late_qa_without_replacing_final_panel_evidence(
+    tmp_path: Path,
+) -> None:
+    """QA may arrive for an incomplete run but is immutable after panel completion."""
+
+    initial = _attended_preflight_fixture(tmp_path)
+    initial["required_stages"] = ("ledger", "baseline")
+    initial["qa_dir"] = None
+    output_root = tmp_path / "output"
+    materializer._attended_start_or_resume(initial, output_root, resume=False)
+
+    qa_dir = tmp_path / "qa"
+    late = dict(initial)
+    late["qa_dir"] = qa_dir
+    materializer._attended_start_or_resume(late, output_root, resume=True)
+    bound = json.loads((output_root / "attended-qa.json").read_text(encoding="utf-8"))
+    assert bound["path"] == str(qa_dir)
+
+    for role in materializer.ATTENDED_STAGES:
+        _record_attended_stage(output_root, role)
+    replacement = tmp_path / "replacement-qa"
+    replacement.mkdir()
+    changed = dict(initial)
+    changed["qa_dir"] = replacement
+    with pytest.raises(materializer.MaterializationError, match="QA identity"):
+        materializer._attended_start_or_resume(changed, output_root, resume=True)
+
+
+def test_attended_source_only_resume_still_rejects_a_missing_run_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Legacy source-only resume cannot bootstrap a downstream receipt."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    calls: list[list[str]] = []
+
+    def no_child(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer, "_attended_preflight", lambda _args: preflight)
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+
+    assert (
+        materializer.main(
+            _attended_argv(preflight, output_root, execute=True, resume=True)
+        )
+        == 1
+    )
+    assert calls == []
+
+
+def test_attended_rejects_missing_run_receipt_after_execution_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A lost downstream receipt never restarts verified completed producers."""
+
+    preflight = _attended_preflight_fixture(tmp_path)
+    preflight["required_stages"] = ("ledger", "baseline")
+    output_root = tmp_path / "output"
+    output_root.mkdir()
+    clock = {"selected_financial_cutoff": "2026-09-17"}
+    source_run = preflight["source_run"]
+    assert isinstance(source_run, Path)
+    source_run.write_bytes(canonical_json_bytes({"attended": {"data_clock": clock}}))
+    (output_root / "preparation-handoff.json").write_bytes(
+        canonical_json_bytes(
+            {
+                "data_clock": clock,
+                "financial_stage_inputs": {},
+                "schema_version": 1,
+                "source_phase": preflight["source_phase"],
+                "source_run": materializer._file_definition(source_run),
+            }
+        )
+    )
+    materializer._attended_start_or_resume(preflight, output_root, resume=False)
+    _record_attended_stage(output_root, "ledger")
+    materializer._attended_start_execution_attempt(output_root)
+    (output_root / "attended-run.json").unlink()
+    calls: list[list[str]] = []
+
+    def no_child(
+        argv: list[str], **_kwargs: object
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(materializer.subprocess, "run", no_child)
+
+    with pytest.raises(materializer.MaterializationError, match="attended run receipt"):
+        materializer._attended_execute(preflight, output_root, resume=True)
+
+    assert calls == []
+    assert (output_root / "stage-results" / "ledger.json").is_file()
 
 
 # The tool must be the thing being run, not merely named. `docs/ci.md:108`

@@ -37,6 +37,82 @@ def test_governed_policy_rebinds_only_product_authority() -> None:
     assert actual == expected_bytes
 
 
+def test_governed_policy_preserves_retained_pretty_bytes_when_only_authority_moves() -> (
+    None
+):
+    """A retained v4 receipt may keep its admitted non-canonical JSON layout."""
+
+    current = json.loads(reporter._PORTABLE_HWM_POLICY.read_bytes())
+    retained_contract = b'{\n  "retained": "native source authority"\n}\n'
+    old_raw = current["product_authority"]["raw_sha256"]
+    old_semantic = current["product_authority"]["semantic_digest"]
+    new_raw = hashlib.sha256(retained_contract).hexdigest()
+    new_semantic = hashlib.sha256(_canonical(json.loads(retained_contract))).hexdigest()
+    retained_pretty = json.dumps(current, indent=1).encode("utf-8") + b"\n"
+    expected = retained_pretty.replace(old_raw.encode(), new_raw.encode(), 1).replace(
+        old_semantic.encode(), new_semantic.encode(), 1
+    )
+
+    actual = capital.governed_hwm_input_policy(
+        retained_pretty,
+        retained_contract,
+        hashlib.sha256(expected).hexdigest(),
+    )
+
+    assert actual == expected
+    assert json.loads(actual) == {
+        **current,
+        "product_authority": {
+            **current["product_authority"],
+            "raw_sha256": new_raw,
+            "semantic_digest": new_semantic,
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    "current_newline, expected_newline", [(b"\n", b"\r\n"), (b"\r\n", b"\n")]
+)
+def test_governed_policy_accepts_lf_crlf_interchange(
+    current_newline: bytes, expected_newline: bytes
+) -> None:
+    current = json.loads(reporter._PORTABLE_HWM_POLICY.read_bytes())
+    current["test_note"] = r"line1\nline2"
+    current_lf = json.dumps(current, indent=1).encode("utf-8") + b"\n"
+    current_lf = current_lf.replace(b"\r\n", b"\n")
+    current_bytes = current_lf.replace(b"\n", current_newline)
+    retained_contract = b'{"retained":"native source authority"}'
+    expected = deepcopy(current)
+    expected["product_authority"]["raw_sha256"] = hashlib.sha256(
+        retained_contract
+    ).hexdigest()
+    expected["product_authority"]["semantic_digest"] = hashlib.sha256(
+        _canonical(json.loads(retained_contract))
+    ).hexdigest()
+    expected_lf = json.dumps(expected, indent=1).encode("utf-8") + b"\n"
+    expected_lf = expected_lf.replace(b"\r\n", b"\n")
+    expected_bytes = expected_lf.replace(b"\n", expected_newline)
+
+    actual = capital.governed_hwm_input_policy(
+        current_bytes,
+        retained_contract,
+        hashlib.sha256(expected_bytes).hexdigest(),
+    )
+
+    assert actual == expected_bytes
+    assert json.loads(actual) == expected
+    assert b'"test_note": "line1\\\\nline2"' in actual
+
+
+def test_governed_policy_rejects_unknown_expected_hash() -> None:
+    with pytest.raises(capital.CapitalValidationError, match="HWM policy"):
+        capital.governed_hwm_input_policy(
+            reporter._PORTABLE_HWM_POLICY.read_bytes(),
+            reporter._PORTABLE_HWM_PRODUCT_CONTRACT.read_bytes(),
+            "0" * 64,
+        )
+
+
 def test_governed_policy_rejects_changed_current_calculation() -> None:
     current = json.loads(reporter._PORTABLE_HWM_POLICY.read_bytes())
     expected_bytes = _canonical(current)
@@ -120,6 +196,9 @@ def test_retained_authority_rejects_unbound_provider_spec(tmp_path: Path) -> Non
             }
         )
     )
+    capital.write_local_sidecar(
+        inputs, {"provider_ledger": ledger, "provider_ledger_spec": spec}
+    )
     spec.write_bytes(b'{"synthetic":"tampered specification"}')
     with pytest.raises(capital.CapitalValidationError, match="source binding differs"):
         capital.resolve_financial_input_authority(inputs, current, {})
@@ -147,6 +226,9 @@ def test_retained_authority_rejects_provider_outside_baseline(tmp_path: Path) ->
                 },
             }
         )
+    )
+    capital.write_local_sidecar(
+        inputs, {"provider_ledger": ledger, "provider_ledger_spec": spec}
     )
     with pytest.raises(capital.CapitalValidationError, match="selected baseline"):
         capital.resolve_financial_input_authority(inputs, current, {})

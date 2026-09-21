@@ -177,57 +177,24 @@ def test_pre_pr_cannot_certify_different_code(monkeypatch, dirty, remote_head, r
         qc._pre_pr(args)
 
 
-def test_workstation_uses_workspace_local_copy_and_preserves_candidate(
+def test_workstation_profile_is_held_before_candidate_or_runtime_access(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The held workbook-only route must not inspect files or spawn a runtime."""
     spec_path = tmp_path / "pipeline.json"
     spec_path.write_text("{}", encoding="utf-8")
-    spec = _spec(tmp_path)
     candidate = tmp_path / "candidate"
-    (candidate / "excel").mkdir(parents=True)
-    workbook = candidate / "excel" / "portfolio-report.xlsx"
-    workbook.write_bytes(b"retained workbook")
-    (candidate / "workbook-contract.json").write_text("{}", encoding="utf-8")
-    (candidate / "xlsx-job.json").write_text(
-        json.dumps(
-            {
-                "steps": [
-                    {
-                        "type": "open",
-                        "read_only": False,
-                        "workbook_path": str(workbook.resolve()),
-                    },
-                    {"type": "recalc", "mode": "full_rebuild"},
-                    {
-                        "type": "save_as",
-                        "output_path": str(workbook.resolve()),
-                        "overwrite": True,
-                    },
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    runtime, cli = tmp_path / "python.exe", tmp_path / "cli.py"
-    runtime.write_bytes(b"runtime")
-    cli.write_bytes(b"cli")
-    monkeypatch.setattr(qc, "XLSX_RUNTIME", runtime)
-    monkeypatch.setattr(qc, "XLSX_CLI", cli)
-    monkeypatch.setattr(qc, "_load_and_validate_spec", lambda _path: (spec, _proof()))
-    copied_jobs: list[str] = []
-    monkeypatch.setattr(
-        qc, "_native_workbook_checks", lambda _path: {"parity_sha256": "e" * 64}
-    )
+    forbidden: list[str] = []
 
-    def run(command: Any, **_kwargs: Any) -> None:
-        rendered = tuple(command)
-        if "run" in rendered:
-            copied_jobs.append(Path(rendered[3]).read_text(encoding="utf-8"))
-            Path(rendered[rendered.index("--result") + 1]).write_text(
-                json.dumps({"ok": True, "final_state": "SUCCEEDED"}), encoding="utf-8"
-            )
+    def accessed(*_args: Any, **_kwargs: Any) -> Any:
+        forbidden.append("access")
+        raise AssertionError("held workstation profile accessed a candidate or runtime")
 
-    monkeypatch.setattr(qc, "_run_checked", run)
+    monkeypatch.setattr(qc, "_load_and_validate_spec", accessed)
+    monkeypatch.setattr(qc, "_regular_directory", accessed)
+    monkeypatch.setattr(qc, "_regular_file", accessed)
+    monkeypatch.setattr(qc, "_run_checked", accessed)
+    monkeypatch.setattr(qc.subprocess, "run", accessed)
     evidence = tmp_path / "evidence"
 
     assert (
@@ -243,14 +210,9 @@ def test_workstation_uses_workspace_local_copy_and_preserves_candidate(
                 str(evidence),
             ]
         )
-        == 0
+        == 2
     )
-    assert workbook.read_bytes() == b"retained workbook"
-    assert str(candidate.resolve()) not in copied_jobs[0]
-    # System.Text.Json requires the polymorphic discriminator first.
-    copied_steps = json.loads(copied_jobs[0])["steps"]
-    assert all(next(iter(step)) == "type" for step in copied_steps)
-    assert len(list(evidence.glob("*.json"))) == 1
+    assert forbidden == []
 
 
 def test_workstation_rejects_xlsx_job_write_escape(tmp_path: Path) -> None:

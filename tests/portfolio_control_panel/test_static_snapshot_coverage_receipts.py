@@ -451,14 +451,20 @@ def test_public_manifest_predicate_rejects_rebound_static_fact_count(
 
 
 @pytest.mark.parametrize(
-    ("nav_ends_before_receipt", "policy_after_data"),
-    [(False, False), (True, False), (True, True)],
+    ("nav_ends_before_receipt", "policy_after_data", "later_provider_provenance"),
+    [
+        (False, False, False),
+        (True, False, False),
+        (True, True, False),
+        (False, False, True),
+    ],
 )
 def test_static_receipts_pass_the_public_producer_and_independent_verifier(
     receipts_module: object,
     tmp_path: Path,
     nav_ends_before_receipt: bool,
     policy_after_data: bool,
+    later_provider_provenance: bool,
 ) -> None:
     """Static receipt facts are recomputed across the actual candidate boundary.
 
@@ -485,6 +491,8 @@ def test_static_receipts_pass_the_public_producer_and_independent_verifier(
     cutoff_date = "2026-09-04" if policy_after_data else "2026-02-01"
     policy_date = "2026-09-06" if policy_after_data else data_date
     ledger["as_of_date"] = data_date
+    if later_provider_provenance:
+        ledger["provider_generations"][0]["generation_as_of_date"] = "2026-02-03"
     ledger["flows"][0].update(
         {"event_date": "2026-02-01", "nav_recognition_date": "2026-02-02"}
     )

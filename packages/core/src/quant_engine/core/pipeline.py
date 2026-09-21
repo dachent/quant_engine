@@ -82,7 +82,6 @@ _PORTFOLIO_STAGE_ORDER: Final = (
     "attribution",
     "analytics",
     "report",
-    "workbook",
     "panel",
 )
 _PORTFOLIO_STAGE_DEPENDENCIES: Final = {
@@ -91,8 +90,7 @@ _PORTFOLIO_STAGE_DEPENDENCIES: Final = {
     "attribution": ("baseline", "ledger"),
     "analytics": ("attribution",),
     "report": ("baseline", "ledger", "analytics"),
-    "workbook": ("baseline", "ledger", "report"),
-    "panel": ("ledger", "attribution", "analytics", "workbook"),
+    "panel": ("ledger", "attribution", "analytics", "report"),
 }
 _FINANCIAL_MVP_CANDIDATE_ROOT_IDS: Final = {
     "ledger": ("provider-ledger",),
@@ -103,7 +101,7 @@ _FINANCIAL_MVP_CANDIDATE_ROOT_IDS: Final = {
 _FINANCIAL_MVP_GENERATION_STAGE: Final = {
     "ledger": "ledger",
     "baseline": "baseline",
-    "report": "workbook",
+    "report": "report",
     "panel": "panel",
 }
 _SEMANTIC_FIRST_STAGE: Final = {
@@ -117,7 +115,6 @@ _SEMANTIC_FIRST_STAGE: Final = {
     "INVESTED_CAPITAL": "analytics",
     "DEPENDENCE": "analytics",
     "REPORT": "report",
-    "WORKBOOK": "workbook",
     "PANEL": "panel",
     "RELEASE_RECEIPT": "panel",
 }

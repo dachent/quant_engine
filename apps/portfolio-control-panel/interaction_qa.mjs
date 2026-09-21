@@ -33,6 +33,66 @@ function acceptedCutoff(value) {
   return value;
 }
 
+function optionalExpectedCommonEod(value) {
+  if (value == null) return null;
+  if (!isCalendarDate(value)) throw new Error("--expected-common-eod must be an ISO calendar date");
+  return value;
+}
+
+function sourceClockEvidence(clock, expectedCutoff, expectedCommonEod, renderedLines) {
+  if (clock == null) return { applicable: false, valid: true, reason: "legacy input without source_clock" };
+  const rows = Array.isArray(clock.source_data_as_of) ? clock.source_data_as_of : [];
+  const applicable = rows.filter((row) => row?.applies_to_latest_common_eod === true);
+  const dates = applicable.map((row) => row?.provider_data_date);
+  const latest = dates.length && dates.every(isCalendarDate) ? [...dates].sort()[0] : null;
+  const limiting = latest == null ? [] : applicable.filter((row) => row.provider_data_date === latest).map((row) => row.source_id).sort();
+  const sourceIds = rows.map((row) => row?.source_id);
+  const expectedHeadline = `Source clock — selected financial cutoff ${clock.selected_financial_cutoff}; latest common finalized EOD ${clock.latest_common_eod}; limiting inputs ${(clock.limiting_inputs || []).join(", ")}.`;
+  const sourceLines = rows.map((row) => renderedLines.find((line) => line.startsWith(`Source clock — ${row?.source_id}:`)) || "");
+  const nativeObservationValid = rows.every((row) => row?.native_observed_at == null
+    || (typeof row.native_observed_at === "string"
+      && /(?:Z|[+-]\d{2}:\d{2})$/.test(row.native_observed_at)
+      && typeof row.precision === "string"
+      && row.precision.length > 0
+      && row.precision !== "DATE"));
+  const nativeDeclarationDisplay = rows.every((row, index) => {
+    const line = sourceLines[index];
+    const timezone = typeof row?.timezone === "string" && row.timezone.length > 0
+      ? row.timezone
+      : "unavailable";
+    const precision = typeof row?.precision === "string" && row.precision.length > 0
+      ? row.precision
+      : "DATE";
+    return line.includes(`native timezone ${timezone}`)
+      && line.includes(`native precision ${precision}`)
+      && (row?.native_observed_at != null || !line.includes("T00:00:00"));
+  });
+  return {
+    applicable: true,
+    valid: isCalendarDate(clock.selected_financial_cutoff)
+      && isCalendarDate(clock.latest_common_eod)
+      && clock.selected_financial_cutoff === expectedCutoff
+      && (expectedCommonEod == null || clock.latest_common_eod === expectedCommonEod)
+      && clock.latest_common_eod >= clock.selected_financial_cutoff
+      && sourceIds.length > 0
+      && sourceIds.every((sourceId) => typeof sourceId === "string" && sourceId.length > 0)
+      && rows.every((row) => (row?.timezone == null || (typeof row.timezone === "string" && row.timezone.length > 0))
+        && (row?.precision == null || (typeof row.precision === "string" && row.precision.length > 0)))
+      && nativeObservationValid
+      && JSON.stringify(sourceIds) === JSON.stringify([...new Set(sourceIds)].sort())
+      && latest === clock.latest_common_eod
+      && JSON.stringify(clock.limiting_inputs) === JSON.stringify(limiting)
+      && renderedLines.includes(expectedHeadline)
+      && sourceLines.every(Boolean)
+      && nativeDeclarationDisplay
+      && renderedLines.some((line) => line.includes("Actual execution timestamp is not declared")),
+    selected_financial_cutoff: clock.selected_financial_cutoff,
+    latest_common_eod: clock.latest_common_eod,
+    limiting_inputs: clock.limiting_inputs,
+    rendered_lines: sourceLines,
+  };
+}
+
 function calculationDateFacts(manifest) {
   const facts = [];
   for (const row of manifest?.rows || []) {
@@ -71,6 +131,7 @@ if (!options.html || !options.output || !process.env.PLAYWRIGHT_MODULE) {
   throw new Error("--html, --output, and PLAYWRIGHT_MODULE are required");
 }
 const expectedCalculationCutoff = acceptedCutoff(options["expected-calculation-cutoff"]);
+const expectedCommonEod = optionalExpectedCommonEod(options["expected-common-eod"]);
 const moduleUrl = pathToFileURL(path.resolve(process.env.PLAYWRIGHT_MODULE)).href;
 const { chromium } = await import(moduleUrl);
 const html = path.resolve(options.html);
@@ -88,11 +149,6 @@ const candidateRecordSha256 = createHash("sha256").update(candidateRecordBytes).
 const dashboardData = JSON.parse(await readFile(path.join(path.dirname(html), "data", "dashboard_data.json"), "utf8"));
 const expectedFactorSeries = dashboardData.dependence_analysis.series_ids.length;
 const expectedCurrentStrategies = dashboardData.strategies.length;
-// The account selector lists every account the panel scopes to, plus the
-// "all accounts" entry.  Bind that to the census the panel actually carries
-// rather than to a literal: the current-product perimeter decides how many
-// accounts appear, and a fixed count silently encodes one perimeter vintage.
-const expectedAccountOptions = dashboardData.account_summary.length + 1;
 const expectedReserveAssignments = dashboardData.performance.filter((row) => row.strategy_mapping_disposition === "RESERVE_NOT_APPLICABLE").length;
 const performanceLineageMismatch = dashboardData.meta?.performance_lineage?.status === "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH";
 const includeCandidates = options["exclude-candidates"] !== "true";
@@ -112,6 +168,17 @@ await page.goto(pathToFileURL(html).href, { waitUntil: "load" });
 await page.waitForFunction(() => document.querySelector("#app")?.dataset.appState === "ready");
 
 const checks = [];
+const sourceClock = sourceClockEvidence(
+  dashboardData.meta?.source_clock,
+  expectedCalculationCutoff,
+  expectedCommonEod,
+  (await page.locator("#limitations-list li").allTextContents()).map((line) => line.trim()),
+);
+checks.push(check(
+  "Source clock preserves selected/common EOD, limiting inputs, and native source disclosures",
+  sourceClock.valid,
+  sourceClock,
+));
 if (!epochOnly) {
   await page.keyboard.press("Tab");
   const firstKeyboardTarget = await page.evaluate(() => ({
@@ -128,10 +195,13 @@ if (!epochOnly) {
     { first_keyboard_target: firstKeyboardTarget, skip_target: skipTarget },
   ));
   await page.locator('[data-nav="data"]').click();
-  const downloads = [
-    "downloads/portfolio-report-data.json",
-    ...(dashboardData.invested_capital ? ["downloads/portfolio-report.xlsx"] : []),
-  ];
+  // No workbook download is expected. The owner placed Excel and all workbook
+  // work on permanent hold on 2026-09-19, so the panel no longer carries
+  // `downloads/portfolio-report.xlsx` or the base64 payload elements described
+  // below. This list keyed off `invested_capital`, which is still produced, so
+  // the loop waited forever on a `download` event for a link the page does not
+  // contain and failed the panel stage with a bare TimeoutError.
+  const downloads = ["downloads/portfolio-report-data.json"];
   const downloadDirectory = path.join(path.dirname(output), "downloads");
   await mkdir(downloadDirectory, { recursive: true });
   for (const relative of downloads) {
@@ -474,6 +544,11 @@ if (epochOnly) {
   if (!result.all_passed) process.exitCode = 1;
   process.exit();
 }
+// The account selector lists every account the panel scopes to, plus the
+// "all accounts" entry.  Bind that to the census the panel actually carries
+// rather than to a literal: the current-product perimeter decides how many
+// accounts appear, and a fixed count silently encodes one perimeter vintage.
+const expectedAccountOptions = dashboardData.account_summary.length + 1;
 const views = ["command", "capital", "risk", "attribution", "dependence", "weekly", "data"];
 const requiredFactorLenses = [
   "ECONOMIC_FACTOR",

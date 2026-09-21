@@ -10,6 +10,8 @@ import sys
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
+
+from quant_engine.core.contracts import assert_no_absolute_locators
 import pyarrow as pa
 import pyarrow.parquet as pq
 import xlsxwriter
@@ -175,7 +177,7 @@ def _qsi_subscription_archive(path: Path) -> None:
         archive.writestr(member, repaired.getvalue())
 
 
-def _qsi_current_archive(path: Path) -> None:
+def _qsi_current_archive(path: Path, *, revised: bool = False) -> None:
     embedded = io.BytesIO()
     workbook = xlsxwriter.Workbook(embedded, {"in_memory": True})
     sheet = workbook.add_worksheet("Stratum Data Combined")
@@ -190,13 +192,14 @@ def _qsi_current_archive(path: Path) -> None:
             "allocation_reference",
         ],
     )
-    start = datetime(2025, 1, 3)
-    for index in range(30):
+    start = datetime(2023, 1, 6) if revised else datetime(2025, 1, 3)
+    count = (datetime(2026, 9, 18) - start).days // 7 + 1 if revised else 30
+    for index in range(count):
         sheet.write_datetime(index + 1, 0, start + timedelta(days=7 * index))
-        sheet.write_number(index + 1, 1, 0.011)
-        sheet.write_number(index + 1, 2, 0.01)
-        sheet.write(index + 1, 3, "SPXL / BIL")
-        sheet.write(index + 1, 4, "0.75 / 0.25")
+        sheet.write_number(index + 1, 1, 0.01 if revised else 0.011)
+        sheet.write_number(index + 1, 2, 0.012 if revised else 0.01)
+        sheet.write(index + 1, 3, "SPXL" if revised else "SPXL / BIL")
+        sheet.write(index + 1, 4, "1" if revised else "0.75 / 0.25")
     workbook.close()
     with ZipFile(path, "w", ZIP_DEFLATED) as archive:
         archive.writestr(
@@ -223,6 +226,31 @@ def _qsi_prices(path: Path) -> None:
         writer.writerow(["Date", "Open", "High", "Low", "Close", "Volume"])
         for observed, close in reversed(rows):
             writer.writerow([observed, close, close, close, close, 1_000])
+
+
+def _qsi_price_extension(path: Path, price_root: Path) -> None:
+    """Synthetic adjusted prices continue the retained, constant weekly path."""
+    with (price_root / "SPXL.csv").open(encoding="utf-8") as handle:
+        latest = next(history.csv.DictReader(handle))
+    observed = date.fromisoformat(latest["Date"])
+    level = float(latest["Close"])
+    rows = []
+    while observed < date(2026, 9, 17):
+        observed += timedelta(days=1)
+        if observed.weekday() < 5:
+            level *= 1.01 ** (1 / 5)
+            rows.append({"Ticker": "SPXL", "Date": str(observed), "Close": level})
+    path.write_text(
+        json.dumps(
+            {
+                "provider": "yahoo",
+                "transport": "yfinance",
+                "dataset": "history",
+                "rows": rows,
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 def _p123_generation(path: Path) -> None:
@@ -609,6 +637,286 @@ def test_qsi_current_archive_is_newer_overlap_authority(tmp_path: Path) -> None:
     assert revision["accepted_authority"] == "NEWER_CURRENT_ARCHIVE"
     assert revision["overlap_observations"] == 30
     assert revision["max_abs_return_revision"] == pytest.approx(0.001)
+
+
+def _verify_refreshed(
+    bundle_root: Path,
+    *,
+    manifest: object | None = None,
+    returns: object | None = None,
+) -> dict[str, object]:
+    """Verify a refresh bundle using the locators its producer wrote beside it.
+
+    The receipt no longer carries paths -- it is embedded in a portable artifact -- so the
+    producer records them in an unhashed sidecar and the producer-side verifier is handed
+    them. Reading the sidecar here also exercises it.
+    """
+    sidecar = json.loads((bundle_root / "sources.local.json").read_bytes())
+    return history.verify_qsi_refresh_bundle(
+        manifest if manifest is not None else bundle_root / "manifest.json",
+        returns if returns is not None else bundle_root / "returns.csv",
+        sources={key: Path(value) for key, value in sidecar["sources"].items()},
+        seed_manifest_path=Path(sidecar["accepted_predecessor"]["manifest_path"]),
+        seed_returns_path=Path(sidecar["accepted_predecessor"]["returns_path"]),
+    )
+
+
+def test_qsi_refresh_replaces_only_pre_live_qsi_and_rejects_a_tampered_seed(
+    tmp_path: Path,
+) -> None:
+    """A source revision is a bounded replacement, not a history equivalence claim."""
+
+    inputs = _bundle_inputs(tmp_path)
+    current = tmp_path / "qsi-current.zip"
+    extension = tmp_path / "qsi-extension.json"
+    _qsi_current_archive(current, revised=True)
+    _qsi_price_extension(extension, inputs["qsi_price_root"])
+
+    retained_root = tmp_path / "retained"
+    retained = history.write_bundle(
+        retained_root,
+        **inputs,
+        as_of_date="2026-09-17",
+        live_inceptions={"QSI": "2026-01-05"},
+    )
+    retained_path = Path(str(retained["destination"]))
+
+    refreshed = history.write_qsi_refresh_bundle(
+        tmp_path / "refreshed",
+        retained_manifest_path=retained_path / "manifest.json",
+        retained_returns_path=retained_path / "returns.csv",
+        qsi_subscription_archive=inputs["qsi_subscription_archive"],
+        qsi_current_subscription_archive=current,
+        qsi_appendix_workbook=inputs["qsi_appendix_workbook"],
+        qsi_price_root=inputs["qsi_price_root"],
+        price_extension_json=extension,
+        as_of_date="2026-09-17",
+    )
+    refreshed_path = Path(str(refreshed["destination"]))
+    manifest = json.loads(
+        (refreshed_path / "manifest.json").read_text(encoding="utf-8")
+    )
+    seed_manifest = json.loads((retained_path / "manifest.json").read_bytes())
+    for key in (
+        "history_dispositions",
+        "live_inceptions_applied",
+        "live_inceptions_not_in_bundle",
+    ):
+        assert manifest[key] == seed_manifest[key]
+    assert [row for row in manifest["series"] if row["series_id"] != "QSI"] == [
+        row for row in seed_manifest["series"] if row["series_id"] != "QSI"
+    ]
+    retained_rows = list(
+        history.csv.DictReader(
+            (retained_path / "returns.csv").read_text(encoding="utf-8").splitlines()
+        )
+    )
+    refreshed_rows = list(
+        history.csv.DictReader(
+            (refreshed_path / "returns.csv").read_text(encoding="utf-8").splitlines()
+        )
+    )
+
+    assert manifest["qsi_source_revision"]["schema_version"] == 2
+    # The receipt is embedded in a portable artifact, so no value in it may name a path
+    # only this machine can resolve. Asserted structurally rather than by token, because
+    # the original guard's token list had no /tmp/ and so passed on Linux exactly when the
+    # leak escaped detection.
+    assert_no_absolute_locators(
+        manifest["qsi_source_revision"], field_name="qsi refresh receipt"
+    )
+    sidecar = json.loads((refreshed_path / "sources.local.json").read_bytes())
+    assert sidecar["bundle_id"] == manifest["bundle_id"]
+    assert Path(sidecar["accepted_predecessor"]["manifest_path"]).is_absolute()
+    assert (
+        manifest["qsi_source_revision"]["accepted_predecessor"]["bundle_id"]
+        == retained["bundle_id"]
+    )
+    assert {
+        tuple(sorted(row.items()))
+        for row in refreshed_rows
+        if row["series_id"] != "QSI"
+    } == {
+        tuple(sorted(row.items())) for row in retained_rows if row["series_id"] != "QSI"
+    }
+    assert all(
+        row["date"] < "2026-01-05"
+        for row in refreshed_rows
+        if row["series_id"] == "QSI"
+    )
+    definition = next(row for row in manifest["series"] if row["series_id"] == "QSI")
+    assert definition["observed_end"] == "2026-01-02"
+    assert definition["source_observed_end"] == "2026-09-18"
+    assert definition["source_rows_excluded_after_as_of"] == 1
+    weekly = [
+        row
+        for row in refreshed_rows
+        if row["series_id"] == "QSI" and "2025-12-29" <= row["date"] <= "2026-01-02"
+    ]
+    compounded = history.Decimal(1)
+    for row in weekly:
+        compounded *= 1 + history.Decimal(row["return"])
+    assert float(compounded - 1) == pytest.approx(0.012, abs=1e-12)
+    assert _verify_refreshed(refreshed_path)["bundle_id"] == refreshed["bundle_id"]
+
+    tampered = json.loads(
+        (refreshed_path / "manifest.json").read_text(encoding="utf-8")
+    )
+    tampered["qsi_source_revision"]["accepted_predecessor"]["returns_sha256"] = "0" * 64
+    tampered.pop("bundle_id")
+    tampered["bundle_id"] = history.hashlib.sha256(
+        history.canonical_json_bytes(tampered)
+    ).hexdigest()
+    tampered_path = tmp_path / "tampered-manifest.json"
+    tampered_path.write_bytes(history.canonical_json_bytes(tampered))
+    with pytest.raises(history.StrategyHistoryError, match="QSI refresh predecessor"):
+        _verify_refreshed(refreshed_path, manifest=tampered_path)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "qsi_return",
+        "other_return",
+        "stale_version",
+        "post_live",
+        "post_cutoff",
+        "definition",
+        "revision_qc",
+        "seed",
+        "missing_archive",
+        "original_price",
+    ],
+)
+def test_qsi_refresh_rejects_rehashed_forgery(tmp_path: Path, mutation: str) -> None:
+    inputs = _bundle_inputs(tmp_path)
+    seed = Path(
+        history.write_bundle(
+            tmp_path / "seed",
+            **inputs,
+            as_of_date="2026-09-17",
+            live_inceptions={"QSI": "2026-01-05"},
+        )["destination"]
+    )
+    current = tmp_path / "current.zip"
+    extension = tmp_path / "extension.json"
+    _qsi_current_archive(current, revised=True)
+    _qsi_price_extension(extension, inputs["qsi_price_root"])
+    refreshed = Path(
+        history.write_qsi_refresh_bundle(
+            tmp_path / "refresh",
+            retained_manifest_path=seed / "manifest.json",
+            retained_returns_path=seed / "returns.csv",
+            qsi_subscription_archive=inputs["qsi_subscription_archive"],
+            qsi_current_subscription_archive=current,
+            qsi_appendix_workbook=inputs["qsi_appendix_workbook"],
+            qsi_price_root=inputs["qsi_price_root"],
+            price_extension_json=extension,
+            as_of_date="2026-09-17",
+        )["destination"]
+    )
+    manifest = json.loads((refreshed / "manifest.json").read_bytes())
+    rows = list(
+        history.csv.DictReader((refreshed / "returns.csv").read_text().splitlines())
+    )
+    qsi = next(row for row in rows if row["series_id"] == "QSI")
+    receipt = manifest["qsi_source_revision"]
+    if mutation == "qsi_return":
+        qsi["return"] = "0.25"
+    elif mutation == "other_return":
+        next(row for row in rows if row["series_id"] != "QSI")["return"] = "0.25"
+    elif mutation == "stale_version":
+        qsi["strategy_version"] = receipt["accepted_predecessor"][
+            "accepted_strategy_version"
+        ]
+    elif mutation in {"post_live", "post_cutoff"}:
+        qsi["date"] = "2026-01-05" if mutation == "post_live" else "2026-09-18"
+    elif mutation == "definition":
+        next(row for row in manifest["series"] if row["series_id"] != "QSI")[
+            "method"
+        ] = "FORGED"
+    elif mutation == "revision_qc":
+        receipt["daily_reconstruction_validation"]["price_shape_mae"] = 0
+    elif mutation == "seed":
+        receipt["accepted_predecessor"]["manifest_path"] = str(
+            tmp_path / "missing-seed.json"
+        )
+    elif mutation == "missing_archive":
+        current.rename(tmp_path / "removed-current.zip")
+    elif mutation == "original_price":
+        price = inputs["qsi_price_root"] / "SPXL.csv"
+        price.write_bytes(price.read_bytes() + b"\n")
+        source = next(
+            item
+            for item in receipt["sources"]
+            if item["source_id"] == "qsi-price-history-spxl"
+        )
+        source["sha256"], source["size_bytes"] = history._sha256(price)
+    output = io.StringIO(newline="")
+    writer = history.csv.DictWriter(
+        output, fieldnames=history.RETURN_FIELDS, lineterminator="\n"
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+    content = output.getvalue().encode()
+    manifest["returns_artifact"].update(
+        sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content)
+    )
+    manifest.pop("bundle_id")
+    manifest["bundle_id"] = hashlib.sha256(
+        history.canonical_json_bytes(manifest)
+    ).hexdigest()
+    with pytest.raises(history.StrategyHistoryError):
+        _verify_refreshed(
+            refreshed,
+            manifest=history.canonical_json_bytes(manifest),
+            returns=content,
+        )
+
+
+def test_qsi_refresh_cli_does_not_require_unrelated_sources(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    inputs = _bundle_inputs(tmp_path)
+    seed = Path(
+        history.write_bundle(
+            tmp_path / "seed",
+            **inputs,
+            as_of_date="2026-09-17",
+            live_inceptions={"QSI": "2026-01-05"},
+        )["destination"]
+    )
+    current = tmp_path / "current.zip"
+    extension = tmp_path / "extension.json"
+    _qsi_current_archive(current, revised=True)
+    _qsi_price_extension(extension, inputs["qsi_price_root"])
+    arguments = {
+        "qsi-refresh-retained-manifest": seed / "manifest.json",
+        "qsi-refresh-retained-returns": seed / "returns.csv",
+        "qsi-subscription-archive": inputs["qsi_subscription_archive"],
+        "qsi-current-subscription-archive": current,
+        "qsi-appendix-workbook": inputs["qsi_appendix_workbook"],
+        "qsi-price-root": inputs["qsi_price_root"],
+        "price-extension-json": extension,
+        "output-root": tmp_path / "output",
+        "as-of-date": "2026-09-17",
+    }
+    assert (
+        history.main(
+            [
+                part
+                for key, value in arguments.items()
+                for part in (f"--{key}", str(value))
+            ]
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert (
+        _verify_refreshed(Path(result["destination"]))["bundle_id"]
+        == result["bundle_id"]
+    )
 
 
 def test_each_series_is_capped_at_its_own_live_inception(tmp_path: Path) -> None:
