@@ -636,9 +636,16 @@ def _directory_rows(path: Path) -> list[dict[str, object]]:
 
 
 def _directory_identity(path: Path) -> dict[str, object]:
+    # The trailing newline is load-bearing. `portfolio_release_builder
+    # ._directory_inventory` and `portfolio_control_panel._directory_identity`
+    # both hash the canonical rows plus a newline, and this function has to
+    # validate what they write. Omitting it made every panel-candidate receipt
+    # unverifiable: the rows agree byte for byte and only the framing differed.
+    # `test_directory_identity_agrees_across_producers` pins all three together.
     rows = _directory_rows(path)
-    encoded = json.dumps(
-        rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    encoded = (
+        json.dumps(rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        + "\n"
     ).encode("utf-8")
     return {
         "file_count": len(rows),
