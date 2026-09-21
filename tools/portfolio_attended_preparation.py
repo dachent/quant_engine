@@ -1960,7 +1960,13 @@ def _prepare_attended_inputs(
             requested_as_of=cutoff,
             evaluated_on=evaluated_on,
         )
+        # The builder returns the portable generation and this machine's
+        # locators for it. The generation is written and hashed; the locators
+        # go to a sidecar that is never hashed, published, or copied into the
+        # report candidate, so the artifact does not depend on the run root.
+        capital_input_value, capital_input_locators = capital_input_value
         _write(capital_input, capital_input_value)
+        capital.write_local_sidecar(capital_input, capital_input_locators)
         capital_result_value = capital.build_governed_capital_result(
             capital_input, contract
         )

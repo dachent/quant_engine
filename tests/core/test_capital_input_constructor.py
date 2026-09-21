@@ -119,3 +119,46 @@ def test_cli_resolves_repo_tools_before_reaching_date_validation(tmp_path):
     combined_output = completed.stdout + completed.stderr
     assert "evaluated_on cannot be before requested_as_of" in combined_output
     assert "ModuleNotFoundError" not in combined_output
+
+
+def test_preparation_unpacks_exactly_what_the_builder_returns() -> None:
+    """The attended caller and the builder must agree on the return shape.
+
+    The builder returns `(generation, locators)` so the generation can stay
+    portable while this machine's paths go to a sidecar. Changing that return
+    from a dict to a tuple broke `portfolio_attended_preparation` with
+    "dictionary update sequence element #0 has length 12", and no test caught
+    it -- the signature check above pins parameter names, not the return -- so
+    a full pipeline run was the first thing to notice.
+    """
+
+    import ast
+
+    module = _load_module()
+    returns = str(inspect.signature(module.build_input_generation).return_annotation)
+    assert returns == "tuple[dict, dict[str, str]]", (
+        "the builder's declared return changed; every caller must be updated "
+        f"with it, not just this annotation: {returns!r}"
+    )
+
+    preparation = (
+        Path(__file__).resolve().parents[2]
+        / "tools"
+        / "portfolio_attended_preparation.py"
+    )
+    tree = ast.parse(preparation.read_text(encoding="utf-8"))
+    unpacks = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and isinstance(node.targets[0], ast.Tuple)
+        and len(node.targets[0].elts) == 2
+        and any(
+            isinstance(element, ast.Name) and element.id == "capital_input_value"
+            for element in node.targets[0].elts
+        )
+    ]
+    assert unpacks, (
+        "portfolio_attended_preparation no longer unpacks the builder's two "
+        "return values, so it will write a tuple where a generation belongs"
+    )
