@@ -1048,6 +1048,55 @@ def _current_report(root: Path) -> tuple[dict[str, Any], dict[str, str], Path]:
     )
 
 
+def _current_panel_qa(root: Path, *, required: tuple[str, ...]) -> dict[str, str]:
+    """Bind the published panel's retained QA evidence to its own manifest.
+
+    The panel producer stages with the bare `stage_generation` and then writes
+    QA under `qa/<name>` while declaring the artifact id `evidence/<name>`, so
+    the detached-bundle verifier cannot read it: the sidecars are absent and the
+    declared ids are logical rather than on-disk paths.
+
+    Each required name is resolved through that mapping and its bytes are
+    compared to the manifest's recorded sha256 **and** size. Asserting only that
+    an artifact id appears in the manifest would accept a claim with no bytes
+    behind it, which is the property the retained-QA gate exists to deny.
+    """
+
+    (
+        pointer,
+        manifest,
+        pointer_path,
+        pointer_sha256,
+        manifest_path,
+        manifest_sha256,
+        generation_snapshots,
+    ) = _current_generation_snapshot(root, "portfolio panel")
+    artifacts = {item.artifact_id: item for item in manifest.artifacts}
+    for name in required:
+        artifact = artifacts.get(f"evidence/{name}")
+        if artifact is None:
+            raise ControlPanelValidationError(
+                f"panel retained QA evidence is missing from the manifest: {name}"
+            )
+        try:
+            content, sha256 = generation_snapshots[f"qa/{name}"]
+        except KeyError as exc:
+            raise ControlPanelValidationError(
+                f"panel retained QA evidence is missing: {name}"
+            ) from exc
+        if (sha256, len(content)) != (artifact.sha256, artifact.size_bytes):
+            raise ControlPanelValidationError(
+                f"panel retained QA evidence is not hash-bound by its manifest: {name}"
+            )
+    return {
+        "generation_id": pointer.generation_id,
+        "manifest_path": str(manifest_path),
+        "manifest_sha256": manifest_sha256,
+        "pointer_path": str(pointer_path),
+        "pointer_sha256": pointer_sha256,
+    }
+
+
 def _report_candidate(
     candidate_dir: Path,
 ) -> tuple[dict[str, Any], dict[str, str | None], Path]:

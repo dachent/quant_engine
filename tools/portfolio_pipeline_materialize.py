@@ -5105,7 +5105,17 @@ def _attended_completed_report(receipt: Mapping[str, Any], stage_root: Path) -> 
     current = read_current(root)
     if current.generation_id != generation_id:
         raise ValueError("report current generation differs")
-    read_generation_bundle(root, generation_id)
+    # Read through the producer's own reader, as the ledger, baseline and
+    # analytics gates already do. `read_generation_bundle` demands the detached
+    # inventory and receipt that only `stage_generation_bundle` writes, and the
+    # report producer uses the bare `stage_generation`, so it could never pass.
+    # `_current_report` binds the report bytes to the manifest artifact's sha
+    # AND size, and `read_current` pins the whole directory inventory.
+    import portfolio_control_panel as panel
+
+    _report, identity, _path = panel._current_report(root)  # noqa: SLF001
+    if identity.get("generation_id") != generation_id:
+        raise ValueError("report generation identity differs")
     generation_report = (
         root / "generations" / generation_id / "portfolio-report-data.json"
     )
@@ -5127,13 +5137,19 @@ def _attended_completed_panel(receipt: Mapping[str, Any], stage_root: Path) -> N
     current = read_current(root)
     if current.generation_id != generation_id:
         raise ValueError("panel current generation differs")
-    bundle = read_generation_bundle(root, generation_id)
-    required_qa = {
-        "evidence/qa-validation.json",
-        "evidence/semantic-validation.json",
-    }
-    if not required_qa.issubset(bundle.payloads):
-        raise ValueError("panel retained QA evidence differs")
+    # Same correction as the report gate. The panel producer also stages with
+    # the bare `stage_generation`, and it writes QA under `qa/<name>` while
+    # declaring the artifact id `evidence/<name>`, so a bundle read fails twice
+    # over. `_current_panel_qa` binds each declared artifact to the bytes on
+    # disk by sha and size, which a membership test on manifest ids would not.
+    import portfolio_control_panel as panel
+
+    identity = panel._current_panel_qa(  # noqa: SLF001
+        root,
+        required=("qa-validation.json", "semantic-validation.json"),
+    )
+    if identity.get("generation_id") != generation_id:
+        raise ValueError("panel generation identity differs")
 
 
 def _attended_completed_stage_root(

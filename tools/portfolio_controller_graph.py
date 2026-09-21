@@ -1202,7 +1202,13 @@ def _critical_relationships(
         repo_root,
         _MATERIALIZER,
         "_attended_completed_panel",
-        {"read_generation_bundle"},
+        {"panel._current_panel_qa"},
+    )
+    _require_calls(
+        repo_root,
+        _MATERIALIZER,
+        "_attended_completed_report",
+        {"panel._current_report"},
     )
     release_tree = _tree(repo_root, _RELEASE)
     _require_local_route_calls(
@@ -1474,8 +1480,13 @@ def _critical_relationships(
         },
         {
             "caller": "tools.portfolio_pipeline_materialize._attended_completed_panel",
-            "callee": "quant_engine.core.publication.read_generation_bundle",
+            "callee": "tools.portfolio_control_panel._current_panel_qa",
             "kind": "retained-panel-qa-verification",
+        },
+        {
+            "caller": "tools.portfolio_pipeline_materialize._attended_completed_report",
+            "callee": "tools.portfolio_control_panel._current_report",
+            "kind": "retained-report-data-verification",
         },
     ]
     relationships.extend(

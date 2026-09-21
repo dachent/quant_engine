@@ -61,7 +61,7 @@ def test_qa_input_and_generated_evidence_have_distinct_controller_flows() -> Non
         (
             "tools/portfolio_pipeline_materialize.py",
             "_attended_completed_panel",
-            "read_generation_bundle(",
+            "panel._current_panel_qa(",
             "missing_qa_reader(",
         ),
     ),

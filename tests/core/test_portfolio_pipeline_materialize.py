@@ -4973,7 +4973,23 @@ def test_attended_completed_panel_verifies_retained_qa_generation(
         artifacts=artifacts,
         verification=VerificationStatus.VERIFIED,
     )
-    stage_generation_bundle(root, manifest, payloads)
+    # The real panel producer stages with the bare `stage_generation` and then
+    # writes each payload itself, QA under `qa/<name>` while declaring the
+    # artifact id `evidence/<name>` (portfolio_control_panel.py:12812,12856).
+    # Building this fixture with `stage_generation_bundle` produced a shape
+    # production never emits, so the gate passed here and failed on every real
+    # run.
+    manifest_path = stage_generation(root, manifest)
+    generation_dir = manifest_path.parent
+    for artifact_id, content in payloads.items():
+        relative = artifact_id.split("/", 1)[1]
+        written = (
+            generation_dir / "qa" / relative
+            if artifact_id.startswith("evidence/")
+            else generation_dir / relative
+        )
+        written.parent.mkdir(parents=True, exist_ok=True)
+        written.write_bytes(content)
     publish_generation(root, manifest.generation_id)
     receipt = {
         "generation_id": manifest.generation_id,
@@ -4984,9 +5000,7 @@ def test_attended_completed_panel_verifies_retained_qa_generation(
     materializer._attended_completed_stages(  # noqa: SLF001
         tmp_path / "output", ("panel",)
     )
-    target = (
-        root / "generations" / manifest.generation_id / "evidence/qa-validation.json"
-    )
+    target = root / "generations" / manifest.generation_id / "qa" / "qa-validation.json"
     if mutation == "tamper":
         target.write_bytes(b'{"all_passed":false}')
     else:
@@ -4996,6 +5010,80 @@ def test_attended_completed_panel_verifies_retained_qa_generation(
     ):
         materializer._attended_completed_stage_root(  # noqa: SLF001
             receipt, root, "panel"
+        )
+
+
+@pytest.mark.parametrize("mutation", ("tamper", "missing"))
+def test_attended_completed_report_verifies_the_published_generation(
+    tmp_path: Path, mutation: str
+) -> None:
+    """Report resume must bind the published report bytes to their manifest.
+
+    Built with the real producer's shape: `portfolio_report.publish_report`
+    stages with the bare `stage_generation` and writes the report data at
+    `portfolio-report-data.json` while declaring the artifact id
+    `normalized/portfolio-report-data.json`. The detached-bundle verifier
+    cannot read that -- no sidecars, and the declared ids are logical rather
+    than on-disk paths -- so this gate failed on every real run and had no
+    test at all.
+    """
+
+    root = tmp_path / "output" / "stages" / "report"
+    as_of = date(2026, 9, 17)
+    report = {"report_schema_version": 1, "as_of_date": as_of.isoformat()}
+    report_bytes = canonical_json_bytes(report)
+    manifest = GenerationManifest.build(
+        as_of_date=as_of,
+        adapter=AdapterIdentity("attended-report-test", "1"),
+        coverage=CoverageClaim(
+            status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
+            boundary="attended report resume test",
+            fact_types=("portfolio report",),
+            observed_start=as_of,
+            observed_end=as_of,
+        ),
+        artifacts=(
+            SourceArtifact(
+                artifact_id="normalized/portfolio-report-data.json",
+                sha256=hashlib.sha256(report_bytes).hexdigest(),
+                size_bytes=len(report_bytes),
+                as_of_date=as_of,
+                schema_name="portfolio-report-data",
+                schema_version="1",
+            ),
+        ),
+        verification=VerificationStatus.VERIFIED,
+    )
+    manifest_path = stage_generation(root, manifest)
+    generation_dir = manifest_path.parent
+    (generation_dir / "portfolio-report-data.json").write_bytes(report_bytes)
+    publish_generation(root, manifest.generation_id)
+
+    candidate = root / "candidates" / hashlib.sha256(report_bytes).hexdigest()
+    candidate.mkdir(parents=True)
+    (candidate / "portfolio-report-data.json").write_bytes(report_bytes)
+
+    receipt = {
+        "generation_id": manifest.generation_id,
+        "root": str(root),
+        "candidate_dir": str(candidate),
+    }
+    _write_json(tmp_path / "output" / "stage-results" / "report.json", receipt)
+
+    materializer._attended_completed_stages(  # noqa: SLF001
+        tmp_path / "output", ("report",)
+    )
+
+    target = generation_dir / "portfolio-report-data.json"
+    if mutation == "tamper":
+        target.write_bytes(canonical_json_bytes({"report_schema_version": 1, "x": 1}))
+    else:
+        target.unlink()
+    with pytest.raises(
+        materializer.MaterializationError, match="attended completed report"
+    ):
+        materializer._attended_completed_stages(  # noqa: SLF001
+            tmp_path / "output", ("report",)
         )
 
 
