@@ -7,6 +7,7 @@ from decimal import ROUND_HALF_EVEN, Decimal, localcontext
 import hashlib
 import importlib.util
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -12030,3 +12031,49 @@ def test_panel_mwr_projection_rejects_label_perimeter_mismatch() -> None:
     row["mwr_label"] = "ACCOUNT_EPOCH_MWR"
     with pytest.raises(panel.ControlPanelValidationError, match="valuation perimeter"):
         panel._validate_mwr_perimeter([row])
+
+
+def test_embedded_download_chunk_cap_is_one_shared_constant() -> None:
+    """The producer's cap and the renderer's cap must be the same number.
+
+    Nothing bounded the producer, so it emitted a 6612-chunk payload against a
+    renderer that refused anything over 4096. The panel published an inert
+    download link and the cost surfaced six stages later, in the attended panel
+    stage, as an interaction-QA timeout that named nothing.
+
+    8191 is the mechanism's ceiling rather than a policy choice: the renderer
+    joins every chunk into one string and V8's MAX_STRING_LENGTH is 536870888,
+    so 8192 chunks of 65536 raise RangeError there whatever these say.
+    """
+
+    renderer = (panel.DEFAULT_TEMPLATE_ROOT / "app.js").read_text(encoding="utf-8")
+    match = re.search(r"EMBEDDED_DOWNLOAD_MAX_CHUNKS = (\d+);", renderer)
+    assert match is not None, "the renderer no longer declares a chunk cap"
+    assert int(match.group(1)) == panel._DOWNLOAD_MAX_BASE64_CHUNKS, (
+        "the renderer and the producer disagree about the embedded download "
+        "chunk cap, so the producer can emit a panel that refuses its own "
+        "download metadata"
+    )
+
+    size = re.search(r"EMBEDDED_DOWNLOAD_CHUNK_SIZE = (\d+);", renderer)
+    assert size is not None
+    assert int(size.group(1)) == panel._DOWNLOAD_BASE64_CHUNK_SIZE
+    assert (
+        panel._DOWNLOAD_MAX_BASE64_CHUNKS * panel._DOWNLOAD_BASE64_CHUNK_SIZE
+        <= 536_870_888
+    ), "the cap admits a payload the renderer's string join cannot hold"
+
+
+def test_report_download_link_refuses_a_payload_over_the_chunk_cap() -> None:
+    """A payload the renderer would reject must not reach a published panel."""
+
+    oversized = b"x" * (
+        (panel._DOWNLOAD_MAX_BASE64_CHUNKS + 1) * panel._DOWNLOAD_BASE64_CHUNK_SIZE
+    )
+    with pytest.raises(
+        panel.ControlPanelValidationError,
+        match="exceeds the embedded download chunk cap",
+    ):
+        panel._report_download_link(
+            "downloads/portfolio-report-data.json", "Report data", oversized
+        )

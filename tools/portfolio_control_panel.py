@@ -205,6 +205,11 @@ _DOWNLOAD_METADATA: Final = {
     ),
 }
 _DOWNLOAD_BASE64_CHUNK_SIZE: Final = 65_536
+# Must equal `EMBEDDED_DOWNLOAD_MAX_CHUNKS` in apps/portfolio-control-panel/app.js.
+# The renderer joins every chunk into one string and V8's MAX_STRING_LENGTH is
+# 536870888, so 8192 chunks of 65536 raise RangeError there no matter what
+# either constant says. A test pins the two together.
+_DOWNLOAD_MAX_BASE64_CHUNKS: Final = 8191
 _DOWNLOAD_PLACEHOLDER: Final = b"<!-- REPORT_DOWNLOADS -->"
 _ALLOWED_FRONTEND_REFERENCES: Final = (
     ("link", "href", "styles.css"),
@@ -1224,6 +1229,16 @@ def _report_download_link(relative_path: str, label: str, content: bytes) -> str
         payload[index : index + _DOWNLOAD_BASE64_CHUNK_SIZE]
         for index in range(0, len(payload), _DOWNLOAD_BASE64_CHUNK_SIZE)
     ]
+    if len(chunks) > _DOWNLOAD_MAX_BASE64_CHUNKS:
+        # Refuse here rather than emit a panel whose own download handler will
+        # reject its metadata. Nothing bounded this before, so the producer
+        # could publish an inert link and the cost surfaced six stages later as
+        # a bare interaction-QA timeout naming nothing.
+        raise ControlPanelValidationError(
+            "report download payload exceeds the embedded download chunk cap: "
+            f"{relative_path} needs {len(chunks)} chunks, the renderer accepts "
+            f"{_DOWNLOAD_MAX_BASE64_CHUNKS}"
+        )
     link = (
         f'<a class="ghost-button" href="{relative_path}" download="{filename}" '
         f'data-download-filename="{filename}" data-download-mime="{mime_type}" '

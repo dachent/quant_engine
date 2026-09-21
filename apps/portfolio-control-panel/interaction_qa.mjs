@@ -195,10 +195,13 @@ if (!epochOnly) {
     { first_keyboard_target: firstKeyboardTarget, skip_target: skipTarget },
   ));
   await page.locator('[data-nav="data"]').click();
-  const downloads = [
-    "downloads/portfolio-report-data.json",
-    ...(dashboardData.invested_capital ? ["downloads/portfolio-report.xlsx"] : []),
-  ];
+  // No workbook download is expected. The owner placed Excel and all workbook
+  // work on permanent hold on 2026-09-19, so the panel no longer carries
+  // `downloads/portfolio-report.xlsx` or the base64 payload elements described
+  // below. This list keyed off `invested_capital`, which is still produced, so
+  // the loop waited forever on a `download` event for a link the page does not
+  // contain and failed the panel stage with a bare TimeoutError.
+  const downloads = ["downloads/portfolio-report-data.json"];
   const downloadDirectory = path.join(path.dirname(output), "downloads");
   await mkdir(downloadDirectory, { recursive: true });
   for (const relative of downloads) {

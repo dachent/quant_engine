@@ -79,7 +79,18 @@
     "portfolio-report.xlsx": Object.freeze({ mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", payloadPrefix: "download-payload-report-xlsx" }),
   });
   const EMBEDDED_DOWNLOAD_CHUNK_SIZE = 65536;
-  const EMBEDDED_DOWNLOAD_MAX_CHUNKS = 4096;
+  // The report data is embedded rather than linked to the sibling file because
+  // Chromium ignores the `download` attribute when a file:// page links to a
+  // file:// target: it navigates instead and no download event ever fires.
+  // Every browser and interaction QA capture loads the panel over file://, so
+  // the sibling route cannot satisfy the gate.
+  //
+  // 8191 is the mechanism's ceiling, not a policy choice. `chunks.join("")`
+  // below builds one string and V8's MAX_STRING_LENGTH is 536870888, so 8192
+  // chunks of 65536 raise RangeError whatever this constant says.
+  // `_DOWNLOAD_MAX_BASE64_CHUNKS` in tools/portfolio_control_panel.py must
+  // equal this, and a test pins the two together.
+  const EMBEDDED_DOWNLOAD_MAX_CHUNKS = 8191;
   const humanStatus = (status) => STATUS_LABELS[String(status)] || String(status || "Unknown").replaceAll("_", " ").toLowerCase().replace(/^./, (character) => character.toUpperCase());
   const statusText = (status) => `<span class="status-text ${toneForStatus(status)}">${safe(humanStatus(status))}</span>`;
   const kpi = (label, value, note, tone = "") => `<article class="kpi-card ${tone ? `tone-${tone}` : ""}"><div class="kpi-label">${safe(label)}</div><div class="kpi-value">${safe(value)}</div><div class="kpi-note">${safe(note)}</div></article>`;
