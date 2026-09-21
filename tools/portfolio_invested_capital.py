@@ -19,9 +19,12 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
-from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.core.contracts import (
+    assert_no_absolute_locators,
+    canonical_json_bytes,
+)
 
 from portfolio_financial_mvp_contract import (
     FinancialMvpContractError,
@@ -1217,16 +1220,116 @@ def _verify_selected_facts(
 
 
 def _file_binding(path: Path) -> tuple[dict[str, Any], bytes]:
+    """Bind bound bytes by identity, never by where they happen to live.
+
+    This binding is hashed into `result_id` and published inside the report, so
+    an absolute path here makes the financial artifact depend on the directory
+    it was built in. Two runs over identical inputs under different roots
+    produced different `report_id` and `panel_id` for that reason alone, and a
+    published candidate could not re-verify away from its original location.
+
+    Callers that must actually open the file take the resolved path from
+    `_local_binding` instead; a locator belongs in a `.local.json` sidecar, not
+    in any hashed or published payload.
+    """
+
     if path.is_symlink() or not path.is_file():
         raise CapitalValidationError(
             f"capital bound file absent or linked: {path.name}"
         )
     content = path.read_bytes()
     return {
-        "path": str(path.resolve()),
         "sha256": hashlib.sha256(content).hexdigest(),
         "size_bytes": len(content),
     }, content
+
+
+def _binding_matches(actual: Mapping[str, Any], declared: Mapping[str, Any]) -> bool:
+    """Compare a binding on the bytes it identifies, not on its whole shape.
+
+    A binding may also carry portable provenance such as `generation_id`, which
+    identifies which generation the bytes came from and is verified by the
+    consumer that cares about it. Comparing the dicts whole would make adding
+    any such field look like a content mismatch.
+    """
+
+    return all(
+        actual.get(field) == declared.get(field) for field in ("sha256", "size_bytes")
+    )
+
+
+def _local_binding(path: Path) -> str:
+    """The resolved locator for a bound file, for sidecars and local reads."""
+
+    return str(path.resolve())
+
+
+LOCAL_SIDECAR_SCHEMA_VERSION: Final = 1
+
+
+def local_sidecar_path(input_generation_path: Path) -> Path:
+    """The locator sidecar that sits beside a portable input generation."""
+
+    return input_generation_path.with_name(f"{input_generation_path.stem}.local.json")
+
+
+def write_local_sidecar(
+    input_generation_path: Path, locators: Mapping[str, str | Path]
+) -> Path:
+    """Record where this machine keeps the bytes a portable generation binds."""
+
+    path = local_sidecar_path(input_generation_path)
+    path.write_bytes(
+        _canonical(
+            {
+                "schema_version": LOCAL_SIDECAR_SCHEMA_VERSION,
+                "source_bindings": {
+                    role: str(Path(located).resolve())
+                    for role, located in locators.items()
+                },
+            }
+        )
+    )
+    return path
+
+
+def read_local_sidecar(input_generation_path: Path) -> dict[str, str]:
+    """Resolve where this machine keeps the bytes a portable generation binds.
+
+    The generation itself carries only `{sha256, size_bytes}` so that its bytes,
+    and every digest over them, are the same wherever the run happened. The
+    locators live here, beside it, and are never hashed or published. Callers
+    resolve through this and then verify the bytes against the portable binding,
+    so a wrong sidecar cannot substitute different content.
+    """
+
+    path = local_sidecar_path(input_generation_path)
+    if path.is_symlink() or not path.is_file():
+        raise CapitalValidationError(
+            f"capital input locator sidecar is absent: {path.name}"
+        )
+    document = json.loads(path.read_bytes())
+    if (
+        not isinstance(document, dict)
+        or document.get("schema_version") != LOCAL_SIDECAR_SCHEMA_VERSION
+    ):
+        raise CapitalValidationError("capital input locator sidecar schema differs")
+    sources = document.get("source_bindings")
+    if not isinstance(sources, dict) or not all(
+        isinstance(key, str) and isinstance(value, str)
+        for key, value in sources.items()
+    ):
+        raise CapitalValidationError("capital input locator sidecar differs")
+    return dict(sources)
+
+
+def _bound_source_path(locators: Mapping[str, str], role: str) -> Path:
+    located = locators.get(role)
+    if not located:
+        raise CapitalValidationError(
+            f"capital input locator sidecar omits a bound source: {role}"
+        )
+    return Path(located)
 
 
 def resolve_financial_input_authority(
@@ -1250,18 +1353,19 @@ def resolve_financial_input_authority(
             "retained financial input requires governed authority"
         )
     sources = inputs.get("source_bindings", {})
+    locators = read_local_sidecar(input_generation_path)
     snapshots = {}
     for role in ("provider_ledger", "provider_ledger_spec"):
         binding = sources.get(role)
-        if not isinstance(binding, dict) or "path" not in binding:
+        if not isinstance(binding, dict) or "sha256" not in binding:
             raise CapitalValidationError(f"financial input source is absent: {role}")
-        actual, content = _file_binding(Path(binding["path"]))
-        if actual != binding:
+        actual, content = _file_binding(_bound_source_path(locators, role))
+        if not _binding_matches(actual, binding):
             raise CapitalValidationError(
                 f"financial input source binding differs: {role}"
             )
         snapshots[role] = json.loads(content)
-    ledger_path = Path(sources["provider_ledger"]["path"])
+    ledger_path = _bound_source_path(locators, "provider_ledger")
     manifest_binding, _ = _file_binding(ledger_path.parent / "generation.json")
     selected = [
         row
@@ -1654,10 +1758,11 @@ def build_governed_capital_result(
         raise CapitalValidationError(
             "capital source roles differ from canonical provider authority"
         )
+    locators = read_local_sidecar(input_generation_path)
     snapshots = {}
     for role, binding in arguments["source_bindings"].items():
-        actual, content = _file_binding(Path(binding["path"]))
-        if actual != binding:
+        actual, content = _file_binding(_bound_source_path(locators, role))
+        if not _binding_matches(actual, binding):
             raise CapitalValidationError(f"capital source binding differs: {role}")
         snapshots[role] = json.loads(content)
     if "provider_ledger" not in snapshots:
@@ -1666,7 +1771,10 @@ def build_governed_capital_result(
     contract = (
         load_contract(contract_path)
         if registry is None
-        else load_contract(contract_path, registry_path=Path(registry["path"]))
+        else load_contract(
+            contract_path,
+            registry_path=_bound_source_path(locators, "strategy_registry"),
+        )
     )
     policy = next(
         row["calculation_contract"]
@@ -1707,7 +1815,7 @@ def build_governed_capital_result(
         # treating this input document's own status or hash as admission.
         from portfolio_pipeline_materialize import _provider_admission_authority
 
-        ledger_path = Path(arguments["source_bindings"]["provider_ledger"]["path"])
+        ledger_path = _bound_source_path(locators, "provider_ledger")
         ledger_spec = arguments["source_bindings"].get("provider_ledger_spec")
         if ledger_spec is None:
             raise CapitalValidationError(
@@ -1716,7 +1824,7 @@ def build_governed_capital_result(
         from provider_ledger import verify_candidate
 
         verified = verify_candidate(
-            Path(ledger_spec["path"]),
+            _bound_source_path(locators, "provider_ledger_spec"),
             ledger_path.parent.name,
             output_root_override=ledger_path.parent.parent.parent,
         )
@@ -1745,6 +1853,11 @@ def build_governed_capital_result(
             "product_contract_semantic_sha256": contract_digest(contract),
         }
     )
+    # Seal only after proving the payload carries no locator. `result_id` is a
+    # digest of this dict and the dict is published inside the report, so a
+    # single absolute path here would make the financial artifact depend on the
+    # directory it was built in.
+    assert_no_absolute_locators(result, field_name="invested capital result")
     result["result_id"] = _digest(result)
     return result
 

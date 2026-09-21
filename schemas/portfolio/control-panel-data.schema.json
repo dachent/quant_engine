@@ -981,11 +981,11 @@
     "file_binding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "sha256", "size_bytes"],
+      "required": ["sha256", "size_bytes"],
       "properties": {
-        "path": { "type": "string", "minLength": 1 },
         "sha256": { "$ref": "#/$defs/hash" },
-        "size_bytes": { "type": "integer", "minimum": 1 }
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "generation_id": { "$ref": "#/$defs/hash" }
       }
     },
     "capital_daily_epoch": {

@@ -196,6 +196,9 @@ def test_retained_authority_rejects_unbound_provider_spec(tmp_path: Path) -> Non
             }
         )
     )
+    capital.write_local_sidecar(
+        inputs, {"provider_ledger": ledger, "provider_ledger_spec": spec}
+    )
     spec.write_bytes(b'{"synthetic":"tampered specification"}')
     with pytest.raises(capital.CapitalValidationError, match="source binding differs"):
         capital.resolve_financial_input_authority(inputs, current, {})
@@ -223,6 +226,9 @@ def test_retained_authority_rejects_provider_outside_baseline(tmp_path: Path) ->
                 },
             }
         )
+    )
+    capital.write_local_sidecar(
+        inputs, {"provider_ledger": ledger, "provider_ledger_spec": spec}
     )
     with pytest.raises(capital.CapitalValidationError, match="selected baseline"):
         capital.resolve_financial_input_authority(inputs, current, {})

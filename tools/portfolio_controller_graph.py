@@ -459,7 +459,13 @@ _ARTIFACT_FLOW_SPECS: tuple[dict[str, object], ...] = (
         "source_paths": (_CAPITAL_INPUT, _CAPITAL, _PREPARATION),
         "contracts": ("contracts/portfolio-financial-mvp-source-v1.json",),
         "producer": (_CAPITAL, "build_governed_capital_result"),
-        "artifacts": ("capital-input-generation.json", "invested-capital-result.json"),
+        "artifacts": (
+            "capital-input-generation.json",
+            # Locators for the portable generation above. Never hashed,
+            # published, or copied into the report candidate.
+            "capital-input-generation.local.json",
+            "invested-capital-result.json",
+        ),
         "consumers": ((_RELEASE, "build_report"), (_PANEL, "build_candidate")),
         "validators": ((_CAPITAL, "verify_governed_capital_result"),),
         "writers": ((_CAPITAL_INPUT, "build_input_generation"),),

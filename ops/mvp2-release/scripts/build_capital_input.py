@@ -55,8 +55,8 @@ def build_input_generation(
     account_crosswalk_path: Path,
     requested_as_of: str,
     evaluated_on: str,
-) -> dict:
-    """Build the existing capital input generation from selected source roots."""
+) -> tuple[dict, dict[str, str]]:
+    """Build the capital input generation and this machine's locators for it."""
 
     requested_date = _canonical_date(requested_as_of, "requested_as_of")
     evaluation_date = _canonical_date(evaluated_on, "evaluated_on")
@@ -364,13 +364,29 @@ def build_input_generation(
         "required_epochs": epochs,
         "schema_version": 1,
         "source_bindings": {
-            "provider_ledger": capital._file_binding(ledger_path)[0],
+            # The generation id is portable identity, not a locator, and it
+            # is what proves this ledger came from the SELECTED generation
+            # rather than merely having the same bytes as some other one.
+            "provider_ledger": {
+                **capital._file_binding(ledger_path)[0],
+                "generation_id": provider_ledger_generation_root.name,
+            },
             "provider_ledger_spec": capital._file_binding(provider_ledger_spec_path)[0],
             "account_crosswalk": capital._file_binding(account_crosswalk_path)[0],
             "strategy_registry": capital._file_binding(strategy_registry_path)[0],
         },
     }
-    return generation
+    # The generation binds bytes by identity only, so it is the same document
+    # wherever the run happened. Where those bytes live on this machine is
+    # returned separately and written to a sidecar that is never hashed,
+    # published, or copied into the report candidate.
+    locators = {
+        "provider_ledger": capital._local_binding(ledger_path),
+        "provider_ledger_spec": capital._local_binding(provider_ledger_spec_path),
+        "account_crosswalk": capital._local_binding(account_crosswalk_path),
+        "strategy_registry": capital._local_binding(strategy_registry_path),
+    }
+    return generation, locators
 
 
 def main(argv=None):
@@ -398,7 +414,7 @@ def main(argv=None):
 
     import portfolio_invested_capital as capital
 
-    generation = build_input_generation(
+    generation, locators = build_input_generation(
         provider_ledger_generation_root=args.provider_ledger_generation_root,
         epoch_manifest_generation_root=args.epoch_manifest_generation_root,
         provider_ledger_spec_path=args.provider_ledger_spec,
@@ -410,7 +426,11 @@ def main(argv=None):
     )
     args.output_root.mkdir(parents=True, exist_ok=True)
     input_path = args.output_root / "capital-input-generation.json"
+    capital.assert_no_absolute_locators(
+        generation, field_name="capital input generation"
+    )
     input_path.write_bytes(capital._canonical(generation))
+    capital.write_local_sidecar(input_path, locators)
     result = capital.build_governed_capital_result(input_path, args.financial_contract)
     capital.verify_governed_capital_result(result, input_path, args.financial_contract)
     result_path = args.output_root / "invested-capital.json"
