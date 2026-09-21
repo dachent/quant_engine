@@ -86,7 +86,10 @@
     "catalog_schema_version": {"const": 2},
     "corporate_actions": {"type": "array", "items": {"type": "object"}},
     "fact_counts": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/factCount"}},
+    "financing_cost_observations": {"type": "array", "items": {"type": "object"}},
+    "financing_liability_observations": {"type": "array", "items": {"type": "object"}},
     "flows": {"type": "array", "items": {"type": "object"}},
+    "leverage_exposure_observations": {"type": "array", "items": {"type": "object"}},
     "nav_observations": {
       "type": "array",
       "items": {
@@ -95,7 +98,7 @@
         "properties": {
           "provider_id": {"type": "string", "minLength": 1},
           "source_artifact_id": {"type": "string", "minLength": 1},
-          "value_basis": {"enum": ["ACCOUNT_TOTAL", "ACCOUNT_VALUE"]}
+          "value_basis": {"enum": ["ACCOUNT_TOTAL", "ACCOUNT_VALUE", "STRATEGY_NAV"]}
         },
         "allOf": [
           {
@@ -105,6 +108,10 @@
           {
             "if": {"required": ["value_basis"], "properties": {"provider_id": {"const": "matrixport"}}},
             "then": {"required": ["source_artifact_id"], "properties": {"value_basis": {"const": "ACCOUNT_TOTAL"}}}
+          },
+          {
+            "if": {"required": ["value_basis"], "properties": {"provider_id": {"const": "quantbase"}}},
+            "then": {"required": ["source_artifact_id"], "properties": {"value_basis": {"const": "STRATEGY_NAV"}}}
           },
           {
             "if": {"required": ["value_basis"], "properties": {"provider_id": {"const": "schwab"}}},
@@ -174,7 +181,7 @@
         "generation_id": {"$ref": "#/$defs/sha256"},
         "manifest_sha256": {"$ref": "#/$defs/sha256"},
         "provider_id": {"type": "string", "minLength": 1},
-        "qualification": {"enum": ["PUBLISHED_COMPLETE", "ACCEPTED_PARTIAL", "FINITE_STATIC"]}
+        "qualification": {"enum": ["PUBLISHED_COMPLETE", "STAGED_COMPLETE", "ACCEPTED_PARTIAL", "FINITE_STATIC"]}
       }
     }
   }

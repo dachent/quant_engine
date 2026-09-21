@@ -3836,6 +3836,212 @@ def test_xirr_diagnostic_includes_internal_capital_legs(
 
 
 @pytest.mark.parametrize(
+    ("cashflows", "status", "expected_rate"),
+    (
+        (
+            (("2025-01-01", "-100"), ("2026-01-01", "110")),
+            "AVAILABLE",
+            "0.10",
+        ),
+        (
+            (("2025-01-01", "-100"), ("2026-01-01", "80")),
+            "AVAILABLE",
+            "-0.20",
+        ),
+        (
+            (("2025-01-01", "-100"), ("2026-01-01", "-110")),
+            "NO_ROOT",
+            None,
+        ),
+        (
+            (
+                ("2025-01-01", "-100"),
+                ("2026-01-01", "230"),
+                ("2027-01-01", "-132"),
+            ),
+            "UNIQUENESS_NOT_PROVED",
+            None,
+        ),
+    ),
+)
+def test_xirr_status_classification_preserves_decimal_solver_domain(
+    manifest_module: Any,
+    cashflows: tuple[tuple[str, str], ...],
+    status: str,
+    expected_rate: str | None,
+) -> None:
+    result = manifest_module.classify_xirr(
+        [
+            (manifest_module.date.fromisoformat(day), manifest_module.Decimal(amount))
+            for day, amount in cashflows
+        ]
+    )
+
+    assert result["status"] == status
+    if expected_rate is None:
+        assert result["rate"] is None
+    else:
+        assert abs(result["rate"] - manifest_module.Decimal(expected_rate)) <= (
+            manifest_module.Decimal("1e-28")
+        )
+
+
+def test_source_bound_strategy_mwr_uses_strategy_nav_and_allocation_not_brokerage_deposit(
+    manifest_module: Any,
+) -> None:
+    row = {
+        "account_id": "synthetic-account",
+        "strategy_id": "synthetic-strategy",
+        "status": "OK",
+        "start": "2025-01-01",
+        "end": "2026-01-01",
+        "opening_capital": "60",
+        "current_value": "66",
+        "funded_nav_record_ids": ["synthetic-opening-nav"],
+        "observation_trace": {"links": [{"start_date": "2025-01-01"}]},
+        "capital_flow_trace": [],
+    }
+    manifest = {"rows": [row]}
+    ledger = {
+        "nav_observations": [
+            {
+                "account_id": "synthetic-account",
+                "as_of_date": "2025-01-01",
+                "record_id": "synthetic-opening-nav",
+                "value_basis": "STRATEGY_NAV",
+                "nav": {"currency": "USD"},
+            },
+            {
+                "account_id": "synthetic-account",
+                "as_of_date": "2026-01-01",
+                "record_id": "synthetic-terminal-nav",
+                "value_basis": "STRATEGY_NAV",
+                "nav": {"currency": "USD"},
+            },
+        ]
+    }
+
+    manifest_module._mwr_payloads_from_governed_inputs(manifest, ledger, [], [])
+
+    assert row["mwr_status"] == "AVAILABLE"
+    assert abs(
+        row["mwr_xirr"] - manifest_module.Decimal("0.10")
+    ) <= manifest_module.Decimal("1e-28")
+    assert row["mwr_label"] == "STRATEGY_EPOCH_MWR"
+    assert row["mwr_cashflows"] == [
+        {
+            "date": "2025-01-01",
+            "amount": manifest_module.Decimal("-60"),
+            "source_record_ids": ["synthetic-opening-nav"],
+        },
+        {
+            "date": "2026-01-01",
+            "amount": manifest_module.Decimal("66"),
+            "source_record_ids": ["synthetic-terminal-nav"],
+        },
+    ]
+
+
+def test_source_bound_strategy_mwr_accepts_in_memory_decimal_manifest_values(
+    manifest_module: Any,
+) -> None:
+    """The manifest builder computes money as Decimal before JSON encoding."""
+    row = {
+        "account_id": "synthetic-account",
+        "strategy_id": "synthetic-strategy",
+        "status": "OK",
+        "start": "2025-01-01",
+        "end": "2026-01-01",
+        "opening_capital": manifest_module.Decimal("60"),
+        "current_value": manifest_module.Decimal("66"),
+        "funded_nav_record_ids": ["synthetic-opening-nav"],
+        "observation_trace": {"links": [{"start_date": "2025-01-01"}]},
+        "capital_flow_trace": [],
+    }
+    manifest = {"rows": [row]}
+    ledger = {
+        "nav_observations": [
+            {
+                "account_id": "synthetic-account",
+                "as_of_date": "2025-01-01",
+                "record_id": "synthetic-opening-nav",
+                "value_basis": "STRATEGY_NAV",
+                "nav": {"currency": "USD"},
+            },
+            {
+                "account_id": "synthetic-account",
+                "as_of_date": "2026-01-01",
+                "record_id": "synthetic-terminal-nav",
+                "value_basis": "STRATEGY_NAV",
+                "nav": {"currency": "USD"},
+            },
+        ]
+    }
+
+    manifest_module._mwr_payloads_from_governed_inputs(manifest, ledger, [], [])
+
+    assert row["mwr_status"] == "AVAILABLE"
+    assert row["mwr_opening_value"] == manifest_module.Decimal("60")
+    assert row["mwr_terminal_value"] == manifest_module.Decimal("66")
+
+
+def test_source_bound_strategy_mwr_uses_opening_anchor_at_economic_date(
+    manifest_module: Any,
+) -> None:
+    """A capital event can predate the first NAV that recognizes it."""
+    row = {
+        "account_id": "synthetic-account",
+        "strategy_id": "synthetic-strategy",
+        "status": "OK",
+        "start": "2025-01-01",
+        "end": "2026-01-01",
+        "opening_capital": "100",
+        "current_value": "110",
+        "funded_nav_record_ids": ["recognized-opening-nav"],
+        "observation_trace": {"links": [{"start_date": "2025-01-01"}]},
+        "capital_flow_trace": [],
+    }
+    manifest = {"rows": [row]}
+    ledger = {
+        "nav_observations": [
+            {
+                "account_id": "synthetic-account",
+                "as_of_date": "2025-01-02",
+                "record_id": "recognized-opening-nav",
+                "value_basis": "STRATEGY_NAV",
+                "nav": {"currency": "USD"},
+            },
+            {
+                "account_id": "synthetic-account",
+                "as_of_date": "2026-01-01",
+                "record_id": "synthetic-terminal-nav",
+                "value_basis": "STRATEGY_NAV",
+                "nav": {"currency": "USD"},
+            },
+        ]
+    }
+    anchors = [
+        {
+            "account_id": "synthetic-account",
+            "strategy_id": "synthetic-strategy",
+            "capital_type": "OPENING_CAPITAL_ANCHOR",
+            "event_date": "2025-01-01",
+            "nav_recognition_date": "2025-01-02",
+            "source_record_id": "synthetic-opening-capital",
+        }
+    ]
+
+    manifest_module._mwr_payloads_from_governed_inputs(manifest, ledger, [], anchors)
+
+    assert row["mwr_status"] == "AVAILABLE"
+    assert row["mwr_cashflows"][0] == {
+        "date": "2025-01-01",
+        "amount": manifest_module.Decimal("-100"),
+        "source_record_ids": ["synthetic-opening-capital"],
+    }
+
+
+@pytest.mark.parametrize(
     ("end", "current"),
     [
         ("2026-12-31", "110"),

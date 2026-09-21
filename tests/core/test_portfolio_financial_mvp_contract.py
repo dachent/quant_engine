@@ -1057,7 +1057,7 @@ def test_contract_is_valid_and_has_stable_identity() -> None:
     # became a governed generation, and the strategy-backtests generation was
     # restaged from the bundle carrying its 4,208 pre-launch returns.
     assert contract_tool.contract_digest(contract) == (
-        "6be237352a4c9e380e22869c9362677ea96c1c1271562f0cbc265f81c4352a95"
+        "fa920d9fcd504ecdca5122ae9beec96cd2f8de7c2cc15c5f99717dee10a0f4ec"
     )
 
 
@@ -1104,7 +1104,7 @@ def test_current_provider_capital_authority_binds_recomputed_dataset_sets() -> N
                 "fd1a14d0408373d4e278dbd04b3cab3bd5e6957894d354146523b9787b8883f8"
             ),
             "product_data_class_set_sha256": (
-                "d5559b19d9aa437788772ab7b5c89c1f2ad9176c5a2d63f4f1e492a3f57b596d"
+                "c8fa73170b7176c8d31ffe9b0d2ffb25aceed4193361930270e9e92a8968bfc5"
             ),
             # Moved from 24 to 25 when CAPITAL_ANCHOR materialized: netting
             # each statement account's capital events on their own recognition
@@ -2532,16 +2532,6 @@ def test_leverage_policy_preserves_returns_without_inflating_invested_capital() 
     assert vector["ending_nav"] == "114"
     assert vector["invested_capital"] == "100"
     assert vector["total_return"] == vector["twr"] == vector["mwr_one_year"] == "0.14"
-    contract = _contract()
-    # Issue #396 deferred the three leverage classes out of MVP-2's scope, so
-    # no account source may declare one: a declared class with no producer
-    # returns the product to REQUIRED_DATA_CLASS_NOT_MATERIALIZED. The
-    # calculation contract below still governs how leverage is treated if and
-    # when the facts return.
-    for source_id in contract_tool.REQUIRED_ACCOUNT_PROVIDER_SOURCE_IDS:
-        declared = set(_source(contract, source_id)["data_classes"])
-        assert not contract_tool.DEFERRED_LEVERAGE_CLASSES & declared
-
     changed = _contract()
     changed_vector = _outcome(changed, "INVESTED_CAPITAL")["calculation_contract"][
         "leverage_accounting"
@@ -2553,15 +2543,33 @@ def test_leverage_policy_preserves_returns_without_inflating_invested_capital() 
     ):
         _validate(changed)
 
-    readded_source_fact = _contract()
-    ibkr = _source(readded_source_fact, "ibkr-account-generation")
-    ibkr["data_classes"].append("FINANCING_LIABILITY")
-    with pytest.raises(
-        contract_tool.FinancialMvpContractError,
-        match="source declares leverage facts deferred by issue 396: "
-        "ibkr-account-generation",
-    ):
-        _validate(readded_source_fact)
+    declared_source_facts = _contract()
+    ibkr = _source(declared_source_facts, "ibkr-account-generation")
+    assert {"FINANCING_COST", "FINANCING_LIABILITY", "LEVERAGE_EXPOSURE"} <= set(
+        ibkr["data_classes"]
+    )
+    # #396 now has a source and ledger producer. Contract declarations are
+    # allowed; actual source materialization remains independently required
+    # by provider admission before composition.
+    _validate(declared_source_facts)
+
+
+def test_leverage_source_class_bindings_are_limited_to_native_producers() -> None:
+    """#396 declares only the approved native IBKR and Schwab classes."""
+
+    contract = _contract()
+    expected = {
+        "ibkr-account-generation": {
+            "FINANCING_COST",
+            "FINANCING_LIABILITY",
+            "LEVERAGE_EXPOSURE",
+        },
+        "schwab-account-generation": {"FINANCING_COST"},
+    }
+    for source_id, classes in expected.items():
+        source = _source(contract, source_id)
+        assert classes <= set(source["data_classes"])
+        assert classes <= set(source["admission"]["facts"])
 
 
 @pytest.mark.parametrize(
@@ -4202,9 +4210,11 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
     # union-generation repin, and the strategy-backtests segment binding onto
     # its governed generation; each edits source_segments, which this proof
     # hashes. Moved again when the strategy-backtests segment was restaged onto
-    # the bundle carrying the EU designer-model prehistory.
+    # the bundle carrying the EU designer-model prehistory, then to declare
+    # approved source-backed IBKR/Schwab leverage classes without changing
+    # historical generation, inventory or admitted-item pins.
     assert hashlib.sha256(historical_bytes).hexdigest() == (
-        "b3c8f7af6c5ad4c9e1379ff9d97de15349752eaa7b4c56a17e18a007ee443f60"
+        "22ff75caae0417988b513bdfa745616306ff2c0e31803aac33a462e0ce539f51"
     )
 
     legacy_views = contract_tool.render_views(legacy_contract)
@@ -4241,7 +4251,7 @@ def test_synthetic_epoch_source_preserves_legacy_bytes_and_historical_rows() -> 
             + b"\n"
         )
     ).hexdigest() == (
-        "b3c8f7af6c5ad4c9e1379ff9d97de15349752eaa7b4c56a17e18a007ee443f60"
+        "22ff75caae0417988b513bdfa745616306ff2c0e31803aac33a462e0ce539f51"
     )
     augmented_matrix = json.loads(
         contract_tool.render_views(augmented_contract).source_matrix_json

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import json
 from pathlib import Path
 from typing import Sequence
@@ -10,10 +11,12 @@ from typing import Sequence
 from quant_engine.schwab import (
     build_generation,
     publish_generation_candidate,
+    read_holdings_v2_current_snapshot,
     read_web_current_snapshot,
     stage_generation_candidate,
     write_current_snapshot,
 )
+from quant_engine.schwab.generation import _crosswalk
 
 
 def _summary(spec_path: Path) -> dict[str, object]:
@@ -55,6 +58,40 @@ def _web_current(
     }
 
 
+def _holdings_v2_current(
+    raw_response: Path, spec_path: Path, receipt_path: Path, output: Path
+) -> dict[str, object]:
+    raw = json.loads(raw_response.read_text(encoding="utf-8-sig"))
+    spec = json.loads(spec_path.read_text(encoding="utf-8-sig"))
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8-sig"))
+    if not isinstance(spec, dict):
+        raise ValueError("generation spec must be an object")
+    try:
+        generation_date = date.fromisoformat(str(spec["as_of_date"]))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("generation spec as_of_date is invalid") from exc
+    crosswalk, _ = _crosswalk(spec.get("crosswalk"))
+    if not isinstance(receipt, dict):
+        raise ValueError("capture receipt must be an object")
+    snapshot = read_holdings_v2_current_snapshot(
+        raw,
+        crosswalk=crosswalk,
+        captured_at=receipt.get("captured_at_utc"),
+    )
+    if snapshot.observed_at.date() != generation_date:
+        raise ValueError("capture receipt UTC date differs from generation as_of_date")
+    digest, size = write_current_snapshot(snapshot, output)
+    return {
+        "account_count": len(snapshot.accounts),
+        "observed_at": snapshot.observed_at.isoformat(),
+        "position_count": len(snapshot.positions),
+        "sha256": digest,
+        "size_bytes": size,
+        "sweep_vehicle_count": snapshot.sweep_vehicle_count,
+        "transport": snapshot.transport,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -67,6 +104,14 @@ def _parser() -> argparse.ArgumentParser:
     normalize.add_argument("raw_response", type=Path)
     normalize.add_argument("spec", type=Path)
     normalize.add_argument("output", type=Path)
+    holdings_v2 = subparsers.add_parser(
+        "normalize-holdings-v2",
+        help="sanitize one retained Holdings-V2 response using its capture receipt",
+    )
+    holdings_v2.add_argument("raw_response", type=Path)
+    holdings_v2.add_argument("spec", type=Path)
+    holdings_v2.add_argument("capture_receipt", type=Path)
+    holdings_v2.add_argument("output", type=Path)
     stage = subparsers.add_parser("stage", help="create an immutable candidate")
     stage.add_argument("spec", type=Path)
     stage.add_argument("output_root", type=Path)
@@ -85,6 +130,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         result = _summary(args.spec)
     elif args.command == "normalize-web-current":
         result = _web_current(args.raw_response, args.spec, args.output)
+    elif args.command == "normalize-holdings-v2":
+        result = _holdings_v2_current(
+            args.raw_response, args.spec, args.capture_receipt, args.output
+        )
     elif args.command == "stage":
         result = stage_generation_candidate(args.spec, args.output_root)
     else:

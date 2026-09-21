@@ -1111,6 +1111,26 @@ def test_epoch_admission_blocks_twelve_rows_before_any_numeric_candidate(
         }
         for row in included
     }
+    for detail in epoch_details.values():
+        if detail["epoch_admission_status"] == "BLOCKED":
+            detail["mwr_payload"] = {
+                "mwr_status": "BLOCKED_ADMISSION",
+                "mwr_xirr": None,
+                "mwr_reason": "SYNTHETIC_BLOCKED",
+                "mwr_opening_date": None,
+                "mwr_opening_value": None,
+                "mwr_terminal_date": None,
+                "mwr_terminal_value": None,
+                "mwr_currency": None,
+                "mwr_coverage_status": "BLOCKED",
+                "mwr_cashflows": [],
+                "mwr_label": None,
+                "mwr_value_basis": None,
+                "mwr_valuation_timing": None,
+                "mwr_day_count": "ACTUAL_365",
+                "mwr_unit": "ANNUALIZED_RETURN",
+                "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+            }
     catalog = {
         "assignments": assignments,
         "calendar_coverage": [],
@@ -1187,6 +1207,7 @@ def test_epoch_admission_blocks_twelve_rows_before_any_numeric_candidate(
         for row in blocked
         for status_field in ("twr_status", "mwr_status", "return_path_status")
     )
+    assert {row["mwr_reason"] for row in blocked} == {"SYNTHETIC_BLOCKED"}
     suppressed_fields = (
         "twr",
         "mwr_xirr",
@@ -1791,7 +1812,7 @@ def test_current_dependence_reaches_report_workbook_and_receipt_identity(
         history_contract_path=history_path,
         correlation_root=dependence_root,
     )
-    assert verified["table_count"] == 14
+    assert verified["table_count"] == 15
 
 
 def test_current_dependence_report_rejects_mismatched_verified_source(
@@ -2281,7 +2302,7 @@ def test_staged_selectors_flow_through_real_cli_lifecycle(
         )
         == 0
     )
-    assert json.loads(capsys.readouterr().out)["table_count"] == 14
+    assert json.loads(capsys.readouterr().out)["table_count"] == 15
     final_workbook, run_result, validation, binding_path = _prepare_workbook_evidence(
         candidate, run_id="4" * 32
     )
@@ -2642,6 +2663,15 @@ def test_report_data_has_hand_checked_twr_and_coverage_failures(tmp_path: Path) 
     assert mapped["twr_status"] == "AVAILABLE_WITH_INFERRED_FLOW_TIMING"
     assert mapped["mwr_xirr"] is None
     assert mapped["mwr_status"] == "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE"
+    assert mapped["mwr_reason"] == "FLOW_COVERAGE_NOT_GOVERNED"
+    assert mapped["mwr_coverage_status"] == "BLOCKED"
+    assert mapped["mwr_cashflows"] == []
+    assert mapped["mwr_label"] is None
+    assert mapped["mwr_value_basis"] is None
+    assert mapped["mwr_valuation_timing"] is None
+    assert mapped["mwr_day_count"] == "ACTUAL_365"
+    assert mapped["mwr_unit"] == "ANNUALIZED_RETURN"
+    assert mapped["mwr_source_binding"] == "GOVERNED_SOURCE_IDENTITIES"
     missing = next(
         item for item in report["twr_mwr"] if item["assignment_id"] == "assignment-b"
     )
@@ -2852,8 +2882,8 @@ def test_workbook_is_deterministic_structured_and_has_no_external_surface(
     candidate = Path(first["candidate_dir"])
     workbook = Path(first["workbook_path"])
     evidence = reporter.verify_candidate(baseline_root, candidate, workbook)
-    assert evidence["sheet_count"] == 14
-    assert evidence["table_count"] == 14
+    assert evidence["sheet_count"] == 15
+    assert evidence["table_count"] == 15
     assert evidence["external_links"] == 0
     assert evidence["macro_parts"] == 0
     assert evidence["formula_count"] >= 1
@@ -4209,8 +4239,17 @@ def test_report_schema_is_closed_and_keeps_mwr_unavailable() -> None:
     )
     assert schema["properties"]["strategy_summary"]["minItems"] == 7
     assert schema["properties"]["strategy_summary"]["maxItems"] == 7
-    assert schema["$defs"]["performance"]["properties"]["mwr_xirr"]["type"] == "null"
+    assert schema["$defs"]["performance"]["properties"]["mwr_xirr"]["type"] == [
+        "string",
+        "null",
+    ]
     assert schema["$defs"]["performance"]["properties"]["mwr_status"]["enum"] == [
+        "AVAILABLE",
+        "NO_ROOT",
+        "INDETERMINATE",
+        "UNIQUENESS_NOT_PROVED",
+        "NUMERICAL_SEARCH_UNRESOLVED",
+        "INCOMPLETE_FLOW_COVERAGE",
         "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
         "BLOCKED_ADMISSION",
     ]
@@ -5696,6 +5735,151 @@ def test_report_accepts_explicit_non_sibling_provider_ledger_root(
     ]
     assert [item["check_id"] for item in rows] == ["provider-explicit-root"]
     assert rows[0]["source_generation_id"] == provider_generation
+
+
+def test_report_projects_hash_bound_leverage_disclosures_to_physical_workbook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Observed leverage facts remain source-bound and unavailable measures explicit."""
+    monkeypatch.setattr(
+        reporter,
+        "_PORTABLE_HWM_PRODUCT_CONTRACT",
+        _bind_synthetic_product_contract(tmp_path / "report-contract"),
+    )
+    provider_generation = "a" * 64
+    tier = {
+        "account_id": "account-leverage",
+        "accounting_date": "2026-01-03",
+        "amount": {"currency": "USD", "status": "AVAILABLE", "value": "1"},
+        "classification": "BROKER_DEBIT_INTEREST",
+        "generation_id": "b" * 64,
+        "included_in_nav": None,
+        "measurement_basis": "VALUE_DATE_INTEREST_DETAIL",
+        "native_source_record_id": "native-tier-1",
+        "provider_id": "ibkr",
+        "record_id": "ibkr:tier-1",
+        "source_amount": {"currency": "USD", "status": "AVAILABLE", "value": "-1"},
+        "source_artifact_id": "selected/ibkr.xml",
+        "source_record_id": "catalog-tier-1",
+        "strategy_id": "strategy-1",
+        "value_date": "2026-01-02",
+    }
+    provider_catalog = {
+        "financing_cost_observations": [tier],
+        "financing_liability_observations": [],
+        "leverage_exposure_observations": [],
+        "provider_generations": [{"provider_id": "ibkr"}],
+        "reconciliation_checks": [],
+    }
+    provider_bytes = canonical_json_bytes(provider_catalog)
+    provider_sha256 = hashlib.sha256(provider_bytes).hexdigest()
+    provider_root = tmp_path / "provider-ledger"
+    provider_dir = provider_root / "generations" / provider_generation
+    provider_dir.mkdir(parents=True)
+    provider_path = provider_dir / "provider-ledger.json"
+    provider_path.write_bytes(provider_bytes)
+    catalog = _baseline_catalog()
+    catalog["source_artifacts"].append(
+        {
+            "artifact_id": "providers/provider-ledger/provider-ledger.json",
+            "as_of_date": "2026-01-03",
+            "schema_name": "provider-ledger-catalog",
+            "schema_version": "2",
+            "sha256": provider_sha256,
+            "source_key": "provider-ledger-generation",
+        }
+    )
+    baseline_root = _published_baseline(tmp_path / "baseline", catalog)
+
+    report, _, _ = reporter.build_report_data(
+        baseline_root, provider_ledger_root=provider_root
+    )
+    from jsonschema import Draft202012Validator, FormatChecker
+
+    report_schema = json.loads(
+        (
+            REPOSITORY_ROOT / "schemas" / "portfolio" / "report-data.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    assert not list(
+        Draft202012Validator(report_schema, format_checker=FormatChecker()).iter_errors(
+            report
+        )
+    )
+
+    observed = next(
+        row
+        for row in report["leverage_disclosures"]
+        if row.get("record_id") == tier["record_id"]
+    )
+    assert {field: observed[field] for field in tier} == tier
+    assert observed["coverage_status"] == "OBSERVED_ONLY"
+    assert observed["source_record_ids"] == [tier["record_id"]]
+    assert observed["source_catalog_generation_id"] == provider_generation
+    assert observed["source_catalog_sha256"] == provider_sha256
+    assert {
+        row["reason"]
+        for row in report["leverage_disclosures"]
+        if row["account_id"] == tier["account_id"]
+        and row["coverage_status"] == "UNAVAILABLE"
+    } == {
+        "NO_RECONCILED_FINANCING_COST_BASIS",
+        "BORROWED_PRINCIPAL_NOT_PROVED",
+        "DERIVATIVE_NOTIONAL_NOT_PROVED",
+        "DELTA_EQUIVALENT_NOT_PROVED",
+        "EMBEDDED_PRODUCT_EXPOSURE_NOT_PROVED",
+    }
+
+    workbook_path = tmp_path / "portfolio-report.xlsx"
+    reporter._build_workbook_exact(report, workbook_path)
+    workbook = load_workbook(workbook_path, read_only=False, data_only=True)
+    try:
+        table = workbook["Leverage Disclosures"].tables["tblLeverageDisclosures"]
+        cells = list(workbook["Leverage Disclosures"][table.ref])
+        headers = [str(cell.value).lower().replace(" ", "_") for cell in cells[0]]
+        physical = next(
+            dict(zip(headers, (cell.value for cell in row), strict=True))
+            for row in cells[1:]
+            if row[headers.index("record_id")].value == tier["record_id"]
+        )
+        for field in (
+            "account_id",
+            "accounting_date",
+            "classification",
+            "measurement_basis",
+            "native_source_record_id",
+            "provider_id",
+            "record_id",
+            "source_artifact_id",
+            "source_record_id",
+            "strategy_id",
+            "value_date",
+        ):
+            assert physical[field] == observed[field]
+        assert json.loads(physical["amount"])["value"] == observed["amount"]["value"]
+        assert (
+            json.loads(physical["source_amount"])["value"]
+            == observed["source_amount"]["value"]
+        )
+        assert (
+            json.loads(physical["source_record_ids"]) == observed["source_record_ids"]
+        )
+    finally:
+        workbook.close()
+
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="hash-bound provider-ledger catalog is missing or ambiguous",
+    ):
+        reporter.build_report_data(
+            baseline_root, provider_ledger_root=tmp_path / "wrong-ledger"
+        )
+    provider_path.write_bytes(canonical_json_bytes({"reconciliation_checks": []}))
+    with pytest.raises(
+        reporter.ReportValidationError,
+        match="hash-bound provider-ledger catalog is missing or ambiguous",
+    ):
+        reporter.build_report_data(baseline_root, provider_ledger_root=provider_root)
 
 
 def test_report_fails_closed_when_provider_reconciliation_source_is_missing(

@@ -51,6 +51,7 @@ def _xml(
     omit_section: str | None = None,
     change_nav: str | None = None,
     change_attributes: str = "",
+    native_sections: str = "",
 ) -> str:
     observed = day.isoformat().replace("-", "")
     sections = {
@@ -111,6 +112,7 @@ def _xml(
         "Transfers": "<Transfers />",
     }
     body = "".join(value for key, value in sections.items() if key != omit_section)
+    body += native_sections
     return (
         '<?xml version="1.0" encoding="UTF-8"?>'
         '<FlexQueryResponse type="AF" queryName="SYNTHETIC">'
@@ -1578,6 +1580,209 @@ def test_exclusion_counts_appear_in_boundary_when_scope_mismatch(
     # But the boundary still records the declared exclusions that matched
     assert "AMBIGUOUS_REPORTED_ACCOUNT" in manifest.coverage.boundary
     assert "1 catalog rows" in manifest.coverage.boundary
+
+
+def test_native_financing_fields_survive_real_parser_and_generation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "native-leverage.xml"
+    path.write_text(
+        _xml(
+            "SYNTH-RAW",
+            date(2026, 1, 3),
+            "114",
+            cash_rows=(
+                '<CashTransaction accountId="SYNTH-RAW" levelOfDetail="DETAIL" '
+                'transactionID="paid-interest" dateTime="20260103;120000" '
+                'reportDate="20260103" settleDate="20260103" currency="USD" '
+                'type="Broker Interest Paid" description="native paid" '
+                'amount="-1" fxRateToBase="1" />'
+            ),
+            change_attributes=(
+                'toDate="20260103" startingValue="100" '
+                'depositsWithdrawals="0" mtm="15" interest="-1"'
+            ),
+            native_sections=(
+                '<CashReport><CashReportCurrency accountId="SYNTH-RAW" '
+                'currency="USD" levelOfDetail="Currency" fromDate="20260103" '
+                'toDate="20260103" startingCash="-50" endingCash="-50" '
+                'endingSettledCash="-50" brokerInterest="-1" /></CashReport>'
+                '<InterestAccruals><InterestAccrualsCurrency accountId="SYNTH-RAW" '
+                'currency="USD" fromDate="20260102" toDate="20260103" '
+                'startingAccrualBalance="0" interestAccrued="-1" '
+                'accrualReversal="1" endingAccrualBalance="0" '
+                'fxTranslation="0" /></InterestAccruals>'
+                '<TierInterestDetails><TierInterestDetail accountId="SYNTH-RAW" '
+                'currency="USD" interestType="Debit Interest" valueDate="20260102" '
+                'reportDate="20260103" tierBreak="I" totalInterest="-1" '
+                'securitiesInterest="-1" commoditiesInterest="0" ibuklInterest="0" '
+                'securitiesPrincipal="-50" commoditiesPrincipal="0" '
+                'ibuklPrincipal="0" totalPrincipal="-50" rate="1" '
+                'fxRateToBase="1" /></TierInterestDetails>'
+            ),
+        ),
+        encoding="utf-8",
+    )
+
+    statement = parse_flex_file(
+        path, artifact_id="synthetic/native-leverage.xml"
+    ).statements[0]
+    assert statement.cash_reports[0].ending_cash == Decimal("-50")
+    assert statement.interest_accruals[0].interest_accrued == Decimal("-1")
+    assert statement.tier_interest[0].value_date == date(2026, 1, 2)
+    assert statement.tier_interest[0].tier_break == "I"
+    assert statement.cash_transactions[0].settlement_date == date(2026, 1, 3)
+    assert statement.cash_transactions[0].description == "native paid"
+
+    catalog = ibkr_generation._normalize(
+        [statement],
+        {
+            "accounts": [
+                {
+                    "account_id": "account-ibkr-synthetic",
+                    "base_currency": "USD",
+                    "role": "INVESTMENT",
+                }
+            ],
+            "assignments": [],
+        },
+        {"SYNTH-RAW": "account-ibkr-synthetic"},
+        [],
+        frozenset(),
+        0,
+        None,
+    )
+    tier = next(
+        row
+        for row in catalog["financing_cost_observations"]
+        if row["measurement_basis"] == "VALUE_DATE_INTEREST_DETAIL"
+    )
+    assert tier["amount"] == {"currency": "USD", "status": "AVAILABLE", "value": "1"}
+    assert tier["source_amount"] == {
+        "currency": "USD",
+        "status": "AVAILABLE",
+        "value": "-1",
+    }
+    assert tier["value_date"] == "2026-01-02"
+    assert tier["accounting_date"] == "2026-01-03"
+    paid = next(
+        row
+        for row in catalog["financing_cost_observations"]
+        if row["measurement_basis"] == "CASH_POSTING"
+    )
+    assert paid["amount"]["value"] == "1"
+    assert paid["source_amount"]["value"] == "-1"
+    assert "paid-interest" not in paid["source_record_id"]
+    assert hashlib.sha256(b"paid-interest").hexdigest() in paid["source_record_id"]
+    assert paid["settlement_date"] == "2026-01-03"
+    liability = next(
+        row
+        for row in catalog["financing_liability_observations"]
+        if row["measurement_basis"] == "TRADE_DATE_CASH_BALANCE"
+    )
+    assert liability["amount"]["value"] == "-50"
+    assert not any(
+        row["amount"]["status"] == "AVAILABLE"
+        and row["measurement_basis"] == "BORROWED_PRINCIPAL"
+        for row in catalog["financing_liability_observations"]
+    )
+    exposure = next(
+        row
+        for row in catalog["leverage_exposure_observations"]
+        if row["measurement_basis"] == "GROSS_POSITION_MARKET_VALUE"
+    )
+    assert exposure["amount"]["value"] == "20"
+    assert catalog["change_in_nav_observations"][0]["components"][-1] == {
+        "source_component_key": "mtm",
+        "value": "15",
+    }
+
+
+def test_native_tier_rows_preserve_labels_and_allocation_discriminators(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "native-tier-views.xml"
+    path.write_text(
+        _xml(
+            "SYNTH-RAW",
+            date(2026, 1, 3),
+            "114",
+            native_sections=(
+                "<TierInterestDetails>"
+                '<TierInterestDetail accountId="SYNTH-RAW" currency="USD" '
+                'interestType="Debit Interest" valueDate="20260102" '
+                'reportDate="20260103" tierBreak="I" balanceThreshold="-50" '
+                'rate="1" securitiesPrincipal="-50" securitiesInterest="-1" '
+                'commoditiesPrincipal="0" commoditiesInterest="0" '
+                'ibuklPrincipal="0" ibuklInterest="0" totalPrincipal="-50" '
+                'totalInterest="-1" code="SEC" fromAcct="ALLOC-A" '
+                'toAcct="ALLOC-B" />'
+                '<TierInterestDetail accountId="SYNTH-RAW" currency="USD" '
+                'interestType="Debit Interest" valueDate="20260102" '
+                'reportDate="20260103" tierBreak="I" balanceThreshold="-40" '
+                'rate="2" securitiesPrincipal="-40" securitiesInterest="-1" '
+                'commoditiesPrincipal="0" commoditiesInterest="0" '
+                'ibuklPrincipal="0" ibuklInterest="0" totalPrincipal="-40" '
+                'totalInterest="-1" code="COM" fromAcct="ALLOC-C" '
+                'toAcct="ALLOC-D" />'
+                "</TierInterestDetails>"
+            ),
+        ),
+        encoding="utf-8",
+    )
+    statement = parse_flex_file(
+        path, artifact_id="synthetic/native-tier-views.xml"
+    ).statements[0]
+    assert [tier.tier_break for tier in statement.tier_interest] == ["I", "I"]
+
+    catalog = ibkr_generation._normalize(
+        [statement],
+        {
+            "accounts": [
+                {
+                    "account_id": "account-ibkr-synthetic",
+                    "base_currency": "USD",
+                    "role": "INVESTMENT",
+                }
+            ],
+            "assignments": [],
+        },
+        {"SYNTH-RAW": "account-ibkr-synthetic"},
+        [],
+        frozenset(),
+        0,
+        None,
+    )
+    rows = [
+        row
+        for row in catalog["financing_cost_observations"]
+        if row["measurement_basis"] == "VALUE_DATE_INTEREST_DETAIL"
+    ]
+    assert len(rows) == 2
+    assert len({row["record_id"] for row in rows}) == 2
+    assert {row["balance_threshold"] for row in rows} == {"-50", "-40"}
+    assert {row["rate"] for row in rows} == {"1", "2"}
+    assert all(row["allocation_scope"] == "HASHED_NATIVE_ACCOUNTS" for row in rows)
+    assert all("ALLOC-" not in json.dumps(row) for row in rows)
+
+
+def test_native_present_malformed_numeric_fails_closed(tmp_path: Path) -> None:
+    path = tmp_path / "malformed-native-leverage.xml"
+    path.write_text(
+        _xml(
+            "SYNTH-RAW",
+            date(2026, 1, 3),
+            "114",
+            native_sections=(
+                '<TierInterestDetails><TierInterestDetail accountId="SYNTH-RAW" '
+                'currency="USD" interestType="Debit Interest" valueDate="20260102" '
+                'reportDate="20260103" totalInterest="NaN" /></TierInterestDetails>'
+            ),
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(FlexValidationError, match="must be finite"):
+        parse_flex_file(path, artifact_id="synthetic/malformed-native-leverage.xml")
 
 
 def _topology_diff_spec(tmp_path: Path) -> Path:
