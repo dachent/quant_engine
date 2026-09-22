@@ -87,6 +87,16 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--history-store",
+        type=Path,
+        required=True,
+        help=(
+            "the layered-history store holding the superseded generations #320 invalidated. "
+            "It is NOT the run's own history: the run writes exactly one generation under "
+            "preparation/history/, so sweeping beside that finds no superseded root at all."
+        ),
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         required=True,
@@ -118,6 +128,7 @@ HISTORY = Path(
     )["history_generation_root"]
 )
 PIPELINE_RECIPE = ARGS.pipeline_recipe.resolve()
+HISTORY_STORE = ARGS.history_store.resolve()
 OUT = ARGS.out.resolve()
 
 # Imported, not copied. The previous copies cited the line numbers they were taken from and
@@ -197,9 +208,12 @@ def main() -> int:
 
     # The roots this correction invalidated, identified by their own manifests
     # rather than by the rebuild that replaced them.
+    # Swept in the STORE, not beside the run's own history. The run writes exactly one
+    # generation under preparation/history/, so sweeping its parent names nothing and the
+    # guard below fires; the superseded roots this correction invalidated live in the store.
     superseded = {
         path.parent.name: hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(HISTORY.parent.glob("*/generation.json"))
+        for path in sorted(HISTORY_STORE.glob("*/generation.json"))
         if path.parent.name != HISTORY.name
     }
     if not superseded:

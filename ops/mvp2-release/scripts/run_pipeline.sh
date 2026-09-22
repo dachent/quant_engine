@@ -41,6 +41,7 @@ echo "== redraft the correction authority against the staged candidates =="
 "$PY" ops/mvp2-release/scripts/draft_correction_registries.py \
   --run "$W/proof2" \
   --pipeline-recipe "$W/cycle2/pipeline-recipe-probe.json" \
+  --history-store "$Q/dataPortfolio/rollforward/2026-09-10-mvp2-live-only/layered-history" \
   --out "$CA" | tail -6
 
 echo "== pipeline recipe =="
