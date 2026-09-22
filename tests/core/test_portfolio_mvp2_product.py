@@ -149,11 +149,11 @@ def assemble_product_spec(
             _artifact("financial-account-manifest-generation", selected["generation"]),
             _artifact("financial-capital-input", capital["input"]),
             _artifact("financial-outcome-hwm", hwm["governed_result"]),
-            _artifact(
-                "financial-outcome-capital",
-                consumers["report_generation"] / "invested-capital.json",
-                ("selected-report",),
-            ),
+            # No generation dependency, matching `financial-outcome-hwm`: the report
+            # generation stopped publishing `invested-capital.json` when the workbook
+            # runtime was removed, so a fixture binding it there describes a world that
+            # no longer exists and would mask the regression.
+            _artifact("financial-outcome-capital", capital["result"]),
         ]
     )
     for mode in fixture.EVIDENCE_MODES:
