@@ -96,3 +96,86 @@ def test_admission_policy_row_refuses_a_file_that_drifted_from_the_pin(tmp_path)
 
     with pytest.raises(SystemExit, match="differs from the pin"):
         module.admission_policy_row(run)
+
+
+def test_the_emitted_row_is_accepted_by_both_release_consumers(tmp_path):
+    """The row the producer emits is the row the consumers resolve. No fabrication either side.
+
+    `AGENTS.md` A1.3: "A consumer suite that mocks the producer does not satisfy this rule --
+    the seam needs at least one end-to-end regression from the producer's own output." The
+    unit tests on each side of this seam pass with a hand-built row, which is why the seam
+    could be broken while both sides were green.
+    """
+
+    import importlib.util as _importlib
+
+    module = _load_module()
+    run, policy_path, _pin = _run_root(tmp_path)
+    row = module.admission_policy_row(run)
+
+    spec = _importlib.spec_from_file_location(
+        "portfolio_pipeline_materialize",
+        ROOT / "tools" / "portfolio_pipeline_materialize.py",
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    materializer = _importlib.module_from_spec(spec)
+    sys.modules[spec.name] = materializer
+    spec.loader.exec_module(materializer)
+
+    assert materializer._admission_policy_artifact([row]) == policy_path
+
+    # And the runtime side, which reads the same node out of the specification.
+    outcomes_spec = _importlib.spec_from_file_location(
+        "portfolio_financial_outcomes",
+        ROOT / "tools" / "portfolio_financial_outcomes.py",
+    )
+    assert outcomes_spec is not None
+    assert outcomes_spec.loader is not None
+    outcomes = _importlib.module_from_spec(outcomes_spec)
+    sys.modules[outcomes_spec.name] = outcomes
+    outcomes_spec.loader.exec_module(outcomes)
+
+    from types import SimpleNamespace
+
+    from quant_engine.core import pipeline as core_pipeline
+
+    node = core_pipeline.ArtifactNode(
+        str(row["node_id"]),
+        (),
+        Path(str(row["path"])),
+        str(row["sha256"]),
+        int(row["size_bytes"]),
+    )
+    resolved = outcomes._artifact_node(
+        SimpleNamespace(nodes=(node,)), "financial-account-manifest-admission-policy"
+    )
+    assert (
+        outcomes._verified_file(resolved.path, resolved.sha256, resolved.size_bytes)
+        == POLICY
+    )
+
+
+def test_main_appends_the_admission_policy_row_to_the_inventory():
+    """Emitting the row is what the consumers depend on, not merely being able to build it.
+
+    The other tests call `admission_policy_row` directly, which proves the function is correct
+    and proves nothing about whether the inventory contains its output. `main()` reads a full
+    run tree, so it cannot be called here; the call is asserted structurally instead, the same
+    way `portfolio_controller_graph` asserts a named call exists.
+    """
+
+    import ast
+
+    tree = ast.parse(MODULE_PATH.read_bytes().decode("utf-8"))
+    main_fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(main_fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "admission_policy_row" in called
