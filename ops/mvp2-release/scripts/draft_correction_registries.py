@@ -97,6 +97,18 @@ def _arguments() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--expect-superseded",
+        type=int,
+        required=True,
+        help=(
+            "how many superseded generations the store must hold. The sweep means "
+            "'everything in the store except the selected one', and build_vertical.sh writes "
+            "NEW layered-history generations into that same store, so a later cycle's rebuild "
+            "would silently join the subject set and be recorded as invalidated by #320. "
+            "Pinning the count makes that a loud refusal instead."
+        ),
+    )
+    parser.add_argument(
         "--out",
         type=Path,
         required=True,
@@ -218,6 +230,14 @@ def main() -> int:
     }
     if not superseded:
         raise SystemExit("no superseded layered history to name as the subject")
+    if len(superseded) != ARGS.expect_superseded:
+        raise SystemExit(
+            "superseded layered-history count is %d, expected %d: the store gained or lost a "
+            "generation since this cycle was defined. Naming a generation that #320 never "
+            "invalidated would falsify the correction record, so this refuses rather than "
+            "silently widening the subject set."
+            % (len(superseded), ARGS.expect_superseded)
+        )
 
     generations = json.loads(PIPELINE_RECIPE.read_text(encoding="utf-8"))[
         "expected_generations"

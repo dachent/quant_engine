@@ -42,6 +42,7 @@ echo "== redraft the correction authority against the staged candidates =="
   --run "$W/proof2" \
   --pipeline-recipe "$W/cycle2/pipeline-recipe-probe.json" \
   --history-store "$Q/dataPortfolio/rollforward/2026-09-10-mvp2-live-only/layered-history" \
+  --expect-superseded 13 \
   --out "$CA" | tail -6
 
 echo "== pipeline recipe =="
