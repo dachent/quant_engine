@@ -44,7 +44,10 @@ fi
 mkdir -p "$P"
 
 echo "== financial artifact inventory =="
-"$PY" "$W/epoch/build_financial_artifacts.py"
+"$PY" ops/mvp2-release/scripts/build_financial_artifacts.py \
+  --run "$W/proof2" \
+  --cycle "$W/cycle2" \
+  --out "$P/financial-artifacts.json"
 
 # A generation an external agent rewrote after publication can never
 # reproduce the inventory its release sealed, which blocks every successor
