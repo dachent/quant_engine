@@ -595,9 +595,9 @@ def test_artifact_node_binds_exactly_one_named_production_node(tmp_path):
         spec, "financial-account-manifest-admission-policy"
     )
     assert resolved.path == path
-    assert outcomes._verified_file(resolved.path, resolved.sha256, resolved.size_bytes) == (
-        payload
-    )
+    assert outcomes._verified_file(
+        resolved.path, resolved.sha256, resolved.size_bytes
+    ) == (payload)
 
     with pytest.raises(outcomes.FinancialOutcomeError, match="artifact node differs"):
         outcomes._artifact_node(spec, "financial-account-manifest-generation")

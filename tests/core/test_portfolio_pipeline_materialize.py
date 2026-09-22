@@ -5637,20 +5637,14 @@ def test_admission_policy_artifact_resolves_a_non_canonical_selected_input(tmp_p
 
     assert materializer._admission_policy_artifact([row]) == path
 
-    with pytest.raises(
-        materializer.MaterializationError, match="absent or ambiguous"
-    ):
+    with pytest.raises(materializer.MaterializationError, match="absent or ambiguous"):
         materializer._admission_policy_artifact([])
-    with pytest.raises(
-        materializer.MaterializationError, match="absent or ambiguous"
-    ):
+    with pytest.raises(materializer.MaterializationError, match="absent or ambiguous"):
         materializer._admission_policy_artifact([row, dict(row)])
 
     other = dict(row)
     other["node_id"] = "financial-account-manifest-generation"
-    with pytest.raises(
-        materializer.MaterializationError, match="absent or ambiguous"
-    ):
+    with pytest.raises(materializer.MaterializationError, match="absent or ambiguous"):
         materializer._admission_policy_artifact([other])
 
     path.write_bytes(payload + b"\n")
