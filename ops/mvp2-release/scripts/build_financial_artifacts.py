@@ -14,24 +14,48 @@ read from disk. Nothing is created here, and a row that is wrong fails closed
 in `validate_financial_outcomes` rather than shipping.
 """
 
+import argparse
 import hashlib
 import json
 import sys
 from pathlib import Path
 
-REPO = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
-    r"/.codex-bootstrap/mvp2-execution/repo"
-)
-sys.path[:0] = [str(REPO / "tools")] + [str(p) for p in REPO.glob("packages/*/src")]
 
-Q = Path(r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine")
-W = Path(r"C:/Dev/scratch/quant-engine/pl12")
-PREPARED = W / "run2"
-CYCLE = W / "cycle2"
-LIVE = Q / "dataPortfolio/rollforward/2026-09-10-mvp2-live-only"
-CONTRACT = REPO / "contracts/portfolio-financial-mvp-source-v1.json"
-OUT = W / "production"
+def _arguments() -> argparse.Namespace:
+    """Take every root as an argument.
+
+    The pinned constants this replaced named one cycle's roots -- a repo checkout, a venv and two
+    run roots -- and none of them exist any more, so the script could not run at all. They also
+    hid which inputs are the run's and which are the product's.
+    """
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--run", type=Path, required=True, help="the prepared run's output root"
+    )
+    parser.add_argument(
+        "--cycle",
+        type=Path,
+        required=True,
+        help="where the pipeline recipe was written",
+    )
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument(
+        "--repo",
+        type=Path,
+        default=Path.cwd(),
+        help="defaults to the working directory",
+    )
+    return parser.parse_args()
+
+
+# Resolved in `main()`, not here. Parsing argv at import time made the module impossible to
+# import from a test, which is how the producer side of this inventory went uncovered.
+REPO: Path
+PREPARED: Path
+CYCLE: Path
+CONTRACT: Path
+OUT: Path
 
 
 def definition(path):
@@ -52,11 +76,45 @@ def artifact(node_id, path, depends_on=()):
     }
 
 
+def admission_policy_row(prepared: Path) -> dict[str, object]:
+    """Build the node for the selected admission policy from the run's own checkpoint.
+
+    The release consumers cannot take this input from the epoch-manifest generation: the
+    generation stores a canonicalised projection of the policy, and the captured policy is
+    pretty-printed, which no generation artifact may be. So the specification names the input
+    itself, beside the generation it belongs to.
+
+    Preparation already verified this pin by digest and recorded path, sha256 and size in the
+    epoch checkpoint, so the row names the bytes the run actually consumed. It is re-checked
+    here because a row that silently disagreed with the pin would bind the wrong policy.
+    """
+
+    pin = json.loads((prepared / "preparation/checkpoints/epoch.json").read_bytes())[
+        "input_identity"
+    ]["inputs"]["epoch_admission_policy"]
+    row = artifact("financial-account-manifest-admission-policy", Path(pin["path"]))
+    if row["sha256"] != pin["sha256"] or row["size_bytes"] != pin["size_bytes"]:
+        raise SystemExit(
+            "selected admission policy differs from the pin preparation verified"
+        )
+    return row
+
+
 def main():
+    global REPO, PREPARED, CYCLE, CONTRACT, OUT
+    args = _arguments()
+    REPO = args.repo.resolve()
+    sys.path[:0] = [str(REPO / "tools")] + [str(p) for p in REPO.glob("packages/*/src")]
+    PREPARED = args.run.resolve()
+    CYCLE = args.cycle.resolve()
+    CONTRACT = REPO / "contracts/portfolio-financial-mvp-source-v1.json"
+    OUT = args.out.resolve()
+
     from portfolio_financial_outcomes import required_outcome_roles
 
     recipe = json.loads((CYCLE / "pipeline-recipe.json").read_bytes())
-    vertical = json.loads((CYCLE / "vertical-recipe.json").read_bytes())
+    # The attended runner writes the vertical recipe into the run it describes.
+    vertical = json.loads((PREPARED / "preparation/release-recipe.json").read_bytes())
     analytics = json.loads((PREPARED / "stage-results/analytics.json").read_bytes())
     lens_root = {
         (row["evidence_mode"], row["surface"], row["source_key"]): Path(row["root"])
@@ -64,11 +122,8 @@ def main():
         / row["generation_id"]
         for row in analytics["lens_generation_bindings"]
     }
-    report_root = (
-        PREPARED
-        / "stages/report/generations"
-        / recipe["expected_generations"]["report"]["generation_id"]
-    )
+    # The report generation root is no longer resolved here: the capital outcome now reads
+    # the run's own `preparation/invested-capital-result.json`, and nothing else used it.
     correlation_root = (
         Path(analytics["correlation_root"])
         / "generations"
@@ -86,15 +141,21 @@ def main():
         ).read_bytes()
     )
     contract = json.loads(CONTRACT.read_bytes())
-    # The history may be reused rather than rebuilt, so the pinned policy is
-    # the authority for which generation this cycle actually used.
+    # The run's own selected history is the authority, not the pinned policy.
+    # `portfolio_current_dependence.py:335-337` reads `policy["history_authority"]` only as a
+    # FALLBACK -- `history_authority if ... is not None else policy.get(...)` -- and `:630-652`
+    # builds that override from the selected generation's own manifest and passes it. So a run
+    # consuming a newer history than the pin is the designed path, and binding the pin here
+    # would silently bind whatever the previous cycle used, since that generation is still on
+    # disk. The divergence is worth reporting; it is not grounds to refuse.
+    selected = json.loads(
+        (PREPARED / "preparation/dependence-selected-inputs.json").read_bytes()
+    )
+    history_root = Path(selected["history_generation_root"])
     policy = json.loads(
         (REPO / "contracts/portfolio-dependence-policy-v1.json").read_bytes()
     )
-    history_root = (
-        LIVE / "layered-history" / policy["history_authority"]["generation_id"]
-    )
-    dependence = json.loads((CYCLE / "dependence-final.json").read_bytes())
+    pinned_history = policy["history_authority"]["generation_id"]
 
     rows = []
     # The contract requires DECOMPOSITION in both evidence modes and the
@@ -134,10 +195,30 @@ def main():
     rows.append(
         artifact("financial-account-manifest-generation", epoch / "generation.json")
     )
+    rows.append(admission_policy_row(PREPARED))
 
-    rows.append(artifact("financial-outcome-hwm", W / "hwm/as-held-composite-hwm.json"))
     rows.append(
-        artifact("financial-capital-input", W / "capital/capital-input-generation.json")
+        artifact(
+            "financial-outcome-hwm", PREPARED / "preparation/hwm-governed-result.json"
+        )
+    )
+    rows.append(
+        artifact(
+            "financial-capital-input",
+            PREPARED / "preparation/capital-input-generation.json",
+        )
+    )
+    # Bound to the report generation, because `verify_outcome_inventory` requires every non-HWM
+    # outcome path to resolve to a file inside one of its `depends_on` generations. NOTE: this
+    # run's report generation does not emit `invested-capital.json` -- it appears only under
+    # `stages/report/candidates/` -- so the INVESTED_CAPITAL outcome (#318) has no valid binding
+    # in the attended layout yet. That is a product question, not a path fix; do not "correct" it
+    # by pointing outside the generation, which silently trades a loud absence for
+    # "financial outcome generation binding differs".
+    report_root = (
+        PREPARED
+        / "stages/report/generations"
+        / recipe["expected_generations"]["report"]["generation_id"]
     )
     rows.append(
         artifact(
@@ -180,7 +261,7 @@ def main():
     # files in under a different name (`inputs/base/provenance/NN-<name>`), so
     # the original name resolves only against the root itself. Same reason as
     # the dependence bundle below: a source read by digest has to be nameable.
-    base_source = W / "epoch/base-source"
+    base_source = PREPARED / "stages/analytics/base-input"
     index = 0
     for child in sorted(base_source.rglob("*")):
         if child.is_file():
@@ -189,17 +270,28 @@ def main():
 
     # The correlation replay reads its sources by digest from the dependence
     # bundle, so every file in it has to be nameable.
-    dependence_root = LIVE / "dependence" / dependence["bundle_id"]
+    dependence_root = Path(vertical["correlation_source_root"]["path"])
     index = 0
     for child in sorted(dependence_root.rglob("*")):
         if child.is_file():
             rows.append(artifact("dependence-source-%d" % index, child))
             index += 1
 
-    OUT.mkdir(parents=True, exist_ok=True)
-    path = OUT / "financial-artifacts.json"
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    path = OUT
     path.write_text(json.dumps(rows, indent=1, sort_keys=True), encoding="utf-8")
     print("artifact rows", len(rows))
+    print(
+        "  layered history",
+        history_root.name[:16],
+        "(policy pin %s%s)"
+        % (
+            pinned_history[:16],
+            "; the run's own authority wins"
+            if history_root.name != pinned_history
+            else "",
+        ),
+    )
     print(
         "  decomposition cells",
         sum(1 for value in roles.values() if value[0] == "DECOMPOSITION"),
@@ -209,6 +301,7 @@ def main():
         sum(1 for value in roles.values() if value[0] == "DEPENDENCE"),
     )
     print("  dependence sources", index)
+    print("  recipe", recipe["pipeline_id"], "at", recipe["release_commit"][:8])
     print("written", path)
     return 0
 
