@@ -5,9 +5,12 @@
 > `bind-workbook-evidence` describes retained implementation that is no longer part of the
 > product output contract, and `docs/controller-graph.md` records the workbook as an excluded
 > sink that cannot become a required edge. It is documented here so the held work stays
-> recoverable, not so it can be run: the producer writes those artifacts only when a workbook
-> evidence snapshot is supplied, and nothing supplies one. Do not revive it without an owner
-> instruction. The canonical report and panel sections are current and unaffected.
+> recoverable, not so it can be run, and the CLI offers no way to run it in either direction:
+> `build_candidate` takes `include_workbook`, no command-line flag sets it, and `build` never
+> passes it, so the workbook is never produced; `bind-workbook-evidence` consumes an Excel
+> workbook, an xlsx result and a validation result that must already exist, so it cannot
+> produce them either. Reviving this workflow needs a new producer path and an owner
+> instruction, not a rerun. The canonical report and panel sections are current and unaffected.
 
 `tools/portfolio_report.py` turns the current accepted private portfolio
 baseline into a coverage-aware report dataset and an independent unified Excel
