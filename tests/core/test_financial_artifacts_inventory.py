@@ -107,38 +107,23 @@ def test_the_emitted_row_is_accepted_by_both_release_consumers(tmp_path):
     could be broken while both sides were green.
     """
 
-    import importlib.util as _importlib
+    # Imported, never re-executed from source. Other modules in this suite hold plain
+    # `import portfolio_financial_outcomes` / `portfolio_pipeline_materialize` references
+    # bound at their own import time, so exec'ing fresh copies over those `sys.modules`
+    # entries leaves two identities of the same module alive in one session and breaks
+    # tests that never touched this seam.
+    from types import SimpleNamespace
+
+    import portfolio_financial_outcomes as outcomes
+    import portfolio_pipeline_materialize as materializer
+
+    from quant_engine.core import pipeline as core_pipeline
 
     module = _load_module()
     run, policy_path, _pin = _run_root(tmp_path)
     row = module.admission_policy_row(run)
 
-    spec = _importlib.spec_from_file_location(
-        "portfolio_pipeline_materialize",
-        ROOT / "tools" / "portfolio_pipeline_materialize.py",
-    )
-    assert spec is not None
-    assert spec.loader is not None
-    materializer = _importlib.module_from_spec(spec)
-    sys.modules[spec.name] = materializer
-    spec.loader.exec_module(materializer)
-
     assert materializer._admission_policy_artifact([row]) == policy_path
-
-    # And the runtime side, which reads the same node out of the specification.
-    outcomes_spec = _importlib.spec_from_file_location(
-        "portfolio_financial_outcomes",
-        ROOT / "tools" / "portfolio_financial_outcomes.py",
-    )
-    assert outcomes_spec is not None
-    assert outcomes_spec.loader is not None
-    outcomes = _importlib.module_from_spec(outcomes_spec)
-    sys.modules[outcomes_spec.name] = outcomes
-    outcomes_spec.loader.exec_module(outcomes)
-
-    from types import SimpleNamespace
-
-    from quant_engine.core import pipeline as core_pipeline
 
     node = core_pipeline.ArtifactNode(
         str(row["node_id"]),
