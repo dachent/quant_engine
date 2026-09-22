@@ -273,24 +273,19 @@ def _optional_gate(spec: Any, gate_id: str) -> tuple[Path, dict[str, Any]] | Non
     return _gate(spec, gate_id)
 
 
-def _generation_artifact_path(
-    generation_dir: Path, manifest: Any, sha256: str, size_bytes: int
-) -> Path:
-    """Find the artifact a generation pins by digest, without trusting a name."""
+def _artifact_node(spec: Any, node_id: str) -> Any:
+    """Return the single ARTIFACT node the specification binds under this id."""
 
-    matches = [
-        artifact
-        for artifact in manifest.artifacts
-        if artifact.sha256 == sha256 and artifact.size_bytes == size_bytes
+    nodes = [
+        node
+        for node in spec.nodes
+        if isinstance(node, ArtifactNode) and node.node_id == node_id
     ]
-    if len(matches) != 1:
-        raise FinancialOutcomeError("selected epoch generation artifact differs")
-    parts = matches[0].artifact_id.split("/")
-    if not parts or any(part in ("", ".", "..") for part in parts):
-        raise FinancialOutcomeError("selected epoch generation artifact differs")
-    path = generation_dir.joinpath(*parts)
-    _verified_file(path, sha256, size_bytes)
-    return path
+    if len(nodes) != 1:
+        raise FinancialOutcomeError(
+            f"selected financial artifact node differs: {node_id}"
+        )
+    return nodes[0]
 
 
 def _epoch_manifest_profile(spec: Any) -> dict[str, Any]:
@@ -340,10 +335,20 @@ def _epoch_manifest_profile(spec: Any) -> dict[str, Any]:
     admission = identities.get("admission_policy")
     if not isinstance(admission, Mapping):
         raise FinancialOutcomeError("selected epoch admission policy identity differs")
-    admission_path = _generation_artifact_path(
-        generation_dir, manifest, admission["sha256"], admission["size_bytes"]
+    # The generation stores a projection of the policy, not the policy, so the selected
+    # input's bytes are never among its artifacts -- see `_admission_policy_artifact` in
+    # `portfolio_pipeline_materialize`. The production specification carries the input as
+    # its own node, exactly as it carries the generation it belongs to.
+    admission_node = _artifact_node(spec, "financial-account-manifest-admission-policy")
+    if (
+        admission_node.sha256 != admission["sha256"]
+        or admission_node.size_bytes != admission["size_bytes"]
+    ):
+        raise FinancialOutcomeError("selected epoch admission policy identity differs")
+    admission_path = admission_node.path
+    selected_bytes["account_strategy_admission_policy"] = _verified_file(
+        admission_path, admission_node.sha256, admission_node.size_bytes
     )
-    selected_bytes["account_strategy_admission_policy"] = admission_path.read_bytes()
     # The classification policy stays the repository copy for both profiles:
     # it is what the generation pins as its selected `flow_classification_policy`,
     # and the selected-input checker verifies the file it is handed against that

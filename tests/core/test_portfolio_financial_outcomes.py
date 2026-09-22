@@ -570,3 +570,43 @@ def test_hwm_replay_uses_the_admitted_input_authority(tmp_path, monkeypatch):
     )
     assert observed[-1]["financial_contract_path"] == product
     assert observed[-1]["hwm_policy_bytes"] is None
+
+
+def test_artifact_node_binds_exactly_one_named_production_node(tmp_path):
+    """The runtime reads the admission policy from the specification, by node id.
+
+    `_epoch_manifest_profile`'s schema-10 branch used to search the bound generation for an
+    artifact matching the declared `admission_policy` digest. The generation stores a
+    canonicalised projection of that policy rather than the policy, so the search could not
+    succeed for a pretty-printed input -- and a pretty-printed input cannot be a generation
+    artifact in the first place, because artifacts are canonical JSON by construction.
+    """
+
+    payload = b'{\n  "policy_id": "epoch-admission",\n  "admissions": []\n}\n'
+    digest = hashlib.sha256(payload).hexdigest()
+    path = tmp_path / "mapped-epoch-admission-current-v10-dated.json"
+    path.write_bytes(payload)
+    node = pipeline.ArtifactNode(
+        "financial-account-manifest-admission-policy", (), path, digest, len(payload)
+    )
+
+    spec = SimpleNamespace(nodes=(node,))
+    resolved = outcomes._artifact_node(
+        spec, "financial-account-manifest-admission-policy"
+    )
+    assert resolved.path == path
+    assert outcomes._verified_file(resolved.path, resolved.sha256, resolved.size_bytes) == (
+        payload
+    )
+
+    with pytest.raises(outcomes.FinancialOutcomeError, match="artifact node differs"):
+        outcomes._artifact_node(spec, "financial-account-manifest-generation")
+    with pytest.raises(outcomes.FinancialOutcomeError, match="artifact node differs"):
+        outcomes._artifact_node(
+            SimpleNamespace(nodes=(node, node)),
+            "financial-account-manifest-admission-policy",
+        )
+
+    path.write_bytes(payload + b"\n")
+    with pytest.raises(outcomes.FinancialOutcomeError, match="identity differs"):
+        outcomes._verified_file(resolved.path, resolved.sha256, resolved.size_bytes)

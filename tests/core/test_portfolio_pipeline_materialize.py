@@ -5608,3 +5608,51 @@ def test_documented_cli_invocations_supply_every_required_option() -> None:
     assert not missing, "documented invocations omit required options: " + "; ".join(
         missing
     )
+
+
+def test_admission_policy_artifact_resolves_a_non_canonical_selected_input(tmp_path):
+    """The selected admission policy travels as its own production node, not inside the generation.
+
+    This is the property the old resolver could not satisfy. The captured policy is
+    pretty-printed, and every generation artifact must be canonical JSON, so the selected
+    input's own bytes can never appear among the generation's artifacts -- the generation
+    stores a canonicalised *projection* instead. Searching the generation for the declared
+    digest therefore found zero matches and refused every schema-10 release.
+
+    The fixture payload is deliberately not canonical. A canonical one would pass under both
+    the old and the new resolver and prove nothing.
+    """
+
+    payload = b'{\n  "policy_id": "epoch-admission",\n  "admissions": []\n}\n'
+    assert canonical_json_bytes(json.loads(payload)) != payload
+    path = tmp_path / "mapped-epoch-admission-current-v10-dated.json"
+    path.write_bytes(payload)
+    row = {
+        "kind": "ARTIFACT",
+        "node_id": "financial-account-manifest-admission-policy",
+        "path": str(path),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+        "size_bytes": len(payload),
+    }
+
+    assert materializer._admission_policy_artifact([row]) == path
+
+    with pytest.raises(
+        materializer.MaterializationError, match="absent or ambiguous"
+    ):
+        materializer._admission_policy_artifact([])
+    with pytest.raises(
+        materializer.MaterializationError, match="absent or ambiguous"
+    ):
+        materializer._admission_policy_artifact([row, dict(row)])
+
+    other = dict(row)
+    other["node_id"] = "financial-account-manifest-generation"
+    with pytest.raises(
+        materializer.MaterializationError, match="absent or ambiguous"
+    ):
+        materializer._admission_policy_artifact([other])
+
+    path.write_bytes(payload + b"\n")
+    with pytest.raises(materializer.MaterializationError, match="binding differs"):
+        materializer._admission_policy_artifact([row])
