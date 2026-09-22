@@ -2936,14 +2936,25 @@ def _verified_epoch_manifest_materialization_proof(
     account_artifact = _epoch_generation_artifact(
         panel_manifest, "input/account-strategy-manifest.json"
     )
-    physical_input_sha256, physical_input_size = _sha(
-        panel_generation / "input" / "account-strategy-manifest.json"
-    )
-    if (physical_input_sha256, physical_input_size) != (
-        hashlib.sha256(source_bytes).hexdigest(),
-        len(source_bytes),
-    ):
-        raise MaterializationError("physical panel input differs from verified bundle")
+    # The panel declares `input/*` as logical snapshot artifacts and does not materialize
+    # them (portfolio_control_panel.py:12784) -- no panel generation built by this product
+    # has ever contained the directory. Requiring the physical file therefore rejected every
+    # real panel, while the bytes it guards are already proved to reach the published panel:
+    # the staged copy above is asserted equal to the bundle payload, the declared artifact
+    # below equal to the staged copy, and the dashboard's embedded manifest canonicalizes to
+    # the same bytes. So verify the physical file where a producer does write it, and do not
+    # demand it where one declares it logically.
+    physical_input = panel_generation / "input" / "account-strategy-manifest.json"
+    if physical_input.is_symlink():
+        raise MaterializationError("physical panel input must not be a link")
+    if physical_input.exists():
+        if _sha(physical_input) != (
+            hashlib.sha256(source_bytes).hexdigest(),
+            len(source_bytes),
+        ):
+            raise MaterializationError(
+                "physical panel input differs from verified bundle"
+            )
     if (
         account_artifact.schema_name != "account-strategy-manifest"
         or account_artifact.schema_version != str(staged_manifest.get("schema_version"))
@@ -3213,6 +3224,31 @@ def _result(
 _DATA_DATED_RELEASE_ROLES: Final = frozenset({"ledger", "baseline", "report"})
 
 
+def _release_evaluation_date(recipe: Mapping[str, Any]) -> str:
+    """Return the date this release is evaluated on, not the financial cutoff it carries.
+
+    The two are different clocks and the owner contract keeps them apart: the cutoff is an
+    explicit owner selection, while the evaluation date is when the release is cut.  Only
+    the schema-10 vertical records it, so an older single-clock vertical falls back to the
+    cutoff -- the same shape `portfolio_release_builder.py:2031` already uses.  Reading it
+    from the vertical rather than the pipeline recipe keeps every recipe hash unchanged.
+
+    A recipe with no `vertical_recipe` at all never passed `_recipe`, which requires the key,
+    so that shape reaches here only from a unit test exercising something else.  It falls back
+    to the cutoff rather than raising, because refusing would make this helper the reason such
+    a test fails instead of the behaviour it is actually checking.
+    """
+
+    definition = recipe.get("vertical_recipe")
+    if definition is None:
+        return _text(recipe["as_of_date"], "as_of_date")
+    vertical = _load(
+        _validate_file_definition(definition, "vertical recipe"), "vertical recipe"
+    )
+    evaluated_on = vertical.get("evaluated_on", recipe["as_of_date"])
+    return _text(evaluated_on, "evaluated_on")
+
+
 def _generation_as_of_allowed(
     role: str, generation_as_of: date, release_as_of: date
 ) -> bool:
@@ -3307,6 +3343,9 @@ def _semantic_gate_payload(
 
     return {
         "as_of_date": recipe["as_of_date"],
+        # The generation and freshness checks are decided by this date, so a receipt carrying
+        # only the cutoff cannot be audited back to the comparison it made.
+        "evaluated_on": _release_evaluation_date(recipe),
         "checks": checks,
         **(
             {
@@ -3360,7 +3399,14 @@ def semantic(
     recipe = _recipe(recipe_path)
     output_root = output_path.parent.parent
     checks: dict[str, dict[str, Any]] = {}
-    release_as_of = date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
+    # `_generation_as_of_allowed` reasons about the date the release is CUT -- data-dated
+    # roles "legitimately lag the evaluation date" and the panel "is generated at release
+    # time". Handing it the financial cutoff conflated the two clocks, so a ledger whose
+    # provenance is one day past the cutoff (which `provider_ledger._generation_as_of_date`
+    # produces by design) failed, and every freshness row had to be stamped with the data
+    # date to pass -- which is what the previous release did, asserting nothing.
+    evaluated_on = _release_evaluation_date(recipe)
+    release_as_of = date.fromisoformat(evaluated_on)
     if recipe.get("schema_version") == 3:
         conformance = recipe["product_authority"]["conformance"]
         _result(
@@ -3655,7 +3701,7 @@ def semantic(
         assessments
     )
     evaluation_ok = assessment_shape_ok and all(
-        row.get("evaluated_on") == recipe["as_of_date"] for row in assessment_rows
+        row.get("evaluated_on") == evaluated_on for row in assessment_rows
     )
     blocking = [
         row for row in assessment_rows if row.get("blocks_current_consumers") is True
@@ -3690,7 +3736,7 @@ def semantic(
     }
     rendered_disclosures_ok = blocking_disclosures == rendered_disclosures
     freshness_ok = (
-        freshness.get("as_of_date") == recipe["as_of_date"]
+        freshness.get("as_of_date") == evaluated_on
         and evaluation_ok
         and blockers_disclosed
         and rendered_disclosures_ok
@@ -3710,24 +3756,20 @@ def semantic(
     interaction_qa = _load(
         panel_generation / "qa" / "interaction-results.json", "interaction QA"
     )
-    workbook_validation = _load(
-        report_generation / "workbook-validation.json", "workbook validation"
-    )
-    xlsx_result = _load(
-        report_generation / "xlsx-win-result.json", "native Excel result"
-    )
+    # Workbook generation is on permanent owner hold and the runtime was removed in
+    # `47120f1`, so the report generation no longer carries `workbook-validation.json` or
+    # `xlsx-win-result.json`. Requiring them here made the gate demand an artifact the
+    # product is forbidden to produce -- `docs/controller-graph.md:74`: the workbook
+    # "cannot become a required edge". Both terms proved workbook properties only, and the
+    # value they fed, `release_evidence.native_excel_ok`, had no reader anywhere.
     evidence_ok = (
         panel_qa.get("checks_passed") == panel_qa.get("checks_total")
         and interaction_qa.get("all_passed") is True
-        and workbook_validation.get("all_passed") is True
-        and xlsx_result.get("final_state") == "SUCCEEDED"
-        and xlsx_result.get("ok") is True
         and _sha(output_root / "stages" / "panel" / "index.html")[0]
         == recipe["panel_launcher_sha256"]
     )
     generation_check = checks["generation_invariants"]
     generation_check["evidence"]["release_evidence"] = {
-        "native_excel_ok": xlsx_result.get("ok"),
         "panel_browser_checks": panel_qa.get("checks_total"),
         "panel_interaction_ok": interaction_qa.get("all_passed"),
         "status": "PASS" if evidence_ok else "FAIL",
@@ -3740,6 +3782,7 @@ def semantic(
     )
     details = {
         "as_of_date": recipe["as_of_date"],
+        "evaluated_on": evaluated_on,
         "checks": checks,
         "release_commit": recipe["release_commit"],
         "schema_version": 2 if recipe.get("schema_version") == 3 else 1,

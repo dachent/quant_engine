@@ -2974,6 +2974,7 @@ def _verify_post_build_semantic_gate(spec: PipelineSpec, path: Path) -> None:
         raise PipelineValidationError("financial epoch manifest gate is ambiguous")
     expected_payload_keys = {
         "as_of_date",
+        "evaluated_on",
         "checks",
         "release_commit",
         "release_generations",

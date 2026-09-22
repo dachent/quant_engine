@@ -1252,10 +1252,19 @@ def _dir_definition(path: Path) -> dict[str, object]:
     return {"path": str(path), **materializer._directory_identity(path)}
 
 
-def _generation(root: Path, role: str, files: dict[str, object]) -> Path:
+def _generation(
+    root: Path,
+    role: str,
+    files: dict[str, object],
+    *,
+    as_of_date: date = AS_OF,
+) -> Path:
+    # `as_of_date` is the generation's own provenance stamp. It defaults to the fixture clock
+    # so every existing caller is unchanged, and the coverage boundary stays at AS_OF because
+    # that is the financial observation window, which provenance may legitimately outrun.
     seed = f"{role}\n".encode()
     manifest = GenerationManifest.build(
-        as_of_date=AS_OF,
+        as_of_date=as_of_date,
         adapter=AdapterIdentity(f"synthetic-{role}", "1"),
         coverage=CoverageClaim(
             status=CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY,
@@ -1289,14 +1298,19 @@ def _generation(root: Path, role: str, files: dict[str, object]) -> Path:
     return generation
 
 
-def _fixture(tmp_path: Path) -> tuple[Path, Path]:
+def _fixture(tmp_path: Path, *, evaluated_on: date | None = None) -> tuple[Path, Path]:
     output_root = tmp_path / "candidate"
     stages = output_root / "stages"
     hwm = {"nav_coverage": "1", "status": "AVAILABLE_GOVERNED_HWM_PERIMETER"}
+    # A real ledger generation carries source provenance that may outrun the cutoff --
+    # `provider_ledger._generation_as_of_date` returns max(cutoff, artifact dates) -- while its
+    # financial boundary stays at the cutoff. The baseline inherits that stamp.
+    provenance = AS_OF if evaluated_on is None else AS_OF + timedelta(days=1)
     ledger = _generation(
         stages / "ledger",
         "ledger",
         {"provider-ledger.json": {"as_of_date": AS_OF.isoformat()}},
+        as_of_date=provenance,
     )
     ledger_sha = hashlib.sha256(
         (ledger / "provider-ledger.json").read_bytes()
@@ -1361,6 +1375,7 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
         stages / "baseline",
         "baseline",
         {"portfolio-baseline.json": baseline_payload},
+        as_of_date=provenance,
     )
     baseline_sha = hashlib.sha256(
         (baseline / "portfolio-baseline.json").read_bytes()
@@ -1398,10 +1413,12 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
         },
         "strategies": [{"strategy_id": f"strategy-{index}"} for index in range(9)],
     }
+    # The panel is generated at release time, so it carries the evaluation clock.
     panel = _generation(
         stages / "panel",
         "panel",
-        {
+        as_of_date=evaluated_on or AS_OF,
+        files={
             "data/dashboard_data.json": panel_payload,
             "qa/interaction-results.json": {"all_passed": True},
             "qa/qa-validation.json": {"checks_passed": 8, "checks_total": 8},
@@ -1411,7 +1428,10 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     launcher.write_text("<!doctype html><title>synthetic</title>", encoding="utf-8")
     _write_json(
         stages / "ledger" / "freshness-health.json",
-        {"as_of_date": AS_OF.isoformat(), "assessments": []},
+        {
+            "as_of_date": (evaluated_on or AS_OF).isoformat(),
+            "assessments": [],
+        },
     )
     for key, root_name in (
         ("decomposition_generation_id", "decomposition"),
@@ -1446,6 +1466,11 @@ def _fixture(tmp_path: Path) -> tuple[Path, Path]:
     _write_json(attribution / "catalog.json", {"synthetic": True})
     vertical = {
         "as_of_date": AS_OF.isoformat(),
+        **(
+            {"evaluated_on": evaluated_on.isoformat()}
+            if evaluated_on is not None
+            else {}
+        ),
         "base_factor_file": _definition(source_files[0]),
         "baseline_spec": _definition(source_files[1]),
         "correlation_source_root": _dir_definition(correlation),
@@ -3964,6 +3989,59 @@ def test_schema_v9_production_spec_binds_real_epoch_manifest_authority(
             PipelineSpec.from_json_bytes(canonical_json_bytes(forged))
         )
     Path(result["contract"]).write_bytes(canonical_json_bytes(production_contract))
+
+
+def test_semantic_accepts_three_distinct_clocks(tmp_path: Path) -> None:
+    """The gate must read the evaluation date, not the financial cutoff, as the release date.
+
+    Cutoff, source-generation provenance and evaluation are three different clocks. A real run
+    stamps the ledger and baseline manifests with provenance that can outrun the cutoff --
+    `provider_ledger._generation_as_of_date` returns `max(cutoff, artifact dates)` and its
+    docstring says that date "is provenance ... not a request to advance the financial
+    projection or the execution clock" -- while the panel is generated at release time and the
+    freshness rows are evaluated then. Comparing any of those to the cutoff rejected every
+    honest run, and the previous release passed only by stamping everything with the data date.
+    """
+
+    cutoff = AS_OF
+    provenance = AS_OF + timedelta(days=1)
+    evaluation = AS_OF + timedelta(days=4)
+    recipe, output_root = _fixture(tmp_path, evaluated_on=evaluation)
+
+    vertical = json.loads(
+        Path(
+            json.loads(recipe.read_text("utf-8"))["vertical_recipe"]["path"]
+        ).read_text("utf-8")
+    )
+    assert vertical["as_of_date"] == cutoff.isoformat()
+    assert vertical["evaluated_on"] == evaluation.isoformat()
+
+    result = materializer.semantic(
+        recipe, output_root / "evidence" / "post-build-semantic.json"
+    )
+
+    assert result["state"] == "PASS"
+    details = json.loads(
+        (output_root / "evidence" / "semantic-details.json").read_text("utf-8")
+    )
+    # The two predicates that read a clock, named rather than inferred from the verdict.
+    assert details["checks"]["generation_invariants"]["status"] == "PASS"
+    assert details["checks"]["freshness"]["status"] == "PASS"
+    # Provenance outran the cutoff and was allowed, not relabelled onto the cutoff.
+    assert provenance > cutoff
+    assert details["checks"]["freshness"]["evidence"]["as_of_date"] == (
+        evaluation.isoformat()
+    )
+    # Both receipts must say which clock decided the verdict. Recording only the cutoff would
+    # leave an auditor unable to tell a correct PASS from one produced by the old conflation --
+    # and the two dates are equal in exactly the runs where that distinction is cheapest to lose.
+    assert details["as_of_date"] == cutoff.isoformat()
+    assert details["evaluated_on"] == evaluation.isoformat()
+    gate = json.loads(
+        (output_root / "evidence" / "post-build-semantic.json").read_text("utf-8")
+    )
+    assert gate["as_of_date"] == cutoff.isoformat()
+    assert gate["evaluated_on"] == evaluation.isoformat()
 
 
 def test_semantic_accepts_explicitly_rendered_freshness_blocker(
