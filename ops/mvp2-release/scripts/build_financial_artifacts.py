@@ -49,14 +49,13 @@ def _arguments() -> argparse.Namespace:
     return parser.parse_args()
 
 
-ARGS = _arguments()
-REPO = ARGS.repo.resolve()
-sys.path[:0] = [str(REPO / "tools")] + [str(p) for p in REPO.glob("packages/*/src")]
-
-PREPARED = ARGS.run.resolve()
-CYCLE = ARGS.cycle.resolve()
-CONTRACT = REPO / "contracts/portfolio-financial-mvp-source-v1.json"
-OUT = ARGS.out.resolve()
+# Resolved in `main()`, not here. Parsing argv at import time made the module impossible to
+# import from a test, which is how the producer side of this inventory went uncovered.
+REPO: Path
+PREPARED: Path
+CYCLE: Path
+CONTRACT: Path
+OUT: Path
 
 
 def definition(path):
@@ -77,7 +76,40 @@ def artifact(node_id, path, depends_on=()):
     }
 
 
+def admission_policy_row(prepared: Path) -> dict[str, object]:
+    """Build the node for the selected admission policy from the run's own checkpoint.
+
+    The release consumers cannot take this input from the epoch-manifest generation: the
+    generation stores a canonicalised projection of the policy, and the captured policy is
+    pretty-printed, which no generation artifact may be. So the specification names the input
+    itself, beside the generation it belongs to.
+
+    Preparation already verified this pin by digest and recorded path, sha256 and size in the
+    epoch checkpoint, so the row names the bytes the run actually consumed. It is re-checked
+    here because a row that silently disagreed with the pin would bind the wrong policy.
+    """
+
+    pin = json.loads((prepared / "preparation/checkpoints/epoch.json").read_bytes())[
+        "input_identity"
+    ]["inputs"]["epoch_admission_policy"]
+    row = artifact("financial-account-manifest-admission-policy", Path(pin["path"]))
+    if row["sha256"] != pin["sha256"] or row["size_bytes"] != pin["size_bytes"]:
+        raise SystemExit(
+            "selected admission policy differs from the pin preparation verified"
+        )
+    return row
+
+
 def main():
+    global REPO, PREPARED, CYCLE, CONTRACT, OUT
+    args = _arguments()
+    REPO = args.repo.resolve()
+    sys.path[:0] = [str(REPO / "tools")] + [str(p) for p in REPO.glob("packages/*/src")]
+    PREPARED = args.run.resolve()
+    CYCLE = args.cycle.resolve()
+    CONTRACT = REPO / "contracts/portfolio-financial-mvp-source-v1.json"
+    OUT = args.out.resolve()
+
     from portfolio_financial_outcomes import required_outcome_roles
 
     recipe = json.loads((CYCLE / "pipeline-recipe.json").read_bytes())
@@ -163,6 +195,7 @@ def main():
     rows.append(
         artifact("financial-account-manifest-generation", epoch / "generation.json")
     )
+    rows.append(admission_policy_row(PREPARED))
 
     rows.append(
         artifact(
