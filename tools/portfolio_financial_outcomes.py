@@ -136,7 +136,17 @@ def verify_outcome_inventory(
     }
     for node_id, node in selected.items():
         _verified_file(node.path, node.sha256, node.size_bytes)
-        if required[node_id][0] == "AS_HELD_COMPOSITE_HWM":
+        # Neither of these is published as a standalone artifact inside a release
+        # generation. HWM never was; INVESTED_CAPITAL stopped being one when the workbook
+        # runtime was removed under the owner's permanent hold (47120f1) -- the only
+        # promoter of `invested-capital.json` into the report generation was the workbook
+        # route (`portfolio_report.py:11002`/`:11201`, fed solely from `:9547`/`:9693`).
+        # Both remain verified where they ship: HWM by the binding at the assessment gate,
+        # capital by re-derivation from a digest-resolved, ledger-bound input, with that
+        # input pinned to the declared `financial-capital-input` row below.
+        # Why the two exemptions are compensated differently, and why a HWM-style gate for
+        # capital would be ceremony: docs/financial-outcome-verification.md
+        if required[node_id][0] in ("AS_HELD_COMPOSITE_HWM", "INVESTED_CAPITAL"):
             continue
         matches = []
         for dependency in node.depends_on:
@@ -1408,6 +1418,15 @@ def validate_financial_outcomes(
     capital_input_node = _artifact_for_digest(
         spec, capital_input["sha256"], capital_input["size_bytes"]
     )
+    # Compensating binding for the containment exemption above. `_artifact_for_digest`
+    # matches on sha256+size across every ArtifactNode and never checks WHICH node it
+    # found, so the capital result's declared input could be satisfied by any artifact
+    # carrying those bytes. Requiring the declared capital input row ties the result to
+    # the input the production inventory declares, which nothing checked before.
+    if capital_input_node.node_id != "financial-capital-input":
+        raise FinancialOutcomeError(
+            "selected capital input is not the declared capital input artifact"
+        )
     verify_selected_capital_ledger(
         capital_input_node.path,
         selected_sources["provider_ledger_generation_path"],
