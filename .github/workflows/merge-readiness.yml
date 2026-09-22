@@ -7,6 +7,13 @@ on:
     types: [submitted, dismissed, edited]
   issue_comment:
     types: [created]
+  # Without this the probe is only ever asked while the required checks are still
+  # pending, so it answers "not ready" by construction: 29 of its last 30 runs failed
+  # for that reason alone. Re-asking it when Quality completes is the first moment its
+  # answer carries information.
+  workflow_run:
+    workflows: ["Quality"]
+    types: [completed]
   workflow_dispatch:
     inputs:
       pr_number:
@@ -21,7 +28,7 @@ permissions:
   statuses: read
 
 concurrency:
-  group: merge-readiness-${{ github.event.pull_request.number || github.event.pull_request.head.sha || github.ref }}
+  group: merge-readiness-${{ github.event.pull_request.number || github.event.workflow_run.pull_requests[0].number || github.event.pull_request.head.sha || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -38,7 +45,7 @@ jobs:
       - name: Compute merge readiness
         env:
           GH_TOKEN: ${{ github.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || inputs.pr_number }}
+          PR_NUMBER: ${{ github.event.pull_request.number || github.event.issue.number || github.event.workflow_run.pull_requests[0].number || inputs.pr_number }}
         run: |
           if [ -z "$PR_NUMBER" ] || [ "$PR_NUMBER" = "null" ]; then
             echo "No pull request context or pr_number input; nothing to check."
