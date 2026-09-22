@@ -38,7 +38,10 @@ echo "== probe recipe for the candidate generation ids =="
 "$PY" tools/portfolio_pipeline_materialize.py recipe   --vertical-recipe "$W/cycle2/vertical-recipe.json"   --proof-root "$W/proof2" --qa-dir "$QA_PIPE"   --pipeline-id mvp2-live-only-20260910-pipeline   --financial-mvp-contract contracts/portfolio-financial-mvp-source-v1.json   --financial-mvp-source-matrix generated/financial-mvp/source-matrix.json   --output "$W/cycle2/pipeline-recipe-probe.json" | cut -c1-140
 
 echo "== redraft the correction authority against the staged candidates =="
-"$PY" "$W/epoch/draft_correction_registries.py" | tail -6
+"$PY" ops/mvp2-release/scripts/draft_correction_registries.py \
+  --run "$W/proof2" \
+  --pipeline-recipe "$W/cycle2/pipeline-recipe-probe.json" \
+  --out "$CA" | tail -6
 
 echo "== pipeline recipe =="
 "$PY" tools/portfolio_pipeline_materialize.py recipe \

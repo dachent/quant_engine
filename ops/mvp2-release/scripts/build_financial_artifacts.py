@@ -175,12 +175,22 @@ def main():
             PREPARED / "preparation/capital-input-generation.json",
         )
     )
-    # The attended report generation does not carry `invested-capital.json`; the run records the
-    # governed result under `preparation/`, which is the same artifact the spec binds.
+    # Bound to the report generation, because `verify_outcome_inventory` requires every non-HWM
+    # outcome path to resolve to a file inside one of its `depends_on` generations. NOTE: this
+    # run's report generation does not emit `invested-capital.json` -- it appears only under
+    # `stages/report/candidates/` -- so the INVESTED_CAPITAL outcome (#318) has no valid binding
+    # in the attended layout yet. That is a product question, not a path fix; do not "correct" it
+    # by pointing outside the generation, which silently trades a loud absence for
+    # "financial outcome generation binding differs".
+    report_root = (
+        PREPARED
+        / "stages/report/generations"
+        / recipe["expected_generations"]["report"]["generation_id"]
+    )
     rows.append(
         artifact(
             "financial-outcome-capital",
-            PREPARED / "preparation/invested-capital-result.json",
+            report_root / "invested-capital.json",
             ("publish-portfolio-report",),
         )
     )

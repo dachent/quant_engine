@@ -77,10 +77,14 @@ def _arguments() -> argparse.Namespace:
         "--run", type=Path, required=True, help="the prepared run's output root"
     )
     parser.add_argument(
-        "--cycle",
+        "--pipeline-recipe",
         type=Path,
         required=True,
-        help="where the pipeline recipe was written",
+        help=(
+            "the recipe carrying expected_generations. `run_pipeline.sh` runs this script "
+            "before the real recipe exists and passes the probe, which agrees with it on "
+            "expected_generations by construction."
+        ),
     )
     parser.add_argument(
         "--out",
@@ -113,7 +117,7 @@ HISTORY = Path(
         (PREPARED / "preparation" / "dependence-selected-inputs.json").read_bytes()
     )["history_generation_root"]
 )
-PIPELINE_RECIPE = ARGS.cycle.resolve() / "pipeline-recipe.json"
+PIPELINE_RECIPE = ARGS.pipeline_recipe.resolve()
 OUT = ARGS.out.resolve()
 
 # Imported, not copied. The previous copies cited the line numbers they were taken from and
