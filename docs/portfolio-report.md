@@ -1,5 +1,14 @@
 # Portfolio report runbook
 
+> **The workbook half of this runbook is on permanent owner hold and is excluded from the MVP.**
+> Everything below about the Excel workbook, the xlsx-win job, workbook validation and
+> `bind-workbook-evidence` describes retained implementation that is no longer part of the
+> product output contract, and `docs/controller-graph.md` records the workbook as an excluded
+> sink that cannot become a required edge. It is documented here so the held work stays
+> recoverable, not so it can be run: the producer writes those artifacts only when a workbook
+> evidence snapshot is supplied, and nothing supplies one. Do not revive it without an owner
+> instruction. The canonical report and panel sections are current and unaffected.
+
 `tools/portfolio_report.py` turns the current accepted private portfolio
 baseline into a coverage-aware report dataset and an independent unified Excel
 workbook. It does not edit or refresh any legacy workbook. Real financial data,

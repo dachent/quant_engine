@@ -308,9 +308,12 @@ observed merge state in the governing issue before merging.
 - Per merged PR: body carries test evidence and resolution links for all review
   threads.
 - REQUIRED-family acceptance only: the full tier — provenance parity across
-  report/workbook/panel/release receipt showing identical values, hashes and
-  digests, adversarial tests, deterministic rebuild proof — exactly as the
-  governing issue's criteria require.
+  report/panel/release receipt showing identical values, hashes and digests,
+  adversarial tests, deterministic rebuild proof — exactly as the governing
+  issue's criteria require. The workbook is not in that parity set: it is on
+  permanent hold above, and `docs/controller-graph.md` records it as an
+  excluded sink that cannot become a required edge, so requiring parity across
+  it made this tier unsatisfiable by construction.
 
 Heavier tiers must not be substituted for lighter ones at intermediate steps.
 
