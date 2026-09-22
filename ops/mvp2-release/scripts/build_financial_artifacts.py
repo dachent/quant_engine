@@ -34,11 +34,17 @@ def _arguments() -> argparse.Namespace:
         "--run", type=Path, required=True, help="the prepared run's output root"
     )
     parser.add_argument(
-        "--cycle", type=Path, required=True, help="where the pipeline recipe was written"
+        "--cycle",
+        type=Path,
+        required=True,
+        help="where the pipeline recipe was written",
     )
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument(
-        "--repo", type=Path, default=Path.cwd(), help="defaults to the working directory"
+        "--repo",
+        type=Path,
+        default=Path.cwd(),
+        help="defaults to the working directory",
     )
     return parser.parse_args()
 
@@ -84,11 +90,8 @@ def main():
         / row["generation_id"]
         for row in analytics["lens_generation_bindings"]
     }
-    report_root = (
-        PREPARED
-        / "stages/report/generations"
-        / recipe["expected_generations"]["report"]["generation_id"]
-    )
+    # The report generation root is no longer resolved here: the capital outcome now reads
+    # the run's own `preparation/invested-capital-result.json`, and nothing else used it.
     correlation_root = (
         Path(analytics["correlation_root"])
         / "generations"
@@ -241,7 +244,9 @@ def main():
         "(policy pin %s%s)"
         % (
             pinned_history[:16],
-            "; the run's own authority wins" if history_root.name != pinned_history else "",
+            "; the run's own authority wins"
+            if history_root.name != pinned_history
+            else "",
         ),
     )
     print(
@@ -253,6 +258,7 @@ def main():
         sum(1 for value in roles.values() if value[0] == "DEPENDENCE"),
     )
     print("  dependence sources", index)
+    print("  recipe", recipe["pipeline_id"], "at", recipe["release_commit"][:8])
     print("written", path)
     return 0
 

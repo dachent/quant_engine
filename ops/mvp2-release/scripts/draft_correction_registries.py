@@ -77,13 +77,22 @@ def _arguments() -> argparse.Namespace:
         "--run", type=Path, required=True, help="the prepared run's output root"
     )
     parser.add_argument(
-        "--cycle", type=Path, required=True, help="where the pipeline recipe was written"
+        "--cycle",
+        type=Path,
+        required=True,
+        help="where the pipeline recipe was written",
     )
     parser.add_argument(
-        "--out", type=Path, required=True, help="directory to write both registries into"
+        "--out",
+        type=Path,
+        required=True,
+        help="directory to write both registries into",
     )
     parser.add_argument(
-        "--repo", type=Path, default=Path.cwd(), help="defaults to the working directory"
+        "--repo",
+        type=Path,
+        default=Path.cwd(),
+        help="defaults to the working directory",
     )
     return parser.parse_args()
 
