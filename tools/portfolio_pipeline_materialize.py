@@ -3232,11 +3232,18 @@ def _release_evaluation_date(recipe: Mapping[str, Any]) -> str:
     the schema-10 vertical records it, so an older single-clock vertical falls back to the
     cutoff -- the same shape `portfolio_release_builder.py:2031` already uses.  Reading it
     from the vertical rather than the pipeline recipe keeps every recipe hash unchanged.
+
+    A recipe with no `vertical_recipe` at all never passed `_recipe`, which requires the key,
+    so that shape reaches here only from a unit test exercising something else.  It falls back
+    to the cutoff rather than raising, because refusing would make this helper the reason such
+    a test fails instead of the behaviour it is actually checking.
     """
 
+    definition = recipe.get("vertical_recipe")
+    if definition is None:
+        return _text(recipe["as_of_date"], "as_of_date")
     vertical = _load(
-        _validate_file_definition(recipe["vertical_recipe"], "vertical recipe"),
-        "vertical recipe",
+        _validate_file_definition(definition, "vertical recipe"), "vertical recipe"
     )
     evaluated_on = vertical.get("evaluated_on", recipe["as_of_date"])
     return _text(evaluated_on, "evaluated_on")
@@ -3336,6 +3343,9 @@ def _semantic_gate_payload(
 
     return {
         "as_of_date": recipe["as_of_date"],
+        # The generation and freshness checks are decided by this date, so a receipt carrying
+        # only the cutoff cannot be audited back to the comparison it made.
+        "evaluated_on": _release_evaluation_date(recipe),
         "checks": checks,
         **(
             {
@@ -3772,6 +3782,7 @@ def semantic(
     )
     details = {
         "as_of_date": recipe["as_of_date"],
+        "evaluated_on": evaluated_on,
         "checks": checks,
         "release_commit": recipe["release_commit"],
         "schema_version": 2 if recipe.get("schema_version") == 3 else 1,

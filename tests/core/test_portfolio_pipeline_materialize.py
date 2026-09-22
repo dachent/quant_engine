@@ -4032,6 +4032,16 @@ def test_semantic_accepts_three_distinct_clocks(tmp_path: Path) -> None:
     assert details["checks"]["freshness"]["evidence"]["as_of_date"] == (
         evaluation.isoformat()
     )
+    # Both receipts must say which clock decided the verdict. Recording only the cutoff would
+    # leave an auditor unable to tell a correct PASS from one produced by the old conflation --
+    # and the two dates are equal in exactly the runs where that distinction is cheapest to lose.
+    assert details["as_of_date"] == cutoff.isoformat()
+    assert details["evaluated_on"] == evaluation.isoformat()
+    gate = json.loads(
+        (output_root / "evidence" / "post-build-semantic.json").read_text("utf-8")
+    )
+    assert gate["as_of_date"] == cutoff.isoformat()
+    assert gate["evaluated_on"] == evaluation.isoformat()
 
 
 def test_semantic_accepts_explicitly_rendered_freshness_blocker(

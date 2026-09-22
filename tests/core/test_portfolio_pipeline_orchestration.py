@@ -183,6 +183,10 @@ def _portfolio_spec(
     semantic_path = tmp_path / "candidate" / "post-build-semantic.json"
     semantic_payload = {
         "as_of_date": AS_OF.isoformat(),
+        # The gate declares the clock that decided its verdict, not only the financial cutoff.
+        # This fixture builds the payload by hand rather than through `_semantic_gate_payload`,
+        # so it has to carry the same keys the producer emits.
+        "evaluated_on": AS_OF.isoformat(),
         "checks": {
             "analytics_report_panel_equality": "PASS",
             "financial_identities": "PASS",
