@@ -96,3 +96,71 @@ def test_admission_policy_row_refuses_a_file_that_drifted_from_the_pin(tmp_path)
 
     with pytest.raises(SystemExit, match="differs from the pin"):
         module.admission_policy_row(run)
+
+
+def test_the_emitted_row_is_accepted_by_both_release_consumers(tmp_path):
+    """The row the producer emits is the row the consumers resolve. No fabrication either side.
+
+    `AGENTS.md` A1.3: "A consumer suite that mocks the producer does not satisfy this rule --
+    the seam needs at least one end-to-end regression from the producer's own output." The
+    unit tests on each side of this seam pass with a hand-built row, which is why the seam
+    could be broken while both sides were green.
+    """
+
+    # Imported, never re-executed from source. Other modules in this suite hold plain
+    # `import portfolio_financial_outcomes` / `portfolio_pipeline_materialize` references
+    # bound at their own import time, so exec'ing fresh copies over those `sys.modules`
+    # entries leaves two identities of the same module alive in one session and breaks
+    # tests that never touched this seam.
+    from types import SimpleNamespace
+
+    import portfolio_financial_outcomes as outcomes
+    import portfolio_pipeline_materialize as materializer
+
+    from quant_engine.core import pipeline as core_pipeline
+
+    module = _load_module()
+    run, policy_path, _pin = _run_root(tmp_path)
+    row = module.admission_policy_row(run)
+
+    assert materializer._admission_policy_artifact([row]) == policy_path
+
+    node = core_pipeline.ArtifactNode(
+        str(row["node_id"]),
+        (),
+        Path(str(row["path"])),
+        str(row["sha256"]),
+        int(row["size_bytes"]),
+    )
+    resolved = outcomes._artifact_node(
+        SimpleNamespace(nodes=(node,)), "financial-account-manifest-admission-policy"
+    )
+    assert (
+        outcomes._verified_file(resolved.path, resolved.sha256, resolved.size_bytes)
+        == POLICY
+    )
+
+
+def test_main_appends_the_admission_policy_row_to_the_inventory():
+    """Emitting the row is what the consumers depend on, not merely being able to build it.
+
+    The other tests call `admission_policy_row` directly, which proves the function is correct
+    and proves nothing about whether the inventory contains its output. `main()` reads a full
+    run tree, so it cannot be called here; the call is asserted structurally instead, the same
+    way `portfolio_controller_graph` asserts a named call exists.
+    """
+
+    import ast
+
+    tree = ast.parse(MODULE_PATH.read_bytes().decode("utf-8"))
+    main_fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(main_fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "admission_policy_row" in called

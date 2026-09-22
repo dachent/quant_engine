@@ -284,52 +284,42 @@ def _governed_stage_paths(
     return resolved
 
 
-def _generation_admission_policy(generation_root: Path) -> Path:
-    """Resolve the admission policy a schema-10 recipe binds through its generation.
+def _admission_policy_artifact(artifact_rows: Sequence[Mapping[str, Any]]) -> Path:
+    """Resolve the selected admission policy from the production artifact inventory.
 
-    A schema-9 recipe names the five epoch-manifest inputs as files, and the
-    admission policy is one of them. Schema 10 binds the verified generation
-    instead, so the policy travels inside it and there is no separate input to
-    name -- which is why demanding one refused every schema-10 release here.
+    This used to search the epoch-manifest generation for an artifact whose digest equalled
+    the `admission_policy` identity the generation declares, and it could never succeed. The
+    generation stores a *projection* of the policy -- admissions filtered to the selected
+    assignment keys with `assignment_sha256` recomputed, then canonicalised -- so the
+    selected input's own bytes are not among its artifacts. Nor could they be: every
+    generation artifact must be canonical JSON, checked by the independent verifier and
+    again by `quant_engine.core.publication`, while the captured policy is pretty-printed.
 
-    Nothing trusts a file name. The generation pins the policy digest in its own
-    `selected-input-identities.json`, the manifest says which artifact carries
-    that digest, and the bytes on disk have to agree with both.
+    So the input travels the way every other out-of-root producer input travels -- as its
+    own node in the production specification, beside the generation it belongs to.
+    `_identity_snapshot` downstream still requires these bytes to equal the identity the
+    generation declares, so naming the wrong file is refused there.
     """
 
-    identities = _load(
-        generation_root / "authority" / "selected-input-identities.json",
-        "selected input identities",
-    )
-    declared = identities.get("admission_policy")
-    if not isinstance(declared, Mapping):
-        raise MaterializationError("selected HWM admission policy binding is absent")
-    manifest = _load(generation_root / "generation.json", "account manifest generation")
-    artifacts = manifest.get("artifacts")
-    if not isinstance(artifacts, list):
-        raise MaterializationError("selected HWM admission policy binding differs")
-    matches = [
+    rows = [
         row
-        for row in artifacts
-        if isinstance(row, Mapping)
-        and row.get("sha256") == declared.get("sha256")
-        and row.get("size_bytes") == declared.get("size_bytes")
+        for row in artifact_rows
+        if row.get("kind") == "ARTIFACT"
+        and row.get("node_id") == "financial-account-manifest-admission-policy"
     ]
-    if len(matches) != 1:
+    if len(rows) != 1:
+        raise MaterializationError(
+            "selected HWM admission policy binding is absent or ambiguous"
+        )
+    path = Path(_text(rows[0].get("path"), "HWM admission policy path"))
+    definition = _file_definition(path)
+    if (
+        definition["sha256"] != rows[0].get("sha256")
+        or definition["size_bytes"] != rows[0].get("size_bytes")
+        or Path(cast(str, definition["path"])).resolve() != path.resolve()
+    ):
         raise MaterializationError("selected HWM admission policy binding differs")
-    relative = _text(matches[0].get("artifact_id"), "admission policy artifact_id")
-    parts = relative.split("/")
-    if not parts or any(part in ("", ".", "..") for part in parts):
-        raise MaterializationError("selected HWM admission policy binding differs")
-    policy = generation_root.joinpath(*parts)
-    if policy.is_symlink() or not policy.is_file():
-        raise MaterializationError("selected HWM admission policy binding is absent")
-    content = policy.read_bytes()
-    if hashlib.sha256(content).hexdigest() != declared.get("sha256") or len(
-        content
-    ) != declared.get("size_bytes"):
-        raise MaterializationError("selected HWM admission policy binding differs")
-    return policy
+    return path
 
 
 def _production_hwm_source_paths(
@@ -367,7 +357,7 @@ def _production_hwm_source_paths(
             "account strategy admission policy",
         )
     else:
-        admission_path = _generation_admission_policy(account_path.parent)
+        admission_path = _admission_policy_artifact(artifact_rows)
     try:
         provider_path = sources["provider-ledger"] / "generation.json"
         baseline_path = sources["portfolio-baseline"] / "generation.json"
