@@ -22,8 +22,14 @@ jobs:
       fail-fast: false
       max-parallel: 3
       matrix:
-        os: [ubuntu-24.04, windows-2025]
-        python-version: ["3.11", "3.12", "3.13"]
+        # Delivery runtime is Windows / CPython 3.11.15 on this workstation and there are no
+        # downstream installers, so the other five combinations validated a promise nothing
+        # consumes. Measured on run 35791363435: six jobs cost 126 min compute and ~57 min
+        # wall clock at max-parallel 3; this one costs ~31. requires-python still allows
+        # >=3.11,<3.14 -- narrowing it forces a uv.lock regeneration that would change the
+        # dependency set the release candidate is built against.
+        os: [windows-2025]
+        python-version: ["3.11"]
     env:
       UV_LINK_MODE: copy
       UV_NO_PROGRESS: "1"
