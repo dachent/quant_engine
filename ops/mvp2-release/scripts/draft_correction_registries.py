@@ -59,57 +59,71 @@ runtime defect, not a property of these files.
 """
 
 import hashlib
+import argparse
 import json
 import sys
 from pathlib import Path
 
-REPO = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine"
-    r"/.codex-bootstrap/mvp2-execution/repo"
-)
+
+def _arguments() -> argparse.Namespace:
+    """Take every root as an argument.
+
+    The pinned constants this replaced named one cycle's roots -- a repo checkout, a probe
+    recipe and one layered-history generation -- and none of them exist any more.
+    """
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--run", type=Path, required=True, help="the prepared run's output root"
+    )
+    parser.add_argument(
+        "--cycle", type=Path, required=True, help="where the pipeline recipe was written"
+    )
+    parser.add_argument(
+        "--out", type=Path, required=True, help="directory to write both registries into"
+    )
+    parser.add_argument(
+        "--repo", type=Path, default=Path.cwd(), help="defaults to the working directory"
+    )
+    return parser.parse_args()
+
+
+ARGS = _arguments()
+REPO = ARGS.repo.resolve()
 sys.path[:0] = [str(REPO / "tools")] + [str(p) for p in REPO.glob("packages/*/src")]
 from quant_engine.core.contracts import canonical_json_bytes  # noqa: E402
 
 CONTRACT = REPO / "contracts/portfolio-financial-mvp-source-v1.json"
+PREPARED = ARGS.run.resolve()
+# The run's own selected history, not the contract pin: `portfolio_current_dependence.py:335-337`
+# reads `policy["history_authority"]` only as a fallback and `:630-652` builds the override from
+# the selected generation's own manifest, so binding the pin here would name whichever generation
+# the previous cycle used -- it is still on disk.
 HISTORY = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/dataPortfolio"
-    r"/rollforward/2026-09-10-mvp2-live-only/layered-history"
-    r"/bf8b225745c7b0e37e49f2bafe8dd3c60c040dcdcedf3a852f88ca06ccdf7e92"
+    json.loads(
+        (PREPARED / "preparation" / "dependence-selected-inputs.json").read_bytes()
+    )["history_generation_root"]
 )
-# The probe recipe carries the same expected_generations as the real one.
-PIPELINE_RECIPE = Path(
-    r"C:/Dev/scratch/quant-engine/pl12/cycle2/pipeline-recipe-probe.json"
-)
-OUT = Path(
-    r"C:/Users/BorisVaisman/V Capital/investing - Documents/_quant_engine/dataPortfolio"
-    r"/rollforward/2026-09-10-mvp2-live-only/correction-authority"
+PIPELINE_RECIPE = ARGS.cycle.resolve() / "pipeline-recipe.json"
+OUT = ARGS.out.resolve()
+
+# Imported, not copied. The previous copies cited the line numbers they were taken from and
+# then drifted: `workbook` had been removed from `STAGES` and `panel` rewired away from it, so
+# a stage table claiming `"panel": ("workbook",)` routed corrections through a stage that no
+# longer exists.
+from portfolio_pipeline_materialize import (  # noqa: E402
+    SEMANTIC_FIRST_STAGE,
+    STAGE_DEPENDENCIES,
+    STAGES,
 )
 
-# tools/portfolio_pipeline_materialize.py:43-57, 108-114, 301-306
-STAGES = (
-    "ledger",
-    "baseline",
-    "attribution",
-    "analytics",
-    "report",
-    "workbook",
-    "panel",
-)
-STAGE_DEPENDENCIES = {
-    "ledger": (),
-    "baseline": ("ledger",),
-    "attribution": ("baseline", "ledger"),
-    "analytics": ("attribution",),
-    "report": ("baseline", "ledger", "analytics"),
-    "workbook": ("report",),
-    "panel": ("workbook",),
-}
-SEMANTIC_FIRST_STAGE = {"LAYERED_HISTORY": "attribution", "COMPOSITION": "ledger"}
 RELEASE_ROLES = ("ledger", "baseline", "report", "panel")
+# `report` maps to the `report` stage. It read `"workbook"`, which is not in `STAGES` any more,
+# so `output_role` could never return the `report` role and `LAYERED_HISTORY` routed to `panel`.
 GENERATION_STAGE = {
     "ledger": "ledger",
     "baseline": "baseline",
-    "report": "workbook",
+    "report": "report",
     "panel": "panel",
 }
 
