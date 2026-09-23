@@ -16,7 +16,7 @@ import sys
 from typing import Any, Mapping, Sequence, cast
 
 
-BUILDER_VERSION = "0.17.0"
+BUILDER_VERSION = "0.18.0"
 PUBLIC_FACTOR_BUILDER = "portfolio-public-decomposition-sources"
 PUBLIC_FACTOR_BUILDER_VERSION = "0.3.0"
 PUBLIC_FACTOR_FRESHNESS_POLICY = {
@@ -1243,6 +1243,71 @@ def _required_decomposition_surfaces(
     return tuple(surface for surface in SURFACES if surface in surfaces)
 
 
+def _reporting_currency(financial_mvp_contract: Mapping[str, Any]) -> str:
+    """Read the reporting currency from the governed capital policy.
+
+    The financial-MVP contract deliberately has no top-level ``currency``:
+    currency is an owner-selected capital-policy treatment.  Decomposition
+    return inputs are labelled with that reporting denomination only after the
+    treatment explicitly names it; this does not assert that every raw source
+    is itself a net-return series in that denomination.
+    """
+
+    matching = [
+        outcome
+        for outcome in _objects(
+            financial_mvp_contract.get("financial_outcomes"),
+            "financial MVP outcomes",
+        )
+        if outcome.get("outcome_id") == "INVESTED_CAPITAL"
+    ]
+    if len(matching) != 1:
+        raise CurrentPlanError("financial MVP invested-capital outcome is missing")
+    calculation = _object(
+        matching[0].get("calculation_contract"),
+        "financial MVP invested-capital calculation contract",
+    )
+    fx_policy = _object(
+        calculation.get("fx_base_currency"),
+        "financial MVP fx base currency policy",
+    )
+    selected = _text(
+        fx_policy.get("selected_treatment"),
+        "financial MVP fx base currency selected treatment",
+    )
+    if not selected.startswith("USD_REPORTING_CURRENCY"):
+        raise CurrentPlanError(
+            "financial MVP fx base currency policy does not declare USD reporting currency"
+        )
+    return "USD"
+
+
+def _declared_factor_anchor_periods_per_year(
+    base_spec: Mapping[str, Any],
+) -> dict[str, int]:
+    """Collect the factor-anchor annualization declared by the base spec."""
+
+    declared: dict[str, set[int]] = {}
+    for index, model in enumerate(
+        _objects(base_spec.get("models"), "base specification models")
+    ):
+        series_id = _text(model.get("series_id"), f"base model {index} series_id")
+        periods_per_year = _integer(
+            model.get("periods_per_year"),
+            f"base model {index} periods_per_year",
+            1,
+        )
+        declared.setdefault(series_id, set()).add(periods_per_year)
+    ambiguous = sorted(
+        series_id for series_id, values in declared.items() if len(values) != 1
+    )
+    if ambiguous:
+        raise CurrentPlanError(
+            f"base factor methodology has conflicting periods_per_year: {ambiguous}"
+        )
+    return {series_id: next(iter(values)) for series_id, values in declared.items()}
+
+
 def _validate_strategy_perimeter(
     strategies: Sequence[Mapping[str, Any]],
     financial_mvp_contract: Mapping[str, Any],
@@ -1550,6 +1615,7 @@ def build_bundle(
         market_paths["sector_returns"], sector_manifest_path, catalog_sha256
     )
     strategies = _resolved_strategies(plan)
+    declared_periods_per_year = _declared_factor_anchor_periods_per_year(base_spec)
     layered_history = _layered_history_targets(
         generation_root=layered_history_generation_path,
         contract_path=financial_mvp_contract_path,
@@ -1576,6 +1642,7 @@ def build_bundle(
             "verified financial MVP contract is unavailable"
         ) from exc
     required_surfaces = _required_decomposition_surfaces(financial_mvp_contract)
+    reporting_currency = _reporting_currency(financial_mvp_contract)
     contract_sources = {
         _text(source.get("source_id"), "financial MVP source_id"): source
         for source in _objects(
@@ -1886,6 +1953,11 @@ def build_bundle(
             _text(strategy.get("series_id"), "series_id")
             for strategy, _assignment in source_assignments
         }
+        missing_periods = sorted(assigned_series - set(declared_periods_per_year))
+        if missing_periods:
+            raise CurrentPlanError(
+                f"base factor methodology lacks periods_per_year for: {missing_periods}"
+            )
         complete_date_set = set(complete_dates)
         if input_key in public_factor_boundaries:
             if (
@@ -1992,7 +2064,7 @@ def build_bundle(
                         ),
                         "model_id": model_id,
                         "parsimony_tolerance": tolerance,
-                        "periods_per_year": 252,
+                        "periods_per_year": declared_periods_per_year[series_id],
                         "ridge_candidates": list(ridge),
                         "series_id": series_id,
                         "test_start": test_start.isoformat(),
@@ -2137,6 +2209,15 @@ def build_bundle(
                     "expected_sha256": _sha256(projected_factor_content),
                     "expected_size_bytes": len(projected_factor_content),
                     "factors": factor_definitions,
+                    "interval_policy": {
+                        "available_through_anchor": analysis_as_of.isoformat(),
+                        "currency": reporting_currency,
+                        "finality": "COMPLETE_SELECTED_SNAPSHOT",
+                        "native_calendar": "SOURCE_LABELLED_DAILY",
+                        "native_label_convention": "SOURCE_PUBLISHED_DAILY_LABEL",
+                        "return_basis": "SOURCE_PUBLISHED",
+                        "source_vintage": _sha256(projected_factor_content),
+                    },
                     "relative_path": factor_relative,
                     "risk_free_column": risk_free,
                     "schema_name": f"portfolio-{source_key}-returns",
@@ -2148,6 +2229,24 @@ def build_bundle(
                 "schema_version": 1,
                 "series_composition": series_composition,
                 "target_source": generated_target,
+            }
+            target_policy = cast(dict[str, object], spec["target_source"])
+            target_policy["interval_policy"] = {
+                "currency": reporting_currency,
+                "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+                "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
+                "finalized_through": analysis_as_of.isoformat(),
+                "gap_disposition": "REJECT_BUCKET",
+                "legacy_alignment_policy": (
+                    "EXACT_TARGET_FACTOR_LABEL_INTERSECTION_NO_CALENDAR_INFERENCE"
+                ),
+                "native_calendar": "LEGACY_EXACT_LABEL",
+                "native_label_convention": "RETAINED_TARGET_LABEL_EXACT_INTERSECTION",
+                "return_basis": "MIXED_NET_MODEL",
+                "source_vintage": _text(
+                    layered_history["identity"]["generation_id"],
+                    "layered history generation id",
+                ),
             }
             relative = (
                 f"specs/{source_key}.json"

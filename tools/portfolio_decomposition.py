@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import csv
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 import hashlib
 import json
@@ -35,9 +35,9 @@ from quant_engine.core import (
 from quant_engine.core.contracts import canonical_json_bytes
 
 
-ANALYTICS_SCHEMA_VERSION: Final = 2
-BUILDER_VERSION: Final = "1.11.0"
-METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-3"
+ANALYTICS_SCHEMA_VERSION: Final = 3
+BUILDER_VERSION: Final = "1.13.0"
+METHODOLOGY_VERSION: Final = "ANL-DECOMP-CLEANROOM-6"
 METHOD_LABEL: Final = "MPI_INFORMED_NON_EQUIVALENT"
 ANALYSIS_LENSES: Final = {
     "ECONOMIC_FACTOR",
@@ -74,11 +74,24 @@ EVIDENCE_LAYERS: Final = {
     "CONCEPTUAL_STRESS",
 }
 RETURN_BASES: Final = {"GROSS", "MODEL", "NET"}
+TARGET_RETURN_BASIS_POLICIES: Final = {"MIXED_NET_MODEL"}
+FACTOR_RETURN_BASIS_POLICIES: Final = {"SOURCE_PUBLISHED"}
 RETURN_TYPES: Final = {"EXCESS", "TOTAL"}
 CONSTRAINTS: Final = {"UNCONSTRAINED", "LONG_ONLY_SUM_TO_ONE"}
 COST_COVERAGE: Final = {"COMPLETE", "INCOMPLETE"}
 ESTIMATORS: Final = {"STATIC_RBSA", "DYNAMIC_FLS"}
 EVIDENCE_MODES: Final = {"LIVE_ONLY", "LIVE_PLUS_BACKTEST"}
+TARGET_CALENDARS: Final = {
+    "CALENDAR_DAY_24_7",
+    "LEGACY_EXACT_LABEL",
+    "SESSION_LABELLED",
+}
+FACTOR_CALENDARS: Final = {"SOURCE_LABELLED_DAILY"}
+EVALUATION_INFORMATION_SETS: Final = {
+    "RETROSPECTIVE_SELECTED_SNAPSHOT",
+    "POINT_IN_TIME_VINTAGE",
+}
+FACTOR_ANCHOR_POLICY: Final = "SOURCE_LABELLED_FACTOR_ANCHOR_ASSOCIATION_V1"
 
 FloatArray = npt.NDArray[np.float64]
 
@@ -131,6 +144,28 @@ class FactorRow:
 
 
 @dataclass(frozen=True)
+class IntervalAssociationPolicy:
+    target_calendar: str
+    target_label_convention: str
+    target_finality: str
+    target_finalized_through: date
+    target_source_vintage: str
+    target_currency: str
+    target_return_basis: str
+    target_gap_disposition: str
+    factor_calendar: str
+    factor_label_convention: str
+    factor_finality: str
+    factor_available_through_anchor: date
+    factor_source_vintage: str
+    factor_currency: str
+    factor_return_basis: str
+    evaluation_information_set: str
+    point_in_time_vintage: str | None
+    target_session_labels: Mapping[str, tuple[date, ...]]
+
+
+@dataclass(frozen=True)
 class ModelDefinition:
     model_id: str
     series_id: str
@@ -164,6 +199,7 @@ class Specification:
     models: tuple[ModelDefinition, ...]
     provenance_sources: tuple[SourceDefinition, ...]
     series_composition: Mapping[str, Mapping[str, object]]
+    interval_association: IntervalAssociationPolicy
 
 
 @dataclass(frozen=True)
@@ -256,16 +292,19 @@ def _portable(value: object, name: str) -> str:
 
 def _source_definition(value: object, name: str) -> SourceDefinition:
     source = _object(value, name)
+    expected_keys = {
+        "artifact_id",
+        "expected_sha256",
+        "expected_size_bytes",
+        "relative_path",
+        "schema_name",
+        "schema_version",
+    }
+    if "interval_policy" in source:
+        expected_keys.add("interval_policy")
     _strict_keys(
         source,
-        {
-            "artifact_id",
-            "expected_sha256",
-            "expected_size_bytes",
-            "relative_path",
-            "schema_name",
-            "schema_version",
-        },
+        expected_keys,
         name,
     )
     digest = _text(source["expected_sha256"], f"{name}.expected_sha256")
@@ -483,6 +522,180 @@ def _model_definition(value: Mapping[str, Any], index: int) -> ModelDefinition:
     )
 
 
+def _interval_association_policy(
+    target_source: Mapping[str, Any], factor_source: Mapping[str, Any]
+) -> IntervalAssociationPolicy:
+    """Parse declared source-label semantics without manufacturing a clock cut-off."""
+    target = _object(target_source["interval_policy"], "target_source.interval_policy")
+    factor = _object(factor_source["interval_policy"], "factor_source.interval_policy")
+    target_keys = {
+        "currency",
+        "evaluation_information_set",
+        "finality",
+        "finalized_through",
+        "gap_disposition",
+        "native_calendar",
+        "native_label_convention",
+        "return_basis",
+        "source_vintage",
+    }
+    if target.get("native_calendar") == "SESSION_LABELLED":
+        target_keys.add("session_schedule_labels")
+    if target.get("native_calendar") == "LEGACY_EXACT_LABEL":
+        target_keys.add("legacy_alignment_policy")
+    if "point_in_time_vintage" in target:
+        target_keys.add("point_in_time_vintage")
+        target_keys.update(
+            {
+                "causal_feature_cutoff_proved",
+                "retained_historical_availability_proved",
+            }
+        )
+    _strict_keys(target, target_keys, "target_source.interval_policy")
+    _strict_keys(
+        factor,
+        {
+            "available_through_anchor",
+            "currency",
+            "finality",
+            "native_calendar",
+            "native_label_convention",
+            "return_basis",
+            "source_vintage",
+        },
+        "factor_source.interval_policy",
+    )
+    target_calendar = _text(
+        target["native_calendar"], "target_source.interval_policy.native_calendar"
+    )
+    if target_calendar not in TARGET_CALENDARS:
+        raise DecompositionError("target native calendar is unsupported")
+    if (
+        target_calendar == "LEGACY_EXACT_LABEL"
+        and _text(
+            target["legacy_alignment_policy"],
+            "target_source.interval_policy.legacy_alignment_policy",
+        )
+        != "EXACT_TARGET_FACTOR_LABEL_INTERSECTION_NO_CALENDAR_INFERENCE"
+    ):
+        raise DecompositionError("legacy target interval alignment policy differs")
+    factor_calendar = _text(
+        factor["native_calendar"], "factor_source.interval_policy.native_calendar"
+    )
+    if factor_calendar not in FACTOR_CALENDARS:
+        raise DecompositionError("factor native calendar is unsupported")
+    information_set = _text(
+        target["evaluation_information_set"],
+        "target_source.interval_policy.evaluation_information_set",
+    )
+    if information_set not in EVALUATION_INFORMATION_SETS:
+        raise DecompositionError("evaluation information set is unsupported")
+    point_in_time_vintage = target.get("point_in_time_vintage")
+    if point_in_time_vintage is not None:
+        point_in_time_vintage = _text(
+            point_in_time_vintage,
+            "target_source.interval_policy.point_in_time_vintage",
+        )
+    if information_set == "POINT_IN_TIME_VINTAGE" and (
+        not point_in_time_vintage
+        or target.get("retained_historical_availability_proved") is not True
+        or target.get("causal_feature_cutoff_proved") is not True
+    ):
+        raise DecompositionError(
+            "point-in-time evaluation requires retained historical availability and causal feature proof"
+        )
+    target_basis = _text(
+        target["return_basis"], "target_source.interval_policy.return_basis"
+    )
+    factor_basis = _text(
+        factor["return_basis"], "factor_source.interval_policy.return_basis"
+    )
+    if target_basis not in RETURN_BASES | TARGET_RETURN_BASIS_POLICIES:
+        raise DecompositionError("target interval return basis is unsupported")
+    if factor_basis not in RETURN_BASES | FACTOR_RETURN_BASIS_POLICIES:
+        raise DecompositionError("interval return basis is unsupported")
+    target_currency = _text(
+        target["currency"], "target_source.interval_policy.currency"
+    )
+    factor_currency = _text(
+        factor["currency"], "factor_source.interval_policy.currency"
+    )
+    if target_currency != factor_currency:
+        raise DecompositionError("target and factor interval currencies differ")
+    if (
+        _text(
+            target["gap_disposition"], "target_source.interval_policy.gap_disposition"
+        )
+        != "REJECT_BUCKET"
+    ):
+        raise DecompositionError("target interval gaps must reject the affected bucket")
+    target_session_labels: dict[str, tuple[date, ...]] = {}
+    if target_calendar == "SESSION_LABELLED":
+        raw_schedule = _object(
+            target["session_schedule_labels"],
+            "target_source.interval_policy.session_schedule_labels",
+        )
+        for series_id, raw_labels in raw_schedule.items():
+            if not isinstance(raw_labels, list) or not raw_labels:
+                raise DecompositionError(
+                    "target session schedule labels must be non-empty arrays"
+                )
+            labels = tuple(
+                _day(
+                    raw_label,
+                    "target_source.interval_policy.session_schedule_labels[]",
+                )
+                for raw_label in raw_labels
+            )
+            if tuple(sorted(set(labels))) != labels:
+                raise DecompositionError(
+                    "target session schedule labels must be unique and sorted"
+                )
+            target_session_labels[
+                _text(series_id, "target session schedule series")
+            ] = labels
+    return IntervalAssociationPolicy(
+        target_calendar=target_calendar,
+        target_label_convention=_text(
+            target["native_label_convention"],
+            "target_source.interval_policy.native_label_convention",
+        ),
+        target_finality=_text(
+            target["finality"], "target_source.interval_policy.finality"
+        ),
+        target_finalized_through=_day(
+            target["finalized_through"],
+            "target_source.interval_policy.finalized_through",
+        ),
+        target_source_vintage=_text(
+            target["source_vintage"], "target_source.interval_policy.source_vintage"
+        ),
+        target_currency=target_currency,
+        target_return_basis=target_basis,
+        target_gap_disposition="REJECT_BUCKET",
+        factor_calendar=factor_calendar,
+        factor_label_convention=_text(
+            factor["native_label_convention"],
+            "factor_source.interval_policy.native_label_convention",
+        ),
+        factor_finality=_text(
+            factor["finality"], "factor_source.interval_policy.finality"
+        ),
+        factor_available_through_anchor=_day(
+            factor["available_through_anchor"],
+            "factor_source.interval_policy.available_through_anchor",
+        ),
+        factor_source_vintage=_text(
+            factor["source_vintage"], "factor_source.interval_policy.source_vintage"
+        ),
+        factor_currency=factor_currency,
+        factor_return_basis=factor_basis,
+        evaluation_information_set=information_set,
+        point_in_time_vintage=point_in_time_vintage,
+        target_session_labels=target_session_labels,
+    )
+
+
 def _load_spec(path: Path) -> Specification:
     try:
         decoded = json.loads(path.read_text(encoding="utf-8"))
@@ -528,6 +741,7 @@ def _load_spec(path: Path) -> Specification:
             "expected_sha256",
             "expected_size_bytes",
             "factors",
+            "interval_policy",
             "relative_path",
             "risk_free_column",
             "schema_name",
@@ -606,6 +820,9 @@ def _load_spec(path: Path) -> Specification:
             )
         ),
         series_composition=cast(Mapping[str, Mapping[str, object]], raw_composition),
+        interval_association=_interval_association_policy(
+            _object(root["target_source"], "target_source"), factor_source_object
+        ),
     )
 
 
@@ -786,6 +1003,268 @@ def _number(value: float | np.floating[Any] | None) -> str | None:
     if abs(accepted) < 5e-16:
         accepted = 0.0
     return format(accepted, ".12g")
+
+
+def _orthogonal_attribution(
+    *,
+    model: ModelDefinition,
+    train_matrix: FloatArray,
+    aligned_matrix: FloatArray,
+    aligned: Sequence[tuple[TargetRow, FactorRow, tuple[float, ...]]],
+    exposures: FloatArray,
+    intercept: float,
+) -> dict[str, object]:
+    """Project an already-fitted raw model into frozen train-only symmetric modes."""
+    observation_count, factor_count = train_matrix.shape
+    factor_ids = list(model.factor_ids)
+    mean = np.mean(train_matrix, axis=0)
+    scale = np.std(train_matrix, axis=0, ddof=1)
+    if np.any(~np.isfinite(scale)) or np.any(scale <= 0.0):
+        eigenvalues = np.full(factor_count, np.nan, dtype=np.float64)
+        maximum = 0.0
+        tolerance = 0.0
+        rank = 0
+        covariance = np.full((factor_count, factor_count), np.nan, dtype=np.float64)
+    else:
+        standardized_train = (train_matrix - mean) / scale
+        covariance = (standardized_train.T @ standardized_train) / (
+            observation_count - 1
+        )
+        eigenvalues, vectors = np.linalg.eigh(covariance)
+        maximum = float(eigenvalues[-1])
+        tolerance = float(
+            np.finfo(np.float64).eps * max(observation_count, factor_count) * maximum
+        )
+        rank = int(np.sum(eigenvalues > tolerance)) if math.isfinite(maximum) else 0
+    mode_ids = [f"symmetric_mode:{factor_id}" for factor_id in factor_ids]
+    common: dict[str, object] = {
+        "method_id": "TRAINING_ONLY_SYMMETRIC_COVARIANCE_WHITENING_V1",
+        "raw_factor_ids": factor_ids,
+        "train_end": model.train_end.isoformat(),
+        "train_mean": {
+            factor_id: _number(mean[index])
+            for index, factor_id in enumerate(factor_ids)
+        },
+        "train_scale": {
+            factor_id: _number(scale[index])
+            for index, factor_id in enumerate(factor_ids)
+        },
+        "covariance": [[_number(value) for value in row] for row in covariance],
+        "eigenvalues": [_number(value) for value in eigenvalues],
+        "rank": rank,
+        "rank_tolerance": _number(tolerance),
+        "mode_ids": mode_ids,
+        "raw_exposures": (
+            {
+                factor_id: _number(exposures[index])
+                for index, factor_id in enumerate(factor_ids)
+            }
+            if exposures.ndim == 1
+            else [
+                {
+                    factor_id: _number(row[index])
+                    for index, factor_id in enumerate(factor_ids)
+                }
+                for row in exposures
+            ]
+        ),
+        "training_row_identity": {
+            "dates": [
+                item[0].day.isoformat()
+                for item in aligned
+                if item[0].day <= model.train_end
+            ],
+            "partition": "TRAIN",
+        },
+        "train_start": min(
+            item[0].day for item in aligned if item[0].day <= model.train_end
+        ).isoformat(),
+    }
+    if (
+        maximum <= 0.0
+        or not math.isfinite(maximum)
+        or np.any(~np.isfinite(eigenvalues))
+        or np.any(eigenvalues <= tolerance)
+    ):
+        return {
+            **common,
+            "status": "UNAVAILABLE_ORTHOGONAL_RANK_DEFICIENT",
+            "raw_to_mode_weights": None,
+            "mode_coefficients": None,
+            "orthogonal_intercept": None,
+            "train_fitted_risk_budget": None,
+            "per_date": [],
+            "raw_prediction_reconciliation": "UNAVAILABLE_ORTHOGONAL_RANK_DEFICIENT",
+        }
+    square_root = (vectors * np.sqrt(eigenvalues)) @ vectors.T
+    whitening = (vectors * (1.0 / np.sqrt(eigenvalues))) @ vectors.T
+    if exposures.ndim == 2:
+        coefficients_by_date = (square_root @ (scale * exposures).T).T
+        orthogonal_intercepts = intercept + exposures @ mean
+        modes = ((aligned_matrix - mean) / scale) @ whitening
+        mode_components = modes * coefficients_by_date
+        fitted = orthogonal_intercepts + np.sum(mode_components, axis=1)
+        raw_fitted = intercept + np.sum(aligned_matrix * exposures, axis=1)
+        if not np.allclose(raw_fitted, fitted, rtol=0.0, atol=5e-11):
+            raise DecompositionError(
+                "dynamic orthogonal projection does not reconcile raw prediction"
+            )
+        train_count = sum(item[0].day <= model.train_end for item in aligned)
+        include_intercept = not np.allclose(
+            orthogonal_intercepts[:train_count],
+            orthogonal_intercepts[0],
+            rtol=0.0,
+            atol=5e-15,
+        )
+        component_ids = (
+            ["orthogonal_intercept"] if include_intercept else []
+        ) + mode_ids
+        component_rows = mode_components[:train_count]
+        if include_intercept:
+            component_rows = np.column_stack(
+                (orthogonal_intercepts[:train_count], component_rows)
+            )
+        component_covariance = np.cov(component_rows, rowvar=False, ddof=1)
+        if len(component_ids) == 1:
+            component_covariance = np.asarray(
+                [[float(component_covariance)]], dtype=np.float64
+            )
+        ones = np.ones(len(component_ids), dtype=np.float64)
+        euler = component_covariance @ ones
+        fitted_variance = float(ones @ component_covariance @ ones)
+        if not math.isclose(
+            fitted_variance,
+            float(np.var(np.sum(component_rows, axis=1), ddof=1)),
+            rel_tol=0.0,
+            abs_tol=5e-11,
+        ):
+            raise DecompositionError(
+                "dynamic orthogonal fitted-risk budget does not reconcile"
+            )
+        return {
+            **common,
+            "status": "AVAILABLE",
+            "raw_to_mode_weights": {
+                factor_id: {
+                    mode_id: _number(whitening[row, column])
+                    for column, mode_id in enumerate(mode_ids)
+                }
+                for row, factor_id in enumerate(factor_ids)
+            },
+            "mode_coefficients": [
+                {
+                    mode_id: _number(coefficients_by_date[row, column])
+                    for column, mode_id in enumerate(mode_ids)
+                }
+                for row in range(len(aligned))
+            ],
+            "orthogonal_intercept": [_number(value) for value in orthogonal_intercepts],
+            "train_fitted_risk_budget": {
+                "component_ids": component_ids,
+                "component_covariance": [
+                    [_number(value) for value in row] for row in component_covariance
+                ],
+                "cross_mode_covariance_present": True,
+                "euler_allocations": {
+                    component_id: _number(euler[index])
+                    for index, component_id in enumerate(component_ids)
+                },
+                "fitted_variance": _number(fitted_variance),
+                "intercept_time_varying": include_intercept,
+                "interpretation": "EQUAL_FACTOR_ANCHOR_FITTED_COMPONENT_SAMPLE_VARIANCE",
+            },
+            "per_date": [
+                {
+                    "date": observation[0].day.isoformat(),
+                    "fitted_excess_return": _number(fitted[index]),
+                    "mode_contributions": {
+                        mode_id: _number(mode_components[index, column])
+                        for column, mode_id in enumerate(mode_ids)
+                    },
+                    "partition": "TRAIN"
+                    if observation[0].day <= model.train_end
+                    else "TEST"
+                    if observation[0].day >= model.test_start
+                    else "GAP",
+                }
+                for index, observation in enumerate(aligned)
+            ],
+            "raw_prediction_reconciliation": "EXACT_WITHIN_5E-11",
+        }
+    coefficients = square_root @ (scale * exposures)
+    orthogonal_intercept = float(intercept + mean @ exposures)
+    modes = ((aligned_matrix - mean) / scale) @ whitening
+    fitted = orthogonal_intercept + modes @ coefficients
+    raw_fitted = intercept + aligned_matrix @ exposures
+    if not np.allclose(raw_fitted, fitted, rtol=0.0, atol=5e-11):
+        raise DecompositionError(
+            "orthogonal projection does not reconcile raw prediction"
+        )
+    train_count = sum(item[0].day <= model.train_end for item in aligned)
+    train_components = modes[:train_count] * coefficients
+    component_covariance = np.cov(train_components, rowvar=False, ddof=1)
+    if factor_count == 1:
+        component_covariance = np.asarray(
+            [[float(component_covariance)]], dtype=np.float64
+        )
+    ones = np.ones(factor_count, dtype=np.float64)
+    euler = component_covariance @ ones
+    fitted_variance = float(ones @ component_covariance @ ones)
+    if not math.isclose(
+        fitted_variance,
+        float(np.var(train_components @ ones, ddof=1)),
+        rel_tol=0.0,
+        abs_tol=5e-11,
+    ):
+        raise DecompositionError("orthogonal fitted-risk budget does not reconcile")
+    return {
+        **common,
+        "status": "AVAILABLE",
+        "raw_to_mode_weights": {
+            factor_id: {
+                mode_id: _number(whitening[row, column])
+                for column, mode_id in enumerate(mode_ids)
+            }
+            for row, factor_id in enumerate(factor_ids)
+        },
+        "mode_coefficients": {
+            mode_id: _number(coefficients[index])
+            for index, mode_id in enumerate(mode_ids)
+        },
+        "orthogonal_intercept": _number(orthogonal_intercept),
+        "train_fitted_risk_budget": {
+            "component_ids": mode_ids,
+            "component_covariance": [
+                [_number(value) for value in row] for row in component_covariance
+            ],
+            "cross_mode_covariance_present": False,
+            "euler_allocations": {
+                mode_id: _number(euler[index]) for index, mode_id in enumerate(mode_ids)
+            },
+            "fitted_variance": _number(fitted_variance),
+            "intercept_time_varying": False,
+            "interpretation": "EQUAL_FACTOR_ANCHOR_FITTED_COMPONENT_SAMPLE_VARIANCE",
+        },
+        "per_date": [
+            {
+                "date": observation[0].day.isoformat(),
+                "fitted_excess_return": _number(fitted[index]),
+                "mode_contributions": {
+                    mode_id: _number(modes[index, column] * coefficients[column])
+                    for column, mode_id in enumerate(mode_ids)
+                },
+                "partition": (
+                    "TRAIN"
+                    if observation[0].day <= model.train_end
+                    else "TEST"
+                    if observation[0].day >= model.test_start
+                    else "GAP"
+                ),
+            }
+            for index, observation in enumerate(aligned)
+        ],
+        "raw_prediction_reconciliation": "EXACT_WITHIN_5E-11",
+    }
 
 
 def _canonical_decimal_text(value: str, name: str) -> str:
@@ -1786,6 +2265,7 @@ def _dynamic_model_result(
     last_train_exposure = train_fit.exposures[-1].copy()
     exposure_path: list[dict[str, object]] = []
     contributions: list[dict[str, object]] = []
+    orthogonal_exposure_path: list[FloatArray] = []
     previous_exposure: FloatArray | None = None
     change_rows: list[tuple[float, str]] = []
     for index, observation in enumerate(aligned):
@@ -1857,6 +2337,7 @@ def _dynamic_model_result(
                 "residual": _number(residual),
             }
         )
+        orthogonal_exposure_path.append(exposure.copy())
         previous_exposure = exposure
 
     latest_exposure = previous_exposure
@@ -2031,6 +2512,14 @@ def _dynamic_model_result(
         "smoothness_sensitivity": sensitivity,
         "status": "AVAILABLE",
     }
+    result["orthogonal_attribution"] = _orthogonal_attribution(
+        model=model,
+        train_matrix=train_matrix,
+        aligned_matrix=aligned_matrix,
+        aligned=aligned,
+        exposures=np.asarray(orthogonal_exposure_path, dtype=np.float64),
+        intercept=train_fit.intercept,
+    )
     return _apply_model_quality_gate(result, holdout_r_squared)
 
 
@@ -2078,12 +2567,228 @@ def _unavailable_result(
     }
 
 
+def _factor_anchor_observations(
+    *,
+    model: ModelDefinition,
+    target_rows: Sequence[TargetRow],
+    factor_rows: Mapping[date, FactorRow],
+    policy: IntervalAssociationPolicy,
+) -> tuple[list[tuple[TargetRow, FactorRow, tuple[float, ...]]], dict[str, object]]:
+    """Associate target labels to one right-hand published factor anchor.
+
+    This preserves the source row as published: only the target series is
+    compounded across a multi-label bucket, and RF/factor spreads remain one
+    value from the right-hand source-labelled row.
+    """
+    effective_target_finality = min(
+        policy.target_finalized_through,
+        model.as_of_date or policy.target_finalized_through,
+    )
+    effective_factor_availability = min(
+        policy.factor_available_through_anchor,
+        model.as_of_date or policy.factor_available_through_anchor,
+    )
+    if policy.target_return_basis in RETURN_BASES and any(
+        row.return_basis != policy.target_return_basis for row in target_rows
+    ):
+        raise DecompositionError(
+            "target rows differ from declared interval return basis"
+        )
+    if policy.target_return_basis == "MIXED_NET_MODEL" and any(
+        row.return_basis not in {"NET", "MODEL"} for row in target_rows
+    ):
+        raise DecompositionError(
+            "target rows are outside the declared mixed NET/MODEL return basis"
+        )
+    usable_rows = [row for row in target_rows if row.day <= effective_target_finality]
+    all_anchors = sorted(factor_rows)
+    future_anchors = [
+        observed for observed in all_anchors if observed > effective_factor_availability
+    ]
+    anchors = [
+        observed
+        for observed in all_anchors
+        if observed <= effective_factor_availability
+    ]
+    if len(anchors) < 2:
+        raise DecompositionError("fewer than two available factor anchors")
+    for observed in anchors:
+        factor_row = factor_rows[observed]
+        if any(
+            factor_row.values.get(factor_id) is None for factor_id in model.factor_ids
+        ):
+            raise DecompositionError(
+                f"factor anchor {observed.isoformat()} has incomplete selected components"
+            )
+    target_by_day = {row.day: row for row in usable_rows}
+    if len(target_by_day) != len(usable_rows):
+        raise DecompositionError("target source contains a duplicate date")
+    if policy.target_calendar == "CALENDAR_DAY_24_7" and any(
+        row.return_type != "TOTAL" for row in usable_rows
+    ):
+        raise DecompositionError("24/7 target intervals require simple total returns")
+    observations: list[tuple[TargetRow, FactorRow, tuple[float, ...]]] = []
+    bucket_receipts: list[dict[str, object]] = []
+    assigned: set[date] = set()
+    for left, right in zip(anchors, anchors[1:]):
+        if policy.target_calendar == "CALENDAR_DAY_24_7":
+            labels: list[date] = []
+            cursor = left + timedelta(days=1)
+            while cursor <= right:
+                labels.append(cursor)
+                cursor += timedelta(days=1)
+        elif policy.target_calendar == "SESSION_LABELLED":
+            schedule = policy.target_session_labels.get(model.series_id)
+            if schedule is None:
+                raise DecompositionError(
+                    f"target session schedule is absent for {model.series_id}"
+                )
+            labels = [label for label in schedule if left < label <= right]
+        else:
+            # A schema-1 producer without a retained native calendar can still
+            # describe its historic exact-label join.  It cannot be promoted to
+            # a session schedule or a 24/7 bucket from observed rows alone.
+            labels = [right] if right in target_by_day else []
+        missing = [label for label in labels if label not in target_by_day]
+        if missing and policy.target_calendar != "LEGACY_EXACT_LABEL":
+            raise DecompositionError(
+                "missing expected target label(s) for factor anchor "
+                f"{right.isoformat()}: {[item.isoformat() for item in missing]}"
+            )
+        if not labels:
+            if policy.target_calendar == "LEGACY_EXACT_LABEL":
+                continue
+            raise DecompositionError(
+                f"factor anchor {right.isoformat()} has no admitted target labels"
+            )
+        if policy.target_calendar == "SESSION_LABELLED":
+            scheduled = set(policy.target_session_labels[model.series_id])
+            unscheduled = [
+                row.day
+                for row in usable_rows
+                if left < row.day <= right and row.day not in scheduled
+            ]
+            if unscheduled:
+                raise DecompositionError(
+                    "target source has labels outside its declared session schedule: "
+                    f"{[item.isoformat() for item in unscheduled]}"
+                )
+        if assigned.intersection(labels):
+            raise DecompositionError(
+                "target label assigned to more than one factor anchor"
+            )
+        assigned.update(labels)
+        bucket_rows = [target_by_day[label] for label in labels]
+        if len({row.return_type for row in bucket_rows}) != 1:
+            raise DecompositionError("target bucket mixes return types")
+        if len({row.return_basis for row in bucket_rows}) != 1:
+            raise DecompositionError("target bucket mixes declared return bases")
+        target_return = math.prod(1.0 + row.value for row in bucket_rows) - 1.0
+        factor_row = factor_rows[right]
+        anchor_adjusted = (
+            target_return - factor_row.risk_free
+            if bucket_rows[0].return_type == "TOTAL"
+            else target_return
+        )
+        partition = (
+            "TRAIN"
+            if right <= model.train_end
+            else "HOLDOUT"
+            if right >= model.test_start
+            else "GAP"
+        )
+        values = tuple(
+            cast(float, factor_row.values[factor_id]) for factor_id in model.factor_ids
+        )
+        observations.append(
+            (
+                TargetRow(
+                    day=right,
+                    value=target_return,
+                    canonical_return=_canonical_decimal_text(
+                        format(target_return, ".17g"), "anchor adjusted target return"
+                    ),
+                    evidence_layer=bucket_rows[-1].evidence_layer,
+                    return_basis=bucket_rows[0].return_basis,
+                    return_type=bucket_rows[0].return_type,
+                    cost=(
+                        None
+                        if any(row.cost is None for row in bucket_rows)
+                        else sum(cast(float, row.cost) for row in bucket_rows)
+                    ),
+                ),
+                factor_row,
+                values,
+            )
+        )
+        bucket_receipts.append(
+            {
+                "anchor_adjusted_target_return": _number(anchor_adjusted),
+                "calendar_day_duration": (right - left).days,
+                "factor_anchor": right.isoformat(),
+                "factor_source_snapshot_identity": policy.factor_source_vintage,
+                "partition": partition,
+                "prior_factor_anchor": left.isoformat(),
+                "risk_free": _number(factor_row.risk_free),
+                "factor_return_basis": policy.factor_return_basis,
+                "target_currency": policy.target_currency,
+                "target_return_basis": bucket_rows[0].return_basis,
+                "target_calendar": policy.target_calendar,
+                "target_label_convention": policy.target_label_convention,
+                "target_labels": [label.isoformat() for label in labels],
+                "target_source_snapshot_identity": policy.target_source_vintage,
+                "target_total_return": _number(target_return),
+            }
+        )
+    last_anchor = anchors[-1]
+    return observations, {
+        "buckets": bucket_receipts,
+        "evaluation_information_set": policy.evaluation_information_set,
+        "factor_anchor_availability_boundary": effective_factor_availability.isoformat(),
+        "factor_native_calendar": policy.factor_calendar,
+        "factor_native_label_convention": policy.factor_label_convention,
+        "future_factor_anchors": [item.isoformat() for item in future_anchors],
+        "holdout_display_claim": (
+            "holdout association using selected historical snapshot"
+            if policy.evaluation_information_set == "RETROSPECTIVE_SELECTED_SNAPSHOT"
+            else "point-in-time factor-conditional holdout association using retained historical vintage"
+        ),
+        "pending_factor_anchor_labels": [
+            row.day.isoformat() for row in usable_rows if row.day > last_anchor
+        ],
+        "periods_per_year": model.periods_per_year,
+        "policy_id": (
+            FACTOR_ANCHOR_POLICY
+            if policy.target_calendar != "LEGACY_EXACT_LABEL"
+            else "LEGACY_EXACT_LABEL_ASSOCIATION_V1"
+        ),
+        "point_in_time_vintage": policy.point_in_time_vintage,
+        "pre_anchor_labels": [
+            row.day.isoformat() for row in usable_rows if row.day <= anchors[0]
+        ],
+        "response_label": "ANCHOR_ADJUSTED_TARGET_RETURN",
+        "SIMULTANEOUS_MARKS_NOT_PROVED": True,
+        "unfinalized_tail_labels": [
+            row.day.isoformat()
+            for row in target_rows
+            if row.day > effective_target_finality
+        ],
+        "variable_bucket_duration_calendar_days": sorted(
+            {
+                int(cast(int | str, item["calendar_day_duration"]))
+                for item in bucket_receipts
+            }
+        ),
+    }
+
+
 def _model_result(
     model: ModelDefinition,
     target_rows: Sequence[TargetRow] | None,
     factor_rows: Mapping[date, FactorRow],
     factor_definitions: Mapping[str, FactorDefinition],
     maximum_staleness_days: int,
+    interval_policy: IntervalAssociationPolicy,
 ) -> dict[str, object]:
     if model.as_of_date is not None:
         target_rows = tuple(
@@ -2152,24 +2857,13 @@ def _model_result(
             model, None, "UNAVAILABLE_UNKNOWN_TARGET_SERIES", empty_coverage
         )
 
-    aligned: list[tuple[TargetRow, FactorRow, tuple[float, ...]]] = []
+    aligned, interval_association = _factor_anchor_observations(
+        model=model,
+        target_rows=target_rows,
+        factor_rows=factor_rows,
+        policy=interval_policy,
+    )
     missing_dates: list[date] = []
-    for target_row in target_rows:
-        factor_row = factor_rows.get(target_row.day)
-        if factor_row is None:
-            missing_dates.append(target_row.day)
-            continue
-        values = tuple(factor_row.values[factor_id] for factor_id in model.factor_ids)
-        if any(value is None for value in values):
-            missing_dates.append(target_row.day)
-            continue
-        aligned.append(
-            (
-                target_row,
-                factor_row,
-                tuple(cast(float, value) for value in values),
-            )
-        )
 
     train = [item for item in aligned if item[0].day <= model.train_end]
     test = [item for item in aligned if item[0].day >= model.test_start]
@@ -2292,7 +2986,7 @@ def _model_result(
     aligned_matrix, aligned_target = arrays(aligned)
     training_design = _training_design_diagnostics(train_matrix, model.factor_ids)
     if model.estimator == "DYNAMIC_FLS":
-        return _dynamic_model_result(
+        result = _dynamic_model_result(
             model,
             target_rows,
             aligned,
@@ -2307,6 +3001,8 @@ def _model_result(
             coverage,
             training_design,
         )
+        result["interval_association"] = interval_association
+        return result
     sensitivity: list[dict[str, object]] = []
     scored: list[tuple[float, float]] = []
     for ridge in model.ridge_candidates:
@@ -2480,7 +3176,7 @@ def _model_result(
         None if standard_errors is None else float(standard_errors[0]),
         model.periods_per_year,
     )
-    result: dict[str, object] = {
+    result = {
         "alpha": {
             "annualized_standard_error": _number(alpha_standard_error),
             "confidence_status": confidence_status,
@@ -2537,6 +3233,15 @@ def _model_result(
         "series_id": model.series_id,
         "status": "AVAILABLE",
     }
+    result["orthogonal_attribution"] = _orthogonal_attribution(
+        model=model,
+        train_matrix=train_matrix,
+        aligned_matrix=aligned_matrix,
+        aligned=aligned,
+        exposures=fit.exposures,
+        intercept=fit.intercept,
+    )
+    result["interval_association"] = interval_association
     return _apply_model_quality_gate(result, holdout_r2)
 
 
@@ -2708,6 +3413,7 @@ def build_decomposition(
             factors,
             definitions,
             spec.maximum_factor_staleness_days,
+            spec.interval_association,
         )
         for model in spec.models
     ]
@@ -2723,7 +3429,25 @@ def build_decomposition(
             spec.series_composition.get(str(model_result.get("series_id")), {})
         )
     selections = _select_models(results, spec.models)
+    selected_model_ids = {str(item["model_id"]) for item in selections}
+    for model_result in results:
+        if str(model_result["model_id"]) not in selected_model_ids:
+            model_result.pop("orthogonal_attribution", None)
     methodology_hash, methodology_size = hash_file(METHODOLOGY_PATH)
+    for model_result in results:
+        model_id = str(model_result["model_id"])
+        model_result["analytics_identities"] = {
+            "orthogonal": {
+                "methodology_manifest_sha256": methodology_hash,
+                "model_id": model_id,
+                "surface": "ORTHOGONAL_RISK_ATTRIBUTION",
+            },
+            "raw": {
+                "methodology_manifest_sha256": methodology_hash,
+                "model_id": model_id,
+                "surface": "RAW_MODEL",
+            },
+        }
     source_summary = {
         "factor": {
             "artifact_id": spec.factor_source.artifact_id,

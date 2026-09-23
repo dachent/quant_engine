@@ -336,6 +336,10 @@ def _fixture(
         tmp_path / "base-spec.json",
         {
             "schema_version": 1,
+            "models": [
+                {"series_id": "QSI", "periods_per_year": 252},
+                {"series_id": "TT Portfolio", "periods_per_year": 252},
+            ],
             "target_source": _definition(targets, "target-fixture"),
             "provenance_sources": [],
         },
@@ -597,7 +601,7 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         **{key: value for key, value in inputs.items() if key != "plan_document"}
     )
 
-    assert manifest["builder_version"] == "0.17.0"
+    assert manifest["builder_version"] == "0.18.0"
     assert manifest["schema_version"] == 2
     assert manifest["policies"]["publication"] == "PLAN_ONLY_NO_ACCEPTED_POINTER_CHANGE"
     assert manifest["policies"]["holdout"] == {
@@ -707,6 +711,24 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         for model in dynamic_economic["models"]
     )
     assert economic["models"][0]["test_start"] > economic["models"][0]["train_end"]
+    assert economic["factor_source"]["interval_policy"]["native_calendar"] == (
+        "SOURCE_LABELLED_DAILY"
+    )
+    assert (
+        economic["target_source"]["interval_policy"]["evaluation_information_set"]
+        == "RETROSPECTIVE_SELECTED_SNAPSHOT"
+    )
+    target_interval = economic["target_source"]["interval_policy"]
+    assert target_interval["native_calendar"] == "LEGACY_EXACT_LABEL"
+    assert target_interval["legacy_alignment_policy"] == (
+        "EXACT_TARGET_FACTOR_LABEL_INTERSECTION_NO_CALENDAR_INFERENCE"
+    )
+    assert "session_schedule_labels" not in target_interval
+    assert (
+        economic["factor_source"]["interval_policy"]["return_basis"]
+        == "SOURCE_PUBLISHED"
+    )
+    assert economic["models"][0]["periods_per_year"] == 252
     assert {factor["factor_id"] for factor in economic["factor_source"]["factors"]} == {
         "MKT_RF",
         "SMB",
@@ -735,6 +757,52 @@ def test_build_covers_candidates_and_emits_separate_lens_specs(tmp_path: Path) -
         "reason": "NOT_APPLICABLE_OWNER_APPROVED_DEPRECATED",
         "status": "NOT_APPLICABLE_OWNER_APPROVED",
     }
+
+
+def test_emitted_interval_spec_reaches_the_decomposition_producer(
+    tmp_path: Path,
+) -> None:
+    """The planner's declared source contract is consumable by the real producer."""
+    inputs = _fixture(tmp_path)
+    written = planner.write_bundle(
+        output_root=tmp_path / "output",
+        **{key: value for key, value in inputs.items() if key != "plan_document"},
+    )
+    destination = Path(written["destination"])
+    result, _manifest, _content = engine.build_decomposition(
+        destination / "specs" / "economic.json",
+        destination,
+    )
+    model = next(
+        item
+        for item in result["model_results"]
+        if item["model_id"] == "qsi-economic-01-static"
+    )
+    assert result["analytics_schema_version"] == 3
+    assert model["coverage"]["train_observations"] > 3, model["coverage"]
+    # The fixture has no predictive signal, so the established time-ordered
+    # CV gate remains closed rather than manufacturing an interval receipt.
+    assert model["status"] == "UNAVAILABLE_INSUFFICIENT_TIME_ORDERED_CV"
+
+
+def test_planner_preserves_declared_factor_anchor_periods_per_year(
+    tmp_path: Path,
+) -> None:
+    """Annualization comes from the supplied factor methodology, never dates."""
+    inputs = _fixture(tmp_path)
+    base_spec = json.loads(inputs["base_spec_path"].read_text(encoding="utf-8"))
+    base_spec["models"] = [
+        {"series_id": "QSI", "periods_per_year": 260},
+        {"series_id": "TT Portfolio", "periods_per_year": 260},
+    ]
+    _write_json(inputs["base_spec_path"], base_spec)
+
+    outputs, _manifest = planner.build_bundle(
+        **{key: value for key, value in inputs.items() if key != "plan_document"}
+    )
+
+    economic = json.loads(outputs["specs/economic.json"])
+    assert {model["periods_per_year"] for model in economic["models"]} == {260}
 
 
 def test_dynamic_surface_policy_and_grid_fail_closed(tmp_path: Path) -> None:
