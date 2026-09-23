@@ -597,6 +597,12 @@ def test_declared_unavailable_label_rejects_only_the_bucket_it_spoils(
         label for bucket in interval["buckets"] for label in bucket["target_labels"]
     }
     assert declared_missing.isoformat() not in kept_labels
+    # A declared gap carried real, unpublished return, so nothing compounded from the
+    # published rows alone may be reported as the series' cumulative or drawdown figure.
+    coverage = selected["coverage"]
+    assert coverage["target_cumulative_return"] is None
+    assert coverage["target_current_drawdown"] is None
+    assert coverage["target_max_drawdown"] is None
 
 
 def _available(result: dict[str, object]) -> dict[str, Any]:

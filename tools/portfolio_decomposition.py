@@ -3595,7 +3595,15 @@ def _model_result(
     current_drawdown: float | None = None
     maximum_drawdown: float | None = None
     cumulative_return: float | None = None
-    if all(row.return_type == "TOTAL" for row in target_rows):
+    # A declared gap is a day of real return the source did not publish. Compounding the
+    # published rows alone treats it as zero, so cumulative return and drawdown would be wrong.
+    # The Matrixport declared-gap policy (#287) keeps those dates unavailable for daily metrics
+    # and admits a return across them only for epoch cumulative TWR, from hash-bound holding
+    # period spans -- so these stay unavailable rather than being computed from partial rows.
+    if (
+        all(row.return_type == "TOTAL" for row in target_rows)
+        and not interval_policy.declared_unavailable_labels
+    ):
         wealth = 1.0
         peak = 1.0
         maximum_drawdown = 0.0
