@@ -842,10 +842,30 @@
     return `<div class="panel span-12"><div class="panel-heading"><div><div class="eyebrow">Forward-only research tracker</div><h3>Sealed-holdout replication</h3></div><span class="badge ${row.availability_status === "AVAILABLE_RESEARCH_REPLICATION" ? "badge-positive" : "badge-warning"}">${statusText(row.availability_status)}</span></div><div class="analytics-detail-grid"><div class="metric-block"><div class="metric-label">Actual cumulative</div><div class="metric-value">${pct(metrics.cumulative_actual_excess_return)}</div><div class="metric-note">${safe(row.holdout_start)}–${safe(row.holdout_end)}</div></div><div class="metric-block"><div class="metric-label">Net tracker cumulative</div><div class="metric-value">${pct(metrics.cumulative_net_tracker_excess_return)}</div><div class="metric-note">Gross ${pct(metrics.cumulative_gross_tracker_excess_return)}</div></div><div class="metric-block"><div class="metric-label">Tracking error</div><div class="metric-value">${pct(metrics.annualized_tracking_error)}</div><div class="metric-note">${integer.format(metrics.observation_count)} causal holdout observations</div></div><div class="metric-block"><div class="metric-label">Residual alpha</div><div class="metric-value">${pct(metrics.annualized_descriptive_residual_alpha)}</div><div class="metric-note">Descriptive; no confidence claim</div></div><div class="metric-block"><div class="metric-label">Relative drawdown</div><div class="metric-value">${pct(metrics.max_relative_wealth_ratio_drawdown_loss)}</div><div class="metric-note">Actual versus net tracker wealth ratio</div></div><div class="metric-block"><div class="metric-label">Turnover / cost</div><div class="metric-value">${decimal(metrics.total_turnover)}×</div><div class="metric-note">${safe(policy.selected_cost_bps_per_one_way_turnover)} bps · ${pct(metrics.cumulative_cost_drag)} drag</div></div></div><div class="callout callout-neutral"><strong>Replication rule:</strong> At each accepted daily observation, use only the prior model state to set dynamic weights on ${safe(factors || "the selected factors")}; clip each factor to ±${safe(policy.max_absolute_factor_weight || "unavailable")}×, cap gross factor exposure at ${safe(policy.max_gross_factor_exposure || "unavailable")}×, put the residual in zero-excess-return cash, and charge ${safe(policy.selected_cost_bps_per_one_way_turnover || "unavailable")} bps per one-way turnover. Smoothness ${safe(parameterSelection.smoothness || "unavailable")} was selected on training data by ${safe(humanStatus(parameterSelection.selection_rule || "UNAVAILABLE"))}; holdout recalibration is NONE under the governed policy (payload: ${safe(parameterSelection.holdout_recalibration || "NONE")}).</div><div class="callout callout-neutral"><strong>Interpretation:</strong> This is a simple three-input research replicator when three factors are selected; it is not a recovered copy of the provider's hidden trading rules. <strong>Authority boundary:</strong> Research diagnostic only, with no readiness, allocation, HWM, execution, or order authority.</div></div>`;
   }
 
+  function rejectedBucketNote(row) {
+    // Receipts the producer writes when it drops a factor bucket rather than fit across it.
+    const rejected = Array.isArray(row.interval_association?.rejected_buckets) ? row.interval_association.rejected_buckets : [];
+    if (!rejected.length) return "";
+    const nouns = {
+      DECLARED_UNAVAILABLE_LABEL: ["declared source gap", "declared source gaps"],
+      SOURCE_SEGMENT_GAP: ["source-segment gap", "source-segment gaps"],
+      INCOMPATIBLE_RETURN_BASIS_SOURCE_LAYER_BOUNDARY: ["return-basis boundary", "return-basis boundaries"],
+    };
+    const counts = new Map();
+    rejected.forEach((bucket) => counts.set(bucket.reason, (counts.get(bucket.reason) || 0) + 1));
+    const reasons = [...counts].map(([reason, count]) => {
+      const noun = nouns[reason] ? nouns[reason][count === 1 ? 0 : 1] : humanStatus(reason);
+      return `${integer.format(count)} ${noun}`;
+    }).join(", ");
+    const declared = [...new Set(rejected.flatMap((bucket) => bucket.declared_unavailable_labels || []))].sort();
+    const dates = declared.length ? ` Source-declared unavailable dates: ${declared.map(formatDate).join(", ")}.` : "";
+    return ` ${integer.format(rejected.length)} factor ${rejected.length === 1 ? "bucket was" : "buckets were"} excluded from this fit (${reasons}); no return is filled across them.${dates}`;
+  }
+
   function factorEvidenceComposition(row) {
     const composition = row.series_composition || {};
     if (!composition.status) {
-      return `<div class="callout callout-warning"><strong>Evidence composition:</strong> This legacy analysis does not declare live-versus-backtest row composition. No backtest-history claim is made.</div>`;
+      return `<div class="callout callout-warning"><strong>Evidence composition:</strong> This legacy analysis does not declare live-versus-backtest row composition. No backtest-history claim is made.${safe(rejectedBucketNote(row))}</div>`;
     }
     const liveCount = Number(composition.live_observations || 0);
     const backtestCount = Number(composition.backtest_observations_used || 0);
@@ -856,7 +876,7 @@
       : selectedFactorEvidenceMode === "LIVE_PLUS_BACKTEST"
         ? "Accepted version-matched backtest observations end before live inception; live observations remain authoritative from inception forward."
         : "Only accepted live observations enter this result; backtest observations are excluded.";
-    return `<div class="callout ${noMatchedPrehistory ? "callout-warning" : "callout-neutral"}"><strong>Evidence composition:</strong> ${integer.format(liveCount)} live + ${integer.format(backtestCount)} backtest observations · live inception ${formatDate(composition.live_inception)} · ${statusText(composition.status)}. ${safe(detail)}${rejectedOverlap ? ` ${integer.format(rejectedOverlap)} overlapping backtest observations were rejected because live evidence has precedence.` : ""}</div>`;
+    return `<div class="callout ${noMatchedPrehistory ? "callout-warning" : "callout-neutral"}"><strong>Evidence composition:</strong> ${integer.format(liveCount)} live + ${integer.format(backtestCount)} backtest observations · live inception ${formatDate(composition.live_inception)} · ${statusText(composition.status)}. ${safe(detail)}${rejectedOverlap ? ` ${integer.format(rejectedOverlap)} overlapping backtest observations were rejected because live evidence has precedence.` : ""}${safe(rejectedBucketNote(row))}</div>`;
   }
 
   function factorCoverageText(row) {

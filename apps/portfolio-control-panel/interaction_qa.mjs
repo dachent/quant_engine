@@ -648,6 +648,58 @@ checks.push(check(
         && hybridFactorEvidence.strategy_rows.some((row) => /[1-9][0-9,]* backtest/.test(row.evidence ?? ""))),
   factorModeEvidence,
 ));
+// Rejected factor buckets must be disclosed wherever the payload carries them (#471). The rows
+// come from the payload itself, so every rejection the producer recorded is checked on the page.
+const rejectedBucketCases = [];
+for (const [mode, lenses] of Object.entries(dashboardData.decomposition_lenses?.modes || {})) {
+  for (const lens of lenses || []) {
+    for (const [surface, analysis] of Object.entries(lens.surfaces || {})) {
+      for (const row of analysis.series || []) {
+        const rejected = row.interval_association?.rejected_buckets || [];
+        if (rejected.length) {
+          rejectedBucketCases.push({
+            count: rejected.length,
+            lens: lens.lens_id,
+            mode,
+            series: row.series_id,
+            source: row.source_key || null,
+            surface,
+          });
+        }
+      }
+    }
+  }
+}
+const rejectedBucketEvidence = [];
+for (const item of rejectedBucketCases) {
+  // A disabled control means the view is legitimately unreachable (for example a hybrid mode
+  // with no accepted prehistory), so the case is recorded as unnavigable instead of hanging.
+  const click = async (selector) => {
+    const target = page.locator(selector);
+    if (!(await target.count())) return false;
+    if (await target.first().isDisabled()) return false;
+    await target.first().click();
+    return true;
+  };
+  const navigable = (await click(`[data-factor-evidence-mode="${item.mode}"]`))
+    && (await click(`[data-factor-lens="${item.lens}"]`))
+    && ((await page.locator("[data-factor-surface]").count()) === 0
+      || (await click(`[data-factor-surface="${item.surface}"]`)))
+    && (!item.source || (await click(`[data-factor-source="${item.source}"]`)))
+    && (await click(`[data-factor-strategy="${item.series}"]`));
+  const detail = navigable ? ((await page.locator("#factor-detail").textContent()) ?? "") : "";
+  const phrase = `${item.count} factor ${item.count === 1 ? "bucket was" : "buckets were"} excluded from this fit`;
+  rejectedBucketEvidence.push({ ...item, disclosed: detail.includes(phrase), navigable });
+}
+// Leave the factor view as the later lens checks expect it.
+if (await page.locator('[data-factor-surface="STATIC"]').count()) {
+  await page.locator('[data-factor-surface="STATIC"]').first().click();
+}
+checks.push(check(
+  "Rejected factor buckets are disclosed beside the fit they affect",
+  rejectedBucketEvidence.every((item) => !item.navigable || item.disclosed),
+  rejectedBucketEvidence,
+));
 await page.locator('[data-factor-evidence-mode="LIVE_ONLY"]').click();
 const factorLensButtons = await page.locator("[data-factor-lens]").count();
 const factorLensEvidence = [];
