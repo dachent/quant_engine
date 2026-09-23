@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "governing_issue": 107,
+  "sources": [
+    {
+      "authority": "repository",
+      "commit": "f7eedb35dff9317bbac6aaa53d8df3607da03c4a",
+      "commit_count": 16,
+      "license_file": null,
+      "name": "dachent/mdt",
+      "retained_path": "skills/agent-market-data-terminal",
+      "source_url": "https://github.com/dachent/mdt",
+      "tree_anchor": "SKILL.md",
+      "tree_anchor_blob": "a7b6c834896f5343affe6f8db18853c475b51684"
+    },
+    {
+      "authority": "absorbed_provenance",
+      "commit": "29ac0f3da93a6fee42a1dc4a675ca734b356acc5",
+      "commit_count": 5,
+      "license_file": null,
+      "name": "dachent/yf_marketdata",
+      "removed_from_all_revisions": [
+        ".vendor"
+      ],
+      "retained_path": "skills/agent-market-data-terminal/scripts/fetch_yfinance.py",
+      "sanitized_head_tree": "d549d6cca6f696d490bfb583735fd85830842fe4",
+      "source_commit": "a009e963d50b8bd6140ee44e0944088302b2bfaa",
+      "source_head_tree": "d549d6cca6f696d490bfb583735fd85830842fe4",
+      "source_url": "https://github.com/dachent/yf_marketdata",
+      "tree_anchor": "yf_marketdata/transform.py",
+      "tree_anchor_blob": "204d11dd4ce5bfdbd3297c66fd893cf66dd0f0de"
+    },
+    {
+      "authority": "generated_provenance_snapshot",
+      "commit": "28315ce9711360989e56452d62c72e43ed36b247",
+      "commit_count": 7,
+      "license_file": null,
+      "name": "dachent/a80848d89966daa6730cd553be691b1a",
+      "retained_path": "skills/agent-market-data-terminal/references/generated_endpoint_catalog.md",
+      "source_url": "https://gist.github.com/dachent/a80848d89966daa6730cd553be691b1a",
+      "tree_anchor": "market_data_terminal_endpoints.md",
+      "tree_anchor_blob": "927c2f6fc8d52b8092eb739b158a83080086a6ca"
+    }
+  ]
+}

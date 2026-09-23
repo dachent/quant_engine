@@ -1,0 +1,74 @@
+{
+ "schema_version": 5,
+ "policy_id": "PORT-HWM-4",
+ "product_authority": {
+  "path": "contracts/portfolio-financial-mvp-source-v1.json",
+  "raw_sha256": "5030ee0f5daa9f6e7d87789ce6bff9112c7e108ee047f7c48332d5b6b9b920ab",
+  "semantic_digest": "6be237352a4c9e380e22869c9362677ea96c1c1271562f0cbc265f81c4352a95"
+ },
+ "performance_authority": {
+  "path": "contracts/portfolio-performance-policy-v1.json",
+  "sha256": "b9153ddb6bbaff9d707b0d160d88bf7d43383ce1880ea27339103adc74040809",
+  "policy_version": "PORT-PERF-1"
+ },
+ "owner_decision_receipts": {
+  "CORRECTION_REVERSAL": "eed08d6741194eb68e10940c42cfba64e491df9df217e0231a8dfe1446675589",
+  "FX_BASE_CURRENCY": "d5c1cfd2c63f7a432cea792f7c2f39cf580d70c51aad13ea21eb5db981b4ebd1",
+  "MARGIN_AND_LEVERAGE": "b94d2809b9f9c3d49d4aaa04f3656c7c67aafd82b1069a1e53cd39399f45cc13",
+  "NEGATIVE_NET_CONTRIBUTIONS": "c6d763f09be23919a588a56501e920ff530e4bba0d6af0cda6cde35b05b45551",
+  "PREDECESSOR_TRANSITION": "27a023b850c67bee593b6779d14e7c58bb7a156141588542ffe28c8053af2976"
+ },
+ "material_perimeter_authority": {
+  "source": "PRODUCT_AUTHORITY_HWM_REQUIREMENT_AND_ACCEPTED_HWM_EXCLUSIONS",
+  "legacy_policy_path": "contracts/portfolio-hwm-policy-v3.json",
+  "legacy_policy_sha256": "713799967883f6940a5effeca8e6b879c0d62a41eeb6c6b843e836fa5dbec79b"
+ },
+ "calculation": {
+  "method": "GEOMETRIC_BEGINNING_CAPITAL_WEIGHTED_AS_HELD",
+  "index_base": "100",
+  "return_basis": "LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL",
+  "weight_basis": "BEGINNING_NET_NAV",
+  "hwm_rule": "RUNNING_MAXIMUM_OF_COMPOSITE_INDEX",
+  "drawdown_sign": "SIGNED_NON_POSITIVE",
+  "governor_loss_sign": "POSITIVE_MAGNITUDE",
+  "numeric_type": "DECIMAL_CONTEXT_INDEPENDENT_HALF_EVEN"
+ },
+ "as_of_policy": {
+  "boundary": "LATEST_COMMON_COMPLETE_ACCEPTED_BOUNDARY",
+  "development": "WARN_AND_CALCULATE",
+  "workstation_qc": "WARN_AND_CALCULATE",
+  "release_qc": "WARN_AND_CALCULATE",
+  "required_evidence": [
+   "EVALUATED_ON",
+   "COMPLETE_THROUGH",
+   "CALCULATION_AGE_DAYS",
+   "LIMITING_INPUT_IDENTITIES"
+  ]
+ },
+ "membership_policy": {
+  "basis": "EFFECTIVE_FUNDED_MEMBERSHIP",
+  "entry_exit": "ACCEPTED_INTERVAL_BOUNDARIES_ONLY",
+  "missing_member": "FAIL_NO_SURVIVOR_RENORMALIZATION"
+ },
+ "capital_policy": {
+  "first_period": "INDEPENDENT_OBSERVED_BEGINNING_NET_NAV",
+  "later_periods": "INDEPENDENT_OBSERVED_OR_EXACT_PRIOR_ENDING_NET_NAV_ROLLFORWARD",
+  "terminal_anchor": "NO_BACKCAST"
+ },
+ "calendar_policy": {
+  "authority": "HASH_BOUND_ACCEPTED_INTERVAL_SEQUENCE",
+  "interval_rule": "EXACT_CONTIGUOUS_ONE_DAY_ACCEPTED_INTERVALS",
+  "missing_interval": "FAIL_NO_ZERO_FILL_OR_HOLIDAY_INFERENCE",
+  "release_authority_status": "READY",
+  "accepted_governed_calendar_policy_ids": [
+   "GOVERNED-MIXED-CALENDAR-2026-08-22"
+  ],
+  "portable_synthetic_policy_id": "SYNTHETIC_DAILY_COMMON_CALENDAR"
+ },
+ "input_authority_policy": {
+  "portable_synthetic": "DEVELOPMENT_PROOF_ONLY_NOT_FINANCIAL_ACCEPTANCE",
+  "available_status": "REQUIRES_EXISTING_PIPELINE_GOVERNED_RECEIPT",
+  "workstation_and_release": "REJECT_PORTABLE_SYNTHETIC_INPUTS"
+ },
+ "absence_behavior": "REQUIRED_INFRASTRUCTURE_OR_EVIDENCE_ABSENCE_FAILS_NUMERICAL_ACCEPTANCE"
+}

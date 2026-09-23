@@ -1,0 +1,818 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/account-manifest-independent-verification.schema.json",
+  "title": "Independent account-manifest verification report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "artifact_id",
+    "as_of_date",
+    "status",
+    "verifier",
+    "selected_source_identities",
+    "subjects",
+    "subjects_semantic_sha256",
+    "counts",
+    "blocker_chains",
+    "numeric_verification",
+    "invariants"
+  ],
+  "properties": {
+    "schema_version": {"enum": [1, 2, 3]},
+    "artifact_id": {"const": "verification/independent-verification.json"},
+    "as_of_date": {"$ref": "#/$defs/date"},
+    "status": {"const": "VERIFIED"},
+    "verifier": {
+      "allOf": [
+        {"$ref": "#/$defs/source_artifact"},
+        {
+          "properties": {
+            "artifact_id": {"const": "tools/verify_account_manifest_generation.py"},
+            "schema": {
+              "properties": {
+                "name": {"const": "independent-account-manifest-verifier"},
+                "version": {"const": "1"}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "selected_source_identities": {},
+    "subjects": {},
+    "subjects_semantic_sha256": {"$ref": "#/$defs/sha256"},
+    "counts": {},
+    "blocker_chains": {},
+    "numeric_verification": {"$ref": "#/$defs/numeric_verification"},
+    "invariants": {"$ref": "#/$defs/invariants"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"const": 1}}},
+      "then": {"properties": {
+        "selected_source_identities": {"$ref": "#/$defs/selected_source_identities"},
+        "subjects": {"$ref": "#/$defs/subjects_legacy"},
+        "counts": {"$ref": "#/$defs/counts_v1"},
+        "blocker_chains": {"$ref": "#/$defs/blocker_chains_legacy"}
+      }}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 2}}},
+      "then": {"properties": {
+        "selected_source_identities": {"$ref": "#/$defs/selected_source_identities"},
+        "subjects": {"$ref": "#/$defs/subjects_legacy"},
+        "counts": {"$ref": "#/$defs/counts_v2"},
+        "blocker_chains": {"$ref": "#/$defs/blocker_chains_legacy"}
+      }}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 3}}},
+      "then": {"properties": {
+        "selected_source_identities": {"$ref": "#/$defs/selected_source_identities_v3"},
+        "subjects": {"$ref": "#/$defs/subjects_v3"},
+        "counts": {"$ref": "#/$defs/counts_v3"},
+        "blocker_chains": {"$ref": "#/$defs/blocker_chains_v3"}
+      }}
+    }
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^(?!0000)(?:(?:[0-9]{4}-(?:(?:01|03|05|07|08|10|12)-(?:0[1-9]|[12][0-9]|3[01])|(?:04|06|09|11)-(?:0[1-9]|[12][0-9]|30)|02-(?:0[1-9]|1[0-9]|2[0-8])))|(?:(?:[0-9]{2}(?:0[48]|[2468][048]|[13579][26])|(?:0[48]|[2468][048]|[13579][26])00)-02-29))$"
+    },
+    "portable_path": {
+      "type": "string",
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*//)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*(?:^|/)(?:[aA][uU][xX]|[cC][oO][nN]|[cC][oO][nN][iI][nN]\\$|[cC][oO][nN][oO][uU][tT]\\$|[nN][uU][lL]|[pP][rR][nN]|[cC][oO][mM][1-9]|[lL][pP][tT][1-9])(?:\\.|/|$))(?!.*(?:^|/)[A-Za-z0-9][A-Za-z0-9._-]*[ .](?:/|$))[A-Za-z0-9](?:[A-Za-z0-9._/-]*[A-Za-z0-9])?$"
+    },
+    "nonnegative_integer": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "internal_id": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+    },
+    "schema_object": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1}
+      }
+    },
+    "source_artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "as_of_date", "schema", "sha256", "size_bytes"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/portable_path"},
+        "as_of_date": {"$ref": "#/$defs/date"},
+        "schema": {"$ref": "#/$defs/schema_object"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"$ref": "#/$defs/nonnegative_integer"}
+      }
+    },
+    "selected_catalog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "artifact", "generation_manifest"],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "artifact": {"$ref": "#/$defs/source_artifact"},
+        "generation_manifest": {"$ref": "#/$defs/source_artifact"}
+      }
+    },
+    "provider_catalog": {
+      "allOf": [
+        {"$ref": "#/$defs/selected_catalog"},
+        {"properties": {
+          "artifact": {"allOf": [
+            {"$ref": "#/$defs/source_artifact"},
+            {"properties": {"artifact_id": {"const": "normalized/provider-ledger.json"}, "schema": {"properties": {"name": {"const": "provider-ledger-catalog"}}}}}
+          ]},
+          "generation_manifest": {"allOf": [
+            {"$ref": "#/$defs/source_artifact"},
+            {"properties": {"artifact_id": {"const": "identity/provider-ledger-generation.json"}, "schema": {"properties": {"name": {"const": "generation-manifest"}, "version": {"const": "1"}}}}}
+          ]}
+        }}
+      ]
+    },
+    "baseline_catalog": {
+      "allOf": [
+        {"$ref": "#/$defs/selected_catalog"},
+        {"properties": {
+          "artifact": {"allOf": [
+            {"$ref": "#/$defs/source_artifact"},
+            {"properties": {"artifact_id": {"const": "normalized/portfolio-baseline.json"}, "schema": {"properties": {"name": {"const": "portfolio-baseline-catalog"}}}}}
+          ]},
+          "generation_manifest": {"allOf": [
+            {"$ref": "#/$defs/source_artifact"},
+            {"properties": {"artifact_id": {"const": "identity/portfolio-baseline-generation.json"}, "schema": {"properties": {"name": {"const": "generation-manifest"}, "version": {"const": "1"}}}}}
+          ]}
+        }}
+      ]
+    },
+    "receipt_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["receipt_id", "sha256", "size_bytes"],
+      "properties": {
+        "receipt_id": {"$ref": "#/$defs/portable_path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"$ref": "#/$defs/nonnegative_integer"}
+      }
+    },
+    "code_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "sha256", "size_bytes"],
+      "properties": {
+        "artifact_id": {"$ref": "#/$defs/portable_path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"$ref": "#/$defs/nonnegative_integer"}
+      }
+    },
+    "epoch_producer_identity": {
+      "allOf": [
+        {"$ref": "#/$defs/code_identity"},
+        {"properties": {"artifact_id": {"const": "tools/account_strategy_manifest.py"}}}
+      ]
+    },
+    "generation_builder_identity": {
+      "allOf": [
+        {"$ref": "#/$defs/code_identity"},
+        {"properties": {"artifact_id": {"const": "tools/build_account_manifest_generation.py"}}}
+      ]
+    },
+    "independent_verifier_identity": {
+      "allOf": [
+        {"$ref": "#/$defs/code_identity"},
+        {"properties": {"artifact_id": {"const": "tools/verify_account_manifest_generation.py"}}}
+      ]
+    },
+    "selected_source_identities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "artifact_id",
+        "as_of_date",
+        "provider_ledger",
+        "baseline",
+        "flow_classification_policy",
+        "retrieval_receipts",
+        "code_sources"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "artifact_id": {"const": "selected-input-identities"},
+        "as_of_date": {"$ref": "#/$defs/date"},
+        "provider_ledger": {"$ref": "#/$defs/provider_catalog"},
+        "baseline": {"$ref": "#/$defs/baseline_catalog"},
+        "flow_classification_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["sha256", "size_bytes"],
+          "properties": {
+            "sha256": {"$ref": "#/$defs/sha256"},
+            "size_bytes": {"$ref": "#/$defs/nonnegative_integer"}
+          }
+        },
+        "retrieval_receipts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/receipt_identity"}
+        },
+        "code_sources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["epoch_producer", "generation_builder", "independent_verifier"],
+          "properties": {
+            "epoch_producer": {"$ref": "#/$defs/epoch_producer_identity"},
+            "generation_builder": {"$ref": "#/$defs/generation_builder_identity"},
+            "independent_verifier": {"$ref": "#/$defs/independent_verifier_identity"}
+          }
+        }
+      }
+    },
+    "snapshot_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sha256", "size_bytes"],
+      "properties": {
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"$ref": "#/$defs/nonnegative_integer"}
+      }
+    },
+    "selected_source_identities_v3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "artifact_id",
+        "as_of_date",
+        "provider_ledger",
+        "baseline",
+        "flow_classification_policy",
+        "retrieval_receipts",
+        "code_sources",
+        "receipt_authority",
+        "admission_policy",
+        "manifest_schema",
+        "current_epoch_crosswalk"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "artifact_id": {"const": "selected-input-identities"},
+        "as_of_date": {"$ref": "#/$defs/date"},
+        "provider_ledger": {"$ref": "#/$defs/provider_catalog"},
+        "baseline": {"$ref": "#/$defs/baseline_catalog"},
+        "flow_classification_policy": {"$ref": "#/$defs/snapshot_identity"},
+        "retrieval_receipts": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 15,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/receipt_identity"}
+        },
+        "code_sources": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["epoch_producer", "generation_builder", "independent_verifier"],
+          "properties": {
+            "epoch_producer": {"$ref": "#/$defs/epoch_producer_identity"},
+            "generation_builder": {"$ref": "#/$defs/generation_builder_identity"},
+            "independent_verifier": {"$ref": "#/$defs/independent_verifier_identity"}
+          }
+        },
+        "receipt_authority": {"$ref": "#/$defs/snapshot_identity"},
+        "admission_policy": {"$ref": "#/$defs/snapshot_identity"},
+        "manifest_schema": {"$ref": "#/$defs/snapshot_identity"},
+        "current_epoch_crosswalk": {"$ref": "#/$defs/snapshot_identity"}
+      }
+    },
+    "subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "enum": [
+            "authority/selected-input-identities.json",
+            "authority/account-assignment-perimeter.json",
+            "authority/calculation-inputs.json",
+            "authority/flow-classification-policy.json",
+            "authority/classified-flows.json",
+            "authority/account-flow-coverage.json",
+            "authority/mapped-epoch-admission.json",
+            "authority/code-identities.json",
+            "outputs/account-strategy-manifest.json"
+          ]
+        },
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"$ref": "#/$defs/nonnegative_integer"}
+      }
+    },
+    "mixed_subject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": {"$ref": "#/$defs/portable_path"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size_bytes": {"$ref": "#/$defs/nonnegative_integer"}
+      }
+    },
+    "subjects_legacy": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "uniqueItems": true,
+      "prefixItems": [
+        {"allOf": [{"$ref": "#/$defs/subject"}, {"properties": {"path": {"const": "authority/account-assignment-perimeter.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/subject"}, {"properties": {"path": {"const": "authority/account-flow-coverage.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/subject"}, {"properties": {"path": {"const": "authority/calculation-inputs.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/subject"}, {"properties": {"path": {"const": "authority/classified-flows.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/subject"}, {"properties": {"path": {"const": "authority/code-identities.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/subject"}, {"properties": {"path": {"const": "authority/flow-classification-policy.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/subject"}, {"properties": {"path": {"const": "authority/mapped-epoch-admission.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/subject"}, {"properties": {"path": {"const": "authority/selected-input-identities.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/subject"}, {"properties": {"path": {"const": "outputs/account-strategy-manifest.json"}}}]}
+      ],
+      "items": false
+    },
+    "subjects_v3": {
+      "type": "array",
+      "minItems": 12,
+      "maxItems": 26,
+      "uniqueItems": true,
+      "prefixItems": [
+        {"allOf": [{"$ref": "#/$defs/mixed_subject"}, {"properties": {"path": {"const": "authority/account-assignment-perimeter.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/mixed_subject"}, {"properties": {"path": {"const": "authority/account-flow-coverage.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/mixed_subject"}, {"properties": {"path": {"const": "authority/calculation-inputs.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/mixed_subject"}, {"properties": {"path": {"const": "authority/classified-flows.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/mixed_subject"}, {"properties": {"path": {"const": "authority/code-identities.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/mixed_subject"}, {"properties": {"path": {"const": "authority/flow-classification-policy.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/mixed_subject"}, {"properties": {"path": {"const": "authority/mapped-epoch-admission.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/mixed_subject"}, {"properties": {"path": {"const": "authority/selected-input-identities.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/mixed_subject"}, {"properties": {"path": {"const": "outputs/account-strategy-manifest.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/mixed_subject"}, {"properties": {"path": {"const": "authority/account-interval-retrieval-receipt-authority.json"}}}]},
+        {"allOf": [{"$ref": "#/$defs/mixed_subject"}, {"properties": {"path": {"const": "authority/account-assignment-crosswalk.json"}}}]}
+      ],
+      "items": {
+        "allOf": [
+          {"$ref": "#/$defs/mixed_subject"},
+          {
+            "properties": {
+              "path": {
+                "not": {
+                  "enum": [
+                    "authority/account-assignment-perimeter.json",
+                    "authority/account-assignment-crosswalk.json",
+                    "authority/account-flow-coverage.json",
+                    "authority/account-interval-retrieval-receipt-authority.json",
+                    "authority/calculation-inputs.json",
+                    "authority/classified-flows.json",
+                    "authority/code-identities.json",
+                    "authority/flow-classification-policy.json",
+                    "authority/mapped-epoch-admission.json",
+                    "authority/selected-input-identities.json",
+                    "outputs/account-strategy-manifest.json",
+                    "verification/independent-verification.json"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    "assignment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "strategy_id", "effective_start", "effective_end"],
+      "properties": {
+        "account_id": {"$ref": "#/$defs/internal_id"},
+        "strategy_id": {"$ref": "#/$defs/internal_id"},
+        "effective_start": {"$ref": "#/$defs/date"},
+        "effective_end": {"anyOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]}
+      }
+    },
+    "blocker_chain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assignment", "coverage", "admission", "output", "numeric_candidate"],
+      "properties": {
+        "assignment": {"$ref": "#/$defs/assignment"},
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "blocker_code"],
+          "properties": {
+            "status": {"const": "BLOCKED"},
+            "blocker_code": {"const": "NO_ADMISSIBLE_V2_RECEIPT"}
+          }
+        },
+        "admission": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "blocker_code"],
+          "properties": {
+            "status": {"const": "BLOCKED"},
+            "blocker_code": {"const": "FLOW_COMPLETENESS_NOT_PROVEN"}
+          }
+        },
+        "output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "blocking_reason"],
+          "properties": {
+            "status": {"const": "BLOCKED_ADMISSION"},
+            "blocking_reason": {"const": "FLOW_COMPLETENESS_NOT_PROVEN"}
+          }
+        },
+        "numeric_candidate": {"const": false}
+      }
+    },
+    "blocker_chains_legacy": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/blocker_chain"}
+    },
+    "mixed_numeric_chain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assignment", "coverage", "admission", "output", "numeric_candidate"],
+      "properties": {
+        "assignment": {"$ref": "#/$defs/assignment"},
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "blocker_code"],
+          "properties": {"status": {"const": "COMPLETE"}, "blocker_code": {"type": "null"}}
+        },
+        "admission": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "blocker_code"],
+          "properties": {"status": {"const": "FUNDED"}, "blocker_code": {"type": "null"}}
+        },
+        "output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "blocking_reason"],
+          "properties": {"status": {"const": "OK"}, "blocking_reason": {"type": "null"}}
+        },
+        "numeric_candidate": {"const": true}
+      }
+    },
+    "mixed_blocked_chain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assignment", "coverage", "admission", "output", "numeric_candidate"],
+      "properties": {
+        "assignment": {"$ref": "#/$defs/assignment"},
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "blocker_code"],
+          "properties": {
+            "status": {"enum": ["COMPLETE", "BLOCKED"]},
+            "blocker_code": {
+              "oneOf": [
+                {"type": "null"},
+                {"const": "NO_ADMISSIBLE_V2_RECEIPT"}
+              ]
+            }
+          }
+        },
+        "admission": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "blocker_code"],
+          "properties": {
+            "status": {"enum": ["FUNDED", "BLOCKED"]},
+            "blocker_code": {
+              "oneOf": [
+                {"type": "null"},
+                {"type": "string", "minLength": 1}
+              ]
+            }
+          }
+        },
+        "output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "blocking_reason"],
+          "properties": {
+            "status": {
+              "enum": [
+                "BLOCKED_ADMISSION",
+                "BLOCKED_UNPROVABLE_OPENING_FLOWS",
+                "BLOCKED_RETURN_LINKAGE"
+              ]
+            },
+            "blocking_reason": {"type": "string", "minLength": 1}
+          }
+        },
+        "numeric_candidate": {"const": false}
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "coverage": {"properties": {"status": {"const": "COMPLETE"}, "blocker_code": {"type": "null"}}},
+            "admission": {"properties": {"status": {"const": "BLOCKED"}, "blocker_code": {"type": "string", "minLength": 1}}},
+            "output": {"properties": {"status": {"const": "BLOCKED_ADMISSION"}}}
+          }
+        },
+        {
+          "properties": {
+            "coverage": {"properties": {"status": {"const": "BLOCKED"}, "blocker_code": {"const": "NO_ADMISSIBLE_V2_RECEIPT"}}},
+            "admission": {"properties": {"status": {"const": "BLOCKED"}, "blocker_code": {"type": "string", "minLength": 1}}},
+            "output": {"properties": {"status": {"const": "BLOCKED_ADMISSION"}}}
+          }
+        },
+        {
+          "properties": {
+            "coverage": {"properties": {"status": {"const": "BLOCKED"}, "blocker_code": {"const": "NO_ADMISSIBLE_V2_RECEIPT"}}},
+            "admission": {"properties": {"status": {"const": "FUNDED"}, "blocker_code": {"type": "null"}}},
+            "output": {"properties": {"status": {"const": "BLOCKED_UNPROVABLE_OPENING_FLOWS"}, "blocking_reason": {"const": "FLOW_COMPLETENESS_NOT_PROVEN"}}}
+          }
+        },
+        {
+          "properties": {
+            "coverage": {"properties": {"status": {"const": "COMPLETE"}, "blocker_code": {"type": "null"}}},
+            "admission": {"properties": {"status": {"const": "FUNDED"}, "blocker_code": {"type": "null"}}},
+            "output": {"properties": {"status": {"const": "BLOCKED_RETURN_LINKAGE"}, "blocking_reason": {"const": "OPENING_ANCHOR_RECOGNITION_AFTER_CUTOFF"}}}
+          }
+        },
+        {
+          "properties": {
+            "coverage": {"properties": {"status": {"const": "COMPLETE"}, "blocker_code": {"type": "null"}}},
+            "admission": {"properties": {"status": {"const": "FUNDED"}, "blocker_code": {"type": "null"}}},
+            "output": {"properties": {"status": {"const": "BLOCKED_RETURN_LINKAGE"}, "blocking_reason": {"const": "FLOW_RECOGNITION_NOT_LINKED_TO_OBSERVED_INTERVAL"}}}
+          }
+        }
+      ]
+    },
+    "blocker_chains_v3": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "oneOf": [
+          {"$ref": "#/$defs/mixed_numeric_chain"},
+          {"$ref": "#/$defs/mixed_blocked_chain"}
+        ]
+      }
+    },
+    "counts_v1": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selected_baseline_account_count",
+        "account_count",
+        "assignment_count",
+        "mapped_assignment_count",
+        "historical_assignment_count",
+        "reserve_assignment_count",
+        "current_product_epoch_count",
+        "nav_fact_count",
+        "raw_flow_count",
+        "classified_flow_count",
+        "unassigned_fact_count",
+        "unassigned_projection_count",
+        "calculation_input_row_count",
+        "coverage_row_count",
+        "admission_row_count",
+        "output_row_count",
+        "blocked_coverage_row_count",
+        "blocked_admission_row_count",
+        "blocked_output_row_count"
+      ],
+      "properties": {
+        "selected_baseline_account_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "account_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "mapped_assignment_count": {"const": 15},
+        "current_product_epoch_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "historical_assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "reserve_assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "nav_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "raw_flow_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "classified_flow_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unassigned_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unassigned_projection_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "calculation_input_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "coverage_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "admission_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "output_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "blocked_coverage_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "blocked_admission_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "blocked_output_row_count": {"$ref": "#/$defs/nonnegative_integer"}
+      }
+    },
+    "counts_v2": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selected_baseline_account_count",
+        "account_count",
+        "assignment_count",
+        "mapped_assignment_count",
+        "historical_assignment_count",
+        "reserve_assignment_count",
+        "observed_nav_fact_count",
+        "observed_raw_flow_count",
+        "classified_event_count",
+        "classified_event_classified_count",
+        "classified_event_blocked_count",
+        "unmatched_nav_fact_count",
+        "unmatched_raw_flow_fact_count",
+        "unmatched_fact_count",
+        "unmatched_projection_count",
+        "calculation_input_row_count",
+        "coverage_row_count",
+        "admission_row_count",
+        "output_row_count",
+        "blocked_coverage_row_count",
+        "blocked_admission_row_count",
+        "blocked_output_row_count"
+      ],
+      "properties": {
+        "selected_baseline_account_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "account_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "mapped_assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "historical_assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "reserve_assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "observed_nav_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "observed_raw_flow_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "classified_event_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "classified_event_classified_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "classified_event_blocked_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unmatched_nav_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unmatched_raw_flow_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unmatched_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unmatched_projection_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "calculation_input_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "coverage_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "admission_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "output_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "blocked_coverage_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "blocked_admission_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "blocked_output_row_count": {"$ref": "#/$defs/nonnegative_integer"}
+      }
+    },
+    "counts_v3": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selected_baseline_account_count",
+        "account_count",
+        "assignment_count",
+        "mapped_assignment_count",
+        "historical_assignment_count",
+        "reserve_assignment_count",
+        "observed_nav_fact_count",
+        "observed_raw_flow_count",
+        "classified_event_count",
+        "classified_event_classified_count",
+        "classified_event_blocked_count",
+        "unmatched_nav_fact_count",
+        "unmatched_raw_flow_fact_count",
+        "unmatched_fact_count",
+        "unmatched_projection_count",
+        "calculation_input_row_count",
+        "coverage_row_count",
+        "admission_row_count",
+        "output_row_count",
+        "complete_coverage_row_count",
+        "funded_admission_row_count",
+        "ok_output_row_count",
+        "blocked_coverage_row_count",
+        "blocked_admission_row_count",
+        "blocked_output_row_count"
+      ],
+      "properties": {
+        "selected_baseline_account_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "account_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "mapped_assignment_count": {"const": 15},
+        "historical_assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "reserve_assignment_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "current_product_epoch_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "observed_nav_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "observed_raw_flow_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "classified_event_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "classified_event_classified_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "classified_event_blocked_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unmatched_nav_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unmatched_raw_flow_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unmatched_fact_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "unmatched_projection_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "calculation_input_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "coverage_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "admission_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "output_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "complete_coverage_row_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "funded_admission_row_count": {"type": "integer", "minimum": 0, "maximum": 15},
+        "ok_output_row_count": {"type": "integer", "minimum": 0, "maximum": 15},
+        "blocked_coverage_row_count": {"type": "integer", "minimum": 0, "maximum": 15},
+        "blocked_admission_row_count": {"type": "integer", "minimum": 0, "maximum": 15},
+        "blocked_output_row_count": {"type": "integer", "minimum": 0, "maximum": 15}
+      }
+    },
+    "numeric_verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidate_count",
+        "comparison_count",
+        "discrepancy_count",
+        "disposition"
+      ],
+      "properties": {
+        "candidate_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "comparison_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "discrepancy_count": {"$ref": "#/$defs/nonnegative_integer"},
+        "disposition": {
+          "enum": [
+            "NOT_APPLICABLE_NO_CANDIDATES",
+            "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": ["disposition"],
+            "properties": {
+              "disposition": {"const": "NOT_APPLICABLE_NO_CANDIDATES"}
+            }
+          },
+          "then": {
+            "properties": {
+              "candidate_count": {"const": 0},
+              "comparison_count": {"const": 0},
+              "discrepancy_count": {"const": 0}
+            }
+          }
+        },
+        {
+          "if": {
+            "required": ["disposition"],
+            "properties": {
+              "disposition": {
+                "const": "INDEPENDENT_RECALCULATION_NO_DISCREPANCIES"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "candidate_count": {"minimum": 1},
+              "comparison_count": {"minimum": 1},
+              "discrepancy_count": {"const": 0}
+            }
+          }
+        }
+      ]
+    },
+    "invariants": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exact_subject_set",
+        "canonical_subject_bytes",
+        "selected_source_binding",
+        "fact_disposition_complete",
+        "unassigned_numeric_exclusion",
+        "classified_flow_reconciliation",
+        "mapped_row_bijection",
+        "blocker_propagation",
+        "blocked_numeric_exclusion",
+        "privacy_safe_projection"
+      ],
+      "properties": {
+        "exact_subject_set": {"const": true},
+        "canonical_subject_bytes": {"const": true},
+        "selected_source_binding": {"const": true},
+        "fact_disposition_complete": {"const": true},
+        "unassigned_numeric_exclusion": {"const": true},
+        "classified_flow_reconciliation": {"const": true},
+        "mapped_row_bijection": {"const": true},
+        "blocker_propagation": {"const": true},
+        "blocked_numeric_exclusion": {"const": true},
+        "privacy_safe_projection": {"const": true}
+      }
+    }
+  }
+}

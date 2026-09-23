@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/providers/turingtrader-source-rejection.schema.json",
+  "title": "Sanitized TuringTrader source rejection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "provider_id",
+    "audit_date",
+    "governing_issue",
+    "decision",
+    "privacy",
+    "verified_source_metadata",
+    "unhydrated_capture_set",
+    "rejected_branch",
+    "accepted_routes",
+    "accepted_outputs",
+    "explicit_route_rejections",
+    "blocking_findings",
+    "strategy_handoff",
+    "restricted_output_control",
+    "recovery"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "provider_id": {"const": "turingtrader"},
+    "audit_date": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "governing_issue": {"const": 197},
+    "decision": {"const": "REJECTED_NO_ACCEPTED_PROVIDER_ROUTE"},
+    "privacy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_filenames_committed",
+        "absolute_paths_committed",
+        "provider_payloads_committed",
+        "profile_or_session_material_committed",
+        "real_evidence_location",
+        "artifact_id_rule"
+      ],
+      "properties": {
+        "source_filenames_committed": {"const": false},
+        "absolute_paths_committed": {"const": false},
+        "provider_payloads_committed": {"const": false},
+        "profile_or_session_material_committed": {"const": false},
+        "real_evidence_location": {"const": "outside_git"},
+        "artifact_id_rule": {"type": "string", "minLength": 1}
+      }
+    },
+    "verified_source_metadata": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/verified_metadata"}
+    },
+    "unhydrated_capture_set": {"$ref": "#/$defs/unhydrated_capture_set"},
+    "rejected_branch": {"$ref": "#/$defs/rejected_branch"},
+    "accepted_routes": {"type": "array", "maxItems": 0},
+    "accepted_outputs": {"type": "array", "maxItems": 0},
+    "explicit_route_rejections": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/route_rejection"}
+    },
+    "blocking_findings": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "strategy_handoff": {"$ref": "#/$defs/strategy_handoff"},
+    "restricted_output_control": {"$ref": "#/$defs/restricted_output_control"},
+    "recovery": {"type": "string", "minLength": 1}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verified_metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "format", "bytes", "sha256", "role", "disposition"],
+      "properties": {
+        "artifact_id": {"type": "string", "pattern": "^metadata-[0-9]{3}$"},
+        "format": {"const": ".md"},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "role": {
+          "enum": ["LOCAL_CAPTURE_RUNBOOK", "LOCAL_CAPTURE_SUMMARY"]
+        },
+        "disposition": {
+          "const": "REFERENCE_ONLY_CONFLICTS_WITH_REJECTED_BRANCH_NARRATIVE"
+        }
+      }
+    },
+    "unhydrated_capture_set": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_count",
+        "total_bytes",
+        "principal_navigation_artifact_count",
+        "principal_navigation_total_bytes",
+        "availability",
+        "sha256_state",
+        "content_inspected",
+        "hydration_attempted",
+        "disposition"
+      ],
+      "properties": {
+        "artifact_count": {"const": 5},
+        "total_bytes": {"const": 687784294},
+        "principal_navigation_artifact_count": {"const": 3},
+        "principal_navigation_total_bytes": {"const": 687176414},
+        "availability": {"const": "ONEDRIVE_OFFLINE_UNPINNED_PLACEHOLDER"},
+        "sha256_state": {"const": "UNAVAILABLE_HYDRATION_NOT_AUTHORIZED"},
+        "content_inspected": {"const": false},
+        "hydration_attempted": {"const": false},
+        "disposition": {"const": "REJECTED_UNVERIFIED_CAPTURE_SET"}
+      }
+    },
+    "rejected_branch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "merge_base",
+        "head_commit",
+        "head_tree",
+        "unique_commits",
+        "changed_file_count",
+        "tracked_provider_module_sha256",
+        "opaque_provenance_anchor",
+        "self_contained",
+        "unrelated_untracked_overlap",
+        "disposition"
+      ],
+      "properties": {
+        "merge_base": {"$ref": "#/$defs/sha1"},
+        "head_commit": {"$ref": "#/$defs/sha1"},
+        "head_tree": {"$ref": "#/$defs/sha1"},
+        "unique_commits": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {"$ref": "#/$defs/sha1"}
+        },
+        "changed_file_count": {"const": 6},
+        "tracked_provider_module_sha256": {"$ref": "#/$defs/sha256"},
+        "opaque_provenance_anchor": {"$ref": "#/$defs/sha256"},
+        "self_contained": {"const": false},
+        "unrelated_untracked_overlap": {"const": "PRESERVED_UNCHANGED_OUT_OF_SCOPE_ISSUE_196"},
+        "disposition": {"const": "PRESERVE_UNMERGED_AS_REJECTED_EVIDENCE"}
+      }
+    },
+    "sha1": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "route_rejection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["route_class", "disposition"],
+      "properties": {
+        "route_class": {"enum": ["AUTHENTICATED_PROFILE", "PUBLIC_FIREBASE_CANDIDATES"]},
+        "disposition": {
+          "enum": [
+            "REJECTED_PRIVATE_PROFILE_AND_SESSION_BOUNDARY",
+            "REJECTED_UNVERIFIED_CAPTURE_SCHEMA_IDENTITY_AND_TERMS"
+          ]
+        }
+      }
+    },
+    "strategy_handoff": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy_id",
+        "provider_evidence_state",
+        "version_ref",
+        "version_disposition",
+        "account_live_authority_unchanged",
+        "provider_series_may_replace_account_live"
+      ],
+      "properties": {
+        "strategy_id": {"const": "tt-portfolio"},
+        "provider_evidence_state": {"const": "UNAVAILABLE"},
+        "version_ref": {"const": null},
+        "version_disposition": {"const": "UNRESOLVED_NO_AUTHORITATIVE_MAPPING"},
+        "account_live_authority_unchanged": {"const": true},
+        "provider_series_may_replace_account_live": {"const": false}
+      }
+    },
+    "restricted_output_control": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["finding_issue", "broad_local_serialization_rejected", "future_local_inspection"],
+      "properties": {
+        "finding_issue": {"const": 214},
+        "broad_local_serialization_rejected": {"const": true},
+        "future_local_inspection": {"const": "SCHEMA_FIRST_ALLOWLIST_AGGREGATE_OR_HASH_ONLY"}
+      }
+    }
+  }
+}

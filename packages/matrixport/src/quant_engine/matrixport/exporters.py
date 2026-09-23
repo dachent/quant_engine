@@ -1,0 +1,611 @@
+"""Deterministic CSV and XLSX exports for normalized Matrixport datasets."""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+import re
+from collections import OrderedDict
+from datetime import date, datetime, timezone
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Any, Iterable, Mapping, Sequence
+
+import xlsxwriter  # type: ignore[import-untyped]
+
+
+EXCEL_MAX_CELL_UNITS = 32_767
+EXCEL_MAX_DATA_ROWS = 1_048_575  # one header row occupies Excel's final slot
+SAFE_NUMERIC_SIGNIFICANT_DIGITS = 15
+
+STRATEGY_DATASET_TERMS = (
+    "product",
+    "holding",
+    "portfolio",
+    "trade",
+    "subscription",
+    "redemption",
+    "reservation",
+    "nav",
+    "btc_performance",
+    "statistical",
+    "window",
+    "agreement",
+    "position_event",
+)
+ACCOUNT_DATASET_TERMS = (
+    "wallet",
+    "balance",
+    "bill",
+    "deposit",
+    "withdrawal",
+    "currency",
+    "rfq",
+    "prime_broker",
+)
+AUDIT_DATASET_TERMS = (
+    "endpoint",
+    "request",
+    "manifest",
+    "schema",
+    "dictionary",
+    "quality",
+    "coverage",
+    "reconciliation",
+    "verification",
+)
+
+
+def _json_default(value: Any) -> str:
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    raise TypeError(f"unsupported value: {type(value)!r}")
+
+
+def exact_text(value: Any) -> str:
+    """Convert a canonical scalar to stable text without binary float math."""
+
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError("non-finite decimal cannot be exported")
+        return format(value, "f")
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=_json_default,
+        )
+    return str(value)
+
+
+def protect_csv_formula(value: Any) -> str:
+    """Neutralize spreadsheet formula prefixes while preserving visible text."""
+
+    text = exact_text(value)
+    probe = text.lstrip(" \t\r\n")
+    if probe.startswith(("=", "+", "-", "@")):
+        return "'" + text
+    return text
+
+
+def _columns(
+    rows: Sequence[Mapping[str, Any]], fieldnames: Sequence[str] | None = None
+) -> list[str]:
+    if fieldnames is not None:
+        return [str(name) for name in fieldnames]
+    return sorted({str(key) for row in rows for key in row})
+
+
+def write_csv(
+    path: str | Path,
+    rows: Iterable[Mapping[str, Any]],
+    *,
+    fieldnames: Sequence[str] | None = None,
+) -> Path:
+    """Write deterministic UTF-8-BOM, RFC-4180 CSV atomically."""
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    materialized = list(rows)
+    columns = _columns(materialized, fieldnames)
+    temporary = destination.with_name(destination.name + ".tmp")
+    with temporary.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.writer(
+            handle,
+            dialect="excel",
+            quoting=csv.QUOTE_MINIMAL,
+            lineterminator="\r\n",
+        )
+        writer.writerow(columns)
+        for row in sorted(materialized, key=lambda item: _row_sort_key(item, columns)):
+            writer.writerow(
+                [protect_csv_formula(row.get(column)) for column in columns]
+            )
+    temporary.replace(destination)
+    return destination
+
+
+def _row_sort_key(row: Mapping[str, Any], columns: Sequence[str]) -> tuple[str, ...]:
+    preferred = (
+        "utc_date",
+        "date",
+        "effective_ms",
+        "timestamp_ms",
+        "product_id",
+        "id",
+        "serial_number",
+    )
+    ordered = [column for column in preferred if column in columns]
+    ordered.extend(column for column in columns if column not in ordered)
+    return tuple(exact_text(row.get(column)) for column in ordered)
+
+
+def _safe_filename(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    return cleaned or "dataset"
+
+
+def write_csv_bundle(
+    directory: str | Path,
+    datasets: Mapping[str, Iterable[Mapping[str, Any]]],
+) -> dict[str, Path]:
+    """Write one deterministic CSV per dataset."""
+
+    output_dir = Path(directory)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    written: dict[str, Path] = {}
+    for name in sorted(datasets):
+        written[name] = write_csv(
+            output_dir / f"{_safe_filename(name)}.csv", datasets[name]
+        )
+    return written
+
+
+def _excel_chunks(text: str, limit: int = EXCEL_MAX_CELL_UNITS) -> list[str]:
+    """Split text without exceeding Excel's UTF-16 code-unit cell limit."""
+
+    if not text:
+        return [""]
+    chunks: list[str] = []
+    current: list[str] = []
+    units = 0
+    for character in text:
+        size = 2 if ord(character) > 0xFFFF else 1
+        if current and units + size > limit:
+            chunks.append("".join(current))
+            current = []
+            units = 0
+        current.append(character)
+        units += size
+    chunks.append("".join(current))
+    return chunks
+
+
+def _identifier_column(name: str) -> bool:
+    lowered = name.lower()
+    return (
+        lowered == "id"
+        or lowered.endswith("_id")
+        or lowered.endswith("id")
+        or lowered in {"uid", "sn"}
+        or "serial" in lowered
+        or lowered.endswith("_no")
+        or "timestamp" in lowered
+        or lowered.endswith("_ms")
+        or lowered in {"date", "utc_date"}
+        or lowered.endswith("_date")
+    )
+
+
+def _safe_decimal_number(value: Any) -> float | None:
+    if value is None or value == "" or isinstance(value, bool):
+        return None
+    text = exact_text(value).strip()
+    try:
+        parsed = Decimal(text)
+    except InvalidOperation:
+        return None
+    if not parsed.is_finite():
+        return None
+    significant_digits = len(parsed.as_tuple().digits)
+    if significant_digits > SAFE_NUMERIC_SIGNIFICANT_DIGITS:
+        return None
+    number = float(parsed)
+    if number == float("inf") or number == float("-inf"):
+        return None
+    # Decimal(str(float)) models the 15-digit value Excel exposes.  Requiring
+    # equality prevents a companion that silently changes the canonical text.
+    if Decimal(str(number)) != parsed:
+        return None
+    return number
+
+
+def _excel_datetime(value: Any, column: str) -> datetime | None:
+    lowered = column.lower()
+    if not any(marker in lowered for marker in ("date", "time", "_ms")):
+        return None
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    elif isinstance(value, date):
+        dt = datetime.combine(value, datetime.min.time())
+    else:
+        text = exact_text(value).strip()
+        if (lowered.endswith("_ms") or "timestamp" in lowered) and re.fullmatch(
+            r"-?\d+", text
+        ):
+            milliseconds = int(text)
+            if abs(milliseconds) < 100_000_000_000:
+                milliseconds *= 1000
+            try:
+                dt = datetime.fromtimestamp(milliseconds / 1000, tz=timezone.utc)
+            except (OSError, OverflowError, ValueError):
+                return None
+        else:
+            try:
+                dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+class _ExpandedColumn:
+    __slots__ = ("source", "name", "kind", "part")
+
+    def __init__(
+        self, source: str, name: str, kind: str = "text", part: int = 0
+    ) -> None:
+        self.source = source
+        self.name = name
+        self.kind = kind
+        self.part = part
+
+
+def _expanded_columns(rows: Sequence[Mapping[str, Any]]) -> list[_ExpandedColumn]:
+    expanded: list[_ExpandedColumn] = []
+    for column in _columns(rows):
+        texts = [exact_text(row.get(column)) for row in rows]
+        max_parts = max((_excel_chunks(text).__len__() for text in texts), default=1)
+        if max_parts == 1:
+            expanded.append(_ExpandedColumn(column, column))
+        else:
+            for part in range(max_parts):
+                expanded.append(
+                    _ExpandedColumn(
+                        column, f"{column}__part_{part + 1:03d}", "text", part
+                    )
+                )
+
+        if not _identifier_column(column) and any(
+            _safe_decimal_number(row.get(column)) is not None for row in rows
+        ):
+            expanded.append(_ExpandedColumn(column, f"{column}__number", "number"))
+        if any(_excel_datetime(row.get(column), column) is not None for row in rows):
+            expanded.append(
+                _ExpandedColumn(column, f"{column}__excel_datetime", "datetime")
+            )
+    return expanded
+
+
+def _sheet_base(name: str) -> str:
+    cleaned = re.sub(r"[\[\]:*?/\\]", "_", name).strip("'")
+    return cleaned or "dataset"
+
+
+def _unique_sheet_name(base: str, used: set[str], part: int | None = None) -> str:
+    suffix = "" if part is None else f"_{part:03d}"
+    stem = _sheet_base(base)[: 31 - len(suffix)]
+    candidate = stem + suffix
+    counter = 2
+    while candidate.lower() in used:
+        extra = f"_{counter}"
+        candidate = stem[: 31 - len(suffix) - len(extra)] + suffix + extra
+        counter += 1
+    used.add(candidate.lower())
+    return candidate
+
+
+def _write_readme(
+    workbook: xlsxwriter.Workbook,
+    formats: Mapping[str, Any],
+    workbook_kind: str,
+    run_id: str,
+    datasets: Mapping[str, Sequence[Mapping[str, Any]]],
+    used: set[str],
+) -> None:
+    sheet = workbook.add_worksheet(_unique_sheet_name("README", used))
+    sheet.hide_gridlines(2)
+    sheet.set_column("A:A", 26)
+    sheet.set_column("B:B", 70)
+    sheet.write("A1", "Matrixport Read-Only Export", formats["title"])
+    sheet.merge_range("A1:B1", "Matrixport Read-Only Export", formats["title"])
+    metadata = [
+        ("Workbook", workbook_kind),
+        ("Run ID", run_id),
+        (
+            "Data contract",
+            "Canonical source fields remain exact text; typed companions are explicitly suffixed.",
+        ),
+        (
+            "Valuation policy",
+            "No NAV forward-fill. Strict USD is blank when an active holding lacks NAV or FX.",
+        ),
+        (
+            "Stablecoin policy",
+            "USD, USDC, and USDT parity assumptions are stored in separate labeled columns.",
+        ),
+    ]
+    for row_number, (label, value) in enumerate(metadata, start=2):
+        sheet.write(row_number, 0, label, formats["label"])
+        sheet.write_string(row_number, 1, value, formats["wrap"])
+    start = len(metadata) + 4
+    sheet.write(start, 0, "Dataset", formats["header"])
+    sheet.write(start, 1, "Rows", formats["header"])
+    for offset, name in enumerate(sorted(datasets), start=1):
+        sheet.write_string(start + offset, 0, name, formats["text"])
+        sheet.write_number(start + offset, 1, len(datasets[name]), formats["integer"])
+
+
+def _write_dataset(
+    workbook: xlsxwriter.Workbook,
+    formats: Mapping[str, Any],
+    dataset_name: str,
+    rows: Sequence[Mapping[str, Any]],
+    used: set[str],
+    max_rows_per_sheet: int,
+) -> None:
+    columns = _expanded_columns(rows)
+    if not columns:
+        columns = [_ExpandedColumn("status", "status")]
+        rows = [{"status": "no rows"}]
+
+    for part_number, start in enumerate(
+        range(0, len(rows), max_rows_per_sheet), start=1
+    ):
+        part_rows = rows[start : start + max_rows_per_sheet]
+        split = len(rows) > max_rows_per_sheet
+        sheet = workbook.add_worksheet(
+            _unique_sheet_name(dataset_name, used, part_number if split else None)
+        )
+        sheet.hide_gridlines(2)
+        sheet.freeze_panes(1, 0)
+        sheet.autofilter(0, 0, len(part_rows), len(columns) - 1)
+
+        for column_index, column in enumerate(columns):
+            sheet.write_string(0, column_index, column.name, formats["header"])
+            samples = [column.name]
+            for row in part_rows[:200]:
+                if column.kind == "text":
+                    chunks = _excel_chunks(exact_text(row.get(column.source)))
+                    samples.append(
+                        chunks[column.part] if column.part < len(chunks) else ""
+                    )
+            width = min(
+                60, max(10, max((len(sample) for sample in samples), default=10) + 2)
+            )
+            sheet.set_column(column_index, column_index, width)
+
+        for row_index, row in enumerate(part_rows, start=1):
+            base_format = formats["text_alt"] if row_index % 2 == 0 else formats["text"]
+            for column_index, column in enumerate(columns):
+                value = row.get(column.source)
+                if column.kind == "number":
+                    number = _safe_decimal_number(value)
+                    if number is not None:
+                        sheet.write_number(
+                            row_index, column_index, number, formats["number"]
+                        )
+                elif column.kind == "datetime":
+                    dt = _excel_datetime(value, column.source)
+                    if dt is not None:
+                        sheet.write_datetime(
+                            row_index, column_index, dt, formats["datetime"]
+                        )
+                else:
+                    chunks = _excel_chunks(exact_text(value))
+                    text = chunks[column.part] if column.part < len(chunks) else ""
+                    # Explicit write_string prevents formula execution while
+                    # leaving the exact visible source text unchanged.
+                    sheet.write_string(row_index, column_index, text, base_format)
+
+
+def write_xlsx(
+    path: str | Path,
+    datasets: Mapping[str, Iterable[Mapping[str, Any]]],
+    *,
+    run_id: str,
+    workbook_kind: str = "Matrixport export",
+    max_rows_per_sheet: int = EXCEL_MAX_DATA_ROWS,
+) -> Path:
+    """Write a deterministic, professional, multi-sheet XLSX atomically."""
+
+    if max_rows_per_sheet < 1 or max_rows_per_sheet > EXCEL_MAX_DATA_ROWS:
+        raise ValueError(
+            f"max_rows_per_sheet must be between 1 and {EXCEL_MAX_DATA_ROWS}"
+        )
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(destination.stem + ".tmp.xlsx")
+    materialized: dict[str, list[Mapping[str, Any]]] = {}
+    for name, rows in sorted(datasets.items()):
+        table = list(rows)
+        columns = _columns(table)
+        materialized[str(name)] = sorted(
+            table, key=lambda row: _row_sort_key(row, columns)
+        )
+    workbook = xlsxwriter.Workbook(
+        temporary,
+        {
+            "constant_memory": True,
+            "strings_to_urls": False,
+            "nan_inf_to_errors": True,
+        },
+    )
+    workbook.set_properties(
+        {
+            "title": workbook_kind,
+            "subject": "Read-only Matrixport API export",
+            "author": "Matrixport Export",
+            "company": "",
+            "comments": f"Run ID: {run_id}",
+            "created": datetime(1980, 1, 1),
+        }
+    )
+    formats = {
+        "title": workbook.add_format(
+            {
+                "bold": True,
+                "font_size": 18,
+                "font_color": "#FFFFFF",
+                "bg_color": "#17365D",
+                "align": "left",
+            }
+        ),
+        "header": workbook.add_format(
+            {
+                "bold": True,
+                "font_color": "#FFFFFF",
+                "bg_color": "#1F4E78",
+                "border": 1,
+                "text_wrap": True,
+            }
+        ),
+        "label": workbook.add_format(
+            {"bold": True, "font_color": "#17365D", "bg_color": "#D9EAF7"}
+        ),
+        "text": workbook.add_format({"font_color": "#222222", "valign": "top"}),
+        "text_alt": workbook.add_format(
+            {"font_color": "#222222", "bg_color": "#F3F7FA", "valign": "top"}
+        ),
+        "wrap": workbook.add_format({"text_wrap": True, "valign": "top"}),
+        "number": workbook.add_format(
+            {"num_format": "#,##0.###############", "valign": "top"}
+        ),
+        "integer": workbook.add_format({"num_format": "#,##0"}),
+        "datetime": workbook.add_format(
+            {"num_format": "yyyy-mm-dd hh:mm:ss", "valign": "top"}
+        ),
+    }
+    used: set[str] = set()
+    try:
+        _write_readme(workbook, formats, workbook_kind, run_id, materialized, used)
+        for name in sorted(materialized):
+            _write_dataset(
+                workbook,
+                formats,
+                name,
+                materialized[name],
+                used,
+                max_rows_per_sheet,
+            )
+    finally:
+        workbook.close()
+    temporary.replace(destination)
+    return destination
+
+
+def partition_datasets(
+    datasets: Mapping[str, Iterable[Mapping[str, Any]]],
+) -> dict[str, OrderedDict[str, list[Mapping[str, Any]]]]:
+    """Assign canonical tables to strategy, account, and audit workbooks.
+
+    Reconciliation/audit tables take precedence.  Unknown datasets go to the
+    audit workbook so nothing is silently dropped.
+    """
+
+    groups: dict[str, OrderedDict[str, list[Mapping[str, Any]]]] = {
+        "strategy": OrderedDict(),
+        "account": OrderedDict(),
+        "audit": OrderedDict(),
+    }
+    for name in sorted(datasets):
+        rows = list(datasets[name])
+        lowered = name.lower()
+        if any(term in lowered for term in AUDIT_DATASET_TERMS):
+            group = "audit"
+        elif any(term in lowered for term in STRATEGY_DATASET_TERMS):
+            group = "strategy"
+        elif any(term in lowered for term in ACCOUNT_DATASET_TERMS):
+            group = "account"
+        else:
+            group = "audit"
+        groups[group][name] = rows
+    return groups
+
+
+def generate_workbooks(
+    directory: str | Path,
+    run_id: str,
+    datasets: Mapping[str, Iterable[Mapping[str, Any]]],
+) -> dict[str, Path]:
+    """Generate the strategy, account, and audit workbook contract."""
+
+    output_dir = Path(directory)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    groups = partition_datasets(datasets)
+    result: dict[str, Path] = {}
+    for kind in ("strategy", "account", "audit"):
+        filename = f"matrixport_{kind}_{run_id}.xlsx"
+        result[kind] = write_xlsx(
+            output_dir / filename,
+            groups[kind],
+            run_id=run_id,
+            workbook_kind=f"Matrixport {kind.title()} Export",
+        )
+    return result
+
+
+def dataset_digest(rows: Iterable[Mapping[str, Any]]) -> str:
+    """Return a stable SHA-256 digest for cross-format parity manifests."""
+
+    materialized = list(rows)
+    columns = _columns(materialized)
+    payload = [columns]
+    payload.extend(
+        [exact_text(row.get(column)) for column in columns]
+        for row in sorted(materialized, key=lambda item: _row_sort_key(item, columns))
+    )
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def export_datasets(
+    run_directory: str | Path,
+    run_id: str,
+    datasets: Mapping[str, Iterable[Mapping[str, Any]]],
+) -> dict[str, Any]:
+    """Write canonical CSVs, three workbooks, and a parity manifest."""
+
+    run_dir = Path(run_directory)
+    materialized = {str(name): list(rows) for name, rows in datasets.items()}
+    csv_paths = write_csv_bundle(run_dir / "csv", materialized)
+    workbook_paths = generate_workbooks(run_dir / "xlsx", run_id, materialized)
+    manifest = [
+        {
+            "dataset": name,
+            "row_count": str(len(materialized[name])),
+            "sha256": dataset_digest(materialized[name]),
+        }
+        for name in sorted(materialized)
+    ]
+    write_csv(run_dir / "reports" / "dataset_manifest.csv", manifest)
+    return {"csv": csv_paths, "xlsx": workbook_paths, "manifest": manifest}

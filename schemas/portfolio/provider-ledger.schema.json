@@ -1,0 +1,181 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/provider-ledger.schema.json",
+  "title": "Canonical provider-to-ledger admission catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "admissions",
+    "as_of_date",
+    "capital_anchors",
+    "catalog_schema_version",
+    "corporate_actions",
+    "fact_counts",
+    "flows",
+    "nav_observations",
+    "positions",
+    "provider_coverage",
+    "provider_generations",
+    "provider_strategy_returns",
+    "quality_findings",
+    "reconciliation_checks",
+    "securities",
+    "strategy_evidence",
+    "strategy_returns",
+    "transactions"
+  ],
+  "properties": {
+    "admissions": {"type": "array", "items": {"$ref": "#/$defs/admission"}},
+    "as_of_date": {"type": "string", "format": "date"},
+    "capital_anchors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["account_id", "amount", "capital_type", "event_date", "evidence_layer", "generation_id", "mapping_basis", "mapping_status", "nav_recognition_date", "provider_id", "record_id", "source_artifact_id", "source_record_id", "strategy_id"],
+        "properties": {
+          "account_id": {"type": "string", "minLength": 1},
+          "amount": {"$ref": "#/$defs/money"},
+          "capital_type": {"enum": ["OPENING_CAPITAL_ANCHOR", "STRATEGY_CAPITAL_ALLOCATION"]},
+          "event_date": {"type": "string", "format": "date"},
+          "evidence_layer": {"const": "ACCOUNT_LIVE"},
+          "generation_id": {"type": "string", "minLength": 1},
+          "mapping_basis": {"type": "string", "minLength": 1},
+          "mapping_status": {"enum": ["MAPPED", "UNMAPPED"]},
+          "nav_recognition_date": {"type": "string", "format": "date"},
+          "nav_source_artifact_id": {"type": "string", "minLength": 1},
+          "opening_nav": {"$ref": "#/$defs/money"},
+          "provider_id": {"type": "string", "minLength": 1},
+          "record_id": {"type": "string", "minLength": 1},
+          "source_artifact_id": {"type": "string", "minLength": 1},
+          "source_product_id": {"type": "string", "minLength": 1},
+          "source_record_id": {"type": "string", "minLength": 1},
+          "strategy_id": {"type": ["string", "null"]},
+          "valuation_fx": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "base_currency", "currency", "date", "field", "generation_id",
+                "provider", "rate", "source_artifact_id", "timing"
+              ],
+              "properties": {
+                "base_currency": {"type": "string", "minLength": 1},
+                "currency": {"type": "string", "minLength": 1},
+                "date": {"type": "string", "format": "date"},
+                "field": {"type": "string", "minLength": 1},
+                "generation_id": {"type": "string", "minLength": 1},
+                "provider": {"type": "string", "minLength": 1},
+                "rate": {"type": "string", "minLength": 1},
+                "source_artifact_id": {"type": "string", "minLength": 1},
+                "timing": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"capital_type": {"const": "OPENING_CAPITAL_ANCHOR"}}, "required": ["capital_type"]},
+            "then": {"required": ["opening_nav", "nav_source_artifact_id"]}
+          }
+        ]
+      }
+    },
+    "catalog_schema_version": {"const": 2},
+    "corporate_actions": {"type": "array", "items": {"type": "object"}},
+    "fact_counts": {"type": "array", "minItems": 5, "items": {"$ref": "#/$defs/factCount"}},
+    "flows": {"type": "array", "items": {"type": "object"}},
+    "nav_observations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["provider_id"],
+        "properties": {
+          "provider_id": {"type": "string", "minLength": 1},
+          "source_artifact_id": {"type": "string", "minLength": 1},
+          "value_basis": {"enum": ["ACCOUNT_TOTAL", "ACCOUNT_VALUE"]}
+        },
+        "allOf": [
+          {
+            "if": {"required": ["value_basis"], "properties": {"provider_id": {"const": "ibkr"}}},
+            "then": {"required": ["source_artifact_id"], "properties": {"value_basis": {"const": "ACCOUNT_TOTAL"}}}
+          },
+          {
+            "if": {"required": ["value_basis"], "properties": {"provider_id": {"const": "matrixport"}}},
+            "then": {"required": ["source_artifact_id"], "properties": {"value_basis": {"const": "ACCOUNT_TOTAL"}}}
+          },
+          {
+            "if": {"required": ["value_basis"], "properties": {"provider_id": {"const": "schwab"}}},
+            "then": {"required": ["source_artifact_id"], "properties": {"value_basis": {"const": "ACCOUNT_VALUE"}}}
+          }
+        ]
+      }
+    },
+    "positions": {"type": "array", "items": {"type": "object"}},
+    "provider_coverage": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"type": "object"}},
+    "provider_generations": {"type": "array", "minItems": 7, "maxItems": 7, "items": {"$ref": "#/$defs/providerGeneration"}},
+    "provider_strategy_returns": {"type": "array", "items": {"type": "object"}},
+    "quality_findings": {"type": "array", "items": {"type": "object"}},
+    "reconciliation_checks": {"type": "array", "minItems": 3, "items": {"type": "object"}},
+    "securities": {"type": "array", "items": {"type": "object"}},
+    "strategy_evidence": {"type": "array", "minItems": 8, "items": {"type": "object"}},
+    "strategy_returns": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "transactions": {"type": "array", "items": {"type": "object"}}
+  },
+  "$defs": {
+    "money": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["currency", "status", "value"],
+      "properties": {
+        "currency": {"type": "string", "minLength": 1},
+        "status": {"const": "AVAILABLE"},
+        "value": {"type": "string", "minLength": 1}
+      }
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "account_reconciliation_sha256", "disposition", "effective_end", "effective_start", "evidence_layer", "fact_type", "pool_id", "provider_id", "strategy_id"],
+      "properties": {
+        "account_id": {"type": ["string", "null"]},
+        "account_reconciliation_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "disposition": {"enum": ["AUTHORITATIVE", "RECONCILIATION_ONLY", "REFERENCE_ONLY", "BLOCKED_GAP"]},
+        "effective_end": {"type": "string", "format": "date"},
+        "effective_start": {"type": "string", "format": "date"},
+        "evidence_layer": {"enum": ["ACCOUNT_LIVE", "PROVIDER_LIVE", "OFFICIAL_VEHICLE", "PREDECESSOR", "SHADOW_OOS", "BACKTEST", "CONCEPTUAL_STRESS"]},
+        "fact_type": {"type": "string", "minLength": 1},
+        "pool_id": {"type": ["string", "null"]},
+        "provider_id": {"type": "string", "minLength": 1},
+        "strategy_id": {"type": ["string", "null"]}
+      }
+    },
+    "factCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fact_type", "mapped_count", "record_count", "unmapped_count"],
+      "properties": {
+        "fact_type": {"type": "string", "minLength": 1},
+        "mapped_count": {"type": "integer", "minimum": 0},
+        "record_count": {"type": "integer", "minimum": 0},
+        "unmapped_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "providerGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog_sha256", "generation_as_of_date", "generation_id", "manifest_sha256", "provider_id", "qualification"],
+      "properties": {
+        "catalog_sha256": {"$ref": "#/$defs/sha256"},
+        "generation_as_of_date": {"type": "string", "format": "date"},
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "provider_id": {"type": "string", "minLength": 1},
+        "qualification": {"enum": ["PUBLISHED_COMPLETE", "ACCEPTED_PARTIAL", "FINITE_STATIC"]}
+      }
+    }
+  }
+}

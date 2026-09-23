@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "review": {
+    "accepted_commit": "8ca2b94eef2cdd7cd0172295d1eae15e8b137376",
+    "finding_disposition": "FALSE_POSITIVE",
+    "issue": "https://github.com/dachent/quant_engine/issues/194",
+    "reviewed_on": "2026-08-12",
+    "state": "CLOSED"
+  },
+  "suppressions": [
+    {
+      "classification": "archived-synthetic-negative-test",
+      "fingerprint": "b61bf496f7b636252b785dba11bd3c807280a743:recovery/orphan-git-blobs/f668db55401647f449c3a5b705a8165c7418c014.txt:generic-api-key:214",
+      "rationale": "Archived recovery copy of the Matrixport hostile-target negative-test fixture; no credential value is present."
+    },
+    {
+      "classification": "provenance-content-hash",
+      "fingerprint": "0dafe7e4019d8c67c246bcf9e3d4abc3f6db408d:provenance/portfolio123/skill-installation-manifest.json:generic-api-key:9",
+      "rationale": "Portfolio123 skill-installation provenance records an immutable SHA-256 content hash, not an API credential."
+    },
+    {
+      "classification": "synthetic-negative-test",
+      "fingerprint": "fec98dca7957e31eb0154f5afca554708ff3462f:tests/matrixport/test_security_transport.py:generic-api-key:214",
+      "rationale": "Matrixport transport negative test contains a deliberately hostile example URL and no credential value."
+    },
+    {
+      "classification": "source-provenance-commit",
+      "fingerprint": "f2ec77f35685dd68df9ca2a0a9976b5d7a645e99:packages/schwab/src/quant_engine/schwab/generation.py:generic-api-key:732",
+      "rationale": "Schwab source provenance records the public dependency repository commit identity, not an API credential."
+    }
+  ]
+}

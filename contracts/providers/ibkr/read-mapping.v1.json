@@ -1,0 +1,322 @@
+{
+  "schema_version": "1.0",
+  "provider_id": "ibkr",
+  "decision_date": "2026-07-30",
+  "surfaces": {
+    "tws_gateway": {
+      "role": "CURRENT_INTRADAY",
+      "publishable_as_finalized_history": false,
+      "allowed_capabilities": [
+        "CURRENT_ACCOUNT_VALUES",
+        "CURRENT_POSITIONS",
+        "CURRENT_OPEN_ORDERS",
+        "CURRENT_AND_BOUNDED_RECENT_EXECUTIONS",
+        "CURRENT_DAY_EVENT_CAPTURE"
+      ],
+      "denied_claims": [
+        "HISTORICAL_ACCOUNT_NAV",
+        "HISTORICAL_ACCOUNT_POSITIONS",
+        "DURABLE_FINALIZED_ACCOUNT_LEDGER"
+      ]
+    },
+    "flex_activity": {
+      "role": "FINALIZED_HISTORY",
+      "publishable_as_finalized_history": true,
+      "allowed_capabilities": [
+        "ACCOUNT_NAV_HISTORY",
+        "POSITION_HISTORY",
+        "TRADES_AND_COSTS",
+        "CASH_ACTIVITY",
+        "TRANSFERS",
+        "CORPORATE_ACTIONS",
+        "REPORT_DATE_FX"
+      ],
+      "retrieval_contract": {
+        "workflow": "SEND_REQUEST_THEN_GET_STATEMENT",
+        "service_version": 3,
+        "send_request_limit": "1_PER_SECOND_AND_10_PER_MINUTE_PER_TOKEN",
+        "require_user_agent": true,
+        "reject_error_codes": true,
+        "reject_truncated_or_malformed_statement": true
+      }
+    },
+    "historical_market_data": {
+      "role": "INSTRUMENT_MARKET_DATA_ONLY",
+      "publishable_as_finalized_history": false,
+      "denied_claims": [
+        "ACCOUNT_NAV",
+        "ACCOUNT_POSITION_HISTORY",
+        "ACCOUNT_TRANSACTION_HISTORY"
+      ]
+    }
+  },
+  "authority_rules": [
+    {
+      "fact_type": "ACCOUNT_IDENTITY",
+      "finalization_state": "ANY",
+      "authority": "LOCAL_RESTRICTED_CROSSWALK",
+      "corroborating_sources": ["FLEX_ACTIVITY", "TWS_GATEWAY"],
+      "rule": "Raw account numbers and aliases resolve locally to stable internal account IDs and never enter Git."
+    },
+    {
+      "fact_type": "CURRENT_ACCOUNT_VALUE",
+      "finalization_state": "INTRADAY",
+      "authority": "TWS_GATEWAY",
+      "source_operation": "reqAccountUpdates_or_reqAccountSummary"
+    },
+    {
+      "fact_type": "NAV_OBSERVATION",
+      "finalization_state": "FINALIZED",
+      "authority": "FLEX_ACTIVITY",
+      "source_section": "EquitySummaryByReportDateInBase",
+      "reconcile_with": "ChangeInNAV.endingValue"
+    },
+    {
+      "fact_type": "POSITION_SNAPSHOT",
+      "finalization_state": "INTRADAY",
+      "authority": "TWS_GATEWAY",
+      "source_operation": "reqPositions_or_reqAccountUpdates"
+    },
+    {
+      "fact_type": "POSITION_SNAPSHOT",
+      "finalization_state": "FINALIZED",
+      "authority": "FLEX_ACTIVITY",
+      "source_section": "OpenPosition",
+      "required_level_of_detail": "SUMMARY"
+    },
+    {
+      "fact_type": "OPEN_ORDER",
+      "finalization_state": "CURRENT",
+      "authority": "TWS_GATEWAY",
+      "source_operation": "reqOpenOrders_or_reqAllOpenOrders"
+    },
+    {
+      "fact_type": "EXECUTION",
+      "finalization_state": "INTRADAY_PROVISIONAL",
+      "authority": "TWS_GATEWAY",
+      "source_operation": "execDetails_and_reqExecutions"
+    },
+    {
+      "fact_type": "TRANSACTION",
+      "finalization_state": "FINALIZED",
+      "authority": "FLEX_ACTIVITY",
+      "source_section": "Trade",
+      "required_level_of_detail": "EXECUTION"
+    },
+    {
+      "fact_type": "CASH_FLOW",
+      "finalization_state": "FINALIZED",
+      "authority": "FLEX_ACTIVITY",
+      "source_sections": ["Transfer", "CashTransaction"],
+      "rule": "Only classified external deposits, withdrawals, and transfers become external cash flows."
+    },
+    {
+      "fact_type": "CORPORATE_ACTION",
+      "finalization_state": "FINALIZED",
+      "authority": "FLEX_ACTIVITY",
+      "source_section": "CorporateAction"
+    },
+    {
+      "fact_type": "REPORT_DATE_FX",
+      "finalization_state": "FINALIZED",
+      "authority": "FLEX_ACTIVITY",
+      "source_section": "ConversionRate"
+    }
+  ],
+  "fact_mappings": [
+    {
+      "target_record": "Account",
+      "source_section": "AccountInformation",
+      "identity_fields": ["accountId", "acctAlias"],
+      "target_fields": {
+        "account_id": "restricted_crosswalk(accountId, acctAlias)",
+        "base_currency": "currency",
+        "name": "configured_internal_name",
+        "role": "configured_account_role"
+      },
+      "gaps": [
+        "No raw account identifier or owner name may enter normalized output or Git."
+      ]
+    },
+    {
+      "target_record": "Security",
+      "source_section": "OpenPosition_or_Trade_or_CashTransaction",
+      "identity_fields": ["conid"],
+      "descriptive_fields": [
+        "symbol",
+        "assetCategory",
+        "currency",
+        "listingExchange",
+        "securityID",
+        "securityIDType",
+        "figi",
+        "isin"
+      ],
+      "target_fields": {
+        "security_id": "restricted_security_crosswalk(conid)",
+        "name": "description_or_configured_name",
+        "currency": "currency"
+      },
+      "gaps": [
+        "A missing or ambiguous conid blocks identity; symbol alone is not sufficient."
+      ]
+    },
+    {
+      "target_record": "NavObservation",
+      "source_section": "EquitySummaryByReportDateInBase",
+      "identity_fields": ["accountId", "reportDate"],
+      "target_fields": {
+        "account_id": "restricted_crosswalk(accountId)",
+        "as_of_date": "reportDate",
+        "nav.value": "total",
+        "nav.currency": "currency",
+        "nav.status": "AVAILABLE"
+      },
+      "verification": [
+        "Reconcile total to ChangeInNAV.endingValue for the same account and date.",
+        "Require one summary row per internal account and report date."
+      ]
+    },
+    {
+      "target_record": "PositionSnapshot",
+      "source_section": "OpenPosition",
+      "identity_fields": ["accountId", "conid", "reportDate", "levelOfDetail"],
+      "filters": ["levelOfDetail == SUMMARY"],
+      "target_fields": {
+        "account_id": "restricted_crosswalk(accountId)",
+        "security_id": "restricted_security_crosswalk(conid)",
+        "as_of_date": "reportDate",
+        "quantity": "position",
+        "market_value.value": "positionValue * fxRateToBase",
+        "market_value.currency": "account_base_currency",
+        "mapping_status": "accepted_assignment_or_UNMAPPED",
+        "strategy_id": "accepted_assignment_only"
+      },
+      "verification": [
+        "Preserve original positionValue, currency, markPrice, and fxRateToBase as source evidence.",
+        "Do not aggregate SUMMARY and LOT rows together."
+      ]
+    },
+    {
+      "target_record": "Transaction",
+      "source_section": "Trade",
+      "identity_fields": ["accountId", "ibExecID"],
+      "fallback_identity_fields": [
+        "accountId",
+        "tradeID",
+        "transactionID",
+        "dateTime"
+      ],
+      "filters": ["levelOfDetail == EXECUTION"],
+      "target_fields": {
+        "account_id": "restricted_crosswalk(accountId)",
+        "event_date": "tradeDate_or_date(dateTime)",
+        "kind": "normalized(transactionType, buySell, code)",
+        "amount.value": "netCash",
+        "amount.currency": "currency",
+        "security_id": "restricted_security_crosswalk(conid)",
+        "mapping_status": "accepted_assignment_or_UNMAPPED",
+        "strategy_id": "accepted_assignment_only"
+      },
+      "verification": [
+        "Preserve quantity, tradePrice, proceeds, taxes, commissions, and correction lineage.",
+        "Deduplicate by execution identity; corrected or cancelled trades supersede append-only."
+      ]
+    },
+    {
+      "target_record": "Transaction_or_CashFlow",
+      "source_section": "CashTransaction",
+      "identity_fields": ["accountId", "transactionID", "actionID"],
+      "fallback_identity_fields": [
+        "stable_hash_of_complete_source_row_when_provider_identity_is_absent"
+      ],
+      "target_fields": {
+        "account_id": "restricted_crosswalk(accountId)",
+        "event_date": "date(dateTime_or_reportDate)",
+        "nav_recognition_date": "reportDate",
+        "amount.value": "amount",
+        "amount.currency": "currency",
+        "kind_or_flow_type": "classified(type, code, description)",
+        "security_id": "restricted_security_crosswalk(conid)_when_present"
+      },
+      "classification": {
+        "external_cash_flow": ["DEPOSIT", "WITHDRAWAL", "EXTERNAL_TRANSFER"],
+        "investment_result_transaction": [
+          "DIVIDEND",
+          "INTEREST",
+          "FEE",
+          "TAX",
+          "PAYMENT_IN_LIEU"
+        ],
+        "unrecognized": "UNMAPPED_AND_BLOCK_PUBLICATION"
+      }
+    },
+    {
+      "target_record": "CashFlow",
+      "source_section": "Transfer",
+      "identity_fields": ["accountId", "transactionID", "positionInstructionID"],
+      "target_fields": {
+        "account_id": "restricted_crosswalk(accountId)",
+        "event_date": "date(dateTime_or_date)",
+        "nav_recognition_date": "reportDate",
+        "flow_type": "classified(direction, type, cashTransfer, code)",
+        "amount.value": "cashTransfer when nonzero; otherwise exact positionAmountInBase only after a proved paired internal transfer",
+        "amount.currency": "currency for cashTransfer; statement base currency for positionAmountInBase",
+        "value_basis": "POSITION_AMOUNT_IN_BASE only for the proved positionAmountInBase projection",
+        "mapping_status": "accepted_assignment_or_UNMAPPED"
+      },
+      "verification": [
+        "Use event_date for economic cash timing and nav_recognition_date for flow-adjusted NAV return links; never substitute one for the other.",
+        "A positionAmountInBase projection requires exactly two distinct internal accounts with one shared transaction/activity identity, same date and conid, IN/OUT directions, and exactly opposite retained source-base values.",
+        "Do not infer cash value from quantity or price; a missing or unproved positionAmountInBase remains UNAVAILABLE.",
+        "Both paired rows must be type INTERNAL, have identical statement base currencies, and use positive IN / negative OUT positionAmountInBase signs."
+      ]
+    },
+    {
+      "target_record": "CorporateAction",
+      "source_section": "CorporateAction",
+      "identity_fields": ["accountId", "transactionID", "actionID"],
+      "target_fields": {
+        "account_id": "restricted_crosswalk(accountId)",
+        "security_id": "restricted_security_crosswalk(conid)",
+        "event_date": "date(dateTime_or_reportDate)",
+        "kind": "normalized(type, code, actionDescription)",
+        "quantity": "quantity",
+        "amount": "amount_or_proceeds"
+      },
+      "verification": [
+        "Preserve quantity and source-observed amount independently.",
+        "Apply strategy attribution only through an accepted effective-dated assignment; account-scope exceptions remain UNMAPPED."
+      ]
+    },
+    {
+      "target_record": "SourceFxObservation",
+      "source_section": "ConversionRate",
+      "identity_fields": ["reportDate", "fromCurrency", "toCurrency"],
+      "target_fields": {
+        "as_of_date": "reportDate",
+        "from_currency": "fromCurrency",
+        "to_currency": "toCurrency",
+        "rate": "rate"
+      },
+      "gaps": [
+        "The minimal ledger has no standalone FX record; retain as provider evidence until a real second consumer justifies a shared market-data contract."
+      ]
+    }
+  ],
+  "strategy_mapping": {
+    "authority": "ACCEPTED_EFFECTIVE_DATED_ACCOUNT_STRATEGY_ASSIGNMENT",
+    "provider_fields_are_evidence_only": ["accountId", "acctAlias", "model"],
+    "rule": "Provider model or account labels never create Strategy identities. Unresolved facts remain UNMAPPED."
+  },
+  "known_gaps": [
+    "The legacy evidence begins on 2025-09-15 and ends on 2026-07-14; earlier and later history is not proven by this inventory.",
+    "Five statement-level account identities are observed across the legacy XML and match the accepted NAV curves exactly through a restricted local crosswalk.",
+    "A further provider-reported account identifier occurs on 217 cash or corporate-action rows under a different enclosing statement; these facts remain account-scope exceptions and cannot receive strategy attribution until adjudicated.",
+    "The two binary XLS artifacts have not been semantically compared to XML/CSV and remain secondary evidence.",
+    "Current Flex query configuration, included accounts, field selection, token scope, and entitlement have not been verified.",
+    "TWS/Gateway connectivity, account visibility, and execution-window behavior have not been tested locally.",
+    "A standalone shared FX record is not implemented in the minimal ledger.",
+    "No provider generation or authority pointer is created by this decision contract."
+  ]
+}

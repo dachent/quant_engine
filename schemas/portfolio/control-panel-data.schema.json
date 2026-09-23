@@ -1,0 +1,1155 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/control-panel-data.schema.json",
+  "title": "Portfolio control panel data",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "account_summary",
+    "account_manifest",
+    "advisory",
+    "allocations",
+    "attribution_dispositions",
+    "blocking_items",
+    "candidate_appendix",
+    "candidate_driver_map",
+    "canonical_strategy_series",
+    "capital",
+    "counts",
+    "coverage",
+    "decomposition_lenses",
+    "default_dependence_mode",
+    "dependence_analysis",
+    "dependence_modes",
+    "factor_analysis",
+    "fact_coverage_matrix",
+    "fact_status",
+    "gates",
+    "hwm_summary",
+    "hybrid_mode_gate",
+    "limitations",
+    "meta",
+    "observation_windows",
+    "panel_schema_version",
+    "performance",
+    "positions",
+    "provenance",
+    "provider_counts",
+    "reconciliation_checks",
+    "replication_analysis",
+    "strategies",
+    "strategy_underwriting",
+    "weekly_returns"
+  ],
+  "properties": {
+    "panel_schema_version": { "const": 21 },
+    "account_manifest": {
+      "anyOf": [
+        { "$ref": "#/$defs/account_manifest_v7" },
+        { "type": "null" }
+      ]
+    },
+    "meta": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_manifest_authority_profile", "account_manifest_verification", "account_manifest_sha256", "account_manifest_size_bytes", "baseline_generation_id", "candidate_driver_map_sha256", "correlation_generation_id", "correlation_sha256", "decomposition_generation_id", "decomposition_plan_bundle_id", "decomposition_plan_manifest_sha256", "decomposition_sha256", "freshness_evaluated_on", "hwm_policy_sha256", "hwm_status_code_version", "hwm_status_semantics", "panel_mode", "performance_lineage", "portfolio_as_of", "replication_generation_id", "replication_sha256", "report_generation_id", "report_sha256", "source_shell_hashes", "strategy_evidence_as_of", "strategy_evidence_sha256", "strategy_evidence_source", "template_hashes", "underwriting_policy_sha256", "weekly_returns_generation_id", "weekly_returns_sha256"],
+      "properties": {
+        "account_manifest_authority_profile": { "enum": ["INDEPENDENT_EXACT_REBUILD", "INTERNAL_VALIDATION_ONLY_NON_RELEASEABLE", "NOT_SUPPLIED_NON_RELEASEABLE", "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"] },
+        "account_manifest_verification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "method", "producer_readiness", "publication_readiness"],
+          "properties": {
+            "status": {"enum": ["PANEL_INDEPENDENT_EXACT_REBUILD_VERIFIED", "INTERNAL_SCHEMA_AND_SEMANTIC_VALIDATION_ONLY", "NOT_SUPPLIED", "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"]},
+            "method": {"enum": ["EXACT_REBUILD_REPORT_BASELINE_CANONICAL_POLICY_AND_TEMPLATE_BOUND", "SELF_CONTAINED_SCHEMA_AND_DERIVATION_CHECKS", "NONE", "READ_GENERATION_BUNDLE_EXACT_BYTES_AND_FINANCIAL_MVP_BINDER"]},
+            "producer_readiness": {"anyOf": [{"type": "object"}, {"type": "null"}]},
+            "publication_readiness": {"enum": ["READY", "NOT_READY"]},
+            "epoch_manifest_source": {"$ref": "#/$defs/epoch_manifest_source"},
+            "independent_report": {"$ref": "#/$defs/independent_report_attestation"}
+          }
+        },
+        "account_manifest_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "account_manifest_size_bytes": { "anyOf": [{ "type": "integer", "minimum": 1 }, { "type": "null" }] },
+        "baseline_generation_id": { "$ref": "#/$defs/hash" },
+        "candidate_driver_map_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "correlation_generation_id": { "$ref": "#/$defs/hash" },
+        "correlation_sha256": { "$ref": "#/$defs/hash" },
+        "decomposition_generation_id": { "$ref": "#/$defs/hash" },
+        "decomposition_plan_bundle_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "decomposition_plan_manifest_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "decomposition_sha256": { "$ref": "#/$defs/hash" },
+        "freshness_evaluated_on": { "type": "string", "format": "date" },
+        "hwm_policy_sha256": { "$ref": "#/$defs/hash" },
+        "hwm_status_code_version": { "const": 2 },
+        "hwm_status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
+        "panel_mode": { "const": "LOCAL_DIRECT_FILE_READ_ONLY" },
+        "performance_lineage": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["status"],
+              "properties": { "status": { "const": "NOT_APPLICABLE" } }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["baseline_provider_ledger", "manifest_provider_ledger", "status"],
+              "properties": {
+                "baseline_provider_ledger": { "$ref": "#/$defs/provider_ledger_identity" },
+                "manifest_provider_ledger": { "$ref": "#/$defs/provider_ledger_identity" },
+                "status": { "enum": ["PASS", "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH"] }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["baseline_provider_ledger", "manifest_provider_ledger", "status"],
+              "properties": {
+                "baseline_provider_ledger": { "$ref": "#/$defs/unavailable_provider_ledger_identity" },
+                "manifest_provider_ledger": { "$ref": "#/$defs/provider_ledger_identity" },
+                "status": { "const": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" }
+              }
+            }
+          ]
+        },
+        "portfolio_as_of": { "type": "string", "format": "date" },
+        "report_generation_id": { "$ref": "#/$defs/hash" },
+        "report_sha256": { "$ref": "#/$defs/hash" },
+        "replication_generation_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "replication_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "source_shell_hashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/hash" } },
+        "strategy_evidence_as_of": { "type": ["string", "null"], "format": "date" },
+        "strategy_evidence_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "strategy_evidence_source": { "enum": ["CANONICAL_PORTFOLIO_REPORT", "LEGACY_COMPATIBILITY_INPUT", null] },
+        "template_hashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/hash" } },
+        "underwriting_policy_sha256": { "$ref": "#/$defs/hash" },
+        "weekly_returns_generation_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "weekly_returns_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] }
+      }
+    },
+    "invested_capital": { "$ref": "#/$defs/invested_capital" },
+    "capital": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reserve", "systematic", "total_liquid"],
+      "properties": {
+        "reserve": { "$ref": "#/$defs/decimal" },
+        "systematic": { "$ref": "#/$defs/decimal" },
+        "total_liquid": { "$ref": "#/$defs/decimal" }
+      }
+    },
+    "advisory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["central_case_loss", "correlation_one_stress", "hwm_limit", "hwm_numerical_status", "hwm_status", "hwm_status_code_version", "hwm_status_semantics", "nav_coverage", "readiness", "readiness_loss_measure", "reason"],
+      "properties": {
+        "central_case_loss": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "correlation_one_stress": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "hwm_limit": { "$ref": "#/$defs/decimal" },
+        "hwm_index": { "$ref": "#/$defs/decimal" },
+        "hwm_current_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_maximum_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_numerical_status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
+        "hwm_numerical_reason": { "type": "string", "minLength": 1 },
+        "hwm_status": { "type": "string" },
+        "hwm_status_code_version": { "const": 2 },
+        "hwm_status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
+        "nav_coverage": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "readiness": { "type": "string" },
+        "readiness_loss_measure": { "const": "CORRELATION_ONE_CONSERVATIVE_BOUND" },
+        "reason": { "type": "string" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "hwm_numerical_status": { "const": "AVAILABLE" } }, "required": ["hwm_numerical_status"] },
+          "then": {
+            "required": ["hwm_index", "hwm_current_drawdown", "hwm_maximum_drawdown"],
+            "not": { "required": ["hwm_numerical_reason"] }
+          }
+        },
+        {
+          "if": { "properties": { "hwm_numerical_status": { "const": "UNAVAILABLE" } }, "required": ["hwm_numerical_status"] },
+          "then": {
+            "required": ["hwm_numerical_reason"],
+            "not": { "anyOf": [{ "required": ["hwm_index"] }, { "required": ["hwm_current_drawdown"] }, { "required": ["hwm_maximum_drawdown"] }] }
+          }
+        }
+      ]
+    },
+    "candidate_appendix": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["as_of_date", "providers", "source_sha256", "status", "tier_counts"],
+      "properties": {
+        "as_of_date": { "type": "string", "format": "date" },
+        "providers": { "type": "array", "minItems": 33, "maxItems": 33, "items": { "type": "object" } },
+        "source_sha256": { "$ref": "#/$defs/hash" },
+        "status": { "const": "FROZEN_AUDIT_APPENDIX" },
+        "tier_counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } }
+      }
+    },
+    "candidate_driver_map": {
+      "anyOf": [
+        { "type": "object" },
+        { "type": "null" }
+      ]
+    },
+    "hybrid_mode_gate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["blocked_strategies", "eligible_strategies", "reason", "status"],
+      "properties": {
+        "blocked_strategies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["compatibility_status", "reason", "strategy_id", "strategy_name"],
+            "properties": {
+              "compatibility_status": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 },
+              "strategy_id": { "type": "string", "minLength": 1 },
+              "strategy_name": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "eligible_strategies": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["compatibility_status", "reason", "strategy_id", "strategy_name", "version_ref"],
+            "properties": {
+              "compatibility_status": { "const": "PROVEN_COMPATIBLE" },
+              "reason": { "type": "string", "minLength": 1 },
+              "strategy_id": { "type": "string", "minLength": 1 },
+              "strategy_name": { "type": "string", "minLength": 1 },
+              "version_ref": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "reason": { "type": "string", "minLength": 1 },
+        "status": { "enum": ["ELIGIBLE_PROVEN_COMPATIBLE", "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY", "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE"] }
+      }
+    },
+    "account_summary": { "$ref": "#/$defs/rows" },
+    "allocations": { "type": "array", "minItems": 8, "maxItems": 8, "items": { "type": "object" } },
+    "blocking_items": { "$ref": "#/$defs/rows" },
+    "counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+    "coverage": { "$ref": "#/$defs/rows" },
+    "fact_coverage_matrix": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+    "observation_windows": { "$ref": "#/$defs/rows" },
+    "attribution_dispositions": { "$ref": "#/$defs/rows" },
+    "canonical_strategy_series": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["canonical_live_series_sha256", "evidence_layer", "factor_window_observed_end", "factor_window_observed_start", "factor_window_return_observations", "factor_window_series_sha256", "generation_id", "live_version_ref", "observed_end", "observed_start", "report_catalog_version_ref", "return_observations", "series_id", "strategy_id", "strategy_version"],
+        "properties": {
+          "canonical_live_series_sha256": { "$ref": "#/$defs/hash" },
+          "evidence_layer": { "enum": ["ACCOUNT_LIVE", "PROVIDER_LIVE"] },
+          "factor_window_observed_end": { "type": "string", "format": "date" },
+          "factor_window_observed_start": { "type": "string", "format": "date" },
+          "factor_window_return_observations": { "type": "integer", "minimum": 1 },
+          "factor_window_series_sha256": { "$ref": "#/$defs/hash" },
+          "generation_id": { "$ref": "#/$defs/hash" },
+          "live_version_ref": { "type": "string", "minLength": 1 },
+          "observed_end": { "type": "string", "format": "date" },
+          "observed_start": { "type": "string", "format": "date" },
+          "report_catalog_version_ref": { "type": "string", "minLength": 1 },
+          "return_observations": { "type": "integer", "minimum": 1 },
+          "series_id": { "type": "string", "minLength": 1 },
+          "strategy_id": { "type": "string", "minLength": 1 },
+          "strategy_version": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "decomposition_lenses": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default_evidence_mode", "default_lens", "evidence_modes", "lenses", "modes", "plan_bundle_id", "plan_manifest_sha256"],
+      "properties": {
+        "default_evidence_mode": { "const": "LIVE_ONLY" },
+        "default_lens": { "type": "string" },
+        "evidence_modes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] }
+        },
+        "lenses": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/decomposition_lens" }
+        },
+        "modes": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["LIVE_ONLY"],
+          "properties": {
+            "LIVE_ONLY": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/decomposition_lens" }
+            },
+            "LIVE_PLUS_BACKTEST": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/decomposition_lens" }
+            }
+          }
+        },
+        "plan_bundle_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "plan_manifest_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] }
+      }
+    },
+    "default_dependence_mode": { "const": "LIVE_ONLY" },
+    "dependence_analysis": {
+      "type": "object",
+      "required": ["analytics_hash", "as_of_date", "available_pair_count", "cells", "central_case", "correlation_one", "economic_driver_cluster_budget", "generation_id", "matrices", "pair_count", "series_ids", "source_sha256"],
+      "properties": {
+        "analytics_hash": { "$ref": "#/$defs/hash" },
+        "as_of_date": { "type": "string", "format": "date" },
+        "available_pair_count": { "type": "integer", "minimum": 0 },
+        "cells": { "type": "array", "minItems": 21, "maxItems": 21, "items": { "type": "object" } },
+        "central_case": { "type": "object" },
+        "correlation_one": { "type": "object" },
+        "economic_driver_cluster_budget": { "type": "object" },
+        "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
+        "generation_id": { "$ref": "#/$defs/hash" },
+        "matrices": { "type": "object", "minProperties": 6, "maxProperties": 6 },
+        "pair_count": { "const": 21 },
+        "series_ids": { "type": "array", "minItems": 7, "maxItems": 7, "items": { "type": "string" }, "uniqueItems": true },
+        "series_composition": { "type": "object", "additionalProperties": { "type": "object" } },
+        "source_sha256": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "dependence_modes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["LIVE_ONLY"],
+      "properties": {
+        "LIVE_ONLY": { "$ref": "#/properties/dependence_analysis" },
+        "LIVE_PLUS_BACKTEST": { "$ref": "#/properties/dependence_analysis" }
+      }
+    },
+    "factor_analysis": {
+      "type": "object",
+      "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "series", "series_composition", "source_sha256", "sources", "unavailable_count"],
+      "properties": {
+        "analytics_hash": { "$ref": "#/$defs/hash" },
+        "analytics_schema_version": { "enum": [1, 2, 3] },
+        "as_of_date": { "type": "string", "format": "date" },
+        "available_count": { "type": "integer", "minimum": 0 },
+        "available_source_keys": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "diagnostic_count": { "type": "integer", "minimum": 0 },
+        "dynamic_available_count": { "type": "integer", "minimum": 0 },
+        "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
+        "generation_id": { "$ref": "#/$defs/hash" },
+        "method_label": { "const": "MPI_INFORMED_NON_EQUIVALENT" },
+        "methodology_manifest_sha256": { "$ref": "#/$defs/hash" },
+        "methodology_version": { "type": "string" },
+        "proxy_governance": { "type": "object" },
+        "series": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "items": { "type": "object" }
+        },
+        "series_composition": { "type": "object", "additionalProperties": { "type": "object" } },
+        "source_sha256": { "$ref": "#/$defs/hash" },
+        "sources": {
+          "anyOf": [
+            { "type": "object" },
+            { "type": "array", "items": { "type": "object" } }
+          ]
+        },
+        "unavailable_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "fact_status": { "type": "object", "additionalProperties": { "type": "string" } },
+    "gates": { "$ref": "#/$defs/rows" },
+    "hwm_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["covered_value_usd", "excluded_details", "excluded_strategies", "excluded_value_usd", "governed_perimeter_value_usd", "hwm_numerical_status", "nav_coverage", "policy_id", "status", "status_code_version", "status_semantics", "uncovered_details", "uncovered_strategies", "uncovered_value_usd"],
+      "properties": {
+        "covered_value_usd": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "excluded_details": { "type": "array", "items": { "type": "object" } },
+        "excluded_value_usd": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "excluded_strategies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "governed_perimeter_value_usd": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "hwm_index": { "$ref": "#/$defs/decimal" },
+        "hwm_current_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_maximum_drawdown": { "$ref": "#/$defs/decimal" },
+        "hwm_numerical_status": { "enum": ["AVAILABLE", "UNAVAILABLE"] },
+        "hwm_numerical_reason": { "type": "string", "minLength": 1 },
+        "nav_coverage": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] },
+        "policy_id": { "const": "PORT-HWM-3" },
+        "status": { "type": "string" },
+        "status_code_version": { "const": 2 },
+        "status_semantics": { "const": "EXPLICIT_GOVERNED_HWM_PERIMETER" },
+        "uncovered_details": { "type": "array", "items": { "type": "object" } },
+        "uncovered_strategies": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "uncovered_value_usd": { "anyOf": [{ "$ref": "#/$defs/decimal" }, { "type": "null" }] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "hwm_numerical_status": { "const": "AVAILABLE" } }, "required": ["hwm_numerical_status"] },
+          "then": {
+            "required": ["hwm_index", "hwm_current_drawdown", "hwm_maximum_drawdown"],
+            "not": { "required": ["hwm_numerical_reason"] }
+          }
+        },
+        {
+          "if": { "properties": { "hwm_numerical_status": { "const": "UNAVAILABLE" } }, "required": ["hwm_numerical_status"] },
+          "then": {
+            "required": ["hwm_numerical_reason"],
+            "not": { "anyOf": [{ "required": ["hwm_index"] }, { "required": ["hwm_current_drawdown"] }, { "required": ["hwm_maximum_drawdown"] }] }
+          }
+        }
+      ]
+    },
+    "hwm_portable_proof": { "$ref": "#/$defs/portable_hwm_proof" },
+    "hwm_governed_proof": { "$ref": "#/$defs/governed_hwm_proof" },
+    "limitations": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+    "performance": {
+      "$comment": "JSON Schema uniqueItems cannot enforce semantic account-strategy identity for generic objects; the Python panel validator owns that invariant.",
+      "type": "array",
+      "minItems": 13,
+      "maxItems": 13,
+      "items": { "type": "object" }
+    },
+    "positions": { "$ref": "#/$defs/rows" },
+    "provenance": { "$ref": "#/$defs/rows" },
+    "provider_counts": { "type": "object", "additionalProperties": { "type": "integer", "minimum": 0 } },
+    "reconciliation_checks": { "$ref": "#/$defs/rows" },
+    "replication_analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["analytics_hash", "as_of_date", "authority_boundary", "available_count", "clean_room_boundary", "diagnostic_count", "generation_id", "method_label", "series", "source_sha256", "unavailable_count"],
+      "properties": {
+        "analytics_hash": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "as_of_date": { "type": "string", "format": "date" },
+        "authority_boundary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allocation_authority", "execution_authority", "hwm_authority", "readiness_gate_effect", "use"],
+          "properties": {
+            "allocation_authority": { "const": "NONE" },
+            "execution_authority": { "const": "NONE" },
+            "hwm_authority": { "const": "NONE" },
+            "readiness_gate_effect": { "const": "NONE" },
+            "use": { "const": "RESEARCH_DIAGNOSTIC_ONLY" }
+          }
+        },
+        "available_count": { "type": "integer", "minimum": 0 },
+        "clean_room_boundary": { "type": "string", "minLength": 1 },
+        "diagnostic_count": { "type": "integer", "minimum": 0 },
+        "generation_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "method_label": { "const": "MPI_INFORMED_NON_EQUIVALENT_RESEARCH_REPLICATION" },
+        "series": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "items": {
+            "type": "object",
+            "required": ["availability_status", "model_id", "series_id"]
+          }
+        },
+        "source_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "unavailable_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "strategies": {
+      "$comment": "JSON Schema uniqueItems cannot enforce semantic strategy identity for generic objects; the Python panel validator owns that invariant.",
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": { "type": "object" }
+    },
+    "strategy_underwriting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["as_of_date", "authority_boundary", "counts", "methodology", "policy_id", "policy_sha256", "rows", "schema_version"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "policy_id": { "const": "PORT-UNDERWRITE-1" },
+        "policy_sha256": { "$ref": "#/$defs/hash" },
+        "as_of_date": { "type": "string", "format": "date" },
+        "authority_boundary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allocation_authority", "automatic_drop_authority", "execution_authority", "readiness_gate_effect", "use"],
+          "properties": {
+            "allocation_authority": { "const": "NONE" },
+            "automatic_drop_authority": { "const": "NONE" },
+            "execution_authority": { "const": "NONE" },
+            "readiness_gate_effect": { "const": "NONE" },
+            "use": { "const": "ADVISORY_UNDERWRITING_AND_EVIDENCE_PRIORITIZATION" }
+          }
+        },
+        "counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["authoritative_design", "empirical_regime_comparison", "quantified_model_account_gap", "strategies", "version_matched_long_history"],
+          "properties": {
+            "authoritative_design": { "type": "integer", "minimum": 0, "maximum": 7 },
+            "empirical_regime_comparison": { "type": "integer", "minimum": 0, "maximum": 7 },
+            "quantified_model_account_gap": { "type": "integer", "minimum": 0, "maximum": 7 },
+            "strategies": { "const": 7 },
+            "version_matched_long_history": { "type": "integer", "minimum": 0, "maximum": 7 }
+          }
+        },
+        "methodology": { "type": "object" },
+        "rows": {
+          "type": "array",
+          "minItems": 7,
+          "maxItems": 7,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["advisory_disposition", "design_fit", "evidence_layers", "long_history", "model_account_gap", "portfolio_fit", "regime_conformance", "strategy_id", "strategy_name"],
+            "properties": {
+              "strategy_id": { "type": "string", "minLength": 1 },
+              "strategy_name": { "type": "string", "minLength": 1 },
+              "evidence_layers": { "type": "object" },
+              "design_fit": { "type": "object" },
+              "long_history": { "type": "object" },
+              "model_account_gap": { "type": "object" },
+              "regime_conformance": { "type": "object" },
+              "portfolio_fit": { "type": "object" },
+              "advisory_disposition": { "type": "object" }
+            }
+          }
+        }
+      }
+    },
+    "weekly_returns": {
+      "type": "object",
+      "required": ["analytics_schema_version", "as_of_date", "current_week", "default_evidence_mode", "display_groups", "generation_id", "hybrid_mode_reason", "hybrid_mode_status", "observation_meta_fields", "series", "source_sha256", "strategy_evidence_modes", "week_policy", "weeks"],
+      "properties": {
+        "analytics_schema_version": { "const": 1 },
+        "as_of_date": { "type": "string", "format": "date" },
+        "current_week": { "type": "object" },
+        "default_evidence_mode": { "const": "LIVE_ONLY" },
+        "display_groups": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "generation_id": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "hybrid_mode_reason": { "type": "string", "minLength": 1 },
+        "hybrid_mode_status": { "enum": ["ELIGIBLE_PROVEN_COMPATIBLE", "ELIGIBLE_PARTIAL_VERSION_COMPATIBILITY", "BLOCKED_VERSION_NOT_PROVEN_COMPATIBLE", "UNAVAILABLE_NOT_CONFIGURED"] },
+        "observation_meta_fields": { "const": ["daily_observation_count", "actual_observed_start", "actual_observed_end", "coverage_status", "boundary_reasons"] },
+        "series": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "status": { "enum": ["AVAILABLE", "UNAVAILABLE_NOT_CONFIGURED"] },
+        "source_sha256": { "anyOf": [{ "$ref": "#/$defs/hash" }, { "type": "null" }] },
+        "strategy_evidence_modes": {
+          "oneOf": [
+            { "const": ["LIVE_ONLY"] },
+            { "const": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] }
+          ]
+        },
+        "week_policy": { "type": "object" },
+        "weeks": { "type": "array", "items": { "type": "string", "format": "date" }, "uniqueItems": true }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "status": { "const": "UNAVAILABLE_NOT_CONFIGURED" } },
+            "required": ["status"]
+          },
+          "then": { "properties": { "series": { "maxItems": 0 } } },
+          "else": {
+            "properties": {
+              "series": {
+                "contains": {
+                  "type": "object",
+                  "required": ["primary_group"],
+                  "properties": { "primary_group": { "const": "STRATEGY" } }
+                },
+                "minContains": 7,
+                "maxContains": 7
+              }
+            }
+          }
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "weekly_returns": {
+            "properties": { "status": { "const": "UNAVAILABLE_NOT_CONFIGURED" } },
+            "required": ["status"]
+          }
+        },
+        "required": ["weekly_returns"]
+      },
+      "then": {
+        "properties": { "canonical_strategy_series": { "maxItems": 0 } }
+      },
+      "else": {
+        "properties": {
+          "canonical_strategy_series": { "minItems": 7, "maxItems": 7 }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"meta": {"properties": {"account_manifest_authority_profile": {"const": "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"}}}},
+        "required": ["meta"]
+      },
+      "then": {
+        "properties": {
+          "account_manifest": {"$ref": "#/$defs/account_manifest_v7"},
+          "meta": {
+            "properties": {
+              "account_manifest_sha256": {"$ref": "#/$defs/hash"},
+              "account_manifest_size_bytes": {"type": "integer", "minimum": 1},
+              "account_manifest_verification": {
+                "required": ["status", "method", "producer_readiness", "publication_readiness", "epoch_manifest_source", "independent_report"],
+                "properties": {
+                  "status": {"const": "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"},
+                  "method": {"const": "READ_GENERATION_BUNDLE_EXACT_BYTES_AND_FINANCIAL_MVP_BINDER"},
+                  "producer_readiness": {"$ref": "#/$defs/verified_bundle_producer_readiness"},
+                  "publication_readiness": {"const": "NOT_READY"},
+                  "epoch_manifest_source": {"$ref": "#/$defs/epoch_manifest_source"},
+                  "independent_report": {"$ref": "#/$defs/independent_report_attestation"}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "meta": {
+            "properties": { "account_manifest_authority_profile": { "const": "NOT_SUPPLIED_NON_RELEASEABLE" } },
+            "required": ["account_manifest_authority_profile"]
+          }
+        },
+        "required": ["meta"]
+      },
+      "then": {
+        "properties": {
+          "account_manifest": { "type": "null" },
+          "meta": {
+            "properties": {
+              "account_manifest_sha256": { "type": "null" },
+              "account_manifest_size_bytes": { "type": "null" },
+              "account_manifest_verification": {
+                "properties": {
+                  "status": {"const": "NOT_SUPPLIED"},
+                  "method": {"const": "NONE"},
+                  "producer_readiness": {"type": "null"},
+                  "publication_readiness": {"const": "NOT_READY"}
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"meta": {"properties": {"account_manifest_authority_profile": {"const": "INDEPENDENT_EXACT_REBUILD"}}}},
+        "required": ["meta"]
+      },
+      "then": {
+        "properties": {"meta": {"properties": {"account_manifest_verification": {
+          "properties": {
+            "status": {"const": "PANEL_INDEPENDENT_EXACT_REBUILD_VERIFIED"},
+            "method": {"const": "EXACT_REBUILD_REPORT_BASELINE_CANONICAL_POLICY_AND_TEMPLATE_BOUND"},
+            "producer_readiness": {"type": "object"},
+            "publication_readiness": {"const": "READY"}
+          }
+        }}}}
+      }
+    },
+    {
+      "if": {
+        "properties": {"meta": {"properties": {"account_manifest_authority_profile": {"const": "INTERNAL_VALIDATION_ONLY_NON_RELEASEABLE"}}}},
+        "required": ["meta"]
+      },
+      "then": {
+        "properties": {"meta": {"properties": {"account_manifest_verification": {
+          "properties": {
+            "status": {"const": "INTERNAL_SCHEMA_AND_SEMANTIC_VALIDATION_ONLY"},
+            "method": {"const": "SELF_CONTAINED_SCHEMA_AND_DERIVATION_CHECKS"},
+            "producer_readiness": {"type": "object"},
+            "publication_readiness": {"const": "NOT_READY"}
+          }
+        }}}}
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "meta": {
+            "properties": {
+              "account_manifest_authority_profile": {
+                "enum": ["INDEPENDENT_EXACT_REBUILD", "INTERNAL_VALIDATION_ONLY_NON_RELEASEABLE"]
+              }
+            },
+            "required": ["account_manifest_authority_profile"]
+          }
+        },
+        "required": ["meta"]
+      },
+      "then": {
+        "properties": {
+          "account_manifest": { "$ref": "#/$defs/account_manifest_v7" },
+          "meta": {
+            "properties": {
+              "account_manifest_sha256": { "$ref": "#/$defs/hash" },
+              "account_manifest_size_bytes": { "type": "integer", "minimum": 1 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "meta": {
+            "properties": {
+              "performance_lineage": {
+                "properties": {
+                  "status": { "const": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" }
+                },
+                "required": ["status"]
+              }
+            },
+            "required": ["performance_lineage"]
+          }
+        },
+        "required": ["meta"]
+      },
+      "then": {
+        "properties": {
+          "advisory": {
+            "properties": {
+              "central_case_loss": { "type": "null" },
+              "correlation_one_stress": { "type": "null" },
+              "nav_coverage": { "type": "null" },
+              "readiness": { "const": "DO_NOT_EXPAND_SYSTEMATIC_RISK" },
+              "hwm_numerical_status": { "const": "UNAVAILABLE" },
+              "hwm_numerical_reason": { "const": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" },
+              "hwm_status": { "const": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" }
+            }
+          },
+          "hwm_summary": {
+            "properties": {
+              "covered_value_usd": { "type": "null" },
+              "excluded_value_usd": { "type": "null" },
+              "governed_perimeter_value_usd": { "type": "null" },
+              "nav_coverage": { "type": "null" },
+              "uncovered_value_usd": { "type": "null" },
+              "hwm_numerical_status": { "const": "UNAVAILABLE" },
+              "hwm_numerical_reason": { "const": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" },
+              "status": { "const": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" }
+            }
+          },
+          "strategy_underwriting": {
+            "properties": {
+              "methodology": {
+                "properties": {
+                  "performance_lineage": { "const": "UNAVAILABLE_SOURCE_LINEAGE_MISMATCH" }
+                },
+                "required": ["performance_lineage"]
+              },
+              "counts": {
+                "properties": {
+                  "authoritative_design": { "const": 0 },
+                  "empirical_regime_comparison": { "const": 0 },
+                  "quantified_model_account_gap": { "const": 0 },
+                  "version_matched_long_history": { "const": 0 }
+                }
+              }
+            }
+          }
+        },
+        "not": {
+          "anyOf": [
+            { "required": ["hwm_portable_proof"] },
+            { "required": ["hwm_governed_proof"] }
+          ]
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "decomposition_lens": {
+      "type": "object",
+      "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "lens_id", "lens_label", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "return_basis", "series", "source_sha256", "sources", "unavailable_count"],
+      "properties": {
+        "analytics_hash": { "$ref": "#/$defs/hash" },
+        "analytics_schema_version": { "enum": [1, 2, 3] },
+        "as_of_date": { "type": "string", "format": "date" },
+        "available_count": { "type": "integer", "minimum": 0 },
+        "available_surfaces": { "type": "array", "minItems": 1, "maxItems": 2, "uniqueItems": true, "items": { "enum": ["STATIC", "DYNAMIC_FLS"] } },
+        "default_surface": { "const": "STATIC" },
+        "default_source_key": { "type": "string", "minLength": 1 },
+        "diagnostic_count": { "type": "integer", "minimum": 0 },
+        "dynamic_available_count": { "type": "integer", "minimum": 0 },
+        "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
+        "generation_id": { "$ref": "#/$defs/hash" },
+        "lens_id": { "type": "string", "minLength": 1 },
+        "lens_label": { "type": "string", "minLength": 1 },
+        "method_label": { "const": "MPI_INFORMED_NON_EQUIVALENT" },
+        "methodology_manifest_sha256": { "$ref": "#/$defs/hash" },
+        "methodology_version": { "type": "string", "minLength": 1 },
+        "plan_bundle_id": { "$ref": "#/$defs/hash" },
+        "proxy_governance": { "type": "object" },
+        "return_basis": { "type": "string", "minLength": 1 },
+        "series": { "type": "array" },
+        "source_sha256": { "$ref": "#/$defs/hash" },
+        "sources": { "anyOf": [{ "type": "array", "minItems": 1 }, { "type": "object", "minProperties": 1 }] },
+        "surfaces": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["STATIC"],
+          "properties": {
+            "STATIC": { "$ref": "#/$defs/decomposition_surface" },
+            "DYNAMIC_FLS": { "$ref": "#/$defs/decomposition_surface" }
+          }
+        },
+        "unavailable_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "decomposition_surface": {
+      "type": "object",
+      "required": ["analytics_hash", "analytics_schema_version", "as_of_date", "available_count", "available_source_keys", "default_source_key", "diagnostic_count", "dynamic_available_count", "evidence_mode", "generation_id", "lens_id", "lens_label", "method_label", "methodology_manifest_sha256", "methodology_version", "proxy_governance", "return_basis", "series", "source_sha256", "sources", "surface", "unavailable_count"],
+      "properties": {
+        "analytics_hash": { "$ref": "#/$defs/hash" },
+        "analytics_schema_version": { "enum": [1, 2, 3] },
+        "as_of_date": { "type": "string", "format": "date" },
+        "available_count": { "type": "integer", "minimum": 0 },
+        "available_source_keys": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "default_source_key": { "type": "string", "minLength": 1 },
+        "diagnostic_count": { "type": "integer", "minimum": 0 },
+        "dynamic_available_count": { "type": "integer", "minimum": 0 },
+        "evidence_mode": { "enum": ["LIVE_ONLY", "LIVE_PLUS_BACKTEST"] },
+        "generation_id": { "$ref": "#/$defs/hash" },
+        "lens_id": { "type": "string", "minLength": 1 },
+        "lens_label": { "type": "string", "minLength": 1 },
+        "method_label": { "const": "MPI_INFORMED_NON_EQUIVALENT" },
+        "methodology_manifest_sha256": { "$ref": "#/$defs/hash" },
+        "methodology_version": { "type": "string", "minLength": 1 },
+        "plan_bundle_id": { "$ref": "#/$defs/hash" },
+        "proxy_governance": { "type": "object" },
+        "return_basis": { "type": "string", "minLength": 1 },
+        "series": { "type": "array" },
+        "source_sha256": { "$ref": "#/$defs/hash" },
+        "sources": { "type": "array", "minItems": 1 },
+        "surface": { "enum": ["STATIC", "DYNAMIC_FLS"] },
+        "unavailable_count": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "decimal": { "type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$" },
+    "invested_capital": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "outcome_id", "status", "evaluation_date", "complete_through", "period_start", "currency", "age_days", "policy_id", "policy_sha256", "policy_readiness_provenance", "required_epochs", "required_strategy_ids", "source_bindings", "flow_coverage", "correction_bindings", "events", "daily_by_epoch", "daily_by_strategy", "daily_aggregate", "current_by_strategy", "current_aggregate_usd", "missing_inputs", "authority_profile", "input_generation", "product_contract_sha256", "product_contract_semantic_sha256", "result_id"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "outcome_id": { "const": "INVESTED_CAPITAL" },
+        "status": { "const": "AVAILABLE" },
+        "evaluation_date": { "type": "string", "format": "date" },
+        "complete_through": { "type": "string", "format": "date" },
+        "period_start": { "type": "string", "format": "date" },
+        "currency": { "const": "USD" },
+        "age_days": { "type": "integer", "minimum": 0 },
+        "policy_id": { "type": "string", "minLength": 1 },
+        "policy_sha256": { "$ref": "#/$defs/hash" },
+        "policy_readiness_provenance": { "type": "string", "minLength": 1 },
+        "required_epochs": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+        "supporting_epochs": { "type": "array", "items": { "type": "object" } },
+        "required_strategy_ids": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "source_bindings": { "type": "object", "minProperties": 1, "additionalProperties": { "$ref": "#/$defs/file_binding" } },
+        "flow_coverage": { "type": "array", "minItems": 1, "items": { "type": "object" } },
+        "correction_bindings": { "type": "array", "items": { "type": "object" } },
+        "events": { "type": "array", "items": { "type": "object" } },
+        "daily_by_epoch": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/capital_daily_epoch" } },
+        "daily_by_strategy": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/capital_daily_strategy" } },
+        "daily_aggregate": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/capital_daily_aggregate" } },
+        "current_by_strategy": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/capital_current_strategy" } },
+        "current_aggregate_usd": { "$ref": "#/$defs/decimal" },
+        "missing_inputs": { "type": "array", "maxItems": 0 },
+        "authority_profile": { "enum": ["ACCEPTED_GOVERNED", "SYNTHETIC"] },
+        "input_generation": { "$ref": "#/$defs/file_binding" },
+        "product_contract_sha256": { "$ref": "#/$defs/hash" },
+        "product_contract_semantic_sha256": { "$ref": "#/$defs/hash" },
+        "result_id": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "file_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "size_bytes"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/hash" },
+        "size_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "capital_daily_epoch": {
+      "type": "object", "additionalProperties": false,
+      "required": ["date", "epoch_id", "invested_capital_usd"],
+      "properties": { "date": { "type": "string", "format": "date" }, "epoch_id": { "type": "string", "minLength": 1 }, "invested_capital_usd": { "$ref": "#/$defs/decimal" } }
+    },
+    "capital_daily_strategy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["date", "strategy_id", "invested_capital_usd"],
+      "properties": { "date": { "type": "string", "format": "date" }, "strategy_id": { "type": "string", "minLength": 1 }, "invested_capital_usd": { "$ref": "#/$defs/decimal" } }
+    },
+    "capital_daily_aggregate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["date", "invested_capital_usd"],
+      "properties": { "date": { "type": "string", "format": "date" }, "invested_capital_usd": { "$ref": "#/$defs/decimal" } }
+    },
+    "capital_current_strategy": {
+      "type": "object", "additionalProperties": false,
+      "required": ["strategy_id", "invested_capital_usd"],
+      "properties": { "strategy_id": { "type": "string", "minLength": 1 }, "invested_capital_usd": { "$ref": "#/$defs/decimal" } }
+    },
+    "account_manifest_v7": {
+      "$ref": "https://github.com/dachent/quant_engine/schemas/portfolio/account-strategy-manifest.schema.json"
+    },
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "provider_ledger_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_name", "schema_version", "sha256"],
+      "properties": {
+        "schema_name": { "const": "provider-ledger-catalog" },
+        "schema_version": { "type": "string", "minLength": 1 },
+        "sha256": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "unavailable_provider_ledger_identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": { "const": "UNAVAILABLE_BASELINE_PROVIDER_LEDGER_IDENTITY" }
+      }
+    },
+    "epoch_manifest_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "generation_manifest_sha256", "generation_receipt_sha256", "full_directory_inventory_sha256", "artifact"],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/hash"},
+        "generation_manifest_sha256": {"$ref": "#/$defs/hash"},
+        "generation_receipt_sha256": {"$ref": "#/$defs/hash"},
+        "full_directory_inventory_sha256": {"$ref": "#/$defs/hash"},
+        "artifact": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "size_bytes", "schema"],
+          "properties": {
+            "path": {"const": "outputs/account-strategy-manifest.json"},
+            "sha256": {"$ref": "#/$defs/hash"},
+            "size_bytes": {"type": "integer", "minimum": 1},
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "version"],
+              "properties": {
+                "name": {"const": "account-strategy-manifest"},
+                "version": {"enum": ["8", "9"]}
+              }
+            }
+          }
+        },
+        "crosswalk": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256", "size_bytes", "schema"],
+          "properties": {
+            "path": {"const": "authority/account-assignment-crosswalk.json"},
+            "sha256": {"$ref": "#/$defs/hash"},
+            "size_bytes": {"type": "integer", "minimum": 1},
+            "schema": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "version"],
+              "properties": {
+                "name": {"const": "account-strategy-current-epoch-crosswalk"},
+                "version": {"const": "1"}
+              }
+            }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"artifact": {"properties": {"schema": {"properties": {"version": {"const": "8"}}}}}},
+            "required": ["artifact"]
+          },
+          "then": {"not": {"required": ["crosswalk"]}}
+        },
+        {
+          "if": {
+            "properties": {"artifact": {"properties": {"schema": {"properties": {"version": {"const": "9"}}}}}},
+            "required": ["artifact"]
+          },
+          "then": {"required": ["crosswalk"]}
+        }
+      ]
+    },
+    "verified_bundle_producer_readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["authority_status", "independent_authority_verification", "publication_readiness"],
+      "properties": {
+        "authority_status": {"const": "SOURCE_BOUND_CANDIDATE"},
+        "independent_authority_verification": {"const": "NOT_PERFORMED"},
+        "publication_readiness": {"const": "NOT_READY"}
+      }
+    },
+    "independent_report_attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["artifact_id", "sha256", "size_bytes", "schema", "report_schema_version", "status", "subjects_semantic_sha256", "numeric_verification"],
+      "properties": {
+        "artifact_id": {"const": "verification/independent-verification.json"},
+        "sha256": {"$ref": "#/$defs/hash"},
+        "size_bytes": {"type": "integer", "minimum": 1},
+        "schema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "version"],
+          "properties": {
+            "name": {"const": "account-manifest-independent-verification"},
+            "version": {"enum": ["2", "3"]}
+          }
+        },
+        "report_schema_version": {"enum": [2, 3]},
+        "status": {"const": "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"},
+        "subjects_semantic_sha256": {"$ref": "#/$defs/hash"},
+        "numeric_verification": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["candidate_count", "comparison_count", "discrepancy_count", "disposition"],
+          "properties": {
+            "candidate_count": {"type": "integer", "minimum": 0},
+            "comparison_count": {"type": "integer", "minimum": 0},
+            "discrepancy_count": {"const": 0},
+            "disposition": {"enum": ["INDEPENDENT_RECALCULATION_NO_DISCREPANCIES", "NOT_APPLICABLE_NO_CANDIDATES"]}
+          }
+        }
+      }
+    },
+    "governed_hwm_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "status", "financial_acceptance", "assurance_profile", "policy_id", "policy_sha256", "calendar_sha256", "input_generation_sha256", "upstream_receipt_sha256", "receipt_sha256", "input_authority_class", "return_basis", "evaluated_on", "complete_through", "calculation_age_days", "maximum_age_days", "age_status", "warnings", "current_index", "current_hwm", "current_drawdown", "maximum_drawdown", "index_path"],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "status": { "const": "AVAILABLE" },
+        "financial_acceptance": { "const": "PENDING_OWNER_ACCEPTANCE" },
+        "assurance_profile": { "type": "string", "minLength": 1 },
+        "policy_id": { "const": "PORT-HWM-4" },
+        "policy_sha256": { "$ref": "#/$defs/hash" },
+        "calendar_sha256": { "$ref": "#/$defs/hash" },
+        "input_generation_sha256": { "$ref": "#/$defs/hash" },
+        "upstream_receipt_sha256": { "$ref": "#/$defs/hash" },
+        "receipt_sha256": { "$ref": "#/$defs/hash" },
+        "input_authority_class": { "const": "ACCEPTED_GOVERNED" },
+        "return_basis": { "const": "LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL" },
+        "evaluated_on": { "type": "string", "format": "date" },
+        "complete_through": { "type": "string", "format": "date" },
+        "calculation_age_days": { "type": "integer", "minimum": 0 },
+        "maximum_age_days": { "type": "integer", "minimum": 0 },
+        "age_status": { "enum": ["CURRENT", "COMPLETE_DATA_AGE_WARNING"] },
+        "warnings": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "current_index": { "$ref": "#/$defs/decimal" },
+        "current_hwm": { "$ref": "#/$defs/decimal" },
+        "current_drawdown": { "$ref": "#/$defs/decimal" },
+        "maximum_drawdown": { "$ref": "#/$defs/decimal" },
+        "index_path": { "$ref": "#/$defs/hwm_index_path" }
+      }
+    },
+    "hwm_index_path": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["as_of", "index", "hwm", "drawdown"],
+        "properties": {
+          "as_of": { "type": "string", "format": "date" },
+          "index": { "$ref": "#/$defs/decimal" },
+          "hwm": { "$ref": "#/$defs/decimal" },
+          "drawdown": { "$ref": "#/$defs/decimal" }
+        }
+      }
+    },
+    "portable_hwm_proof": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "status", "financial_acceptance", "assurance_profile",
+        "policy_id", "policy_sha256", "policy_semantic_digest", "receipt_sha256",
+        "input_authority_class", "calendar_authority_status",
+        "input_generation_sha256", "input_sha256", "return_basis", "evaluated_on",
+        "complete_through", "calculation_age_days", "maximum_age_days", "age_status",
+        "warnings", "current_index", "current_hwm", "current_drawdown",
+        "maximum_drawdown", "index_path"
+      ],
+      "properties": {
+        "schema_version": { "const": 1 },
+        "status": { "const": "PORTABLE_SYNTHETIC_PROOF" },
+        "financial_acceptance": { "const": "NOT_FINANCIAL_ACCEPTANCE" },
+        "assurance_profile": { "const": "DEVELOPMENT" },
+        "policy_id": { "const": "PORT-HWM-4" },
+        "policy_sha256": { "$ref": "#/$defs/hash" },
+        "policy_semantic_digest": { "$ref": "#/$defs/hash" },
+        "receipt_sha256": { "$ref": "#/$defs/hash" },
+        "input_authority_class": { "const": "PORTABLE_SYNTHETIC" },
+        "calendar_authority_status": { "const": "PORTABLE_SYNTHETIC" },
+        "input_generation_sha256": { "$ref": "#/$defs/hash" },
+        "input_sha256": { "$ref": "#/$defs/hash" },
+        "return_basis": { "const": "LEVERED_NET_NAV_AFTER_FINANCING_COST_FLOW_NEUTRAL" },
+        "evaluated_on": { "type": "string", "format": "date" },
+        "complete_through": { "type": "string", "format": "date" },
+        "calculation_age_days": { "type": "integer", "minimum": 0 },
+        "maximum_age_days": { "type": "integer", "minimum": 0 },
+        "age_status": { "enum": ["CURRENT", "COMPLETE_DATA_AGE_WARNING"] },
+        "warnings": {
+          "type": "array", "uniqueItems": true,
+          "items": { "const": "HWM_COMPLETE_DATA_AGE" }
+        },
+        "current_index": { "$ref": "#/$defs/decimal" },
+        "current_hwm": { "$ref": "#/$defs/decimal" },
+        "current_drawdown": { "$ref": "#/$defs/decimal" },
+        "maximum_drawdown": { "$ref": "#/$defs/decimal" },
+        "index_path": {
+          "type": "array", "minItems": 2,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["as_of", "index", "hwm", "drawdown"],
+            "properties": {
+              "as_of": { "type": "string", "format": "date" },
+              "index": { "$ref": "#/$defs/decimal" },
+              "hwm": { "$ref": "#/$defs/decimal" },
+              "drawdown": { "$ref": "#/$defs/decimal" }
+            }
+          }
+        }
+      }
+    },
+    "rows": { "type": "array", "items": { "type": "object" } }
+  }
+}

@@ -1,0 +1,24 @@
+[project]
+name = "quant-engine-matrixport"
+version = "0.2.1"
+description = "Governed, semantically read-only Matrixport/BIT adapter and generation verifier."
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "openpyxl>=3.1,<4",
+  "pywin32>=306; platform_system == 'Windows'",
+  "quant-engine-core",
+  "requests>=2.31,<3",
+  "tzdata>=2025.2",
+  "xlsxwriter>=3.2,<4",
+]
+classifiers = ["Private :: Do Not Upload"]
+
+[project.scripts]
+quant-engine-matrixport = "quant_engine.matrixport.cli:main"
+
+[build-system]
+requires = ["uv_build==0.11.28"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "quant_engine.matrixport"

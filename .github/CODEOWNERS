@@ -1,0 +1,7 @@
+# Ownership intent only: CODEOWNERS is not review enforcement for this private
+# personal GitHub Free repository. See GOV-002 and ADR 0001.
+* @dachent
+
+/AGENTS.md @dachent
+/docs/operating-model.md @dachent
+/.github/ @dachent

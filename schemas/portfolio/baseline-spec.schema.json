@@ -1,0 +1,185 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/baseline-spec.schema.json",
+  "title": "Private portfolio baseline specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_version",
+    "as_of_date",
+    "provenance",
+    "roots",
+    "sources",
+    "replay"
+  ],
+  "properties": {
+    "schema_version": {"enum": [1, 2, 3]},
+    "policy_version": {"const": "PORT-PERF-1"},
+    "as_of_date": {"type": "string", "format": "date"},
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "roots": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {"$ref": "#/$defs/identifier"},
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "alpaca-events",
+        "alpaca-flows",
+        "alpaca-nav",
+        "attribution-diagnostic",
+        "combined-control-status",
+        "component-decision-table",
+        "cost-economics",
+        "current-portfolio-summary",
+        "data-coverage-matrix",
+        "evidence-layer-metrics",
+        "hwm-status",
+        "ibkr-ledger",
+        "implementation-gap",
+        "phase2-evidence-summary",
+        "schwab-flows",
+        "schwab-nav",
+        "strategy-live-metrics"
+      ],
+      "properties": {
+        "alpaca-events": {"$ref": "#/$defs/source_ref"},
+        "alpaca-flows": {"$ref": "#/$defs/source_ref"},
+        "alpaca-nav": {"$ref": "#/$defs/source_ref"},
+        "attribution-diagnostic": {"$ref": "#/$defs/source_ref"},
+        "combined-control-status": {"$ref": "#/$defs/source_ref"},
+        "component-decision-table": {"$ref": "#/$defs/source_ref"},
+        "cost-economics": {"$ref": "#/$defs/source_ref"},
+        "current-portfolio-summary": {"$ref": "#/$defs/source_ref"},
+        "data-coverage-matrix": {"$ref": "#/$defs/source_ref"},
+        "evidence-layer-metrics": {"$ref": "#/$defs/source_ref"},
+        "hwm-anchor-acceptance": {"$ref": "#/$defs/source_ref"},
+        "hwm-calendar-authority-account": {"$ref": "#/$defs/source_ref"},
+        "hwm-calendar-authority-legacy": {"$ref": "#/$defs/source_ref"},
+        "hwm-calendar-authority-provider": {"$ref": "#/$defs/source_ref"},
+        "hwm-flow-attestation": {"$ref": "#/$defs/source_ref"},
+        "hwm-fx-attestation": {"$ref": "#/$defs/source_ref"},
+        "hwm-inputs": {"$ref": "#/$defs/source_ref"},
+        "hwm-status": {"$ref": "#/$defs/source_ref"},
+        "ibkr-ledger": {"$ref": "#/$defs/source_ref"},
+        "implementation-gap": {"$ref": "#/$defs/source_ref"},
+        "phase2-evidence-summary": {"$ref": "#/$defs/source_ref"},
+        "schwab-flows": {"$ref": "#/$defs/source_ref"},
+        "schwab-nav": {"$ref": "#/$defs/source_ref"},
+        "strategy-live-metrics": {"$ref": "#/$defs/source_ref"}
+      }
+    },
+    "provider_generations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schwab"],
+      "properties": {"schwab": {"$ref": "#/$defs/provider_generation"}}
+    },
+    "provider_ledger": {"$ref": "#/$defs/provider_generation"},
+    "replay": {"$ref": "#/$defs/replay"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"const": 2}}},
+      "then": {"required": ["provider_generations"]}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 1}}},
+      "then": {"not": {"anyOf": [{"required": ["provider_generations"]}, {"required": ["provider_ledger"]}]}}
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 3}}},
+      "then": {"required": ["provider_ledger"], "not": {"required": ["provider_generations"]}}
+    }
+  ],
+  "$defs": {
+    "identifier": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "not": {"pattern": "(^[A-Za-z]:|^/|\\\\|(^|/)\\.\\.?(/|$))"}
+    },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root", "generation_id", "catalog_sha256"],
+      "properties": {
+        "root": {"type": "string", "minLength": 1},
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "catalog_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "source_ref": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_id",
+        "relative_path",
+        "expected_sha256",
+        "as_of_date",
+        "schema_name",
+        "schema_version"
+      ],
+      "properties": {
+        "root_id": {"$ref": "#/$defs/identifier"},
+        "relative_path": {"$ref": "#/$defs/relative_path"},
+        "expected_sha256": {"$ref": "#/$defs/sha256"},
+        "as_of_date": {"type": "string", "format": "date"},
+        "schema_name": {"type": "string", "minLength": 1},
+        "schema_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "provider_generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "root_id",
+        "generation_id",
+        "catalog_sha256",
+        "manifest_sha256"
+      ],
+      "properties": {
+        "root_id": {"$ref": "#/$defs/identifier"},
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "catalog_sha256": {"$ref": "#/$defs/sha256"},
+        "manifest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "expected_decimal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "tolerance"],
+      "properties": {
+        "value": {"type": "string", "pattern": "^-?[0-9]+(\\.[0-9]+)?$"},
+        "tolerance": {"type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?$"}
+      }
+    },
+    "replay": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "total_liquid_usd",
+        "systematic_total_usd",
+        "reserve_total_usd",
+        "nav_coverage",
+        "correlation_one_stress",
+        "full_systematic_hwm_status",
+        "portfolio_action"
+      ],
+      "properties": {
+        "total_liquid_usd": {"$ref": "#/$defs/expected_decimal"},
+        "systematic_total_usd": {"$ref": "#/$defs/expected_decimal"},
+        "reserve_total_usd": {"$ref": "#/$defs/expected_decimal"},
+        "nav_coverage": {"$ref": "#/$defs/expected_decimal"},
+        "correlation_one_stress": {"$ref": "#/$defs/expected_decimal"},
+        "full_systematic_hwm_status": {"type": "string", "minLength": 1},
+        "portfolio_action": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

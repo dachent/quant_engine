@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/strategy-version-catalog.schema.json",
+  "title": "Effective-dated strategy version catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["as_of_date", "catalog_schema_version", "strategies"],
+  "properties": {
+    "catalog_schema_version": {"const": 2},
+    "as_of_date": {"type": "string", "format": "date"},
+    "strategies": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {"$ref": "#/$defs/version"}
+    }
+  },
+  "$defs": {
+    "hash": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "identifier": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+    "evidence_layer": {
+      "enum": [
+        "ACCOUNT_LIVE",
+        "PROVIDER_LIVE",
+        "OFFICIAL_VEHICLE",
+        "PREDECESSOR",
+        "SHADOW_OOS",
+        "BACKTEST",
+        "CONCEPTUAL_STRESS"
+      ]
+    },
+    "slot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "artifact_sha256",
+        "disposition",
+        "evidence_layer",
+        "observed_end",
+        "observed_start",
+        "source_ids",
+        "status",
+        "version_ref"
+      ],
+      "properties": {
+        "artifact_sha256": {"$ref": "#/$defs/hash"},
+        "disposition": {"type": "string", "minLength": 1},
+        "evidence_layer": {
+          "anyOf": [
+            {"$ref": "#/$defs/evidence_layer"},
+            {"type": "null"}
+          ]
+        },
+        "observed_end": {"type": ["string", "null"], "format": "date"},
+        "observed_start": {"type": ["string", "null"], "format": "date"},
+        "source_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/identifier"}
+        },
+        "status": {
+          "enum": ["EVIDENCED", "REFERENCE_ONLY", "UNAVAILABLE", "NOT_APPLICABLE"]
+        },
+        "version_ref": {"type": ["string", "null"]}
+      }
+    },
+    "layer_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {"status": {"const": "EVIDENCED"}},
+            "required": ["status"]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                },
+                "required": ["artifact_sha256"]
+              },
+              {
+                "properties": {"version_ref": {"type": "string", "minLength": 1}},
+                "required": ["version_ref"]
+              }
+            ]
+          }
+        }
+      ],
+      "required": [
+        "artifact_sha256",
+        "disposition",
+        "evidence_layer",
+        "observed_end",
+        "observed_start",
+        "source_id",
+        "status",
+        "version_ref"
+      ],
+      "properties": {
+        "artifact_sha256": {"$ref": "#/$defs/hash"},
+        "disposition": {"type": "string", "minLength": 1},
+        "evidence_layer": {"$ref": "#/$defs/evidence_layer"},
+        "observed_end": {"type": ["string", "null"], "format": "date"},
+        "observed_start": {"type": ["string", "null"], "format": "date"},
+        "source_id": {"$ref": "#/$defs/identifier"},
+        "status": {"enum": ["EVIDENCED", "REFERENCE_ONLY", "UNAVAILABLE"]},
+        "version_ref": {"type": ["string", "null"]}
+      }
+    },
+    "version": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "backtest",
+        "benchmark",
+        "compatibility_reason",
+        "compatibility_status",
+        "configuration",
+        "costs",
+        "design",
+        "disposition",
+        "disposition_reason",
+        "effective_end",
+        "effective_start",
+        "evidence_layers",
+        "gaps",
+        "live_boundary",
+        "source_route",
+        "strategy_id",
+        "version_ref"
+      ],
+      "properties": {
+        "backtest": {"$ref": "#/$defs/slot"},
+        "benchmark": {"$ref": "#/$defs/slot"},
+        "compatibility_reason": {"type": "string", "minLength": 1},
+        "compatibility_status": {
+          "enum": ["PROVEN_COMPATIBLE", "VERSION_MISMATCH", "UNRESOLVED", "NOT_APPLICABLE"]
+        },
+        "configuration": {"$ref": "#/$defs/slot"},
+        "costs": {"$ref": "#/$defs/slot"},
+        "design": {"$ref": "#/$defs/slot"},
+        "disposition": {"enum": ["EVIDENCED", "REFERENCE_ONLY", "UNRESOLVED"]},
+        "disposition_reason": {"type": "string", "minLength": 1},
+        "effective_end": {"type": ["string", "null"], "format": "date"},
+        "effective_start": {"type": "string", "format": "date"},
+        "evidence_layers": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/layer_record"}
+        },
+        "gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "live_boundary": {"$ref": "#/$defs/slot"},
+        "source_route": {"$ref": "#/$defs/slot"},
+        "strategy_id": {"$ref": "#/$defs/identifier"},
+        "version_ref": {"type": ["string", "null"]}
+      }
+    }
+  }
+}
