@@ -3121,6 +3121,10 @@ def _factor_anchor_observations(
         row.return_type != "TOTAL" for row in usable_rows
     ):
         raise DecompositionError("24/7 target intervals require simple total returns")
+    declared_unavailable_days = {
+        _day(item["date"], "declared unavailable label date")
+        for item in policy.declared_unavailable_labels
+    }
     observations: list[tuple[TargetRow, FactorRow, tuple[float, ...]]] = []
     bucket_receipts: list[dict[str, object]] = []
     rejected_bucket_receipts: list[dict[str, object]] = []
@@ -3179,6 +3183,33 @@ def _factor_anchor_observations(
                     "prior_factor_anchor": left.isoformat(),
                     "reason": "SOURCE_SEGMENT_GAP",
                     "source_segments": [dict(prior_segment), dict(next_segment)],
+                    "target_calendar": policy.target_calendar,
+                    "target_currency": policy.target_currency,
+                    "target_label_convention": policy.target_label_convention,
+                    "target_labels": [label.isoformat() for label in labels],
+                    "target_source_snapshot_identity": policy.target_source_vintage,
+                }
+            )
+            continue
+        # A label the source declared unavailable spoils its bucket the same way a segment
+        # gap does. The factor return still spans the whole bucket, but the target return
+        # can only be compounded from the labels that were published, so pairing them would
+        # understate the target against that factor period -- the misattribution the
+        # `bridged` check below refuses to make. Drop the bucket, keep the receipt, and let
+        # the surrounding buckets carry the series.
+        spoiled = [label for label in labels if label in declared_unavailable_days]
+        if spoiled:
+            rejected_bucket_receipts.append(
+                {
+                    "calendar_day_duration": (right - left).days,
+                    "declared_unavailable_labels": [
+                        label.isoformat() for label in spoiled
+                    ],
+                    "factor_anchor": right.isoformat(),
+                    "factor_return_basis": policy.factor_return_basis,
+                    "factor_source_snapshot_identity": policy.factor_source_vintage,
+                    "prior_factor_anchor": left.isoformat(),
+                    "reason": "DECLARED_UNAVAILABLE_LABEL",
                     "target_calendar": policy.target_calendar,
                     "target_currency": policy.target_currency,
                     "target_label_convention": policy.target_label_convention,
@@ -3541,19 +3572,12 @@ def _model_result(
                 "missing expected target label(s) from source-period authority: "
                 f"{[day.isoformat() for day in unexpected_missing]}"
             )
-        source_proof = {
-            "declared_unavailable_labels": [
-                dict(item) for item in declared_unavailable
-            ],
-            "source_segments": [dict(item) for item in interval_policy.source_segments],
-        }
-        unavailable_coverage = {**empty_coverage, "interval_association": source_proof}
-        return _unavailable_result(
-            model,
-            target_rows,
-            "UNAVAILABLE_DECLARED_SOURCE_INTERVAL",
-            unavailable_coverage,
-        )
+        # The labels above have now been proved to be a genuine, evidenced source gap rather
+        # than a silent hole. That is what `gap_disposition: REJECT_BUCKET` is for: the
+        # buckets those labels spoil are dropped with a receipt in
+        # `_factor_anchor_observations`, and the series is fitted on the rest. Abandoning the
+        # whole series here instead made every strategy with a declared gap permanently
+        # unavailable, which is a product outcome the contract requires.
 
     aligned, interval_association = _factor_anchor_observations(
         model=model,
