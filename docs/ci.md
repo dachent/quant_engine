@@ -11,6 +11,16 @@ The repository root is a virtual uv project supporting Python 3.11 through
 investment product behavior. Future packages join the shared workspace and
 lock only through their governing issues.
 
+The packaging range and the CI contract are deliberately not the same thing. The
+workspace stays source-compatible across `>=3.11,<3.14` and publishes nothing, so the range is
+kept; what Quality gates is the single combination the product is delivered on, windows-2025 with
+CPython 3.11. Installability across the rest of the declared range is still proved on every pull
+request, because the required `validate` and `workflow-policy` contexts each run
+`uv sync --frozen --all-groups --all-packages` on ubuntu-24.04 with Python 3.13. That is an
+install gate, not a test gate, and the distinction is the point: a behavioural difference on an
+interpreter nothing ships on would be found by neither a six-cell matrix nobody reads nor by
+these, so the honest contract is to gate the runtime that ships and say so.
+
 `uv.lock` is authoritative for development and CI dependencies. Every quality
 job runs `uv lock --check` before a frozen sync; later commands use `--no-sync`
 so a check cannot silently change the environment. Builds use `--no-sources`
@@ -20,7 +30,7 @@ to prove that each member's published metadata is complete.
 
 | Workflow | Purpose | Token authority |
 |---|---|---|
-| `quality.yml` | Six-cell Windows/Ubuntu and Python 3.11–3.13 matrix: frozen install, Ruff, mypy, pinned Gitleaks-suppression provenance, bounded offline pytest, and all-package build | `contents: read` |
+| `quality.yml` | Single delivery cell (windows-2025 / CPython 3.11): frozen install, Ruff, mypy, pinned Gitleaks-suppression provenance, bounded offline pytest, and all-package build | `contents: read` |
 | `security.yml` | Local Git-history secret scan, locked dependency audit, and workflow policy validation | `contents: read` |
 | `data-boundary.yml` | Standard-library scan of the authoritative Git index and staged blobs | `contents: read` |
 | `issue-guard.yml` | Validate the issue graph; outside pull requests, reconcile native dependencies and reopen illegal closures | Pull requests: `contents: read`; reconcile only: `contents: read`, `issues: write` |
