@@ -528,6 +528,83 @@ def test_declared_unavailable_label_does_not_hide_other_missing_source_label(
         decomposition.build_decomposition(spec_path, source)
 
 
+def test_declared_unavailable_label_rejects_only_the_bucket_it_spoils(
+    tmp_path: Path,
+) -> None:
+    """A declared source gap costs its bucket, not the whole series.
+
+    Every series policy declares `gap_disposition: REJECT_BUCKET`, and the source contract keeps
+    declared-missing dates unavailable for daily metrics with no fill. So the bucket holding the
+    declared label is dropped with a receipt and the series is fitted on the rest. Abandoning the
+    series instead left Robuxio Crypto's required decomposition cells empty in every run (#465).
+    """
+    source = tmp_path / "source"
+    target_path, days = _write_sources(source)
+    declared_missing = days[20]
+    rows = list(csv.reader(target_path.read_text(encoding="utf-8").splitlines()))
+    with target_path.open("w", encoding="utf-8", newline="") as handle:
+        csv.writer(handle).writerows(
+            row
+            for row in rows
+            if len(row) < 2 or row[1] != declared_missing.isoformat()
+        )
+    spec_path = _spec(source, target_path, days)
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    target_source = spec["target_source"]
+    target_hash, target_size = _hash(target_path)
+    target_source["expected_sha256"] = target_hash
+    target_source["expected_size_bytes"] = target_size
+    policy = target_source["interval_policy"]
+    policy["source_segments"] = [
+        {
+            "segment_id": "selected-source-segment",
+            "observed_start": days[0].isoformat(),
+            "observed_end": days[-1].isoformat(),
+            "source_vintage": "SELECTED_SNAPSHOT",
+        }
+    ]
+    policy["declared_unavailable_labels"] = [
+        {
+            "date": declared_missing.isoformat(),
+            "reason": "DECLARED_NATIVE_NAV_GAP",
+            "source_reference": {
+                "source_id": "matrixport",
+                "generation_id": "SELECTED_SNAPSHOT",
+                "manifest_sha256": "selected-manifest",
+                "declared_exclusion_item": f"nav_missing_date:{declared_missing.isoformat()}",
+            },
+        }
+    ]
+    spec_path.write_text(
+        json.dumps(spec, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    result, _manifest, _content = decomposition.build_decomposition(spec_path, source)
+
+    selected = _selected(result)
+    assert selected["status"] in {"AVAILABLE", "DIAGNOSTIC_ONLY"}
+    interval = selected["interval_association"]
+    rejected = [
+        bucket
+        for bucket in interval["rejected_buckets"]
+        if bucket["reason"] == "DECLARED_UNAVAILABLE_LABEL"
+    ]
+    assert len(rejected) == 1
+    assert rejected[0]["declared_unavailable_labels"] == [declared_missing.isoformat()]
+    assert declared_missing.isoformat() in rejected[0]["target_labels"]
+    kept_labels = {
+        label for bucket in interval["buckets"] for label in bucket["target_labels"]
+    }
+    assert declared_missing.isoformat() not in kept_labels
+    # A declared gap carried real, unpublished return, so nothing compounded from the
+    # published rows alone may be reported as the series' cumulative or drawdown figure.
+    coverage = selected["coverage"]
+    assert coverage["target_cumulative_return"] is None
+    assert coverage["target_current_drawdown"] is None
+    assert coverage["target_max_drawdown"] is None
+
+
 def _available(result: dict[str, object]) -> dict[str, Any]:
     models = cast(list[dict[str, Any]], result["model_results"])
     selected = [item for item in models if item["selected_for_series"]]
