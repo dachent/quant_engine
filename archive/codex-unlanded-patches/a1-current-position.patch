@@ -1,0 +1,1046 @@
+diff --git a/tests/provider_ledger/test_admit_or_declare.py b/tests/provider_ledger/test_admit_or_declare.py
+index 8f53b29..9b86881 100644
+--- a/tests/provider_ledger/test_admit_or_declare.py
++++ b/tests/provider_ledger/test_admit_or_declare.py
+@@ -404,15 +404,20 @@ def _staged_observation(
+     catalogs: dict[str, dict[str, Any]],
+     *,
+     cutoff: date = DAY,
++    schwab_point_capture: str | None = None,
+ ) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+     """Small synthetic sources using native formats, no asserted finality flag."""
+     from datetime import datetime, timedelta, timezone
+     from quant_engine.core.publication import CurrentPointer
+ 
+-    generation_day = max(DAY, cutoff)
+     refs, selections = {}, {}
+     for index, identity in enumerate(list(identities)):
+         provider_id = identity.provider_id
++        generation_day = (
++            datetime.fromisoformat(schwab_point_capture).date()
++            if provider_id == "schwab" and schwab_point_capture is not None
++            else max(DAY, cutoff)
++        )
+         root = tmp_path / provider_id
+         root.mkdir(parents=True)
+         catalog_name, versions = ledger._PROVIDER_CATALOGS[provider_id]
+@@ -434,6 +439,7 @@ def _staged_observation(
+             path: Path,
+             content: bytes,
+             schema: str = "synthetic-source",
++            version: str = "1",
+         ) -> None:
+             path.parent.mkdir(parents=True, exist_ok=True)
+             path.write_bytes(content)
+@@ -444,7 +450,7 @@ def _staged_observation(
+                     size_bytes=len(content),
+                     as_of_date=generation_day,
+                     schema_name=schema,
+-                    schema_version="1",
++                    schema_version=version,
+                 )
+             )
+ 
+@@ -611,6 +617,81 @@ def _staged_observation(
+             catalog.update(
+                 accounts=[{"account_id": account}], nav_observations=[nav(nav_artifact)]
+             )
++            if schwab_point_capture is not None:
++                from quant_engine.schwab import (
++                    read_holdings_v2_current_snapshot,
++                    write_current_snapshot,
++                )
++
++                snapshot = read_holdings_v2_current_snapshot(
++                    {
++                        "accounts": [
++                            {
++                                "accountId": "SYNTHETIC-001",
++                                "groupedPositions": [
++                                    {
++                                        "groupName": "Equity",
++                                        "securityType": 1,
++                                        "holdingsRows": [
++                                            {
++                                                "dataSymbol": "SYNTH",
++                                                "qty": {"qty": "3"},
++                                                "marketValue": {"val": "99"},
++                                                "costBasis": {"cstBasis": "27"},
++                                            }
++                                        ],
++                                    }
++                                ],
++                            },
++                            {"accountId": "SYNTHETIC-002", "groupedPositions": []},
++                        ],
++                        "accountTotals": [],
++                    },
++                    crosswalk={
++                        "SYNTHETIC-001": account,
++                        "SYNTHETIC-002": "synthetic-schwab-empty",
++                    },
++                    captured_at=schwab_point_capture,
++                )
++                snapshot_path = root / "snapshot.json"
++                digest, size = write_current_snapshot(snapshot, snapshot_path)
++                document = json.loads(snapshot_path.read_bytes())
++                point_artifact = SourceArtifact(
++                    artifact_id="web/api-current-snapshot.json",
++                    sha256=digest,
++                    size_bytes=size,
++                    as_of_date=generation_day,
++                    schema_name="schwab-api-current-snapshot",
++                    schema_version="2",
++                )
++                artifacts.append(point_artifact)
++                catalog.update(
++                    catalog_schema_version=2,
++                    as_of_date=generation_day.isoformat(),
++                    accounts=[
++                        {"account_id": row["account_id"], "base_currency": "USD"}
++                        for row in document["accounts"]
++                    ],
++                    current_accounts=document["accounts"],
++                    positions=document["positions"],
++                    current_transport="WEB_CONTRACT",
++                    current_position_account_count=1,
++                    position_snapshot_as_of={"observed_at": schwab_point_capture},
++                    source_artifacts=[point_artifact.to_dict()],
++                )
++                bind(
++                    "native/empty-nav.csv",
++                    root / "native/empty-nav.csv",
++                    content,
++                    "schwab-wch-historical-balance",
++                )
++                catalog["nav_observations"].append(
++                    {
++                        **nav("native/empty-nav.csv"),
++                        "account_id": "synthetic-schwab-empty",
++                        "record_id": "synthetic-empty-nav",
++                    }
++                )
+             evidence_path.write_bytes(
+                 canonical_json_bytes(
+                     {
+@@ -626,7 +707,24 @@ def _staged_observation(
+                                 "expected_sha256": hashlib.sha256(content).hexdigest(),
+                                 "expected_size_bytes": len(content),
+                             }
+-                        ],
++                        ]
++                        + (
++                            [
++                                {
++                                    "role": "WCH_NAV_CSV",
++                                    "artifact_id": "native/empty-nav.csv",
++                                    "account_id": "synthetic-schwab-empty",
++                                    "root_id": "native",
++                                    "relative_path": "native/empty-nav.csv",
++                                    "expected_sha256": hashlib.sha256(
++                                        content
++                                    ).hexdigest(),
++                                    "expected_size_bytes": len(content),
++                                }
++                            ]
++                            if schwab_point_capture is not None
++                            else []
++                        ),
+                     }
+                 )
+             )
+@@ -636,6 +734,9 @@ def _staged_observation(
+             root / catalog_name,
+             catalog_bytes,
+             provider_id + "-generation-catalog",
++            str(catalog["catalog_schema_version"])
++            if provider_id == "schwab" and schwab_point_capture is not None
++            else "1",
+         )
+         qualification = {
+             "alpaca": "PUBLISHED_COMPLETE",
+@@ -659,7 +760,11 @@ def _staged_observation(
+         )
+         manifest = GenerationManifest.build(
+             as_of_date=generation_day,
+-            adapter=manifests[provider_id].adapter,
++            adapter=(
++                AdapterIdentity("quant-engine-schwab", "1")
++                if provider_id == "schwab" and schwab_point_capture is not None
++                else manifests[provider_id].adapter
++            ),
+             coverage=coverage,
+             artifacts=artifacts,
+             verification=VerificationStatus.VERIFIED,
+@@ -710,12 +815,21 @@ def _staged_observation(
+ 
+ 
+ def _source_bound_stage(
+-    tmp_path: Path, *, source_cutoff: date = DAY
++    tmp_path: Path,
++    *,
++    source_cutoff: date = DAY,
++    schwab_point_capture: str | None = None,
++    requested_as_of: date = date(2026, 9, 17),
+ ) -> tuple[Path, dict[str, Any], Path]:
+     """Real stage, real financial contract/schema/registry, tiny synthetic inputs."""
+     _, identities, manifests, catalogs, _ = _fixture(unreferenced_dataset=True)
+     refs, selections = _staged_observation(
+-        tmp_path / "sources", identities, manifests, catalogs, cutoff=source_cutoff
++        tmp_path / "sources",
++        identities,
++        manifests,
++        catalogs,
++        cutoff=source_cutoff,
++        schwab_point_capture=schwab_point_capture,
+     )
+     contract_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
+     schema_path = ROOT / "schemas/portfolio/financial-mvp-source-contract.schema.json"
+@@ -739,7 +853,7 @@ def _source_bound_stage(
+     observation = {
+         "schema_version": 1,
+         "captured_at_utc": "2026-09-18T12:00:00Z",
+-        "financial_cutoff": "2026-09-17",
++        "financial_cutoff": requested_as_of.isoformat(),
+         "policy_contract_sha256": financial["contract_sha256"],
+         "providers": selections,
+     }
+@@ -829,7 +943,7 @@ def _source_bound_stage(
+         "spec.json",
+         {
+             "schema_version": 2,
+-            "as_of_date": "2026-09-17",
++            "as_of_date": requested_as_of.isoformat(),
+             "financial_mvp": financial,
+             "output_root": str(tmp_path / "staged"),
+             "providers": refs,
+diff --git a/tools/portfolio_pipeline_materialize.py b/tools/portfolio_pipeline_materialize.py
+index b7ffb5e..d69468b 100644
+--- a/tools/portfolio_pipeline_materialize.py
++++ b/tools/portfolio_pipeline_materialize.py
+@@ -965,6 +965,127 @@ def _manifest_artifact_bytes(
+     return content
+ 
+ 
++def _schwab_selected_point_positions(
++    manifest: GenerationManifest,
++    source: Mapping[str, Any],
++    requested_as_of: date,
++) -> dict[str, dict[str, Any]] | None:
++    """Reconstruct point facts from reopened source authority, not ledger flags."""
++    metadata = source.get("position_snapshot_as_of")
++    if not isinstance(metadata, dict) or "observed_at" not in metadata:
++        return None
++    try:
++        clock = metadata["observed_at"]
++        captured = datetime.fromisoformat(clock)
++        day = captured.date()
++        transport = source["current_transport"]
++        artifacts = [
++            item
++            for item in source["source_artifacts"]
++            if item["schema"]["name"] == "schwab-api-current-snapshot"
++        ]
++        if (
++            captured.tzinfo is None
++            or captured.utcoffset() is None
++            or day != manifest.as_of_date
++            or source["as_of_date"] != day.isoformat()
++            or source["catalog_schema_version"] not in {2, 3}
++            or manifest.adapter.name != "quant-engine-schwab"
++            or len(artifacts) != 1
++            or transport not in {"WEB_CONTRACT", "DEVELOPER_API"}
++        ):
++            raise ValueError("point clock/date/transport differs")
++        artifact = artifacts[0]
++        if (
++            artifact["as_of_date"] != day.isoformat()
++            or artifact["schema"]["version"] not in {"1", "2"}
++            or (artifact["schema"]["version"] == "1" and transport != "DEVELOPER_API")
++            or type(artifact["size_bytes"]) is not int
++            or artifact["size_bytes"] < 1
++            or [
++                a.to_dict()
++                for a in manifest.artifacts
++                if a.artifact_id == artifact["artifact_id"]
++            ]
++            != [artifact]
++            or len(
++                [
++                    a
++                    for a in source["source_artifacts"]
++                    if a["artifact_id"] == artifact["artifact_id"]
++                ]
++            )
++            != 1
++        ):
++            raise ValueError("point selected artifact differs")
++        accounts = {row["account_id"] for row in source["accounts"]}
++        current = source["current_accounts"]
++        if (
++            not accounts
++            or len(accounts) != len(source["accounts"])
++            or {row["account_id"] for row in current} != accounts
++            or len(current) != len(accounts)
++            or any(row["observed_at"] != clock for row in current)
++        ):
++            raise ValueError("point account/clock scope differs")
++        expected = {}
++        for native in source["positions"]:
++            identity = {
++                "account_id": native["account_id"],
++                "as_of_date": native["as_of_date"],
++                "security_id": native["security_id"],
++            }
++            record_id = native["record_id"]
++            if (
++                native["account_id"] not in accounts
++                or native["as_of_date"] != day.isoformat()
++                or native["observed_at"] != clock
++                or native["security_id"]
++                != "security-schwab-"
++                + hashlib.sha256(native["symbol"].encode()).hexdigest()[:24]
++                or record_id
++                != "position-"
++                + hashlib.sha256(canonical_json_bytes(identity)).hexdigest()[:24]
++                or record_id in expected
++                or native.get("source_artifact_id", artifact["artifact_id"])
++                != artifact["artifact_id"]
++                or native["evidence_class"]
++                != (
++                    "WCH_CURRENT"
++                    if transport == "WEB_CONTRACT"
++                    else "DEVELOPER_API_CURRENT"
++                )
++            ):
++                raise ValueError("point native row scope differs")
++            expected[record_id] = {
++                **{
++                    key: native[key]
++                    for key in (
++                        "account_id",
++                        "as_of_date",
++                        "observed_at",
++                        "quantity",
++                        "market_value",
++                        "average_price",
++                        "security_id",
++                    )
++                },
++                "evidence_layer": "ACCOUNT_LIVE",
++                "provider_id": "schwab",
++                "record_id": "schwab:" + record_id,
++                "source_record_id": record_id,
++                "source_artifact_id": artifact["artifact_id"],
++                "generation_id": manifest.generation_id,
++            }
++        if source["current_position_account_count"] != len(
++            {row["account_id"] for row in expected.values()}
++        ):
++            raise ValueError("point position account count differs")
++    except (KeyError, ValueError, TypeError, AttributeError) as exc:
++        raise MaterializationError("Schwab selected point authority differs") from exc
++    return expected if day <= requested_as_of else None
++
++
+ def _provider_admission_authority(
+     generation: Path,
+     contract: Mapping[str, Any],
+@@ -1146,6 +1267,13 @@ def _provider_admission_authority(
+                 effective = min(
+                     cutoff, date.fromisoformat(selection["finalized_through"])
+                 )
++                point_positions = (
++                    _schwab_selected_point_positions(
++                        source_manifest, source_catalog, cutoff
++                    )
++                    if provider_id == "schwab"
++                    else None
++                )
+                 for fact_name in reader._TARGET_ADMISSION_FACT:
+                     rows = reader._objects(catalog.get(fact_name, []), fact_name)
+                     if any(row.get("provider_id") not in selected for row in rows):
+@@ -1155,6 +1283,28 @@ def _provider_admission_authority(
+                     if fact_name == "provider_strategy_returns":
+                         continue
+                     rows = [row for row in rows if row["provider_id"] == provider_id]
++                    point_bound = (
++                        fact_name == "positions" and point_positions is not None
++                    )
++                    if point_bound:
++                        assert point_positions is not None
++                        if (
++                            len(rows) != len(point_positions)
++                            or {row.get("source_record_id") for row in rows}
++                            != set(point_positions)
++                            or any(
++                                {
++                                    key: value
++                                    for key, value in row.items()
++                                    if key not in {"mapping_status", "strategy_id"}
++                                }
++                                != point_positions.get(row.get("source_record_id"))
++                                for row in rows
++                            )
++                        ):
++                            raise MaterializationError(
++                                "materialized Schwab point differs from selected native positions"
++                            )
+                     if (
+                         provider_id == "ibkr"
+                         and fact_name in reader._NATIVE_LEVERAGE_OBSERVATION_FACTS
+@@ -1179,7 +1329,10 @@ def _provider_admission_authority(
+                             if row.get(field) not in {None, ""}
+                         ]
+                         if row.get("generation_id") != identity.generation_id or (
+-                            any(day > effective for day in days)
++                            any(
++                                day > (cutoff if point_bound else effective)
++                                for day in days
++                            )
+                         ):
+                             raise MaterializationError(
+                                 "materialized provider fact cutoff or generation differs"
+diff --git a/tools/provider_ledger.py b/tools/provider_ledger.py
+index 247c6e1..f3172ec 100644
+--- a/tools/provider_ledger.py
++++ b/tools/provider_ledger.py
+@@ -25,7 +25,7 @@ import re
+ import shutil
+ import sys
+ import tempfile
+-from typing import Any, Callable, Final, Mapping, Sequence
++from typing import Any, Callable, Final, Mapping, NamedTuple, Sequence
+ from urllib.parse import urlsplit
+ 
+ from quant_engine.core import (
+@@ -3779,6 +3779,152 @@ def _schwab_transactions_within_cutoff(
+     return retained
+ 
+ 
++class _SchwabPositionObservation(NamedTuple):
++    """One selected holdings point, never an extension of daily finality."""
++
++    observed_at: datetime
++    artifact: SourceArtifact
++    record_ids: frozenset[str]
++
++
++def _schwab_position_observation(
++    catalog: Mapping[str, Any],
++    manifest: GenerationManifest | None,
++    root: Path | None,
++    requested_as_of: date | None,
++) -> _SchwabPositionObservation | None:
++    metadata = catalog.get("position_snapshot_as_of")
++    if (
++        requested_as_of is None
++        or manifest is None
++        or root is None
++        or not isinstance(metadata, dict)
++        or "observed_at" not in metadata
++    ):
++        # Manual/legacy observations have no independently selected point proof.
++        return None
++    label = "Schwab position observation"
++    clock = _text(metadata["observed_at"], label)
++    try:
++        observed_at = datetime.fromisoformat(clock)
++    except ValueError as exc:
++        raise ProviderLedgerError(f"{label} clock is invalid") from exc
++    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
++        raise ProviderLedgerError(f"{label} clock must be timezone-aware")
++    day = observed_at.date()
++    if (
++        manifest.verification is not VerificationStatus.VERIFIED
++        or manifest.adapter.name != "quant-engine-schwab"
++        or manifest.as_of_date != day
++        or catalog.get("as_of_date") != day.isoformat()
++        or catalog.get("catalog_schema_version") not in {2, 3}
++    ):
++        raise ProviderLedgerError(f"{label} generation/date/schema differs")
++    catalog_artifacts = [
++        artifact
++        for artifact in manifest.artifacts
++        if artifact.artifact_id
++        in {"normalized/schwab-generation.json", "schwab-generation.json"}
++        and artifact.schema_name == "schwab-generation-catalog"
++        and artifact.schema_version == str(catalog["catalog_schema_version"])
++        and artifact.as_of_date == day
++    ]
++    if len(catalog_artifacts) != 1:
++        raise ProviderLedgerError(f"{label} selected catalog artifact differs")
++    selected, _, size = _verified_json(
++        _exact_file(
++            root / "generations" / manifest.generation_id,
++            Path("schwab-generation.json"),
++            label,
++        ),
++        catalog_artifacts[0].sha256,
++        label,
++    )
++    if size != catalog_artifacts[0].size_bytes or selected != catalog:
++        raise ProviderLedgerError(f"{label} selected catalog bytes differ")
++    try:
++        artifacts = [
++            SourceArtifact.from_dict(row)
++            for row in _objects(catalog.get("source_artifacts"), label)
++        ]
++    except (TypeError, ValueError) as exc:
++        raise ProviderLedgerError(f"{label} source artifacts are invalid") from exc
++    points = [a for a in artifacts if a.schema_name == "schwab-api-current-snapshot"]
++    if len(points) != 1:
++        raise ProviderLedgerError(
++            f"{label} selected snapshot artifact is absent or ambiguous"
++        )
++    artifact = points[0]
++    transport = catalog.get("current_transport")
++    if (
++        artifact.schema_version not in {"1", "2"}
++        or artifact.as_of_date != day
++        or artifact.size_bytes < 1
++        or [a for a in manifest.artifacts if a.artifact_id == artifact.artifact_id]
++        != [artifact]
++        or len([a for a in artifacts if a.artifact_id == artifact.artifact_id]) != 1
++        or transport not in {"WEB_CONTRACT", "DEVELOPER_API"}
++        or (artifact.schema_version == "1" and transport != "DEVELOPER_API")
++    ):
++        raise ProviderLedgerError(
++            f"{label} selected snapshot binding/transport differs"
++        )
++    accounts = _objects(catalog.get("accounts"), label)
++    account_ids = {_text(row.get("account_id"), label) for row in accounts}
++    current = _objects(catalog.get("current_accounts"), label)
++    if (
++        not account_ids
++        or len(account_ids) != len(accounts)
++        or len(current) != len(account_ids)
++        or {row.get("account_id") for row in current} != account_ids
++        or any(row.get("observed_at") != clock for row in current)
++    ):
++        raise ProviderLedgerError(f"{label} account/clock scope differs")
++    record_ids: set[str] = set()
++    position_accounts: set[str] = set()
++    for row in _objects(catalog.get("positions"), label):
++        account_id = _text(row.get("account_id"), label)
++        security_id = _text(row.get("security_id"), label)
++        symbol = _text(row.get("symbol"), label)
++        record_id = _text(row.get("record_id"), label)
++        native_identity = {
++            "account_id": account_id,
++            "as_of_date": day.isoformat(),
++            "security_id": security_id,
++        }
++        expected_id = (
++            "position-"
++            + hashlib.sha256(canonical_json_bytes(native_identity)).hexdigest()[:24]
++        )
++        if (
++            account_id not in account_ids
++            or record_id != expected_id
++            or record_id in record_ids
++            or security_id
++            != "security-schwab-" + hashlib.sha256(symbol.encode()).hexdigest()[:24]
++            or row.get("as_of_date") != day.isoformat()
++            or row.get("observed_at") != clock
++            or row.get("source_artifact_id", artifact.artifact_id)
++            != artifact.artifact_id
++            or row.get("evidence_class")
++            != (
++                "WCH_CURRENT"
++                if transport == "WEB_CONTRACT"
++                else "DEVELOPER_API_CURRENT"
++            )
++        ):
++            raise ProviderLedgerError(
++                f"{label} position record/date/clock scope differs"
++            )
++        record_ids.add(record_id)
++        position_accounts.add(account_id)
++    if catalog.get("current_position_account_count") != len(position_accounts):
++        raise ProviderLedgerError(f"{label} position account count differs")
++    if day > requested_as_of:
++        return None
++    return _SchwabPositionObservation(observed_at, artifact, frozenset(record_ids))
++
++
+ def _project_account_facts(
+     provider_id: str,
+     generation_id: str,
+@@ -3795,11 +3941,24 @@ def _project_account_facts(
+     ]
+     | None = None,
+     financial_cutoff: date | None = None,
++    *,
++    requested_as_of: date | None = None,
+ ) -> tuple[dict[str, list[dict[str, Any]]], list[dict[str, Any]]]:
+     projections: dict[str, list[dict[str, Any]]] = defaultdict(list)
+     exceptions: list[dict[str, Any]] = []
+     if provider_id not in _ACCOUNT_FACTS:
+         raise ProviderLedgerError(f"unknown provider fact mapping: {provider_id}")
++    position_observation = (
++        _schwab_position_observation(catalog, manifest, root, requested_as_of)
++        if provider_id == "schwab"
++        else None
++    )
++    if position_observation is not None and (
++        manifest is None or manifest.generation_id != generation_id
++    ):
++        raise ProviderLedgerError(
++            "Schwab position observation selected generation differs"
++        )
+     if provider_id == "ibkr" and financial_cutoff is not None:
+         # Anchors consume NAV, recognition-dated flows and ChangeInNAV. Cut all
+         # three before reconciliation; a future unquantified flow must not erase
+@@ -4098,6 +4257,12 @@ def _project_account_facts(
+                 ):
+                     if field in row:
+                         record[field] = row[field]
++            if source_fact == "positions" and position_observation is not None:
++                record.update(
++                    observed_at=row["observed_at"],
++                    average_price=row["average_price"],
++                    source_artifact_id=position_observation.artifact.artifact_id,
++                )
+             if (
+                 source_fact == "flows"
+                 and record.get("flow_type") == "DEPOSIT_OR_WITHDRAWAL"
+@@ -4207,7 +4372,17 @@ def _project_account_facts(
+             retained = []
+             for row in rows:
+                 observed = _row_day(row)
+-                if observed is None or observed <= financial_cutoff:
++                if (
++                    observed is None
++                    or observed <= financial_cutoff
++                    or (
++                        fact_type == "positions"
++                        and position_observation is not None
++                        and row.get("source_record_id")
++                        in position_observation.record_ids
++                        and observed == position_observation.observed_at.date()
++                    )
++                ):
+                     retained.append(row)
+                     continue
+                 exceptions.append(
+@@ -8134,6 +8309,7 @@ def build_catalog(
+             manifest=manifest,
+             root=root,
+             fx_rates=fx_rates if provider_id == "matrixport" else None,
++            requested_as_of=as_of if run_observation is not None else None,
+             financial_cutoff=(
+                 min(
+                     as_of,
+diff --git a/tests/provider_ledger/test_schwab_point_admission.py b/tests/provider_ledger/test_schwab_point_admission.py
+new file mode 100644
+index 0000000..40526d3
+--- /dev/null
++++ b/tests/provider_ledger/test_schwab_point_admission.py
+@@ -0,0 +1,406 @@
++"""Synthetic selected-source point positions across the real admission seam."""
++
++from __future__ import annotations
++
++import copy
++from dataclasses import replace
++from datetime import date
++import hashlib
++import importlib.util
++import json
++from pathlib import Path
++from typing import Any, cast
++
++import pytest
++
++from quant_engine.core import GenerationManifest
++from quant_engine.core.contracts import canonical_json_bytes
++import portfolio_pipeline_materialize as materializer
++
++
++ROOT = Path(__file__).resolve().parents[2]
++SPEC = importlib.util.spec_from_file_location(
++    "schwab_point_source_fixture", Path(__file__).with_name("test_admit_or_declare.py")
++)
++assert SPEC is not None and SPEC.loader is not None
++fixtures = importlib.util.module_from_spec(SPEC)
++SPEC.loader.exec_module(fixtures)
++ledger = fixtures.ledger
++CLOCK = "2026-09-18T03:59:40.004417+00:00"
++CUTOFF = date(2026, 9, 17)
++REQUESTED = date(2026, 9, 18)
++PointStage = tuple[Path, dict[str, Any], Path]
++
++
++@pytest.fixture(scope="module")
++def point_stage(tmp_path_factory: pytest.TempPathFactory) -> PointStage:
++    return cast(
++        PointStage,
++        fixtures._source_bound_stage(
++            tmp_path_factory.mktemp("point-source"),
++            source_cutoff=CUTOFF,
++            schwab_point_capture=CLOCK,
++            requested_as_of=REQUESTED,
++        ),
++    )
++
++
++def _verify(generation: Path, authority: dict[str, Any]) -> dict[str, Any]:
++    return materializer._provider_admission_authority(
++        generation,
++        authority["contract"],
++        **{
++            key: authority[key]
++            for key in (
++                "contract_raw_sha256",
++                "contract_semantic_sha256",
++                "census_sha256",
++            )
++        },
++    )
++
++
++def _selected(
++    authority: dict[str, Any],
++) -> tuple[Path, GenerationManifest, dict[str, Any]]:
++    selection = authority["run_observation"]["providers"]["schwab"]
++    root = Path(selection["root"])
++    generation = root / "generations" / selection["generation_id"]
++    return (
++        root,
++        GenerationManifest.from_json_bytes(
++            (generation / "generation.json").read_bytes()
++        ),
++        json.loads((generation / "schwab-generation.json").read_bytes()),
++    )
++
++
++def test_build_catalog_retains_selected_point_without_extending_daily_finality(
++    point_stage: PointStage,
++) -> None:
++    generation, authority, spec_path = point_stage
++    source_root, _, native = _selected(authority)
++    originals = {
++        path: path.read_bytes() for path in source_root.rglob("*") if path.is_file()
++    }
++    policy_path = ROOT / "contracts/portfolio-financial-mvp-source-v1.json"
++    policy_before = policy_path.read_bytes()
++    catalog, _, _, receipt_bytes = ledger.build_catalog(spec_path)
++    positions = [row for row in catalog["positions"] if row["provider_id"] == "schwab"]
++    assert len(positions) == 1
++    position = positions[0]
++    assert position["source_record_id"] == native["positions"][0]["record_id"]
++    assert position["record_id"] == "schwab:" + native["positions"][0]["record_id"]
++    assert (position["as_of_date"], position["observed_at"], position["quantity"]) == (
++        "2026-09-18",
++        CLOCK,
++        "3",
++    )
++    assert position["source_artifact_id"] == "web/api-current-snapshot.json"
++    assert position["average_price"] == native["positions"][0]["average_price"]
++    assert position["market_value"] == {
++        "currency": "USD",
++        "status": "UNAVAILABLE",
++        "value": None,
++    }
++    assert native["current_position_account_count"] == 1
++    assert len(native["current_accounts"]) == 2
++    for fact in ("nav_observations", "flows", "transactions"):
++        assert all(
++            row.get("as_of_date", row.get("event_date", "")) <= "2026-09-17"
++            for row in catalog[fact]
++        )
++    assert all(row["date"] <= "2026-09-17" for row in catalog["strategy_returns"])
++    receipt = json.loads(receipt_bytes)
++    assert all(
++        row["finalized_through"] == "2026-09-17"
++        for row in receipt["run_observation"]["providers"]
++    )
++    assert _verify(generation, authority)["provider_count"] == 7
++    assert policy_path.read_bytes() == policy_before
++    assert all(path.read_bytes() == content for path, content in originals.items())
++    assert not (spec_path.parent / "staged/CURRENT.json").exists()
++
++
++def _forged_candidate(
++    tmp_path: Path, generation: Path, authority: dict[str, Any], catalog: dict[str, Any]
++) -> Path:
++    """Rebind all candidate receipts/digests; only selected sources stay fixed."""
++    identities, manifests, catalogs = [], {}, {}
++    observation = authority["run_observation"]
++    for provider_id, selection in observation["providers"].items():
++        reference = {
++            key: selection[key]
++            for key in (
++                "root",
++                "generation_id",
++                "manifest_sha256",
++                "catalog_sha256",
++                "qualification",
++            )
++        }
++        identity, manifest, source, _, _ = ledger._provider(
++            provider_id, reference, REQUESTED, run_observation=observation
++        )
++        identities.append(identity)
++        manifests[provider_id], catalogs[provider_id] = manifest, source
++    facts = {
++        provider_id: {
++            fact_name: [
++                row
++                for row in catalog.get(fact_name, [])
++                if row["provider_id"] == provider_id
++            ]
++            for fact_name in ledger._TARGET_ADMISSION_FACT
++            if fact_name != "provider_strategy_returns"
++        }
++        for provider_id in manifests
++    }
++    for fact_name in ledger._NATIVE_LEVERAGE_OBSERVATION_FACTS:
++        if not facts["ibkr"].get(fact_name):
++            facts["ibkr"].pop(fact_name, None)
++    _, receipt_bytes = ledger._admit_or_declare_receipt(
++        authority,
++        identities,
++        manifests,
++        catalogs,
++        facts,
++        catalog["provider_strategy_returns"],
++    )
++    contents = {
++        "normalized/admit-or-declare-receipt.json": receipt_bytes,
++        "normalized/provider-ledger.json": canonical_json_bytes(catalog),
++    }
++    original = GenerationManifest.from_json_bytes(
++        (generation / "generation.json").read_bytes()
++    )
++    manifest = GenerationManifest.build(
++        as_of_date=original.as_of_date,
++        adapter=original.adapter,
++        coverage=original.coverage,
++        verification=original.verification,
++        artifacts=tuple(
++            replace(
++                artifact,
++                sha256=hashlib.sha256(contents[artifact.artifact_id]).hexdigest(),
++                size_bytes=len(contents[artifact.artifact_id]),
++            )
++            if artifact.artifact_id in contents
++            else artifact
++            for artifact in original.artifacts
++        ),
++    )
++    forged = tmp_path / manifest.generation_id
++    forged.mkdir()
++    (forged / "generation.json").write_bytes(manifest.to_json_bytes())
++    for artifact_id, content in contents.items():
++        (forged / Path(artifact_id).name).write_bytes(content)
++    return forged
++
++
++@pytest.mark.parametrize(
++    "attack",
++    [
++        "quantity",
++        "market_value",
++        "average_price",
++        "account_id",
++        "source_record_id",
++        "source_artifact_id",
++        "observed_at",
++        "as_of_date",
++        "omit",
++        "duplicate",
++        "daily_nav",
++    ],
++)
++def test_materializer_reconstructs_point_from_selected_rows_despite_coherent_receipt(
++    point_stage: PointStage, tmp_path: Path, attack: str
++) -> None:
++    generation, authority, _ = point_stage
++    catalog = json.loads((generation / "provider-ledger.json").read_bytes())
++    assert len(catalog["positions"]) == 1
++    position = catalog["positions"][0]
++    if attack == "omit":
++        catalog["positions"] = []
++    elif attack == "duplicate":
++        catalog["positions"].append(copy.deepcopy(position))
++    elif attack == "daily_nav":
++        next(
++            row for row in catalog["nav_observations"] if row["provider_id"] == "schwab"
++        )["as_of_date"] = "2026-09-18"
++    else:
++        position[attack] = {
++            "quantity": "4",
++            "market_value": {"currency": "USD", "status": "AVAILABLE", "value": "99"},
++            "average_price": "999",
++            "account_id": "synthetic-schwab-empty",
++            "source_record_id": "synthetic-unselected-position",
++            "source_artifact_id": "native/nav.csv",
++            "observed_at": "2026-09-19T03:59:40+00:00",
++            "as_of_date": "2026-09-19",
++        }[attack]
++    forged = _forged_candidate(tmp_path, generation, authority, catalog)
++    reason = (
++        "materialized provider fact cutoff or generation differs"
++        if attack == "daily_nav"
++        else "materialized Schwab point differs from selected native positions"
++    )
++    with pytest.raises(materializer.MaterializationError, match=reason):
++        _verify(forged, authority)
++
++
++def test_point_source_catalog_mutation_rejected_by_build_and_materializer(
++    tmp_path: Path,
++) -> None:
++    generation, authority, spec = fixtures._source_bound_stage(
++        tmp_path,
++        source_cutoff=CUTOFF,
++        schwab_point_capture=CLOCK,
++        requested_as_of=REQUESTED,
++    )
++    root, manifest, _ = _selected(authority)
++    path = root / "generations" / manifest.generation_id / "schwab-generation.json"
++    content = path.read_bytes()
++    assert b'"quantity":"3"' in content
++    path.write_bytes(content.replace(b'"quantity":"3"', b'"quantity":"4"'))
++    with pytest.raises(ledger.ProviderLedgerError):
++        ledger.build_catalog(spec)
++    with pytest.raises(materializer.MaterializationError):
++        _verify(generation, authority)
++
++
++@pytest.mark.parametrize("requested", [None, CUTOFF])
++def test_point_projection_preserves_legacy_and_requested_date_bounds(
++    point_stage: PointStage,
++    requested: date | None,
++) -> None:
++    _, authority, _ = point_stage
++    root, manifest, catalog = _selected(authority)
++    kwargs = {} if requested is None else {"requested_as_of": requested}
++    facts, findings = ledger._project_account_facts(
++        "schwab",
++        manifest.generation_id,
++        catalog,
++        {"synthetic-schwab"},
++        set(),
++        {},
++        manifest=manifest,
++        root=root,
++        financial_cutoff=CUTOFF,
++        **kwargs,
++    )
++    assert not facts["positions"]
++    assert any(
++        row.get("fact_type") == "positions"
++        and row["status"] == "OUTSIDE_FINANCIAL_CUTOFF"
++        for row in findings
++    )
++
++
++@pytest.mark.parametrize(
++    "attack",
++    [
++        "missing_clock",
++        "naive_clock",
++        "mismatched_clock",
++        "missing_artifact",
++        "artifact_hash",
++        "artifact_size",
++        "artifact_date",
++        "artifact_schema",
++        "transport",
++        "row_date",
++        "row_clock",
++        "row_account",
++        "row_record",
++        "duplicate_row",
++        "account_clock",
++        "account_scope",
++    ],
++)
++def test_selected_point_proof_must_be_coherent(
++    point_stage: PointStage,
++    tmp_path: Path,
++    attack: str,
++) -> None:
++    _, authority, _ = point_stage
++    _, original_manifest, catalog = _selected(authority)
++    if attack == "missing_clock":
++        catalog.pop("position_snapshot_as_of")
++    elif attack in {"naive_clock", "mismatched_clock"}:
++        catalog["position_snapshot_as_of"]["observed_at"] = (
++            "2026-09-18T03:59:40"
++            if attack == "naive_clock"
++            else "2026-09-18T04:59:40+00:00"
++        )
++    elif attack == "missing_artifact":
++        catalog["source_artifacts"] = []
++    elif attack.startswith("artifact_"):
++        field, value = {
++            "artifact_hash": ("sha256", "b" * 64),
++            "artifact_size": ("size_bytes", 1),
++            "artifact_date": ("as_of_date", "2026-09-17"),
++            "artifact_schema": ("schema", {"name": "unknown", "version": "2"}),
++        }[attack]
++        catalog["source_artifacts"][0][field] = value
++    elif attack == "transport":
++        catalog["current_transport"] = "UNSUPPORTED"
++    elif attack.startswith("row_"):
++        field, value = {
++            "row_date": ("as_of_date", "2026-09-19"),
++            "row_clock": ("observed_at", "2026-09-18T04:00:00+00:00"),
++            "row_account": ("account_id", "synthetic-unselected"),
++            "row_record": ("record_id", "synthetic-unselected"),
++        }[attack]
++        catalog["positions"][0][field] = value
++    elif attack == "duplicate_row":
++        catalog["positions"].append(copy.deepcopy(catalog["positions"][0]))
++    elif attack == "account_clock":
++        catalog["current_accounts"][0]["observed_at"] = "2026-09-18T04:00:00+00:00"
++    else:
++        catalog["current_accounts"].pop()
++    content = canonical_json_bytes(catalog)
++    manifest = GenerationManifest.build(
++        as_of_date=original_manifest.as_of_date,
++        adapter=original_manifest.adapter,
++        coverage=original_manifest.coverage,
++        verification=original_manifest.verification,
++        artifacts=tuple(
++            replace(
++                a, sha256=hashlib.sha256(content).hexdigest(), size_bytes=len(content)
++            )
++            if a.artifact_id == "schwab-generation.json"
++            else a
++            for a in original_manifest.artifacts
++        ),
++    )
++    generation = tmp_path / "generations" / manifest.generation_id
++    generation.mkdir(parents=True)
++    (generation / "generation.json").write_bytes(manifest.to_json_bytes())
++    (generation / "schwab-generation.json").write_bytes(content)
++    try:
++        facts, _ = ledger._project_account_facts(
++            "schwab",
++            manifest.generation_id,
++            catalog,
++            {"synthetic-schwab"},
++            set(),
++            {},
++            manifest=manifest,
++            root=tmp_path,
++            financial_cutoff=CUTOFF,
++            requested_as_of=REQUESTED,
++        )
++    except ledger.ProviderLedgerError:
++        pass
++    else:
++        assert not facts["positions"]
++    try:
++        expected = materializer._schwab_selected_point_positions(
++            manifest, catalog, REQUESTED
++        )
++    except materializer.MaterializationError:
++        pass
++    else:
++        assert not expected
