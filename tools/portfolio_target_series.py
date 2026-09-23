@@ -198,7 +198,7 @@ def _trusted_layered_history_code_identity() -> tuple[str, str]:
             check=False,
             env=_clean_git_environment(),
             text=True,
-            timeout=10,
+            timeout=120,
         )
     except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
         raise TargetSeriesError(
@@ -239,7 +239,7 @@ def _committed_layered_history_dependency_sha256s(
                 capture_output=True,
                 check=False,
                 env=_clean_git_environment(),
-                timeout=10,
+                timeout=120,
             )
         except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
             raise TargetSeriesError(

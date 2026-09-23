@@ -333,7 +333,17 @@ def _csv_bytes(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> bytes:
 
 
 def _layered_history_module() -> Any:
+    """Load the layered history verifier once per process.
+
+    Re-executing the module on every call discards its caches, so the
+    verifier re-resolved the repository identity -- a ``git rev-parse``
+    subprocess -- once per call instead of once per process.
+    """
+
     module_name = "portfolio_target_series_for_current_decomposition_plan"
+    loaded = sys.modules.get(module_name)
+    if loaded is not None:
+        return loaded
     module_path = Path(__file__).resolve().with_name("portfolio_target_series.py")
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     if spec is None or spec.loader is None:
