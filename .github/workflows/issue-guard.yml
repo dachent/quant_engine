@@ -11,8 +11,12 @@ on:
 
 permissions: {}
 
+# Pull-request validation only reads (reconcile is skipped on pull requests), so each pull
+# request gets its own group. Sharing the repository-wide group let an issue edit or the hourly
+# reconcile cancel a pending required `validate` run (#472). Every other event stays serialised
+# in the repository-wide group, because reconcile mutates native dependencies.
 concurrency:
-  group: issue-guard-${{ github.repository }}
+  group: issue-guard-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || github.repository }}
   cancel-in-progress: false
 
 jobs:
