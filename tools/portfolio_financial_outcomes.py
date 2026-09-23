@@ -844,6 +844,59 @@ def _required_series(
     return mapping
 
 
+_RETAINED_CAPTURE_KEY = "inputs/governance/retained-public-factor-capture.json"
+_HISTORY_AUTHORITY_NODES = {
+    "provider_admission_receipt_path": "financial-history-authority-admission-receipt",
+    "provider_ledger_manifest_path": "financial-history-authority-ledger-manifest",
+    "provider_ledger_catalog_path": "financial-history-authority-ledger-catalog",
+    "portfolio123_version_evidence_path": "financial-history-authority-p123-version",
+}
+
+
+def _history_authorities(spec: Any, bundle: Path) -> dict[str, Path]:
+    """Resolve the layered-history reader authorities the attended run supplied.
+
+    A layered-history generation records the evidence its builder was given, and the verifier
+    derives the exact key set it demands from which of these arguments it receives
+    (`portfolio_target_series.py:6088-6119`). Replaying a generation built with them therefore
+    requires passing them, and supplying them verifies strictly more: the provider-ledger trio
+    must be exact-named siblings of one generation directory and the admission authority is
+    re-derived and compared by digest (`portfolio_target_series.py:2350-2357, 2392-2396`).
+
+    All four or none. A bundle whose generation was built without authorities -- a synthetic
+    fixture -- has no rows and replays as before. Absence cannot weaken a release, because a
+    generation built with them and replayed without them fails the key-set check outright.
+    """
+
+    resolved: dict[str, Path] = {}
+    for name, node_id in _HISTORY_AUTHORITY_NODES.items():
+        matches = [
+            row
+            for row in spec.nodes
+            if isinstance(row, ArtifactNode) and row.node_id == node_id
+        ]
+        if len(matches) > 1:
+            raise FinancialOutcomeError(
+                f"layered history authority binding differs: {node_id}"
+            )
+        if matches:
+            node = matches[0]
+            _verified_file(node.path, node.sha256, node.size_bytes)
+            resolved[name] = node.path
+    if not resolved:
+        return {}
+    if len(resolved) != len(_HISTORY_AUTHORITY_NODES):
+        missing = sorted(set(_HISTORY_AUTHORITY_NODES) - set(resolved))
+        raise FinancialOutcomeError(
+            f"layered history authorities are partially bound: {', '.join(missing)}"
+        )
+    # The fifth authority is the bundle's own copy, already passed as the contract path.
+    resolved["financial_input_contract_path"] = (
+        bundle / "inputs/history/financial-mvp-contract.json"
+    )
+    return resolved
+
+
 def _bound_decomposition_plan(
     spec: Any, contract: Mapping[str, Any], mode: str, *, allow_synthetic: bool
 ) -> Path:
@@ -900,21 +953,36 @@ def _bound_decomposition_plan(
             "decomposition plan uses a different layered history"
         )
     base = json.loads(files["inputs/governance/base-decomposition-spec.json"])
-    base_roots = set()
+    # The root is what has to be unique, not each file. The primary and hybrid bundles share
+    # eight of their nine base sources byte-for-byte, so resolving each source on its own
+    # requires a digest to appear at exactly one path in the run and cannot hold once both
+    # roots are named. Intersecting the roots each source admits picks the single root that
+    # explains the whole base specification, and every file is still required to sit under it
+    # at its declared relative path with its declared digest and size.
+    base_roots: set[Path] | None = None
     for definition in base.get("provenance_sources", []):
-        source = _artifact_for_digest(
-            spec,
-            definition["expected_sha256"],
-            definition["expected_size_bytes"],
-            relative_path=definition["relative_path"],
-        )
         relative = Path(definition["relative_path"])
-        root = source.path.resolve().parents[len(relative.parts) - 1]
-        if (root / relative).resolve() != source.path.resolve():
-            raise FinancialOutcomeError("decomposition base source path differs")
-        base_roots.add(root)
-    if len(base_roots) > 1:
-        raise FinancialOutcomeError("decomposition base source roots conflict")
+        admitted = set()
+        for node in spec.nodes:
+            if (
+                not isinstance(node, ArtifactNode)
+                or node.sha256 != definition["expected_sha256"]
+                or node.size_bytes != definition["expected_size_bytes"]
+            ):
+                continue
+            resolved = node.path.resolve()
+            if resolved.parts[-len(relative.parts) :] != relative.parts:
+                continue
+            root = resolved.parents[len(relative.parts) - 1]
+            if (root / relative).resolve() == resolved:
+                admitted.add(root)
+        if not admitted:
+            raise FinancialOutcomeError("decomposition base source is absent")
+        base_roots = admitted if base_roots is None else base_roots & admitted
+        if not base_roots:
+            raise FinancialOutcomeError("decomposition base source roots conflict")
+    if base_roots is not None and len(base_roots) != 1:
+        raise FinancialOutcomeError("decomposition base source root is ambiguous")
     outputs, rebuilt = producer.build_bundle(
         plan_path=bundle / "inputs/governance/current-strategy-decomposition-plan.json",
         catalog_path=bundle / "inputs/governance/decomposition-source-catalog.json",
@@ -922,7 +990,7 @@ def _bound_decomposition_plan(
         / "inputs/history/financial-mvp-contract.json",
         layered_history_generation_path=history.path.parent,
         base_spec_path=bundle / "inputs/governance/base-decomposition-spec.json",
-        base_source_root=next(iter(base_roots), bundle),
+        base_source_root=next(iter(base_roots or ()), bundle),
         market_paths={
             key: bundle / f"inputs/market/{key}.csv" for key in producer.INPUT_KEYS
         },
@@ -933,6 +1001,16 @@ def _bound_decomposition_plan(
         evaluation_date=manifest["evaluation_date"],
         evidence_mode=mode,
         assurance_profile=manifest["assurance_profile"],
+        # The bundle declares its own retained capture as an input, and the loop above has
+        # already verified those bytes against the manifest digest. Without it the replay
+        # runs the RELEASE_QC freshness gate with no retained capture while the attended run
+        # had one, so a bundle that was built legitimately cannot be rebuilt from itself.
+        retained_public_factor_capture=(
+            json.loads(files[_RETAINED_CAPTURE_KEY])
+            if _RETAINED_CAPTURE_KEY in files
+            else None
+        ),
+        **_history_authorities(spec, bundle),
     )
     if rebuilt != manifest or outputs != files:
         raise FinancialOutcomeError(

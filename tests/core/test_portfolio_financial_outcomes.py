@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+import ast
 import json
 import hashlib
 from pathlib import Path
@@ -610,3 +611,84 @@ def test_artifact_node_binds_exactly_one_named_production_node(tmp_path):
     path.write_bytes(payload + b"\n")
     with pytest.raises(outcomes.FinancialOutcomeError, match="identity differs"):
         outcomes._verified_file(resolved.path, resolved.sha256, resolved.size_bytes)
+
+
+def _authority_spec(tmp_path, node_ids):
+    nodes = []
+    for node_id in node_ids:
+        path = tmp_path / f"{node_id}.json"
+        content = json.dumps({"node": node_id}).encode("utf-8")
+        path.write_bytes(content)
+        nodes.append(
+            pipeline.ArtifactNode(
+                node_id, (), path, hashlib.sha256(content).hexdigest(), len(content)
+            )
+        )
+    return SimpleNamespace(nodes=nodes)
+
+
+def test_replay_binds_every_layered_history_authority(tmp_path):
+    """The producer decides what a layered history must prove from what it is handed.
+
+    `portfolio_target_series.py:6088-6119` derives the exact key set a generation must carry
+    from which authority arguments its caller supplied, so a generation built with them can
+    only be verified by a caller that also supplies them. The replay omitted all five and
+    failed with "layered history generation keys differ" the moment the public-factor gate
+    ahead of it was cleared.
+    """
+
+    spec = _authority_spec(tmp_path, outcomes._HISTORY_AUTHORITY_NODES.values())
+    resolved = outcomes._history_authorities(spec, tmp_path / "bundle")
+    assert set(resolved) == set(outcomes._HISTORY_AUTHORITY_NODES) | {
+        "financial_input_contract_path"
+    }
+    assert resolved["financial_input_contract_path"] == (
+        tmp_path / "bundle" / "inputs/history/financial-mvp-contract.json"
+    )
+
+
+def test_replay_accepts_a_bundle_that_declares_no_authorities(tmp_path):
+    """A synthetic fixture whose generation was built without authorities still replays.
+
+    This cannot weaken a release: a generation built WITH them and replayed without them
+    fails the key-set check outright, which is the behaviour the test above pins.
+    """
+
+    assert outcomes._history_authorities(_authority_spec(tmp_path, ()), tmp_path) == {}
+
+
+def test_replay_refuses_a_partially_bound_authority_set(tmp_path):
+    """Half a set is the one case that could silently verify the wrong shape."""
+
+    partial = list(outcomes._HISTORY_AUTHORITY_NODES.values())[:-1]
+    with pytest.raises(outcomes.FinancialOutcomeError, match="partially bound"):
+        outcomes._history_authorities(_authority_spec(tmp_path, partial), tmp_path)
+
+
+def test_decomposition_replay_hands_the_producer_its_own_arguments():
+    """Pin the seam itself, because every one of these was omitted at some point.
+
+    A reviewer diffing these call sites by hand reads named keywords and misses `**` expansions
+    -- which is exactly how the five authorities were first reported as supplied by neither
+    side, when `portfolio_attended_preparation.py:1637` passes them by expansion.
+    """
+
+    tree = ast.parse(Path(outcomes.__file__).read_text(encoding="utf-8"))
+    function = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef)
+        and node.name == "_bound_decomposition_plan"
+    )
+    call = next(
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and ast.unparse(node.func).endswith("build_bundle")
+    )
+    named = {keyword.arg for keyword in call.keywords if keyword.arg}
+    expanded = {
+        ast.unparse(keyword.value) for keyword in call.keywords if keyword.arg is None
+    }
+    assert "retained_public_factor_capture" in named
+    assert any("_history_authorities" in item for item in expanded)
