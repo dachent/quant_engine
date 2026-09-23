@@ -851,6 +851,9 @@ _HISTORY_AUTHORITY_NODES = {
     "provider_ledger_catalog_path": "financial-history-authority-ledger-catalog",
     "portfolio123_version_evidence_path": "financial-history-authority-p123-version",
 }
+# Version evidence is its own flag in the verifier and optional in the selected-input record, so
+# it may be absent while the admission group is bound.
+_OPTIONAL_HISTORY_AUTHORITIES = frozenset({"portfolio123_version_evidence_path"})
 
 
 def _history_authorities(spec: Any, bundle: Path) -> dict[str, Path]:
@@ -863,9 +866,15 @@ def _history_authorities(spec: Any, bundle: Path) -> dict[str, Path]:
     must be exact-named siblings of one generation directory and the admission authority is
     re-derived and compared by digest (`portfolio_target_series.py:2350-2357, 2392-2396`).
 
-    All four or none. A bundle whose generation was built without authorities -- a synthetic
-    fixture -- has no rows and replays as before. Absence cannot weaken a release, because a
-    generation built with them and replayed without them fails the key-set check outright.
+    Two groups. The admission receipt, ledger manifest and ledger catalog -- and with them the
+    financial input contract -- stand or fall together, because the verifier ties the contract
+    to the receipt and the receipt to its ledger siblings (`portfolio_target_series.py:2339-2357`).
+    Version evidence is a separate flag there (`:6089`) and optional in the selected-input record,
+    so it may be absent on its own.
+
+    A bundle whose generation was built without authorities -- a synthetic fixture -- has no rows
+    and replays as before. Neither absence can weaken a release: a generation built with an
+    authority and replayed without it fails the verifier's key-set check outright.
     """
 
     resolved: dict[str, Path] = {}
@@ -883,17 +892,19 @@ def _history_authorities(spec: Any, bundle: Path) -> dict[str, Path]:
             node = matches[0]
             _verified_file(node.path, node.sha256, node.size_bytes)
             resolved[name] = node.path
-    if not resolved:
-        return {}
-    if len(resolved) != len(_HISTORY_AUTHORITY_NODES):
-        missing = sorted(set(_HISTORY_AUTHORITY_NODES) - set(resolved))
+    admission = set(_HISTORY_AUTHORITY_NODES) - _OPTIONAL_HISTORY_AUTHORITIES
+    bound = admission & set(resolved)
+    if bound and bound != admission:
+        missing = sorted(admission - bound)
         raise FinancialOutcomeError(
             f"layered history authorities are partially bound: {', '.join(missing)}"
         )
-    # The fifth authority is the bundle's own copy, already passed as the contract path.
-    resolved["financial_input_contract_path"] = (
-        bundle / "inputs/history/financial-mvp-contract.json"
-    )
+    if bound:
+        # The contract is the bundle's own copy, already passed as the contract path. The
+        # verifier refuses a contract without its receipt, so it joins the admission group.
+        resolved["financial_input_contract_path"] = (
+            bundle / "inputs/history/financial-mvp-contract.json"
+        )
     return resolved
 
 

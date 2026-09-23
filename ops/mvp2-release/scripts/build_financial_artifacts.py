@@ -125,7 +125,7 @@ def history_authority_rows(vertical):
     receipt = ledger / "admit-or-declare-receipt.json"
     if Path(selected["provider_admission_receipt_path"]).resolve() != receipt.resolve():
         raise SystemExit("selected admission receipt is outside its ledger generation")
-    return [
+    rows = [
         artifact("financial-history-authority-admission-receipt", receipt),
         artifact(
             "financial-history-authority-ledger-manifest", ledger / "generation.json"
@@ -134,11 +134,15 @@ def history_authority_rows(vertical):
             "financial-history-authority-ledger-catalog",
             ledger / "provider-ledger.json",
         ),
-        artifact(
-            "financial-history-authority-p123-version",
-            Path(selected["portfolio123_version_evidence_path"]),
-        ),
     ]
+    # Optional in the selected-input record (`portfolio_current_dependence._selected_inputs`),
+    # so it is named only when the run actually had it.
+    evidence = selected.get("portfolio123_version_evidence_path")
+    if evidence is not None:
+        rows.append(
+            artifact("financial-history-authority-p123-version", Path(evidence))
+        )
+    return rows
 
 
 def main():

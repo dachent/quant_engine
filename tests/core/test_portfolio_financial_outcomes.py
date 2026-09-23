@@ -657,12 +657,47 @@ def test_replay_accepts_a_bundle_that_declares_no_authorities(tmp_path):
     assert outcomes._history_authorities(_authority_spec(tmp_path, ()), tmp_path) == {}
 
 
-def test_replay_refuses_a_partially_bound_authority_set(tmp_path):
-    """Half a set is the one case that could silently verify the wrong shape."""
+def test_replay_refuses_a_partially_bound_admission_group(tmp_path):
+    """Half the admission group is the case that could verify the wrong shape.
 
-    partial = list(outcomes._HISTORY_AUTHORITY_NODES.values())[:-1]
+    The verifier ties the receipt to its ledger manifest and catalog, so binding some of them
+    describes no generation any producer could have built.
+    """
+
+    nodes = outcomes._HISTORY_AUTHORITY_NODES
+    partial = [
+        node_id
+        for name, node_id in nodes.items()
+        if name != "provider_ledger_catalog_path"
+    ]
     with pytest.raises(outcomes.FinancialOutcomeError, match="partially bound"):
         outcomes._history_authorities(_authority_spec(tmp_path, partial), tmp_path)
+
+
+def test_replay_accepts_the_admission_group_without_version_evidence(tmp_path):
+    """Version evidence is optional upstream and a separate flag in the verifier.
+
+    Refusing the admission trio without it rejected a valid replay before the producer could
+    judge it. Its absence still cannot weaken a release, because a generation that carries
+    `portfolio123_version_equivalence` fails the verifier's key-set check without it.
+    """
+
+    nodes = outcomes._HISTORY_AUTHORITY_NODES
+    admission = [
+        node_id
+        for name, node_id in nodes.items()
+        if name not in outcomes._OPTIONAL_HISTORY_AUTHORITIES
+    ]
+    resolved = outcomes._history_authorities(
+        _authority_spec(tmp_path, admission), tmp_path / "bundle"
+    )
+    assert "portfolio123_version_evidence_path" not in resolved
+    assert set(resolved) == {
+        "provider_admission_receipt_path",
+        "provider_ledger_manifest_path",
+        "provider_ledger_catalog_path",
+        "financial_input_contract_path",
+    }
 
 
 def test_decomposition_replay_hands_the_producer_its_own_arguments():
