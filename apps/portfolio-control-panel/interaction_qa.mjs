@@ -671,9 +671,10 @@ for (const [mode, lenses] of Object.entries(dashboardData.decomposition_lenses?.
   }
 }
 const rejectedBucketEvidence = [];
+const countFormat = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
 for (const item of rejectedBucketCases) {
-  // A disabled control means the view is legitimately unreachable (for example a hybrid mode
-  // with no accepted prehistory), so the case is recorded as unnavigable instead of hanging.
+  // Every case comes from the payload, so every one must be reachable: a missing or disabled
+  // control hides a disclosure the producer recorded, and fails the check rather than hanging.
   const click = async (selector) => {
     const target = page.locator(selector);
     if (!(await target.count())) return false;
@@ -688,7 +689,8 @@ for (const item of rejectedBucketCases) {
     && (!item.source || (await click(`[data-factor-source="${item.source}"]`)))
     && (await click(`[data-factor-strategy="${item.series}"]`));
   const detail = navigable ? ((await page.locator("#factor-detail").textContent()) ?? "") : "";
-  const phrase = `${item.count} factor ${item.count === 1 ? "bucket was" : "buckets were"} excluded from this fit`;
+  // Format the count exactly as the panel does, or a correct disclosure of 1,000+ buckets fails.
+  const phrase = `${countFormat.format(item.count)} factor ${item.count === 1 ? "bucket was" : "buckets were"} excluded from this fit`;
   rejectedBucketEvidence.push({ ...item, disclosed: detail.includes(phrase), navigable });
 }
 // Leave the factor view as the later lens checks expect it.
@@ -697,7 +699,7 @@ if (await page.locator('[data-factor-surface="STATIC"]').count()) {
 }
 checks.push(check(
   "Rejected factor buckets are disclosed beside the fit they affect",
-  rejectedBucketEvidence.every((item) => !item.navigable || item.disclosed),
+  rejectedBucketEvidence.every((item) => item.navigable && item.disclosed),
   rejectedBucketEvidence,
 ));
 await page.locator('[data-factor-evidence-mode="LIVE_ONLY"]').click();
