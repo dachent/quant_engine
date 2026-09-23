@@ -164,3 +164,174 @@ def test_main_appends_the_admission_policy_row_to_the_inventory():
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
     assert "admission_policy_row" in called
+
+
+def _authority_run(tmp_path):
+    """A selected-input record and the provider-ledger generation it points at."""
+
+    ledger = tmp_path / "source" / "generations" / "abc123"
+    ledger.mkdir(parents=True)
+    for name in (
+        "admit-or-declare-receipt.json",
+        "generation.json",
+        "provider-ledger.json",
+    ):
+        (ledger / name).write_bytes(json.dumps({"name": name}).encode("utf-8"))
+    evidence = tmp_path / "control" / "version-evidence.json"
+    evidence.parent.mkdir(parents=True)
+    evidence.write_bytes(b'{"portfolio123": "frozen"}')
+    record = tmp_path / "dependence-selected-inputs.json"
+    record.write_bytes(
+        json.dumps(
+            {
+                "provider_ledger_generation_root": str(ledger),
+                "provider_admission_receipt_path": str(
+                    ledger / "admit-or-declare-receipt.json"
+                ),
+                "portfolio123_version_evidence_path": str(evidence),
+            }
+        ).encode("utf-8")
+    )
+    vertical = {
+        "dependence_selected_inputs": {"path": str(record)},
+        "provider_ledger_generation": {"path": str(ledger)},
+    }
+    return vertical, record, ledger, evidence
+
+
+def test_authority_rows_name_the_five_files_the_replay_must_pass(tmp_path):
+    """The production replay could not verify a RELEASE_QC layered history without these.
+
+    `build_bundle` derives the exact key set a generation must carry from which authority
+    arguments its caller supplies (`portfolio_target_series.py:6088-6119`), so the
+    specification has to name the files or the replay cannot supply them.
+    """
+
+    module = _load_module()
+    vertical, _record, ledger, evidence = _authority_run(tmp_path)
+
+    rows = module.history_authority_rows(vertical)
+    by_id = {row["node_id"]: row for row in rows}
+    assert set(by_id) == {
+        "financial-history-authority-admission-receipt",
+        "financial-history-authority-ledger-manifest",
+        "financial-history-authority-ledger-catalog",
+        "financial-history-authority-p123-version",
+    }
+    assert Path(by_id["financial-history-authority-ledger-manifest"]["path"]) == (
+        ledger / "generation.json"
+    )
+    assert Path(by_id["financial-history-authority-p123-version"]["path"]) == evidence
+    for row in rows:
+        assert row["kind"] == "ARTIFACT"
+        assert row["depends_on"] == []
+        content = Path(row["path"]).read_bytes()
+        assert row["sha256"] == hashlib.sha256(content).hexdigest()
+        assert row["size_bytes"] == len(content)
+
+
+def test_authority_rows_refuse_a_ledger_generation_the_recipe_did_not_declare(tmp_path):
+    """The record must not be able to nominate its own auditor."""
+
+    module = _load_module()
+    vertical, _record, _ledger, _evidence = _authority_run(tmp_path)
+    other = tmp_path / "source" / "generations" / "def456"
+    other.mkdir(parents=True)
+    vertical["provider_ledger_generation"] = {"path": str(other)}
+
+    with pytest.raises(SystemExit, match="differs from the recipe"):
+        module.history_authority_rows(vertical)
+
+
+def test_authority_rows_refuse_a_receipt_outside_its_ledger_generation(tmp_path):
+    """The verifier requires the trio to be siblings; a row set that is not would fail late."""
+
+    module = _load_module()
+    vertical, record, ledger, evidence = _authority_run(tmp_path)
+    stray = tmp_path / "admit-or-declare-receipt.json"
+    stray.write_bytes(b"{}")
+    selected = json.loads(record.read_bytes())
+    selected["provider_admission_receipt_path"] = str(stray)
+    record.write_bytes(json.dumps(selected).encode("utf-8"))
+
+    with pytest.raises(SystemExit, match="outside its ledger generation"):
+        module.history_authority_rows(vertical)
+
+
+def test_authority_rows_omit_version_evidence_the_run_did_not_have(tmp_path):
+    """The selected-input record declares version evidence optional, so no row is invented."""
+
+    module = _load_module()
+    vertical, record, _ledger, _evidence = _authority_run(tmp_path)
+    selected = json.loads(record.read_bytes())
+    del selected["portfolio123_version_evidence_path"]
+    record.write_bytes(json.dumps(selected).encode("utf-8"))
+
+    rows = module.history_authority_rows(vertical)
+    assert {row["node_id"] for row in rows} == {
+        "financial-history-authority-admission-receipt",
+        "financial-history-authority-ledger-manifest",
+        "financial-history-authority-ledger-catalog",
+    }
+
+
+def test_the_emitted_authority_rows_reach_the_replay(tmp_path):
+    """The seam itself, from the producer's own output rather than fabricated nodes.
+
+    AGENTS.md A1.3: a consumer suite that mocks the producer does not satisfy the rule. The
+    consumer test builds its own nodes and the producer test stops at the rows, so a node ID that
+    drifted on one side would leave both green while production replay received nothing.
+    """
+
+    import portfolio_financial_outcomes as outcomes
+    from types import SimpleNamespace
+
+    from quant_engine.core import pipeline
+
+    module = _load_module()
+    vertical, _record, _ledger, _evidence = _authority_run(tmp_path)
+    rows = module.history_authority_rows(vertical)
+    spec = SimpleNamespace(
+        nodes=[
+            pipeline.ArtifactNode(
+                str(row["node_id"]),
+                tuple(row["depends_on"]),
+                Path(str(row["path"])),
+                str(row["sha256"]),
+                int(row["size_bytes"]),
+            )
+            for row in rows
+        ]
+    )
+
+    resolved = outcomes._history_authorities(spec, tmp_path / "bundle")
+    assert set(resolved) == {
+        "provider_admission_receipt_path",
+        "provider_ledger_manifest_path",
+        "provider_ledger_catalog_path",
+        "portfolio123_version_evidence_path",
+        "financial_input_contract_path",
+    }
+
+
+def test_main_appends_the_authority_rows_to_the_inventory():
+    """Emitting the rows is what the replay depends on, not merely being able to build them.
+
+    Same reasoning as the admission-policy row: `main()` reads a full run tree and cannot be
+    called here, so the call is asserted structurally.
+    """
+
+    import ast
+
+    tree = ast.parse(MODULE_PATH.read_bytes().decode("utf-8"))
+    main_fn = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "main"
+    )
+    called = {
+        node.func.id
+        for node in ast.walk(main_fn)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "history_authority_rows" in called

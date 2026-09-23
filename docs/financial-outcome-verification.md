@@ -130,6 +130,7 @@ the cheapest binding that is not circular.
 
 ## Related
 
+* `docs/production-replay-seam.md` — why the production replay must call a producer the way the producer was called, and the four blockers that hid behind one omission.
 * `docs/controller-graph.md` — why edge connectivity does not establish value semantics.
 * `AGENTS.md` A1.3 — a changed output contract must enumerate and update its in-repo consumers in
   the same change. The workbook removal did not, which is how this defect was created.

@@ -100,6 +100,51 @@ def admission_policy_row(prepared: Path) -> dict[str, object]:
     return row
 
 
+def history_authority_rows(vertical):
+    """Declare the reader authorities the layered-history verification requires.
+
+    `build_bundle` decides which evidence a layered-history generation must carry from which
+    authority arguments its caller passes (`portfolio_target_series.py:6088-6119`), so the
+    generation the attended run built with these cannot be replayed without them. The
+    specification never named the files, which is why the production replay could not supply
+    them.
+
+    The paths come from the run's own selected-input record rather than from a scan, and the
+    provider-ledger trio is cross-checked against the recipe's declared generation because the
+    verifier requires those three to be exact-named siblings of one directory
+    (`portfolio_target_series.py:2350-2357`). The financial input contract needs no row: it is
+    the bundle's own `inputs/history/financial-mvp-contract.json`.
+    """
+
+    selected = json.loads(
+        Path(vertical["dependence_selected_inputs"]["path"]).read_bytes()
+    )
+    ledger = Path(selected["provider_ledger_generation_root"]).resolve()
+    if ledger != Path(vertical["provider_ledger_generation"]["path"]).resolve():
+        raise SystemExit("selected provider ledger generation differs from the recipe")
+    receipt = ledger / "admit-or-declare-receipt.json"
+    if Path(selected["provider_admission_receipt_path"]).resolve() != receipt.resolve():
+        raise SystemExit("selected admission receipt is outside its ledger generation")
+    rows = [
+        artifact("financial-history-authority-admission-receipt", receipt),
+        artifact(
+            "financial-history-authority-ledger-manifest", ledger / "generation.json"
+        ),
+        artifact(
+            "financial-history-authority-ledger-catalog",
+            ledger / "provider-ledger.json",
+        ),
+    ]
+    # Optional in the selected-input record (`portfolio_current_dependence._selected_inputs`),
+    # so it is named only when the run actually had it.
+    evidence = selected.get("portfolio123_version_evidence_path")
+    if evidence is not None:
+        rows.append(
+            artifact("financial-history-authority-p123-version", Path(evidence))
+        )
+    return rows
+
+
 def main():
     global REPO, PREPARED, CYCLE, CONTRACT, OUT
     args = _arguments()
@@ -195,6 +240,7 @@ def main():
     rows.append(
         artifact("financial-account-manifest-generation", epoch / "generation.json")
     )
+    rows.extend(history_authority_rows(vertical))
     rows.append(admission_policy_row(PREPARED))
 
     rows.append(
@@ -252,12 +298,21 @@ def main():
     # files in under a different name (`inputs/base/provenance/NN-<name>`), so
     # the original name resolves only against the root itself. Same reason as
     # the dependence bundle below: a source read by digest has to be nameable.
-    base_source = PREPARED / "stages/analytics/base-input"
+    # Both plan bundles must be covered. Eight of the hybrid's nine sources happen to be
+    # byte-identical to the primary's, so only `source/interval-authority.json` actually
+    # differs -- which is why one root looked sufficient until the hybrid bundle was
+    # verified. A row set that works by coincidence is not a binding.
+    base_sources = [PREPARED / "stages/analytics/base-input"]
+    if hybrid_definition is not None:
+        base_sources.append(PREPARED / "stages/analytics/hybrid-base/base-input")
     index = 0
-    for child in sorted(base_source.rglob("*")):
-        if child.is_file():
-            rows.append(artifact("decomposition-base-source-%d" % index, child))
-            index += 1
+    for base_source in base_sources:
+        if not base_source.is_dir():
+            raise SystemExit("base source root is absent: %s" % base_source)
+        for child in sorted(base_source.rglob("*")):
+            if child.is_file():
+                rows.append(artifact("decomposition-base-source-%d" % index, child))
+                index += 1
 
     # The correlation replay reads its sources by digest from the dependence
     # bundle, so every file in it has to be nameable.
