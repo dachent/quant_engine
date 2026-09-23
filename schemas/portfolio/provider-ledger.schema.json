@@ -95,7 +95,7 @@
         "properties": {
           "provider_id": {"type": "string", "minLength": 1},
           "source_artifact_id": {"type": "string", "minLength": 1},
-          "value_basis": {"enum": ["ACCOUNT_TOTAL", "ACCOUNT_VALUE"]}
+          "value_basis": {"enum": ["ACCOUNT_TOTAL", "ACCOUNT_VALUE", "STRATEGY_NAV"]}
         },
         "allOf": [
           {
@@ -105,6 +105,10 @@
           {
             "if": {"required": ["value_basis"], "properties": {"provider_id": {"const": "matrixport"}}},
             "then": {"required": ["source_artifact_id"], "properties": {"value_basis": {"const": "ACCOUNT_TOTAL"}}}
+          },
+          {
+            "if": {"required": ["value_basis"], "properties": {"provider_id": {"const": "quantbase"}}},
+            "then": {"required": ["source_artifact_id"], "properties": {"value_basis": {"const": "STRATEGY_NAV"}}}
           },
           {
             "if": {"required": ["value_basis"], "properties": {"provider_id": {"const": "schwab"}}},

@@ -28,6 +28,34 @@
       ],
       "day_count": "ACTUAL_365",
       "expected_return": "0.10"
+    },
+    {
+      "case_id": "one_year_negative_xirr",
+      "cash_flows": [
+        {"date": "2025-01-01", "investor_cash_flow": "-100"},
+        {"date": "2026-01-01", "investor_cash_flow": "80"}
+      ],
+      "day_count": "ACTUAL_365",
+      "expected_return": "-0.20"
+    },
+    {
+      "case_id": "same_sign_no_root",
+      "cash_flows": [
+        {"date": "2025-01-01", "investor_cash_flow": "-100"},
+        {"date": "2026-01-01", "investor_cash_flow": "-110"}
+      ],
+      "day_count": "ACTUAL_365",
+      "expected_status": "NO_ROOT"
+    },
+    {
+      "case_id": "two_root_conservative_rejection",
+      "cash_flows": [
+        {"date": "2025-01-01", "investor_cash_flow": "-100"},
+        {"date": "2026-01-01", "investor_cash_flow": "230"},
+        {"date": "2027-01-01", "investor_cash_flow": "-132"}
+      ],
+      "day_count": "ACTUAL_365",
+      "expected_status": "UNIQUENESS_NOT_PROVED"
     }
   ],
   "policy_version": "PORT-PERF-1",

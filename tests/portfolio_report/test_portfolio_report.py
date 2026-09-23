@@ -2642,6 +2642,15 @@ def test_report_data_has_hand_checked_twr_and_coverage_failures(tmp_path: Path) 
     assert mapped["twr_status"] == "AVAILABLE_WITH_INFERRED_FLOW_TIMING"
     assert mapped["mwr_xirr"] is None
     assert mapped["mwr_status"] == "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE"
+    assert mapped["mwr_reason"] == "FLOW_COVERAGE_NOT_GOVERNED"
+    assert mapped["mwr_coverage_status"] == "BLOCKED"
+    assert mapped["mwr_cashflows"] == []
+    assert mapped["mwr_label"] is None
+    assert mapped["mwr_value_basis"] is None
+    assert mapped["mwr_valuation_timing"] is None
+    assert mapped["mwr_day_count"] == "ACTUAL_365"
+    assert mapped["mwr_unit"] == "ANNUALIZED_RETURN"
+    assert mapped["mwr_source_binding"] == "GOVERNED_SOURCE_IDENTITIES"
     missing = next(
         item for item in report["twr_mwr"] if item["assignment_id"] == "assignment-b"
     )
@@ -4209,8 +4218,17 @@ def test_report_schema_is_closed_and_keeps_mwr_unavailable() -> None:
     )
     assert schema["properties"]["strategy_summary"]["minItems"] == 7
     assert schema["properties"]["strategy_summary"]["maxItems"] == 7
-    assert schema["$defs"]["performance"]["properties"]["mwr_xirr"]["type"] == "null"
+    assert schema["$defs"]["performance"]["properties"]["mwr_xirr"]["type"] == [
+        "string",
+        "null",
+    ]
     assert schema["$defs"]["performance"]["properties"]["mwr_status"]["enum"] == [
+        "AVAILABLE",
+        "NO_ROOT",
+        "INDETERMINATE",
+        "UNIQUENESS_NOT_PROVED",
+        "NUMERICAL_SEARCH_UNRESOLVED",
+        "INCOMPLETE_FLOW_COVERAGE",
         "UNAVAILABLE_INCOMPLETE_FLOW_COVERAGE",
         "BLOCKED_ADMISSION",
     ]

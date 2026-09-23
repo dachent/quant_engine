@@ -11796,3 +11796,39 @@ def test_governed_hwm_direct_publish_requires_private_stage_context_before_io(
 
     assert not output_root.exists()
     assert not (tmp_path / "qa").exists()
+
+
+def test_panel_mwr_projection_rejects_label_perimeter_mismatch() -> None:
+    row = {
+        "mwr_status": "AVAILABLE",
+        "mwr_xirr": "0.10",
+        "mwr_opening_date": "2025-01-01",
+        "mwr_opening_value": "100",
+        "mwr_terminal_date": "2026-01-01",
+        "mwr_terminal_value": "110",
+        "mwr_currency": "USD",
+        "mwr_coverage_status": "COMPLETE",
+        "mwr_cashflows": [
+            {
+                "date": "2025-01-01",
+                "amount": "-100",
+                "source_record_ids": ["synthetic-opening-nav"],
+            },
+            {
+                "date": "2026-01-01",
+                "amount": "110",
+                "source_record_ids": ["synthetic-terminal-nav"],
+            },
+        ],
+        "mwr_label": "STRATEGY_EPOCH_MWR",
+        "mwr_value_basis": "STRATEGY_NAV",
+        "mwr_valuation_timing": "ECONOMIC_DATE_WITH_SEPARATE_NAV_RECOGNITION_DATE",
+        "mwr_day_count": "ACTUAL_365",
+        "mwr_unit": "ANNUALIZED_RETURN",
+        "mwr_source_binding": "GOVERNED_SOURCE_IDENTITIES",
+    }
+    panel._validate_mwr_perimeter([row])
+
+    row["mwr_label"] = "ACCOUNT_EPOCH_MWR"
+    with pytest.raises(panel.ControlPanelValidationError, match="valuation perimeter"):
+        panel._validate_mwr_perimeter([row])
