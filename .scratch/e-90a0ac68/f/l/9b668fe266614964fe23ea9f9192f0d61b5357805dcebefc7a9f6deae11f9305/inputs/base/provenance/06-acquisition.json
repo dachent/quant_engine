@@ -1,0 +1,49 @@
+{
+  "argv": [
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.codex-bootstrap\\runtime\\venv\\Scripts\\python.exe",
+    "-I",
+    "-B",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\repo\\skills\\agent-market-data-terminal\\scripts\\fetch_yfinance.py",
+    "--dataset",
+    "history_adjusted",
+    "--start",
+    "2007-05-30",
+    "--end",
+    "2026-09-19",
+    "--interval",
+    "1d",
+    "--format",
+    "parsed",
+    "--cache-dir",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\cache",
+    "--output",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\capture\\base-proxies-adjusted.json",
+    "--resolve-names",
+    "false",
+    "--ticker",
+    "SPY",
+    "--ticker",
+    "IWM",
+    "--ticker",
+    "HYG",
+    "--ticker",
+    "BIL"
+  ],
+  "cwd": "C:\\Dev\\worktrees\\quant-engine-completion",
+  "started_at_utc": "2026-09-19T07:41:44.787547+00:00",
+  "fetcher_sha256": "2e04a9a529925fe15b1c04405bab31fe45e1feaf874a45f346835e60b54ddbd2",
+  "returncode": 0,
+  "finished_at_utc": "2026-09-19T07:42:10.571399+00:00",
+  "outputs": [
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\capture\\base-proxies-adjusted.json",
+      "sha256": "cba7fd6e7f80f315015dd772e74786330fd8d38c48130aa32fb818b789fcb69b",
+      "size_bytes": 12515985
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\capture\\base-proxies-adjusted.json.manifest.json",
+      "sha256": "be95a7a5d099111188ad4a6d0781ea0a438b125e5f281958d5732d641f233f3a",
+      "size_bytes": 7323795
+    }
+  ]
+}

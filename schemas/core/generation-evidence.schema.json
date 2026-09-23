@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-engine.local/schemas/core/generation-evidence.schema.json",
+  "title": "quant_engine generation evidence sidecar",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "acquired_at", "adapter_commit", "disposition", "generation_id",
+    "manifest_sha256", "provider_revision_id", "revision_policy",
+    "supersedes_generation_id"
+  ],
+  "properties": {
+    "acquired_at": {"type": "string", "format": "date-time"},
+    "adapter_commit": {"type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$"},
+    "disposition": {"enum": ["CURRENT", "PINNED_PARTIAL", "STAGED"]},
+    "generation_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "provider_revision_id": {"type": "string", "minLength": 1},
+    "revision_policy": {"enum": ["IMMUTABLE_SNAPSHOT", "APPEND_ONLY", "RESTATABLE", "FINITE_STATIC"]},
+    "supersedes_generation_id": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+  }
+}

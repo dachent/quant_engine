@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "strategy-return-sources.schema.json",
+  "title": "Strategy return-source attribution contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "strategies"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "strategies": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {
+        "$ref": "#/$defs/strategy"
+      }
+    }
+  },
+  "$defs": {
+    "source_type": {
+      "type": "string",
+      "enum": [
+        "service_intermediation",
+        "risk_premium",
+        "information_edge",
+        "structural_edge",
+        "behavioral_constraint"
+      ]
+    },
+    "confidence_level": {
+      "type": "string",
+      "enum": [
+        "strong",
+        "moderate",
+        "weak",
+        "none"
+      ]
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "primary",
+        "secondary"
+      ],
+      "properties": {
+        "primary": {
+          "anyOf": [
+            { "$ref": "#/$defs/source_type" },
+            { "type": "null" }
+          ]
+        },
+        "secondary": {
+          "anyOf": [
+            { "$ref": "#/$defs/source_type" },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "strategy_id": {
+      "type": "string",
+      "enum": [
+        "p123-ai-factor",
+        "p123-eu",
+        "qsi",
+        "tt-portfolio",
+        "volatis-strategy",
+        "grizzlybears-vtma",
+        "robuxio-crypto",
+        "echotrade-growth-pivots",
+        "composer-holy-grail"
+      ]
+    },
+    "strategy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "strategy_id",
+        "sources",
+        "no_identified_source",
+        "mechanism",
+        "persistence",
+        "alternative_explanation",
+        "falsification",
+        "confidence"
+      ],
+      "properties": {
+        "strategy_id": {
+          "$ref": "#/$defs/strategy_id"
+        },
+        "sources": {
+          "$ref": "#/$defs/sources"
+        },
+        "no_identified_source": {
+          "type": "boolean"
+        },
+        "mechanism": {
+          "type": "string",
+          "minLength": 1
+        },
+        "persistence": {
+          "type": "string",
+          "minLength": 1
+        },
+        "alternative_explanation": {
+          "type": "string",
+          "minLength": 1
+        },
+        "falsification": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "confidence": {
+          "$ref": "#/$defs/confidence_level"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "no_identified_source": { "const": true }
+            },
+            "required": ["no_identified_source"]
+          },
+          "then": {
+            "properties": {
+              "sources": {
+                "properties": {
+                  "primary": { "type": "null" },
+                  "secondary": { "type": "null" }
+                }
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "sources": {
+                "properties": {
+                  "primary": { "$ref": "#/$defs/source_type" }
+                },
+                "required": ["primary"]
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

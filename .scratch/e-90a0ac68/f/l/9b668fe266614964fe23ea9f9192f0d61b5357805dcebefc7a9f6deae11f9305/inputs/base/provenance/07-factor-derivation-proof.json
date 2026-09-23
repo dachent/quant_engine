@@ -1,0 +1,200 @@
+{
+  "adjusted_close_matches_native_adj_close_all_rows": true,
+  "capture": {
+    "argv": [
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.codex-bootstrap\\runtime\\venv\\Scripts\\python.exe",
+      "-I",
+      "-B",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\repo\\skills\\agent-market-data-terminal\\scripts\\fetch_yfinance.py",
+      "--dataset",
+      "history_adjusted",
+      "--start",
+      "2007-05-30",
+      "--end",
+      "2026-09-19",
+      "--interval",
+      "1d",
+      "--format",
+      "parsed",
+      "--cache-dir",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\cache",
+      "--output",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\capture\\base-proxies-adjusted.json",
+      "--resolve-names",
+      "false",
+      "--ticker",
+      "SPY",
+      "--ticker",
+      "IWM",
+      "--ticker",
+      "HYG",
+      "--ticker",
+      "BIL"
+    ],
+    "cwd": "C:\\Dev\\worktrees\\quant-engine-completion",
+    "fetcher_sha256": "2e04a9a529925fe15b1c04405bab31fe45e1feaf874a45f346835e60b54ddbd2",
+    "finished_at_utc": "2026-09-19T07:42:10.571399+00:00",
+    "outputs": [
+      {
+        "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\capture\\base-proxies-adjusted.json",
+        "sha256": "cba7fd6e7f80f315015dd772e74786330fd8d38c48130aa32fb818b789fcb69b",
+        "size_bytes": 12515985
+      },
+      {
+        "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\capture\\base-proxies-adjusted.json.manifest.json",
+        "sha256": "be95a7a5d099111188ad4a6d0781ea0a438b125e5f281958d5732d641f233f3a",
+        "size_bytes": 7323795
+      }
+    ],
+    "returncode": 0,
+    "started_at_utc": "2026-09-19T07:41:44.787547+00:00"
+  },
+  "construction": "CONSECUTIVE_BIL_PRICE_LABELS_ALL_FOUR_PRICES_REQUIRED_NO_FILL; RF=BIL_RATIO-1; XS=PROXY_RATIO-1-RF",
+  "decimal_precision": 60,
+  "excluded_source_rows": 0,
+  "factor": {
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\factors.csv",
+    "sha256": "7e1eb53c6498217b7cb533af372b976e95d215de6d6ce3d8b136355aaac3e86b",
+    "size_bytes": 1163787
+  },
+  "factor_end": "2026-09-18",
+  "factor_rows": 4857,
+  "factor_start": "2007-05-31",
+  "native_raw_rows": 19432,
+  "native_raw_sha256": "c37a3857f7e38d3f2f5ccdf0d0cd840aaf924f855e63f2055b1a097bea1f4d9d",
+  "oracle": {
+    "absolute_rounding_bound": "1/25000000000000000000000000000000000000000000000000000000000",
+    "algorithm": "INDEPENDENT_EXACT_FRACTION_FROM_NATIVE_ADJ_CLOSE",
+    "checks": 19428,
+    "literal_samples": [
+      {
+        "date": "2007-05-31",
+        "emitted": {
+          "HYG_XS": "-0.001605236467836169107774354932980655932710699829442175325708",
+          "IWM_XS": "0.00548873520608794380479484974224234642981907551110448389934",
+          "RF": "0",
+          "SPY_XS": "-0.001042517673438938998969128631963707240192767121887824575495",
+          "date": "2007-05-31"
+        },
+        "exact_rational_expected": {
+          "HYG_XS": "-12749195098877/7942253589630127",
+          "IWM_XS": "5908711751302/1076516087849935",
+          "RF": "0",
+          "SPY_XS": "-11206817626953/10749762725830078"
+        },
+        "native_adjusted_closes": {
+          "BIL": {
+            "current": "70.162353515625",
+            "previous": "70.162353515625"
+          },
+          "HYG": {
+            "current": "31.718017578125",
+            "previous": "31.769014358520508"
+          },
+          "IWM": {
+            "current": "64.94548797607422",
+            "previous": "64.5909652709961"
+          },
+          "SPY": {
+            "current": "107.38555908203125",
+            "previous": "107.49762725830078"
+          }
+        },
+        "previous_date": "2007-05-30"
+      },
+      {
+        "date": "2017-01-20",
+        "emitted": {
+          "HYG_XS": "0.00173364815077642912316079717135029932636668558062279802485",
+          "IWM_XS": "0.00493979832620546387042546020333284919916427833401780146846",
+          "RF": "0.00021900538552713042899581050908096928490010931061866586032",
+          "SPY_XS": "0.00345472652317324530893173637422177426341230475659428179087",
+          "date": "2017-01-20"
+        },
+        "exact_rational_expected": {
+          "HYG_XS": "18318480587833881738707754347/10566435051789369046142045656840",
+          "IWM_XS": "296969076886159484447505739/60117652032624191585264272160",
+          "RF": "88882446289/405845938788520",
+          "SPY_XS": "1700584534778051465771595637/492248669575160954915275838640"
+        },
+        "native_adjusted_closes": {
+          "BIL": {
+            "current": "73.06826782226562",
+            "previous": "73.0522689819336"
+          },
+          "HYG": {
+            "current": "52.1728401184082",
+            "previous": "52.071163177490234"
+          },
+          "IWM": {
+            "current": "119.11473083496094",
+            "previous": "118.5033950805664"
+          },
+          "SPY": {
+            "current": "194.7761993408203",
+            "previous": "194.06326293945312"
+          }
+        },
+        "previous_date": "2017-01-19"
+      },
+      {
+        "date": "2026-09-18",
+        "emitted": {
+          "HYG_XS": "-0.002632203136860804260284041234277812223801360693048300095772",
+          "IWM_XS": "-0.004878143688155404403597937316852733708258912519927489428306",
+          "RF": "0.00021855427431137205879195590132376269691171478487648423958",
+          "SPY_XS": "0.00106840477864723375810866126804910594404312419722988988007",
+          "date": "2026-09-18"
+        },
+        "exact_rational_expected": {
+          "HYG_XS": "-878039795487049146952452483/333576000723944698013143186216",
+          "IWM_XS": "-7723847798664470826591722893/1583357992799331831005859375000",
+          "RF": "666809082031/3050999959309896",
+          "SPY_XS": "12398459377544331734390258789/11604646127886759609303232828776"
+        },
+        "native_adjusted_closes": {
+          "BIL": {
+            "current": "91.55000305175781",
+            "previous": "91.52999877929688"
+          },
+          "HYG": {
+            "current": "78.52999877929688",
+            "previous": "78.72000122070312"
+          },
+          "IWM": {
+            "current": "284.1000061035156",
+            "previous": "285.42999267578125"
+          },
+          "SPY": {
+            "current": "761.6900024414062",
+            "previous": "760.7109985351562"
+          }
+        },
+        "previous_date": "2026-09-17"
+      }
+    ],
+    "maximum_absolute_error": "54717735310991484048139848649/5611666895187000100635029375553125000000000000000000000000000000000000000000000000000000"
+  },
+  "price_end": "2026-09-18",
+  "price_rows_per_ticker": {
+    "BIL": 4858,
+    "HYG": 4858,
+    "IWM": 4858,
+    "SPY": 4858
+  },
+  "price_start": "2007-05-30",
+  "prior_factor_hash_reproduction_claim": false,
+  "source": {
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\capture\\base-proxies-adjusted.json",
+    "sha256": "cba7fd6e7f80f315015dd772e74786330fd8d38c48130aa32fb818b789fcb69b",
+    "size_bytes": 12515985
+  },
+  "source_coverage_claim": "PARTIAL",
+  "source_dates_are_native_labels": true,
+  "source_manifest": {
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\capture\\base-proxies-adjusted.json.manifest.json",
+    "sha256": "be95a7a5d099111188ad4a6d0781ea0a438b125e5f281958d5732d641f233f3a",
+    "size_bytes": 7323795
+  },
+  "status": "PASS_SOURCE_AND_LITERAL_RATIONAL_ARITHMETIC"
+}

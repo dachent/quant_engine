@@ -1,0 +1,1128 @@
+{
+  "files": [
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\current-native-baseline-inputs\\portfolio-baseline-spec-v10.ready.json",
+      "sha256": "bf17d2c57fd6b9c9478715286657800d7fdea062ff93810f25e25c2afed26c3b",
+      "size_bytes": 9749
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\eu1764562\\catalog.json",
+      "sha256": "370b7bc6fdbafc57fdc3acbaf614ae9b7438bebfc4133ab7bd8cb7c03e88c8d3",
+      "size_bytes": 1728
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\eu1764562\\raw\\designer-model.json",
+      "sha256": "6d24736b55d84ffb5a3386fe041a507d9b9530cfb39cd9ce35a7762326de753b",
+      "size_bytes": 12474
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\eu1764562\\raw\\designer-performance.json",
+      "sha256": "6b037f0d54892fa701318bf302d642f6a0bedae62a93263f8d9b2d71dad76176",
+      "size_bytes": 111407
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\eu1764562\\returns.csv",
+      "sha256": "4314d240040582d75fe4cd0518009a2712e1e008e1beee169e06da454cf20024",
+      "size_bytes": 586711
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\admission-positive-proof.json",
+      "sha256": "32fbae9495d27a22a3912c4aff26290cbe8f5d6cac6f770fba34939702228562",
+      "size_bytes": 1423106
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\admission-spec.json",
+      "sha256": "7779dc8cc1933d7cb35765e60372b5d83fd30637cb85584e727305cfd48f720c",
+      "size_bytes": 6068
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\backtests-generation.json",
+      "sha256": "34ea746df32c28dbd634bc1903f93f516868c7ee3e8aedf74594e98ffdc41eab",
+      "size_bytes": 1394
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\eu1764562-generation.json",
+      "sha256": "3b4cb0cc7fe37a066445648e05e76a57ec25447660c5302cdcbf46ac3542e329",
+      "size_bytes": 1576
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\financial-contract.json",
+      "sha256": "4f385b0a7b8f9eeb85987ba479ce4a50db18d2d1ba37dbc8e4976292390e5b98",
+      "size_bytes": 216967
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\fixed-history-manifest.json",
+      "sha256": "14c76884d746b808955eaf955f9dfbd245a144970f5096e053d787c933ddcb76",
+      "size_bytes": 15953
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\fixed-history-returns.csv",
+      "sha256": "b7d66345d5223b007051b1be042b822d399267cce04af798ae75c3367c80af75",
+      "size_bytes": 2824903
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\live-evidence-reference.json",
+      "sha256": "ec3f96c1a0da1763929c2ba84daa11c6b1a631e565a7d973112f554003cee6fc",
+      "size_bytes": 11913
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\live-target-reference.csv",
+      "sha256": "83080a952587b6e44b07aac3f2166eb22ae58466d32704c73e662447980280b3",
+      "size_bytes": 162747
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\matrixport_daily_holdings_path.csv",
+      "sha256": "09c72df5926df88721edbedc523714b53ad538086d5d3cf8bfe33cfecdcca3f0",
+      "size_bytes": 109091
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\matrixport_holdings_path.csv",
+      "sha256": "1c2b26bf6b192d349385393c495edd46958205b36682f17b5a19ab64360322e4",
+      "size_bytes": 11499
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\matrixport_nav_path.csv",
+      "sha256": "36e3cb0b87a0f7af1eba3810a97cfdff285e4dbafc7cdf15103def644219526e",
+      "size_bytes": 161115
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\matrixport_subscription_path.csv",
+      "sha256": "8ad83ac4c128ef33ed8df73e00f6d389132d5d4efdfe441a812af86b3454b685",
+      "size_bytes": 1868
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\p123-relationships.parquet",
+      "sha256": "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc",
+      "size_bytes": 3767
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\p123-returns.parquet",
+      "sha256": "ea900ebf4b6073c715922535559bded916ff9f1283cb6326cef5b1177861045e",
+      "size_bytes": 4343745
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\quantbase-activity.csv",
+      "sha256": "ce766d77dab9cd3d55ed4fe7b162ae959f71b6ee591db5c9a3d506620185e1cc",
+      "size_bytes": 171189
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\quantbase-history.csv",
+      "sha256": "54afa5f4501fa9941e2963a11b541495a3171d4d2b050a7026077bc93384c9d7",
+      "size_bytes": 25672
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\quantbase-selector-accounts.csv",
+      "sha256": "f3a490498df40fd82c7c8d9e8d6770d3af5c1da47b0571bb3b6d5b9525d70675",
+      "size_bytes": 737
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\run-observation.json",
+      "sha256": "e87dab457282fecd5457ce191c169e6440e3d751ce5aa4f61f95fd66b1c14f11",
+      "size_bytes": 6177
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\fx\\fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa\\generation.json",
+      "sha256": "964bf36b632aa7059455b5f3869f259aaabe323d31fdb6d6bce03915e84820f6",
+      "size_bytes": 1164
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\fx\\fd6096d8faafd6271ca210e992ca22ab89356674f513af3a642f4cdf71c4d0aa\\rates.csv",
+      "sha256": "5aabe89502c713220d92d807474116269d526da41b8c00431b5933e976e160c1",
+      "size_bytes": 94735
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\ledger\\generations\\fd1ae097a02c469bb2ac03443d07d8e11787110ce6c0b6983be0dd3a3053f404\\admit-or-declare-receipt.json",
+      "sha256": "73a10301e4b4cc45c0f534a3e18d8bcb0eca2650df50787126c6ac94e95bfc75",
+      "size_bytes": 1000213
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\ledger\\generations\\fd1ae097a02c469bb2ac03443d07d8e11787110ce6c0b6983be0dd3a3053f404\\generation.json",
+      "sha256": "ef11fdfac3765d1958169fdeefa7eeca8409030b7a3f671676b7dfaeef7ad24f",
+      "size_bytes": 5701
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\ledger\\generations\\fd1ae097a02c469bb2ac03443d07d8e11787110ce6c0b6983be0dd3a3053f404\\provider-ledger.json",
+      "sha256": "2c9a48c744b04294cabe307081461d8be749f209233bdc77fb7e6ed753a36433",
+      "size_bytes": 38472092
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\matrixport\\generations\\f6e87f8c7db99caae712c95ee7e84932df0e724c234016a34df6fcf1b47bd7d1\\generation.json",
+      "sha256": "99247c47984caa50641aa04591d81480b0e9d0dcb50c9e7a0386f485e0e9ee0f",
+      "size_bytes": 11005
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\oracle.json",
+      "sha256": "fc24a04e1ec9888a1c7979ba2ae88d2ffb154d32cd7501d915f6a4b70156ee74",
+      "size_bytes": 4858170
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\portfolio123\\generations\\3c8a0f41df897a103a3f562edffbef75a73cbc71865605d98784a34cd74f306e\\generation.json",
+      "sha256": "8aee0e1f6cc4edcf10e64c9cfaa5298e3f748f9e747179900818434d804e26f6",
+      "size_bytes": 75642
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\quantbase\\generations\\42c1933faeb61013b40a73df60e7f3947653dee52b633a5f0aa77c988bb47230\\generation.json",
+      "sha256": "d341b362543bdd98d38323e46e3f559346fa93b377b00a39e796f81ba86c276d",
+      "size_bytes": 13617
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\selection.json",
+      "sha256": "ab090fdcbcdddf23be5d7dc2c73c425a945a85e3938bf5d4bf8f97f35c8835e6",
+      "size_bytes": 18672
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\accepted-source-generation.json",
+      "sha256": "8da15634a52fbd51a95a9d610c15eb558e5d1abf4e85631c522fc98d0f9a5ffb",
+      "size_bytes": 134809
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\current\\source\\har-workspace\\csv\\strategy_1853536_trading_system_settings.csv",
+      "sha256": "73a9ef88042f6d7d1c16b2b6402baad8efb373c3cc6faf6b04b540918c75f17d",
+      "size_bytes": 365
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\current\\source\\har-workspace\\csv\\strategy_1853549_trading_system_settings.csv",
+      "sha256": "655a6213268b6534ffaba574663314e66f7a84a2f864bec53f53ee90d38dbce4",
+      "size_bytes": 199
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\current\\tables\\book_assets.parquet",
+      "sha256": "76a216e0ff822707e663a4cb3866bd057733b020113b8f39beca910bd15a82ab",
+      "size_bytes": 6698
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\current\\tables\\entities.parquet",
+      "sha256": "0bd9c17bf4bfe8d71fb5a42ec497b3751ca0ea4b1d8127db2e58fed336856f31",
+      "size_bytes": 5421
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\current\\tables\\general_info.parquet",
+      "sha256": "475fdc63e51e2f71bed0960ccc408b6e0675a9d55e8ec6cb81988bc4c79ceedf",
+      "size_bytes": 23555
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\current\\tables\\har_buy_rules.parquet",
+      "sha256": "47e0b72ba03a8aa5fd1353a3f1b3489797fa9a040cc61f4596d07d09eeb82435",
+      "size_bytes": 2071
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\current\\tables\\har_sell_rules.parquet",
+      "sha256": "356b49ee959593ac7924ff4d7b5bc085422ff97e25e7dd1044045d2e91140765",
+      "size_bytes": 2017
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\current\\tables\\har_trading_system_settings.parquet",
+      "sha256": "6d5e13ba726d9b37a76d0b820fe35e9faedb6b5adc643de58cc9bcc48d289980",
+      "size_bytes": 18145
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\current\\tables\\manual_trading_system_config.parquet",
+      "sha256": "e7dae66abbfc76f81af38501ea13f7beaf10faee4bd337e493db96bd97f82530",
+      "size_bytes": 10359
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\current\\tables\\returns_daily.parquet",
+      "sha256": "ea900ebf4b6073c715922535559bded916ff9f1283cb6326cef5b1177861045e",
+      "size_bytes": 4343745
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\current\\tables\\strategy_registry.parquet",
+      "sha256": "d8dc7b888b8342cf814a8c2a5f644d2ae6a7a579da8ea53aadbc7c61c25e8e8e",
+      "size_bytes": 15302
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\current\\tables\\strategy_relationships.parquet",
+      "sha256": "4b88f88a1993da4580ef06c178a30b0979616fc1ed57a7c86a39d6a4c308c8fc",
+      "size_bytes": 3767
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\historical-coverage.json",
+      "sha256": "dfd9c28313ba4bc35699d50f83efc355706300c7d573971331c669470ca26116",
+      "size_bytes": 212826
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\historical-generation.json",
+      "sha256": "4d0d25d3223252a895132c3bb194dc808027e39e6d8dff0bbc34deeb4654827b",
+      "size_bytes": 307227
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\selection.json",
+      "sha256": "b7d251c2ed2c6e00ae47979a0d0ba654712534fcea763723ec5eee6da7a228b1",
+      "size_bytes": 7540
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\version-evidence.json",
+      "sha256": "938a6fc173cd8ede655970c094f8f0c5ec8d0ead519e41b2f31adb62549a044d",
+      "size_bytes": 2912
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\native-plan-v13-live_only-invocation.json",
+      "sha256": "2c322b1b51de924a00c7f8706dfa4e095579c05fb2559bc2a22883118b5f1912",
+      "size_bytes": 4370
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\native-plan-v13-live_plus_backtest-invocation.json",
+      "sha256": "4e2da692f2411293ba38e639a012ba5daf2b5c4ca16067b62ecad2300676da2c",
+      "size_bytes": 4415
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\factors.csv",
+      "sha256": "7e1eb53c6498217b7cb533af372b976e95d215de6d6ce3d8b136355aaac3e86b",
+      "size_bytes": 1163787
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_only\\base-decomposition-spec.json",
+      "sha256": "2b6162ba7a0b98900df3b0312560f4d3c70c4df000b3ca0cf3a433daf7dc98d9",
+      "size_bytes": 22844
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_only\\base-source\\factors.csv",
+      "sha256": "7e1eb53c6498217b7cb533af372b976e95d215de6d6ce3d8b136355aaac3e86b",
+      "size_bytes": 1163787
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_only\\base-source\\provider-ledger-generation.json",
+      "sha256": "ef11fdfac3765d1958169fdeefa7eeca8409030b7a3f671676b7dfaeef7ad24f",
+      "size_bytes": 5701
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_only\\base-source\\provider-ledger-source-proof.json",
+      "sha256": "d262a6c73b48d220cb52795d52c072ac8d19094ee0af6d830e2261c73d87b444",
+      "size_bytes": 2878
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_only\\base-source\\provider-ledger.json",
+      "sha256": "2c9a48c744b04294cabe307081461d8be749f209233bdc77fb7e6ed753a36433",
+      "size_bytes": 38472092
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_only\\base-source\\source\\acquisition.json",
+      "sha256": "bbc4435abb36f4033a50f0f00f09fc9230525bd86afc7e71b84843a21a2a9f2f",
+      "size_bytes": 1702
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_only\\base-source\\source\\base-proxies-adjusted.json",
+      "sha256": "cba7fd6e7f80f315015dd772e74786330fd8d38c48130aa32fb818b789fcb69b",
+      "size_bytes": 12515985
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_only\\base-source\\source\\base-proxies-adjusted.json.manifest.json",
+      "sha256": "be95a7a5d099111188ad4a6d0781ea0a438b125e5f281958d5732d641f233f3a",
+      "size_bytes": 7323795
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_only\\base-source\\source\\factor-derivation-proof.json",
+      "sha256": "21b09e8fb54856fc30f44bfa9b63fd9f0f70029b451519eae2c630a3c15ed429",
+      "size_bytes": 7624
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_only\\base-source\\source\\interval-authority.json",
+      "sha256": "ad299580a33e552b8f6ceb143200e7bc4965134f2301a36be69658e77b324939",
+      "size_bytes": 8332
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_only\\base-source\\strategy-evidence.json",
+      "sha256": "ec3f96c1a0da1763929c2ba84daa11c6b1a631e565a7d973112f554003cee6fc",
+      "size_bytes": 11913
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_only\\base-source\\targets.csv",
+      "sha256": "2e21a66fb13ca5c259caaf01d895cab5759dea61ec37249bf08a4414c8c3f4a3",
+      "size_bytes": 161474
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_plus_backtest\\base-decomposition-spec.json",
+      "sha256": "b220c4fd7d4980576bcaa9d439553c0fb97b5af059603cd68c0970b4a183e480",
+      "size_bytes": 22543
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_plus_backtest\\base-source\\factors.csv",
+      "sha256": "7e1eb53c6498217b7cb533af372b976e95d215de6d6ce3d8b136355aaac3e86b",
+      "size_bytes": 1163787
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_plus_backtest\\base-source\\provider-ledger-generation.json",
+      "sha256": "ef11fdfac3765d1958169fdeefa7eeca8409030b7a3f671676b7dfaeef7ad24f",
+      "size_bytes": 5701
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_plus_backtest\\base-source\\provider-ledger-source-proof.json",
+      "sha256": "d262a6c73b48d220cb52795d52c072ac8d19094ee0af6d830e2261c73d87b444",
+      "size_bytes": 2878
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_plus_backtest\\base-source\\provider-ledger.json",
+      "sha256": "2c9a48c744b04294cabe307081461d8be749f209233bdc77fb7e6ed753a36433",
+      "size_bytes": 38472092
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_plus_backtest\\base-source\\source\\acquisition.json",
+      "sha256": "bbc4435abb36f4033a50f0f00f09fc9230525bd86afc7e71b84843a21a2a9f2f",
+      "size_bytes": 1702
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_plus_backtest\\base-source\\source\\base-proxies-adjusted.json",
+      "sha256": "cba7fd6e7f80f315015dd772e74786330fd8d38c48130aa32fb818b789fcb69b",
+      "size_bytes": 12515985
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_plus_backtest\\base-source\\source\\base-proxies-adjusted.json.manifest.json",
+      "sha256": "be95a7a5d099111188ad4a6d0781ea0a438b125e5f281958d5732d641f233f3a",
+      "size_bytes": 7323795
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_plus_backtest\\base-source\\source\\factor-derivation-proof.json",
+      "sha256": "21b09e8fb54856fc30f44bfa9b63fd9f0f70029b451519eae2c630a3c15ed429",
+      "size_bytes": 7624
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_plus_backtest\\base-source\\source\\interval-authority.json",
+      "sha256": "7e23293e09a99e47360258368a5d51b8bed2cf3e196536e49103b512e743cc63",
+      "size_bytes": 9581
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_plus_backtest\\base-source\\strategy-evidence.json",
+      "sha256": "ec3f96c1a0da1763929c2ba84daa11c6b1a631e565a7d973112f554003cee6fc",
+      "size_bytes": 11913
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\live_plus_backtest\\base-source\\targets.csv",
+      "sha256": "7795155f02d792146fe11692500f72650e98533c87ebfdba993642041053bcad",
+      "size_bytes": 1664761
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-combined-style-current\\observed-complete-through-20260917\\bundles\\07ea17e198abbfb07d4a05db0be83ff6c320ecc5d3c02e61452331d755550a7c\\etf_style_returns_daily.csv",
+      "sha256": "885da112e1f6741e447772ba79e4b9eb6ed44861518cfb151eb2558177c2b120",
+      "size_bytes": 2719361
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-combined-style-current\\observed-complete-through-20260917\\bundles\\07ea17e198abbfb07d4a05db0be83ff6c320ecc5d3c02e61452331d755550a7c\\source-manifest.json",
+      "sha256": "b9beac5dc6155f88417f1d3cdbe96a7284eeae55e7cdf8365ec733bbf2ccfc35",
+      "size_bytes": 6480
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-attribution-v10\\stage\\generations\\c59a17f145cdb59ef58a5ece58d4d4000aeea76e1de9ba2786a4af2bb34de7ef\\generation.json",
+      "sha256": "535382e8a1ceeeea4c377624429ec0f44b5f82a6bf3981158d20e9168638e070",
+      "size_bytes": 1629
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-attribution-v10\\stage\\generations\\c59a17f145cdb59ef58a5ece58d4d4000aeea76e1de9ba2786a4af2bb34de7ef\\strategy-attribution.json",
+      "sha256": "097ab41cb62878c2dff572f469929934ceb86d634a29613880e120f77ded2074",
+      "size_bytes": 25464
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-baseline-v10\\generations\\10dcd0af514a790a09684be7749e2bc37905ab6a7627ec8f59fecd2e9b3282f1\\generation.json",
+      "sha256": "e7e8f937825559bc7e0aa403459d477037a065a79372c3c99e6a561ce11edac0",
+      "size_bytes": 7175
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-baseline-v10\\generations\\10dcd0af514a790a09684be7749e2bc37905ab6a7627ec8f59fecd2e9b3282f1\\portfolio-baseline.json",
+      "sha256": "bda37ec1cc7e44b34b82a24af31e9a78a3fc3a600af42f93fd7abb664d12993b",
+      "size_bytes": 10572386
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-dependence-v10\\0ff968444990511d22498859c253143f64bf8fb0f20d16541766c03c33059551\\dependence-source.json",
+      "sha256": "407865e8dd783120a40893da1a5e584d99580d729d1f731aedbf151f65399fb6",
+      "size_bytes": 16129
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-dependence-v10\\0ff968444990511d22498859c253143f64bf8fb0f20d16541766c03c33059551\\history-coverage.json",
+      "sha256": "073143f73b7f5c464ca2b46c2e8f272d0cdaba74f8dce386f0e1734460eb2e09",
+      "size_bytes": 280965
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-dependence-v10\\0ff968444990511d22498859c253143f64bf8fb0f20d16541766c03c33059551\\returns.csv",
+      "sha256": "89cf236e8df95cc9c6ca36569fa57b1579330a0e2b7cb39ee5ac0a0827033b19",
+      "size_bytes": 3388744
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-dependence-v10\\0ff968444990511d22498859c253143f64bf8fb0f20d16541766c03c33059551\\segments.csv",
+      "sha256": "c6ce705b87d82b509ef9992e9ae607eeeb22b311c7ca0d8a867297cefe2988b0",
+      "size_bytes": 8009980
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-dependence-v10\\0ff968444990511d22498859c253143f64bf8fb0f20d16541766c03c33059551\\spec.json",
+      "sha256": "7cbe868517057863530fd5c5d5109aed1b18e72ebb906e67f0c9af5c043f0d51",
+      "size_bytes": 8058
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-dependence-v10\\selected-inputs.json",
+      "sha256": "5965ca7454a2684585d34a9f032cd2cfbb47aa3c73c5160ec40ab4e329b828e2",
+      "size_bytes": 1110
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-history-v10\\845e0f85932430a50541c100a08e91d58501b2849a7535da73687ce6b39f79cb\\coverage.json",
+      "sha256": "073143f73b7f5c464ca2b46c2e8f272d0cdaba74f8dce386f0e1734460eb2e09",
+      "size_bytes": 280965
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-history-v10\\845e0f85932430a50541c100a08e91d58501b2849a7535da73687ce6b39f79cb\\excluded.csv",
+      "sha256": "8eee0f630ee66b2280884623c71acc414e72665c44869949cc203b20a5807360",
+      "size_bytes": 67
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-history-v10\\845e0f85932430a50541c100a08e91d58501b2849a7535da73687ce6b39f79cb\\generation.json",
+      "sha256": "907d41ceead35391484d30122e159cec5554538d17fe7d7bac3585ef81c65866",
+      "size_bytes": 149136
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-history-v10\\845e0f85932430a50541c100a08e91d58501b2849a7535da73687ce6b39f79cb\\live-only.csv",
+      "sha256": "119ae941d60c9029934a32266248c01c58e97bd6e9c354aa406811b7cb5b86a9",
+      "size_bytes": 340101
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-history-v10\\845e0f85932430a50541c100a08e91d58501b2849a7535da73687ce6b39f79cb\\live-plus-backtest.csv",
+      "sha256": "385e7803e4f526466888715868fdcd7c863bdd8b2aaf8cb124aeb7be5b6fdd60",
+      "size_bytes": 3388744
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-history-v10\\845e0f85932430a50541c100a08e91d58501b2849a7535da73687ce6b39f79cb\\returns.csv",
+      "sha256": "385e7803e4f526466888715868fdcd7c863bdd8b2aaf8cb124aeb7be5b6fdd60",
+      "size_bytes": 3388744
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-history-v10\\845e0f85932430a50541c100a08e91d58501b2849a7535da73687ce6b39f79cb\\segments.csv",
+      "sha256": "ade0e9c86dabdf25889f47a035031d5086c7cdb94cca595dae5996e0824abba3",
+      "size_bytes": 8088766
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-inputs-v10\\governance\\current-strategy-decomposition-plan.json",
+      "sha256": "151fd7c2a493377768749555a8f11b25f16aaca5595bceab47e341a2d6523dcd",
+      "size_bytes": 39727
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-inputs-v10\\governance\\decomposition-source-catalog.json",
+      "sha256": "13b236987db8e55635071b4d8874097aad6cacd5a8798a5e5f483b7fe0eb3360",
+      "size_bytes": 24819
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-inputs-v10\\market\\europe_factors_daily.csv",
+      "sha256": "61fb0d8ec6aad69f82110b102281d6e4951ba2bf92cf60f6a6116141832a391c",
+      "size_bytes": 559315
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-inputs-v10\\market\\public-factor-source-manifest.json",
+      "sha256": "a7bd1264de8b5d14e9b3a4eaa2a01bb764000aa83e608705f7aeeff6be661e48",
+      "size_bytes": 8767
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-inputs-v10\\market\\sector_returns-source-manifest.json",
+      "sha256": "0e0ebb22064505b7e39c9ec186a1b13b7b84d5f62db5a5925875ff5305a6f218",
+      "size_bytes": 4408
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-inputs-v10\\market\\us_49_industries_value_weighted_daily.csv",
+      "sha256": "4693c26717b50ef5987a955894c50b7da0e22aa6d437326fd737d45d584874ce",
+      "size_bytes": 5974166
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-inputs-v10\\market\\us_factors_daily.csv",
+      "sha256": "8e3ac71c11c1f8617c43fbff4a9d64c77d0c60638285cd3286863bf130388df8",
+      "size_bytes": 966842
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-inputs-v10\\market\\us_sector_returns_daily.csv",
+      "sha256": "c550a35699d7c1cebf84016fb0155dca8bd22774cb2dd13781afa97a53d9c175",
+      "size_bytes": 2171241
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\candidate-dispositions.json",
+      "sha256": "b031c890eb7d8a96afefe892cad1fd746a00b304c2f0124ecadbdc9e9c62a182",
+      "size_bytes": 555179
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\base\\provenance\\00-provider-ledger-generation.json",
+      "sha256": "ef11fdfac3765d1958169fdeefa7eeca8409030b7a3f671676b7dfaeef7ad24f",
+      "size_bytes": 5701
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\base\\provenance\\01-provider-ledger.json",
+      "sha256": "2c9a48c744b04294cabe307081461d8be749f209233bdc77fb7e6ed753a36433",
+      "size_bytes": 38472092
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\base\\provenance\\02-provider-ledger-source-proof.json",
+      "sha256": "d262a6c73b48d220cb52795d52c072ac8d19094ee0af6d830e2261c73d87b444",
+      "size_bytes": 2878
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\base\\provenance\\03-strategy-evidence.json",
+      "sha256": "ec3f96c1a0da1763929c2ba84daa11c6b1a631e565a7d973112f554003cee6fc",
+      "size_bytes": 11913
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\base\\provenance\\04-base-proxies-adjusted.json",
+      "sha256": "cba7fd6e7f80f315015dd772e74786330fd8d38c48130aa32fb818b789fcb69b",
+      "size_bytes": 12515985
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\base\\provenance\\05-base-proxies-adjusted.json.manifest.json",
+      "sha256": "be95a7a5d099111188ad4a6d0781ea0a438b125e5f281958d5732d641f233f3a",
+      "size_bytes": 7323795
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\base\\provenance\\06-acquisition.json",
+      "sha256": "bbc4435abb36f4033a50f0f00f09fc9230525bd86afc7e71b84843a21a2a9f2f",
+      "size_bytes": 1702
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\base\\provenance\\07-factor-derivation-proof.json",
+      "sha256": "21b09e8fb54856fc30f44bfa9b63fd9f0f70029b451519eae2c630a3c15ed429",
+      "size_bytes": 7624
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\base\\provenance\\08-interval-authority.json",
+      "sha256": "ad299580a33e552b8f6ceb143200e7bc4965134f2301a36be69658e77b324939",
+      "size_bytes": 8332
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\governance\\base-decomposition-spec.json",
+      "sha256": "2b6162ba7a0b98900df3b0312560f4d3c70c4df000b3ca0cf3a433daf7dc98d9",
+      "size_bytes": 22844
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\governance\\current-strategy-decomposition-plan.json",
+      "sha256": "151fd7c2a493377768749555a8f11b25f16aaca5595bceab47e341a2d6523dcd",
+      "size_bytes": 39727
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\governance\\decomposition-source-catalog.json",
+      "sha256": "13b236987db8e55635071b4d8874097aad6cacd5a8798a5e5f483b7fe0eb3360",
+      "size_bytes": 24819
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\governance\\public-factor-source-manifest.json",
+      "sha256": "a7bd1264de8b5d14e9b3a4eaa2a01bb764000aa83e608705f7aeeff6be661e48",
+      "size_bytes": 8767
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\governance\\sector-source-manifest.json",
+      "sha256": "0e0ebb22064505b7e39c9ec186a1b13b7b84d5f62db5a5925875ff5305a6f218",
+      "size_bytes": 4408
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\governance\\style-source-manifest.json",
+      "sha256": "b9beac5dc6155f88417f1d3cdbe96a7284eeae55e7cdf8365ec733bbf2ccfc35",
+      "size_bytes": 6480
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\history\\coverage.json",
+      "sha256": "073143f73b7f5c464ca2b46c2e8f272d0cdaba74f8dce386f0e1734460eb2e09",
+      "size_bytes": 280965
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\history\\excluded.csv",
+      "sha256": "8eee0f630ee66b2280884623c71acc414e72665c44869949cc203b20a5807360",
+      "size_bytes": 67
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\history\\financial-mvp-contract.json",
+      "sha256": "4f385b0a7b8f9eeb85987ba479ce4a50db18d2d1ba37dbc8e4976292390e5b98",
+      "size_bytes": 216967
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\history\\generation.json",
+      "sha256": "907d41ceead35391484d30122e159cec5554538d17fe7d7bac3585ef81c65866",
+      "size_bytes": 149136
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\history\\live-only.csv",
+      "sha256": "119ae941d60c9029934a32266248c01c58e97bd6e9c354aa406811b7cb5b86a9",
+      "size_bytes": 340101
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\history\\live-plus-backtest.csv",
+      "sha256": "385e7803e4f526466888715868fdcd7c863bdd8b2aaf8cb124aeb7be5b6fdd60",
+      "size_bytes": 3388744
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\history\\returns.csv",
+      "sha256": "385e7803e4f526466888715868fdcd7c863bdd8b2aaf8cb124aeb7be5b6fdd60",
+      "size_bytes": 3388744
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\history\\segments.csv",
+      "sha256": "ade0e9c86dabdf25889f47a035031d5086c7cdb94cca595dae5996e0824abba3",
+      "size_bytes": 8088766
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\history\\selected-targets.csv",
+      "sha256": "2e21a66fb13ca5c259caaf01d895cab5759dea61ec37249bf08a4414c8c3f4a3",
+      "size_bytes": 161474
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\lenses\\europe-economic-factors.csv",
+      "sha256": "61fb0d8ec6aad69f82110b102281d6e4951ba2bf92cf60f6a6116141832a391c",
+      "size_bytes": 559315
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\lenses\\europe-economic-targets.csv",
+      "sha256": "ae7a13edb34b91e847f7a70a911bbbd38d61778d8a0fc0075ae73788aa5d6dea",
+      "size_bytes": 12224
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\lenses\\multi-asset-style-factors.csv",
+      "sha256": "19c0f40b26901970ec7430f909fa3e555428a0b5b42053d9207aa74a60328f49",
+      "size_bytes": 1864008
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\lenses\\multi-asset-style-targets.csv",
+      "sha256": "3fec10eba44a7b203ae0acaabf4dcbec14246befdededaeb2c4703c637383450",
+      "size_bytes": 133853
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\lenses\\us-economic-factors.csv",
+      "sha256": "8e3ac71c11c1f8617c43fbff4a9d64c77d0c60638285cd3286863bf130388df8",
+      "size_bytes": 966842
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\lenses\\us-economic-targets.csv",
+      "sha256": "943ebaac2877a0bbd10ed7ab5a46fe69f3cccdd23a6cf0813065f87f3427dca8",
+      "size_bytes": 101187
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\lenses\\us-equity-style-factors.csv",
+      "sha256": "9781ec6d7c7b4528d835cde94aeb587ae4c131b950bb8b97d4773ae74af49270",
+      "size_bytes": 1005106
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\lenses\\us-equity-style-targets.csv",
+      "sha256": "14601992525d92e91a2b3c856402db7901a9b8a2219eea0a160bb478e969afc6",
+      "size_bytes": 117504
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\lenses\\us-industry-factors.csv",
+      "sha256": "4693c26717b50ef5987a955894c50b7da0e22aa6d437326fd737d45d584874ce",
+      "size_bytes": 5974166
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\lenses\\us-industry-targets.csv",
+      "sha256": "943ebaac2877a0bbd10ed7ab5a46fe69f3cccdd23a6cf0813065f87f3427dca8",
+      "size_bytes": 101187
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\lenses\\us-sector-factors.csv",
+      "sha256": "d1737e585794111fd81c0b59941c07a4946f0244242ad8463aa7186004cde319",
+      "size_bytes": 1636131
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\lenses\\us-sector-targets.csv",
+      "sha256": "14601992525d92e91a2b3c856402db7901a9b8a2219eea0a160bb478e969afc6",
+      "size_bytes": 117504
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\market\\europe_factors.csv",
+      "sha256": "61fb0d8ec6aad69f82110b102281d6e4951ba2bf92cf60f6a6116141832a391c",
+      "size_bytes": 559315
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\market\\sector_returns.csv",
+      "sha256": "c550a35699d7c1cebf84016fb0155dca8bd22774cb2dd13781afa97a53d9c175",
+      "size_bytes": 2171241
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\market\\style_returns.csv",
+      "sha256": "885da112e1f6741e447772ba79e4b9eb6ed44861518cfb151eb2558177c2b120",
+      "size_bytes": 2719361
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\market\\us_factors.csv",
+      "sha256": "8e3ac71c11c1f8617c43fbff4a9d64c77d0c60638285cd3286863bf130388df8",
+      "size_bytes": 966842
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\inputs\\market\\us_industries.csv",
+      "sha256": "4693c26717b50ef5987a955894c50b7da0e22aa6d437326fd737d45d584874ce",
+      "size_bytes": 5974166
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\plan-manifest.json",
+      "sha256": "0270cd704f6cd41cc5b27a5cf3c56ce77e1d7579ac432cbd05b4c5bb0403b291",
+      "size_bytes": 120507
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\specs\\europe-economic-dynamic-fls.json",
+      "sha256": "477233d31dc4216d6350edf6fcde4fc701bb3303f70d5f842b984141d4be4a22",
+      "size_bytes": 14124
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\specs\\europe-economic.json",
+      "sha256": "dc9fad14ce1c3fa194dad128d921a4946bc65eda6187935113ca2f7445bfed6d",
+      "size_bytes": 13920
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\specs\\multi-asset-style-dynamic-fls.json",
+      "sha256": "0dc947aa9b71f9a1136e4e59d3ef08555bba501b62f5956e645f2b8edadffd5c",
+      "size_bytes": 36019
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\specs\\multi-asset-style.json",
+      "sha256": "716c8d4c62b6f44f80fdf108bf9128d060418e82980a1850f266849ab2a078b0",
+      "size_bytes": 34128
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\specs\\us-economic-dynamic-fls.json",
+      "sha256": "ce6a7cca1186d89256f5fbc4841ef8749fe8e0ac36b429714f1fbbd8cc718b9e",
+      "size_bytes": 22201
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\specs\\us-economic.json",
+      "sha256": "2ba37347425c738f53d4c61ffb0293ca4f17d52e5c33ac6059d4ca4b5b6aca83",
+      "size_bytes": 21181
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\specs\\us-equity-style-dynamic-fls.json",
+      "sha256": "3d7333b1dbcab46fa04bfd612dd8996c42df442187339a22dab5728e5b23e1b1",
+      "size_bytes": 30224
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\specs\\us-equity-style.json",
+      "sha256": "6b93385f36c90268862bd095c2a7707233e65280fce4e3dc187a3f9f75c60cad",
+      "size_bytes": 28394
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\specs\\us-industry-dynamic-fls.json",
+      "sha256": "db85aefe7d502ac3fdfc7251c0d9c1220a978c4a8f492675ba0744608b0cc170",
+      "size_bytes": 69268
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\specs\\us-industry.json",
+      "sha256": "37091b6c928273cd2d77c08db62b3e789d3806bd6bd98c4b7a48fb76eb744b8e",
+      "size_bytes": 65868
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\specs\\us-sector-dynamic-fls.json",
+      "sha256": "5e26d172c4740ad24b63222ba2cb070f62bce848b7bc5f86b1297060c9cd5eb6",
+      "size_bytes": 30580
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_only\\9540499b49a3f8ae204abd5dad3f69a6401ea11bcb6399ab95253029e05cea9c\\specs\\us-sector.json",
+      "sha256": "7c267fa21614fdfe0b480c0cb51ad47305dcd47f361842231b1a131864c70fb1",
+      "size_bytes": 28880
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\candidate-dispositions.json",
+      "sha256": "b031c890eb7d8a96afefe892cad1fd746a00b304c2f0124ecadbdc9e9c62a182",
+      "size_bytes": 555179
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\base\\provenance\\00-provider-ledger-generation.json",
+      "sha256": "ef11fdfac3765d1958169fdeefa7eeca8409030b7a3f671676b7dfaeef7ad24f",
+      "size_bytes": 5701
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\base\\provenance\\01-provider-ledger.json",
+      "sha256": "2c9a48c744b04294cabe307081461d8be749f209233bdc77fb7e6ed753a36433",
+      "size_bytes": 38472092
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\base\\provenance\\02-provider-ledger-source-proof.json",
+      "sha256": "d262a6c73b48d220cb52795d52c072ac8d19094ee0af6d830e2261c73d87b444",
+      "size_bytes": 2878
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\base\\provenance\\03-strategy-evidence.json",
+      "sha256": "ec3f96c1a0da1763929c2ba84daa11c6b1a631e565a7d973112f554003cee6fc",
+      "size_bytes": 11913
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\base\\provenance\\04-base-proxies-adjusted.json",
+      "sha256": "cba7fd6e7f80f315015dd772e74786330fd8d38c48130aa32fb818b789fcb69b",
+      "size_bytes": 12515985
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\base\\provenance\\05-base-proxies-adjusted.json.manifest.json",
+      "sha256": "be95a7a5d099111188ad4a6d0781ea0a438b125e5f281958d5732d641f233f3a",
+      "size_bytes": 7323795
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\base\\provenance\\06-acquisition.json",
+      "sha256": "bbc4435abb36f4033a50f0f00f09fc9230525bd86afc7e71b84843a21a2a9f2f",
+      "size_bytes": 1702
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\base\\provenance\\07-factor-derivation-proof.json",
+      "sha256": "21b09e8fb54856fc30f44bfa9b63fd9f0f70029b451519eae2c630a3c15ed429",
+      "size_bytes": 7624
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\base\\provenance\\08-interval-authority.json",
+      "sha256": "7e23293e09a99e47360258368a5d51b8bed2cf3e196536e49103b512e743cc63",
+      "size_bytes": 9581
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\governance\\base-decomposition-spec.json",
+      "sha256": "b220c4fd7d4980576bcaa9d439553c0fb97b5af059603cd68c0970b4a183e480",
+      "size_bytes": 22543
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\governance\\current-strategy-decomposition-plan.json",
+      "sha256": "151fd7c2a493377768749555a8f11b25f16aaca5595bceab47e341a2d6523dcd",
+      "size_bytes": 39727
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\governance\\decomposition-source-catalog.json",
+      "sha256": "13b236987db8e55635071b4d8874097aad6cacd5a8798a5e5f483b7fe0eb3360",
+      "size_bytes": 24819
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\governance\\public-factor-source-manifest.json",
+      "sha256": "a7bd1264de8b5d14e9b3a4eaa2a01bb764000aa83e608705f7aeeff6be661e48",
+      "size_bytes": 8767
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\governance\\sector-source-manifest.json",
+      "sha256": "0e0ebb22064505b7e39c9ec186a1b13b7b84d5f62db5a5925875ff5305a6f218",
+      "size_bytes": 4408
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\governance\\style-source-manifest.json",
+      "sha256": "b9beac5dc6155f88417f1d3cdbe96a7284eeae55e7cdf8365ec733bbf2ccfc35",
+      "size_bytes": 6480
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\history\\coverage.json",
+      "sha256": "073143f73b7f5c464ca2b46c2e8f272d0cdaba74f8dce386f0e1734460eb2e09",
+      "size_bytes": 280965
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\history\\excluded.csv",
+      "sha256": "8eee0f630ee66b2280884623c71acc414e72665c44869949cc203b20a5807360",
+      "size_bytes": 67
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\history\\financial-mvp-contract.json",
+      "sha256": "4f385b0a7b8f9eeb85987ba479ce4a50db18d2d1ba37dbc8e4976292390e5b98",
+      "size_bytes": 216967
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\history\\generation.json",
+      "sha256": "907d41ceead35391484d30122e159cec5554538d17fe7d7bac3585ef81c65866",
+      "size_bytes": 149136
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\history\\live-only.csv",
+      "sha256": "119ae941d60c9029934a32266248c01c58e97bd6e9c354aa406811b7cb5b86a9",
+      "size_bytes": 340101
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\history\\live-plus-backtest.csv",
+      "sha256": "385e7803e4f526466888715868fdcd7c863bdd8b2aaf8cb124aeb7be5b6fdd60",
+      "size_bytes": 3388744
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\history\\returns.csv",
+      "sha256": "385e7803e4f526466888715868fdcd7c863bdd8b2aaf8cb124aeb7be5b6fdd60",
+      "size_bytes": 3388744
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\history\\segments.csv",
+      "sha256": "ade0e9c86dabdf25889f47a035031d5086c7cdb94cca595dae5996e0824abba3",
+      "size_bytes": 8088766
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\history\\selected-targets.csv",
+      "sha256": "7795155f02d792146fe11692500f72650e98533c87ebfdba993642041053bcad",
+      "size_bytes": 1664761
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\lenses\\europe-economic-factors.csv",
+      "sha256": "61fb0d8ec6aad69f82110b102281d6e4951ba2bf92cf60f6a6116141832a391c",
+      "size_bytes": 559315
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\lenses\\europe-economic-targets.csv",
+      "sha256": "b8b119e0b1d412311ca2a20547b8b28ee7cbb32765d1a16913357811c067bc49",
+      "size_bytes": 322572
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\lenses\\multi-asset-style-factors.csv",
+      "sha256": "19c0f40b26901970ec7430f909fa3e555428a0b5b42053d9207aa74a60328f49",
+      "size_bytes": 1864008
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\lenses\\multi-asset-style-targets.csv",
+      "sha256": "c2fe3fd908a92679040befa925bb04408208ea5266fb081a7ed8bbf0523d7fc2",
+      "size_bytes": 1208504
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\lenses\\us-economic-factors.csv",
+      "sha256": "8e3ac71c11c1f8617c43fbff4a9d64c77d0c60638285cd3286863bf130388df8",
+      "size_bytes": 966842
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\lenses\\us-economic-targets.csv",
+      "sha256": "ff62eb811e9c81d075b919f573344a66b54db6704ce05f7f294777b29bae275a",
+      "size_bytes": 1074614
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\lenses\\us-equity-style-factors.csv",
+      "sha256": "9781ec6d7c7b4528d835cde94aeb587ae4c131b950bb8b97d4773ae74af49270",
+      "size_bytes": 1005106
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\lenses\\us-equity-style-targets.csv",
+      "sha256": "8ef8c0cd0e6019e9e122d8eb9536e647b062e2cb356da1db0df548734953615c",
+      "size_bytes": 1090931
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\lenses\\us-industry-factors.csv",
+      "sha256": "4693c26717b50ef5987a955894c50b7da0e22aa6d437326fd737d45d584874ce",
+      "size_bytes": 5974166
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\lenses\\us-industry-targets.csv",
+      "sha256": "ff62eb811e9c81d075b919f573344a66b54db6704ce05f7f294777b29bae275a",
+      "size_bytes": 1074614
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\lenses\\us-sector-factors.csv",
+      "sha256": "d1737e585794111fd81c0b59941c07a4946f0244242ad8463aa7186004cde319",
+      "size_bytes": 1636131
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\lenses\\us-sector-targets.csv",
+      "sha256": "8ef8c0cd0e6019e9e122d8eb9536e647b062e2cb356da1db0df548734953615c",
+      "size_bytes": 1090931
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\market\\europe_factors.csv",
+      "sha256": "61fb0d8ec6aad69f82110b102281d6e4951ba2bf92cf60f6a6116141832a391c",
+      "size_bytes": 559315
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\market\\sector_returns.csv",
+      "sha256": "c550a35699d7c1cebf84016fb0155dca8bd22774cb2dd13781afa97a53d9c175",
+      "size_bytes": 2171241
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\market\\style_returns.csv",
+      "sha256": "885da112e1f6741e447772ba79e4b9eb6ed44861518cfb151eb2558177c2b120",
+      "size_bytes": 2719361
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\market\\us_factors.csv",
+      "sha256": "8e3ac71c11c1f8617c43fbff4a9d64c77d0c60638285cd3286863bf130388df8",
+      "size_bytes": 966842
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\inputs\\market\\us_industries.csv",
+      "sha256": "4693c26717b50ef5987a955894c50b7da0e22aa6d437326fd737d45d584874ce",
+      "size_bytes": 5974166
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\plan-manifest.json",
+      "sha256": "fa67a5f430413f6def08c91722819d4c52b10f1f428d3a7a43b3a0ec5c485790",
+      "size_bytes": 120541
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\specs\\europe-economic-dynamic-fls.json",
+      "sha256": "465dca52de66ea8e7e06fc709ea4d711c3d8b4b7eb04e37bd9c4f58ed031d8fd",
+      "size_bytes": 14157
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\specs\\europe-economic.json",
+      "sha256": "5009b005dea0b8869c70ea9c7335f006509e922b8eece748d49540f87a4c93ec",
+      "size_bytes": 13953
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\specs\\multi-asset-style-dynamic-fls.json",
+      "sha256": "9f4dac00f9f4c9e288228c4a8db48251f26d5f0f21316e818b74a89141c972f7",
+      "size_bytes": 35785
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\specs\\multi-asset-style.json",
+      "sha256": "69ef6857dea50f7841aa3e9105e34782310f62abdb1ebec1a388021b82729e8d",
+      "size_bytes": 33894
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\specs\\us-economic-dynamic-fls.json",
+      "sha256": "ab4ea1ab88d7b5641a72e27a212e7792a6f063f4381938496f807e12a1cbcc59",
+      "size_bytes": 22318
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\specs\\us-economic.json",
+      "sha256": "505a1268292022abb07b1c19d6ffb3d8e3abee3258a4e7c192acf7b71eff75e6",
+      "size_bytes": 21298
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\specs\\us-equity-style-dynamic-fls.json",
+      "sha256": "1856b6cd0e99b83b4562a3a391ec29443c46e24e838e334d2237288fc67e7008",
+      "size_bytes": 30341
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\specs\\us-equity-style.json",
+      "sha256": "69bcf4c3c87db9bec311af4fe020f0789be3e54f1cbede9cf4805892e9dc774f",
+      "size_bytes": 28511
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\specs\\us-industry-dynamic-fls.json",
+      "sha256": "128be676f37cda96e29083b54f1977287f0e98e0ac9b4e1697604d877f578be0",
+      "size_bytes": 69385
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\specs\\us-industry.json",
+      "sha256": "202765485e49e95db0c3e743722e3100836050a23228b86c1a112c5da52aa25a",
+      "size_bytes": 65985
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\specs\\us-sector-dynamic-fls.json",
+      "sha256": "12c3edd54c55aa777b280de7a2e2710737ffd2cf874a0f87fdaf569c1b42edf3",
+      "size_bytes": 30697
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v13-live_plus_backtest\\befc7017618e3ec8236be248029f911754fbe2d47d43164f4bab51b18c4a97d5\\specs\\us-sector.json",
+      "sha256": "3e870dfbd7f5d3d39bce7033083993db891114abdfc311b8918bffb4128a9ebd",
+      "size_bytes": 28997
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-release-v13\\input-recipe.json",
+      "sha256": "d05488e50630db7f4bda88d8e5aa3964e7dcd46b27972477c40a79892b8ccbb5",
+      "size_bytes": 4238
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v1\\implementation-reconciliation.json",
+      "sha256": "34f05da3285ee49111b09ae82824ecb6c827fdd657586d9436f3ec7453ef3ff2",
+      "size_bytes": 21568
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v1\\implementation-return-attribution.json",
+      "sha256": "94921c972a1bd97afa844b9ce7a2b25a843242b7bfa4dd692df3d1dc522a583c",
+      "size_bytes": 17013
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v2\\legacy-panel\\app.js",
+      "sha256": "15e406b2b9df40f5e8b2e6205eaf18669dfd5119a73f796353039ed7f3ab929c",
+      "size_bytes": 30874
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v2\\legacy-panel\\control_panel_validation.json",
+      "sha256": "a139d0dc0bba89b9eca36bc35b2ce3b5649241676ea7164822e10c635d5de6c2",
+      "size_bytes": 3996
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v2\\legacy-panel\\data\\dashboard_data.json",
+      "sha256": "fd89c96a03ab39616a2deafc5866e48c6afb683de6d375f62571e07154b33bd7",
+      "size_bytes": 252784
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v2\\legacy-panel\\index.html",
+      "sha256": "09e5b09bbf87e61eb41ece47c2fa48c6ee563a15cb286e2c9f8bb6030d54feb6",
+      "size_bytes": 17162
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v2\\legacy-panel\\styles.css",
+      "sha256": "e56f6e072bd10b4e19ce98ce5e792a10bc5bcc7c8c0a54fbc8c9ded1e2edd8b2",
+      "size_bytes": 20857
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\workbook-runtime\\runtime.json",
+      "sha256": "b0d25d0d8de43e05bb399737db935ca20def4113c0ec3d6e976ed21a06bcc2b7",
+      "size_bytes": 545
+    }
+  ],
+  "h1_selection": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\selection.json",
+  "recipe": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-release-v13\\input-recipe.json",
+  "runtime": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\workbook-runtime\\runtime.json",
+  "schema_version": 1
+}

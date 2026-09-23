@@ -1,0 +1,5342 @@
+"""Build one governed source-to-panel pipeline from immutable local inputs."""
+
+from __future__ import annotations
+
+import argparse
+from datetime import UTC, date, datetime
+from decimal import Decimal, InvalidOperation
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+from typing import Any, Final, Mapping, Sequence, cast
+
+from quant_engine.core import (
+    CoverageStatus,
+    GenerationManifest,
+    VerificationStatus,
+    inventory_generation,
+    read_generation_bundle,
+    runtime_environment_sha256,
+)
+from quant_engine.core.contracts import canonical_json_bytes
+from quant_engine.portfolio_ledger import (
+    HwmCoverageError,
+    validate_admit_or_declare_receipt,
+)
+from quant_engine.portfolio_ledger.hwm_governed_execution import (
+    verify_governed_hwm_result,
+)
+from portfolio_invested_capital import (
+    CapitalValidationError,
+    governed_hwm_input_policy,
+)
+
+
+class MaterializationError(ValueError):
+    """A private recipe, rebuilt stage, or semantic bridge differs."""
+
+
+STAGES = (
+    "ledger",
+    "baseline",
+    "attribution",
+    "analytics",
+    "report",
+    "workbook",
+    "panel",
+)
+ATTENDED_STAGES: Final = (
+    "ledger",
+    "baseline",
+    "attribution",
+    "analytics",
+    "report",
+    "workbook",
+    "panel-candidate",
+    "panel",
+)
+STAGE_DEPENDENCIES = {
+    "ledger": (),
+    "baseline": ("ledger",),
+    "attribution": ("baseline", "ledger"),
+    "analytics": ("attribution",),
+    "report": ("baseline", "ledger", "analytics"),
+    "workbook": ("baseline", "ledger", "report"),
+    "panel": ("ledger", "attribution", "analytics", "workbook"),
+}
+SEMANTIC_FIRST_STAGE = {
+    "AS_HELD_COMPOSITE_HWM": "analytics",
+    "COMPOSITION": "ledger",
+    "PROVIDER_LEDGER": "ledger",
+    "LAYERED_HISTORY": "attribution",
+    "LAYERED_HISTORY_LIVE_PLUS_BACKTEST": "attribution",
+    "DECOMPOSITION": "attribution",
+    "HWM": "analytics",
+    "INVESTED_CAPITAL": "analytics",
+    "DEPENDENCE": "analytics",
+    "REPORT": "report",
+    "WORKBOOK": "workbook",
+    "PANEL": "panel",
+    "RELEASE_RECEIPT": "panel",
+}
+PRODUCT_AUTHORITY_GATE_IDS = {
+    "contract": "financial-mvp-contract-authority",
+    "source_matrix": "financial-mvp-source-matrix-authority",
+    "provider_manifest": "financial-mvp-provider-manifest-authority",
+    "provider_catalog": "financial-mvp-provider-catalog-authority",
+    "provider_receipt": "financial-mvp-provider-admission-authority",
+}
+EPOCH_MANIFEST_INPUTS = {
+    "account_strategy_ledger": "--manifest-ledger",
+    "account_strategy_ledger_identity": "--manifest-ledger-identity",
+    "account_strategy_classified_flows": "--manifest-classified-flows",
+    "account_strategy_flow_coverage": "--manifest-flow-coverage",
+    "account_strategy_admission_policy": "--manifest-admission-policy",
+}
+SCHEMA_9_VERTICAL_RECIPE_KEYS = frozenset(
+    {
+        "as_of_date",
+        "base_factor_file",
+        "baseline_spec",
+        "correlation_source_root",
+        "decomposition_plan_bundle",
+        "implementation_reconciliation",
+        "implementation_return_attribution",
+        "legacy_panel",
+        "pipeline_id",
+        "provider_ledger_generation",
+        "release_commit",
+        "schema_version",
+        "strategy_attribution_root",
+        *EPOCH_MANIFEST_INPUTS,
+    }
+)
+RELEASE_ROLES = ("ledger", "baseline", "report", "panel")
+# Roles whose release-builder path validates the private stage target against
+# production and therefore requires --portfolio-root on a financial run.
+_PORTFOLIO_ROOT_STAGES: Final = ("workbook", "panel")
+# The roles whose staged output depends on the governed numerical results. A
+# run that binds them into one of these and not the others produces two
+# different semantic validations of the same release.
+_GOVERNED_OUTCOME_STAGES: Final = ("report", "workbook", "panel")
+ROOT_IDS = {
+    "ledger": "provider-ledger",
+    "baseline": "baseline",
+    "report": "reporting",
+    "panel": "control-panel",
+}
+PRODUCTION_ROOTS = {
+    "correlation": Path("analytics/correlation"),
+    "europe-economic": Path("analytics/decomposition-lenses/europe-economic"),
+    "factor-decomposition": Path("analytics/decomposition"),
+    "hybrid-dynamic-style": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/dynamic-style"
+    ),
+    "hybrid-europe-economic": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/europe-economic"
+    ),
+    "hybrid-multi-asset-style": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/multi-asset-style"
+    ),
+    "hybrid-us-economic": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-economic"
+    ),
+    "hybrid-us-equity-style": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-equity-style"
+    ),
+    "hybrid-us-industry": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-industry"
+    ),
+    "hybrid-us-sector": Path(
+        "analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-sector"
+    ),
+    "multi-asset-style": Path("analytics/decomposition-lenses/multi-asset-style"),
+    "portfolio-baseline": Path("baseline"),
+    "portfolio-panel": Path("control-panel"),
+    "portfolio-report": Path("reporting"),
+    "provider-ledger": Path("provider-ledger"),
+    "us-economic": Path("analytics/decomposition-lenses/us-economic"),
+    "us-equity-style": Path("analytics/decomposition-lenses/us-equity-style"),
+    "us-industry": Path("analytics/decomposition-lenses/us-industry"),
+    "us-sector": Path("analytics/decomposition-lenses/us-sector"),
+    "weekly-returns": Path("analytics/weekly-returns"),
+}
+PRODUCTION_STAGE_ROOTS = {
+    "correlation": Path("stages/analytics/correlation"),
+    "europe-economic": Path("stages/analytics/decomposition-lenses/europe-economic"),
+    "factor-decomposition": Path("stages/analytics/decomposition"),
+    "hybrid-dynamic-style": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/dynamic-style"
+    ),
+    "hybrid-europe-economic": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/europe-economic"
+    ),
+    "hybrid-multi-asset-style": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/multi-asset-style"
+    ),
+    "hybrid-us-economic": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-economic"
+    ),
+    "hybrid-us-equity-style": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-equity-style"
+    ),
+    "hybrid-us-industry": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-industry"
+    ),
+    "hybrid-us-sector": Path(
+        "stages/analytics/decomposition-lenses/LIVE_PLUS_BACKTEST/us-sector"
+    ),
+    "multi-asset-style": Path(
+        "stages/analytics/decomposition-lenses/multi-asset-style"
+    ),
+    "portfolio-baseline": Path("stages/baseline"),
+    "portfolio-panel": Path("stages/panel"),
+    "portfolio-report": Path("stages/report"),
+    "provider-ledger": Path("stages/ledger"),
+    "us-economic": Path("stages/analytics/decomposition-lenses/us-economic"),
+    "us-equity-style": Path("stages/analytics/decomposition-lenses/us-equity-style"),
+    "us-industry": Path("stages/analytics/decomposition-lenses/us-industry"),
+    "us-sector": Path("stages/analytics/decomposition-lenses/us-sector"),
+    "weekly-returns": Path("stages/analytics/weekly-returns"),
+}
+REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
+HWM_GOVERNED_POLICY = REPOSITORY_ROOT / "contracts" / "portfolio-hwm-policy-v4.json"
+HWM_PERFORMANCE_POLICY = (
+    REPOSITORY_ROOT / "contracts" / "portfolio-performance-policy-v1.json"
+)
+HWM_LEGACY_POLICY = REPOSITORY_ROOT / "contracts" / "portfolio-hwm-policy-v3.json"
+HWM_BINDING_KEYS = frozenset(
+    {
+        "governed_result",
+        "input_generation",
+        "calendar_authority",
+        "provider_admission_receipt",
+    }
+)
+
+
+def _hwm_binding_paths(
+    hwm_governed_result_path: Path | None,
+    hwm_governed_input_generation_path: Path | None,
+    hwm_governed_calendar_authority_path: Path | None,
+    hwm_governed_admission_receipt_path: Path | None,
+) -> dict[str, Path] | None:
+    values = {
+        "governed_result": hwm_governed_result_path,
+        "input_generation": hwm_governed_input_generation_path,
+        "calendar_authority": hwm_governed_calendar_authority_path,
+        "provider_admission_receipt": hwm_governed_admission_receipt_path,
+    }
+    if all(value is None for value in values.values()):
+        return None
+    if any(value is None for value in values.values()):
+        raise MaterializationError("governed HWM bindings must be supplied together")
+    return {key: Path(value).resolve() for key, value in values.items() if value}
+
+
+def _governed_stage_paths(
+    hwm_governed_result_path: Path | None,
+    hwm_governed_input_generation_path: Path | None,
+    hwm_governed_calendar_authority_path: Path | None,
+    hwm_governed_admission_receipt_path: Path | None,
+    invested_capital_result_path: Path | None,
+    invested_capital_input_generation_path: Path | None,
+) -> dict[str, Path]:
+    """Resolve the governed numerical results the staging roles read.
+
+    All six move together. A run that gave the report an invested-capital
+    result but not a governed HWM would publish a report the panel cannot
+    verify, so a partial set is refused rather than silently narrowed.
+    """
+    values = {
+        "--hwm-governed-result": hwm_governed_result_path,
+        "--hwm-governed-input-generation": hwm_governed_input_generation_path,
+        "--hwm-governed-calendar-authority": hwm_governed_calendar_authority_path,
+        "--hwm-governed-admission-receipt": hwm_governed_admission_receipt_path,
+        "--invested-capital-result": invested_capital_result_path,
+        "--invested-capital-input-generation": (invested_capital_input_generation_path),
+    }
+    if all(value is None for value in values.values()):
+        return {}
+    if any(value is None for value in values.values()):
+        raise MaterializationError(
+            "governed numerical results must be supplied together"
+        )
+    resolved = {}
+    for flag, value in values.items():
+        assert value is not None
+        path = Path(value).resolve()
+        if path.is_symlink() or not path.is_file():
+            raise MaterializationError(f"governed result is absent or linked: {flag}")
+        resolved[flag] = path
+    return resolved
+
+
+def _generation_admission_policy(generation_root: Path) -> Path:
+    """Resolve the admission policy a schema-10 recipe binds through its generation.
+
+    A schema-9 recipe names the five epoch-manifest inputs as files, and the
+    admission policy is one of them. Schema 10 binds the verified generation
+    instead, so the policy travels inside it and there is no separate input to
+    name -- which is why demanding one refused every schema-10 release here.
+
+    Nothing trusts a file name. The generation pins the policy digest in its own
+    `selected-input-identities.json`, the manifest says which artifact carries
+    that digest, and the bytes on disk have to agree with both.
+    """
+
+    identities = _load(
+        generation_root / "authority" / "selected-input-identities.json",
+        "selected input identities",
+    )
+    declared = identities.get("admission_policy")
+    if not isinstance(declared, Mapping):
+        raise MaterializationError("selected HWM admission policy binding is absent")
+    manifest = _load(generation_root / "generation.json", "account manifest generation")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, list):
+        raise MaterializationError("selected HWM admission policy binding differs")
+    matches = [
+        row
+        for row in artifacts
+        if isinstance(row, Mapping)
+        and row.get("sha256") == declared.get("sha256")
+        and row.get("size_bytes") == declared.get("size_bytes")
+    ]
+    if len(matches) != 1:
+        raise MaterializationError("selected HWM admission policy binding differs")
+    relative = _text(matches[0].get("artifact_id"), "admission policy artifact_id")
+    parts = relative.split("/")
+    if not parts or any(part in ("", ".", "..") for part in parts):
+        raise MaterializationError("selected HWM admission policy binding differs")
+    policy = generation_root.joinpath(*parts)
+    if policy.is_symlink() or not policy.is_file():
+        raise MaterializationError("selected HWM admission policy binding is absent")
+    content = policy.read_bytes()
+    if hashlib.sha256(content).hexdigest() != declared.get("sha256") or len(
+        content
+    ) != declared.get("size_bytes"):
+        raise MaterializationError("selected HWM admission policy binding differs")
+    return policy
+
+
+def _production_hwm_source_paths(
+    sources: Mapping[str, Path],
+    artifact_rows: Sequence[Mapping[str, Any]],
+    manifest_inputs: Mapping[str, Any] | None,
+) -> dict[str, Path]:
+    """Resolve the selected ledger authorities already present in the production spec."""
+
+    account_rows = [
+        row
+        for row in artifact_rows
+        if row.get("kind") == "ARTIFACT"
+        and row.get("node_id") == "financial-account-manifest-generation"
+    ]
+    if len(account_rows) != 1:
+        raise MaterializationError(
+            "selected HWM account-manifest generation is absent or ambiguous"
+        )
+    account_row = account_rows[0]
+    account_path = Path(_text(account_row.get("path"), "HWM account generation path"))
+    if account_path.name != "generation.json":
+        raise MaterializationError("selected HWM account generation binding differs")
+    account_definition = _file_definition(account_path)
+    if (
+        account_definition["sha256"] != account_row.get("sha256")
+        or account_definition["size_bytes"] != account_row.get("size_bytes")
+        or Path(cast(str, account_definition["path"])).resolve()
+        != account_path.resolve()
+    ):
+        raise MaterializationError("selected HWM account generation binding differs")
+    if isinstance(manifest_inputs, Mapping):
+        admission_path = _validate_file_definition(
+            manifest_inputs.get("account_strategy_admission_policy"),
+            "account strategy admission policy",
+        )
+    else:
+        admission_path = _generation_admission_policy(account_path.parent)
+    try:
+        provider_path = sources["provider-ledger"] / "generation.json"
+        baseline_path = sources["portfolio-baseline"] / "generation.json"
+    except KeyError as exc:
+        raise MaterializationError("selected HWM generation source is absent") from exc
+    return {
+        "account_manifest_generation_path": account_path.resolve(),
+        "account_manifest_admission_policy_path": admission_path.resolve(),
+        "account_manifest_flow_classification_policy_path": (
+            ACCOUNT_STRATEGY_CLASSIFICATION_POLICY.resolve()
+        ),
+        "provider_ledger_generation_path": provider_path.resolve(),
+        "baseline_generation_path": baseline_path.resolve(),
+    }
+
+
+FINANCIAL_MVP_SCHEMA = (
+    REPOSITORY_ROOT
+    / "schemas"
+    / "portfolio"
+    / "financial-mvp-source-contract.schema.json"
+)
+CURRENT_STRATEGY_REGISTRY = (
+    REPOSITORY_ROOT / "docs" / "analytics" / "current-strategy-decomposition-plan.json"
+)
+FINANCIAL_MVP_TOOL = REPOSITORY_ROOT / "tools" / "portfolio_financial_mvp_contract.py"
+ACCOUNT_STRATEGY_MANIFEST_TOOL = (
+    REPOSITORY_ROOT / "tools" / "account_strategy_manifest.py"
+)
+ACCOUNT_STRATEGY_CLASSIFICATION_POLICY = (
+    REPOSITORY_ROOT
+    / "contracts"
+    / "account-strategy-flow-classification-policy-v1.json"
+)
+HYBRID_PANEL_ROOT_IDS = {
+    "dynamic-style": "hybrid-dynamic-style",
+    "europe-economic": "hybrid-europe-economic",
+    "us-economic": "hybrid-us-economic",
+    "us-equity-style": "hybrid-us-equity-style",
+    "us-industry": "hybrid-us-industry",
+    "us-sector": "hybrid-us-sector",
+}
+GENERATION_STAGE = {
+    "ledger": "ledger",
+    "baseline": "baseline",
+    "report": "workbook",
+    "panel": "panel",
+}
+GENERATION_ROOT = {
+    "ledger": "ledger",
+    "baseline": "baseline",
+    "report": "report",
+    "panel": "panel",
+}
+WINDOWS_SAFE_FILE_PATH = 240
+WEIGHT_SUM_TOLERANCE = Decimal("0.000000000001")
+
+
+def _load(path: Path, label: str = "JSON file") -> dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise MaterializationError(f"{label} is missing: {path}")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MaterializationError(f"{label} is unreadable: {path}") from exc
+    if not isinstance(value, dict):
+        raise MaterializationError(f"{label} root must be an object")
+    return value
+
+
+def _text(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise MaterializationError(f"{label} must be non-empty text")
+    return value.strip()
+
+
+def _canonical_clone(value: object) -> Any:
+    """Return a deterministic JSON-only copy without retaining mutable aliases."""
+
+    return json.loads(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    )
+
+
+def _downstream_stages(first_stage: str) -> list[str]:
+    if first_stage not in STAGES:
+        raise MaterializationError(f"unknown semantic rebuild stage: {first_stage}")
+    affected = {first_stage}
+    changed = True
+    while changed:
+        changed = False
+        for stage in STAGES:
+            if stage in affected:
+                continue
+            if any(dependency in affected for dependency in STAGE_DEPENDENCIES[stage]):
+                affected.add(stage)
+                changed = True
+    return [stage for stage in STAGES if stage in affected]
+
+
+def _semantic_output_route(output_role: object) -> dict[str, Any]:
+    role = _text(output_role, "semantic output role")
+    first_stage = SEMANTIC_FIRST_STAGE.get(role)
+    if first_stage is None:
+        raise MaterializationError(f"semantic output has no rebuild route: {role}")
+    return {
+        "affected_stages": _downstream_stages(first_stage),
+        "first_stage": first_stage,
+        "output_role": role,
+    }
+
+
+def _authority_registry(
+    path: Path | None,
+    *,
+    schema_name: str,
+    record_key: str,
+) -> dict[str, Any]:
+    """Read an optional #322/#326 producer envelope through one strict consumer seam."""
+
+    if path is None:
+        return {
+            "authority_state": "REQUIRED_NOT_READY_NOT_PROVIDED",
+            "file": None,
+            "records": [],
+            "registry_sha256": None,
+            "schema_name": schema_name,
+            "schema_version": 1,
+        }
+    path = path.resolve()
+    payload = _load(path, schema_name)
+    required = {
+        "census_sha256",
+        "contract_semantic_sha256",
+        record_key,
+        "registry_sha256",
+        "schema_name",
+        "schema_version",
+    }
+    if set(payload) != required or payload.get("schema_name") != schema_name:
+        raise MaterializationError(f"{schema_name} shape differs")
+    if payload.get("schema_version") != 1:
+        raise MaterializationError(f"{schema_name} version differs")
+    records = payload.get(record_key)
+    if not isinstance(records, list):
+        raise MaterializationError(f"{schema_name} records differ")
+    declared_sha256 = _text(payload.get("registry_sha256"), f"{schema_name} digest")
+    if len(declared_sha256) != 64:
+        raise MaterializationError(f"{schema_name} digest differs")
+    digest_payload = dict(payload)
+    digest_payload.pop("registry_sha256")
+    actual_sha256 = hashlib.sha256(canonical_json_bytes(digest_payload)).hexdigest()
+    if declared_sha256 != actual_sha256:
+        raise MaterializationError(f"{schema_name} digest differs")
+    return {
+        "authority_state": "PROVIDED",
+        "census_sha256": payload["census_sha256"],
+        "contract_semantic_sha256": payload["contract_semantic_sha256"],
+        "file": _file_definition(path),
+        "records": _canonical_clone(records),
+        "registry_sha256": declared_sha256,
+        "schema_name": schema_name,
+        "schema_version": 1,
+    }
+
+
+def _panel_hybrid_generation_ids(panel_payload: Mapping[str, Any]) -> dict[str, str]:
+    lenses = panel_payload.get("decomposition_lenses")
+    modes = lenses.get("modes") if isinstance(lenses, dict) else None
+    hybrid = modes.get("LIVE_PLUS_BACKTEST") if isinstance(modes, dict) else None
+    if not isinstance(hybrid, list):
+        raise MaterializationError("prepared panel hybrid analytics authority differs")
+
+    source_ids: dict[str, str] = {}
+    for lens in hybrid:
+        if not isinstance(lens, dict):
+            raise MaterializationError(
+                "prepared panel hybrid analytics authority differs"
+            )
+        if lens.get("lens_id") == "DYNAMIC_STYLE":
+            if "dynamic-style" in source_ids:
+                raise MaterializationError(
+                    "prepared panel hybrid analytics authority differs"
+                )
+            source_ids["dynamic-style"] = _text(
+                lens.get("generation_id"), "hybrid dynamic generation_id"
+            )
+        sources = lens.get("sources")
+        if not isinstance(sources, list):
+            continue
+        for source in sources:
+            if not isinstance(source, dict):
+                raise MaterializationError(
+                    "prepared panel hybrid analytics authority differs"
+                )
+            source_key = source.get("source_key")
+            if (
+                not isinstance(source_key, str)
+                or source_key not in HYBRID_PANEL_ROOT_IDS
+            ):
+                continue
+            if source_key in source_ids:
+                raise MaterializationError(
+                    "prepared panel hybrid analytics authority differs"
+                )
+            source_ids[source_key] = _text(
+                source.get("generation_id"), f"hybrid {source_key} generation_id"
+            )
+    if set(source_ids) != set(HYBRID_PANEL_ROOT_IDS):
+        raise MaterializationError("prepared panel hybrid analytics authority differs")
+    return {
+        HYBRID_PANEL_ROOT_IDS[source_key]: generation_id
+        for source_key, generation_id in source_ids.items()
+    }
+
+
+def _absolute(value: object, label: str) -> Path:
+    path = Path(_text(value, label)).expanduser().resolve()
+    if not path.is_absolute():
+        raise MaterializationError(f"{label} must be absolute")
+    return path
+
+
+def _sha(path: Path) -> tuple[str, int]:
+    if path.is_symlink() or not path.is_file():
+        raise MaterializationError(f"regular file is missing: {path}")
+    digest = hashlib.sha256()
+    size = 0
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+            size += len(block)
+    return digest.hexdigest(), size
+
+
+def _write_exact(path: Path, content: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        if path.is_symlink() or path.read_bytes() != content:
+            raise MaterializationError(f"create-only output differs: {path}")
+        return
+    with path.open("xb") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _directory_rows(path: Path) -> list[dict[str, object]]:
+    if path.is_symlink() or not path.is_dir():
+        raise MaterializationError(f"source directory is missing: {path}")
+    rows: list[dict[str, object]] = []
+    for item in sorted(
+        candidate for candidate in path.rglob("*") if candidate.is_file()
+    ):
+        if item.is_symlink():
+            raise MaterializationError(f"source directory contains a link: {item}")
+        sha256, size = _sha(item)
+        rows.append(
+            {
+                "path": item.relative_to(path).as_posix(),
+                "sha256": sha256,
+                "size_bytes": size,
+            }
+        )
+    return rows
+
+
+def _directory_identity(path: Path) -> dict[str, object]:
+    rows = _directory_rows(path)
+    encoded = json.dumps(
+        rows, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode("utf-8")
+    return {
+        "file_count": len(rows),
+        "inventory_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _file_definition(path: Path) -> dict[str, object]:
+    sha256, size = _sha(path)
+    return {"path": str(path.resolve()), "sha256": sha256, "size_bytes": size}
+
+
+def _directory_definition(path: Path) -> dict[str, object]:
+    return {"path": str(path.resolve()), **_directory_identity(path)}
+
+
+def _validate_file_definition(value: object, label: str) -> Path:
+    if not isinstance(value, dict) or set(value) != {"path", "sha256", "size_bytes"}:
+        raise MaterializationError(f"{label} definition differs")
+    path = _absolute(value["path"], f"{label}.path")
+    sha256, size = _sha(path)
+    if sha256 != value["sha256"] or size != value["size_bytes"]:
+        raise MaterializationError(f"{label} identity differs")
+    return path
+
+
+def _financial_epoch_manifest_inputs(
+    vertical: Mapping[str, Any],
+) -> dict[str, dict[str, object]] | None:
+    """Return the immutable five-file manifest authority for schema-9 recipes.
+
+    Schema 9 is deliberately an additive, fail-closed extension of schema 7:
+    the builder is allowed no caller-selected financial input beyond these five
+    file identities.  The returned definitions are freshly derived from the
+    files, not copied from a mutable recipe object.
+    """
+
+    if vertical.get("schema_version") != 9:
+        return None
+    if set(vertical) not in (
+        SCHEMA_9_VERTICAL_RECIPE_KEYS,
+        SCHEMA_9_VERTICAL_RECIPE_KEYS | {"hybrid_decomposition_plan_bundle"},
+    ):
+        raise MaterializationError("financial epoch manifest schema-9 inputs differ")
+    definitions: dict[str, dict[str, object]] = {}
+    for key in EPOCH_MANIFEST_INPUTS:
+        path = _validate_file_definition(
+            vertical.get(key), f"financial epoch manifest {key}"
+        )
+        definitions[key] = _file_definition(path)
+    return definitions
+
+
+def _epoch_manifest_generation_definition(
+    vertical: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Re-read and bind the exact detached epoch-manifest generation for schema 10."""
+
+    if vertical.get("schema_version") != 10:
+        return None
+    definition = vertical.get("epoch_manifest_generation")
+    if not isinstance(definition, dict) or set(definition) != {
+        "runtime_root",
+        "generation_id",
+        "source",
+    }:
+        raise MaterializationError("epoch-manifest generation definition differs")
+    runtime_root = _absolute(
+        definition["runtime_root"], "epoch_manifest_generation.runtime_root"
+    )
+    generation_id = _text(
+        definition["generation_id"], "epoch_manifest_generation.generation_id"
+    )
+    if len(generation_id) != 64:
+        raise MaterializationError("epoch-manifest generation_id differs")
+    try:
+        bundle = read_generation_bundle(runtime_root, generation_id)
+        source = _financial_mvp_module().epoch_manifest_source_from_bundle(bundle)
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "epoch-manifest generation bundle verification failed"
+        ) from exc
+    try:
+        source_matches = canonical_json_bytes(
+            definition["source"]
+        ) == canonical_json_bytes(source)
+    except (TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "epoch-manifest generation source identity differs"
+        ) from exc
+    if not isinstance(source, dict) or not source_matches:
+        raise MaterializationError("epoch-manifest generation source identity differs")
+    return {
+        "runtime_root": str(runtime_root),
+        "generation_id": generation_id,
+        "source": _canonical_clone(source),
+    }
+
+
+def _financial_epoch_manifest_gate_rows(
+    definitions: Mapping[str, Mapping[str, object]] | None,
+    proof: Mapping[str, Any] | None,
+    gate_path: Path,
+) -> list[dict[str, object]]:
+    if definitions is None:
+        return []
+    if proof is None:
+        raise MaterializationError("financial epoch manifest proof is required")
+    payload = {
+        "inputs": {
+            key: _canonical_clone(definitions[key]) for key in EPOCH_MANIFEST_INPUTS
+        },
+        "post_build_proof_sha256": hashlib.sha256(
+            canonical_json_bytes(proof)
+        ).hexdigest(),
+        "schema_version": 2,
+    }
+    content = canonical_json_bytes(payload)
+    _write_exact(gate_path, content)
+    return [
+        {
+            "gate_id": "financial-epoch-manifest-input-authority",
+            "path": str(gate_path),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+    ]
+
+
+def _validate_directory_definition(value: object, label: str) -> Path:
+    if not isinstance(value, dict) or set(value) != {
+        "file_count",
+        "inventory_sha256",
+        "path",
+    }:
+        raise MaterializationError(f"{label} definition differs")
+    path = _absolute(value["path"], f"{label}.path")
+    actual = _directory_identity(path)
+    expected = {
+        "file_count": value["file_count"],
+        "inventory_sha256": value["inventory_sha256"],
+    }
+    if actual != expected:
+        raise MaterializationError(f"{label} inventory differs")
+    return path
+
+
+def _generation_expectation(value: object, role: str) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {
+        "files",
+        "generation_id",
+        "manifest_sha256",
+    }:
+        raise MaterializationError(f"{role} generation expectation differs")
+    files = value["files"]
+    if not isinstance(files, list) or not files:
+        raise MaterializationError(f"{role} generation inventory is empty")
+    for row in files:
+        if not isinstance(row, dict) or set(row) != {
+            "relative_path",
+            "sha256",
+            "size_bytes",
+        }:
+            raise MaterializationError(f"{role} generation inventory differs")
+        relative_path = row["relative_path"]
+        if (
+            role == "report"
+            and isinstance(relative_path, str)
+            and (
+                relative_path.lower().endswith(".xlsx")
+                or any(
+                    segment.lower() == "deliveries"
+                    for segment in relative_path.replace("\\", "/").split("/")
+                )
+            )
+        ):
+            raise MaterializationError(
+                "report generation cannot inventory non-authority workbook delivery"
+            )
+    generation_id = _text(value["generation_id"], f"{role} generation_id")
+    manifest_sha256 = _text(value["manifest_sha256"], f"{role} manifest_sha256")
+    if len(generation_id) != 64 or len(manifest_sha256) != 64:
+        raise MaterializationError(f"{role} generation hashes differ")
+    return dict(value)
+
+
+def _financial_mvp_module() -> Any:
+    """Load the exact repository tool without trusting a cached module object."""
+
+    module_name = "_portfolio_financial_mvp_contract_for_pipeline"
+    spec = importlib.util.spec_from_file_location(module_name, FINANCIAL_MVP_TOOL)
+    if spec is None or spec.loader is None:
+        raise MaterializationError("financial MVP contract validator is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterializationError("financial MVP contract validator failed") from exc
+    finally:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+    module_file = getattr(module, "__file__", None)
+    if (
+        module_file is None
+        or Path(module_file).resolve() != FINANCIAL_MVP_TOOL.resolve()
+    ):
+        raise MaterializationError("financial MVP contract validator origin differs")
+    return module
+
+
+def _bind_epoch_manifest_bundle(
+    generation_root: Path,
+    generation_id: str,
+    financial_contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind the financial contract to one verified epoch-manifest generation.
+
+    This binds and validates; it does not stage the manifest into the run
+    root. The panel command writes that file itself from the same verified
+    bundle, and `build-panel` declares the directory it writes, so seeding it
+    here made the node's own output pre-exist its pipeline receipt and every
+    plan refused the run before it started.
+    """
+
+    try:
+        bundle = read_generation_bundle(generation_root, generation_id)
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "epoch-manifest generation bundle verification failed"
+        ) from exc
+    financial_module = _financial_mvp_module()
+    try:
+        source = financial_module.epoch_manifest_source_from_bundle(bundle)
+        # The lookup is the check: a bundle that verified but carries no
+        # manifest payload raises KeyError here rather than binding a source
+        # document to a generation that does not contain it.
+        _manifest_payload = bundle.payloads["outputs/account-strategy-manifest.json"]
+    except (
+        AttributeError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise MaterializationError("epoch-manifest bundle binding failed") from exc
+    if not isinstance(source, dict):
+        raise MaterializationError("epoch-manifest bundle binding failed")
+    try:
+        augmented = _canonical_clone(financial_contract)
+        source_copy = _canonical_clone(source)
+    except (TypeError, ValueError) as exc:
+        raise MaterializationError("financial MVP contract clone failed") from exc
+    if not isinstance(augmented, dict):
+        raise MaterializationError("financial MVP contract must be an object")
+    if (
+        augmented.get("contract_schema_version") != 6
+        or "epoch_manifest_source" in augmented
+    ):
+        raise MaterializationError(
+            "epoch-manifest binding requires an unbound schema-v6 financial contract"
+        )
+    augmented["contract_schema_version"] = 7
+    augmented["epoch_manifest_source"] = source_copy
+    try:
+        registry = _load(CURRENT_STRATEGY_REGISTRY, "current strategy registry")
+        validated = financial_module.validate_contract(
+            augmented,
+            registry=registry,
+            epoch_manifest_bundle=bundle,
+        )
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "bound financial MVP contract validation failed"
+        ) from exc
+    if canonical_json_bytes(validated) != canonical_json_bytes(augmented):
+        raise MaterializationError("bound financial MVP contract validation differs")
+
+    return augmented
+
+
+def _account_strategy_manifest_module() -> Any:
+    """Load the repository epoch producer used for an independent rebuild."""
+
+    module_name = "_account_strategy_manifest_for_pipeline_proof"
+    spec = importlib.util.spec_from_file_location(
+        module_name, ACCOUNT_STRATEGY_MANIFEST_TOOL
+    )
+    if spec is None or spec.loader is None:
+        raise MaterializationError("account-strategy manifest producer is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+        raise MaterializationError("account-strategy manifest producer failed") from exc
+    finally:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+    module_file = getattr(module, "__file__", None)
+    if (
+        module_file is None
+        or Path(module_file).resolve() != ACCOUNT_STRATEGY_MANIFEST_TOOL.resolve()
+    ):
+        raise MaterializationError("account-strategy manifest producer origin differs")
+    return module
+
+
+def _manifest_artifact_bytes(
+    manifest: GenerationManifest,
+    generation: Path,
+    artifact_id: str,
+    relative_path: str,
+    schema_name: str,
+    schema_version: str,
+) -> bytes:
+    matches = [item for item in manifest.artifacts if item.artifact_id == artifact_id]
+    if len(matches) != 1:
+        raise MaterializationError(f"provider ledger artifact differs: {artifact_id}")
+    artifact = matches[0]
+    path = generation / relative_path
+    if path.is_symlink() or not path.is_file():
+        raise MaterializationError(
+            f"provider ledger artifact is unavailable: {artifact_id}"
+        )
+    content = path.read_bytes()
+    if (
+        artifact.sha256 != hashlib.sha256(content).hexdigest()
+        or artifact.size_bytes != len(content)
+        or artifact.schema_name != schema_name
+        or artifact.schema_version != schema_version
+    ):
+        raise MaterializationError(
+            f"provider ledger artifact identity differs: {artifact_id}"
+        )
+    return content
+
+
+def _schwab_selected_point_positions(
+    manifest: GenerationManifest,
+    source: Mapping[str, Any],
+    requested_as_of: date,
+) -> dict[str, dict[str, Any]] | None:
+    """Reconstruct point facts from reopened source authority, not ledger flags."""
+    metadata = source.get("position_snapshot_as_of")
+    if not isinstance(metadata, dict) or "observed_at" not in metadata:
+        return None
+    try:
+        clock = metadata["observed_at"]
+        captured = datetime.fromisoformat(clock)
+        day = captured.date()
+        transport = source["current_transport"]
+        artifacts = [
+            item
+            for item in source["source_artifacts"]
+            if item["schema"]["name"] == "schwab-api-current-snapshot"
+        ]
+        if (
+            captured.tzinfo is None
+            or captured.utcoffset() is None
+            or day != manifest.as_of_date
+            or source["as_of_date"] != day.isoformat()
+            or source["catalog_schema_version"] not in {2, 3}
+            or manifest.adapter.name != "quant-engine-schwab"
+            or len(artifacts) != 1
+            or transport not in {"WEB_CONTRACT", "DEVELOPER_API"}
+        ):
+            raise ValueError("point clock/date/transport differs")
+        artifact = artifacts[0]
+        if (
+            artifact["as_of_date"] != day.isoformat()
+            or artifact["schema"]["version"] not in {"1", "2"}
+            or (artifact["schema"]["version"] == "1" and transport != "DEVELOPER_API")
+            or type(artifact["size_bytes"]) is not int
+            or artifact["size_bytes"] < 1
+            or [
+                a.to_dict()
+                for a in manifest.artifacts
+                if a.artifact_id == artifact["artifact_id"]
+            ]
+            != [artifact]
+            or len(
+                [
+                    a
+                    for a in source["source_artifacts"]
+                    if a["artifact_id"] == artifact["artifact_id"]
+                ]
+            )
+            != 1
+        ):
+            raise ValueError("point selected artifact differs")
+        accounts = {row["account_id"] for row in source["accounts"]}
+        current = source["current_accounts"]
+        if (
+            not accounts
+            or len(accounts) != len(source["accounts"])
+            or {row["account_id"] for row in current} != accounts
+            or len(current) != len(accounts)
+            or any(row["observed_at"] != clock for row in current)
+        ):
+            raise ValueError("point account/clock scope differs")
+        expected = {}
+        for native in source["positions"]:
+            identity = {
+                "account_id": native["account_id"],
+                "as_of_date": native["as_of_date"],
+                "security_id": native["security_id"],
+            }
+            record_id = native["record_id"]
+            if (
+                native["account_id"] not in accounts
+                or native["as_of_date"] != day.isoformat()
+                or native["observed_at"] != clock
+                or native["security_id"]
+                != "security-schwab-"
+                + hashlib.sha256(native["symbol"].encode()).hexdigest()[:24]
+                or record_id
+                != "position-"
+                + hashlib.sha256(canonical_json_bytes(identity)).hexdigest()[:24]
+                or record_id in expected
+                or native.get("source_artifact_id", artifact["artifact_id"])
+                != artifact["artifact_id"]
+                or native["evidence_class"]
+                != (
+                    "WCH_CURRENT"
+                    if transport == "WEB_CONTRACT"
+                    else "DEVELOPER_API_CURRENT"
+                )
+            ):
+                raise ValueError("point native row scope differs")
+            expected[record_id] = {
+                **{
+                    key: native[key]
+                    for key in (
+                        "account_id",
+                        "as_of_date",
+                        "observed_at",
+                        "quantity",
+                        "market_value",
+                        "average_price",
+                        "security_id",
+                    )
+                },
+                "evidence_layer": "ACCOUNT_LIVE",
+                "provider_id": "schwab",
+                "record_id": "schwab:" + record_id,
+                "source_record_id": record_id,
+                "source_artifact_id": artifact["artifact_id"],
+                "generation_id": manifest.generation_id,
+            }
+        if source["current_position_account_count"] != len(
+            {row["account_id"] for row in expected.values()}
+        ):
+            raise ValueError("point position account count differs")
+    except (KeyError, ValueError, TypeError, AttributeError) as exc:
+        raise MaterializationError("Schwab selected point authority differs") from exc
+    return expected if day <= requested_as_of else None
+
+
+def _provider_admission_authority(
+    generation: Path,
+    contract: Mapping[str, Any],
+    *,
+    contract_raw_sha256: str,
+    contract_semantic_sha256: str,
+    census_sha256: str,
+) -> dict[str, Any]:
+    if generation.is_symlink() or not generation.is_dir():
+        raise MaterializationError("provider ledger generation is unavailable")
+    if len(generation.name) != 64:
+        raise MaterializationError("provider ledger generation identity differs")
+    expected_files = {
+        "admit-or-declare-receipt.json",
+        "generation.json",
+        "provider-ledger.json",
+    }
+    files = {
+        item.relative_to(generation).as_posix()
+        for item in generation.rglob("*")
+        if item.is_file()
+    }
+    if files != expected_files or any(
+        item.is_symlink() for item in generation.iterdir()
+    ):
+        raise MaterializationError("provider ledger generation file boundary differs")
+    try:
+        manifest_bytes = (generation / "generation.json").read_bytes()
+        manifest = GenerationManifest.from_json_bytes(manifest_bytes)
+    except (OSError, ValueError) as exc:
+        raise MaterializationError("provider ledger manifest is invalid") from exc
+    if (
+        manifest.generation_id != generation.name
+        or manifest.verification is not VerificationStatus.VERIFIED
+        or manifest.adapter.name != "quant-engine-provider-ledger"
+        or manifest.adapter.version != "5"
+    ):
+        raise MaterializationError("provider ledger manifest authority differs")
+    receipt_bytes = _manifest_artifact_bytes(
+        manifest,
+        generation,
+        "normalized/admit-or-declare-receipt.json",
+        "admit-or-declare-receipt.json",
+        "provider-admission-receipt",
+        "1",
+    )
+    catalog_bytes = _manifest_artifact_bytes(
+        manifest,
+        generation,
+        "normalized/provider-ledger.json",
+        "provider-ledger.json",
+        "provider-ledger-catalog",
+        "2",
+    )
+    try:
+        receipt = json.loads(receipt_bytes.decode("utf-8"))
+        catalog = json.loads(catalog_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MaterializationError("provider ledger authority is unreadable") from exc
+    if not isinstance(receipt, dict) or not isinstance(catalog, dict):
+        raise MaterializationError("provider ledger authority root differs")
+    if (
+        catalog.get("catalog_schema_version") != 2
+        or catalog.get("as_of_date") != manifest.as_of_date.isoformat()
+    ):
+        raise MaterializationError("provider ledger catalog authority differs")
+    product = contract.get("product")
+    census = contract.get("current_census")
+    sources = contract.get("source_segments")
+    if (
+        not isinstance(product, dict)
+        or not isinstance(census, dict)
+        or not isinstance(sources, list)
+    ):
+        raise MaterializationError("financial MVP authority shape differs")
+    source_segments = {
+        str(row.get("source_id")): row for row in sources if isinstance(row, dict)
+    }
+    provider_rows = receipt.get("provider_generations")
+    if not isinstance(provider_rows, list):
+        raise MaterializationError("provider admission generations differ")
+    provider_generations = {
+        str(row.get("provider_id")): row
+        for row in provider_rows
+        if isinstance(row, dict)
+    }
+    try:
+        validate_admit_or_declare_receipt(
+            receipt,
+            product_authority={
+                "census_id": census.get("census_id"),
+                "census_sha256": census_sha256,
+                "contract_raw_sha256": contract_raw_sha256,
+                "contract_semantic_sha256": contract_semantic_sha256,
+                "product_id": product.get("product_id"),
+                "product_version": product.get("product_version"),
+            },
+            source_segments=source_segments,
+            provider_generations=provider_generations,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise MaterializationError("provider admission receipt is invalid") from exc
+    observation = receipt.get("run_observation")
+    if observation is not None:
+        # Reopen selection and inputs independently. Receipt counts/hashes and
+        # candidate dispositions are outputs, never the source inventory oracle.
+        module_spec = importlib.util.spec_from_file_location(
+            "_admission_source_reader", Path(__file__).with_name("provider_ledger.py")
+        )
+        if module_spec is None or module_spec.loader is None:
+            raise MaterializationError("provider source reader is unavailable")
+        reader = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(reader)
+        try:
+            observation = reader._object(observation, "provider run observation")
+            observation_path = reader._absolute_regular_path(
+                observation["path"], "provider run observation"
+            )
+            observed, digest, size = reader._verified_json(
+                observation_path,
+                observation["sha256"],
+                "provider run observation",
+            )
+            if (
+                size != observation["size_bytes"]
+                or set(observed)
+                != {
+                    "schema_version",
+                    "policy_contract_sha256",
+                    "financial_cutoff",
+                    "captured_at_utc",
+                    "providers",
+                }
+                or observed.get("schema_version") != 1
+                or observed.get("policy_contract_sha256") != contract_raw_sha256
+                or observed.get("financial_cutoff") != catalog["as_of_date"]
+                or any(
+                    observed.get(key) != observation.get(key)
+                    for key in (
+                        "captured_at_utc",
+                        "financial_cutoff",
+                        "policy_contract_sha256",
+                    )
+                )
+            ):
+                raise MaterializationError("provider run observation identity differs")
+            reader._utc_timestamp(
+                observed["captured_at_utc"], "run observation capture"
+            )
+            selected = reader._object(
+                observed["providers"], "run observation providers"
+            )
+            if set(selected) != set(reader._PROVIDER_CATALOGS):
+                raise MaterializationError("provider run observation selection differs")
+            identities, manifests, catalogs = [], {}, {}
+            facts: dict[str, dict[str, list[dict[str, Any]]]] = {}
+            cutoff = date.fromisoformat(observed["financial_cutoff"])
+            for provider_id, selection in sorted(selected.items()):
+                reference = {
+                    key: selection[key]
+                    for key in (
+                        "root",
+                        "generation_id",
+                        "manifest_sha256",
+                        "catalog_sha256",
+                        "qualification",
+                    )
+                }
+                identity, source_manifest, source_catalog, _, _ = reader._provider(
+                    provider_id,
+                    reference,
+                    cutoff,
+                    run_observation=observed,
+                )
+                identities.append(identity)
+                manifests[provider_id] = source_manifest
+                catalogs[provider_id] = source_catalog
+                facts[provider_id] = {}
+                effective = min(
+                    cutoff, date.fromisoformat(selection["finalized_through"])
+                )
+                point_positions = (
+                    _schwab_selected_point_positions(
+                        source_manifest, source_catalog, cutoff
+                    )
+                    if provider_id == "schwab"
+                    else None
+                )
+                for fact_name in reader._TARGET_ADMISSION_FACT:
+                    rows = reader._objects(catalog.get(fact_name, []), fact_name)
+                    if any(row.get("provider_id") not in selected for row in rows):
+                        raise MaterializationError(
+                            "materialized provider fact scope differs"
+                        )
+                    if fact_name == "provider_strategy_returns":
+                        continue
+                    rows = [row for row in rows if row["provider_id"] == provider_id]
+                    point_bound = (
+                        fact_name == "positions" and point_positions is not None
+                    )
+                    if point_bound:
+                        assert point_positions is not None
+                        if (
+                            len(rows) != len(point_positions)
+                            or {row.get("source_record_id") for row in rows}
+                            != set(point_positions)
+                            or any(
+                                {
+                                    key: value
+                                    for key, value in row.items()
+                                    if key not in {"mapping_status", "strategy_id"}
+                                }
+                                != point_positions.get(row.get("source_record_id"))
+                                for row in rows
+                            )
+                        ):
+                            raise MaterializationError(
+                                "materialized Schwab point differs from selected native positions"
+                            )
+                    if (
+                        provider_id == "ibkr"
+                        and fact_name in reader._NATIVE_LEVERAGE_OBSERVATION_FACTS
+                        and not rows
+                    ):
+                        continue
+                    for row in rows:
+                        days = [
+                            date.fromisoformat(row[field])
+                            for field in (
+                                "as_of_date",
+                                "event_date",
+                                "effective_date",
+                                "nav_recognition_date",
+                                "value_date",
+                                "accounting_date",
+                                "settlement_date",
+                                "period_start",
+                                "period_end",
+                                "report_date",
+                            )
+                            if row.get(field) not in {None, ""}
+                        ]
+                        if row.get("generation_id") != identity.generation_id or (
+                            any(
+                                day > (cutoff if point_bound else effective)
+                                for day in days
+                            )
+                        ):
+                            raise MaterializationError(
+                                "materialized provider fact cutoff or generation differs"
+                            )
+                    facts[provider_id][fact_name] = rows
+                for fact_name in ("strategy_returns", "provider_strategy_returns"):
+                    for row in reader._objects(catalog.get(fact_name, []), fact_name):
+                        if (
+                            row.get("provider_id") == provider_id
+                            and (
+                                fact_name == "provider_strategy_returns"
+                                or row.get("evidence_layer") == "ACCOUNT_LIVE"
+                            )
+                            and date.fromisoformat(row["date"]) > effective
+                        ):
+                            raise MaterializationError(
+                                "materialized strategy return cutoff differs"
+                            )
+            authority = {
+                "census_id": census["census_id"],
+                "census_sha256": census_sha256,
+                "contract": contract,
+                "sources": source_segments,
+                "contract_raw_sha256": contract_raw_sha256,
+                "contract_semantic_sha256": contract_semantic_sha256,
+                "product_id": product["product_id"],
+                "product_version": product["product_version"],
+                "run_observation": observed,
+                "run_observation_path": str(observation_path),
+                "run_observation_sha256": digest,
+                "run_observation_size_bytes": size,
+            }
+            reader._validate_current_census_provider_generations(
+                authority, identities, manifests
+            )
+            expected_receipt, _ = reader._admit_or_declare_receipt(
+                authority,
+                identities,
+                manifests,
+                catalogs,
+                facts,
+                reader._objects(
+                    catalog.get("provider_strategy_returns", []), "provider returns"
+                ),
+            )
+            if receipt != expected_receipt:
+                raise MaterializationError(
+                    "provider admission differs from independent source inventory or materialized facts"
+                )
+            expected_generations = [
+                {
+                    **identity.to_dict(),
+                    "generation_as_of_date": manifests[
+                        identity.provider_id
+                    ].as_of_date.isoformat(),
+                }
+                for identity in identities
+            ]
+            if catalog.get("provider_generations") != expected_generations:
+                raise MaterializationError(
+                    "provider ledger selected generations differ"
+                )
+        except MaterializationError:
+            raise
+        except (RuntimeError, ValueError, KeyError, TypeError, OSError) as exc:
+            raise MaterializationError(
+                "provider source admission verification failed"
+            ) from exc
+    manifest_artifacts = tuple(manifest.artifacts)
+    for row in provider_generations.values():
+        if not isinstance(row, dict):
+            raise MaterializationError("provider admission generation row differs")
+        provider_id = str(row.get("provider_id"))
+        prefix = f"providers/{provider_id}/"
+        hashes = {
+            item.sha256
+            for item in manifest_artifacts
+            if item.artifact_id.startswith(prefix)
+        }
+        if (
+            row.get("manifest_sha256") not in hashes
+            or row.get("catalog_sha256") not in hashes
+        ):
+            raise MaterializationError(
+                f"provider admission generation is not manifest-bound: {provider_id}"
+            )
+    return {
+        "admission_gate_status": receipt.get("admission_gate_status"),
+        "catalog_sha256": hashlib.sha256(catalog_bytes).hexdigest(),
+        "disposition_count": len(receipt.get("dispositions", [])),
+        "generation_id": manifest.generation_id,
+        "inventory_count": len(receipt.get("inventory", [])),
+        "manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "product_readiness": receipt.get("product_readiness"),
+        "provider_count": len(receipt.get("provider_generations", [])),
+        "receipt": _canonical_clone(receipt),
+        "receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+    }
+
+
+def _product_conformance(
+    contract: Mapping[str, Any],
+    admission: Mapping[str, Any],
+    correction_registry: Mapping[str, Any],
+    rederive_registry: Mapping[str, Any],
+    *,
+    candidate_generation_ids: Mapping[str, str],
+    contract_raw_sha256: str,
+    contract_semantic_sha256: str,
+    census_sha256: str,
+    source_matrix_sha256: str,
+    invested_capital_policy_sha256: str,
+) -> dict[str, Any]:
+    if set(candidate_generation_ids) != set(RELEASE_ROLES) or any(
+        not isinstance(value, str) or len(value) != 64
+        for value in candidate_generation_ids.values()
+    ):
+        raise MaterializationError("financial MVP candidate generations differ")
+    product = contract["product"]
+    strategies = contract["strategies"]
+    sources = contract["source_segments"]
+    outcomes = contract["financial_outcomes"]
+    history = contract["history_corrections"]
+    census = contract["current_census"]
+    assert isinstance(product, dict)
+    assert isinstance(strategies, list)
+    assert isinstance(sources, list)
+    assert isinstance(outcomes, list)
+    assert isinstance(history, dict)
+    assert isinstance(census, dict)
+    sleeve_values = census.get("account_sleeves")
+    if not isinstance(sleeve_values, list):
+        raise MaterializationError("financial MVP census sleeve authority differs")
+    census_memberships = []
+    for sleeve in sleeve_values:
+        if not isinstance(sleeve, dict) or not isinstance(
+            sleeve.get("assignments"), list
+        ):
+            raise MaterializationError("financial MVP census membership differs")
+        census_memberships.append(
+            {
+                "assignments": sorted(
+                    (
+                        {
+                            "effective_end": row["effective_end"],
+                            "effective_start": row["effective_start"],
+                            "status": row["status"],
+                            "strategy_id": row["strategy_id"],
+                            "transition_group_id": row["transition_group_id"],
+                        }
+                        for row in sleeve["assignments"]
+                        if isinstance(row, dict)
+                    ),
+                    key=lambda row: (
+                        row["effective_start"],
+                        row["strategy_id"],
+                        str(row["effective_end"]),
+                    ),
+                ),
+                "current_strategy_id": sleeve["current_strategy_id"],
+                "provider_id": sleeve["provider_id"],
+                "role": sleeve["role"],
+                "sleeve_alias": sleeve["sleeve_alias"],
+                "source_segment_ids": sorted(sleeve["source_segment_ids"]),
+            }
+        )
+    source_rows = sorted(
+        (_canonical_clone(row) for row in sources if isinstance(row, dict)),
+        key=lambda row: row["source_id"],
+    )
+    outcome_rows = sorted(
+        (_canonical_clone(row) for row in outcomes if isinstance(row, dict)),
+        key=lambda row: row["outcome_id"],
+    )
+    strategy_rows = sorted(
+        (_canonical_clone(row) for row in strategies if isinstance(row, dict)),
+        key=lambda row: row["strategy_id"],
+    )
+    corrections = history.get("corrections")
+    if not isinstance(corrections, list):
+        raise MaterializationError("financial MVP correction authority differs")
+    correction_rows = sorted(
+        (_canonical_clone(row) for row in corrections if isinstance(row, dict)),
+        key=lambda row: row["correction_id"],
+    )
+
+    runtime_corrections = correction_registry.get("records")
+    runtime_rederivations = rederive_registry.get("records")
+    if not isinstance(runtime_corrections, list) or not isinstance(
+        runtime_rederivations, list
+    ):
+        raise MaterializationError("correction/re-derivation runtime authority differs")
+    correction_ids: set[str] = set()
+    applicable_open: list[str] = []
+    resolved_applicable: dict[str, set[str]] = {}
+    for raw in runtime_corrections:
+        if not isinstance(raw, dict) or set(raw) != {
+            "applicability",
+            "correction_id",
+            "disposition_sha256",
+            "evidence_sha256",
+            "invalidated_outputs",
+            "rebuild_boundary",
+            "status",
+            "subject_ids",
+        }:
+            raise MaterializationError("correction registry record differs")
+        correction_id = _text(raw["correction_id"], "correction_id")
+        if correction_id in correction_ids:
+            raise MaterializationError(f"duplicate correction record: {correction_id}")
+        correction_ids.add(correction_id)
+        status = _text(raw["status"], f"{correction_id}.status")
+        applicability = _text(raw["applicability"], f"{correction_id}.applicability")
+        if status not in {"OPEN", "RESOLVED", "DISPOSITIONED"} or applicability not in {
+            "APPLICABLE",
+            "NOT_APPLICABLE",
+        }:
+            raise MaterializationError(f"correction state differs: {correction_id}")
+        subjects = raw["subject_ids"]
+        outputs = raw["invalidated_outputs"]
+        if (
+            not isinstance(subjects, list)
+            or not subjects
+            or not all(isinstance(value, str) and value for value in subjects)
+            or not isinstance(outputs, list)
+            or not outputs
+        ):
+            raise MaterializationError(f"correction scope differs: {correction_id}")
+        for output in outputs:
+            _semantic_output_route(output)
+        for field in ("evidence_sha256",):
+            if len(_text(raw[field], f"{correction_id}.{field}")) != 64:
+                raise MaterializationError(
+                    f"correction evidence differs: {correction_id}"
+                )
+        disposition = raw["disposition_sha256"]
+        if status == "OPEN":
+            if disposition is not None:
+                raise MaterializationError(
+                    f"open correction has a disposition: {correction_id}"
+                )
+        elif not isinstance(disposition, str) or len(disposition) != 64:
+            raise MaterializationError(
+                f"closed correction lacks a disposition: {correction_id}"
+            )
+        if status == "OPEN" and applicability == "APPLICABLE":
+            applicable_open.append(correction_id)
+        if status in {"RESOLVED", "DISPOSITIONED"} and applicability == "APPLICABLE":
+            resolved_applicable[correction_id] = {str(value) for value in outputs}
+
+    rederived: dict[str, set[str]] = {}
+    for raw in runtime_rederivations:
+        if not isinstance(raw, dict) or set(raw) != {
+            "correction_id",
+            "input_generation_id",
+            "invalidated_outputs",
+            "output_generation_id",
+            "receipt_sha256",
+            "status",
+        }:
+            raise MaterializationError("re-derivation registry record differs")
+        correction_id = _text(raw["correction_id"], "re-derivation correction_id")
+        if correction_id in rederived or raw["status"] != "VERIFIED":
+            raise MaterializationError(
+                f"re-derivation receipt state differs: {correction_id}"
+            )
+        for field in ("input_generation_id", "output_generation_id", "receipt_sha256"):
+            if len(_text(raw[field], f"{correction_id}.{field}")) != 64:
+                raise MaterializationError(
+                    f"re-derivation receipt identity differs: {correction_id}"
+                )
+        outputs = raw["invalidated_outputs"]
+        if (
+            not isinstance(outputs, list)
+            or not outputs
+            or outputs != sorted(set(outputs))
+        ):
+            raise MaterializationError(
+                f"re-derivation receipt scope differs: {correction_id}"
+            )
+        rederive_affected_stages = {
+            stage
+            for output in outputs
+            for stage in _semantic_output_route(output)["affected_stages"]
+        }
+        output_role = next(
+            (
+                role
+                for role in RELEASE_ROLES
+                if GENERATION_STAGE[role] in rederive_affected_stages
+            ),
+            None,
+        )
+        receipt_payload = {
+            "correction_id": correction_id,
+            "input_generation_id": raw["input_generation_id"],
+            "invalidated_outputs": outputs,
+            "output_generation_id": raw["output_generation_id"],
+            "status": raw["status"],
+        }
+        if (
+            output_role is None
+            or raw["input_generation_id"] != candidate_generation_ids["ledger"]
+            or raw["output_generation_id"] != candidate_generation_ids[output_role]
+            or raw["receipt_sha256"]
+            != hashlib.sha256(canonical_json_bytes(receipt_payload)).hexdigest()
+        ):
+            raise MaterializationError(
+                f"re-derivation receipt candidate binding differs: {correction_id}"
+            )
+        rederived[correction_id] = {str(value) for value in outputs}
+    missing_rederivations = sorted(
+        correction_id
+        for correction_id, outputs in resolved_applicable.items()
+        if rederived.get(correction_id) != outputs
+    )
+
+    source_routes = []
+    for row in source_rows:
+        outputs = sorted(str(value) for value in row["invalidated_outputs"])
+        rebuild_paths = [_semantic_output_route(output) for output in outputs]
+        affected_stages = [
+            stage
+            for stage in STAGES
+            if any(stage in route["affected_stages"] for route in rebuild_paths)
+        ]
+        source_routes.append(
+            {
+                "affected_stages": affected_stages,
+                "invalidated_outputs": outputs,
+                "rebuild_paths": rebuild_paths,
+                "source_id": row["source_id"],
+            }
+        )
+    runtime_correction_routes = []
+    for row in runtime_corrections:
+        assert isinstance(row, dict)
+        rebuild_paths = [
+            _semantic_output_route(output) for output in row["invalidated_outputs"]
+        ]
+        runtime_correction_routes.append(
+            {
+                "affected_stages": [
+                    stage
+                    for stage in STAGES
+                    if any(stage in route["affected_stages"] for route in rebuild_paths)
+                ],
+                "correction_id": row["correction_id"],
+                "invalidated_outputs": sorted(row["invalidated_outputs"]),
+                "rebuild_paths": rebuild_paths,
+            }
+        )
+
+    stage_identities: list[dict[str, Any]] = []
+    upstream_identity_by_stage: dict[str, str] = {}
+    for stage in STAGES:
+        semantic_sources = [
+            row
+            for row in source_rows
+            if stage
+            in next(
+                route["affected_stages"]
+                for route in source_routes
+                if route["source_id"] == row["source_id"]
+            )
+        ]
+        semantic_corrections = [
+            row
+            for row in runtime_corrections
+            if stage
+            in next(
+                route["affected_stages"]
+                for route in runtime_correction_routes
+                if route["correction_id"] == row["correction_id"]
+            )
+        ]
+        stage_payload = {
+            "corrections": semantic_corrections,
+            "outcomes": [
+                row
+                for row in outcome_rows
+                if stage in _semantic_output_route(row["outcome_id"])["affected_stages"]
+            ],
+            "provider_admission_receipt_sha256": admission["receipt_sha256"],
+            "sources": semantic_sources,
+            "stage": stage,
+            "upstream_stage_identities": {
+                dependency: upstream_identity_by_stage[dependency]
+                for dependency in STAGE_DEPENDENCIES[stage]
+            },
+        }
+        identity = hashlib.sha256(canonical_json_bytes(stage_payload)).hexdigest()
+        upstream_identity_by_stage[stage] = identity
+        stage_identities.append(
+            {
+                "affected_by_corrections": sorted(
+                    row["correction_id"] for row in semantic_corrections
+                ),
+                "semantic_input_sha256": identity,
+                "source_ids": sorted(row["source_id"] for row in semantic_sources),
+                "stage": stage,
+                "upstream_stages": list(STAGE_DEPENDENCIES[stage]),
+            }
+        )
+    blockers = sorted(
+        {
+            *(
+                f"SOURCE:{row['source_id']}"
+                for row in source_rows
+                if row["product_requirement"] == "REQUIRED"
+                and row["readiness"] != "READY"
+            ),
+            *(
+                f"OUTCOME:{row['outcome_id']}"
+                for row in outcome_rows
+                if row["product_requirement"] == "REQUIRED"
+                and row["readiness"] != "READY"
+            ),
+            *(
+                ("PROVIDER_ADMISSION",)
+                if admission["product_readiness"] != "READY_FOR_COMPOSITION"
+                else ()
+            ),
+            *(
+                ("CORRECTION_AUTHORITY_REQUIRED",)
+                if correction_registry["authority_state"] != "PROVIDED"
+                else ()
+            ),
+            *(f"OPEN_CORRECTION:{value}" for value in applicable_open),
+            *(
+                ("REDERIVE_AUTHORITY_REQUIRED",)
+                if resolved_applicable
+                and rederive_registry["authority_state"] != "PROVIDED"
+                else ()
+            ),
+            *(f"MISSING_REDERIVATION:{value}" for value in missing_rederivations),
+        }
+    )
+    correction_boundary = {
+        key: _canonical_clone(value)
+        for key, value in correction_registry.items()
+        if key != "file"
+    }
+    correction_boundary["applicable_open_correction_ids"] = sorted(applicable_open)
+    rederive_boundary = {
+        key: _canonical_clone(value)
+        for key, value in rederive_registry.items()
+        if key != "file"
+    }
+    rederive_boundary["missing_correction_ids"] = missing_rederivations
+    return {
+        "blocking_reasons": blockers,
+        "census_memberships": sorted(
+            census_memberships, key=lambda row: row["sleeve_alias"]
+        ),
+        "census_sha256": census_sha256,
+        "contract_raw_sha256": contract_raw_sha256,
+        "contract_semantic_sha256": contract_semantic_sha256,
+        "correction_authority": correction_boundary,
+        "correction_invalidation_routes": sorted(
+            runtime_correction_routes, key=lambda row: row["correction_id"]
+        ),
+        "history_corrections": correction_rows,
+        "invested_capital_policy_sha256": invested_capital_policy_sha256,
+        "outcomes": sorted(outcome_rows, key=lambda row: row["outcome_id"]),
+        "product": _canonical_clone(product),
+        "product_id": product["product_id"],
+        "product_version": product["product_version"],
+        "provider_admission": dict(admission),
+        "readiness": "READY_FOR_EXECUTION" if not blockers else "REQUIRED_NOT_READY",
+        "rederive_authority": rederive_boundary,
+        "schema_version": 2,
+        "source_invalidation_routes": sorted(
+            source_routes, key=lambda row: row["source_id"]
+        ),
+        "source_matrix_sha256": source_matrix_sha256,
+        "sources": source_rows,
+        "stage_identities": stage_identities,
+        "stage_order": list(STAGES),
+        "strategies": strategy_rows,
+    }
+
+
+def _derive_product_authority(
+    vertical_path: Path,
+    contract_path: Path,
+    source_matrix_path: Path,
+    candidate_generation_ids: Mapping[str, str],
+    correction_registry_path: Path | None = None,
+    rederive_registry_path: Path | None = None,
+    input_contract_path: Path | None = None,
+) -> dict[str, Any]:
+    vertical = _load(vertical_path, "vertical recipe")
+    if vertical.get("schema_version") not in {7, 9, 10}:
+        raise MaterializationError(
+            "financial MVP composition requires vertical recipe schema 7, 9, or 10"
+        )
+    contract_path = contract_path.resolve()
+    source_matrix_path = source_matrix_path.resolve()
+    module = _financial_mvp_module()
+    try:
+        contract = module.load_contract(
+            contract_path, CURRENT_STRATEGY_REGISTRY, FINANCIAL_MVP_SCHEMA
+        )
+        contract_semantic_sha256 = module.contract_digest(contract)
+        census_sha256 = module.census_digest(contract["current_census"])
+        invested_sha256 = module.invested_capital_policy_digest(contract)
+        expected_matrix = module.render_views(contract).source_matrix_json
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise MaterializationError(
+            "financial MVP product authority is invalid"
+        ) from exc
+    contract_raw_sha256, _ = _sha(contract_path)
+    source_matrix_bytes = source_matrix_path.read_bytes()
+    if source_matrix_bytes != expected_matrix:
+        raise MaterializationError("financial MVP source matrix differs from contract")
+    source_matrix_sha256 = hashlib.sha256(source_matrix_bytes).hexdigest()
+    provider_definition = vertical.get("provider_ledger_generation")
+    if not isinstance(provider_definition, dict):
+        raise MaterializationError("financial MVP provider generation is absent")
+    provider_generation = _absolute(
+        provider_definition.get("path"), "provider ledger generation"
+    )
+    # The admit-or-declare receipt records the contract the ledger was ADMITTED
+    # under -- the retained account-input contract, which cannot be the product
+    # contract because a contract never pins a ledger built from itself.  Compare
+    # the receipt against the contract that produced it, while the product
+    # authority (lineage, source matrix, conformance) stays the product contract.
+    # With no separate input contract supplied this is the product contract,
+    # exactly as before.
+    admission_contract = contract
+    admission_raw_sha256 = contract_raw_sha256
+    admission_semantic_sha256 = contract_semantic_sha256
+    admission_census_sha256 = census_sha256
+    if input_contract_path is not None:
+        resolved_input = input_contract_path.resolve()
+        try:
+            admission_contract = module.load_contract(
+                resolved_input, CURRENT_STRATEGY_REGISTRY, FINANCIAL_MVP_SCHEMA
+            )
+            admission_semantic_sha256 = module.contract_digest(admission_contract)
+            admission_census_sha256 = module.census_digest(
+                admission_contract["current_census"]
+            )
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise MaterializationError(
+                "financial MVP admitted input authority is invalid"
+            ) from exc
+        admission_raw_sha256, _ = _sha(resolved_input)
+
+        # Matching the receipt is not sufficient: an old admission marked READY
+        # could otherwise be paired with a current conformance contract that
+        # governs different accounts or different financial rules.  This is the
+        # predicate `portfolio_invested_capital.resolve_financial_input_authority`
+        # already applies to the same current/retained pair -- identical product,
+        # census, REQUIRED strategy set and invested-capital policy.
+        def _required_strategy_ids(source: Mapping[str, Any]) -> set[str]:
+            return {
+                str(row["strategy_id"])
+                for row in source["strategies"]
+                if row.get("product_requirement") == "REQUIRED"
+            }
+
+        try:
+            compatible = (
+                contract["product"]["product_id"]
+                == admission_contract["product"]["product_id"]
+                and census_sha256 == admission_census_sha256
+                and _required_strategy_ids(contract)
+                == _required_strategy_ids(admission_contract)
+                and module.invested_capital_policy_digest(contract)
+                == module.invested_capital_policy_digest(admission_contract)
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise MaterializationError(
+                "financial MVP admitted input authority is invalid"
+            ) from exc
+        if not compatible:
+            raise MaterializationError(
+                "admitted input differs from the current calculation authority"
+            )
+    admission = _provider_admission_authority(
+        provider_generation,
+        admission_contract,
+        contract_raw_sha256=admission_raw_sha256,
+        contract_semantic_sha256=admission_semantic_sha256,
+        census_sha256=admission_census_sha256,
+    )
+    correction_registry = _authority_registry(
+        correction_registry_path,
+        schema_name="portfolio-correction-registry",
+        record_key="corrections",
+    )
+    rederive_registry = _authority_registry(
+        rederive_registry_path,
+        schema_name="portfolio-rederive-receipt-registry",
+        record_key="receipts",
+    )
+    for label, boundary in (
+        ("correction registry", correction_registry),
+        ("re-derivation registry", rederive_registry),
+    ):
+        if boundary["authority_state"] == "PROVIDED" and (
+            boundary["contract_semantic_sha256"] != contract_semantic_sha256
+            or boundary["census_sha256"] != census_sha256
+        ):
+            raise MaterializationError(f"{label} product authority differs")
+    conformance = _product_conformance(
+        contract,
+        admission,
+        correction_registry,
+        rederive_registry,
+        candidate_generation_ids=candidate_generation_ids,
+        contract_raw_sha256=contract_raw_sha256,
+        contract_semantic_sha256=contract_semantic_sha256,
+        census_sha256=census_sha256,
+        source_matrix_sha256=source_matrix_sha256,
+        invested_capital_policy_sha256=invested_sha256,
+    )
+    derived: dict[str, Any] = {
+        "contract": _file_definition(contract_path),
+        "conformance": conformance,
+        "correction_registry": correction_registry,
+        "provider_generation": {
+            "catalog": _file_definition(provider_generation / "provider-ledger.json"),
+            "generation_id": provider_generation.name,
+            "manifest": _file_definition(provider_generation / "generation.json"),
+            "receipt": _file_definition(
+                provider_generation / "admit-or-declare-receipt.json"
+            ),
+        },
+        "rederive_registry": rederive_registry,
+        "source_matrix": _file_definition(source_matrix_path),
+    }
+    if input_contract_path is not None:
+        # Recorded so _recipe can re-derive the identical block: the admission
+        # comparison depends on which contract the ledger was admitted under.
+        derived["input_contract"] = _file_definition(input_contract_path.resolve())
+    return derived
+
+
+def _product_gate_payload(authority: Mapping[str, Any]) -> dict[str, Any]:
+    provider = authority.get("provider_generation")
+    if not isinstance(provider, dict):
+        raise MaterializationError("financial MVP provider authority differs")
+    return {
+        "authority_hashes": {
+            "contract_raw_sha256": authority["contract"]["sha256"],
+            "provider_catalog_sha256": provider["catalog"]["sha256"],
+            "provider_manifest_sha256": provider["manifest"]["sha256"],
+            "provider_receipt_sha256": provider["receipt"]["sha256"],
+            "source_matrix_sha256": authority["source_matrix"]["sha256"],
+        },
+        "conformance": _canonical_clone(authority["conformance"]),
+        "schema_version": 3,
+    }
+
+
+def _hwm_input_authority_assessment(
+    authority: Mapping[str, Any],
+    *,
+    hwm_bindings: Mapping[str, Path] | None = None,
+    hwm_source_paths: Mapping[str, Path] | None = None,
+    assessment_path: Path | None = None,
+    input_contract_path: Path | None = None,
+) -> dict[str, Any]:
+    """Independently assess the actual governed PORT-HWM-4 result bundle."""
+
+    conformance = authority.get("conformance")
+    provider = authority.get("provider_generation")
+    if not isinstance(conformance, Mapping) or not isinstance(provider, Mapping):
+        raise MaterializationError("financial MVP HWM authority differs")
+    sources = conformance.get("sources")
+    outcomes = conformance.get("outcomes")
+    strategies = conformance.get("strategies")
+    if (
+        not isinstance(sources, list)
+        or not isinstance(outcomes, list)
+        or not isinstance(strategies, list)
+    ):
+        raise MaterializationError("financial MVP HWM authority differs")
+
+    hwm_outcomes = [
+        row
+        for row in outcomes
+        if isinstance(row, Mapping) and row.get("outcome_id") == "AS_HELD_COMPOSITE_HWM"
+    ]
+    if len(hwm_outcomes) > 1:
+        raise MaterializationError("financial MVP HWM outcome is ambiguous")
+    unresolved_source_ids = sorted(
+        str(row["source_id"])
+        for row in sources
+        if isinstance(row, Mapping)
+        and isinstance(row.get("consumers"), list)
+        and "AS_HELD_COMPOSITE_HWM" in row["consumers"]
+        and isinstance(row.get("current_generation"), Mapping)
+        and (
+            row["current_generation"].get("generation_id") is None
+            or row["current_generation"].get("sha256") is None
+        )
+    )
+    required_strategy_ids = sorted(
+        str(row["strategy_id"])
+        for row in strategies
+        if isinstance(row, Mapping) and row.get("product_requirement") == "REQUIRED"
+    )
+    outcome_readiness = (
+        str(hwm_outcomes[0].get("readiness")) if hwm_outcomes else "NOT_DECLARED"
+    )
+    blockers: set[str] = {
+        "ACCEPTED_HWM_INPUT_GENERATION_ABSENT",
+        "ACCEPTED_MIXED_CALENDAR_AUTHORITY_ABSENT",
+        *(f"SOURCE:{source_id}" for source_id in unresolved_source_ids),
+    }
+    provider_admission = conformance.get("provider_admission")
+    if not isinstance(provider_admission, Mapping):
+        raise MaterializationError("financial MVP HWM provider authority differs")
+    if provider_admission.get("product_readiness") != "READY_FOR_COMPOSITION":
+        blockers.add("PROVIDER_ADMISSION")
+
+    base = {
+        "assessment_scope": "PENDING_GOVERNED_HWM_RESULT",
+        "authority_hashes": {
+            "census_sha256": conformance["census_sha256"],
+            "contract_raw_sha256": authority["contract"]["sha256"],
+            "contract_semantic_sha256": conformance["contract_semantic_sha256"],
+            "provider_catalog_sha256": provider["catalog"]["sha256"],
+            "provider_manifest_sha256": provider["manifest"]["sha256"],
+            "provider_receipt_sha256": provider["receipt"]["sha256"],
+            "source_matrix_sha256": authority["source_matrix"]["sha256"],
+        },
+        "bindings": {},
+        "blocking_reasons": sorted(blockers),
+        "calendar_authority_sha256": None,
+        "input_generation_sha256": None,
+        "outcome_id": "AS_HELD_COMPOSITE_HWM",
+        "outcome_readiness": outcome_readiness,
+        "required_strategy_ids": required_strategy_ids,
+        "result_sha256": None,
+        "schema_version": 2,
+        "state": "REQUIRED_NOT_READY",
+        "unresolved_source_ids": unresolved_source_ids,
+    }
+    if hwm_bindings is None:
+        return base
+    if hwm_source_paths is None:
+        raise MaterializationError("selected HWM source bindings are required")
+    if set(hwm_bindings) != HWM_BINDING_KEYS:
+        raise MaterializationError("governed HWM bindings must be supplied together")
+    paths = {key: Path(value).resolve() for key, value in hwm_bindings.items()}
+    if assessment_path is not None and any(
+        path == assessment_path.resolve() for path in paths.values()
+    ):
+        raise MaterializationError("governed HWM assessment self-reference")
+    definitions = {key: _file_definition(path) for key, path in paths.items()}
+    contract_path = _validate_file_definition(
+        authority.get("contract"), "financial MVP contract"
+    )
+    provider_receipt = provider.get("receipt")
+    if (
+        not isinstance(provider_receipt, Mapping)
+        or definitions["provider_admission_receipt"] != provider_receipt
+    ):
+        raise MaterializationError("governed HWM admission receipt binding differs")
+    try:
+        result = _load(paths["governed_result"], "governed HWM result")
+        # The governed HWM kernel is bound to the contract the provider ledger was
+        # ADMITTED under, which the admission receipt names.  That is the retained
+        # account-input contract, not the product contract this spec's authority
+        # gate carries: a contract can never pin a ledger built from itself, so the
+        # two legitimately differ.  portfolio_report.py:5312 and
+        # portfolio_control_panel.py:8219 already reconcile this the same way --
+        # retarget the current policy onto the admitted input and require the
+        # result to agree.  With no separate input contract supplied this is the
+        # product contract, exactly as before.
+        input_contract_bytes = (
+            contract_path if input_contract_path is None else input_contract_path
+        ).read_bytes()
+        try:
+            governed_policy_bytes = governed_hwm_input_policy(
+                HWM_GOVERNED_POLICY.read_bytes(),
+                input_contract_bytes,
+                _text(result.get("policy_sha256"), "governed HWM policy sha256"),
+            )
+        except CapitalValidationError as exc:
+            raise MaterializationError(
+                "governed HWM policy differs from the admitted input authority"
+            ) from exc
+        accepted = verify_governed_hwm_result(
+            result,
+            paths["input_generation"].read_bytes(),
+            calendar_bytes=paths["calendar_authority"].read_bytes(),
+            input_receipt_bytes=paths["provider_admission_receipt"].read_bytes(),
+            policy_bytes=governed_policy_bytes,
+            product_contract_bytes=input_contract_bytes,
+            performance_policy_bytes=HWM_PERFORMANCE_POLICY.read_bytes(),
+            legacy_policy_bytes=HWM_LEGACY_POLICY.read_bytes(),
+        )
+    except (HwmCoverageError, OSError, TypeError, ValueError, KeyError) as exc:
+        raise MaterializationError("governed HWM result verification failed") from exc
+    memberships = accepted.get("input_evidence", {}).get("memberships")
+    verified_strategy_ids = (
+        sorted(
+            str(row.get("strategy_id"))
+            for row in memberships
+            if isinstance(row, Mapping) and row.get("strategy_id") is not None
+        )
+        if isinstance(memberships, list)
+        else []
+    )
+    if (
+        accepted.get("status") != "AVAILABLE"
+        or verified_strategy_ids != required_strategy_ids
+    ):
+        raise MaterializationError(
+            "governed HWM result does not cover required strategies"
+        )
+    try:
+        from portfolio_financial_outcomes import verify_selected_hwm_generation
+
+        resolved_source_ids = verify_selected_hwm_generation(
+            hwm_source_paths,
+            contract_path=contract_path,
+            bindings=paths,
+            input_contract_path=input_contract_path,
+            policy_bytes=governed_policy_bytes,
+        )
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError, KeyError) as exc:
+        raise MaterializationError(
+            "selected HWM source replay verification failed"
+        ) from exc
+    remaining_source_ids = sorted(set(unresolved_source_ids) - set(resolved_source_ids))
+    if remaining_source_ids or (
+        provider_admission.get("product_readiness") != "READY_FOR_COMPOSITION"
+    ):
+        raise MaterializationError("governed HWM required authority is absent")
+    return {
+        **base,
+        "assessment_scope": "VERIFIED_GOVERNED_HWM_RESULT",
+        "bindings": definitions,
+        "blocking_reasons": [],
+        "calendar_authority_sha256": definitions["calendar_authority"]["sha256"],
+        "input_generation_sha256": definitions["input_generation"]["sha256"],
+        "result_sha256": definitions["governed_result"]["sha256"],
+        "state": "AVAILABLE",
+        "unresolved_source_ids": remaining_source_ids,
+        **(
+            {}
+            if input_contract_path is None
+            else {"input_contract": _file_definition(input_contract_path)}
+        ),
+    }
+
+
+def _product_gate_rows(
+    authority: Mapping[str, Any],
+    product_path: Path,
+    *,
+    hwm_bindings: Mapping[str, Path] | None = None,
+    hwm_source_paths: Mapping[str, Path] | None = None,
+    input_contract_path: Path | None = None,
+) -> list[dict[str, Any]]:
+    payload = _product_gate_payload(authority)
+    product_bytes = canonical_json_bytes(payload)
+    _write_exact(product_path, product_bytes)
+    provider = authority["provider_generation"]
+    assert isinstance(provider, dict)
+    definitions = {
+        "contract": authority["contract"],
+        "provider_catalog": provider["catalog"],
+        "provider_manifest": provider["manifest"],
+        "provider_receipt": provider["receipt"],
+        "source_matrix": authority["source_matrix"],
+    }
+    rows = [
+        {
+            "gate_id": "financial-mvp-product-conformance",
+            "path": str(product_path),
+            "sha256": hashlib.sha256(product_bytes).hexdigest(),
+        }
+    ]
+    hwm_path = product_path.with_name("financial-mvp-hwm-input-authority.json")
+    hwm_bytes = canonical_json_bytes(
+        _hwm_input_authority_assessment(
+            authority,
+            hwm_bindings=hwm_bindings,
+            hwm_source_paths=hwm_source_paths,
+            assessment_path=hwm_path,
+            input_contract_path=input_contract_path,
+        )
+    )
+    _write_exact(hwm_path, hwm_bytes)
+    rows.append(
+        {
+            "gate_id": "financial-mvp-hwm-input-authority",
+            "path": str(hwm_path),
+            "sha256": hashlib.sha256(hwm_bytes).hexdigest(),
+        }
+    )
+    for key, gate_id in PRODUCT_AUTHORITY_GATE_IDS.items():
+        definition = definitions[key]
+        rows.append(
+            {
+                "gate_id": gate_id,
+                "path": str(definition["path"]),
+                "sha256": definition["sha256"],
+            }
+        )
+    for key in ("correction_registry", "rederive_registry"):
+        boundary = authority[key]
+        assert isinstance(boundary, dict)
+        definition = boundary.get("file")
+        if definition is not None:
+            rows.append(
+                {
+                    "gate_id": (
+                        "portfolio-correction-registry"
+                        if key == "correction_registry"
+                        else "portfolio-rederive-receipt-registry"
+                    ),
+                    "path": str(definition["path"]),
+                    "sha256": definition["sha256"],
+                }
+            )
+    return rows
+
+
+def _recipe(path: Path) -> dict[str, Any]:
+    recipe = _load(path, "pipeline recipe")
+    required = {
+        "as_of_date",
+        "expected_generations",
+        "panel_launcher_sha256",
+        "pipeline_id",
+        "qa_dir",
+        "release_commit",
+        "schema_version",
+        "vertical_recipe",
+    }
+    schema_version = recipe.get("schema_version")
+    if schema_version == 3:
+        required.add("product_authority")
+    if schema_version not in {2, 3}:
+        raise MaterializationError("portfolio pipeline recipe differs")
+    _text(recipe["as_of_date"], "as_of_date")
+    _text(recipe["pipeline_id"], "pipeline_id")
+    if len(_text(recipe["release_commit"], "release_commit")) != 40:
+        raise MaterializationError("release_commit differs")
+    if len(_text(recipe["panel_launcher_sha256"], "panel_launcher_sha256")) != 64:
+        raise MaterializationError("panel launcher hash differs")
+    vertical_path = _validate_file_definition(
+        recipe["vertical_recipe"], "vertical recipe"
+    )
+    vertical = _load(vertical_path, "vertical recipe")
+    if (
+        vertical.get("schema_version") not in {6, 7, 9, 10}
+        or vertical.get("release_commit") != recipe["release_commit"]
+        or vertical.get("as_of_date") != recipe["as_of_date"]
+    ):
+        raise MaterializationError("vertical recipe release identity differs")
+    manifest_inputs = _financial_epoch_manifest_inputs(vertical)
+    epoch_generation = _epoch_manifest_generation_definition(vertical)
+    if manifest_inputs is None:
+        required.discard("financial_epoch_manifest_inputs")
+        required.discard("financial_epoch_manifest_proof")
+    else:
+        required.add("financial_epoch_manifest_inputs")
+        required.add("financial_epoch_manifest_proof")
+    if epoch_generation is None:
+        required.discard("epoch_manifest_generation")
+    else:
+        required.add("epoch_manifest_generation")
+    if set(recipe) != required:
+        raise MaterializationError("portfolio pipeline recipe differs")
+    if manifest_inputs is not None and canonical_json_bytes(
+        recipe["financial_epoch_manifest_inputs"]
+    ) != canonical_json_bytes(manifest_inputs):
+        raise MaterializationError("financial epoch manifest inputs are stale")
+    if manifest_inputs is not None:
+        proof = recipe.get("financial_epoch_manifest_proof")
+        if (
+            not isinstance(proof, dict)
+            or proof.get("schema_version") != 1
+            or proof.get("status") != "PASS"
+            or proof.get("financial_epoch_manifest_inputs_sha256")
+            != hashlib.sha256(canonical_json_bytes(manifest_inputs)).hexdigest()
+        ):
+            raise MaterializationError("financial epoch manifest proof differs")
+    if epoch_generation is not None and canonical_json_bytes(
+        recipe["epoch_manifest_generation"]
+    ) != canonical_json_bytes(epoch_generation):
+        raise MaterializationError("epoch-manifest generation is stale")
+    _validate_directory_definition(recipe["qa_dir"], "panel QA")
+    expected = recipe["expected_generations"]
+    if not isinstance(expected, dict) or set(expected) != set(RELEASE_ROLES):
+        raise MaterializationError("expected release generations differ")
+    for role in RELEASE_ROLES:
+        _generation_expectation(expected[role], role)
+    if schema_version == 3:
+        authority = recipe["product_authority"]
+        # input_contract is present only when the ledger was admitted under a
+        # contract other than the product contract.
+        if not isinstance(authority, dict) or set(authority) - {"input_contract"} != {
+            "contract",
+            "conformance",
+            "correction_registry",
+            "provider_generation",
+            "rederive_registry",
+            "source_matrix",
+        }:
+            raise MaterializationError("financial MVP product authority differs")
+        contract_path = _validate_file_definition(
+            authority["contract"], "financial MVP contract"
+        )
+        source_matrix_path = _validate_file_definition(
+            authority["source_matrix"], "financial MVP source matrix"
+        )
+        registry_paths: dict[str, Path | None] = {}
+        for key in ("correction_registry", "rederive_registry"):
+            boundary = authority[key]
+            if not isinstance(boundary, dict):
+                raise MaterializationError(f"financial MVP {key} differs")
+            file_definition = boundary.get("file")
+            registry_paths[key] = (
+                None
+                if file_definition is None
+                else _validate_file_definition(file_definition, key)
+            )
+        provider_generation = authority["provider_generation"]
+        if not isinstance(provider_generation, dict) or set(provider_generation) != {
+            "catalog",
+            "generation_id",
+            "manifest",
+            "receipt",
+        }:
+            raise MaterializationError("financial MVP provider generation differs")
+        for key in ("catalog", "manifest", "receipt"):
+            _validate_file_definition(provider_generation[key], f"provider {key}")
+        expected_authority = _derive_product_authority(
+            vertical_path,
+            contract_path,
+            source_matrix_path,
+            {role: str(expected[role]["generation_id"]) for role in RELEASE_ROLES},
+            registry_paths["correction_registry"],
+            registry_paths["rederive_registry"],
+            input_contract_path=(
+                None
+                if authority.get("input_contract") is None
+                else _validate_file_definition(
+                    authority["input_contract"], "financial MVP admitted input"
+                )
+            ),
+        )
+        if canonical_json_bytes(authority) != canonical_json_bytes(expected_authority):
+            raise MaterializationError("financial MVP product authority is stale")
+    return recipe
+
+
+def _vertical_source_paths(vertical_path: Path) -> list[Path]:
+    vertical = _load(vertical_path, "vertical recipe")
+    schema_version = vertical.get("schema_version")
+    if schema_version not in {6, 7, 9, 10}:
+        raise MaterializationError("vertical recipe schema differs")
+    paths = [vertical_path]
+    for key in (
+        "baseline_spec",
+        "base_factor_file",
+        "implementation_reconciliation",
+        "implementation_return_attribution",
+        "legacy_panel",
+    ):
+        value = vertical.get(key)
+        if not isinstance(value, dict):
+            raise MaterializationError(f"vertical recipe {key} differs")
+        paths.append(_absolute(value.get("path"), f"vertical recipe {key}.path"))
+    provider_key = (
+        "provider_ledger_spec" if schema_version == 6 else "provider_ledger_generation"
+    )
+    provider = vertical.get(provider_key)
+    if not isinstance(provider, dict):
+        raise MaterializationError(f"vertical recipe {provider_key} differs")
+    paths.append(
+        _absolute(provider.get("path"), f"vertical recipe {provider_key}.path")
+    )
+    manifest_inputs = _financial_epoch_manifest_inputs(vertical)
+    if manifest_inputs is not None:
+        paths.extend(
+            _absolute(manifest_inputs[key]["path"], f"financial epoch manifest {key}")
+            for key in EPOCH_MANIFEST_INPUTS
+        )
+    epoch_generation = _epoch_manifest_generation_definition(vertical)
+    if epoch_generation is not None:
+        paths.append(Path(epoch_generation["runtime_root"]))
+    for key in (
+        "strategy_attribution_root",
+        "decomposition_plan_bundle",
+        "correlation_source_root",
+        *(
+            ("hybrid_decomposition_plan_bundle",)
+            if "hybrid_decomposition_plan_bundle" in vertical
+            else ()
+        ),
+    ):
+        value = vertical.get(key)
+        if not isinstance(value, dict):
+            raise MaterializationError(f"vertical recipe {key} differs")
+        paths.append(_absolute(value.get("path"), f"vertical recipe {key}.path"))
+    return paths
+
+
+def _generation_dir(output_root: Path, recipe: Mapping[str, Any], role: str) -> Path:
+    generation_id = str(recipe["expected_generations"][role]["generation_id"])
+    return (
+        output_root / "stages" / GENERATION_ROOT[role] / "generations" / generation_id
+    )
+
+
+def _epoch_generation_artifact(manifest: GenerationManifest, artifact_id: str) -> Any:
+    matches = [item for item in manifest.artifacts if item.artifact_id == artifact_id]
+    if len(matches) != 1:
+        raise MaterializationError(
+            f"epoch-manifest panel generation artifact differs: {artifact_id}"
+        )
+    return matches[0]
+
+
+def _epoch_json_snapshot(path: Path, label: str) -> tuple[bytes, dict[str, Any]]:
+    if path.is_symlink() or not path.is_file():
+        raise MaterializationError(f"{label} is missing or linked")
+    try:
+        content = path.read_bytes()
+        value = json.loads(content.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MaterializationError(f"{label} is unreadable") from exc
+    if not isinstance(value, dict):
+        raise MaterializationError(f"{label} root differs")
+    return content, value
+
+
+def _financial_epoch_manifest_proof(
+    recipe: Mapping[str, Any], output_root: Path
+) -> dict[str, Any] | None:
+    """Independently prove the emitted schema-9 producer -> panel seam.
+
+    Recipe definitions are only selectors.  PASS evidence comes from reopening
+    the exact emitted panel generation, checking its GenerationManifest, and
+    rebuilding the complete account-strategy manifest from the five selected
+    inputs plus the exact emitted baseline generation and repository policy.
+    The rebuilt object must equal both the staged producer artifact and the
+    manifest embedded in dashboard data, so every row, status, value, and
+    source identity participates in the proof digest.
+    """
+
+    definitions = recipe.get("financial_epoch_manifest_inputs")
+    if definitions is None:
+        return None
+    if not isinstance(definitions, dict) or set(definitions) != set(
+        EPOCH_MANIFEST_INPUTS
+    ):
+        raise MaterializationError("financial epoch manifest definitions differ")
+
+    expected_panel = _generation_expectation(
+        recipe["expected_generations"]["panel"], "panel"
+    )
+    panel_generation = _generation_dir(output_root, recipe, "panel")
+    manifest_path = panel_generation / "generation.json"
+    manifest_bytes, _manifest_payload = _epoch_json_snapshot(
+        manifest_path, "epoch-manifest panel generation manifest"
+    )
+    try:
+        generation_manifest = GenerationManifest.from_json_bytes(manifest_bytes)
+    except (ValueError, RuntimeError) as exc:
+        raise MaterializationError(
+            "epoch-manifest panel generation manifest is invalid"
+        ) from exc
+    if (
+        generation_manifest.generation_id != expected_panel["generation_id"]
+        or generation_manifest.verification is not VerificationStatus.VERIFIED
+        or generation_manifest.coverage.status
+        is not CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+        or hashlib.sha256(manifest_bytes).hexdigest()
+        != expected_panel["manifest_sha256"]
+    ):
+        raise MaterializationError("epoch-manifest panel generation authority differs")
+
+    staged_path = output_root / "stages" / "panel" / "account-strategy-manifest.json"
+    staged_bytes, staged_manifest = _epoch_json_snapshot(
+        staged_path, "staged account-strategy manifest"
+    )
+    dashboard_path = panel_generation / "data" / "dashboard_data.json"
+    dashboard_bytes, dashboard = _epoch_json_snapshot(
+        dashboard_path, "epoch-manifest panel data"
+    )
+    candidate_path = panel_generation / "candidate.json"
+    candidate_bytes, candidate = _epoch_json_snapshot(
+        candidate_path, "epoch-manifest panel candidate"
+    )
+
+    account_artifact = _epoch_generation_artifact(
+        generation_manifest, "input/account-strategy-manifest.json"
+    )
+    dashboard_artifact = _epoch_generation_artifact(
+        generation_manifest, "panel/data/dashboard_data.json"
+    )
+    candidate_artifact = _epoch_generation_artifact(
+        generation_manifest, "panel/candidate.json"
+    )
+    if (
+        account_artifact.schema_name != "account-strategy-manifest"
+        or account_artifact.schema_version != "7"
+        or (account_artifact.sha256, account_artifact.size_bytes)
+        != (hashlib.sha256(staged_bytes).hexdigest(), len(staged_bytes))
+        or (dashboard_artifact.sha256, dashboard_artifact.size_bytes)
+        != (hashlib.sha256(dashboard_bytes).hexdigest(), len(dashboard_bytes))
+        or (candidate_artifact.sha256, candidate_artifact.size_bytes)
+        != (hashlib.sha256(candidate_bytes).hexdigest(), len(candidate_bytes))
+    ):
+        raise MaterializationError("epoch-manifest panel artifact binding differs")
+
+    bound_artifact_ids = {
+        "account_strategy_ledger": "input-bound/manifest_ledger",
+        "account_strategy_ledger_identity": "input-bound/manifest_ledger_identity",
+        "account_strategy_classified_flows": ("input-bound/manifest_classified_flows"),
+        "account_strategy_flow_coverage": ("input-bound/manifest_flow_coverage"),
+        "account_strategy_admission_policy": ("input-bound/manifest_admission_policy"),
+    }
+    bound_inputs: dict[str, dict[str, object]] = {}
+    selected_paths: dict[str, Path] = {}
+    for key, artifact_id in bound_artifact_ids.items():
+        definition = definitions.get(key)
+        if not isinstance(definition, dict):
+            raise MaterializationError(
+                f"financial epoch manifest proof {key} definition differs"
+            )
+        path = _validate_file_definition(
+            definition, f"financial epoch manifest proof {key}"
+        )
+        selected_paths[key] = path
+        artifact = _epoch_generation_artifact(generation_manifest, artifact_id)
+        expected_identity = {
+            "sha256": definition["sha256"],
+            "size_bytes": definition["size_bytes"],
+        }
+        actual_identity = {
+            "sha256": artifact.sha256,
+            "size_bytes": artifact.size_bytes,
+        }
+        if actual_identity != expected_identity:
+            raise MaterializationError(
+                f"epoch-manifest panel source binding differs: {key}"
+            )
+        bound_inputs[key] = actual_identity
+
+    baseline_generation_id = _text(
+        recipe["expected_generations"]["baseline"]["generation_id"],
+        "epoch-manifest baseline generation_id",
+    )
+    producer = _account_strategy_manifest_module()
+    try:
+        rebuilt = producer.build_manifest_candidate(
+            ledger_path=selected_paths["account_strategy_ledger"],
+            ledger_identity_path=selected_paths["account_strategy_ledger_identity"],
+            baseline_root=output_root / "stages" / "baseline",
+            baseline_generation_id=baseline_generation_id,
+            classified_flows_path=selected_paths["account_strategy_classified_flows"],
+            flow_coverage_path=selected_paths["account_strategy_flow_coverage"],
+            classification_policy_path=ACCOUNT_STRATEGY_CLASSIFICATION_POLICY,
+            admission_policy_path=selected_paths["account_strategy_admission_policy"],
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise MaterializationError(
+            "independent post-build epoch-manifest rebuild failed"
+        ) from exc
+    rebuilt_bytes = canonical_json_bytes(rebuilt)
+    if staged_bytes != rebuilt_bytes:
+        raise MaterializationError(
+            "staged account-strategy manifest differs from independent rebuild"
+        )
+    panel_manifest = dashboard.get("account_manifest")
+    if not isinstance(panel_manifest, dict):
+        raise MaterializationError("panel account-strategy manifest shape differs")
+    if canonical_json_bytes(panel_manifest) != rebuilt_bytes:
+        raise MaterializationError(
+            "panel account-strategy manifest differs from independent rebuild"
+        )
+
+    meta = dashboard.get("meta")
+    if not isinstance(meta, dict):
+        raise MaterializationError("epoch-manifest panel metadata differs")
+    expected_verification = {
+        "method": "EXACT_REBUILD_REPORT_BASELINE_CANONICAL_POLICY_AND_TEMPLATE_BOUND",
+        "producer_readiness": rebuilt.get("authority_readiness"),
+        "publication_readiness": "READY",
+        "status": "PANEL_INDEPENDENT_EXACT_REBUILD_VERIFIED",
+    }
+    authority_profile = meta.get("account_manifest_authority_profile")
+    verification = meta.get("account_manifest_verification")
+    if (
+        authority_profile != "INDEPENDENT_EXACT_REBUILD"
+        or verification != expected_verification
+        or meta.get("account_manifest_sha256")
+        != hashlib.sha256(staged_bytes).hexdigest()
+        or meta.get("account_manifest_size_bytes") != len(staged_bytes)
+        or candidate.get("account_manifest_authority_profile") != authority_profile
+        or candidate.get("account_manifest_verification") != verification
+    ):
+        raise MaterializationError("epoch-manifest panel authority profile differs")
+    artifact_sha256 = candidate.get("artifact_sha256")
+    if not isinstance(artifact_sha256, dict) or (
+        artifact_sha256.get("data/dashboard_data.json")
+        != hashlib.sha256(dashboard_bytes).hexdigest()
+    ):
+        raise MaterializationError("epoch-manifest panel candidate binding differs")
+
+    authority_readiness = rebuilt.get("authority_readiness")
+    source_identities = rebuilt.get("source_identities")
+    rows = rebuilt.get("rows")
+    if (
+        not isinstance(authority_readiness, dict)
+        or not isinstance(source_identities, dict)
+        or not isinstance(rows, list)
+    ):
+        raise MaterializationError("independent epoch-manifest proof shape differs")
+    status_counts: dict[str, int] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise MaterializationError("independent epoch-manifest row differs")
+        status = _text(row.get("status"), "epoch-manifest row status")
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    inputs_sha256 = hashlib.sha256(canonical_json_bytes(definitions)).hexdigest()
+    proof = {
+        "account_manifest_sha256": hashlib.sha256(staged_bytes).hexdigest(),
+        "authority_profile": authority_profile,
+        "authority_readiness_sha256": hashlib.sha256(
+            canonical_json_bytes(authority_readiness)
+        ).hexdigest(),
+        "bound_inputs_sha256": hashlib.sha256(
+            canonical_json_bytes(bound_inputs)
+        ).hexdigest(),
+        "candidate_sha256": hashlib.sha256(candidate_bytes).hexdigest(),
+        "dashboard_data_sha256": hashlib.sha256(dashboard_bytes).hexdigest(),
+        "epoch_row_count": len(rows),
+        "epoch_rows_sha256": hashlib.sha256(
+            canonical_json_bytes({"rows": rows})
+        ).hexdigest(),
+        "epoch_status_counts": dict(sorted(status_counts.items())),
+        "financial_epoch_manifest_inputs_sha256": inputs_sha256,
+        "panel_generation_id": generation_manifest.generation_id,
+        "panel_generation_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "schema_version": 1,
+        "source_identities_sha256": hashlib.sha256(
+            canonical_json_bytes(source_identities)
+        ).hexdigest(),
+        "status": "PASS",
+    }
+    return proof
+
+
+def _verified_epoch_manifest_materialization_proof(
+    recipe: Mapping[str, Any], output_root: Path
+) -> dict[str, Any] | None:
+    """Prove schema-10 bundle bytes survive unchanged into the published panel."""
+
+    definition = recipe.get("epoch_manifest_generation")
+    if definition is None:
+        return None
+    if not isinstance(definition, dict) or set(definition) != {
+        "runtime_root",
+        "generation_id",
+        "source",
+    }:
+        raise MaterializationError("epoch-manifest generation definition differs")
+    generation_root = _absolute(
+        definition["runtime_root"], "epoch_manifest_generation.runtime_root"
+    )
+    generation_id = _text(
+        definition["generation_id"], "epoch_manifest_generation.generation_id"
+    )
+    try:
+        bundle = read_generation_bundle(generation_root, generation_id)
+        financial_module = _financial_mvp_module()
+        source = financial_module.epoch_manifest_source_from_bundle(bundle)
+        source_bytes = bundle.payloads["outputs/account-strategy-manifest.json"]
+    except (
+        AttributeError,
+        KeyError,
+        OSError,
+        RuntimeError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise MaterializationError(
+            "epoch-manifest generation bundle verification failed"
+        ) from exc
+    if canonical_json_bytes(source) != canonical_json_bytes(definition["source"]):
+        raise MaterializationError("epoch-manifest generation source identity differs")
+
+    bound_path = output_root / "financial-mvp-bound-contract.json"
+    bound_bytes, bound_contract = _epoch_json_snapshot(
+        bound_path, "bound financial MVP contract"
+    )
+    try:
+        registry = _load(CURRENT_STRATEGY_REGISTRY, "current strategy registry")
+        validated_bound_contract = financial_module.validate_contract(
+            bound_contract,
+            registry=registry,
+            epoch_manifest_bundle=bundle,
+        )
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "bound financial MVP contract validation failed"
+        ) from exc
+    if (
+        canonical_json_bytes(validated_bound_contract) != bound_bytes
+        or bound_contract.get("epoch_manifest_source") != source
+    ):
+        raise MaterializationError("bound financial MVP contract authority differs")
+
+    staged_path = output_root / "stages" / "panel" / "account-strategy-manifest.json"
+    staged_bytes, staged_manifest = _epoch_json_snapshot(
+        staged_path, "staged verified account-strategy manifest"
+    )
+    if staged_bytes != source_bytes:
+        raise MaterializationError(
+            "staged account-strategy manifest differs from verified bundle"
+        )
+
+    expected_panel = _generation_expectation(
+        recipe["expected_generations"]["panel"], "panel"
+    )
+    panel_generation = _generation_dir(output_root, recipe, "panel")
+    manifest_bytes, _manifest_payload = _epoch_json_snapshot(
+        panel_generation / "generation.json",
+        "verified epoch-manifest panel generation manifest",
+    )
+    try:
+        panel_manifest = GenerationManifest.from_json_bytes(manifest_bytes)
+    except (ValueError, RuntimeError) as exc:
+        raise MaterializationError(
+            "verified epoch-manifest panel generation manifest is invalid"
+        ) from exc
+    if (
+        panel_manifest.generation_id != expected_panel["generation_id"]
+        or panel_manifest.verification is not VerificationStatus.VERIFIED
+        or hashlib.sha256(manifest_bytes).hexdigest()
+        != expected_panel["manifest_sha256"]
+    ):
+        raise MaterializationError("verified epoch-manifest panel authority differs")
+
+    dashboard_bytes, dashboard = _epoch_json_snapshot(
+        panel_generation / "data" / "dashboard_data.json",
+        "verified epoch-manifest panel data",
+    )
+    candidate_bytes, candidate = _epoch_json_snapshot(
+        panel_generation / "candidate.json",
+        "verified epoch-manifest panel candidate",
+    )
+    account_artifact = _epoch_generation_artifact(
+        panel_manifest, "input/account-strategy-manifest.json"
+    )
+    physical_input_sha256, physical_input_size = _sha(
+        panel_generation / "input" / "account-strategy-manifest.json"
+    )
+    if (physical_input_sha256, physical_input_size) != (
+        hashlib.sha256(source_bytes).hexdigest(),
+        len(source_bytes),
+    ):
+        raise MaterializationError("physical panel input differs from verified bundle")
+    if (
+        account_artifact.schema_name != "account-strategy-manifest"
+        or account_artifact.schema_version != str(staged_manifest.get("schema_version"))
+        or (account_artifact.sha256, account_artifact.size_bytes)
+        != (hashlib.sha256(staged_bytes).hexdigest(), len(staged_bytes))
+    ):
+        raise MaterializationError("verified epoch-manifest panel artifact differs")
+    embedded = dashboard.get("account_manifest")
+    if not isinstance(embedded, dict) or canonical_json_bytes(embedded) != staged_bytes:
+        raise MaterializationError(
+            "panel account-strategy manifest differs from verified bundle"
+        )
+    meta = dashboard.get("meta")
+    if not isinstance(meta, dict):
+        raise MaterializationError("verified epoch-manifest panel metadata differs")
+    verification = meta.get("account_manifest_verification")
+    if not isinstance(verification, dict):
+        raise MaterializationError("verified epoch-manifest panel verification differs")
+    independent_report = verification.get("independent_report")
+    if (
+        meta.get("account_manifest_authority_profile")
+        != "VERIFIED_GENERATION_BUNDLE_EXACT_BYTES"
+        or meta.get("account_manifest_sha256")
+        != hashlib.sha256(staged_bytes).hexdigest()
+        or meta.get("account_manifest_size_bytes") != len(staged_bytes)
+        or verification.get("status") != "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
+        or verification.get("method")
+        != "READ_GENERATION_BUNDLE_EXACT_BYTES_AND_FINANCIAL_MVP_BINDER"
+        or verification.get("publication_readiness") != "NOT_READY"
+        or verification.get("producer_readiness")
+        != staged_manifest.get("authority_readiness")
+        or verification.get("epoch_manifest_source") != source
+        or not isinstance(independent_report, dict)
+        or independent_report.get("status") != "REPORT_ATTESTED_TO_EXACT_BUNDLE_BYTES"
+        or candidate.get("account_manifest_authority_profile")
+        != meta.get("account_manifest_authority_profile")
+        or candidate.get("account_manifest_verification") != verification
+    ):
+        raise MaterializationError("verified epoch-manifest panel lineage differs")
+    candidate_artifacts = candidate.get("artifact_sha256")
+    if (
+        not isinstance(candidate_artifacts, dict)
+        or candidate_artifacts.get("data/dashboard_data.json")
+        != hashlib.sha256(dashboard_bytes).hexdigest()
+    ):
+        raise MaterializationError("verified epoch-manifest panel candidate differs")
+
+    return {
+        "account_manifest_sha256": hashlib.sha256(staged_bytes).hexdigest(),
+        "account_manifest_size_bytes": len(staged_bytes),
+        "authority_profile": meta["account_manifest_authority_profile"],
+        "candidate_sha256": hashlib.sha256(candidate_bytes).hexdigest(),
+        "dashboard_data_sha256": hashlib.sha256(dashboard_bytes).hexdigest(),
+        "epoch_manifest_source_sha256": hashlib.sha256(
+            canonical_json_bytes(source)
+        ).hexdigest(),
+        "financial_mvp_bound_contract_sha256": hashlib.sha256(bound_bytes).hexdigest(),
+        "panel_generation_id": panel_manifest.generation_id,
+        "panel_generation_manifest_sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "schema_version": 1,
+        "status": "PASS",
+    }
+
+
+def create_recipe(
+    vertical_recipe: Path,
+    proof_root: Path,
+    qa_dir: Path,
+    pipeline_id: str,
+    output: Path,
+    financial_mvp_contract: Path | None = None,
+    financial_mvp_source_matrix: Path | None = None,
+    correction_registry: Path | None = None,
+    rederive_receipt_registry: Path | None = None,
+    financial_input_contract: Path | None = None,
+) -> dict[str, Any]:
+    vertical = _load(vertical_recipe.resolve(), "vertical recipe")
+    if vertical.get("schema_version") not in {6, 7, 9, 10}:
+        raise MaterializationError("vertical recipe schema differs")
+    expected: dict[str, object] = {}
+    for role in RELEASE_ROLES:
+        stage_result = _load(
+            proof_root / "stage-results" / f"{GENERATION_STAGE[role]}.json",
+            f"proof {role} stage result",
+        )
+        generation_id = _text(
+            stage_result.get("generation_id"), f"proof {role} generation"
+        )
+        generation = (
+            proof_root
+            / "stages"
+            / GENERATION_ROOT[role]
+            / "generations"
+            / generation_id
+        )
+        inventory = inventory_generation(generation)
+        expected[role] = {
+            "files": inventory["files"],
+            "generation_id": inventory["generation_id"],
+            "manifest_sha256": inventory["manifest_sha256"],
+        }
+    launcher = proof_root / "stages" / "panel" / "index.html"
+    payload: dict[str, Any] = {
+        "as_of_date": vertical["as_of_date"],
+        "expected_generations": expected,
+        "panel_launcher_sha256": _sha(launcher)[0],
+        "pipeline_id": pipeline_id,
+        "qa_dir": _directory_definition(qa_dir.resolve()),
+        "release_commit": vertical["release_commit"],
+        "schema_version": 3,
+        "vertical_recipe": _file_definition(vertical_recipe.resolve()),
+    }
+    manifest_inputs = _financial_epoch_manifest_inputs(vertical)
+    if manifest_inputs is not None:
+        payload["financial_epoch_manifest_inputs"] = manifest_inputs
+        proof = _financial_epoch_manifest_proof(payload, proof_root)
+        if proof is None:  # pragma: no cover - guarded by manifest_inputs
+            raise MaterializationError("financial epoch manifest proof is unavailable")
+        payload["financial_epoch_manifest_proof"] = proof
+    epoch_generation = _epoch_manifest_generation_definition(vertical)
+    if epoch_generation is not None:
+        payload["epoch_manifest_generation"] = epoch_generation
+    if financial_mvp_contract is None or financial_mvp_source_matrix is None:
+        raise MaterializationError(
+            "current pipeline recipe requires financial MVP contract and source matrix"
+        )
+    payload["product_authority"] = _derive_product_authority(
+        vertical_recipe.resolve(),
+        financial_mvp_contract.resolve(),
+        financial_mvp_source_matrix.resolve(),
+        {
+            role: str(_generation_expectation(expected[role], role)["generation_id"])
+            for role in RELEASE_ROLES
+        },
+        None if correction_registry is None else correction_registry.resolve(),
+        (
+            None
+            if rederive_receipt_registry is None
+            else rederive_receipt_registry.resolve()
+        ),
+        input_contract_path=financial_input_contract,
+    )
+    _write_exact(output, canonical_json_bytes(payload))
+    _recipe(output)
+    return {"pipeline_id": pipeline_id, "recipe": str(output)}
+
+
+def _source_payload(recipe: Mapping[str, Any]) -> dict[str, Any]:
+    vertical_path = _absolute(recipe["vertical_recipe"]["path"], "vertical recipe")
+    artifacts: list[dict[str, object]] = []
+    for path in _vertical_source_paths(vertical_path):
+        if path.is_dir():
+            artifacts.append(
+                {"path": str(path), "type": "DIRECTORY", **_directory_identity(path)}
+            )
+        else:
+            artifacts.append(
+                {"path": str(path), "type": "FILE", **_file_definition(path)}
+            )
+    qa_path = _absolute(recipe["qa_dir"]["path"], "panel QA")
+    artifacts.append(
+        {"path": str(qa_path), "type": "DIRECTORY", **_directory_identity(qa_path)}
+    )
+    product_authority = recipe.get("product_authority")
+    if isinstance(product_authority, dict):
+        for key in ("contract", "source_matrix"):
+            definition = product_authority[key]
+            assert isinstance(definition, dict)
+            path = _absolute(definition["path"], f"product authority {key}")
+            artifacts.append(
+                {"path": str(path), "type": "FILE", **_file_definition(path)}
+            )
+        provider = product_authority["provider_generation"]
+        for key in ("manifest", "catalog", "receipt"):
+            definition = provider[key]
+            path = _absolute(definition["path"], f"product provider {key}")
+            artifacts.append(
+                {"path": str(path), "type": "FILE", **_file_definition(path)}
+            )
+        for key in ("correction_registry", "rederive_registry"):
+            definition = product_authority[key].get("file")
+            if definition is not None:
+                path = _absolute(definition["path"], f"product authority {key}")
+                artifacts.append(
+                    {"path": str(path), "type": "FILE", **_file_definition(path)}
+                )
+    return {
+        "as_of_date": recipe["as_of_date"],
+        "artifacts": sorted(artifacts, key=lambda row: str(row["path"])),
+        "release_commit": recipe["release_commit"],
+        "schema_version": recipe["schema_version"],
+    }
+
+
+def _authority_payload(
+    recipe: Mapping[str, Any], source: Mapping[str, Any]
+) -> dict[str, Any]:
+    return {
+        "as_of_date": recipe["as_of_date"],
+        "authority_policy": "IMMUTABLE_VERTICAL_RECIPE",
+        "financial_epoch_manifest_inputs_sha256": (
+            hashlib.sha256(
+                canonical_json_bytes(recipe["financial_epoch_manifest_inputs"])
+            ).hexdigest()
+            if recipe.get("financial_epoch_manifest_inputs") is not None
+            else None
+        ),
+        **(
+            {
+                "financial_epoch_manifest_proof_sha256": hashlib.sha256(
+                    canonical_json_bytes(recipe["financial_epoch_manifest_proof"])
+                ).hexdigest()
+            }
+            if recipe.get("financial_epoch_manifest_proof") is not None
+            else {}
+        ),
+        "release_commit": recipe["release_commit"],
+        "product_conformance_sha256": (
+            hashlib.sha256(
+                canonical_json_bytes(recipe["product_authority"]["conformance"])
+            ).hexdigest()
+            if recipe.get("schema_version") == 3
+            else None
+        ),
+        "schema_version": recipe["schema_version"],
+        "source_run_sha256": hashlib.sha256(canonical_json_bytes(source)).hexdigest(),
+        "vertical_recipe_sha256": recipe["vertical_recipe"]["sha256"],
+    }
+
+
+def acquire(recipe_path: Path, output_dir: Path) -> dict[str, Any]:
+    payload = _source_payload(_recipe(recipe_path))
+    _write_exact(output_dir / "source-run.json", canonical_json_bytes(payload))
+    return {"source_artifacts": len(payload["artifacts"]), "state": "CAPTURED_LOCAL"}
+
+
+def authority(recipe_path: Path, source_run: Path, output_dir: Path) -> dict[str, Any]:
+    recipe = _recipe(recipe_path)
+    source = _load(source_run, "source run")
+    expected = _source_payload(recipe)
+    if canonical_json_bytes(source) != canonical_json_bytes(expected):
+        raise MaterializationError("source run differs from the accepted recipe")
+    payload = _authority_payload(recipe, source)
+    _write_exact(output_dir / "authority-snapshot.json", canonical_json_bytes(payload))
+    return {"state": "AUTHORITY_SNAPSHOT_CREATED"}
+
+
+def _decimal(value: object, label: str) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise MaterializationError(f"{label} is not decimal") from exc
+
+
+def _current_generation(root: Path) -> tuple[str, Path]:
+    pointer = _load(root / "CURRENT.json", "CURRENT pointer")
+    generation_id = _text(pointer.get("generation_id"), "CURRENT generation_id")
+    return generation_id, root / "generations" / generation_id
+
+
+def _result(
+    checks: dict[str, dict[str, Any]], name: str, passed: bool, **evidence: Any
+) -> None:
+    checks[name] = {"evidence": evidence, "status": "PASS" if passed else "FAIL"}
+
+
+_DATA_DATED_RELEASE_ROLES: Final = frozenset({"ledger", "baseline", "report"})
+
+
+def _generation_as_of_allowed(
+    role: str, generation_as_of: date, release_as_of: date
+) -> bool:
+    """Allow data-dated roles to lag the release; keep the panel exact-date.
+
+    The ledger is dated by the market data it carries, which legitimately lags
+    the evaluation date -- the release-QC planning date is pinned to the public
+    factor capture date, and the plan records `complete_through` and
+    `evaluated_on` as separate fields with an age threshold between them.
+
+    The baseline and the report are computed from that same ledger and inherit
+    its data date, so holding them to the exact release date while exempting
+    their own source was inconsistent: with the market data three days behind
+    the capture date, no release could satisfy both rules at once.  Freshness is
+    still asserted -- `_freshness_*` compares every assessment row's
+    `evaluated_on` against the release date, and the plan's own age threshold
+    still applies -- so the boundary is enforced where the data age is actually
+    measured rather than duplicated here.
+
+    The panel is generated at release time and carries no upstream data date, so
+    it stays exact.
+    """
+
+    return (
+        generation_as_of <= release_as_of
+        if role in _DATA_DATED_RELEASE_ROLES
+        else generation_as_of == release_as_of
+    )
+
+
+def _freshness_key(row: Mapping[str, Any]) -> tuple[str, str, str, str] | None:
+    provider = row.get("provider_id")
+    subject = row.get("subject_id")
+    lane = row.get("lane")
+    fact_type = row.get("fact_type")
+    if not all(
+        isinstance(value, str) and value.strip()
+        for value in (provider, subject, lane, fact_type)
+    ):
+        return None
+    assert isinstance(provider, str)
+    assert isinstance(subject, str)
+    assert isinstance(lane, str)
+    assert isinstance(fact_type, str)
+    return provider.strip(), subject.strip(), lane.strip(), fact_type.strip()
+
+
+def _semantic_gate_payload(
+    recipe: Mapping[str, Any],
+    release_generations: Mapping[str, str] | None = None,
+    *,
+    epoch_manifest_proof: Mapping[str, Any] | None = None,
+    financial_outcomes: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    checks = {
+        "analytics_report_panel_equality": "PASS",
+        "financial_identities": "PASS",
+        "freshness": "PASS",
+        "generation_invariants": "PASS",
+        "ledger_bridges": "PASS",
+        "mappings": "PASS",
+    }
+    if recipe.get("schema_version") == 3:
+        checks["product_conformance"] = "PASS"
+    if financial_outcomes is not None:
+        if financial_outcomes.get("status") != "PASS":
+            raise MaterializationError(
+                "financial outcomes must pass actual verification"
+            )
+        checks["financial_outcomes"] = "PASS"
+    manifest_inputs = recipe.get("financial_epoch_manifest_inputs")
+    if manifest_inputs is not None:
+        if epoch_manifest_proof is None:
+            raise MaterializationError(
+                "post-build epoch-manifest proof is required for semantic PASS"
+            )
+        accepted_proof = recipe.get("financial_epoch_manifest_proof")
+        if not isinstance(accepted_proof, dict):
+            raise MaterializationError("accepted epoch-manifest proof differs")
+        if canonical_json_bytes(epoch_manifest_proof) != canonical_json_bytes(
+            accepted_proof
+        ):
+            raise MaterializationError("post-build epoch-manifest proof differs")
+        checks["epoch_manifest_input_authority"] = "PASS"
+    proof_sha256 = (
+        hashlib.sha256(canonical_json_bytes(epoch_manifest_proof)).hexdigest()
+        if epoch_manifest_proof is not None
+        else None
+    )
+    if financial_outcomes is not None:
+        from portfolio_financial_outcomes import financial_outcomes_semantic_identity
+
+    return {
+        "as_of_date": recipe["as_of_date"],
+        "checks": checks,
+        **(
+            {
+                "financial_outcomes_sha256": financial_outcomes_semantic_identity(
+                    financial_outcomes
+                )
+            }
+            if financial_outcomes is not None
+            else {}
+        ),
+        # Both epoch keys appear only with the raw-five inputs they describe.
+        # This one used to be emitted unconditionally as null, so a schema-10
+        # vertical -- which has no epoch-manifest input gate -- produced a
+        # semantic gate carrying a key the reader does not allow, and every
+        # run failed its last node with "post-build semantic gate keys differ
+        # from the contract".
+        **(
+            {
+                "financial_epoch_manifest_inputs_sha256": hashlib.sha256(
+                    canonical_json_bytes(manifest_inputs)
+                ).hexdigest(),
+                "financial_epoch_manifest_proof_sha256": proof_sha256,
+            }
+            if manifest_inputs is not None
+            else {}
+        ),
+        "release_commit": recipe["release_commit"],
+        "release_generations": (
+            dict(release_generations)
+            if release_generations is not None
+            else {
+                ROOT_IDS[role]: recipe["expected_generations"][role]["generation_id"]
+                for role in RELEASE_ROLES
+            }
+        ),
+        "schema_version": (
+            3
+            if manifest_inputs is not None
+            else 2
+            if recipe.get("schema_version") == 3
+            else 1
+        ),
+        "unwaived_blocking_exceptions": 0,
+        "verdict": "PASS",
+    }
+
+
+def semantic(
+    recipe_path: Path, output_path: Path, financial_spec_path: Path | None = None
+) -> dict[str, Any]:
+    recipe = _recipe(recipe_path)
+    output_root = output_path.parent.parent
+    checks: dict[str, dict[str, Any]] = {}
+    release_as_of = date.fromisoformat(_text(recipe["as_of_date"], "as_of_date"))
+    if recipe.get("schema_version") == 3:
+        conformance = recipe["product_authority"]["conformance"]
+        _result(
+            checks,
+            "product_conformance",
+            True,
+            readiness=conformance["readiness"],
+            sha256=hashlib.sha256(canonical_json_bytes(conformance)).hexdigest(),
+        )
+    manifest_inputs = recipe.get("financial_epoch_manifest_inputs")
+    epoch_manifest_proof: dict[str, Any] | None = None
+    if manifest_inputs is not None:
+        epoch_manifest_proof = _financial_epoch_manifest_proof(recipe, output_root)
+        if epoch_manifest_proof is None:  # pragma: no cover - guarded above
+            raise MaterializationError("post-build epoch-manifest proof is unavailable")
+        if canonical_json_bytes(epoch_manifest_proof) != canonical_json_bytes(
+            recipe["financial_epoch_manifest_proof"]
+        ):
+            raise MaterializationError("post-build epoch-manifest proof differs")
+        _result(
+            checks,
+            "epoch_manifest_input_authority",
+            True,
+            proof_sha256=hashlib.sha256(
+                canonical_json_bytes(epoch_manifest_proof)
+            ).hexdigest(),
+        )
+    verified_epoch_proof = _verified_epoch_manifest_materialization_proof(
+        recipe, output_root
+    )
+    if verified_epoch_proof is not None:
+        _result(
+            checks,
+            "verified_epoch_manifest_bundle_authority",
+            True,
+            proof_sha256=hashlib.sha256(
+                canonical_json_bytes(verified_epoch_proof)
+            ).hexdigest(),
+        )
+
+    generation_rows: dict[str, dict[str, Any]] = {}
+    generation_ok = True
+    for role in RELEASE_ROLES:
+        generation = _generation_dir(output_root, recipe, role)
+        expected = recipe["expected_generations"][role]
+        try:
+            inventory = inventory_generation(generation)
+            inventory_files = inventory["files"]
+            if not isinstance(inventory_files, list):
+                raise MaterializationError(f"{role} generation inventory differs")
+            manifest = GenerationManifest.from_json_bytes(
+                (generation / "generation.json").read_bytes()
+            )
+            actual = {
+                "files": inventory_files,
+                "generation_id": inventory["generation_id"],
+                "manifest_sha256": inventory["manifest_sha256"],
+            }
+            generation_as_of = manifest.as_of_date
+            passed = (
+                actual == expected
+                and manifest.verification is VerificationStatus.VERIFIED
+                and manifest.coverage.status
+                is CoverageStatus.COMPLETE_WITHIN_DECLARED_BOUNDARY
+                and _generation_as_of_allowed(role, generation_as_of, release_as_of)
+            )
+            generation_rows[role] = {
+                "actual_generation_id": actual["generation_id"],
+                "as_of_rule": (
+                    "ON_OR_BEFORE_RELEASE"
+                    if role in _DATA_DATED_RELEASE_ROLES
+                    else "EXACT_RELEASE_DATE"
+                ),
+                "expected_generation_id": expected["generation_id"],
+                "file_count": len(inventory_files),
+                "generation_as_of_date": generation_as_of.isoformat(),
+                "status": "PASS" if passed else "FAIL",
+            }
+        except (OSError, ValueError) as exc:
+            passed = False
+            generation_rows[role] = {"error": str(exc), "status": "FAIL"}
+        generation_ok = generation_ok and passed
+    _result(checks, "generation_invariants", generation_ok, generations=generation_rows)
+
+    ledger_generation = _generation_dir(output_root, recipe, "ledger")
+    baseline_generation = _generation_dir(output_root, recipe, "baseline")
+    report_generation = _generation_dir(output_root, recipe, "report")
+    panel_generation = _generation_dir(output_root, recipe, "panel")
+    baseline = _load(
+        baseline_generation / "portfolio-baseline.json", "portfolio baseline"
+    )
+    report = _load(report_generation / "portfolio-report-data.json", "portfolio report")
+    panel = _load(panel_generation / "data" / "dashboard_data.json", "panel data")
+
+    replay = baseline.get("replay")
+    allocations = baseline.get("allocations")
+    if not isinstance(replay, dict) or not isinstance(allocations, list):
+        raise MaterializationError("baseline financial facts differ")
+    systematic = _decimal(replay.get("systematic_total_usd"), "systematic total")
+    reserve = _decimal(replay.get("reserve_total_usd"), "reserve total")
+    total = _decimal(replay.get("total_liquid_usd"), "total liquid")
+    systematic_allocations = sum(
+        (
+            _decimal(row["current_value"]["value"], "allocation value")
+            for row in allocations
+            if isinstance(row, dict)
+            and row.get("pool_id") == "systematic-capital"
+            and isinstance(row.get("current_value"), dict)
+        ),
+        Decimal(0),
+    )
+    weights = sum(
+        (
+            _decimal(row.get("systematic_weight"), "systematic weight")
+            for row in allocations
+            if isinstance(row, dict) and row.get("pool_id") == "systematic-capital"
+        ),
+        Decimal(0),
+    )
+    financial_ok = (
+        total == systematic + reserve
+        and systematic_allocations == systematic
+        and abs(weights - Decimal(1)) <= WEIGHT_SUM_TOLERANCE
+    )
+    _result(
+        checks,
+        "financial_identities",
+        financial_ok,
+        reserve_total_usd=str(reserve),
+        systematic_allocation_sum_usd=str(systematic_allocations),
+        systematic_total_usd=str(systematic),
+        systematic_weight_sum=str(weights),
+        total_liquid_usd=str(total),
+    )
+
+    assignments = baseline.get("assignments")
+    if not isinstance(assignments, list):
+        raise MaterializationError("baseline assignments differ")
+    open_systematic_unmapped = [
+        row
+        for row in assignments
+        if isinstance(row, dict)
+        and row.get("effective_end") is None
+        and row.get("pool_id") == "systematic-capital"
+        and row.get("strategy_id") is None
+    ]
+    invalid_reserve = [
+        row
+        for row in assignments
+        if isinstance(row, dict)
+        and row.get("effective_end") is None
+        and row.get("pool_id") == "reserve-capital"
+        and (
+            row.get("strategy_id") is not None
+            or row.get("strategy_mapping_disposition") != "RESERVE_NOT_APPLICABLE"
+        )
+    ]
+    _result(
+        checks,
+        "mappings",
+        not open_systematic_unmapped and not invalid_reserve,
+        invalid_open_reserve_count=len(invalid_reserve),
+        open_systematic_unmapped_count=len(open_systematic_unmapped),
+    )
+
+    ledger_sha = _sha(ledger_generation / "provider-ledger.json")[0]
+    baseline_sha = _sha(baseline_generation / "portfolio-baseline.json")[0]
+    source_artifacts = baseline.get("source_artifacts")
+    report_baseline = report.get("baseline")
+    provider_refs = (
+        [
+            row
+            for row in source_artifacts
+            if isinstance(row, dict)
+            and row.get("source_key") == "provider-ledger-generation"
+        ]
+        if isinstance(source_artifacts, list)
+        else []
+    )
+    manifest_refs = [
+        row for row in provider_refs if row.get("schema_name") == "generation-manifest"
+    ]
+    catalog_refs = [
+        row
+        for row in provider_refs
+        if row.get("schema_name") == "provider-ledger-catalog"
+    ]
+    ledger_manifest_sha = _sha(ledger_generation / "generation.json")[0]
+    ledger_bridge_ok = (
+        len(manifest_refs) == 1
+        and manifest_refs[0].get("sha256") == ledger_manifest_sha
+        and len(catalog_refs) == 1
+        and catalog_refs[0].get("sha256") == ledger_sha
+        and isinstance(report_baseline, dict)
+        and report_baseline.get("generation_id")
+        == recipe["expected_generations"]["baseline"]["generation_id"]
+        and report_baseline.get("catalog_sha256") == baseline_sha
+    )
+    _result(
+        checks,
+        "ledger_bridges",
+        ledger_bridge_ok,
+        baseline_catalog_sha256=baseline_sha,
+        baseline_provider_catalog_references=catalog_refs,
+        baseline_provider_manifest_references=manifest_refs,
+        ledger_catalog_sha256=ledger_sha,
+        ledger_manifest_sha256=ledger_manifest_sha,
+        report_baseline=report_baseline,
+    )
+
+    analytics_ids: dict[str, str] = {}
+    for name, root_name in (
+        ("decomposition_generation_id", "decomposition"),
+        ("correlation_generation_id", "correlation"),
+        ("weekly_returns_generation_id", "weekly-returns"),
+    ):
+        generation_id, _ = _current_generation(
+            output_root / "stages" / "analytics" / root_name
+        )
+        analytics_ids[name] = generation_id
+    # The perimeter is whatever the accepted product requires, not a constant.
+    # This was pinned at 9 by 24101f4, when the product had nine REQUIRED
+    # strategies; it now has seven, so the literal rejected every correct
+    # release.  Derive it from the same conformance block the HWM assessment
+    # uses for required_strategy_ids.
+    # Schema-2 recovery recipes carry no conformance block; those keep the
+    # report-versus-panel equality without an absolute count.
+    authority_block = recipe.get("product_authority")
+    conformance_block = (
+        authority_block.get("conformance")
+        if isinstance(authority_block, Mapping)
+        else None
+    )
+    conformance_strategies = (
+        conformance_block.get("strategies")
+        if isinstance(conformance_block, Mapping)
+        else None
+    )
+    required_strategy_count = (
+        sum(
+            1
+            for row in conformance_strategies
+            if isinstance(row, Mapping) and row.get("product_requirement") == "REQUIRED"
+        )
+        if isinstance(conformance_strategies, list)
+        else None
+    )
+    panel_meta = panel.get("meta")
+    report_hwm = report.get("hwm_summary")
+    panel_hwm = panel.get("hwm_summary")
+    equality_ok = (
+        isinstance(panel_meta, dict)
+        and panel_meta.get("baseline_generation_id")
+        == recipe["expected_generations"]["baseline"]["generation_id"]
+        and panel_meta.get("report_generation_id")
+        == recipe["expected_generations"]["report"]["generation_id"]
+        and all(panel_meta.get(key) == value for key, value in analytics_ids.items())
+        and isinstance(report_hwm, dict)
+        and report_hwm == panel_hwm
+        and len(report.get("strategy_summary", [])) == len(panel.get("strategies", []))
+        and (
+            required_strategy_count is None
+            or len(panel.get("strategies", [])) == required_strategy_count
+        )
+    )
+    _result(
+        checks,
+        "analytics_report_panel_equality",
+        equality_ok,
+        analytics_generation_ids=analytics_ids,
+        panel_baseline_generation_id=(panel_meta or {}).get("baseline_generation_id")
+        if isinstance(panel_meta, dict)
+        else None,
+        panel_report_generation_id=(panel_meta or {}).get("report_generation_id")
+        if isinstance(panel_meta, dict)
+        else None,
+        report_hwm=report_hwm,
+        panel_hwm=panel_hwm,
+        report_strategy_count=len(report.get("strategy_summary", [])),
+        panel_strategy_count=len(panel.get("strategies", [])),
+    )
+
+    freshness_path = output_root / "stages" / "ledger" / "freshness-health.json"
+    freshness = _load(freshness_path, "freshness evidence")
+    assessments = freshness.get("assessments")
+    assessment_rows = (
+        [row for row in assessments if isinstance(row, dict)]
+        if isinstance(assessments, list)
+        else []
+    )
+    assessment_shape_ok = isinstance(assessments, list) and len(assessment_rows) == len(
+        assessments
+    )
+    evaluation_ok = assessment_shape_ok and all(
+        row.get("evaluated_on") == recipe["as_of_date"] for row in assessment_rows
+    )
+    blocking = [
+        row for row in assessment_rows if row.get("blocks_current_consumers") is True
+    ]
+    blocking_disclosures = {
+        _freshness_key(row): (row.get("state"), row.get("reason")) for row in blocking
+    }
+    blockers_disclosed = all(
+        _freshness_key(row) is not None
+        and row.get("required_for_current") is True
+        and row.get("escalation_required") is True
+        and row.get("state") in {"STALE", "UNAVAILABLE"}
+        and isinstance(row.get("reason"), str)
+        and bool(str(row["reason"]).strip())
+        for row in blocking
+    )
+    panel_coverage = panel.get("coverage")
+    rendered_blocking = (
+        [
+            row
+            for row in panel_coverage
+            if isinstance(row, dict)
+            and row.get("category") == "DATA_FRESHNESS"
+            and row.get("blocks_current_consumers") is True
+        ]
+        if isinstance(panel_coverage, list)
+        else []
+    )
+    rendered_disclosures = {
+        _freshness_key(row): (row.get("status"), row.get("reason"))
+        for row in rendered_blocking
+    }
+    rendered_disclosures_ok = blocking_disclosures == rendered_disclosures
+    freshness_ok = (
+        freshness.get("as_of_date") == recipe["as_of_date"]
+        and evaluation_ok
+        and blockers_disclosed
+        and rendered_disclosures_ok
+    )
+    _result(
+        checks,
+        "freshness",
+        freshness_ok,
+        as_of_date=freshness.get("as_of_date"),
+        blocking_assessment_count=len(blocking),
+        blockers_explicitly_disclosed=blockers_disclosed,
+        blockers_rendered_in_panel=rendered_disclosures_ok,
+        sha256=_sha(freshness_path)[0],
+    )
+
+    panel_qa = _load(panel_generation / "qa" / "qa-validation.json", "panel QA")
+    interaction_qa = _load(
+        panel_generation / "qa" / "interaction-results.json", "interaction QA"
+    )
+    workbook_validation = _load(
+        report_generation / "workbook-validation.json", "workbook validation"
+    )
+    xlsx_result = _load(
+        report_generation / "xlsx-win-result.json", "native Excel result"
+    )
+    evidence_ok = (
+        panel_qa.get("checks_passed") == panel_qa.get("checks_total")
+        and interaction_qa.get("all_passed") is True
+        and workbook_validation.get("all_passed") is True
+        and xlsx_result.get("final_state") == "SUCCEEDED"
+        and xlsx_result.get("ok") is True
+        and _sha(output_root / "stages" / "panel" / "index.html")[0]
+        == recipe["panel_launcher_sha256"]
+    )
+    generation_check = checks["generation_invariants"]
+    generation_check["evidence"]["release_evidence"] = {
+        "native_excel_ok": xlsx_result.get("ok"),
+        "panel_browser_checks": panel_qa.get("checks_total"),
+        "panel_interaction_ok": interaction_qa.get("all_passed"),
+        "status": "PASS" if evidence_ok else "FAIL",
+    }
+    if not evidence_ok:
+        generation_check["status"] = "FAIL"
+
+    verdict = (
+        "PASS" if all(row["status"] == "PASS" for row in checks.values()) else "FAIL"
+    )
+    details = {
+        "as_of_date": recipe["as_of_date"],
+        "checks": checks,
+        "release_commit": recipe["release_commit"],
+        "schema_version": 2 if recipe.get("schema_version") == 3 else 1,
+        "verdict": verdict,
+    }
+    details_path = output_path.with_name("semantic-details.json")
+    _write_exact(details_path, canonical_json_bytes(details))
+    if verdict != "PASS":
+        failed = sorted(name for name, row in checks.items() if row["status"] != "PASS")
+        raise MaterializationError(
+            f"semantic reconciliation failed: {', '.join(failed)}"
+        )
+    financial_proof = None
+    if financial_spec_path is not None:
+        from quant_engine.core.pipeline import PipelineSpec
+        from portfolio_financial_outcomes import validate_financial_outcomes
+
+        financial_spec = PipelineSpec.from_json_bytes(financial_spec_path.read_bytes())
+        financial_proof = validate_financial_outcomes(financial_spec)
+    _write_exact(
+        output_path,
+        canonical_json_bytes(
+            _semantic_gate_payload(
+                recipe,
+                epoch_manifest_proof=epoch_manifest_proof,
+                financial_outcomes=financial_proof,
+            )
+        ),
+    )
+    return {"details": str(details_path), "state": "PASS"}
+
+
+# `timeout_seconds` bounds a node by time without progress. The analytics stage
+# reports once per decomposition lens, and `portfolio_release_builder` allows a
+# single lens 7200s, so one lens solve is the longest silence that stage can
+# legitimately produce. A smaller budget would kill a lens the layer below it
+# still considers healthy.
+ANALYTICS_SILENCE_SECONDS = 7200
+
+
+def _command(
+    *,
+    node_id: str,
+    runtime: Path,
+    entrypoint: Path,
+    lock: Path,
+    recipe: Path,
+    depends_on: Sequence[str],
+    args: Sequence[str],
+    reads: Sequence[Path],
+    writes: Sequence[Path],
+    retry_limit: int = 0,
+    timeout_seconds: int = 3600,
+) -> dict[str, Any]:
+    return {
+        "argv": [str(runtime), str(entrypoint), *args],
+        "cwd": str(entrypoint.parent.parent),
+        "declared_reads": [
+            str(lock),
+            str(entrypoint),
+            str(recipe),
+            *(str(path) for path in reads),
+        ],
+        "declared_writes": [str(path) for path in writes],
+        "depends_on": list(depends_on),
+        "effect": "LOCAL_ONLY",
+        "kind": "COMMAND",
+        "node_id": node_id,
+        "request_identity": None,
+        "retry_limit": retry_limit,
+        "timeout_seconds": timeout_seconds,
+    }
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", "-C", str(repo), *args],
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    ).stdout.strip()
+
+
+def _validate_output_path_budget(output_root: Path, recipe: Mapping[str, Any]) -> None:
+    longest = 0
+    for role in RELEASE_ROLES:
+        generation_id = str(recipe["expected_generations"][role]["generation_id"])
+        for row in recipe["expected_generations"][role]["files"]:
+            candidate = (
+                output_root
+                / "release-roots"
+                / ROOT_IDS[role]
+                / "generations"
+                / generation_id
+                / row["relative_path"]
+            )
+            longest = max(longest, len(str(candidate)))
+    if longest > WINDOWS_SAFE_FILE_PATH:
+        raise MaterializationError(
+            f"private output root exceeds the portable Windows path budget: {longest} characters"
+        )
+
+
+def build_spec(
+    recipe_path: Path,
+    output_root: Path,
+    spec_path: Path,
+    hwm_governed_result_path: Path | None = None,
+    hwm_governed_input_generation_path: Path | None = None,
+    hwm_governed_calendar_authority_path: Path | None = None,
+    hwm_governed_admission_receipt_path: Path | None = None,
+    financial_input_contract_path: Path | None = None,
+    portfolio_root: Path | None = None,
+    invested_capital_result_path: Path | None = None,
+    invested_capital_input_generation_path: Path | None = None,
+    retained_cache_root: Path | None = None,
+    workbook_runtime_path: Path | None = None,
+) -> dict[str, Any]:
+    if portfolio_root is None:
+        # Fail here rather than four nodes into the run. `build_workbook` and
+        # `build_panel` refuse a financial publication without this root, and
+        # every schema-3 vertical is financial, so an omitted root is always a
+        # blocked execute with an opaque node failure.
+        raise MaterializationError(
+            "financial pipeline specification requires a portfolio root"
+        )
+    recipe = _recipe(recipe_path)
+    if recipe.get("schema_version") != 3:
+        raise MaterializationError(
+            "schema-2 recipe is recovery-only and cannot create a current specification"
+        )
+    _validate_output_path_budget(output_root.resolve(), recipe)
+    retained_cache_root = (retained_cache_root or output_root / "state").resolve()
+    repo = Path(__file__).resolve().parents[1]
+    release_commit = _git(repo, "rev-parse", "HEAD")
+    if release_commit != recipe["release_commit"] or _git(
+        repo, "status", "--porcelain=v1", "--untracked-files=all"
+    ):
+        raise MaterializationError("repository must be clean at the recipe commit")
+    runtime = Path(os.environ.get("QE_PIPELINE_PYTHON", sys.executable)).resolve()
+    lock = repo / "uv.lock"
+    entrypoint = Path(__file__).resolve()
+    builder = repo / "tools" / "portfolio_release_builder.py"
+    run_id = hashlib.sha256(canonical_json_bytes(recipe)).hexdigest()
+    run_dir = output_root / "runs" / run_id
+    source_run = run_dir / "source-run.json"
+    authority_dir = output_root / "stages" / "authority"
+    authority_path = authority_dir / "authority-snapshot.json"
+    semantic_dir = output_root / "evidence"
+    semantic_path = semantic_dir / "post-build-semantic.json"
+    vertical_path = _absolute(recipe["vertical_recipe"]["path"], "vertical recipe")
+    qa_dir = _absolute(recipe["qa_dir"]["path"], "panel QA")
+    source_paths = _vertical_source_paths(vertical_path)
+    manifest_inputs = recipe.get("financial_epoch_manifest_inputs")
+    manifest_input_paths: dict[str, Path] = {}
+    if manifest_inputs is not None:
+        if not isinstance(manifest_inputs, dict):
+            raise MaterializationError("financial epoch manifest inputs differ")
+        manifest_input_paths = {
+            key: _absolute(
+                manifest_inputs[key]["path"], f"financial epoch manifest {key}"
+            )
+            for key in EPOCH_MANIFEST_INPUTS
+        }
+    product_authority = recipe["product_authority"]
+    epoch_generation = recipe.get("epoch_manifest_generation")
+    bound_contract_path: Path | None = None
+    if epoch_generation is not None:
+        contract_definition = product_authority.get("contract")
+        if not isinstance(contract_definition, dict):
+            raise MaterializationError("financial MVP contract authority differs")
+        financial_contract = _load(
+            _absolute(contract_definition["path"], "financial MVP contract"),
+            "financial MVP contract",
+        )
+        bound_financial_contract = _bind_epoch_manifest_bundle(
+            Path(epoch_generation["runtime_root"]),
+            epoch_generation["generation_id"],
+            financial_contract,
+        )
+        bound_contract_path = output_root / "financial-mvp-bound-contract.json"
+        bound_contract_bytes = canonical_json_bytes(bound_financial_contract)
+        _write_exact(bound_contract_path, bound_contract_bytes)
+    for key in ("contract", "source_matrix"):
+        definition = product_authority[key]
+        source_paths.append(_absolute(definition["path"], f"product authority {key}"))
+    provider_definition = product_authority["provider_generation"]
+    for key in ("manifest", "catalog", "receipt"):
+        source_paths.append(
+            _absolute(provider_definition[key]["path"], f"provider authority {key}")
+        )
+    for key in ("correction_registry", "rederive_registry"):
+        definition = product_authority[key].get("file")
+        if definition is not None:
+            source_paths.append(
+                _absolute(definition["path"], f"product authority {key}")
+            )
+
+    nodes: list[dict[str, Any]] = []
+    nodes.append(
+        _command(
+            node_id="acquire-local-sources",
+            runtime=runtime,
+            entrypoint=entrypoint,
+            lock=lock,
+            recipe=recipe_path,
+            depends_on=(),
+            args=(
+                "acquire",
+                "--recipe",
+                str(recipe_path),
+                "--output-dir",
+                str(run_dir),
+            ),
+            reads=[*source_paths, qa_dir],
+            writes=[run_dir],
+        )
+    )
+    nodes.append(
+        _command(
+            node_id="build-authority-snapshot",
+            runtime=runtime,
+            entrypoint=entrypoint,
+            lock=lock,
+            recipe=recipe_path,
+            depends_on=("acquire-local-sources",),
+            args=(
+                "authority",
+                "--recipe",
+                str(recipe_path),
+                "--source-run",
+                str(source_run),
+                "--output-dir",
+                str(authority_dir),
+            ),
+            reads=[run_dir],
+            writes=[authority_dir],
+        )
+    )
+    source_payload = _source_payload(recipe)
+    authority_bytes = canonical_json_bytes(_authority_payload(recipe, source_payload))
+    nodes.append(
+        {
+            "depends_on": ["build-authority-snapshot"],
+            "kind": "ARTIFACT",
+            "node_id": "authority-snapshot",
+            "path": str(authority_path),
+            "sha256": hashlib.sha256(authority_bytes).hexdigest(),
+            "size_bytes": len(authority_bytes),
+        }
+    )
+
+    report_data_file = next(
+        row
+        for row in recipe["expected_generations"]["report"]["files"]
+        if row["relative_path"] == "portfolio-report-data.json"
+    )
+    report_candidate = (
+        output_root
+        / "stages"
+        / "report-candidate"
+        / "candidates"
+        / report_data_file["sha256"]
+    )
+    stage_writes = {
+        "ledger": [
+            output_root / "stages" / "ledger",
+            output_root / "stage-results" / "ledger.json",
+        ],
+        "baseline": [
+            output_root / "stages" / "baseline",
+            output_root / "stage-results" / "baseline.json",
+        ],
+        "attribution": [
+            output_root / "stages" / "attribution",
+            output_root / "stage-results" / "attribution.json",
+        ],
+        "analytics": [
+            output_root / "stages" / "analytics",
+            output_root / "stage-results" / "analytics.json",
+            retained_cache_root,
+        ],
+        "report": [
+            report_candidate / "portfolio-report-data.json",
+            report_candidate / "portfolio-report.xlsx",
+            report_candidate / "workbook-contract.json",
+            report_candidate / "xlsx-job.json",
+            output_root / "stage-results" / "report.json",
+        ],
+        "workbook": [
+            output_root / "stages" / "report-candidate",
+            output_root / "stages" / "report",
+            output_root / "stage-results" / "workbook.json",
+        ],
+        "panel": [
+            output_root / "stages" / "panel",
+            output_root / "stage-results" / "panel.json",
+        ],
+    }
+    governed_stage_paths = _governed_stage_paths(
+        hwm_governed_result_path,
+        hwm_governed_input_generation_path,
+        hwm_governed_calendar_authority_path,
+        hwm_governed_admission_receipt_path,
+        invested_capital_result_path,
+        invested_capital_input_generation_path,
+    )
+    governed_stage_args = [
+        value
+        for flag, path in governed_stage_paths.items()
+        for value in (flag, str(path))
+    ]
+    previous_node = "authority-snapshot"
+    previous_outputs: list[Path] = [authority_path]
+    generation_nodes: dict[str, str] = {}
+    for role in STAGES:
+        command_id = f"build-{role}"
+        args = [
+            "stage",
+            "--recipe",
+            str(vertical_path),
+            "--output-root",
+            str(output_root),
+            "--role",
+            role,
+        ]
+        for key, flag in EPOCH_MANIFEST_INPUTS.items():
+            if key in manifest_input_paths:
+                args.extend((flag, str(manifest_input_paths[key])))
+        if role == "panel":
+            args.extend(("--qa-dir", str(qa_dir)))
+        if role == "analytics":
+            args.extend(("--retained-cache-root", str(retained_cache_root)))
+        if role == "workbook" and workbook_runtime_path is not None:
+            args.extend(("--workbook-runtime", str(workbook_runtime_path)))
+        # `build_workbook` and `build_panel` treat any run carrying governed
+        # HWM, invested capital or decomposition lenses as a financial
+        # publication and refuse it without a portfolio root, which is what
+        # proves the stage output root is disjoint from production. Every
+        # financial vertical has lenses, so both roles always need it.
+        needs_portfolio_root = role in _PORTFOLIO_ROOT_STAGES or (
+            bool(governed_stage_paths) and role in _GOVERNED_OUTCOME_STAGES
+        )
+        if needs_portfolio_root and portfolio_root is not None:
+            args.extend(("--portfolio-root", str(portfolio_root)))
+        # The governed numerical results are stage inputs, not merely gate
+        # evidence: `build_report`, `build_workbook` and `build_panel` each read
+        # them and each refuses to verify a candidate that was built with them
+        # when it is re-run without. Omitting them here made the pipeline's own
+        # panel node recompute a semantic validation that differed from the one
+        # the proof wrote into the shared QA directory.
+        if role in _GOVERNED_OUTCOME_STAGES:
+            args.extend(governed_stage_args)
+        reads = [*previous_outputs, *source_paths]
+        if role in _GOVERNED_OUTCOME_STAGES:
+            reads.extend(governed_stage_paths.values())
+        for dependency in STAGE_DEPENDENCIES[role]:
+            reads.extend(stage_writes[dependency])
+        if role == "panel":
+            reads.append(qa_dir)
+        if role == "workbook" and workbook_runtime_path is not None:
+            reads.append(workbook_runtime_path)
+        reads = list(dict.fromkeys(reads))
+        command = _command(
+            node_id=command_id,
+            runtime=runtime,
+            entrypoint=builder,
+            lock=lock,
+            recipe=recipe_path,
+            depends_on=(previous_node,),
+            args=args,
+            reads=reads,
+            writes=stage_writes[role],
+            retry_limit=1 if role == "workbook" else 0,
+            timeout_seconds=(
+                ANALYTICS_SILENCE_SECONDS if role == "analytics" else 3600
+            ),
+        )
+        nodes.append(command)
+        release_role = next(
+            (item for item, stage in GENERATION_STAGE.items() if stage == role), None
+        )
+        if release_role is not None:
+            expected = recipe["expected_generations"][release_role]
+            generation_node = f"{release_role}-generation"
+            generation_source = _generation_dir(output_root, recipe, release_role)
+            nodes.append(
+                {
+                    "depends_on": [command_id],
+                    "files": expected["files"],
+                    "generation_id": expected["generation_id"],
+                    "kind": "GENERATION",
+                    "manifest_sha256": expected["manifest_sha256"],
+                    "node_id": generation_node,
+                    "release_target": True,
+                    "root_id": ROOT_IDS[release_role],
+                    "source_dir": str(generation_source),
+                }
+            )
+            generation_nodes[release_role] = generation_node
+            previous_outputs = [generation_source]
+        else:
+            previous_outputs = stage_writes[role]
+        previous_node = command_id
+
+    generation_sources = [
+        _generation_dir(output_root, recipe, role) for role in RELEASE_ROLES
+    ]
+    nodes.append(
+        _command(
+            node_id="post-build-semantic-reconciliation",
+            runtime=runtime,
+            entrypoint=entrypoint,
+            lock=lock,
+            recipe=recipe_path,
+            depends_on=(previous_node, *generation_nodes.values()),
+            args=(
+                "semantic",
+                "--recipe",
+                str(recipe_path),
+                "--output",
+                str(semantic_path),
+            ),
+            reads=[
+                authority_path,
+                *generation_sources,
+                output_root / "stages" / "analytics",
+                *stage_writes["panel"],
+                *([bound_contract_path] if bound_contract_path is not None else []),
+            ],
+            writes=[semantic_path, semantic_dir / "semantic-details.json"],
+        )
+    )
+
+    command_sources = []
+    for node in nodes:
+        if node["kind"] != "COMMAND":
+            continue
+        executable = Path(node["argv"][1])
+        command_sources.append(
+            {
+                "entrypoint_path": str(executable),
+                "entrypoint_sha256": _sha(executable)[0],
+                "node_id": node["node_id"],
+            }
+        )
+    manifest_inputs = recipe.get("financial_epoch_manifest_inputs")
+    contract = {
+        "authority_snapshot": {
+            "artifact_node": "authority-snapshot",
+            "command_node": "build-authority-snapshot",
+        },
+        "command_sources": command_sources,
+        "profile": "PORTFOLIO_SOURCE_TO_PANEL_V1",
+        "release_commit": release_commit,
+        "runtime": {
+            "environment_sha256": runtime_environment_sha256(runtime),
+            "executable_path": str(runtime),
+            "executable_sha256": _sha(runtime)[0],
+            "lock_path": str(lock),
+            "lock_sha256": _sha(lock)[0],
+            "repo_root": str(repo),
+        },
+        "schema_version": (
+            3
+            if manifest_inputs is not None
+            # A reused verified epoch-manifest generation is its own
+            # profile: it carries one generation identity where schema 3
+            # carries the five raw role files, and the consumer has to
+            # know which of the two it is reading.
+            else 4
+            if recipe.get("epoch_manifest_generation") is not None
+            else 2
+            if recipe.get("schema_version") == 3
+            else 1
+        ),
+        "semantic_reconciliation_node": "post-build-semantic-reconciliation",
+        "source_acquisitions": [
+            {"adapter_commit": release_commit, "node_id": "acquire-local-sources"}
+        ],
+        "stages": {
+            role: {
+                "command_node": f"build-{role}",
+                "generation_nodes": [generation_nodes[release_role]]
+                if (
+                    release_role := next(
+                        (
+                            item
+                            for item, stage in GENERATION_STAGE.items()
+                            if stage == role
+                        ),
+                        None,
+                    )
+                )
+                is not None
+                else [],
+            }
+            for role in STAGES
+        },
+    }
+    contract["product_authority"] = _product_gate_payload(product_authority)
+    epoch_generation = recipe.get("epoch_manifest_generation")
+    if epoch_generation is not None:
+        contract["epoch_manifest_generation"] = _canonical_clone(epoch_generation)
+        contract["epoch_manifest_source_sha256"] = hashlib.sha256(
+            canonical_json_bytes(epoch_generation["source"])
+        ).hexdigest()
+        contract["financial_mvp_bound_contract_sha256"] = hashlib.sha256(
+            bound_contract_bytes
+        ).hexdigest()
+    if manifest_inputs is not None:
+        contract["financial_epoch_manifest_inputs"] = _canonical_clone(manifest_inputs)
+        contract["financial_epoch_manifest_proof_sha256"] = hashlib.sha256(
+            canonical_json_bytes(recipe["financial_epoch_manifest_proof"])
+        ).hexdigest()
+    contract_path = spec_path.with_name("portfolio-orchestration-contract.json")
+    contract_bytes = canonical_json_bytes(contract)
+    _write_exact(contract_path, contract_bytes)
+    product_path = spec_path.with_name("financial-mvp-product-conformance.json")
+    # The private proof run stages the governed results but does not assess
+    # them: `_hwm_input_authority_assessment` verifies the selected-source
+    # replay against generations that are pinned as artifact nodes, and only
+    # the production specification carries those. The assessment therefore
+    # stays PENDING_GOVERNED_HWM_RESULT here and becomes AVAILABLE in
+    # `build_production_spec`, which has both the bindings and the sources.
+    product_gates = _product_gate_rows(
+        product_authority,
+        product_path,
+        input_contract_path=financial_input_contract_path,
+    )
+    manifest_gate_path = spec_path.with_name(
+        "financial-epoch-manifest-input-authority.json"
+    )
+    manifest_gates = _financial_epoch_manifest_gate_rows(
+        manifest_inputs,
+        recipe.get("financial_epoch_manifest_proof"),
+        manifest_gate_path,
+    )
+    semantic_bytes = canonical_json_bytes(
+        _semantic_gate_payload(
+            recipe,
+            epoch_manifest_proof=recipe.get("financial_epoch_manifest_proof"),
+        )
+    )
+    launcher = output_root / "stages" / "panel" / "index.html"
+    spec = {
+        "as_of_date": recipe["as_of_date"],
+        "code_commit": release_commit,
+        "companions": [
+            {
+                "companion_id": "stable-control-panel-launcher",
+                "relative_path": "index.html",
+                "root_id": "control-panel",
+                "sha256": recipe["panel_launcher_sha256"],
+                "source_path": str(launcher),
+            }
+        ],
+        "coordination_root": str(output_root / "coordination"),
+        "created_at": datetime.now(UTC).isoformat(),
+        "gates": [
+            {
+                "gate_id": "portfolio-orchestration-contract",
+                "path": str(contract_path),
+                "sha256": hashlib.sha256(contract_bytes).hexdigest(),
+            },
+            {
+                "gate_id": "post-build-semantic",
+                "path": str(semantic_path),
+                "sha256": hashlib.sha256(semantic_bytes).hexdigest(),
+            },
+            *(
+                [
+                    {
+                        "gate_id": "financial-mvp-bound-contract",
+                        "path": str(bound_contract_path),
+                        "sha256": hashlib.sha256(bound_contract_bytes).hexdigest(),
+                    }
+                ]
+                if epoch_generation is not None
+                else []
+            ),
+            *product_gates,
+            *manifest_gates,
+        ],
+        "nodes": nodes,
+        "pipeline_id": recipe["pipeline_id"],
+        "roots": {
+            ROOT_IDS[role]: str(output_root / "release-roots" / ROOT_IDS[role])
+            for role in RELEASE_ROLES
+        },
+        "schema_version": 1,
+        "state_root": str(retained_cache_root),
+    }
+    _write_exact(spec_path, canonical_json_bytes(spec))
+    return {"contract": str(contract_path), "nodes": len(nodes), "spec": str(spec_path)}
+
+
+def _production_lens_nodes(
+    prepared_root: Path, contract: Mapping[str, Any]
+) -> dict[tuple[str, str, str], dict[str, Any]]:
+    """Bind both current surfaces to immutable generations in the existing roots."""
+    analytics = _load(
+        prepared_root / "stage-results" / "analytics.json", "prepared analytics"
+    )
+    bindings = analytics.get("lens_generation_bindings")
+    if analytics.get("schema_version") != 2 or not isinstance(bindings, list):
+        raise MaterializationError("current lens generation bindings are absent")
+    calculation = next(
+        row["calculation_contract"]
+        for row in contract["financial_outcomes"]
+        if row["outcome_id"] == "DECOMPOSITION"
+    )
+    plan = _load(CURRENT_STRATEGY_REGISTRY, "current decomposition plan")
+    expected = {
+        (mode, surface, source)
+        for mode in calculation["evidence_modes"]
+        for surface in calculation["surfaces"]
+        for source in plan["sources"]
+    }
+    nodes: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for binding in bindings:
+        if not isinstance(binding, dict):
+            raise MaterializationError("current lens generation binding differs")
+        key = (
+            _text(binding.get("evidence_mode"), "lens evidence_mode"),
+            _text(binding.get("surface"), "lens surface"),
+            _text(binding.get("source_key"), "lens source_key"),
+        )
+        if key not in expected or key in nodes:
+            raise MaterializationError("current lens generation key set differs")
+        mode, surface, source_key = key
+        root_id = f"hybrid-{source_key}" if mode == "LIVE_PLUS_BACKTEST" else source_key
+        if root_id not in PRODUCTION_ROOTS:
+            raise MaterializationError("current lens production root differs")
+        root = (
+            prepared_root
+            / "stages"
+            / "analytics"
+            / "decomposition-lenses"
+            / mode
+            / surface
+            / source_key
+        ).resolve()
+        if _absolute(binding.get("root"), "lens root") != root:
+            raise MaterializationError("current lens staging root differs")
+        generation_id, source = _current_generation(root)
+        if generation_id != binding.get("generation_id"):
+            raise MaterializationError("current lens pointer binding differs")
+        inventory = inventory_generation(source)
+        if inventory["generation_id"] != generation_id:
+            raise MaterializationError("current lens generation identity differs")
+        target = surface == "STATIC"
+        nodes[key] = {
+            "depends_on": [],
+            "files": inventory["files"],
+            "generation_id": generation_id,
+            "kind": "GENERATION",
+            "manifest_sha256": inventory["manifest_sha256"],
+            "node_id": f"publish-{root_id}" + ("" if target else "-dynamic-fls"),
+            "release_target": target,
+            "root_id": root_id,
+            "source_dir": str(source),
+        }
+    if set(nodes) != expected:
+        raise MaterializationError("current lens generation key set differs")
+    return nodes
+
+
+def _verify_panel_lens_nodes(
+    panel: Mapping[str, Any],
+    nodes: Mapping[tuple[str, str, str], Mapping[str, Any]],
+    decomposition_generation_id: str,
+) -> None:
+    """Require the panel to select every bound surface and evidence mode exactly."""
+    lenses = panel.get("decomposition_lenses")
+    modes = lenses.get("modes") if isinstance(lenses, dict) else None
+    selected: dict[tuple[object, object, object], object] = {}
+    if not isinstance(modes, dict):
+        raise MaterializationError("prepared panel lens authority differs")
+    for mode, groups in modes.items():
+        if not isinstance(groups, list):
+            raise MaterializationError("prepared panel lens authority differs")
+        for group in groups:
+            surfaces = group.get("surfaces") if isinstance(group, dict) else None
+            if not isinstance(surfaces, dict):
+                # The dynamic style path is a lens in its own right rather than
+                # a surface split of one, so it carries no `surfaces`. It is not
+                # part of the current-surface binding and must not be compared
+                # against it -- its generation is the decomposition authority
+                # the caller has already verified against `meta`, which is what
+                # makes skipping it here safe rather than merely lenient.
+                if (
+                    isinstance(group, dict)
+                    and group.get("generation_id") == decomposition_generation_id
+                ):
+                    continue
+                raise MaterializationError("prepared panel lens authority differs")
+            for surface, value in surfaces.items():
+                sources = value.get("sources") if isinstance(value, dict) else None
+                if not isinstance(sources, list):
+                    raise MaterializationError("prepared panel lens authority differs")
+                for source in sources:
+                    if not isinstance(source, dict):
+                        raise MaterializationError(
+                            "prepared panel lens authority differs"
+                        )
+                    key = (mode, surface, source.get("source_key"))
+                    if key in selected:
+                        raise MaterializationError(
+                            "prepared panel lens authority differs"
+                        )
+                    selected[key] = source.get("generation_id")
+    if selected != {key: node["generation_id"] for key, node in nodes.items()}:
+        raise MaterializationError("prepared panel lens authority differs")
+
+
+def build_production_spec(
+    recipe_path: Path,
+    prepared_root: Path,
+    semantic_path: Path,
+    portfolio_root: Path,
+    state_root: Path,
+    spec_path: Path,
+    hwm_governed_result_path: Path | None = None,
+    hwm_governed_input_generation_path: Path | None = None,
+    hwm_governed_calendar_authority_path: Path | None = None,
+    hwm_governed_admission_receipt_path: Path | None = None,
+    financial_artifacts_path: Path | None = None,
+    financial_input_contract_path: Path | None = None,
+    predecessor_repair_gate_path: Path | None = None,
+) -> dict[str, Any]:
+    """Bind a verified private proof to the stable production root set."""
+
+    recipe = _recipe(recipe_path)
+    if financial_artifacts_path is None:
+        raise MaterializationError(
+            "actual financial outcome ArtifactNodes are required"
+        )
+    artifact_rows = json.loads(financial_artifacts_path.read_bytes())
+    if (
+        not isinstance(artifact_rows, list)
+        or not artifact_rows
+        or any(
+            not isinstance(row, dict)
+            or row.get("kind") not in {"ARTIFACT", "GENERATION"}
+            or (
+                row.get("kind") == "GENERATION"
+                and (
+                    row.get("release_target") is not False
+                    or row.get("root_id") not in PRODUCTION_ROOTS
+                    or row.get("source_dir") is None
+                )
+            )
+            for row in artifact_rows
+        )
+    ):
+        raise MaterializationError(
+            "financial inventory requires ArtifactNodes or non-pointer "
+            "GenerationNodes under existing production roots"
+        )
+    if recipe.get("schema_version") != 3:
+        raise MaterializationError(
+            "schema-2 recipe is recovery-only and cannot create a production specification"
+        )
+    repo = Path(__file__).resolve().parents[1]
+    release_commit = _git(repo, "rev-parse", "HEAD")
+    if release_commit != recipe["release_commit"] or _git(
+        repo, "status", "--porcelain=v1", "--untracked-files=all"
+    ):
+        raise MaterializationError("repository must be clean at the recipe commit")
+    prepared_root = prepared_root.resolve()
+    semantic_path = semantic_path.resolve()
+    portfolio_root = portfolio_root.resolve()
+    state_root = state_root.resolve()
+    if portfolio_root == repo or repo in portfolio_root.parents:
+        raise MaterializationError("production portfolio root must be outside Git")
+
+    sources: dict[str, Path] = {}
+    generation_ids: dict[str, str] = {}
+    nodes: list[dict[str, Any]] = []
+    analytics_result = prepared_root / "stage-results" / "analytics.json"
+    vertical = _load(Path(recipe["vertical_recipe"]["path"]), "vertical recipe")
+    current_lenses = (
+        _production_lens_nodes(
+            prepared_root,
+            _load(
+                Path(recipe["product_authority"]["contract"]["path"]),
+                "product contract",
+            ),
+        )
+        if vertical.get("schema_version") == 9
+        or (
+            analytics_result.is_file()
+            and "lens_generation_bindings"
+            in _load(analytics_result, "prepared analytics")
+        )
+        else {}
+    )
+    lens_targets = {
+        row["root_id"]: row for row in current_lenses.values() if row["release_target"]
+    }
+    for root_id, relative in PRODUCTION_STAGE_ROOTS.items():
+        if root_id in lens_targets:
+            node = lens_targets[root_id]
+            sources[root_id] = Path(node["source_dir"])
+            generation_ids[root_id] = node["generation_id"]
+            nodes.append(node)
+            continue
+        staged_root = prepared_root / relative
+        if root_id in {
+            "provider-ledger",
+            "portfolio-baseline",
+            "portfolio-report",
+            "portfolio-panel",
+        }:
+            role = {
+                "provider-ledger": "ledger",
+                "portfolio-baseline": "baseline",
+                "portfolio-report": "report",
+                "portfolio-panel": "panel",
+            }[root_id]
+            generation_id = _text(
+                recipe["expected_generations"][role]["generation_id"],
+                f"{root_id} generation_id",
+            )
+        else:
+            generation_id, _ = _current_generation(staged_root)
+        source = staged_root / "generations" / generation_id
+        inventory = inventory_generation(source)
+        files = inventory.get("files")
+        if not isinstance(files, list):
+            raise MaterializationError(f"{root_id} generation inventory differs")
+        expected = (
+            recipe["expected_generations"][role]
+            if root_id
+            in {
+                "provider-ledger",
+                "portfolio-baseline",
+                "portfolio-report",
+                "portfolio-panel",
+            }
+            else None
+        )
+        actual = {
+            "files": files,
+            "generation_id": inventory["generation_id"],
+            "manifest_sha256": inventory["manifest_sha256"],
+        }
+        if expected is not None and actual != expected:
+            raise MaterializationError(f"{root_id} prepared generation differs")
+        sources[root_id] = source
+        generation_ids[root_id] = generation_id
+        nodes.append(
+            {
+                "depends_on": [],
+                "files": files,
+                "generation_id": generation_id,
+                "kind": "GENERATION",
+                "manifest_sha256": inventory["manifest_sha256"],
+                "node_id": f"publish-{root_id}",
+                "release_target": True,
+                "root_id": root_id,
+                "source_dir": str(source),
+            }
+        )
+
+    panel_generation = sources["portfolio-panel"]
+    panel_payload = _load(
+        panel_generation / "data" / "dashboard_data.json", "prepared panel data"
+    )
+    panel_meta = panel_payload.get("meta")
+    expected_panel_analytics = {
+        "correlation_generation_id": generation_ids["correlation"],
+        "decomposition_generation_id": generation_ids["factor-decomposition"],
+        "weekly_returns_generation_id": generation_ids["weekly-returns"],
+    }
+    if not isinstance(panel_meta, dict) or any(
+        panel_meta.get(key) != value for key, value in expected_panel_analytics.items()
+    ):
+        raise MaterializationError("prepared panel analytics authority differs")
+    if current_lenses:
+        _verify_panel_lens_nodes(
+            panel_payload,
+            current_lenses,
+            generation_ids["factor-decomposition"],
+        )
+        # Reuse financial inventory identities so its ArtifactNode dependencies
+        # remain exact, while preventing a duplicate immutable-generation copy.
+        for lens in current_lenses.values():
+            matches = [
+                row
+                for row in artifact_rows
+                if row.get("kind") == "GENERATION"
+                and row.get("root_id") == lens["root_id"]
+                and row.get("generation_id") == lens["generation_id"]
+            ]
+            if len(matches) > 1:
+                raise MaterializationError("duplicate financial lens generation")
+            if matches:
+                supplied = matches[0]
+                if any(
+                    supplied.get(field) != lens[field]
+                    for field in (
+                        "source_dir",
+                        "manifest_sha256",
+                        "files",
+                    )
+                ):
+                    raise MaterializationError(
+                        "financial lens generation binding differs"
+                    )
+                if lens["release_target"]:
+                    old_id = supplied["node_id"]
+                    for row in artifact_rows:
+                        row["depends_on"] = [
+                            lens["node_id"] if item == old_id else item
+                            for item in row.get("depends_on", [])
+                        ]
+                    artifact_rows.remove(supplied)
+            elif not lens["release_target"]:
+                nodes.append(lens)
+    elif _panel_hybrid_generation_ids(panel_payload) != {
+        root_id: generation_ids[root_id] for root_id in HYBRID_PANEL_ROOT_IDS.values()
+    }:
+        raise MaterializationError("prepared panel hybrid analytics authority differs")
+
+    prepared_epoch_proof = _financial_epoch_manifest_proof(recipe, prepared_root)
+    accepted_epoch_proof = recipe.get("financial_epoch_manifest_proof")
+    if accepted_epoch_proof is None:
+        if prepared_epoch_proof is not None:
+            raise MaterializationError("prepared epoch-manifest proof differs")
+    elif (
+        not isinstance(accepted_epoch_proof, dict)
+        or prepared_epoch_proof is None
+        or canonical_json_bytes(prepared_epoch_proof)
+        != canonical_json_bytes(accepted_epoch_proof)
+    ):
+        raise MaterializationError("prepared epoch-manifest proof differs")
+    expected_semantic = canonical_json_bytes(
+        _semantic_gate_payload(recipe, epoch_manifest_proof=prepared_epoch_proof)
+    )
+    if semantic_path.read_bytes() != expected_semantic:
+        raise MaterializationError("prepared semantic gate differs")
+    production_semantic = canonical_json_bytes(
+        _semantic_gate_payload(
+            recipe,
+            generation_ids,
+            epoch_manifest_proof=prepared_epoch_proof,
+        )
+    )
+    production_semantic_path = spec_path.with_name(
+        "production-post-build-semantic.json"
+    )
+    orchestration_path = prepared_root / "portfolio-orchestration-contract.json"
+    orchestration_sha = _sha(orchestration_path)[0]
+    orchestration = _load(orchestration_path, "prepared orchestration contract")
+    prepared_release_commit = _text(
+        orchestration.get("release_commit"), "prepared orchestration release_commit"
+    )
+    if len(prepared_release_commit) != 40:
+        raise MaterializationError("prepared orchestration release_commit differs")
+    launcher = prepared_root / "stages" / "panel" / "index.html"
+    launcher_sha = _sha(launcher)[0]
+    if launcher_sha != recipe["panel_launcher_sha256"]:
+        raise MaterializationError("prepared launcher differs")
+
+    manifest_inputs = recipe.get("financial_epoch_manifest_inputs")
+    contract = {
+        "code_commit": release_commit,
+        "generation_ids": generation_ids,
+        "orchestration_contract_sha256": orchestration_sha,
+        "pipeline_id": recipe["pipeline_id"],
+        "prepared_release_commit": prepared_release_commit,
+        "production_roots": {
+            root_id: str(portfolio_root / relative)
+            for root_id, relative in PRODUCTION_ROOTS.items()
+        },
+        "schema_version": (
+            3
+            if manifest_inputs is not None
+            else 2
+            if recipe.get("schema_version") == 3
+            else 1
+        ),
+        "semantic_gate_sha256": hashlib.sha256(expected_semantic).hexdigest(),
+        "production_semantic_gate_sha256": hashlib.sha256(
+            production_semantic
+        ).hexdigest(),
+        "source_generations": {key: str(value) for key, value in sources.items()},
+    }
+    if manifest_inputs is not None:
+        if prepared_epoch_proof is None:
+            raise MaterializationError("prepared epoch-manifest proof is missing")
+        contract["financial_epoch_manifest_inputs_sha256"] = hashlib.sha256(
+            canonical_json_bytes(manifest_inputs)
+        ).hexdigest()
+        contract["financial_epoch_manifest_proof_sha256"] = hashlib.sha256(
+            canonical_json_bytes(prepared_epoch_proof)
+        ).hexdigest()
+    production_product_authority = _canonical_clone(recipe["product_authority"])
+    expected_admission = recipe["product_authority"]["conformance"][
+        "provider_admission"
+    ]
+    prepared_provider = sources["provider-ledger"]
+    if (
+        prepared_provider.name != expected_admission["generation_id"]
+        or _sha(prepared_provider / "generation.json")[0]
+        != expected_admission["manifest_sha256"]
+        or _sha(prepared_provider / "provider-ledger.json")[0]
+        != expected_admission["catalog_sha256"]
+        or _sha(prepared_provider / "admit-or-declare-receipt.json")[0]
+        != expected_admission["receipt_sha256"]
+    ):
+        raise MaterializationError("prepared provider admission authority differs")
+    production_product_authority["provider_generation"] = {
+        "catalog": _file_definition(prepared_provider / "provider-ledger.json"),
+        "generation_id": prepared_provider.name,
+        "manifest": _file_definition(prepared_provider / "generation.json"),
+        "receipt": _file_definition(
+            prepared_provider / "admit-or-declare-receipt.json"
+        ),
+    }
+    contract["product_authority_sha256"] = hashlib.sha256(
+        canonical_json_bytes(_product_gate_payload(production_product_authority))
+    ).hexdigest()
+    contract_path = spec_path.with_name("portfolio-production-rebind-contract.json")
+    contract_bytes = canonical_json_bytes(contract)
+    product_path = spec_path.with_name("financial-mvp-product-conformance.json")
+    hwm_bindings = _hwm_binding_paths(
+        hwm_governed_result_path,
+        hwm_governed_input_generation_path,
+        hwm_governed_calendar_authority_path,
+        hwm_governed_admission_receipt_path,
+    )
+    # A generation an external agent rewrote after publication can never
+    # reproduce the inventory its release sealed, which stops every successor
+    # being prepared. The pipeline already knows how to admit exactly that,
+    # under `predecessor-authority-repair`: it re-derives the drift itself and
+    # refuses a gate that does not match, or that reuses a drifted generation.
+    # This only carries the reviewed evidence through to the production spec.
+    predecessor_repair_gates: list[dict[str, Any]] = []
+    if predecessor_repair_gate_path is not None:
+        repair_bytes = predecessor_repair_gate_path.read_bytes()
+        predecessor_repair_gates.append(
+            {
+                "gate_id": "predecessor-authority-repair",
+                "path": str(predecessor_repair_gate_path),
+                "sha256": hashlib.sha256(repair_bytes).hexdigest(),
+            }
+        )
+    product_gates = _product_gate_rows(
+        production_product_authority,
+        product_path,
+        input_contract_path=financial_input_contract_path,
+        hwm_bindings=hwm_bindings,
+        hwm_source_paths=(
+            _production_hwm_source_paths(
+                sources,
+                artifact_rows,
+                manifest_inputs,
+            )
+            if hwm_bindings is not None
+            else None
+        ),
+    )
+    manifest_gates = _financial_epoch_manifest_gate_rows(
+        manifest_inputs,
+        prepared_epoch_proof,
+        spec_path.with_name("financial-epoch-manifest-input-authority.json"),
+    )
+    spec = {
+        "as_of_date": recipe["as_of_date"],
+        "code_commit": release_commit,
+        "companions": [
+            {
+                "companion_id": "portfolio-panel-launcher",
+                "relative_path": "index.html",
+                "root_id": "portfolio-panel",
+                "sha256": launcher_sha,
+                "source_path": str(launcher),
+            }
+        ],
+        "coordination_root": str(portfolio_root / "releases-refresh-2026"),
+        "created_at": datetime.now(UTC).isoformat(),
+        "gates": [
+            {
+                "gate_id": "port-underwrite-production-rebind",
+                "path": str(contract_path),
+                "sha256": hashlib.sha256(contract_bytes).hexdigest(),
+            },
+            {
+                "gate_id": "post-build-semantic",
+                "path": str(production_semantic_path),
+                "sha256": hashlib.sha256(production_semantic).hexdigest(),
+            },
+            *product_gates,
+            *manifest_gates,
+            *predecessor_repair_gates,
+        ],
+        "nodes": [*nodes, *artifact_rows],
+        "pipeline_id": f"{recipe['pipeline_id']}-production",
+        "roots": {
+            root_id: str(portfolio_root / relative)
+            for root_id, relative in PRODUCTION_ROOTS.items()
+        },
+        "schema_version": 1,
+        "state_root": str(state_root),
+    }
+    # The initial create-only specification contains no guessed future hashes.
+    # Only this final specification binds already built numerical artifacts.
+    from quant_engine.core.pipeline import PipelineSpec
+    from portfolio_financial_outcomes import validate_financial_outcomes
+
+    completed_spec = PipelineSpec.from_json_bytes(canonical_json_bytes(spec))
+    proof = validate_financial_outcomes(completed_spec)
+    production_semantic = canonical_json_bytes(
+        _semantic_gate_payload(
+            recipe,
+            generation_ids,
+            epoch_manifest_proof=prepared_epoch_proof,
+            financial_outcomes=proof,
+        )
+    )
+    contract["production_semantic_gate_sha256"] = hashlib.sha256(
+        production_semantic
+    ).hexdigest()
+    contract_bytes = canonical_json_bytes(contract)
+    spec["gates"][0]["sha256"] = hashlib.sha256(contract_bytes).hexdigest()
+    spec["gates"][1]["sha256"] = hashlib.sha256(production_semantic).hexdigest()
+    _write_exact(production_semantic_path, production_semantic)
+    _write_exact(contract_path, contract_bytes)
+    _write_exact(spec_path, canonical_json_bytes(spec))
+    return {
+        "contract": str(contract_path),
+        "nodes": len(spec["nodes"]),
+        "root_count": len(PRODUCTION_ROOTS),
+        "spec": str(spec_path),
+    }
+
+
+def _attended_stage_root(output_root: Path, role: str) -> Path:
+    roots = {
+        "ledger": "ledger",
+        "baseline": "baseline",
+        "attribution": "attribution",
+        "analytics": "analytics",
+        "report": "report-candidate",
+        "workbook": "report",
+        "panel-candidate": "panel",
+        "panel": "panel",
+    }
+    return output_root / "stages" / roots[role]
+
+
+def _attended_completed_stages(
+    output_root: Path, required_stages: Sequence[str]
+) -> list[str]:
+    """Return only a contiguous, independently readable prefix of stage receipts."""
+
+    completed: list[str] = []
+    missing_seen = False
+    for role in required_stages:
+        receipt = output_root / "stage-results" / f"{role}.json"
+        stage_root = _attended_stage_root(output_root, role)
+        receipt_exists = receipt.exists()
+        root_exists = stage_root.exists()
+        # The panel candidate intentionally creates the panel staging root;
+        # before browser QA the final panel receipt is absent while that shared
+        # root is already a valid predecessor artifact.
+        if role == "panel" and not receipt_exists and "panel-candidate" in completed:
+            root_exists = False
+        if not receipt_exists and not root_exists:
+            missing_seen = True
+            continue
+        if missing_seen or not receipt_exists or not root_exists:
+            raise MaterializationError(
+                f"attended completed {role} artifact set is incomplete"
+            )
+        _load(receipt, f"attended {role} stage result")
+        if stage_root.is_symlink() or not stage_root.is_dir():
+            raise MaterializationError(
+                f"attended completed {role} stage root is invalid"
+            )
+        completed.append(role)
+    return completed
+
+
+def _attended_view(
+    output_root: Path,
+    required_stages: Sequence[str],
+    request_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Render selection facts without claiming later proof-bound material exists."""
+
+    return {
+        "planned_stages": list(required_stages),
+        "post_proof_pipeline_spec": None,
+        "request_identity": _canonical_clone(request_identity),
+        "verified_completed_stages": _attended_completed_stages(
+            output_root, required_stages
+        ),
+    }
+
+
+def _attended_artifacts(value: object) -> dict[str, dict[str, object]]:
+    if not isinstance(value, list):
+        raise MaterializationError("attended source artifacts differ")
+    artifacts: dict[str, dict[str, object]] = {}
+    for row in value:
+        if not isinstance(row, dict) or "type" not in row:
+            raise MaterializationError("attended source artifact differs")
+        kind = row.get("type")
+        definition = {key: item for key, item in row.items() if key != "type"}
+        if kind == "FILE":
+            path = _validate_file_definition(definition, "attended source artifact")
+        elif kind == "DIRECTORY":
+            path = _validate_directory_definition(
+                definition, "attended source artifact"
+            )
+        else:
+            raise MaterializationError("attended source artifact type differs")
+        key = str(path)
+        if key in artifacts:
+            raise MaterializationError("attended source artifact is duplicated")
+        artifacts[key] = definition
+    return artifacts
+
+
+def _attended_disjoint(left: Path, right: Path, label: str) -> None:
+    try:
+        left.relative_to(right)
+    except ValueError:
+        try:
+            right.relative_to(left)
+        except ValueError:
+            return
+    raise MaterializationError(f"attended {label} roots overlap")
+
+
+def _attended_predecessor(definition: object, portfolio_root: Path) -> Path | None:
+    """Validate the selected predecessor, rather than allowing a shadow pointer."""
+
+    current = portfolio_root / "releases-refresh-2026" / "CURRENT_RELEASE.json"
+    if definition is None:
+        if current.exists():
+            raise MaterializationError(
+                "attended predecessor selection cannot hide a committed release"
+            )
+        return None
+    path = _validate_file_definition(definition, "attended predecessor spec")
+    try:
+        from quant_engine.core.pipeline import PipelineSpec
+        import portfolio_qc
+
+        spec = PipelineSpec.from_json_bytes(path.read_bytes())
+        manifest = portfolio_qc._read_committed_release(spec)  # noqa: SLF001
+        portfolio_qc._verify_committed_manifest(spec, manifest)  # noqa: SLF001
+    except (ImportError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise MaterializationError(
+            "attended predecessor is not a committed release"
+        ) from exc
+    return path
+
+
+def _attended_request_identity(
+    *,
+    repo_root: Path,
+    python: Path,
+    workspace_root: Path,
+    output_root: Path,
+    retained_cache_root: Path,
+    requested_as_of: str,
+    source_run: Path,
+    runtime_descriptor: Path,
+    runtime_identity: Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "output_root": str(output_root),
+        "python": _file_definition(python),
+        "repo_root": str(repo_root),
+        "requested_as_of": requested_as_of,
+        "retained_cache_root": str(retained_cache_root),
+        "runtime": {
+            "descriptor": _file_definition(runtime_descriptor),
+            "identity": _canonical_clone(runtime_identity),
+        },
+        "source_run": _file_definition(source_run),
+        "workspace_root": str(workspace_root),
+    }
+
+
+def _attended_preflight(args: argparse.Namespace) -> dict[str, Any]:
+    """Bind schema-1 initial selection before a release-builder child may run."""
+
+    repo_root = Path(args.repo_root).resolve()
+    python = Path(args.python).resolve()
+    workspace_root = Path(args.workspace_root).resolve()
+    output_root = Path(args.output_root).resolve()
+    retained_cache_root = Path(args.retained_cache_root).resolve()
+    source_run = Path(args.source_run).resolve()
+    runtime_descriptor = Path(args.workbook_runtime).resolve()
+    if repo_root != REPOSITORY_ROOT or not (repo_root / "tools").is_dir():
+        raise MaterializationError(
+            "attended repository root differs from this entrypoint"
+        )
+    _sha(python)
+    if workspace_root.is_symlink() or not workspace_root.is_dir():
+        raise MaterializationError("attended workspace root is unavailable")
+    if retained_cache_root.is_symlink() or not retained_cache_root.is_dir():
+        raise MaterializationError("attended retained cache root is unavailable")
+    portfolio_root = workspace_root / "dataPortfolio"
+    if portfolio_root.is_symlink() or not portfolio_root.is_dir():
+        raise MaterializationError("attended workspace dataPortfolio is unavailable")
+    _attended_disjoint(output_root, portfolio_root, "output and portfolio")
+    _attended_disjoint(output_root, retained_cache_root, "output and retained cache")
+    try:
+        requested_as_of = date.fromisoformat(args.requested_as_of).isoformat()
+    except ValueError as exc:
+        raise MaterializationError("attended requested as-of date is invalid") from exc
+    source = _load(source_run, "attended source run")
+    if (
+        set(source)
+        != {
+            "schema_version",
+            "as_of_date",
+            "release_commit",
+            "artifacts",
+            "attended",
+        }
+        or source.get("schema_version") != 1
+    ):
+        raise MaterializationError("attended source-run schema differs")
+    source_as_of = _text(source.get("as_of_date"), "attended source as_of_date")
+    try:
+        date.fromisoformat(source_as_of)
+    except ValueError as exc:
+        raise MaterializationError("attended source as-of date is invalid") from exc
+    if source_as_of != requested_as_of:
+        raise MaterializationError(
+            "attended requested as-of differs from source selection"
+        )
+    release_commit = _text(source.get("release_commit"), "attended release_commit")
+    if len(release_commit) != 40 or release_commit != _git(
+        repo_root, "rev-parse", "HEAD"
+    ):
+        raise MaterializationError("attended release commit differs")
+    _attended_artifacts(source.get("artifacts"))
+    attended = source.get("attended")
+    expected_attended = {
+        "schema_version",
+        "release_recipe",
+        "history_generation",
+        "allocation_generation",
+        "financial_input_contract",
+        "required_stages",
+        "predecessor_spec",
+    }
+    if not isinstance(attended, dict) or set(attended) != expected_attended:
+        raise MaterializationError("attended extension schema differs")
+    if attended.get("schema_version") != 1:
+        raise MaterializationError("attended extension version differs")
+    required_stages = attended.get("required_stages")
+    if required_stages != list(ATTENDED_STAGES):
+        raise MaterializationError("attended required stage graph differs")
+    recipe_path = _validate_file_definition(
+        attended["release_recipe"], "attended release recipe"
+    )
+    history_root = _validate_directory_definition(
+        attended["history_generation"], "attended history generation"
+    )
+    allocation_root = _validate_directory_definition(
+        attended["allocation_generation"], "attended allocation generation"
+    )
+    financial_input_contract = _validate_file_definition(
+        attended["financial_input_contract"], "attended financial input contract"
+    )
+    import portfolio_release_builder as release
+
+    recipe = release._recipe(recipe_path)  # noqa: SLF001
+    if (
+        recipe["as_of_date"] != requested_as_of
+        or recipe["release_commit"] != release_commit
+    ):
+        raise MaterializationError("attended release recipe identity differs")
+    selected_definition = recipe.get("dependence_selected_inputs")
+    if not isinstance(selected_definition, dict):
+        raise MaterializationError("attended selected dependence inputs are missing")
+    selected_path = _validate_file_definition(
+        selected_definition, "attended selected dependence inputs"
+    )
+    selected = _load(selected_path, "attended selected dependence inputs")
+    try:
+        selected_history = _absolute(
+            selected["history_generation_root"], "attended selected history root"
+        )
+        selected_allocation = _absolute(
+            selected["allocation_generation_root"], "attended selected allocation root"
+        )
+        selected_contract = _absolute(
+            selected["financial_input_contract_path"],
+            "attended selected financial input contract",
+        )
+    except KeyError as exc:
+        raise MaterializationError(
+            "attended selected dependence inputs differ"
+        ) from exc
+    if (
+        selected_history != history_root
+        or selected_allocation != allocation_root
+        or selected_contract != financial_input_contract
+    ):
+        raise MaterializationError("attended selected dependence authority differs")
+    release._history_contract_path(recipe)  # noqa: SLF001
+    _epoch_manifest_generation_definition(recipe)
+    resolved_runtime = release._resolve_workbook_runtime(runtime_descriptor)  # noqa: SLF001
+    predecessor = _attended_predecessor(attended["predecessor_spec"], portfolio_root)
+    financial_inputs = release._financial_epoch_inputs(recipe)  # noqa: SLF001
+    request_identity = _attended_request_identity(
+        repo_root=repo_root,
+        python=python,
+        workspace_root=workspace_root,
+        output_root=output_root,
+        retained_cache_root=retained_cache_root,
+        requested_as_of=requested_as_of,
+        source_run=source_run,
+        runtime_descriptor=runtime_descriptor,
+        runtime_identity=resolved_runtime.identity,
+    )
+    return {
+        "financial_inputs": financial_inputs or {},
+        "portfolio_root": portfolio_root,
+        "predecessor_spec": predecessor,
+        "python": python,
+        "qa_dir": _validate_directory_definition(recipe["qa_dir"], "panel QA"),
+        "recipe": recipe_path,
+        "repo_root": repo_root,
+        "request_identity": request_identity,
+        "required_stages": ATTENDED_STAGES,
+        "retained_cache_root": retained_cache_root,
+        "runtime": {
+            "descriptor": runtime_descriptor,
+            "identity": resolved_runtime.identity,
+        },
+        "source_run": source_run,
+        "workspace_root": workspace_root,
+    }
+
+
+def _attended_run_receipt(output_root: Path) -> Path:
+    return output_root / "attended-run.json"
+
+
+def _attended_start_or_resume(
+    preflight: Mapping[str, Any], output_root: Path, *, resume: bool
+) -> None:
+    request_identity = preflight["request_identity"]
+    if not isinstance(request_identity, dict):
+        raise MaterializationError("attended request identity differs")
+    receipt = _attended_run_receipt(output_root)
+    if resume:
+        value = _load(receipt, "attended run receipt")
+        if (
+            set(value) != {"request_identity", "schema_version"}
+            or value.get("schema_version") != 1
+            or canonical_json_bytes(value["request_identity"])
+            != canonical_json_bytes(request_identity)
+        ):
+            raise MaterializationError("attended resume identity differs")
+        _attended_completed_stages(output_root, preflight["required_stages"])
+        return
+    if output_root.exists():
+        raise MaterializationError("attended output root already exists; use --resume")
+    output_root.mkdir(parents=True, exist_ok=False)
+    _write_exact(
+        receipt,
+        canonical_json_bytes(
+            {"schema_version": 1, "request_identity": request_identity}
+        ),
+    )
+
+
+def _attended_stage_command(
+    preflight: Mapping[str, Any], output_root: Path, role: str
+) -> list[str]:
+    repo_root = cast(Path, preflight["repo_root"])
+    command = [
+        str(cast(Path, preflight["python"])),
+        str(repo_root / "tools" / "portfolio_release_builder.py"),
+        "stage",
+        "--recipe",
+        str(cast(Path, preflight["recipe"])),
+        "--output-root",
+        str(output_root),
+        "--role",
+        role,
+        "--portfolio-root",
+        str(cast(Path, preflight["portfolio_root"])),
+        "--retained-cache-root",
+        str(cast(Path, preflight["retained_cache_root"])),
+        "--workbook-runtime",
+        str(cast(Mapping[str, Any], preflight["runtime"])["descriptor"]),
+    ]
+    financial_inputs = cast(Mapping[str, Path], preflight["financial_inputs"])
+    if set(financial_inputs) not in (set(), set(EPOCH_MANIFEST_INPUTS)):
+        raise MaterializationError("attended financial input family differs")
+    for key, flag in EPOCH_MANIFEST_INPUTS.items():
+        if key in financial_inputs:
+            command.extend((flag, str(financial_inputs[key])))
+    if role == "panel":
+        command.extend(("--qa-dir", str(cast(Path, preflight["qa_dir"]))))
+    return command
+
+
+def _attended_execute(
+    preflight: Mapping[str, Any], output_root: Path, *, resume: bool
+) -> tuple[int, dict[str, Any]]:
+    _attended_start_or_resume(preflight, output_root, resume=resume)
+    completed = _attended_completed_stages(output_root, preflight["required_stages"])
+    for role in preflight["required_stages"]:
+        if role in completed:
+            continue
+        command = _attended_stage_command(preflight, output_root, role)
+        result = subprocess.run(
+            command,
+            cwd=cast(Path, preflight["repo_root"]),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.stdout:
+            print(result.stdout, end="")
+        if result.stderr:
+            print(result.stderr, end="", file=sys.stderr)
+        if result.returncode != 0:
+            return result.returncode, _attended_view(
+                output_root, preflight["required_stages"], preflight["request_identity"]
+            )
+        completed = _attended_completed_stages(
+            output_root, preflight["required_stages"]
+        )
+        if role not in completed:
+            raise MaterializationError(
+                f"attended {role} child returned success without completed artifacts"
+            )
+    return 0, _attended_view(
+        output_root, preflight["required_stages"], preflight["request_identity"]
+    )
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    acquire_cmd = commands.add_parser("acquire")
+    acquire_cmd.add_argument("--recipe", type=Path, required=True)
+    acquire_cmd.add_argument("--output-dir", type=Path, required=True)
+    authority_cmd = commands.add_parser("authority")
+    authority_cmd.add_argument("--recipe", type=Path, required=True)
+    authority_cmd.add_argument("--source-run", type=Path, required=True)
+    authority_cmd.add_argument("--output-dir", type=Path, required=True)
+    attended_cmd = commands.add_parser(
+        "attended",
+        help="plan or run one source-bound attended release without publication",
+    )
+    attended_cmd.add_argument("--repo-root", type=Path, required=True)
+    attended_cmd.add_argument("--python", type=Path, required=True)
+    attended_cmd.add_argument("--workspace-root", type=Path, required=True)
+    attended_cmd.add_argument("--output-root", type=Path, required=True)
+    attended_cmd.add_argument("--retained-cache-root", type=Path, required=True)
+    attended_cmd.add_argument("--requested-as-of", required=True)
+    attended_cmd.add_argument("--source-run", type=Path, required=True)
+    attended_cmd.add_argument("--workbook-runtime", type=Path, required=True)
+    attended_cmd.add_argument("--resume", action="store_true")
+    attended_cmd.add_argument("--execute", action="store_true")
+    semantic_cmd = commands.add_parser("semantic")
+    semantic_cmd.add_argument("--recipe", type=Path, required=True)
+    semantic_cmd.add_argument("--output", type=Path, required=True)
+    semantic_cmd.add_argument("--financial-spec", type=Path)
+    recipe_cmd = commands.add_parser("recipe")
+    recipe_cmd.add_argument("--vertical-recipe", type=Path, required=True)
+    recipe_cmd.add_argument("--proof-root", type=Path, required=True)
+    recipe_cmd.add_argument("--qa-dir", type=Path, required=True)
+    recipe_cmd.add_argument("--pipeline-id", required=True)
+    recipe_cmd.add_argument("--financial-mvp-contract", type=Path, required=True)
+    recipe_cmd.add_argument("--financial-mvp-source-matrix", type=Path, required=True)
+    recipe_cmd.add_argument("--correction-registry", type=Path)
+    recipe_cmd.add_argument("--rederive-receipt-registry", type=Path)
+    recipe_cmd.add_argument("--financial-input-contract", type=Path)
+    recipe_cmd.add_argument("--output", type=Path, required=True)
+    spec_cmd = commands.add_parser("spec")
+    spec_cmd.add_argument("--recipe", type=Path, required=True)
+    spec_cmd.add_argument("--output-root", type=Path, required=True)
+    spec_cmd.add_argument("--spec", type=Path, required=True)
+    spec_cmd.add_argument("--hwm-governed-result", type=Path)
+    spec_cmd.add_argument("--hwm-governed-input-generation", type=Path)
+    spec_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
+    spec_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
+    spec_cmd.add_argument("--invested-capital-result", type=Path)
+    spec_cmd.add_argument("--invested-capital-input-generation", type=Path)
+    spec_cmd.add_argument(
+        "--financial-input-contract",
+        type=Path,
+        help=(
+            "The contract the provider ledger was ADMITTED under, when it differs from the product contract. Defaults to the product contract."
+        ),
+    )
+    spec_cmd.add_argument(
+        "--portfolio-root",
+        type=Path,
+        help=(
+            "The production portfolio root. Required for a financial vertical: "
+            "the workbook and panel roles prove their stage output is disjoint "
+            "from it before publishing governed HWM."
+        ),
+    )
+    spec_cmd.add_argument("--retained-cache-root", type=Path)
+    spec_cmd.add_argument("--workbook-runtime", type=Path)
+    production_cmd = commands.add_parser("production-spec")
+    production_cmd.add_argument("--recipe", type=Path, required=True)
+    production_cmd.add_argument("--prepared-root", type=Path, required=True)
+    production_cmd.add_argument("--semantic-gate", type=Path, required=True)
+    production_cmd.add_argument("--portfolio-root", type=Path, required=True)
+    production_cmd.add_argument("--state-root", type=Path, required=True)
+    production_cmd.add_argument("--spec", type=Path, required=True)
+    production_cmd.add_argument("--hwm-governed-result", type=Path)
+    production_cmd.add_argument("--hwm-governed-input-generation", type=Path)
+    production_cmd.add_argument("--hwm-governed-calendar-authority", type=Path)
+    production_cmd.add_argument("--hwm-governed-admission-receipt", type=Path)
+    production_cmd.add_argument(
+        "--predecessor-repair-gate",
+        type=Path,
+        help=(
+            "Reviewed predecessor-authority-repair gate admitting the artifact "
+            "inventory drift of an already published generation that an external "
+            "agent rewrote. The pipeline re-derives the drift and refuses any gate "
+            "that does not match it exactly."
+        ),
+    )
+    production_cmd.add_argument(
+        "--financial-input-contract",
+        type=Path,
+        help=(
+            "The contract the provider ledger was ADMITTED under, when it differs from the product contract. Defaults to the product contract."
+        ),
+    )
+    production_cmd.add_argument(
+        "--financial-artifacts",
+        type=Path,
+        required=True,
+        help="JSON array of existing ArtifactNode definitions for actual outcomes and their producer inputs",
+    )
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    try:
+        exit_code = 0
+        if args.command == "attended":
+            if args.resume and not args.execute:
+                raise MaterializationError("attended --resume requires --execute")
+            preflight = _attended_preflight(args)
+            if args.execute:
+                exit_code, result = _attended_execute(
+                    preflight, Path(args.output_root).resolve(), resume=args.resume
+                )
+            else:
+                result = _attended_view(
+                    Path(args.output_root).resolve(),
+                    preflight["required_stages"],
+                    preflight["request_identity"],
+                )
+        elif args.command == "acquire":
+            result = acquire(args.recipe, args.output_dir)
+        elif args.command == "authority":
+            result = authority(args.recipe, args.source_run, args.output_dir)
+        elif args.command == "semantic":
+            result = semantic(args.recipe, args.output, args.financial_spec)
+        elif args.command == "recipe":
+            result = create_recipe(
+                args.vertical_recipe,
+                args.proof_root,
+                args.qa_dir,
+                args.pipeline_id,
+                args.output,
+                args.financial_mvp_contract,
+                args.financial_mvp_source_matrix,
+                args.correction_registry,
+                args.rederive_receipt_registry,
+                args.financial_input_contract,
+            )
+        elif args.command == "spec":
+            result = build_spec(
+                args.recipe,
+                args.output_root,
+                args.spec,
+                args.hwm_governed_result,
+                args.hwm_governed_input_generation,
+                args.hwm_governed_calendar_authority,
+                args.hwm_governed_admission_receipt,
+                args.financial_input_contract,
+                args.portfolio_root,
+                args.invested_capital_result,
+                args.invested_capital_input_generation,
+                args.retained_cache_root,
+                workbook_runtime_path=args.workbook_runtime,
+            )
+        else:
+            result = build_production_spec(
+                args.recipe,
+                args.prepared_root,
+                args.semantic_gate,
+                args.portfolio_root,
+                args.state_root,
+                args.spec,
+                args.hwm_governed_result,
+                args.hwm_governed_input_generation,
+                args.hwm_governed_calendar_authority,
+                args.hwm_governed_admission_receipt,
+                args.financial_artifacts,
+                args.financial_input_contract,
+                args.predecessor_repair_gate,
+            )
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"portfolio-pipeline: FAIL: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+    return exit_code
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

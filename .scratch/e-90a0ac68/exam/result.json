@@ -1,0 +1,38 @@
+{
+  "cases": [
+    "planning",
+    "first-child",
+    "resume-same",
+    "missing-extension-schema",
+    "invalid-source-schema",
+    "missing-source",
+    "missing-recipe",
+    "changed-recipe-hash",
+    "changed-contract-hash",
+    "misbound-history",
+    "missing-admission-receipt",
+    "wrong-epoch-binding",
+    "valid-producer-b-bound-as-a",
+    "omitted-panel",
+    "invalid-predecessor",
+    "occupied-output",
+    "invalid-date",
+    "missing-runtime",
+    "invalid-runtime",
+    "wrong-repo",
+    "missing-python",
+    "overlapping-root",
+    "resume-date",
+    "resume-source",
+    "resume-runtime"
+  ],
+  "financial_acceptance": false,
+  "remaining": [
+    "Actual attended implementation",
+    "Governed HWM/capital result selections when produced",
+    "Verified committed predecessor positive and hidden-predecessor negative",
+    "Successful completed-stage resume/corruption proof",
+    "Full native financial/workbook/panel and reuse acceptance"
+  ],
+  "status": "PASS_NATIVE_INITIAL_PREFLIGHT_AND_FIRST_STAGE_ROUTING_ONLY"
+}

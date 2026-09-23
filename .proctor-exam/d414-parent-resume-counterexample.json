@@ -1,0 +1,11 @@
+{
+  "candidate": "0347a28b9b61b630cc1614f6e1f776e9a6c0e00a",
+  "actual_receipt_sha256": "1d805dc6c0e89ef2a9553a4406942cb8c10909bf15b15359727e7b0727a205b3",
+  "actual_receipt": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-release-v13\\proof\\stage-results\\ledger.json",
+  "probe_root": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\d414-native-exam\\resume-counterexample-d88e66a1061841b3a450b00aef760cd1",
+  "generation_files_present": [],
+  "reported_verified_completed": [
+    "ledger"
+  ],
+  "status": "RED_NATIVE_RECEIPT_WITH_ABSENT_GENERATION_ACCEPTED"
+}

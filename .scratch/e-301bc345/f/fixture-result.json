@@ -1,0 +1,191 @@
+{
+  "candidate_code_rebuilt": true,
+  "candidate_commit": "ed863a7ae4f7e9f326ee2bbb4aa5fb66701e67d7",
+  "history_generation": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\f\\history\\f680338ae531c1f321dab9360d322197f464b3610cae40569209cc800cc35356",
+  "identical_economic_history": {
+    "excluded.csv": "8eee0f630ee66b2280884623c71acc414e72665c44869949cc203b20a5807360",
+    "live-only.csv": "119ae941d60c9029934a32266248c01c58e97bd6e9c354aa406811b7cb5b86a9",
+    "live-plus-backtest.csv": "385e7803e4f526466888715868fdcd7c863bdd8b2aaf8cb124aeb7be5b6fdd60",
+    "returns.csv": "385e7803e4f526466888715868fdcd7c863bdd8b2aaf8cb124aeb7be5b6fdd60",
+    "segments.csv": "ade0e9c86dabdf25889f47a035031d5086c7cdb94cca595dae5996e0824abba3"
+  },
+  "recipe": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\f\\input-recipe.json",
+  "recipe_sha256": "db998f0ba45a5afc2dfba20f8e6d95c760f19108c51300e96b42c815d34567e2",
+  "remaining": [
+    "Actual attended implementation",
+    "Governed HWM/capital result selections when produced",
+    "Verified committed predecessor positive and hidden-predecessor negative",
+    "Successful completed-stage resume/corruption proof",
+    "Full native financial/workbook/panel and reuse acceptance"
+  ],
+  "requested_as_of": "2026-09-19",
+  "resolved_runtime_identity": {
+    "adapter": [
+      {
+        "path": "control_plane/__init__.py",
+        "sha256": "3dd7367fa58739d14fc7b193f4c28e173d8bf6d0e87b59e0ef4986b9e6409836",
+        "size_bytes": 225
+      },
+      {
+        "path": "control_plane/audit_manifest.py",
+        "sha256": "ef4f99862de265dedbb14a8f3cfba462f5304d3adb4bf2796b82e873db5fdc79",
+        "size_bytes": 5296
+      },
+      {
+        "path": "control_plane/cli.py",
+        "sha256": "94240ceb3af7f4b605a46d469fbe23e550e5fded508960944084dbe582c9b610",
+        "size_bytes": 19232
+      },
+      {
+        "path": "control_plane/dry_run.py",
+        "sha256": "de7b4d3eb2db6084a7c01c60a09f871ea1f18f53eba3214864456a07d86396e0",
+        "size_bytes": 4196
+      },
+      {
+        "path": "control_plane/errors.py",
+        "sha256": "70df44d152da6b0726d64ffb977e57d1222bda89de51b2860c4c5690fab97ad3",
+        "size_bytes": 3342
+      },
+      {
+        "path": "control_plane/file_router.py",
+        "sha256": "63ca0ded81ac9ce9ff4b299500509d2571131e42451b6bc896568f3c3dc8d9f8",
+        "size_bytes": 10637
+      },
+      {
+        "path": "control_plane/invariant_evaluator.py",
+        "sha256": "759fb41da8091562cdb7b9ec04e88e6a8f0f7e19910246104675be7a524c49e1",
+        "size_bytes": 12289
+      },
+      {
+        "path": "control_plane/macro_policy.py",
+        "sha256": "5440abb980006c1c98069bafc3759da8d6d7068c380c2c2ba029ec8ff636716f",
+        "size_bytes": 2291
+      },
+      {
+        "path": "control_plane/result_contract.py",
+        "sha256": "34bc686b03e9d2acf3efe0411d424ed51da2e017511fa3e7ccab1387f471d400",
+        "size_bytes": 1827
+      },
+      {
+        "path": "control_plane/schemas.py",
+        "sha256": "cc852781d1dec158a1caa3c52cc2abbefdf192896ae84bb82d81f935f0c52973",
+        "size_bytes": 4958
+      },
+      {
+        "path": "control_plane/staging.py",
+        "sha256": "4d8508c43322df7fcf0035f7ce41c883b3c37ea8881a123d5b1ea41152242441",
+        "size_bytes": 4652
+      },
+      {
+        "path": "control_plane/state_machine.py",
+        "sha256": "9c831587912656ac9f85c8477c11ba188f7c4b5ca744d51fcbcabb3bfb316115",
+        "size_bytes": 3393
+      },
+      {
+        "path": "control_plane/supervisor_runner.py",
+        "sha256": "cbbf4dfeb85da842862b6e70d90e568be56cca0bd3f0bcdd919d31c5f2d6cb4c",
+        "size_bytes": 7555
+      },
+      {
+        "path": "control_plane/workbook_inventory.py",
+        "sha256": "648032f6e39e066873fcd95707d0cae0ff3f0c0af3c9d15e367ad5987c0d4eb4",
+        "size_bytes": 7984
+      },
+      {
+        "path": "schemas/audit_manifest.schema.json",
+        "sha256": "d503c581bcf6d3cf94200e19002f0b8dfff8b846730fa3a850f0017be01797dd",
+        "size_bytes": 2009
+      },
+      {
+        "path": "schemas/job.schema.json",
+        "sha256": "1df61c85eb1534284b97fc9596b444f85f9caa35d8f859485f40cc6468b06701",
+        "size_bytes": 4219
+      },
+      {
+        "path": "schemas/result.schema.json",
+        "sha256": "9ffd86f549329c06c29bbc1a1a86843c5c72611459f67647115fe288109cd478",
+        "size_bytes": 2521
+      },
+      {
+        "path": "schemas/validation_contract.schema.json",
+        "sha256": "f0d901b05566bb9912789ab3e912b7a52926770d77f1f5bcd9e1746fb481334d",
+        "size_bytes": 3668
+      }
+    ],
+    "binaries": [
+      {
+        "path": "supervisor/XlsxWinContracts.dll",
+        "sha256": "acf60eedb57d44bd4e790c00dac2cb93ab17d6aeaa6101a2a609f186bae24cc5",
+        "size_bytes": 20992
+      },
+      {
+        "path": "supervisor/XlsxWinSupervisor.deps.json",
+        "sha256": "75aeed140bb2862ff94fec22e13ae01271dfeaf88182a75b9ddf83d921b1e8f3",
+        "size_bytes": 848
+      },
+      {
+        "path": "supervisor/XlsxWinSupervisor.dll",
+        "sha256": "5988250b20393f9c2bedbefc0bc81923e273328f68c7055ae94e77df04539541",
+        "size_bytes": 23040
+      },
+      {
+        "path": "supervisor/XlsxWinSupervisor.exe",
+        "sha256": "cfcdb59824154b4a048463a610dbb56639d2152db5a2e5aa825eab381dc82ca8",
+        "size_bytes": 162304
+      },
+      {
+        "path": "supervisor/XlsxWinSupervisor.runtimeconfig.json",
+        "sha256": "59a7facbb38ea932bc4ca560d45a71c44959f2f09c1437c5c4b2f82d63e13acb",
+        "size_bytes": 506
+      },
+      {
+        "path": "worker/XlsxWinContracts.dll",
+        "sha256": "acf60eedb57d44bd4e790c00dac2cb93ab17d6aeaa6101a2a609f186bae24cc5",
+        "size_bytes": 20992
+      },
+      {
+        "path": "worker/XlsxWinWorker.deps.json",
+        "sha256": "4f89002c5041d716a20ce759540b612f8de3a72f6fe5290ec0e7f9b10470346b",
+        "size_bytes": 836
+      },
+      {
+        "path": "worker/XlsxWinWorker.dll",
+        "sha256": "ed404da5aeaaad8367025e33f7a9e07fc69b1f027f05dde98786cfcf2a6463c2",
+        "size_bytes": 33280
+      },
+      {
+        "path": "worker/XlsxWinWorker.exe",
+        "sha256": "0550371c182a659310aa899166beeb22b1d7d3dec8a7c6be34bf998c527d7050",
+        "size_bytes": 162304
+      },
+      {
+        "path": "worker/XlsxWinWorker.runtimeconfig.json",
+        "sha256": "7f6501844d1d87deef7f94e370bf4fc9496bd923c506dd3f1b5a505dda129239",
+        "size_bytes": 626
+      }
+    ],
+    "descriptor_sha256": "b0d25d0d8de43e05bb399737db935ca20def4113c0ec3d6e976ed21a06bcc2b7",
+    "python": {
+      "dependencies": {
+        "jsonschema": "4.25.1",
+        "openpyxl": "3.1.5",
+        "xlsxwriter": "3.2.9"
+      },
+      "metadata": {
+        "dependencies": {
+          "jsonschema": "4.25.1",
+          "openpyxl": "3.1.5",
+          "xlsxwriter": "3.2.9"
+        },
+        "implementation": "CPython",
+        "version": "3.11.15"
+      },
+      "sha256": "6f1c7f333a98323c94125ea7650242769bf28dc1838e8ae685a50c547c7fc035",
+      "size_bytes": 262144
+    }
+  },
+  "runtime": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\workbook-runtime\\runtime.json",
+  "source_run": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\f\\source-run.json",
+  "source_run_sha256": "73bad21da9db2a12fbfbb85bb955dfdcd3c9ec969aa2e3c1701c9e6f4444fe18",
+  "status": "PASS_NATIVE_PREFLIGHT_FIXTURE"
+}

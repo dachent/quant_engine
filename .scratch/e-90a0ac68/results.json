@@ -1,0 +1,47 @@
+[
+  {
+    "argv": [
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.codex-bootstrap\\runtime\\venv\\Scripts\\python.exe",
+      "-I",
+      "-B",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.proctor-exam\\d414-native-fixture.py",
+      "--checkout",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414",
+      "--output",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-90a0ac68\\f",
+      "--rebuild"
+    ],
+    "exit": 0,
+    "log": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-90a0ac68\\step-0.log"
+  },
+  {
+    "argv": [
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.codex-bootstrap\\runtime\\venv\\Scripts\\python.exe",
+      "-I",
+      "-B",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.proctor-exam\\d414-native-exam.py",
+      "--checkout",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414",
+      "--fixture",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-90a0ac68\\f\\fixture-result.json",
+      "--output",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-90a0ac68\\exam",
+      "--candidate"
+    ],
+    "exit": 0,
+    "log": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-90a0ac68\\step-1.log"
+  },
+  {
+    "argv": [
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.codex-bootstrap\\runtime\\venv\\Scripts\\python.exe",
+      "-I",
+      "-B",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.proctor-exam\\d414-native-resume-exam.py",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-90a0ac68\\f\\fixture-result.json",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-90a0ac68\\resume-exam"
+    ],
+    "exit": 1,
+    "log": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-90a0ac68\\step-2.log"
+  }
+]

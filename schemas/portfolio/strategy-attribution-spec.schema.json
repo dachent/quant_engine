@@ -1,0 +1,98 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "strategy-attribution-spec.schema.json",
+  "title": "Strategy attribution specification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "as_of_date",
+    "benchmark_assignments",
+    "benchmark_comparisons",
+    "comparisons",
+    "return_source",
+    "schema_version"
+  ],
+  "properties": {
+    "schema_version": {"const": 2},
+    "as_of_date": {"type": "string", "format": "date"},
+    "return_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["expected_sha256", "path", "source_manifest_expected_sha256", "source_manifest_path"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "expected_sha256": {"$ref": "#/$defs/hash"},
+        "source_manifest_path": {"type": "string", "minLength": 1},
+        "source_manifest_expected_sha256": {"$ref": "#/$defs/hash"}
+      }
+    },
+    "benchmark_assignments": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {"$ref": "#/$defs/benchmark"}
+    },
+    "comparisons": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {"$ref": "#/$defs/comparison"}
+    },
+    "benchmark_comparisons": {
+      "type": "array",
+      "minItems": 9,
+      "maxItems": 9,
+      "items": {"$ref": "#/$defs/comparison"}
+    }
+  },
+  "$defs": {
+    "hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,63}$"},
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["benchmark_id", "effective_end", "effective_start", "rationale", "status", "strategy_id", "version_ref"],
+      "properties": {
+        "benchmark_id": {"type": ["string", "null"]},
+        "effective_end": {"type": ["string", "null"], "format": "date"},
+        "effective_start": {"type": "string", "format": "date"},
+        "rationale": {"type": "string", "minLength": 1},
+        "status": {"enum": ["EVIDENCED", "UNAVAILABLE_NO_AUTHORITATIVE_ASSIGNMENT"]},
+        "strategy_id": {"$ref": "#/$defs/id"},
+        "version_ref": {"type": ["string", "null"]}
+      }
+    },
+    "comparison": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_series_id",
+        "cash_drag_reason",
+        "cash_drag_status",
+        "disposition",
+        "expected_legacy_cumulative_gap",
+        "observed_end",
+        "observed_start",
+        "periods_per_year",
+        "reference_series_id",
+        "status",
+        "strategy_id",
+        "version_compatibility_status"
+      ],
+      "properties": {
+        "account_series_id": {"type": ["string", "null"]},
+        "cash_drag_reason": {"type": "string", "minLength": 1},
+        "cash_drag_status": {"enum": ["EVIDENCED", "UNAVAILABLE"]},
+        "disposition": {"type": "string", "minLength": 1},
+        "expected_legacy_cumulative_gap": {"type": ["string", "null"]},
+        "observed_end": {"type": ["string", "null"], "format": "date"},
+        "observed_start": {"type": ["string", "null"], "format": "date"},
+        "periods_per_year": {"type": "integer", "minimum": 1, "maximum": 366},
+        "reference_series_id": {"type": ["string", "null"]},
+        "status": {"enum": ["DESCRIPTIVE_EXACT_DATE_VERSION_COMPATIBLE", "DESCRIPTIVE_EXACT_DATE_VERSION_UNRESOLVED", "UNAVAILABLE"]},
+        "strategy_id": {"$ref": "#/$defs/id"},
+        "version_compatibility_status": {"enum": ["PROVEN_COMPATIBLE", "VERSION_MISMATCH", "UNRESOLVED"]}
+      }
+    }
+  }
+}

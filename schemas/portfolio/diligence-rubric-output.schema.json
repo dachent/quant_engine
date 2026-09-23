@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/diligence-rubric-output.schema.json",
+  "title": "Portfolio diligence rubric output",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "rubric_id",
+    "as_of_date",
+    "candidate_id",
+    "candidate_name",
+    "source",
+    "thresholds",
+    "authority_boundary",
+    "gate_counts",
+    "gates",
+    "scenario",
+    "replacement_comparison",
+    "leave_one_out"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "rubric_id": { "const": "PORT-RUBRIC-1" },
+    "as_of_date": { "type": "string", "format": "date" },
+    "candidate_id": { "type": "string", "minLength": 1 },
+    "candidate_name": { "type": "string", "minLength": 1 },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "dependence_sha256",
+        "candidate_evidence_sha256",
+        "rubric_contract_sha256",
+        "economic_driver_cluster_contract_sha256"
+      ],
+      "properties": {
+        "dependence_sha256": { "$ref": "#/$defs/hash" },
+        "candidate_evidence_sha256": { "$ref": "#/$defs/hash" },
+        "rubric_contract_sha256": { "$ref": "#/$defs/hash" },
+        "economic_driver_cluster_contract_sha256": { "$ref": "#/$defs/hash" }
+      }
+    },
+    "thresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimum_observations",
+        "minimum_downside_observations",
+        "authority"
+      ],
+      "properties": {
+        "minimum_observations": { "type": "integer", "minimum": 1 },
+        "minimum_downside_observations": { "type": "integer", "minimum": 1 },
+        "authority": { "const": "SOURCE_DEPENDENCE_POLICY" }
+      }
+    },
+    "authority_boundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allocation_effect",
+        "execution_effect",
+        "readiness_effect",
+        "automatic_add_drop_resize_authority"
+      ],
+      "properties": {
+        "allocation_effect": { "const": "NONE" },
+        "execution_effect": { "const": "NONE" },
+        "readiness_effect": { "const": "NONE" },
+        "automatic_add_drop_resize_authority": { "const": "NONE" }
+      }
+    },
+    "gate_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["PASS", "FAIL", "UNAVAILABLE"],
+      "properties": {
+        "PASS": { "type": "integer", "minimum": 0, "maximum": 8 },
+        "FAIL": { "type": "integer", "minimum": 0, "maximum": 8 },
+        "UNAVAILABLE": { "type": "integer", "minimum": 0, "maximum": 8 }
+      }
+    },
+    "gates": {
+      "type": "array",
+      "minItems": 8,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["gate_id", "status", "reasons", "evidence"],
+        "properties": {
+          "gate_id": {
+            "enum": [
+              "record_lineage",
+              "subscriber_realism",
+              "tail_boundary",
+              "portfolio_hwm",
+              "net_economics",
+              "operational_fit",
+              "independence",
+              "capacity_liquidity"
+            ]
+          },
+          "status": { "enum": ["PASS", "FAIL", "UNAVAILABLE"] },
+          "reasons": { "type": "array", "items": { "type": "string" } },
+          "evidence": { "type": "object" }
+        }
+      }
+    },
+    "scenario": { "type": "object" },
+    "replacement_comparison": { "type": "object" },
+    "leave_one_out": {
+      "type": "array",
+      "minItems": 7,
+      "maxItems": 7,
+      "items": { "type": "object" }
+    }
+  },
+  "$defs": {
+    "hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+  }
+}

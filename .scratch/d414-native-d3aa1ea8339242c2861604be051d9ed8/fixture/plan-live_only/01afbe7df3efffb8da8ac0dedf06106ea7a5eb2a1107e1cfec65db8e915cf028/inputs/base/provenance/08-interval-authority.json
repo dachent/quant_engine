@@ -1,0 +1,222 @@
+{
+  "authority_specs": [
+    {
+      "relative_path": "specs/europe-economic.json",
+      "sha256": "9f61ebcb6db56e9f7d650ac7c11c32e2ba5a43f4474bb8305da9d8955b984ccb"
+    },
+    {
+      "relative_path": "specs/europe-economic-dynamic-fls.json",
+      "sha256": "981add1c0b127009f62117dcb34920ab32260a0c158dca9fdbe99337334f30f9"
+    },
+    {
+      "relative_path": "specs/multi-asset-style.json",
+      "sha256": "e44a633665e4dad64a4d3df8d57628198908635c640f0e2889231fd9e3934f4b"
+    },
+    {
+      "relative_path": "specs/multi-asset-style-dynamic-fls.json",
+      "sha256": "2d0035b283780196fa54b4420650b1b921d72db48dac385a4b4ffac496b727ec"
+    },
+    {
+      "relative_path": "specs/us-economic.json",
+      "sha256": "9979e0d6e773714f8556be799a08dea4c2912086e395564a7ffbcca50b1842e5"
+    },
+    {
+      "relative_path": "specs/us-economic-dynamic-fls.json",
+      "sha256": "05dfe4221de3acc00d09f06228a267f64634546d16fcda719373f9d8a3f1a7e2"
+    },
+    {
+      "relative_path": "specs/us-equity-style.json",
+      "sha256": "19aba28ba12c32be814dd597965a16f3a254fadfa784afe0be0a96643959d697"
+    },
+    {
+      "relative_path": "specs/us-equity-style-dynamic-fls.json",
+      "sha256": "38f0e9c50dfa8b5b45dd0698146efeb2b57bc7ab92c230f8c97ee06711c1af1e"
+    },
+    {
+      "relative_path": "specs/us-industry.json",
+      "sha256": "93e0e2656651e81ed2d3e26174de34929b8d5938c00ec7c27324e90da9741e75"
+    },
+    {
+      "relative_path": "specs/us-industry-dynamic-fls.json",
+      "sha256": "6a2e9cd10f5f7f01e8e2ea8026476d6517a28fc6c9556e1108da6fe790041ee1"
+    },
+    {
+      "relative_path": "specs/us-sector.json",
+      "sha256": "cb4292ede0b9a6d96bd94ef93e511760778e50dd0a8a6a357ad6bdf800bc6c39"
+    },
+    {
+      "relative_path": "specs/us-sector-dynamic-fls.json",
+      "sha256": "b5cd3754251236fde6d292b95d3eaa4658b74d0b6e41c84ffe7b1201fbaba5f3"
+    }
+  ],
+  "per_series_authority": {
+    "AI Factor [P123]": {
+      "calendars": [
+        "ACCOUNT_AND_STRATEGY_DECLARED"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY_OR_PROVIDER_PUBLICATION"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "owner-account-live-history": {
+          "cadence": "DAILY_OR_PROVIDER_PUBLICATION",
+          "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    },
+    "EU [P123]": {
+      "calendars": [
+        "ACCOUNT_AND_STRATEGY_DECLARED"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY_OR_PROVIDER_PUBLICATION"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "owner-account-live-history": {
+          "cadence": "DAILY_OR_PROVIDER_PUBLICATION",
+          "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    },
+    "GrizzlyBears VTMA": {
+      "calendars": [
+        "ACCOUNT_AND_STRATEGY_DECLARED"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY_OR_PROVIDER_PUBLICATION"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "owner-account-live-history": {
+          "cadence": "DAILY_OR_PROVIDER_PUBLICATION",
+          "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    },
+    "QSI": {
+      "calendars": [
+        "ACCOUNT_AND_STRATEGY_DECLARED"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY_OR_PROVIDER_PUBLICATION"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "owner-account-live-history": {
+          "cadence": "DAILY_OR_PROVIDER_PUBLICATION",
+          "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    },
+    "Robuxio Crypto (High Sharpe High Vol)": {
+      "calendars": [
+        "ALWAYS_ON"
+      ],
+      "declared_policy_present": true,
+      "frequencies": [
+        "DAILY"
+      ],
+      "interval_association_status": "AVAILABLE_SOURCE_LABELLED",
+      "limitation": null,
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "matrixport-account-generation": {
+          "cadence": "DAILY",
+          "calendar": "ALWAYS_ON",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    },
+    "TT Portfolio": {
+      "calendars": [
+        "ACCOUNT_AND_STRATEGY_DECLARED"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY_OR_PROVIDER_PUBLICATION"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "owner-account-live-history": {
+          "cadence": "DAILY_OR_PROVIDER_PUBLICATION",
+          "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    },
+    "Volatis Strategy": {
+      "calendars": [
+        "SOURCE_DECLARED"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "quantbase-account-generation": {
+          "cadence": "DAILY",
+          "calendar": "SOURCE_DECLARED",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    }
+  },
+  "selected_target_sha256": "2e21a66fb13ca5c259caaf01d895cab5759dea61ec37249bf08a4414c8c3f4a3",
+  "source_plan": {
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v12-live_only\\7829f15c5344b5e6d0f101260ce0569706c42e15d016633e8e9ad633ea6ac306\\plan-manifest.json",
+    "sha256": "4518deea383c3c439230634ae48750de6d1d806bc693eefba5db62b2ab86360f",
+    "size_bytes": 119707
+  },
+  "target_interval_policy": {
+    "currency": "USD",
+    "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+    "series_policies": {
+      "Robuxio Crypto (High Sharpe High Vol)": {
+        "finality": "FINALIZED_THROUGH_DECLARED_LABEL",
+        "finalized_through": "2026-09-17",
+        "gap_disposition": "REJECT_BUCKET",
+        "native_calendar": "CALENDAR_DAY_24_7",
+        "native_label_convention": "SOURCE_DECLARED_DAILY_LABEL",
+        "return_basis": "MIXED_NET_MODEL",
+        "source_vintage": "dd16023da65382b3d26cfb9d8898519f0e092d9e1594345fe6c126a0b5710499"
+      }
+    }
+  }
+}

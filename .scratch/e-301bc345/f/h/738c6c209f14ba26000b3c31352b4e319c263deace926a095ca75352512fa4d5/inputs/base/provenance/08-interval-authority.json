@@ -1,0 +1,254 @@
+{
+  "authority_specs": [
+    {
+      "relative_path": "specs/europe-economic.json",
+      "sha256": "f58f07972d323c5572b26351a93ca800903c116e8afb369d6d39059b9ef4ec4f"
+    },
+    {
+      "relative_path": "specs/europe-economic-dynamic-fls.json",
+      "sha256": "3831bded3b46fee9d91543e594035c63860300568e3a13e0cd3a2e35c46888ed"
+    },
+    {
+      "relative_path": "specs/multi-asset-style.json",
+      "sha256": "d62f40dbacc6daf5dcfd5bc84109910e6f887641e8ea499ef924d5b7d334d1e3"
+    },
+    {
+      "relative_path": "specs/multi-asset-style-dynamic-fls.json",
+      "sha256": "6ffb222a80d360f72c463b7931ade7f476a72ca45d8d873156b4600aa2e86961"
+    },
+    {
+      "relative_path": "specs/us-economic.json",
+      "sha256": "89c471b50182af58ecb585adde17d6dd282f9a03e86f87f19f7bbc222ffe5e7d"
+    },
+    {
+      "relative_path": "specs/us-economic-dynamic-fls.json",
+      "sha256": "fdc9787f9e884ce496728dcd625f7904fdae6c6b3c1d0f946d3afad22b930240"
+    },
+    {
+      "relative_path": "specs/us-equity-style.json",
+      "sha256": "68c804102d25c5a1a697f2c36fc0bfde8c9cd23aa10f8d4097c43cd8cd54268c"
+    },
+    {
+      "relative_path": "specs/us-equity-style-dynamic-fls.json",
+      "sha256": "f4ed001ab33c45cfae283cdef4ff80db1a7c715cb34491e8fc41a89941b90323"
+    },
+    {
+      "relative_path": "specs/us-industry.json",
+      "sha256": "3093336878d6414c3152aeccbd11106556f1acc0ab07ee11d3043d66a7eba5eb"
+    },
+    {
+      "relative_path": "specs/us-industry-dynamic-fls.json",
+      "sha256": "88bf1ffe2f8d3e568215da7d61a075e49df04facd12a6f23e4a694526b649a6c"
+    },
+    {
+      "relative_path": "specs/us-sector.json",
+      "sha256": "a349eec7d922877099af16eb882c218c738288afd5d65cec97b277fe97325114"
+    },
+    {
+      "relative_path": "specs/us-sector-dynamic-fls.json",
+      "sha256": "aa67b7d59cc5fe6f7f765deebd28dba6e56130835e7e75cd38a28faeb81b284b"
+    }
+  ],
+  "per_series_authority": {
+    "AI Factor [P123]": {
+      "calendars": [
+        "ACCOUNT_AND_STRATEGY_DECLARED",
+        "MODEL_DECLARED"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY_OR_PROVIDER_PUBLICATION",
+        "MODEL_CAPTURE"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "owner-account-live-history": {
+          "cadence": "DAILY_OR_PROVIDER_PUBLICATION",
+          "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
+          "timezone": "SOURCE_DECLARED"
+        },
+        "portfolio123-model-generation": {
+          "cadence": "MODEL_CAPTURE",
+          "calendar": "MODEL_DECLARED",
+          "timezone": "PROVIDER_DECLARED"
+        }
+      }
+    },
+    "EU [P123]": {
+      "calendars": [
+        "ACCOUNT_AND_STRATEGY_DECLARED",
+        "SOURCE_DECLARED_NO_COERCION"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY_OR_PROVIDER_PUBLICATION",
+        "VERSION_SNAPSHOT"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "owner-account-live-history": {
+          "cadence": "DAILY_OR_PROVIDER_PUBLICATION",
+          "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
+          "timezone": "SOURCE_DECLARED"
+        },
+        "strategy-backtests": {
+          "cadence": "VERSION_SNAPSHOT",
+          "calendar": "SOURCE_DECLARED_NO_COERCION",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    },
+    "GrizzlyBears VTMA": {
+      "calendars": [
+        "ACCOUNT_AND_STRATEGY_DECLARED",
+        "SOURCE_DECLARED_NO_COERCION"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY_OR_PROVIDER_PUBLICATION",
+        "VERSION_SNAPSHOT"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "owner-account-live-history": {
+          "cadence": "DAILY_OR_PROVIDER_PUBLICATION",
+          "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
+          "timezone": "SOURCE_DECLARED"
+        },
+        "strategy-backtests": {
+          "cadence": "VERSION_SNAPSHOT",
+          "calendar": "SOURCE_DECLARED_NO_COERCION",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    },
+    "QSI": {
+      "calendars": [
+        "ACCOUNT_AND_STRATEGY_DECLARED",
+        "SOURCE_DECLARED_NO_COERCION"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY_OR_PROVIDER_PUBLICATION",
+        "VERSION_SNAPSHOT"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "owner-account-live-history": {
+          "cadence": "DAILY_OR_PROVIDER_PUBLICATION",
+          "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
+          "timezone": "SOURCE_DECLARED"
+        },
+        "strategy-backtests": {
+          "cadence": "VERSION_SNAPSHOT",
+          "calendar": "SOURCE_DECLARED_NO_COERCION",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    },
+    "Robuxio Crypto (High Sharpe High Vol)": {
+      "calendars": [
+        "ALWAYS_ON",
+        "SOURCE_DECLARED_NO_COERCION"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY",
+        "VERSION_SNAPSHOT"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "matrixport-account-generation": {
+          "cadence": "DAILY",
+          "calendar": "ALWAYS_ON",
+          "timezone": "SOURCE_DECLARED"
+        },
+        "strategy-backtests": {
+          "cadence": "VERSION_SNAPSHOT",
+          "calendar": "SOURCE_DECLARED_NO_COERCION",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    },
+    "TT Portfolio": {
+      "calendars": [
+        "ACCOUNT_AND_STRATEGY_DECLARED",
+        "SOURCE_DECLARED_NO_COERCION"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY_OR_PROVIDER_PUBLICATION",
+        "VERSION_SNAPSHOT"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "owner-account-live-history": {
+          "cadence": "DAILY_OR_PROVIDER_PUBLICATION",
+          "calendar": "ACCOUNT_AND_STRATEGY_DECLARED",
+          "timezone": "SOURCE_DECLARED"
+        },
+        "strategy-backtests": {
+          "cadence": "VERSION_SNAPSHOT",
+          "calendar": "SOURCE_DECLARED_NO_COERCION",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    },
+    "Volatis Strategy": {
+      "calendars": [
+        "SOURCE_DECLARED"
+      ],
+      "declared_policy_present": false,
+      "frequencies": [
+        "DAILY"
+      ],
+      "interval_association_status": "UNAVAILABLE_INTERVAL_CALENDAR_AUTHORITY",
+      "limitation": "Existing compiler emits no target interval policy for these selected native calendar/cadence declarations. Source-governed period/session-label association is not supplied here; rows and history completeness are not replaced or inferred.",
+      "return_types": [
+        "TOTAL"
+      ],
+      "sources": {
+        "quantbase-account-generation": {
+          "cadence": "DAILY",
+          "calendar": "SOURCE_DECLARED",
+          "timezone": "SOURCE_DECLARED"
+        }
+      }
+    }
+  },
+  "selected_target_sha256": "7795155f02d792146fe11692500f72650e98533c87ebfdba993642041053bcad",
+  "source_plan": {
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-plan-v12-live_plus_backtest\\a83aab201611da6bf0671737e29cf23fbbd8923e432a1ada43738ec352cd00a0\\plan-manifest.json",
+    "sha256": "be8111f4534cce12bc69b0be492b7229342c2d0d21fed51b4909451bc96c7457",
+    "size_bytes": 119741
+  },
+  "target_interval_policy": {
+    "currency": "USD",
+    "evaluation_information_set": "RETROSPECTIVE_SELECTED_SNAPSHOT",
+    "series_policies": {}
+  }
+}

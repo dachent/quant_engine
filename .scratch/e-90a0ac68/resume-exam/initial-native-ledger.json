@@ -1,0 +1,6 @@
+{
+  "code": 1,
+  "stage_calls": [],
+  "stdout": "",
+  "stderr": "portfolio-pipeline: FAIL: current dependence source is invalid: selected layered history authority differs\n"
+}

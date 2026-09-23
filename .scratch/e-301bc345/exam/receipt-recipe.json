@@ -1,0 +1,90 @@
+{
+  "as_of_date": "2026-09-19",
+  "base_factor_file": {
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\factors.csv",
+    "sha256": "7e1eb53c6498217b7cb533af372b976e95d215de6d6ce3d8b136355aaac3e86b",
+    "size_bytes": 1163787
+  },
+  "baseline_spec": {
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\current-native-baseline-inputs\\portfolio-baseline-spec-v10.ready.json",
+    "sha256": "bf17d2c57fd6b9c9478715286657800d7fdea062ff93810f25e25c2afed26c3b",
+    "size_bytes": 9749
+  },
+  "correlation_source_root": {
+    "file_count": 5,
+    "inventory_sha256": "5e5004586d3b0c758e2b505e42d64a6e34af5f4b644f099714f72cd4b9f480ca",
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\f\\dependence\\964dae88b507e2ed85d20fc0599c9db6caf01707c41db973a9e662fcf49cacd2"
+  },
+  "decomposition_plan_bundle": {
+    "file_count": 55,
+    "inventory_sha256": "59508fcab42751315aa61fdfba6d7f868fb081bbcc51da46db954a0319c5ab26",
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\f\\l\\b891b5a77f4cb2174f50b950892486aec61021bdcb8b574d7f881badb548303d"
+  },
+  "dependence_selected_inputs": {
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\exam\\missing-receipt-locator.json",
+    "sha256": "ea9d8e0ae7261c9d8aa4770f31fb436b2a7aa868266d8c8a4b7131a42e7c8492",
+    "size_bytes": 1069
+  },
+  "epoch_manifest_generation": {
+    "generation_id": "1bd366358b5852ff59035cfffa6579ebb22b92fd473df0a2cfd54f46a4c4127f",
+    "runtime_root": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-epoch-v11\\stage",
+    "source": {
+      "artifact": {
+        "path": "outputs/account-strategy-manifest.json",
+        "schema": {
+          "name": "account-strategy-manifest",
+          "version": "9"
+        },
+        "sha256": "b57321c20fd63107df2bd28a2e05150972405a51819eb4c8b360f11cd36fc51a",
+        "size_bytes": 1168725
+      },
+      "crosswalk": {
+        "path": "authority/account-assignment-crosswalk.json",
+        "schema": {
+          "name": "account-strategy-current-epoch-crosswalk",
+          "version": "1"
+        },
+        "sha256": "3cf87fd20208129c840d7c47c0fcebff57270b214fd84a4c11ef7035f68a950f",
+        "size_bytes": 5987
+      },
+      "full_directory_inventory_sha256": "79e763fd83b20adfd2a2c8f3da37121f859342a365568c8f4ae6a16ef18f3b84",
+      "generation_id": "1bd366358b5852ff59035cfffa6579ebb22b92fd473df0a2cfd54f46a4c4127f",
+      "generation_manifest_sha256": "b1d6502e8ad10ffb0b208497cc03f8ac619202cb583a735e103a7833018d066f",
+      "generation_receipt_sha256": "d5010a7fb4c6079d7a4c92e144bb5af3926121afbaa2666cf34ac34f657a9d02"
+    }
+  },
+  "hybrid_decomposition_plan_bundle": {
+    "file_count": 55,
+    "inventory_sha256": "b954b4ffdf58987ad7d4c1b16f5dab2c2137d233b08758698c94059abac054fa",
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\f\\h\\738c6c209f14ba26000b3c31352b4e319c263deace926a095ca75352512fa4d5"
+  },
+  "implementation_reconciliation": {
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v1\\implementation-reconciliation.json",
+    "sha256": "34f05da3285ee49111b09ae82824ecb6c827fdd657586d9436f3ec7453ef3ff2",
+    "size_bytes": 21568
+  },
+  "implementation_return_attribution": {
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v1\\implementation-return-attribution.json",
+    "sha256": "94921c972a1bd97afa844b9ce7a2b25a843242b7bfa4dd692df3d1dc522a583c",
+    "size_bytes": 17013
+  },
+  "legacy_panel": {
+    "file_count": 5,
+    "inventory_sha256": "26d08b45a84b648c152ffa021e7759bc6ecde73b74fdf1fc734d772ded20c1f9",
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v2\\legacy-panel"
+  },
+  "pipeline_id": "qe-current-native-20260919-v13",
+  "provider_ledger_generation": {
+    "file_count": 3,
+    "inventory_sha256": "38be0512f2db19fbff42f268d0dbcca9c7331b057a6aad5b2c8085cc6997663a",
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\ledger\\generations\\fd1ae097a02c469bb2ac03443d07d8e11787110ce6c0b6983be0dd3a3053f404"
+  },
+  "release_commit": "ed863a7ae4f7e9f326ee2bbb4aa5fb66701e67d7",
+  "schema_version": 10,
+  "strategy_attribution_root": {
+    "file_count": 2,
+    "generation_id": "c59a17f145cdb59ef58a5ece58d4d4000aeea76e1de9ba2786a4af2bb34de7ef",
+    "inventory_sha256": "0a85796c7d884d8586df8d72468e3988ae62057a45ef59099c606da99f1e6842",
+    "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-attribution-v10\\stage"
+  }
+}

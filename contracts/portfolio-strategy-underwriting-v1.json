@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "policy_id": "PORT-UNDERWRITE-1",
+  "as_of_date": "2026-08-07",
+  "authority": "RESEARCH_DIAGNOSTIC_ONLY",
+  "evidence_layers": [
+    "AUTHORITATIVE_DESIGN",
+    "VERSION_MATCHED_BACKTEST",
+    "PROVIDER_OR_MODEL_LIVE",
+    "ACCOUNT_LIVE",
+    "IMPLEMENTATION_RECONCILIATION"
+  ],
+  "model_account_gap": {
+    "path_aligned_minimum_correlation": 0.95,
+    "path_aligned_beta_minimum": 0.9,
+    "path_aligned_beta_maximum": 1.1,
+    "path_aligned_maximum_tracking_error_annualized": 0.05,
+    "partial_path_minimum_correlation": 0.75,
+    "causal_component_rule": "NUMERIC_ONLY_WHEN_EXACT_DATE_ACCOUNT_BOUND_EVIDENCE_EXISTS",
+    "unresolved_residual_rule": "TOTAL_GAP_MINUS_CAUSALLY_BOUND_COMPONENTS",
+    "subscription_cost_rule": "NEVER_RELABEL_AN_ALLOCATED_SUBSCRIPTION_COST_AS_ACCOUNT_RETURN_DRAG_WITHOUT_ACCOUNT_BINDING"
+  },
+  "regime_conformance": {
+    "calendar": "MONDAY_THROUGH_SUNDAY",
+    "threshold_estimation": "BENCHMARK_WEEKS_STRICTLY_BEFORE_ACCOUNT_LIVE_INCEPTION",
+    "minimum_threshold_history_weeks": 52,
+    "minimum_matched_prehistory_regime_weeks": 12,
+    "minimum_live_regime_weeks_for_distribution_comparison": 3,
+    "lower_tail_quantile": 0.1,
+    "high_absolute_return_quantile": 0.9,
+    "empirical_lower_quantile": 0.05,
+    "empirical_upper_quantile": 0.95,
+    "regimes": [
+      "BENCHMARK_NEGATIVE",
+      "BENCHMARK_LOWER_DECILE",
+      "BENCHMARK_HIGH_ABSOLUTE_RETURN"
+    ],
+    "benchmark_series": {
+      "benchmark:developed-ex-us-iefa": {
+        "components": ["market:IEFA"],
+        "method": "SINGLE_ACCEPTED_WEEKLY_PROXY"
+      },
+      "benchmark:us-small-blend-iwn-iwo": {
+        "components": ["market:IWN", "market:IWO"],
+        "method": "EQUAL_WEIGHT_WEEKLY_PROXY_APPROXIMATION"
+      },
+      "benchmark:us-total-market-itot": {
+        "components": ["market:ITOT"],
+        "method": "SINGLE_ACCEPTED_WEEKLY_PROXY"
+      }
+    },
+    "interpretation": "OBSERVED_BEHAVIOR_DIAGNOSTIC_NOT_PROOF_OF_HIDDEN_STRATEGY_LOGIC"
+  },
+  "portfolio_fit": {
+    "stress_basis": "CURRENT_ACCEPTED_CORRELATION_ONE_COMPONENTS",
+    "leave_one_out_rule": "TOTAL_CORRELATION_ONE_LOSS_MINUS_STRATEGY_LOSS_CONTRIBUTION",
+    "cluster_rule": "ONE_AGGREGATE_STRESS_BUDGET_PER_ECONOMIC_DRIVER_CLUSTER"
+  },
+  "decision_boundary": {
+    "allocation_authority": "NONE",
+    "execution_authority": "NONE",
+    "readiness_gate_effect": "NONE",
+    "automatic_drop_authority": "NONE",
+    "use": "ADVISORY_UNDERWRITING_AND_EVIDENCE_PRIORITIZATION"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "argv": [
+    "attended",
+    "--repo-root",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414",
+    "--python",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.codex-bootstrap\\runtime\\venv\\Scripts\\python.exe",
+    "--workspace-root",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-90a0ac68\\exam\\workspace",
+    "--output-root",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-90a0ac68\\exam\\run-wrong-epoch-binding",
+    "--retained-cache-root",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-90a0ac68\\exam\\retained-cache",
+    "--requested-as-of",
+    "2026-09-19",
+    "--source-run",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-90a0ac68\\exam\\epoch-source.json",
+    "--workbook-runtime",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\workbook-runtime\\runtime.json",
+    "--execute"
+  ],
+  "exit": 1,
+  "stage_calls": [],
+  "stderr": "portfolio-pipeline: FAIL: epoch-manifest generation bundle verification failed\n",
+  "stdout": ""
+}

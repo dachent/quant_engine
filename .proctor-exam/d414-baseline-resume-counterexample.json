@@ -1,0 +1,10 @@
+{
+  "status": "RED_REAL_BASELINE_RECEIPT_WITH_EMPTY_DIRECTORY_CLAIMED_VERIFIED",
+  "completed": [
+    "ledger",
+    "baseline"
+  ],
+  "baseline_receipt_source": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-release-v13\\proof\\stage-results\\baseline.json",
+  "baseline_receipt_source_sha256": "e445341186077f5438bea254418c864e47f08c8c1270009a26a177cd278e4f0d",
+  "native_baseline_generation_missing": true
+}

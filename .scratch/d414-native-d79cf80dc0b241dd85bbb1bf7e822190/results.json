@@ -1,0 +1,17 @@
+[
+  {
+    "argv": [
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.codex-bootstrap\\runtime\\venv\\Scripts\\python.exe",
+      "-I",
+      "-B",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.proctor-exam\\d414-native-fixture.py",
+      "--checkout",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414",
+      "--output",
+      "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\d414-native-d79cf80dc0b241dd85bbb1bf7e822190\\fixture",
+      "--rebuild"
+    ],
+    "exit": 1,
+    "log": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\d414-native-d79cf80dc0b241dd85bbb1bf7e822190\\step-0.log"
+  }
+]

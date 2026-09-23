@@ -1,0 +1,107 @@
+{
+  "artifacts": [
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\current-native-baseline-inputs\\portfolio-baseline-spec-v10.ready.json",
+      "sha256": "bf17d2c57fd6b9c9478715286657800d7fdea062ff93810f25e25c2afed26c3b",
+      "size_bytes": 9749,
+      "type": "FILE"
+    },
+    {
+      "file_count": 3,
+      "inventory_sha256": "d58dda97aa2772e9d5d9ecdda5a5eb698fcd890021e408d2a981a1ab7afd5e83",
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\ledger\\generations\\fd1ae097a02c469bb2ac03443d07d8e11787110ce6c0b6983be0dd3a3053f404",
+      "type": "DIRECTORY"
+    },
+    {
+      "file_count": 5,
+      "inventory_sha256": "65398e5a8742cc73cb41f37e596943f0324180e55f51293a1f31d0fb0ae37b30",
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\f\\dependence\\964dae88b507e2ed85d20fc0599c9db6caf01707c41db973a9e662fcf49cacd2",
+      "type": "DIRECTORY"
+    },
+    {
+      "file_count": 55,
+      "inventory_sha256": "9c5159ab46d350d43bbacdb577c454bb871e3ecb2f7950a982c37025b71cc7bf",
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\f\\h\\738c6c209f14ba26000b3c31352b4e319c263deace926a095ca75352512fa4d5",
+      "type": "DIRECTORY"
+    },
+    {
+      "file_count": 55,
+      "inventory_sha256": "06e6c126db567d78395ffaf863dd92bb1184f529fbaf759b5994aac6a8599d46",
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\f\\l\\b891b5a77f4cb2174f50b950892486aec61021bdcb8b574d7f881badb548303d",
+      "type": "DIRECTORY"
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\f\\selected-inputs.json",
+      "sha256": "4aa036d4d8eb36c8eee29e12cd8107418c9097c5821285255bfa7d1c0d05de59",
+      "size_bytes": 1152,
+      "type": "FILE"
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\20260919-base-current\\factors.csv",
+      "sha256": "7e1eb53c6498217b7cb533af372b976e95d215de6d6ce3d8b136355aaac3e86b",
+      "size_bytes": 1163787,
+      "type": "FILE"
+    },
+    {
+      "file_count": 2,
+      "inventory_sha256": "ca3d6a69629726b6004c6751de0f28e52f174227f685fb491a57253e4412efec",
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-attribution-v10\\stage",
+      "type": "DIRECTORY"
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v1\\implementation-reconciliation.json",
+      "sha256": "34f05da3285ee49111b09ae82824ecb6c827fdd657586d9436f3ec7453ef3ff2",
+      "size_bytes": 21568,
+      "type": "FILE"
+    },
+    {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v1\\implementation-return-attribution.json",
+      "sha256": "94921c972a1bd97afa844b9ce7a2b25a843242b7bfa4dd692df3d1dc522a583c",
+      "size_bytes": 17013,
+      "type": "FILE"
+    },
+    {
+      "file_count": 5,
+      "inventory_sha256": "b5d186a8ff108c1b8b96805f7f9a4ead0e0aaa441217cc581f20b751dbcfa29d",
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-release-retained-inputs-v2\\legacy-panel",
+      "type": "DIRECTORY"
+    }
+  ],
+  "as_of_date": "2026-09-18",
+  "attended": {
+    "allocation_generation": {
+      "file_count": 2,
+      "inventory_sha256": "acd6b149f4cbd1728fb19e0dacc9fd75eca5f0bd1d9f5053bb30cc3fca92d237",
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-baseline-v10\\generations\\10dcd0af514a790a09684be7749e2bc37905ab6a7627ec8f59fecd2e9b3282f1"
+    },
+    "financial_input_contract": {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\financial-contract.json",
+      "sha256": "4f385b0a7b8f9eeb85987ba479ce4a50db18d2d1ba37dbc8e4976292390e5b98",
+      "size_bytes": 216967
+    },
+    "history_generation": {
+      "file_count": 7,
+      "inventory_sha256": "032b6f6205a2cd2afd752bbddef3fe644ed17b2a4881d876fd3e9be52cbe3823",
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\f\\history\\f680338ae531c1f321dab9360d322197f464b3610cae40569209cc800cc35356"
+    },
+    "predecessor_spec": null,
+    "release_recipe": {
+      "path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-301bc345\\f\\input-recipe.json",
+      "sha256": "db998f0ba45a5afc2dfba20f8e6d95c760f19108c51300e96b42c815d34567e2",
+      "size_bytes": 4207
+    },
+    "required_stages": [
+      "ledger",
+      "baseline",
+      "attribution",
+      "analytics",
+      "report",
+      "workbook",
+      "panel-candidate",
+      "panel"
+    ],
+    "schema_version": 1
+  },
+  "release_commit": "ed863a7ae4f7e9f326ee2bbb4aa5fb66701e67d7",
+  "schema_version": 1
+}

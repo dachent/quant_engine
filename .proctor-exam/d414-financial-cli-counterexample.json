@@ -1,0 +1,14 @@
+{
+  "capital": {
+    "status": "RED_EXISTING_RELEASE_STAGE_ARGUMENT_FAMILY_UNREACHABLE",
+    "code": 2,
+    "diagnostic": "usage: d414-financial-cli-counterexample.py [-h]\n                                            {acquire,authority,attended,semantic,recipe,spec,production-spec}\n                                            ...\nd414-financial-cli-counterexample.py: error: unrecognized arguments: --invested-capital-result C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\capital-v16\\capital-input-generation.json --invested-capital-input-generation C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\capital-v16\\invested-capital.json\n",
+    "no_preflight_or_child_executed": true
+  },
+  "qa": {
+    "status": "RED_EXISTING_RELEASE_STAGE_ARGUMENT_FAMILY_UNREACHABLE",
+    "code": 2,
+    "diagnostic": "usage: d414-financial-cli-counterexample.py [-h]\n                                            {acquire,authority,attended,semantic,recipe,spec,production-spec}\n                                            ...\nd414-financial-cli-counterexample.py: error: unrecognized arguments: --qa-dir C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\n",
+    "no_preflight_or_child_executed": true
+  }
+}

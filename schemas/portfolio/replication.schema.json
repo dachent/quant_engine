@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-engine.local/schemas/portfolio/replication.schema.json",
+  "title": "Portfolio dynamic research replication",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "analytics_hash",
+    "as_of_date",
+    "authority_boundary",
+    "builder_version",
+    "clean_room_boundary",
+    "method_label",
+    "replication_results",
+    "replication_schema_version",
+    "sources"
+  ],
+  "properties": {
+    "analytics_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "as_of_date": {"type": "string", "format": "date"},
+    "authority_boundary": {
+      "type": "object",
+      "required": ["allocation_authority", "execution_authority", "hwm_authority", "readiness_gate_effect", "use"],
+      "properties": {
+        "allocation_authority": {"const": "NONE"},
+        "execution_authority": {"const": "NONE"},
+        "hwm_authority": {"const": "NONE"},
+        "readiness_gate_effect": {"const": "NONE"},
+        "use": {"const": "RESEARCH_DIAGNOSTIC_ONLY"}
+      }
+    },
+    "builder_version": {"type": "string"},
+    "clean_room_boundary": {"type": "string", "minLength": 1},
+    "method_label": {"const": "MPI_INFORMED_NON_EQUIVALENT_RESEARCH_REPLICATION"},
+    "replication_results": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/result"}
+    },
+    "replication_schema_version": {"const": 1},
+    "sources": {"type": "object"}
+  },
+  "$defs": {
+    "result": {
+      "type": "object",
+      "required": ["availability_status", "model_id", "series_id"],
+      "properties": {
+        "availability_status": {
+          "enum": [
+            "AVAILABLE_RESEARCH_REPLICATION",
+            "DIAGNOSTIC_ONLY_SOURCE_MODEL",
+            "UNAVAILABLE_NO_SELECTED_DYNAMIC_MODEL"
+          ]
+        },
+        "blocking_reasons": {"type": "array", "items": {"type": "string"}},
+        "model_id": {"type": ["string", "null"]},
+        "series_id": {"type": "string", "minLength": 1},
+        "tracker_rows": {"type": "array"},
+        "metrics": {"type": "object"},
+        "parameter_selection": {"type": "object"},
+        "cost_sensitivity": {"type": "array"}
+      }
+    }
+  }
+}

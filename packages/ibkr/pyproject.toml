@@ -1,0 +1,19 @@
+[project]
+name = "quant-engine-ibkr"
+version = "0.3.0"
+description = "Read-only IBKR Flex parsing and reconciliation for quant_engine."
+requires-python = ">=3.11,<3.14"
+dependencies = ["quant-engine-core", "quant-engine-portfolio-ledger"]
+classifiers = ["Private :: Do Not Upload"]
+
+[project.optional-dependencies]
+gateway = [
+    "ibapi==9.81.1.post1",
+]
+
+[build-system]
+requires = ["uv_build==0.11.28"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "quant_engine.ibkr"

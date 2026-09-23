@@ -1,0 +1,25 @@
+{
+  "argv": [
+    "attended",
+    "--repo-root",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414",
+    "--python",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.codex-bootstrap\\runtime\\venv\\Scripts\\python.exe",
+    "--workspace-root",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-887b9c18\\exam\\workspace",
+    "--output-root",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-887b9c18\\exam\\run-planning",
+    "--retained-cache-root",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-887b9c18\\exam\\retained-cache",
+    "--requested-as-of",
+    "2026-09-19",
+    "--source-run",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-887b9c18\\f\\source-run.json",
+    "--workbook-runtime",
+    "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\workbook-runtime\\runtime.json"
+  ],
+  "exit": 1,
+  "stage_calls": [],
+  "stderr": "portfolio-pipeline: FAIL: current dependence source is invalid: selected layered history authority differs\n",
+  "stdout": ""
+}

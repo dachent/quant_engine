@@ -1,0 +1,52 @@
+{
+  "status": "PASS",
+  "result": {
+    "bundle_id": "964dae88b507e2ed85d20fc0599c9db6caf01707c41db973a9e662fcf49cacd2",
+    "complete_through": "2026-09-17",
+    "epoch_hpr_receipts": [
+      {
+        "evidence_layer": "ACCOUNT_LIVE",
+        "receipt": {
+          "admission_cutoff": "2026-09-17",
+          "daily_cumulative_return": "0.062657062793925186685284226",
+          "daily_return_observations": 281,
+          "daily_return_series_schema": "ordered-date-return/1",
+          "daily_return_series_sha256": "e1d1a86c9f993a0bff4e94a4d95a15bc124477a37a8f698b451d8726640a189b",
+          "epoch_cumulative_return": "0.024397203617809434393832818",
+          "epoch_holding_period_link_observations": 283,
+          "observed_end": "2026-09-17",
+          "observed_start": "2025-12-07",
+          "source_gap_policy_sha256": "3e99a915f55bb44b62afd52953ca322081984cdeb65dd5fdd3d4a109f0828673",
+          "span_return_receipts": [
+            {
+              "end_endpoint_sha256": "95817f10e04c822520b68c5fb3fd830b4ec46a11333dadb0b52007adcd0f8071",
+              "missing_source_date": "2026-01-27",
+              "return": "-0.01709416928350526291909519774280396186272434769656",
+              "span_days": 2,
+              "span_end_date": "2026-01-28",
+              "span_start_date": "2026-01-26",
+              "start_endpoint_sha256": "995713643650d85967d7f422cb5795bd688b37e27cb3b229ec49161b50ee6704",
+              "subscription_events_in_span": 0
+            },
+            {
+              "end_endpoint_sha256": "6c47be0408a18df390624a902e678f3bab3585c91f913f04187a8c70cebd0489",
+              "missing_source_date": "2026-07-03",
+              "return": "-0.01923865655099017965967181945151379856856763539377",
+              "span_days": 2,
+              "span_end_date": "2026-07-04",
+              "span_start_date": "2026-07-02",
+              "start_endpoint_sha256": "d3c4e152375d1ee77ded278b0123b29580f23c45dbbfe857b79cbad0f850b015",
+              "subscription_events_in_span": 0
+            }
+          ]
+        },
+        "source_generation_id": "f6e87f8c7db99caae712c95ee7e84932df0e724c234016a34df6fcf1b47bd7d1",
+        "source_id": "matrixport-account-generation",
+        "strategy_id": "robuxio-crypto"
+      }
+    ],
+    "pair_count": 21,
+    "pair_mode_count": 42,
+    "verification": "VALID"
+  }
+}

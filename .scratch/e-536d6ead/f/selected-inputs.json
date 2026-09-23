@@ -1,0 +1,9 @@
+{
+  "allocation_generation_root": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\source\\current-native-baseline-v10\\generations\\10dcd0af514a790a09684be7749e2bc37905ab6a7627ec8f59fecd2e9b3282f1",
+  "financial_input_contract_path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\files\\financial-contract.json",
+  "history_generation_root": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\d414\\.scratch\\e-536d6ead\\f\\history\\d92e31a438872bf45efcebdcd828eb39969a4c93152a81a872ab72e23a484fb0",
+  "portfolio123_version_evidence_path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h2-frozen-v1\\version-evidence.json",
+  "provider_admission_receipt_path": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\ledger\\generations\\fd1ae097a02c469bb2ac03443d07d8e11787110ce6c0b6983be0dd3a3053f404\\admit-or-declare-receipt.json",
+  "provider_ledger_generation_root": "C:\\Dev\\worktrees\\quant-engine-completion\\.pt\\control\\h1-native-inputs-v1\\ledger\\generations\\fd1ae097a02c469bb2ac03443d07d8e11787110ce6c0b6983be0dd3a3053f404",
+  "schema_version": 1
+}

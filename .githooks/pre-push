@@ -1,0 +1,14 @@
+#!/bin/sh
+# Workstation defense-in-depth only; protected main remains authoritative.
+repo_root="$(git rev-parse --show-toplevel)" || exit 2
+if [ -x "$repo_root/.venv/Scripts/python.exe" ]; then
+  project_python="$repo_root/.venv/Scripts/python.exe"
+elif [ -x "$repo_root/.venv/bin/python" ]; then
+  project_python="$repo_root/.venv/bin/python"
+elif [ -x "C:/Tools/quant-engine/.venv/Scripts/python.exe" ]; then
+  project_python="C:/Tools/quant-engine/.venv/Scripts/python.exe"
+else
+  echo "QE_PUSH_RUNTIME_UNAVAILABLE" >&2
+  exit 2
+fi
+exec "$project_python" "$repo_root/tools/check_push_policy.py"

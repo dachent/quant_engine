@@ -1,0 +1,422 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/dachent/quant_engine/schemas/portfolio/baseline-catalog.schema.json",
+  "title": "Private portfolio baseline catalog",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "baseline_schema_version",
+    "policy_version",
+    "as_of_date",
+    "provenance",
+    "source_artifacts",
+    "accounts",
+    "capital_pools",
+    "strategies",
+    "strategy_version_catalog",
+    "assignments",
+    "allocations",
+    "securities",
+    "positions",
+    "provider_admissions",
+    "provider_coverage",
+    "provider_strategy_returns",
+    "transactions",
+    "flows",
+    "nav_observations",
+    "calendar_coverage",
+    "strategy_nav_coverage",
+    "costs",
+    "evidence_links",
+    "evidence_layer_metrics",
+    "strategy_live_metrics",
+    "strategy_provider_evidence",
+    "strategy_returns",
+    "implementation_gaps",
+    "corrections",
+    "assumptions",
+    "unmapped_records",
+    "fact_coverage",
+    "reconciliation_checks",
+    "reconciliation_exceptions",
+    "replay"
+  ],
+  "properties": {
+    "baseline_schema_version": {"const": 1},
+    "policy_version": {"const": "PORT-PERF-1"},
+    "as_of_date": {"type": "string", "format": "date"},
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation_id", "catalog_sha256"],
+      "properties": {
+        "generation_id": {"$ref": "#/$defs/sha256"},
+        "catalog_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "source_artifacts": {"type": "array", "minItems": 17, "items": {"type": "object"}},
+    "accounts": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/account"}},
+    "capital_pools": {"type": "array", "minItems": 2, "items": {"type": "object"}},
+    "strategies": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "object"}},
+    "strategy_version_catalog": {"$ref": "strategy-version-catalog.schema.json"},
+    "assignments": {"type": "array", "items": {"type": "object"}},
+    "allocations": {"type": "array", "minItems": 10, "maxItems": 10, "items": {"type": "object"}},
+    "securities": {"type": "array", "items": {"type": "object"}},
+    "positions": {"type": "array", "items": {"type": "object"}},
+    "provider_admissions": {"type": "array", "items": {"type": "object"}},
+    "provider_coverage": {"type": "array", "items": {"type": "object"}},
+    "provider_strategy_returns": {"type": "array", "items": {"type": "object"}},
+    "transactions": {"type": "array", "items": {"type": "object"}},
+    "flows": {"type": "array", "items": {"type": "object"}},
+    "nav_observations": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "calendar_coverage": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/calendar_status"}},
+    "strategy_nav_coverage": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "object"}},
+    "costs": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "object"}},
+    "evidence_links": {"type": "array", "minItems": 9, "items": {"type": "object"}},
+    "evidence_layer_metrics": {"type": "array", "items": {"type": "object"}},
+    "strategy_live_metrics": {"type": "array", "items": {"type": "object"}},
+    "strategy_provider_evidence": {"type": "array", "items": {"type": "object"}},
+    "strategy_returns": {"type": "array", "items": {"type": "object"}},
+    "implementation_gaps": {"type": "array", "minItems": 9, "maxItems": 9, "items": {"type": "object"}},
+    "corrections": {"type": "array", "items": {"type": "object"}},
+    "assumptions": {"type": "array", "items": {"type": "object"}},
+    "unmapped_records": {"type": "array", "items": {"type": "object"}},
+    "fact_coverage": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/coverage"}},
+    "fact_coverage_matrix": {"type": "array", "items": {"$ref": "#/$defs/fact_coverage_detail"}},
+    "observation_windows": {"type": "array", "items": {"type": "object"}},
+    "attribution_dispositions": {"type": "array", "items": {"type": "object"}},
+    "hwm_inputs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contract_version",
+        "anchor",
+        "calendar_authorities",
+        "periods",
+        "reconciliation"
+      ],
+      "properties": {
+        "contract_version": {"const": 1},
+        "anchor": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "anchor_date",
+            "index_base_value",
+            "hwm_policy_id",
+            "acceptance_provenance"
+          ],
+          "properties": {
+            "anchor_date": {"type": "string", "format": "date"},
+            "index_base_value": {"const": "1.0"},
+            "hwm_policy_id": {"const": "PORT-HWM-3"},
+            "acceptance_provenance": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "accepted_at",
+                "accepted_by",
+                "source_artifact_id",
+                "source_artifact_sha256"
+              ],
+              "properties": {
+                "accepted_at": {"type": "string", "format": "date-time"},
+                "accepted_by": {"type": "string", "minLength": 1},
+                "source_artifact_id": {"type": "string", "minLength": 1},
+                "source_artifact_sha256": {"$ref": "#/$defs/sha256"}
+              }
+            }
+          }
+        },
+        "calendar_authorities": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "lane",
+              "authority_id",
+              "authority_version",
+              "calendar_kind",
+              "admitted_source_artifact_id"
+            ],
+            "properties": {
+              "lane": {"enum": ["ACCOUNT", "PROVIDER", "LEGACY"]},
+              "authority_id": {"type": "string", "minLength": 1},
+              "authority_version": {"type": "string", "minLength": 1},
+              "calendar_kind": {
+                "enum": ["EXCHANGE", "ALWAYS_ON", "PROVIDER_PUBLICATION"]
+              },
+              "admitted_source_artifact_id": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          }
+        },
+        "periods": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "strategy_id",
+              "date",
+              "lane",
+              "disposition",
+              "beginning_capital_usd",
+              "return_source_record_id",
+              "flow_status",
+              "fx_status"
+            ],
+            "properties": {
+              "strategy_id": {"type": "string", "minLength": 1},
+              "date": {"type": "string", "format": "date"},
+              "lane": {"enum": ["ACCOUNT", "PROVIDER", "LEGACY"]},
+              "disposition": {
+                "enum": [
+                  "AVAILABLE",
+                  "UNAVAILABLE",
+                  "NOT_ADMITTED",
+                  "EXPECTED_NON_TRADING",
+                  "EXCLUDED_BY_POLICY"
+                ]
+              },
+              "beginning_capital_usd": {
+                "oneOf": [
+                  {"type": "string", "minLength": 1},
+                  {"type": "null"}
+                ]
+              },
+              "return_source_record_id": {
+                "oneOf": [
+                  {"type": "string", "minLength": 1},
+                  {"type": "null"}
+                ]
+              },
+              "component_account_ids": {
+                "oneOf": [
+                  {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {"type": "string", "minLength": 1}
+                  },
+                  {"type": "null"}
+                ]
+              },
+              "flow_status": {
+                "enum": [
+                  "OBSERVED",
+                  "CONFIRMED_ZERO",
+                  "MISSING"
+                ]
+              },
+              "fx_status": {
+                "enum": [
+                  "OBSERVED",
+                  "CONFIRMED_ONE",
+                  "NOT_REQUIRED",
+                  "MISSING"
+                ]
+              },
+              "flow_source_record_ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1}
+              },
+              "fx_source_record_ids": {
+                "type": "array",
+                "items": {"type": "string", "minLength": 1}
+              }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "disposition": {"const": "AVAILABLE"}
+                  },
+                  "required": ["disposition"]
+                },
+                "then": {
+                  "properties": {
+                    "beginning_capital_usd": {"type": "string", "minLength": 1},
+                    "return_source_record_id": {"type": "string", "minLength": 1}
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "disposition": {
+                      "enum": [
+                        "UNAVAILABLE",
+                        "NOT_ADMITTED",
+                        "EXPECTED_NON_TRADING",
+                        "EXCLUDED_BY_POLICY"
+                      ]
+                    }
+                  },
+                  "required": ["disposition"]
+                },
+                "then": {
+                  "properties": {
+                    "beginning_capital_usd": {"type": "null"},
+                    "return_source_record_id": {"type": "null"}
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {"flow_status": {"const": "CONFIRMED_ZERO"}},
+                  "required": ["flow_status"]
+                },
+                "then": {
+                  "properties": {
+                    "flow_source_record_ids": {"type": "array", "minItems": 1}
+                  },
+                  "required": ["flow_source_record_ids"]
+                }
+              },
+              {
+                "if": {
+                  "properties": {"fx_status": {"const": "CONFIRMED_ONE"}},
+                  "required": ["fx_status"]
+                },
+                "then": {
+                  "properties": {
+                    "fx_source_record_ids": {"type": "array", "minItems": 1}
+                  },
+                  "required": ["fx_source_record_ids"]
+                }
+              }
+            ]
+          }
+        },
+        "reconciliation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "period_capital_method",
+            "allocation_endpoint_check"
+          ],
+          "properties": {
+            "period_capital_method": {"const": "NAV_ROLLFORWARD"},
+            "allocation_endpoint_check": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["matched", "delta_usd"],
+              "properties": {
+                "matched": {"type": "boolean"},
+                "delta_usd": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        }
+      }
+    },
+    "hwm_acceptance_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "anchor_date",
+        "hwm_policy_id",
+        "index_base_value"
+      ],
+      "properties": {
+        "anchor_date": {"type": "string", "format": "date"},
+        "hwm_policy_id": {"type": "string", "minLength": 1},
+        "index_base_value": {"type": "string", "minLength": 1}
+      }
+    },
+    "reconciliation_checks": {"type": "array", "minItems": 3, "items": {"type": "object"}},
+    "reconciliation_exceptions": {"type": "array", "minItems": 1, "items": {"type": "object"}},
+    "replay": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {"status": {"const": "PASS"}}
+    }
+  },
+  "allOf": [
+    {
+      "if": {"required": ["hwm_inputs"]},
+      "then": {"required": ["hwm_acceptance_record"]}
+    },
+    {
+      "if": {"required": ["hwm_acceptance_record"]},
+      "then": {"required": ["hwm_inputs"]}
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "account": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "base_currency", "provider", "role"],
+      "properties": {
+        "account_id": {"type": "string", "minLength": 1},
+        "base_currency": {"const": "USD"},
+        "provider": {"type": "string", "minLength": 1},
+        "role": {"enum": ["INVESTMENT", "RESERVE"]}
+      }
+    },
+    "calendar_status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "provider", "date", "status"],
+      "properties": {
+        "account_id": {"type": "string", "minLength": 1},
+        "provider": {"type": "string", "minLength": 1},
+        "date": {"type": ["string", "null"], "format": "date"},
+        "status": {
+          "enum": [
+            "OBSERVED",
+            "NON_BUSINESS_WEEKEND",
+            "MISSING_ON_PROVIDER_OBSERVED_DATE",
+            "UNRESOLVED_NO_CALENDAR_EVIDENCE",
+            "NO_ACCOUNT_NAV_OBSERVATIONS"
+          ]
+        }
+      }
+    },
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fact_type", "status", "known_gaps"],
+      "properties": {
+        "fact_type": {"type": "string", "minLength": 1},
+        "status": {"enum": ["COMPLETE_WITHIN_DECLARED_BOUNDARY", "PARTIAL", "FAILED"]},
+        "known_gaps": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "disposition": {"type": "object"},
+        "record_count": {"type": "integer", "minimum": 0}
+      }
+    },
+    "fact_coverage_detail": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["account_id", "admission_effective_end", "admission_effective_start", "authority", "boundary_basis", "cadence", "declared_end", "declared_start", "disposition", "fact_type", "missing_interval_end", "missing_interval_reason", "missing_interval_start", "missing_intervals", "observed_end", "observed_start", "provider_id", "record_count", "status", "unavailable_amount_count"],
+      "properties": {
+        "account_id": {"type": "string", "minLength": 1},
+        "admission_effective_end": {"type": ["string", "null"], "format": "date"},
+        "admission_effective_start": {"type": ["string", "null"], "format": "date"},
+        "authority": {"type": "string", "minLength": 1},
+        "boundary_basis": {"enum": ["OBSERVED_RECORDS_ONLY", "EFFECTIVE_DATED_ADMISSION_NOT_COMPLETENESS", "NO_ACCEPTED_SOURCE"]},
+        "cadence": {"enum": ["DAILY", "EVENT_STREAM", "SNAPSHOT"]},
+        "declared_end": {"type": ["string", "null"], "format": "date"},
+        "declared_start": {"type": ["string", "null"], "format": "date"},
+        "disposition": {"type": "string", "minLength": 1},
+        "fact_type": {"enum": ["flows", "nav", "positions", "transactions"]},
+        "missing_interval_end": {"type": ["string", "null"], "format": "date"},
+        "missing_interval_reason": {"type": "string", "minLength": 1},
+        "missing_interval_start": {"type": ["string", "null"], "format": "date"},
+        "missing_intervals": {"type": "array", "items": {"type": "object"}},
+        "observed_end": {"type": ["string", "null"], "format": "date"},
+        "observed_start": {"type": ["string", "null"], "format": "date"},
+        "provider_id": {"type": "string", "minLength": 1},
+        "record_count": {"type": "integer", "minimum": 0},
+        "status": {"enum": ["OBSERVED_NOT_COMPLETENESS_PROOF", "OBSERVED_WITH_UNAVAILABLE_AMOUNTS_NOT_COMPLETENESS_PROOF", "NO_REPORTED_EVENTS_NOT_COMPLETENESS_PROOF", "NO_REPORTED_FACT_NOT_COMPLETENESS_PROOF", "NO_ACCEPTED_FACT_PATH"]},
+        "unavailable_amount_count": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

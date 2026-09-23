@@ -1,0 +1,4 @@
+interface:
+  display_name: "Portfolio123"
+  short_description: "HAR-first Portfolio123 research workflows"
+  default_prompt: "Use $portfolio123 to retrieve or analyze Portfolio123 evidence through the governed HAR-first workflow."

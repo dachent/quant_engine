@@ -1,0 +1,58 @@
+from __future__ import annotations
+
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+
+import yaml
+
+
+ROOT = Path(__file__).resolve().parents[2]
+SKILL_ROOT = ROOT / "skills" / "portfolio123"
+MANIFEST = ROOT / "provenance" / "portfolio123" / "source-manifest.json"
+INSTALLATION_MANIFEST = (
+    ROOT / "provenance" / "portfolio123" / "skill-installation-manifest.json"
+)
+VERIFIER_PATH = ROOT / "tools" / "verify_portfolio123_skill_installation.py"
+SPEC = importlib.util.spec_from_file_location("p123_skill_verifier", VERIFIER_PATH)
+assert SPEC is not None and SPEC.loader is not None
+VERIFIER = importlib.util.module_from_spec(SPEC)
+SPEC.loader.exec_module(VERIFIER)
+
+
+def test_skill_frontmatter_is_minimal_and_agent_metadata_matches() -> None:
+    text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+    _, frontmatter, _ = text.split("---", 2)
+    metadata = yaml.safe_load(frontmatter)
+    assert set(metadata) == {"name", "description"}
+    assert metadata["name"] == "portfolio123"
+    agent = yaml.safe_load(
+        (SKILL_ROOT / "agents" / "openai.yaml").read_text(encoding="utf-8")
+    )
+    assert agent["interface"]["display_name"] == "Portfolio123"
+    assert "$portfolio123" in agent["interface"]["default_prompt"]
+
+
+def test_curated_formula_references_match_the_source_manifest() -> None:
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
+    hashes = manifest["curated_formula_references"]
+    assert len(hashes) == 14
+    for name, expected in hashes.items():
+        path = SKILL_ROOT / "references" / name
+        assert path.is_file()
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected
+
+
+def test_skill_has_one_governed_api_and_web_runbook() -> None:
+    api = (SKILL_ROOT / "references" / "api.md").read_text(encoding="utf-8")
+    web = (SKILL_ROOT / "references" / "web-contracts.md").read_text(encoding="utf-8")
+    assert "https://api.portfolio123.com/" in api
+    assert "Do not\nhard-code cost numbers" in api
+    assert "never triggers the API automatically" in web
+    assert not (SKILL_ROOT / "scripts").exists()
+
+
+def test_repository_skill_is_checksum_locked() -> None:
+    expected = VERIFIER.load_manifest(INSTALLATION_MANIFEST)
+    VERIFIER.verify_installation(SKILL_ROOT, expected)
